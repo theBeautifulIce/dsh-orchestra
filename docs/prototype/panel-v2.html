@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsh-orchestra · 控制面原型 v11</title>
+<title>dsh-orchestra · 工作台原型 v13</title>
 <style>
 :root{
   --bg:#f3f4f7;
@@ -3504,9 +3504,9 @@ body.v5 .orch-board-agent{font-size:12.5px;color:#7b889e}
     <div class="brand-name">dsh·orchestra</div>
     <div class="brand-sub">Command surface</div>
   </div>
-  <button class="workspace" data-act="toast" data-msg="工作区选择将在正式插件中开放；当前是本机控制面。">
-    <div class="ws-name">本地控制面</div>
-    <div class="ws-url">127.0.0.1:8790 · 开发中</div>
+  <button class="workspace" data-act="toast" data-msg="工作区选择会在正式插件里开放；当前是本机工作台。">
+    <div class="ws-name">本地工作台</div>
+    <div class="ws-url">原型 · 开发中</div>
   </button>
   <div class="nav-scroll">
     <div class="nav-label">工作</div>
@@ -3529,7 +3529,7 @@ body.v5 .orch-board-agent{font-size:12.5px;color:#7b889e}
 
 <div class="main">
   <header class="topbar">
-    <div class="crumb"><span>控制面</span><span class="crumb-sep">/</span><b id="crumbCurrent">总览</b></div>
+    <div class="crumb"><span>工作台</span><span class="crumb-sep">/</span><b id="crumbCurrent">总览</b></div>
     <div class="searchbox">
       <input id="globalSearch" placeholder="搜索任务、流程、决定或记录" autocomplete="off">
       <span class="kbd">/</span>
@@ -3591,7 +3591,8 @@ const typeTag = (type) => {
   const t = TYPE[type] || TYPE.manual;
   return '<span class="type ' + t.cls + '">' + icon(t.icon) + t.label + '</span>';
 };
-const priTag = (p) => '<span class="tag ' + (p === 'P0' ? 'red' : p === 'P1' ? 'amber' : 'gray') + '" style="height:18px;font-size:8px">' + p + '</span>';
+const urgencyWord = (p) => p === 'P0' ? '最急' : p === 'P1' ? '尽快' : p === 'P2' ? '常规' : '有空再做';
+const priTag = (p) => '<span class="tag ' + (p === 'P0' ? 'red' : p === 'P1' ? 'amber' : 'gray') + '" style="height:18px;font-size:12.5px">' + urgencyWord(p) + '</span>';
 
 const spark = (values, color = '#4b73ef') => {
   const max = Math.max(...values), min = Math.min(...values);
@@ -3756,7 +3757,7 @@ const TASKS = [
     attention: 1, progress: 78, due: '今晚 23:30', createdAt: '2026-11-09',
     desc: '围绕第三段九种节点与状态机，把审计指出的引用冲突收敛成可提交的唯一生效清单。',
     acceptance: '没有致命问题、没有重大问题；每处冲突都有处理结论；证据能回查。',
-    tags: ['设计', 'P0', '编排'],
+    tags: ['设计', '编排'],
     chain: [
       { label: '总控拆解', state: 'done', dur: '2m' },
       { label: '证据侦察', state: 'done', dur: '18m' },
@@ -3884,7 +3885,7 @@ const AGENTS = {
     outputs: ['编排计划 v4', '委派记录 5 条', '需要你定的事 1 条'],
     log: [
       ['20:51', '把「引用一致性」复核委派给审计子代理', 'hot'],
-      ['20:42', '把「唯一键冲突」升级为 P0，暂停 run_7f3a'],
+      ['20:42', '把「唯一键冲突」升级为最急，暂停 run_7f3a'],
       ['20:31', '接收审计结果，拆成 2 致命 / 6 重大 / 4 措辞'],
       ['20:28', '把目标拆成证据侦察、修订执行、交叉审计、证据核验四条支线'],
       ['20:24', '读取任务验收条件，确认「0 致命 / 0 重大」是硬门']
@@ -3957,7 +3958,7 @@ const AGENTS = {
 
 const COMMAND_LOG = [
   ['20:51', '<b>七七</b> 把「引用一致性」复核委派给审计子代理', 'hot'],
-  ['20:42', '把「唯一键冲突」升级为 <b>P0</b>，暂停 run_7f3a', 'hot'],
+  ['20:42', '把「唯一键冲突」升级为 <b>最急</b>，暂停 run_7f3a', 'hot'],
   ['20:36', '修订子代理完成新版唯一键段落草稿，等待交叉复核', ''],
   ['20:31', '接收审计结果，拆成 <b>2 致命 / 6 重大 / 4 措辞</b>', ''],
   ['20:28', '把目标拆成侦察、修订、审计、核验四条支线', ''],
@@ -4195,13 +4196,11 @@ function nextOf(t) {
     const cur = chain.find(n => n.state === 'run');
     const idx = cur ? chain.indexOf(cur) : -1;
     const after = idx >= 0 ? chain.slice(idx + 1).find(n => n.state === 'wait' || n.state === 'run' || n.state === 'blocked') : null;
-    let s = cur && after ? '「' + cur.label + '」交回后进「' + after.label + '」' : cur ? '「' + cur.label + '」交回后收尾' : '做完会自动进入下一步';
-    if (t.attention) s += '；另有 ' + t.attention + ' 件等你决定';
-    return s;
+    return cur && after ? '「' + cur.label + '」交回后进「' + after.label + '」' : cur ? '「' + cur.label + '」交回后收尾' : '做完会自动进入下一步';
   }
   if (t.attention) {
     if (t.status === 'paused') { const bad = chain.find(n => n.state === 'fail' || n.state === 'blocked'); return bad ? '「' + bad.label + '」没通过，等你决定是否接手' : '等你恢复'; }
-    return person(t.owner) === '你' ? '处理完这件事，后面的步骤才会继续' : '等 ' + person(t.owner) + ' 处理';
+    return t.status === 'done_unverified' ? '处理完后等系统确认' : '处理完后继续';
   }
   if (t.status === 'scheduled') return '到点自动开始';
   if (t.status === 'done') return '无需动作';
@@ -4250,7 +4249,7 @@ function renderCommand() {
   const paused = !!state.orchPaused;
   const logs = [
     ['20:51', '把「引用一致性」复核交给交叉审计'],
-    ['20:42', '把「唯一键冲突」升级为 P0，暂停这次运行'],
+    ['20:42', '把「唯一键冲突」升级为最急，暂停这次运行'],
     ['20:36', '修订子代理写完草稿，等交叉审计'],
     ['20:31', '收到审计结果：2 个致命、6 个重大、4 处措辞'],
     ['20:28', '把目标拆成侦察、修订、审计、核验四条支线']
@@ -4285,7 +4284,7 @@ function renderCommand() {
         '</div>' + board +
       '</section>' +
       '<aside class="asks"><div class="rail-head"><h2>需要你决定</h2><span>' + open.length + '</span></div><p class="rail-lede">只有承担后果的决定才到这里。</p>' +
-        open.slice(0, 3).map(d => '<button class="ask" data-dec="' + d.id + '"><div class="ask-meta"><span class="ask-pri ' + (d.priority === 'P0' ? 'p0' : '') + '">' + esc(d.priority) + '</span><span>' + esc(d.created) + '</span></div><div class="ask-title">' + esc(tidy(d.title)) + '</div><div class="ask-why">' + esc(tidy(d.why)) + '</div><div class="ask-go">处理 →</div></button>').join('') +
+        open.slice(0, 3).map(d => '<button class="ask" data-dec="' + d.id + '"><div class="ask-meta"><span class="ask-pri ' + (d.priority === 'P0' ? 'p0' : '') + '">' + esc(urgencyWord(d.priority)) + '</span><span>' + esc(d.created) + '</span></div><div class="ask-title">' + esc(tidy(d.title)) + '</div><div class="ask-why">' + esc(tidy(d.why)) + '</div><div class="ask-go">处理 →</div></button>').join('') +
         '<a class="rail-more" data-screen="inbox">全部 ' + open.length + ' 条 →</a>' +
       '</aside>' +
     '</div>' +
@@ -4321,12 +4320,12 @@ function taskCard(t) {
   const progress = (t.progress != null && t.status === 'running') ? '<div class="tc-progress">' + miniBar(t.progress) + '<em>' + t.progress + '%</em></div>' : '';
   const histBtn = t.runCount > 1 ? '<button class="hist-btn" data-act="toggle-history" data-task="' + t.id + '" data-stop="1">历史 ' + t.runCount + ' 次</button>' : '';
   return '<article class="task-card' + (needs ? ' needs' : '') + '" data-task="' + t.id + '" tabindex="0" role="button" aria-label="打开任务 ' + esc(tidy(t.title)) + '">' +
-    '<div class="tc-head"><span class="tc-type t-' + t.type + '">' + typeWord(t.type) + '</span><span class="tc-pri ' + (t.priority === 'P0' ? 'p0' : '') + '">' + esc(t.priority) + '</span><span class="tc-when">' + esc(whenOf(t)) + '</span></div>' +
+    '<div class="tc-head"><span class="tc-type t-' + t.type + '">' + typeWord(t.type) + '</span><span class="tc-when">' + esc(whenOf(t)) + '</span></div>' +
     '<h3 class="tc-title">' + esc(tidy(t.title)) + '</h3>' +
     '<div class="tc-stage"><span class="dot" style="background:' + (t.status === 'blocked' ? '#a63f2b' : t.status === 'running' ? '#b8862f' : '#8b8579') + '"></span><span>' + esc(stageOf(t)) + '</span></div>' +
-    '<div class="tc-result"><b>' + (t.status === 'running' ? '进展' : t.latestRun ? '上次' : '状态') + '</b> · ' + esc(resultOf(t)) + '</div>' +
-    '<div class="tc-next"><b>下一步</b> · ' + esc(nextOf(t)) + '</div>' +
-    (t.attention ? '<div class="tc-call">需要你：' + esc(t.attention) + '</div>' : '') +
+    (t.latestRun || t.status === 'running' ? '<div class="tc-result"><b>' + (t.status === 'running' ? '进展' : '上次') + '</b> · ' + esc(resultOf(t)) + '</div>' : '') +
+    (needs || t.status === 'running' || t.status === 'done_unverified' ? '<div class="tc-next"><b>下一步</b> · ' + esc(nextOf(t)) + '</div>' : '') +
+    (t.attention ? '<div class="tc-call">有 ' + esc(t.attention) + ' 件等你定</div>' : '') +
     progress +
     '<div class="tc-foot"><span>' + esc(person(t.owner)) + '</span><span>·</span><span>' + esc(t.type === 'scheduled' ? '定时唤醒' : wfOfTask(t) ? wfOfTask(t).name : '手工推进') + '</span>' + histBtn + '</div>' +
     (histOpen ? historyPop(t) : '') +
@@ -4366,7 +4365,7 @@ const STEP_STORY = {
     n_research: { actor: '子代理 · 侦察', process: '只读扫描设计稿与台账，找出 10 处旧标题引用和 2 处当前清单指向。', result: '返回 3 条可回查引用；没有改任何文件。', evidence: 'ev_7f3a_01 · 3 处引用', dur: '18m', input: '设计稿 v24 + 台账', output: '3 处可回查的引用', attempt: '第 2 次尝试' },
     n_draft: { actor: '子代理 · 修订', process: '按生效清单重写唯一键段落，并补两条验收用例；当前改到 64%。', result: '已写回 2 个段落，剩余 1 个段落待一致性核对。', evidence: 'diff_7f3a_02 · 2 段', dur: '64%', input: '3 处可回查的引用', output: 'v25 草稿（进行中）', attempt: '第 3 次尝试' },
     n_audit: { actor: '子代理 · 审计', process: '等 v25 草稿完整后逐条对照原文，只写结论，不改稿。', result: '还没轮到这一步：上游草稿还没收尾。', evidence: '—', dur: '—', input: 'v25 草稿', output: '审计结果', attempt: '尚未开始' },
-    n_gate: { actor: '规则 · 证据核对', process: '检查每条结论是否带原文位置与系统确认；没有证据不放行。', result: '停在「唯一键按哪版收尾」，已生成一项 P0 决定。', evidence: 'dec_7f31 · 2 条冲突', dur: '—', input: '侦察 + 修订 + 审计结果', output: '1 项需要你决定的事', attempt: '等待输入' },
+    n_gate: { actor: '规则 · 证据核对', process: '检查每条结论是否带原文位置与系统确认；没有证据不放行。', result: '停在「唯一键按哪版收尾」，已生成一项最急决定。', evidence: 'dec_7f31 · 2 条冲突', dur: '—', input: '侦察 + 修订 + 审计结果', output: '1 项需要你决定的事', attempt: '等待输入' },
     n_close: { actor: '收尾', process: '把通过项写回设计稿、台账和 L5，并留下可回查的收尾记录。', result: '还没轮到这一步：等关口放行。', evidence: '—', dur: '—', input: '关口结论', output: '设计稿 + 台账 + L5', attempt: '尚未开始' }
   },
   wf_memory: {
@@ -4479,7 +4478,7 @@ function renderTasksWorkflow(list) {
 
   const rail = '<aside class="tw-rail"><div class="tw-rail-head"><b>任务</b><span>' + list.length + ' 件 · 点一条看步骤</span></div>' +
     list.map(x => '<button class="tw-task' + (x.id === t.id ? ' on' : '') + '" data-act="task-pick" data-task="' + x.id + '">' +
-      '<div class="tw-task-top"><span class="tw-task-type">' + esc(typeWord(x.type)) + '</span><span class="tw-task-pri">' + esc(x.priority) + '</span><span class="tw-task-pri" style="margin-left:auto">' + esc(statusWord(x.status)) + '</span></div>' +
+      '<div class="tw-task-top"><span class="tw-task-type">' + esc(typeWord(x.type)) + '</span><span class="tw-task-pri" style="margin-left:auto">' + esc(statusWord(x.status)) + '</span></div>' +
       '<div class="tw-task-title">' + esc(tidy(x.title)) + '</div>' +
       '<div class="tw-task-sub">' + esc(stageOf(x)) + '</div>' +
       '<div class="tw-task-foot"><span class="dot"></span><span>' + esc(nextOf(x)) + '</span></div>' +
@@ -4516,7 +4515,7 @@ function renderTasksWorkflow(list) {
 }
 
 function renderTasksList(list) {
-  return '<div class="task-list">' + list.map(t => '<div class="task-list-row" data-task="' + t.id + '"><div class="tl-main"><div class="tl-title">' + esc(tidy(t.title)) + '</div><div class="tl-sub">' + typeWord(t.type) + ' · ' + esc(t.priority) + ' · ' + esc(person(t.owner)) + '</div></div><div class="tl-stage">' + esc(stageOf(t)) + '</div><div class="tl-result">' + esc(resultOf(t)) + '</div><div class="tl-next">' + esc(nextOf(t)) + '</div><div class="tl-when">' + esc(whenOf(t)) + '</div></div>').join('') + '</div>';
+  return '<div class="task-list">' + list.map(t => '<div class="task-list-row" data-task="' + t.id + '"><div class="tl-main"><div class="tl-title">' + esc(tidy(t.title)) + '</div><div class="tl-sub">' + typeWord(t.type) + ' · ' + esc(person(t.owner)) + '</div></div><div class="tl-stage">' + esc(stageOf(t)) + '</div><div class="tl-result">' + esc(resultOf(t)) + '</div><div class="tl-next">' + esc(nextOf(t)) + '</div><div class="tl-when">' + esc(whenOf(t)) + '</div></div>').join('') + '</div>';
 }
 
 function renderTasks() {
@@ -4787,7 +4786,7 @@ function wfTriggers(wf){
     '<div class="policy-cell"><div class="policy-k">重复触发</div><div class="policy-v">同一件事只跑一次</div></div>' +
     '<div class="policy-cell"><div class="policy-k">失败重试</div><div class="policy-v">最多 2 次，间隔逐渐拉长</div></div>' +
     '<div class="policy-cell"><div class="policy-k">算完成的条件</div><div class="policy-v">核验通过</div></div>' +
-  '</div><div class="callout warn">发布前：草稿要先试跑一次，而且不能有没处理的 P0。发布动作会记到「发生过的」。</div></div>';
+  '</div><div class="callout warn">发布前：草稿要先试跑一次，而且不能有没处理的最急决定。发布动作会记到「发生过的」。</div></div>';
 }
 
 function wfGateInfo(wf){
@@ -4844,7 +4843,7 @@ function decisionCard(d){
   const checked = state.selectedDecisions.has(d.id);
   return '<article class="dec-card' + (resolved ? ' resolved' : '') + '" data-decfocus="' + d.id + '">' +
     '<div class="dec-head">' + (resolved ? '' : '<input class="dec-check" type="checkbox" data-act="toggle-dec" data-dec="' + d.id + '" ' + (checked ? 'checked' : '') + ' aria-label="选择 ' + esc(tidy(d.title)) + '">') + '<div class="dec-body">' +
-      '<div class="dec-meta"><span class="ask-pri ' + (d.priority === 'P0' ? 'p0' : '') + '">' + esc(d.priority) + '</span><span>' + esc(d.created) + '</span><span>' + (resolved ? '已处理' : '等你决定') + '</span></div>' +
+      '<div class="dec-meta"><span class="ask-pri ' + (d.priority === 'P0' ? 'p0' : '') + '">' + esc(urgencyWord(d.priority)) + '</span><span>' + esc(d.created) + '</span><span>' + (resolved ? '已处理' : '等你决定') + '</span></div>' +
       '<h3 class="dec-title">' + esc(tidy(d.title)) + '</h3>' +
       '<p class="dec-why">' + esc(tidy(d.why)) + '</p>' +
       '<div class="dec-options">' + d.allowed.map(a => '<div class="dec-choice" role="button" tabindex="0" data-act="pick-decision" data-dec="' + d.id + '" data-choice="' + a + '"><b>' + esc(tidy((d.allowedLabels && d.allowedLabels[a]) || a)) + '</b><span>' + esc(tidy((d.allowedDesc && d.allowedDesc[a]) || '')) + '</span></div>').join('') + '</div>' +
@@ -4980,7 +4979,7 @@ function taskOrchestration(t){
   const latest = taskRuns(t)[0] || null;
   const chain = t.chain || [];
   const isDesign = t.id === 'tsk_design';
-  const stateWord = { done:'已交回', running:'在做', waiting:'等上游', blocked:'停住', queued:'排队', failed:'没通过' };
+  const stateWord = { done:'已完成', running:'在做', waiting:'等前一步', blocked:'停住', queued:'排队', failed:'没通过' };
   const chainState = { done:'done', run:'running', wait:'waiting', fail:'failed', blocked:'blocked' };
   const goal = t.desc || t.title;
   const accept = t.acceptance || '任务完成后由你确认结果。';
@@ -4999,30 +4998,33 @@ function taskOrchestration(t){
       const pct = c.state === 'done' ? 100 : c.state === 'run' ? (/%$/.test(c.dur) ? parseInt(c.dur,10) : 55) : 0;
       return { id:'step_' + i, name:c.label, status:st, pct:pct,
         task: c.out || (c.state === 'done' ? '这一步已经交回。' : c.state === 'run' ? '正在做，做完交回总控。' : c.state === 'fail' ? '没通过，停在这里等你决定。' : '等前一步交回后开始。'),
-        returns: c.state === 'done' ? '已完成 · ' + c.dur : c.state === 'run' ? '在做 · ' + (c.dur || '—') : c.state === 'fail' ? '没通过 · ' + c.dur : '还没开始',
+        foot: c.state === 'done' ? '用时 ' + c.dur : c.state === 'run' ? '做到 ' + pct + '%' : c.state === 'fail' ? '停住 · ' + c.dur : '等前一步',
         clickable:false };
     });
   }
   const cards = team.map(a => {
+    const footLabel = a.clickable ? '交回：' + a.returns : a.foot;
     const inner = '<div class="orch-card-head"><span class="orch-dot ' + a.status + '"></span><b>' + esc(a.name) + '</b><span class="orch-state ' + a.status + '">' + (stateWord[a.status] || '排队') + '</span></div>' +
       '<div class="orch-task">' + esc(tidy(a.task)) + '</div>' +
       '<div class="orch-bar"><i style="width:' + a.pct + '%"></i></div>' +
-      '<div class="orch-foot"><span>交回：' + esc(tidy(a.returns)) + '</span><span>' + a.pct + '%</span></div>';
+      '<div class="orch-foot"><span>' + esc(tidy(footLabel)) + '</span></div>';
     return a.clickable
       ? '<button class="orch-card" type="button" data-act="open-agent" data-agent="' + a.id + '">' + inner + '</button>'
       : '<div class="orch-card static">' + inner + '</div>';
   }).join('');
-  const splitLabel = isDesign ? '拆成四条支线' : '按 ' + team.length + ' 步推进';
-  const splitHint = isDesign ? '点开任一条，能看这个子代理在做什么、做到哪、拿回了什么。' : '每一步按顺序来；需要并行的步骤，七七会拆给子代理。';
-  const note = isDesign ? '四条支线可以同时跑；收尾只发生一次。两条支线的结论对不上时，不互相覆盖，回到收件箱由你定；你定完之后，归档子代理才去更新台账与交接说明。' : '这条任务按固定步骤走，不额外分派子代理；任何一步失败都会停住，交回给你决定。';
-  const board = isDesign ? '<div class="section"><div class="section-h"><h3>共享任务板</h3><div class="right"><span class="muted">子代理只领板上的活</span></div></div><div class="card-box" style="padding:2px 12px">' +
+  const heading = isDesign ? '七七怎么带这一队' : '这次运行怎么走';
+  const roleTag = isDesign ? '总控负责拆活与收口' : '按固定步骤执行';
+  const splitLabel = isDesign ? '拆成四条支线' : (latest && latest.status === 'succeeded' ? '这次走完 ' + team.length + ' 步' : '按 ' + team.length + ' 步推进');
+  const splitHint = isDesign ? '点开任一条，能看它做到哪、拿回了什么。' : '每一步按顺序走，结果都在下面。';
+  const note = isDesign ? '四条支线可以同时跑，收尾只做一次。结论对不上时，不互相覆盖，回到收件箱由你定。' : '按固定步骤走，不额外分派子代理；哪一步失败就停住，交回给你。';
+  const board = isDesign ? '<div class="section"><div class="section-h"><h3>共享任务板</h3><div class="right"><span class="muted">子代理只做板上列出的活</span></div></div><div class="card-box" style="padding:2px 12px">' +
       SHARED_BOARD.map(b => '<div class="orch-board-row"><span class="orch-board-title">' + esc(tidy(b.title)) + '</span><span class="orch-board-agent">' + esc(tidy(b.agent)) + '</span>' + statusTag(b.status === 'running' ? 'running' : b.status === 'done' ? 'done' : b.status === 'waiting' ? 'blocked' : 'queued') + '</div>').join('') +
     '</div></div>' : '';
-  return '<div class="section"><div class="section-h"><h3>七七怎么带这一队</h3><div class="right"><span class="tag violet">总控只收尾，不代做</span></div></div>' +
+  return '<div class="section"><div class="section-h"><h3>' + heading + '</h3><div class="right"><span class="tag violet">' + roleTag + '</span></div></div>' +
     '<div class="orch">' +
       '<div class="orch-brain">' +
-        '<div class="orch-brain-top"><div class="orch-avatar">七</div><div class="orch-brain-copy"><div class="orch-name">七七 · Superagent 总控</div><div class="orch-sub">' + (wf ? esc(tidy(wf.name)) + ' · ' + esc(wf.version) : '人工推进') + '</div></div><div class="orch-pill">' + (latest ? esc(STATUS[latest.status].label) : '还没开始') + '</div></div>' +
-        '<div class="orch-goal"><span>这一轮交什么</span><b>' + esc(tidy(goal)) + '</b></div>' +
+        '<div class="orch-brain-top"><div class="orch-avatar">七</div><div class="orch-brain-copy"><div class="orch-name">七七 · Superagent 总控</div><div class="orch-sub">' + (wf ? esc(tidy(wf.name)) : '人工推进') + '</div></div><div class="orch-pill">' + (latest ? esc(STATUS[latest.status].label) : '还没开始') + '</div></div>' +
+        '<div class="orch-goal"><span>这次要交什么</span><b>' + esc(tidy(goal)) + '</b></div>' +
         '<div class="orch-accept"><span>算通过的条件</span><b>' + esc(tidy(accept)) + '</b></div>' +
         '<div class="orch-split"><span class="orch-k">' + splitLabel + '</span><span>' + splitHint + '</span></div>' +
       '</div>' +
@@ -5046,10 +5048,10 @@ function drawerTask(){
     : taskOverview(t);
   return drawerShell({
     kicker: '任务', title: esc(tidy(t.title)),
-    sub: statusTag(t.status) + typeTag(t.type) + priTag(t.priority) + '<span>· ' + esc(t.owner) + '</span>' + '',
+    sub: statusTag(t.status) + typeTag(t.type) + '<span>· ' + esc(t.owner) + '</span>',
     tabs: [['overview','概览'],['runs','运行','' + runs.length],['orchestration','编排'],['events','事件','' + EVENTS.filter(e => e.taskId === t.id).length]],
     tab: ui, body,
-    foot: '<span class="muted" style="font-size:8.4px">任务做到哪一步，由运行和你的决定共同决定</span><span class="right"><button class="btn ghost sm" data-act="close-drawer">关闭</button><button class="btn primary sm" data-act="task-action" data-task="' + t.id + '">' + (t.attention ? '处理待办' : '继续推进') + '</button></span>'
+    foot: '<span class="muted" style="font-size:12.5px">任务做到哪一步，由运行和你的决定共同决定</span><span class="right"><button class="btn ghost sm" data-act="close-drawer">关闭</button><button class="btn primary sm" data-act="task-action" data-task="' + t.id + '">' + (t.attention ? '处理待办' : '继续推进') + '</button></span>'
   });
 }
 
@@ -5226,7 +5228,7 @@ function resolveModal(d){
   const opts = d.allowed.map(a => '<label class="opt-card" data-opt="' + a + '"><input type="radio" name="decChoice" value="' + a + '"><div class="opt-main"><div class="opt-title">' + esc(d.allowedLabels[a] || a) + '</div><div class="opt-desc">' + esc(d.allowedDesc[a] || '') + '</div></div></label>').join('');
   const impactText = d.allowed.map(a => (d.allowedLabels[a] || a) + '：' + (d.allowedDesc[a] || '')).join('；');
   const p0 = d.priority === 'P0' ? '<div class="callout warn" style="margin-top:8px">' + icon('alert') + '<div><b>两条路的结果不一样。</b>' + esc(tidy(impactText)) + '</div></div><div class="check-row" style="margin-top:8px"><input type="checkbox" id="decAck"><div class="cm"><div class="cn">我知道提交后不能撤回</div><div class="cd">我看清了两条路各自的后果，也接受其中一条会带来的返工。</div></div></div>' : '';
-  return modalShell('需要你决定', esc(tidy(d.title)), '<div class="modal-summary"><div><dt>优先级</dt><dd>' + d.priority + ' · ' + decisionKind(d.kind) + '</dd></div><div><dt>超时会怎样</dt><dd>' + esc(d.expiryLabel) + '</dd></div><div><dt>关联任务</dt><dd>' + esc(task ? tidy(task.title) : '这个任务') + '</dd></div></div><div class="callout info">' + icon('info') + '<div><b>你在决定什么：</b>' + esc(tidy(d.why)) + '</div></div><div class="field"><label>你可以怎么选 <span class="req">必选</span></label><div class="option-list">' + opts + '</div></div><div class="field"><label>补充说明</label><textarea id="decNote" placeholder="写清楚为什么这样选，以及之后要核对什么…"></textarea></div>' + p0, '<span class="muted" style="font-size:8.4px">提交后会写进记录，不能改选</span><span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-decision" data-dec="' + d.id + '">确认这个选择</button></span>');
+  return modalShell('需要你决定', esc(tidy(d.title)), '<div class="modal-summary"><div><dt>优先级</dt><dd>' + urgencyWord(d.priority) + ' · ' + decisionKind(d.kind) + '</dd></div><div><dt>超时会怎样</dt><dd>' + esc(d.expiryLabel) + '</dd></div><div><dt>关联任务</dt><dd>' + esc(task ? tidy(task.title) : '这个任务') + '</dd></div></div><div class="callout info">' + icon('info') + '<div><b>你在决定什么：</b>' + esc(tidy(d.why)) + '</div></div><div class="field"><label>你可以怎么选 <span class="req">必选</span></label><div class="option-list">' + opts + '</div></div><div class="field"><label>补充说明</label><textarea id="decNote" placeholder="写清楚为什么这样选，以及之后要核对什么…"></textarea></div>' + p0, '<span class="muted" style="font-size:8.4px">提交后会写进记录，不能改选</span><span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-decision" data-dec="' + d.id + '">确认这个选择</button></span>');
 }
 
 function signModal(e){
@@ -5247,7 +5249,7 @@ function taskTypeFields(type){
   return '<div class="field"><label>什么时候跑</label><input id="ntSchedule" placeholder="例如：每天 09:00"></div><div class="field"><label>时区</label><select id="ntTz"><option>Asia/Shanghai</option><option>UTC</option></select></div><div class="field"><label>错过一次怎么办</label><select id="ntMiss"><option>补跑一次</option><option>跳过，等下次</option><option>先问我</option></select></div>';
 }
 function newTaskModal(){
-  return modalShell('新建任务', '新建任务', '<div class="field"><label>任务标题 <span class="req">必填</span></label><input id="ntTitle" placeholder="例如：每周一清理没有系统确认的操作"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>任务类型</label><select id="ntType"><option value="scheduled">定时唤醒</option><option value="continuous">持续目标</option><option value="event">事件触发</option><option value="manual">人工任务</option></select></div><div class="field"><label>优先级</label><select id="ntPriority"><option>P1</option><option>P0</option><option selected>P2</option><option>P3</option></select></div></div><div class="field"><label>工作流</label><select id="ntWorkflow"><option value="">不绑定工作流（人工执行）</option>' + Object.keys(WORKFLOWS).map(k => '<option value="' + k + '">' + esc(WORKFLOWS[k].name) + ' · ' + esc(WORKFLOWS[k].version) + '</option>').join('') + '</select></div><div id="ntTypeFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + taskTypeFields('scheduled') + '</div><div class="callout info">' + icon('info') + '<div>定时任务只创建一条任务；每次唤醒生成一次运行，历史在任务内查看，不会在板上堆出一排任务卡。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-task">创建任务</button></span>');
+  return modalShell('新建任务', '新建任务', '<div class="field"><label>任务标题 <span class="req">必填</span></label><input id="ntTitle" placeholder="例如：每周一清理没有系统确认的操作"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>任务类型</label><select id="ntType"><option value="scheduled">定时唤醒</option><option value="continuous">持续目标</option><option value="event">事件触发</option><option value="manual">人工任务</option></select></div><div class="field"><label>优先级</label><select id="ntPriority"><option value="P1">尽快</option><option value="P0">最急</option><option value="P2" selected>常规</option><option value="P3">有空再做</option></select></div></div><div class="field"><label>工作流</label><select id="ntWorkflow"><option value="">不绑定工作流（人工执行）</option>' + Object.keys(WORKFLOWS).map(k => '<option value="' + k + '">' + esc(WORKFLOWS[k].name) + ' · ' + esc(WORKFLOWS[k].version) + '</option>').join('') + '</select></div><div id="ntTypeFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + taskTypeFields('scheduled') + '</div><div class="callout info">' + icon('info') + '<div>定时任务只创建一条任务；每次唤醒生成一次运行，历史在任务内查看，不会在板上堆出一排任务卡。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-task">创建任务</button></span>');
 }
 
 function newWorkflowModal(){
@@ -5895,7 +5897,7 @@ function searchItems(q){
   const out = [];
   TASKS.forEach(t => { if(hit(t.title) || hit(t.desc) || hit(t.id)) out.push({ type: '任务', title: tidy(t.title), sub: stageOf(t) + ' · ' + resultOf(t), attrs: 'data-act="open-task" data-task="' + t.id + '"' }); });
   Object.keys(WORKFLOWS).forEach(id => { const w = WORKFLOWS[id]; if(hit(w.name) || hit(w.desc)) out.push({ type: '流程', title: w.name, sub: w.version + ' · ' + (w.status === 'draft' ? '草稿' : '已发布') + ' · ' + w.triggerLabel, attrs: 'data-act="open-wf" data-wf="' + id + '"' }); });
-  DECISIONS.forEach(d => { if(hit(d.title) || hit(d.why)) out.push({ type: '决定', title: tidy(d.title), sub: d.status === 'resolved' ? '已处理' : '等你决定 · ' + d.priority, attrs: 'data-act="open-decision" data-dec="' + d.id + '"' }); });
+  DECISIONS.forEach(d => { if(hit(d.title) || hit(d.why)) out.push({ type: '决定', title: tidy(d.title), sub: d.status === 'resolved' ? '已处理' : '等你决定 · ' + urgencyWord(d.priority), attrs: 'data-act="open-decision" data-dec="' + d.id + '"' }); });
   EFFECTS.forEach(e => { if(hit(e.title) || hit(e.why) || hit(e.verified)) out.push({ type: '待核实', title: tidy(e.title), sub: e.status === 'signed' ? '已经接手' : '等你接手', attrs: 'data-act="open-effect" data-eff="' + e.id + '"' }); });
   EVENTS.forEach(e => { if(hit(e.summary) || hit(e.type)) out.push({ type: '记录', title: tidy(e.summary), sub: e.time + ' · ' + actorName(e.actor), attrs: 'data-act="open-event" data-event="' + e.seq + '"' }); });
   return out.slice(0, 8);
