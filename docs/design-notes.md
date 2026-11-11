@@ -337,6 +337,6 @@ CREATE UNIQUE INDEX decisions_node_kind_uq ON decisions(node_run_id, kind) WHERE
 ## 六、下一步（第四段已过，第五段初稿已写）
 
 1. **第四段已收口**：v33（1528 行）在第三十四轮拿到 pass（0 致命 / 0 重大 / 4 条非阻断措辞），第四段闸门已开。
-2. **第五段：记忆插件对接 memory-audit-v1**：v34 初稿已写（5.1–5.14，Q-43–Q-56），先单独送审；没 pass 前不写第六段。
+2. **第五段：记忆插件对接 memory-audit-v1**：v34 初稿已写（5.1–5.14，Q-43–Q-56），已单独送审；没 pass 前不写第六段。
 3. **第六段：分阶段落地与验收**：第五段 pass 后再写。
 4. 六段全过后写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`、自审、提交 git、交主人审阅，再转 writing-plans。
