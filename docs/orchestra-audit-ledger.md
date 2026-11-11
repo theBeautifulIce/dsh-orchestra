@@ -28,7 +28,8 @@
 | 20 | 第三段 v18 | fail | 10 | 2 | 0 | failed_with_unverified 只进终态集合没有入边、stopped_at 仍被当成副作用没发生的通行证、run 终态 CAS 不按子节点结果分叉、applyReport 缺 attempt 且新 attempt 把 Ga 重置成 1、continue_wait 的 approved→pending 与结论落地即 closed 互相抵消、verifying 与 timing_out 在桥断期间钟没口径且 verify_* 未清、startup_unknown 出口仍有两处不闭合、report_contradicted 只有 kind 没有挂起态与过期规则、证据门不是统一可执行路径且人工裁决可绕过、capability 规则自相矛盾致 compensable 不可达 |
 | 21 | 第三段 v19 | fail | 6 | 4 | 4 | 重试行模型自相矛盾（同一行 attempt+1 与「新 attempt 必新行」并存）；桥断口径三套（continue_tracking 两支、watchdog 暂停与桥断预算两个时间基、paused_bridge_missing 与 startup_unknown 互撞）；人工证据门自相矛盾（attested 既要 evidence_id 又说不作验证证据）；report_contradicted 有挂起格却没有出口闸门，decision 表也没有 uphold_report / uphold_decision 的落点；confirm_not_started 缺 executor 三支；终态集合四处重复；另有三条措辞口径 |
 | 22 | 第三段 v20 | fail | 3 | 5 | 4 | 约束写成了句子而不是数据库：UNIQUE(node_run_id, attempt) 在新 attempt 必换行时形同虚设；桥断仍从三处漏进 startup_unknown；hang_reason IS NULL 只在总则、逐行漏十处。另有三处落点缺失（uphold_report 无用例、状态未知重查不明无处可去、started→done 的时点判反）与一处键冲突（decision 四列键撞既有 partial index）；M-06 缺 has_tool_call 拒绝路径；四条措辞把五条分支写成四条 |
-| 23 | 第三段 v21 | 已送第二十三轮（a8f7647d），待回 | — | — | — | v21 按第 22 轮 12 条逐条落稿：唯一约束改 UNIQUE(run_id, node_id, attempt) + origin_node_run_id 部分唯一索引（M-58 测换新 node_run_id 仍被拒）；桥断只由 startup_timeout 进 startup_unknown；hang 闸门逐行内联；M 扩到 59（补 uphold_report）；状态未知重查不明统一落 RESOLUTION_NOT_AVAILABLE；started→done 改 now <= effective_deadline_at；decision 唯一键统一 (node_run_id, kind) partial index；M-06 补 has_tool_call=true；五条措辞与三处引用订正；新增 §3.4m [CURRENT] 十二条清单，§3.4l 降为 v20 历史 |
+| 23 | 第三段 v21 | fail | 3 | 3 | 2 | 冲突裁决的另一半没写死：uphold_decision 无独立迁移行、无执行用例、目标仍写 queued；uphold_report 从 startup_unknown 迁出不清钟；裁决收口代次把 uphold_report 统写 Gr；confirm_started 被错误对称成 has_tool_call=true 即拒（应只拒 confirm_not_started）；另有「两条 resolution 行」例外只列两处、Gr+1 包住终态出口两条措辞 |
+| 24 | 第三段 v22 | 已送第二十四轮（a8f7647d），待回 | — | — | — | v22 按第 23 轮 8 条落稿：新增 uphold_decision 独立收口行（D2→rejected+closed，按 D1 收口，清 hang 与钟，superseded/failed）与 M-60；uphold_report 加清钟与代次例外；L139/L443 旧 queued 口径清零；has_tool_call=true 只拒 confirm_not_started 并补 M-61；例外改三处、Gr+1 只给需重新武装的出口；M 扩到 61；新增 §3.4n [CURRENT] 八条清单，§3.4m 降为 v21 历史 |
 
 ## 二、几件能算出来的事
 
@@ -56,6 +57,10 @@
 
 **v21 已按 12 条落稿。** 2026-11-11 20:05 设计稿升 v21（838 行，SHA256 全值 AE771DB18D7CFBEC30C5832D3416D69DA7D873BC239120ADAFA34F9DF4D885B0）：唯一约束改 UNIQUE(run_id, node_id, attempt) 并补 origin_node_run_id 部分唯一索引，M-58 加「换新 node_run_id 仍被拒」；桥断入口从三处删除，只留 startup_timeout；hang_reason IS NULL 逐行内联十三处，例外仅清 hang 与桥断边；M 扩到 M-59；状态未知重查不明统一落 RESOLUTION_NOT_AVAILABLE；started→done 改 now <= effective_deadline_at；decision 唯一键统一 (node_run_id, kind) partial index；M-06 补 has_tool_call=true 的五条分支；四条措辞与三处引用订正；另新增 §3.4m [CURRENT] 十二条清单，§3.4l 降为 v20 历史。第二十三轮已送，未过之前不动第四段。
 
+**第 23 轮之后 v21 被判 fail。** 结论是 3 致命 + 3 重大 + 2 措辞。性质是「冲突裁决的另一半没有落成可执行路径」：uphold_decision 只有一句「维持原裁决」，没有独立迁移行、没有清钟、没有执行用例，目标还写着旧 queued；uphold_report 从 startup_unknown 迁出不清 startup_unknown_deadline_at；裁决收口的代次矩阵把 uphold_report 统写成 Gr；confirm_started 被错误对称成 has_tool_call=true 即拒，实际该闸门只作用于 confirm_not_started。
+
+**v22 已按 8 条落稿。** 2026-11-11 20:0x 设计稿升 v22（854 行，SHA256 全值 0A73DB61550D462797AFA1511AD58A9959F5566FA19C8C54F399FF478B65FE1B）：新增 uphold_decision 独立收口行与 M-60，D2 落 rejected+closed、节点按 D1 的 decision_id+revision 收口，清 hang 与 startup 钟，幂等落 superseded 并回写双指针、不可重试 failed、迟到 report 标 stale；uphold_report 的 CAS 补「来源 startup_unknown 时清钟」，M-59 加断言；代次矩阵与一句话判据补 uphold_report 走 Ga 的例外；L139/L443 改成「旧行 superseded + 新建 queued 新行 / 不可重试 failed」；has_tool_call=true 只拒 confirm_not_started，补 M-61；「两条 resolution 行」例外改三处；Gr+1 只给需重新武装的出口；M 扩到 M-01…M-61；新增 §3.4n [CURRENT] 八条清单，§3.4m 降为 v21 历史。第二十四轮已送，未过之前不动第四段。
+
 **审计子代理的任务就是挑刺**，它会一直找下去。其中「加固项」本质是加保险而非缺陷，保险没有归零的那天，这条线就不该按「清零」验收。
 
 ## 三、收敛判据（自定，用于第四段起的门禁）
@@ -73,9 +78,9 @@
 - 第 3 轮是 pass（附四条在案），是第一、二段的收敛点。
 - 第 4 轮起审的是第三段（九种节点），轮次编号沿用全局计数。
 
-## 五、当前进度与续跑指引（2026-11-11 20:05 记）
+## 五、当前进度与续跑指引（2026-11-11 20:15 记）
 
-- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 838 行（SHA256 全值 AE771DB18D7CFBEC30C5832D3416D69DA7D873BC239120ADAFA34F9DF4D885B0，文件头与第三段标题均已升 v21，§3.4m 为唯一 [CURRENT] 清单）。第二十二轮审计由 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7 判 fail（3 致命 + 5 重大 + 4 措辞），v21 修法已全部落稿，第二十三轮审计已送同一代理，未过前不写第四段。
+- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 854 行（SHA256 全值 0A73DB61550D462797AFA1511AD58A9959F5566FA19C8C54F399FF478B65FE1B，文件头与第三段标题均已升 v22，§3.4n 为唯一 [CURRENT] 清单）。第二十三轮审计由 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7 判 fail（3 致命 + 3 重大 + 2 措辞），v22 修法已全部落稿，第二十四轮审计已送同一代理，未过前不写第四段。
 
 - 项目已于 2026-11-11 16:50 整体迁到 D:\aboutAI\dsh-orchestra（设计稿、台账、requirements.md、design-notes.md、根目录 handoff.md 与 codebasemap.md、references\ 三份参考项目、四份 codebase-memory 图谱）；旧址 D:\aboutAI\dshQQ\docs\ 保留同内容副本，后续只改新址。
 - 第二十轮审计已出结论：fail，10 致命 + 2 重大结构性，措辞/性能 0 条。最易低估的风险：「节点终态」不等于「run 可以成功」；叠加 stopped_at 只证明动作停了、不证明副作用没发生。
@@ -93,7 +98,7 @@
   11. already_stopped 无合法目标行、confirm_not_started 的 dispose 违反「只在节点终态后 dispose」→ 补 already_stopped 行并写 stopped_at；dispose 前置改为「该 attempt 已收口或重试已落库」；confirm_not_started 加 executor 已删且桥断已确认的前置检查。
   12. report_registry.report_id 唯一键只在正文不在 DDL → §14 写 report_id PRIMARY KEY 或 UNIQUE 索引；补「行 → 幂等键」对照表（report_id / decision_id+revision / event_seq / attempt+Ga）；补一条 DDL 验收用例。
 - 执行者自留 7 处：第二十轮判 6 条必须补（policy 判定落成 evaluateEvidence、行→幂等键对照 + report_id DDL、桥断时钟矩阵、settling 与 failed_with_unverified 逐行对齐、补偿描述符注册校验落 §2、迁移表逐行生成用例清单）、1 条可接受（§3.5 标题已补回）。
-- 收敛判据（§三）不按条数归零验收。状态机这一族若在第二十三轮清零、剩下的只是措辞，就按主人口径收口进第四段（面板与查询）。
+- 收敛判据（§三）不按条数归零验收。状态机这一族若在第二十四轮清零、剩下的只是措辞，就按主人口径收口进第四段（面板与查询）。
 - 按主人 2026-11-11 15:39 口径「审计这一步，没通过、没获得正确结果前，就不能往后走」：第三段没拿到 pass 之前不写第四段。
 - 换会话不影响进度：设计稿、本台账、记忆底账（asset 记事本 mem_mwbqav4n_23bd4f8d）与在办条目（L5 mem_mwbq9pys_9139830f）都落在磁盘上，换会话后按这四处接手即可。
 - 审计口径的复用条目：pitfall mem_wbsf89z_3ac546f6（审计轮次不收敛的三条收敛判据）；记忆分层口径 L4 mem_wbtckln_5dd4de9f（项目细节进记事本，长期记忆只留一个待办和索引）。
