@@ -1,6 +1,6 @@
 # dsh-orchestra 设计草案
 
-状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v30：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）；v30 新增流程定义编辑（四个 workflow 命令、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42）。上一版为 v31：第三十二轮审计 1 致命、6 重大、1 措辞已逐条修入正文（发布事务与回执同事务、版本 CAS 顺序与触发器、重复边/自环拒绝码、空草稿名称、已消费草稿优先级、子流程环与深度口径、publish_note 范围），送第三十三轮。v31 不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。本文件为 v33：第四段 v32 已按第三十四轮审计 pass（0 致命 / 0 重大 / 4 条非阻断措辞）收口；v33 只清理这四条措辞（open_draft 分支、create/update 名称校验、Q-39 create 用例、逐字→语义），不改变审查结论，不新增运行态状态、迁移、decision kind、终态或证据门。 本文件为 v36：第五段「记忆插件对接（memory-audit-v1）」已按第三十六轮审计（2 致命 / 4 重大 / 1 措辞）逐条修入：apply 从当前条目重算哈希并与有序快照逐项比对、批准后封死条目增删与全部提议字段、memory_run_requests 持久化 request_key 幂等、memory bridge 独立注册表接上 §11 闸门、blocked/failed 批次条目收口、Q-54 补齐 stopped_at / evidence_id 证据门、三面 toolPolicy 校验，并补 Q-43c / Q-44b / Q-44c / Q-52b；v35 的发布门禁、批准快照、空 payload、评估唯一键、items 契约、生命周期、错误码顺序与 truncated 强制继续有效；第一至第四段除 §3.2 的 trigger 来源口径、§11 的 bridge 注册表口径、§4.12 第 9 行与 §9/§4.6.3 的 resolution 适用范围外未改，不新增节点类型、run 状态或 resolution 值。
+状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v30：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）；v30 新增流程定义编辑（四个 workflow 命令、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42）。上一版为 v31：第三十二轮审计 1 致命、6 重大、1 措辞已逐条修入正文（发布事务与回执同事务、版本 CAS 顺序与触发器、重复边/自环拒绝码、空草稿名称、已消费草稿优先级、子流程环与深度口径、publish_note 范围），送第三十三轮。v31 不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。本文件为 v33：第四段 v32 已按第三十四轮审计 pass（0 致命 / 0 重大 / 4 条非阻断措辞）收口；v33 只清理这四条措辞（open_draft 分支、create/update 名称校验、Q-39 create 用例、逐字→语义），不改变审查结论，不新增运行态状态、迁移、decision kind、终态或证据门。 本文件为 v37：第五段「记忆插件对接（memory-audit-v1）」已按第三十六轮审计（2 致命 / 4 重大 / 1 措辞）逐条修入：apply 从当前条目重算哈希并与有序快照逐项比对、批准后封死条目增删与全部提议字段、memory_run_requests 持久化 request_key 幂等、memory bridge 独立注册表接上 §11 闸门、blocked/failed 批次条目收口、Q-54 补齐 stopped_at / evidence_id 证据门、三面 toolPolicy 校验，并补 Q-43c / Q-44b / Q-44c / Q-52b；v35 的发布门禁、批准快照、空 payload、评估唯一键、items 契约、生命周期、错误码顺序与 truncated 强制继续有效；第一至第四段除 §3.2 的 trigger 来源口径、§11 的 bridge 注册表口径、§4.12 第 9 行与 §9/§4.6.3 的 resolution 适用范围外未改，不新增节点类型、run 状态或 resolution 值。v37 按第三十七轮审计（3 致命 / 4 重大 / 3 措辞）逐条修入：哈希原像白名单与 canonical 排序、tool.result 丢失时批次保持 applying 与同批次节点重试、audit_result 复用为 mem_apply 前置批准、toolRef 前缀统一、Q-44c 错误层、批准后 client_key 只读、inspect_batch 计数与三处措辞；送第三十八轮。
 
 ## 第一段 骨架与落点
 
@@ -264,7 +264,7 @@ node_run 迁移，每行给出「从 → 到」「条件」「触发者」「CAS
 | abandoned_unverified | stopping | abandon_ack 被驳回（要继续跟）→ 节点回 executor 手上并重新武装 | 服务 | 同上 + status=abandoned_unverified + abandon_ack decision_id + **rearm_generation = Gr**（迁移成功后 Gr+1 写回） |
 | abandoned_unverified | abandoned_unverified | **「独立确认停止」落到字段上**：executor 确认已停 → 写 `stopped_at`（附 `stop_evidence`，注明确认来源或 evidence_id）；证据核实到副作用没生效 → 写 `side_effect_verified_none = true`（附 `stop_evidence`）；**这两个字段只能由确认动作写**——迟到 report 不自动写 `stopped_at`（迟到 report 只入 report_registry 留账，见 §3） | 服务 | 同上 + status=abandoned_unverified + **stopped_at** / **side_effect_verified_none** + **stop_evidence** + **rearm_generation = Gr** |
 | queued / leased | blocked_pre | 该节点有不可逆动作且需前置审批（**发生在 send 之前**） | 服务 | 同上 + 当前状态 + **rearm_generation = Gr**；进入时**清空 lease_id（置 null）并释放 slot**，resume_state=queued |
-| blocked_pre | queued | pre_execution decision 批准 | 服务 | 同上 + status=blocked_pre + decision_id + **lease_id IS NULL**（旧租约已释放，不复用）+ **rearm_generation = Gr** |
+| blocked_pre | queued | pre_execution decision 批准；固定图中 mem_confirm 的 audit_result 复用为同一 decision_id 也算 | 服务 | 同上 + status=blocked_pre + decision_id + **lease_id IS NULL**（旧租约已释放，不复用）+ **rearm_generation = Gr** |
 | blocked_pre | failed | 前置审批被拒 / 超时按默认动作 | 服务 | 同上 + status=blocked_pre + decision_id + **rearm_generation = Gr** |
 | started / verifying | blocked_post | 结果需人工裁决 | 服务 | 同上 + 当前状态 + **verify_started_at IS NULL AND verify_deadline_at IS NULL（离开 verifying 那一支显式清钟）** + **rearm_generation = Gr** |
 | blocked_post | done / failed | decision 收口 | 服务 | 同上 + status=blocked_post + decision_id + **rearm_generation = Gr** |
@@ -392,7 +392,7 @@ node_run 迁移，每行给出「从 → 到」「条件」「触发者」「CAS
 
 一句话判据：**凡是「人裁决或引擎判定」驱动的迁移用 Gr，凡是「执行器回写」驱动的迁移用 Ga**（verifier 的 verdict 由 verifier 执行器回写，算 Ga 这一边）。**唯一例外是 `uphold_report`：它虽然由人裁决触发，节点 CAS 仍是 report 回写语义，用 Ga；decision 行用 `decision_id + revision` 收口，不重新武装任何时限，不占 Gr。**续期只动 Gr、不动 Ga——这条一旦混用，续期前发出的旧定时器就能从一条看起来合法的路径把节点推走，而账上还会显示它是在正常收口（§3.4g 第 1 条）。
 
-**前置审批的时序**：前置门在 `send` 之前，所以入口只有 `queued` / `leased`，没有 `dispatched → blocked_pre`。进入 blocked_pre 时**释放 lease 与 slot**——人工审批可能等两小时，三个并发位不能被几个前置门占死，租约也不该在这两小时里空转过期。批准后回到 `queued`，重新抢 slot 走 `queued → leased → dispatched`，attempt 号不变（它还没执行过）。驳回或超时按节点定义的默认动作走，默认 failed。
+**前置审批的时序**：前置门在 `send` 之前，所以入口只有 `queued` / `leased`，没有 `dispatched → blocked_pre`。进入 blocked_pre 时**释放 lease 与 slot**——人工审批可能等两小时，三个并发位不能被几个前置门占死，租约也不该在这两小时里空转过期。批准后回到 `queued`，重新抢 slot 走 `queued → leased → dispatched`，attempt 号不变（它还没执行过）。驳回或超时按节点定义的默认动作走，默认 failed。**固定图例外**：mem_apply 的前置批准复用 mem_confirm 的 audit_result（同 decision_id），不再插第二张卡；复用不成立时才走这条自动前置门。
 
 **不可中断动作的格**：`stopping` 承接「已宣告要停、但动作还在跑」。它不是 timeout：动作在 action_deadline_at 内自然完成就正常收，不算超时失败；只有 executor 真停了、动作状态未知，才进 indeterminate_side_effect。
 
@@ -621,6 +621,8 @@ CREATE INDEX workflow_drafts_updated ON workflow_drafts(updated_at);
 - **显式 approval 节点**：图里的一个节点，产出 decision_ref，结论进 decisions 表，桌面与 QQ 双端通知。
 - **引擎自动插入的前置审批**（irreversible 节点必需）：kind=pre_execution，绑定 node_run_id。节点在 `send` 之前停在 `blocked_pre`（入口只有 queued / leased），**进入时释放 lease 与 slot、lease_id 置 null**（人工审批可能等两小时，并发位不能被前置门占死，租约也不能空转过期）。批准后由**引擎**把它放回 `queued`，重新抢 slot 走 `queued → leased → dispatched`，attempt 号不变（它还没执行过）；未批准按节点定义的默认动作走（默认 failed）。
 
+
+固定图的唯一例外：mem_apply 的 pre_execution 批准复用 mem_confirm 的 audit_result（同一 decision_id，不新建卡，不产生第二张审批卡）；复用条件见 5.7 与 §3.2。
 两者共用：状态机（§8）、artifact 契约（decision_ref）、超时默认动作（升级链路）。用例：无显式 approval 节点 + irreversible agent/tool → 断言引擎自动生成前置 decision，节点停在 blocked_pre；批准 → 重新 queued → leased → dispatched（attempt 不变）；驳回 → failed；**审批等两小时期间 slot 不被占**；**租约过期后批准仍能重新派发**。
 
 **五、policy。** 纯声明式求值，输出 matched / ruleId / 依据字段，artifact=none，无模型参与。
@@ -1554,7 +1556,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | 直接通道 | 主聊天 / 非编排会话 | 记忆插件 audit.js | fail-open（保持现状） | 插件 audit store |
 | 受控通道 | 核心大脑发起的记忆 run | 本段 5.5 的评估节点 | fail-closed | 编排账本 + 插件条目 source |
 
-直接通道不动。受控通道新增三个内部端口：memory.evaluate（只评估，不写）、memory.apply_governed（只执行已批准的批次）与 memory.inspect_batch（只读对账）。三个端口都只给编排服务调用，不注册成执行器工具。**内置 memory bridge 有独立注册表**：`bridge_id=memory-audit-v1`，只登记 memory.evaluate（capability=read_only）、memory.apply_governed（capability=mutating，无补偿描述符，按 irreversible 算；受控性由固定图与批准门禁保证）、memory.inspect_batch（capability=read_only）。§11 的加载期注册表闸门按 tool 节点的 `toolRef.kind` 分派：`executor` 查通用 executor 注册表，`memory_bridge` 查这份独立注册表；查不到或 capability 不符即 TOOL_NOT_REGISTERED，写能力未声明即 SIDE_EFFECT_UNDECLARED。mem_check / mem_apply 仍以 tool 节点出现，`toolRef` 写成 `memory_bridge:memory.evaluate` / `memory_bridge:memory.apply_governed`，由该 bridge 执行；这两个 tool 节点的 toolPolicy.allow 只接受带 `memory_bridge:` 前缀的引用，裸写 memory_write / memory_update 不在任何 allow 里通过；普通 agent / executor 的 allow 仍按通用注册表。
+直接通道不动。受控通道新增三个内部端口：memory.evaluate（只评估，不写）、memory.apply_governed（只执行已批准的批次）与 memory.inspect_batch（只读对账）。三个端口都只给编排服务调用，不注册成执行器工具。**内置 memory bridge 有独立注册表**：`bridge_id=memory-audit-v1`，只登记 memory.evaluate（capability=read_only）、memory.apply_governed（capability=mutating，无补偿描述符，按 irreversible 算；受控性由固定图与批准门禁保证）、memory.inspect_batch（capability=read_only）。§11 的加载期注册表闸门按 `toolRef` 字符串前缀分派：带 `memory_bridge:` 前缀的只查这份独立注册表，裸名只查通用 executor 注册表；查不到或 capability 不符即 TOOL_NOT_REGISTERED，写能力未声明即 SIDE_EFFECT_UNDECLARED。`toolRef` 是字符串，不是对象；tool 节点没有 `toolPolicy.allow`，toolPolicy 只出现在 agent、executor 与任务会话模板三面。mem_check / mem_apply 仍以 tool 节点出现，`toolRef` 写成 `memory_bridge:memory.evaluate` / `memory_bridge:memory.apply_governed`，由该 bridge 执行；这两个 tool 节点的 `toolRef` 只接受带 `memory_bridge:` 前缀的引用，裸写 memory_write / memory_update 不在任何 allow 里通过；普通 agent / executor 的 allow 仍按通用注册表。**固定图里 mem_confirm 的 audit_result 复用为 mem_apply 的 pre_execution 批准（同 decision_id，不新建卡）；其余 irreversible 节点仍按 §3.2 自动插 pre_execution 卡。**
 
 ### 5.2 角色：超级大脑、脊髓、手脚、记忆
 
@@ -1585,11 +1587,11 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 6. **人批准。** 只有评估结果没有「拿不准」的条目时，才生成一张审批卡；人确认后，批次进入 approved。
 7. **执行节点写入并回报。** tool 调 memory.apply_governed，按批准的范围写入；agent 汇总「写了哪几条、哪条没写、为什么」。
 
-这条路径里，**任何一步失败都不会产生「半条记忆」**：提议失败，没有批次；评估失败，没有审批；审批拒绝或过期，没有写入；写入失败，整批不落。写入本身按批次幂等，重放不会写出第二条。
+这条路径里，**正常返回失败不会产生「半条记忆」**：提议失败，没有批次；评估失败，没有审批；审批拒绝或过期，没有写入；写入返回失败，整批不落。**崩溃或 tool.result 丢失不是正常失败**：按 5.7 的写入事故留痕与对账处理，确认部分写入时批次落 indeterminate、开 verify_human，不静默补写、不静默重试。写入本身按批次幂等，重放不会写出第二条。
 
 ### 5.4 数据模型：批次、条目、评估
 
-编排账本新增三张表。它们只存「编排侧的决定与证据」，记忆正文的权威仍在记忆插件；两边用 applied_item_id 与 source 元数据对接。
+编排账本新增四张表。它们只存「编排侧的决定与证据」，记忆正文的权威仍在记忆插件；两边用 applied_item_id 与 source 元数据对接。
 
 **memory_batches**
 
@@ -1601,7 +1603,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | attempt | 同一源 run 的第几次记忆尝试；从 1 开始 |
 | status | draft / evaluating / awaiting_human / approved / applying / applied / empty / blocked / declined / expired / failed / indeterminate |
 | outcome | written / nothing_to_write / blocked / declined / expired / failed / indeterminate；人看的结论；非终态为空 |
-| proposal_hash | SHA256(JCS(当前 items))；每次读取按当前条目重算的哈希，不是可信的批准快照 |
+| proposal_hash | SHA256(JCS(canonical_proposal(当前 items)))，字段白名单与排序见 5.4.1；每次读取按当前条目重算的哈希，不是可信的批准快照 |
 | approved_proposal_hash | 批准事务写入的不可变快照；apply 从当前条目重算 proposal_hash 后与它比，不拿列里的旧值自比较 |
 | approved_item_hashes_json | 批准时按 client_key 升序逐条记录的 `{client_key, content_hash}` 有序数组；apply 把当前条目按同一顺序展开后逐项比 |
 | policy_json | 本次允许的层、条数、正文上限、是否允许 update |
@@ -1627,13 +1629,15 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | key | 可选稳定实体键；用于跨批次去重 |
 | importance / ttl_days | 重要度 1–10；可变层必须给 ttl_days |
 | quote / reason | 来源原话与提议理由；quote 必填 |
-| content_hash | SHA256(JCS(该条))；执行时逐条核对 |
+| content_hash | SHA256(JCS(canonical_item(该条)))，字段白名单见 5.4.1；执行时逐条核对 |
 | approved_content_hash | 批准事务写入的逐条快照；apply 与它比 |
 | status | proposed / approved / skipped / applied / failed |
 | verdict / confidence / judge_reason | 评估结果；verdict ∈ approve / reject / merge / needs_user |
 | applied_item_id | 写入成功后记忆插件返回的条目 id |
 
 唯一键：**(batch_id, client_key)**。同一批次里不许出现两个相同 client_key。
+
+**5.4.1 canonical 函数与哈希原像。** `canonical_item(item)` 只取这些字段，按 JCS 规则编码：`client_key`、`action`、`target_id`、`layer`、`title`、`content`、`tags`、`questions`、`key`、`importance`、`ttl_days`、`quote`、`reason`。`tags` 先按 Unicode 码点升序排、去重；`questions` 保留数组顺序；字符串不做额外归一化。`content_hash = SHA256(JCS(canonical_item(item)))`，原像里不含 `content_hash` 自身，也不含 `status`、`applied_item_id`、`verdict`、`confidence`、`judge_reason`、时间戳与批次号。`canonical_proposal(items)` 是当前 items 按 `client_key` 升序排列后的数组，逐项只取上面的字段；`proposal_hash = SHA256(JCS(canonical_proposal(items)))`。因为 `status` 不在原像里，`proposed → approved` 不会改变 `proposal_hash`；行物理顺序也不参与语义。
 
 **memory_evaluations**
 
@@ -1674,11 +1678,11 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | awaiting_human | declined | audit_result 裁决 rejected | memory bridge |
 | awaiting_human | expired | 24 小时未确认 | memory bridge |
 | approved | applying | mem_apply 开始 | memory bridge |
-| applying | applied | 全部写入成功 | memory bridge |
+| applying | applied | 全部写入成功；或 tool.result 丢失后对账确认全在（confirm_applied） | memory bridge |
 | applying | failed | 插件原子写入失败 | memory bridge |
-| applying | indeterminate | 部分写入或结果不明 | memory bridge |
+| applying | indeterminate | 对账确认只写了一部分（部分写入事故）；仅 tool.result 丢失、尚未对账时不得迁到这里 | memory bridge |
 
-**终态与重试。** applied / empty / blocked / declined / expired / failed / indeterminate 是终态；同一源 run 的另一次尝试必须新建批次、attempt+1，不复活旧行。applied 后批次与条目进入终态，不再接受状态迁移；提议内容、哈希、条目集合与 decision 字段只读。approved_proposal_hash、approved_item_hashes_json、approved_content_hash 只在批准事务写入一次，之后对这些字段的任何 UPDATE 都被数据库约束拒绝。**批准事务提交后，memory_items 禁止 INSERT / DELETE；除 status 与 applied_item_id 外，action、target_id、layer、title、content、tags_json、questions_json、key、importance、ttl_days、quote、reason、content_hash、approved_content_hash 全部只读，任何 UPDATE 被数据库触发器拒绝；status 只按 5.4 迁移表走，applied_item_id 只由 apply 回填一次。**
+**终态与重试。** applied / empty / blocked / declined / expired / failed / indeterminate 是终态；同一源 run 的另一次批次尝试必须新建批次、batch attempt+1，不复活旧行。批次内某次 apply 因 tool.result 丢失、对账确认全不在而重试时，不新建批次：节点 attempt+1、批次保持 applying，重试成功后仍按 applying→applied 收口；只有对账确认只写了一部分，才按上表迁 indeterminate 并交人工。applied 后批次与条目进入终态，不再接受状态迁移；提议内容、哈希、条目集合与 decision 字段只读。approved_proposal_hash、approved_item_hashes_json、approved_content_hash 只在批准事务写入一次，之后对这些字段的任何 UPDATE 都被数据库约束拒绝。**批准事务提交后，memory_items 禁止 INSERT / DELETE；除 status 与 applied_item_id 外，client_key、action、target_id、layer、title、content、tags_json、questions_json、key、importance、ttl_days、quote、reason、content_hash、approved_content_hash 全部只读，任何 UPDATE 被数据库触发器拒绝；status 只按 5.4 迁移表走，applied_item_id 只由 apply 回填一次。** **indeterminate 只在对账确认部分写入后成立；tool.result 丢失但未对账前，批次保持 applying，不得写 indeterminate。**
 
 **status → outcome 映射（CHECK 约束）。** 非终态 draft / evaluating / awaiting_human / approved / applying 的 outcome 必须为 NULL；终态一一对应：applied→written、empty→nothing_to_write、blocked→blocked、declined→declined、expired→expired、failed→failed、indeterminate→indeterminate。不允许出现「status=applying 但 outcome=written」这类组合。
 
@@ -1713,8 +1717,8 @@ mem_trigger（trigger：核心大脑发起）
   → mem_prepare（agent：整理候选，只读工具）
   → mem_check（tool：memory.evaluate，只评估不写）
   → mem_route（branch：ready / empty / blocked）
-      ├─ ready   → mem_confirm（approval：audit_result）
-      │              → mem_apply（tool：memory.apply_governed）
+      ├─ ready   → mem_confirm（approval：audit_result；这张卡同时是 mem_apply 的 pre_execution 批准）
+      │              → mem_apply（tool：memory.apply_governed；blocked_pre 时复用上面这张 audit_result，不新建卡）
       │              → mem_report（agent：汇总写了什么）
       ├─ empty   → mem_report_empty（agent：没有需要写的）
       └─ blocked → mem_report_blocked（agent：哪条拿不准，为什么）
@@ -1732,8 +1736,8 @@ mem_trigger（trigger：核心大脑发起）
 | mem_prepare | agent | allow: memory.search / memory.get；deny 其余 | 源 run 摘要、记忆策略、相似条目 | items[]；由服务落成批次 |
 | mem_check | tool | memory_bridge:memory.evaluate（只读） | prepare_node_run_id | recommendation、逐条 verdict、评估摘要 |
 | mem_route | branch | 无 | recommendation | ready / empty / blocked |
-| mem_confirm | approval | 无 | 批次摘要、评估摘要、源 run 证据 | decision_id；kind=audit_result |
-| mem_apply | tool | memory_bridge:memory.apply_governed（受控写） | decision_id | applied_count、skipped_count、applied_item_ids |
+| mem_confirm | approval | 无 | 批次摘要、评估摘要、源 run 证据 | decision_id；kind=audit_result；固定图中同时充当 mem_apply 的 pre_execution 批准（同 decision_id，不新建卡） |
+| mem_apply | tool | memory_bridge:memory.apply_governed（受控写；irreversible） | decision_id（固定图中复用 mem_confirm 的 audit_result 作为 pre_execution 批准，同一 decision_id；复用不成立时走新卡） | applied_count、skipped_count、applied_item_ids |
 | mem_report | agent | allow: [] | 写入结果 | 一句人话总结 |
 | mem_report_empty | agent | allow: [] | 评估摘要 | 「这次没有需要写的」 |
 | mem_report_blocked | agent | allow: [] | 评估摘要 | 「有哪几条拿不准，为什么」 |
@@ -1876,6 +1880,8 @@ memory.evaluate 是受控通道的评估端口，不是写入端口。它做四�
 
 **audit_result 不套异常 resolution。** 这张卡的 allowed_resolutions 为空，decision.resolve 的 payload 为空对象，只产生 approved / rejected。理由：它不是节点迁移的异常出口，而是 approval 节点自身的前置门；节点去留由 approval 节点契约决定。§9 的 resolution 清单只覆盖异常出口，不覆盖正常批准/驳回。
 
+**复用口径。** 当 mem_apply 是 irreversible 且固定图把 mem_confirm 直接接在它前面时，mem_confirm 的 audit_result 就是 mem_apply 的 pre_execution 批准：引擎把同一 decision_id 绑定到 mem_apply，不新建第二张卡，事件记 `pre_execution.reused`。复用要同时满足：`decision.kind=audit_result`、mem_apply 尚未 send、该 decision 未被其他节点绑定、mem_confirm 是 mem_apply 在固定图里的唯一前驱。任一条件不满足，引擎按 §3.2 自动补一张 pre_execution 卡，mem_apply 停 `blocked_pre`。
+
 **批准的含义写死：**
 
 - 批准 = 同意按卡片的方案写入：verdict=approve / merge 的条目写入；verdict=reject 的条目跳过；needs_user 的条目在 ready 批次里不存在。
@@ -1903,7 +1909,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 - **原子**：先校验全部条目，再在记忆插件的一次持久化里写入全部；任何一条失败，整批不落。插件存储是 JSON 时用一次原子 rename；是 SQLite 时用一个事务。**不许先写一半再补。**
 - **幂等**：以 (batch_id, client_key) 为幂等键。重放时已存在且 content_hash 相同 → 返回 already_applied，不新增；content_hash 不同 → MEMORY_APPLY_CONFLICT（409），整笔拒绝，不覆盖。
-- **部分写入事故**：插件已写入一部分后失败，或 tool.result 丢失导致无法确认，批次落 status=indeterminate、outcome=indeterminate；已写入条目 applied，未写入条目 approved；节点落 indeterminate_side_effect，并开 verify_human 决策，run 保持 paused，allowed_resolutions 只给 abandon。人确认放弃 → 节点 abandoned_unverified，run 仍 paused 并生成 run 级 abandon_ack；签字后 run 落 succeeded_with_unverified（没有副作用被核实为没发生，不许落 succeeded），批次保持 indeterminate，不自动补写、不自动回滚、不重试本批次；要再写，新建批次、attempt+1；任务 run 不受影响。
+- **写入事故的三种落点（不许混）。** ① **插件返回写失败**：批次 failed、outcome=failed，approved 条目全部 failed，节点 failed，不生成未验证副作用。② **tool.result 丢失、无法确认是否写入**：批次保持 `applying`（outcome=NULL），节点落 `indeterminate_side_effect`，先走 5.8 的对账出口；对账前不许把批次写成 `indeterminate`。③ **对账确认只写了一部分**（原子写承诺被打破）：批次 `applying → indeterminate`、outcome=indeterminate，已写入条目 applied、未写入 approved；节点留 `indeterminate_side_effect` 并开 verify_human，run 保持 paused，allowed_resolutions 只给 abandon。人选 abandon 后节点 `abandoned_unverified`，run 仍 paused 并生成 run 级 abandon_ack；签字后 run 落 `succeeded_with_unverified`（没有副作用被核实为没发生，不许落 succeeded）。三种落点都不自动补写、不自动回滚。只有 ② 在对账确认全不在后，按 5.8 在同一批次内重跑 apply（节点 attempt+1，批次仍 applying）；其余情况要再写，新建批次、batch attempt+1。任务 run 不受影响。
 - **可追**：写入条目的 source 带 orchestra 元数据：source_run_id、memory_run_id、batch_id、decision_id、client_key。记忆条目详情里能一路追回任务、批准人与原文。
 - **不删**：v1 不提供编排侧删除 / 遗忘。要删，走主聊天的记忆工具或面板的记忆管理，并留下独立审计。
 
@@ -1924,11 +1930,11 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 }
 ~~~
 
-**对账端口 memory.inspect_batch。** 只读；按 batch_id 返回每条 client_key 在插件里的状态（applied / skipped / missing / conflict）、applied_item_id 与 content_hash，并返回本次对账的 `evidence_id`（写进事件账本，供 confirm_applied / confirm_not_applied 引用）。它不写、不修复、不猜。
+**对账端口 memory.inspect_batch。** 只读；按 batch_id 返回每条 client_key 在插件里的状态（applied / skipped / missing / conflict）、applied_item_id 与 content_hash，并返回本次对账的 `written_count`、`missing_count`、`partial` 与 `evidence_id`（写进事件账本，供 confirm_applied / confirm_not_applied 引用）；计数必须能由逐条状态重算，不许与逐条状态矛盾。它不写、不修复、不猜。
 
 **source 的落点。** 插件 normalizeSource 增补 orchestra 字段：source_run_id、memory_run_id、batch_id、decision_id、client_key；来源 kind=system，direct 模式该字段为 null。字段只允许受控 apply 端口写，direct 的 memory_write 不带。
 
-**写一半崩了怎么办。** 这走第三段现成的 indeterminate_side_effect：tool.call 已发、tool.result 没回来，节点落 indeterminate_side_effect，不猜成功也不猜失败。人用 memory.inspect_batch 查这批条目在插件里到底有没有；全在 → confirm_applied 收 done，批次 applied / written；全不在 → confirm_not_applied 后重试，批次重新 applying→applied；只在一部分（理论上原子写不该出现）→ 批次 status=indeterminate、outcome=indeterminate，已写入条目 applied、未写入条目 approved，节点留 indeterminate_side_effect 并开 verify_human，run 保持 paused，allowed_resolutions 只给 abandon；人选 abandon 后节点 abandoned_unverified、run 仍 paused 并生成 abandon_ack，签字后 run 落 succeeded_with_unverified（没有副作用被核实为没发生），批次保持 indeterminate，不自动补写、不自动回滚、不重试本批次；任务 run 不受影响。**confirm_applied 与 confirm_not_applied 都要带 `stopped_at` 与 `evidence_id`**：前者取 mem_apply 节点已记录的动作停止时刻，后者取 memory.inspect_batch 的返回；缺任一字段返回 VERIFICATION_TOO_WEAK，节点与批次都不动。**原子写是承诺，部分写入是事故，事故必须留痕，不能静默重试。**
+**写一半崩了怎么办。** tool.result 丢失时，按第三段的 indeterminate_side_effect 处理：tool.call 已发、tool.result 没回来，节点落 indeterminate_side_effect，**批次保持 applying、outcome 为空**，不许先写成 indeterminate。人用 memory.inspect_batch 对账：全在 → confirm_applied 收 done，批次 applying→applied / written；全不在 → confirm_not_applied 后旧 apply 节点 superseded、新 attempt 重跑 apply，批次仍在 applying，成功后 applied（不是先回 applying 再写）；只在一部分 → 批次 applying→indeterminate、outcome=indeterminate，已写入条目 applied、未写入条目 approved，节点留 indeterminate_side_effect 并开 verify_human，run 保持 paused，allowed_resolutions 只给 abandon；人选 abandon 后节点 abandoned_unverified、run 仍 paused 并生成 abandon_ack，签字后 run 落 succeeded_with_unverified（没有副作用被核实为没发生），批次保持 indeterminate，不自动补写、不自动回滚、不重试本批次；任务 run 不受影响。**confirm_applied 与 confirm_not_applied 都要带 `stopped_at` 与 `evidence_id`**：前者取 mem_apply 节点已记录的动作停止时刻，后者取 memory.inspect_batch 的返回；缺任一字段返回 VERIFICATION_TOO_WEAK，节点与批次都不动。**原子写是承诺，部分写入是事故，事故必须留痕，不能静默重试。**
 
 ### 5.9 面板：一条任务只回答四个问题
 
@@ -2026,23 +2032,23 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 43c. **Q-43c** 两个并发请求带同一 (source_run_id, request_key) 同时发起：只有一个事务能插入 memory_run_requests，另一个命中主键冲突后读回同一 memory_run_id，只建一条 run；服务重启后同 key 再发仍返回该 run，replayed=true。
 44. **Q-44** executor 的工具白名单里写 memory_write 或 memory_update，workflow.publish 返回 MEMORY_WRITE_TOOL_FORBIDDEN（422），不生成版本；把工具换成 memory.search 后可发布。执行器在运行时调 memory_write 也拿不到该工具。
 44b. **Q-44b** 在 agent 节点的 toolPolicy.allow 或任务会话模板的 allow 里写 memory_update：workflow.publish 分别返回 MEMORY_WRITE_TOOL_FORBIDDEN（422），不生成版本；三面（executor / agent / 任务会话模板）都不含时才可发布。
-44c. **Q-44c** 加载期校验：mem_check 的 toolRef 写 `memory_bridge:memory.evaluate`、mem_apply 写 `memory_bridge:memory.apply_governed` 时通过；把其中一个写成不带前缀的 `memory.evaluate`，或让普通 executor 节点引用 `memory_bridge:memory.evaluate`，加载期返回 TOOL_NOT_REGISTERED；把 `memory.apply_governed` 声明成 read_only，加载期返回 SIDE_EFFECT_UNDECLARED；只有走独立 bridge 注册表且能力声明相符的引用能加载。
+44c. **Q-44c** 加载期校验：mem_check 的 toolRef 写 `memory_bridge:memory.evaluate`、mem_apply 写 `memory_bridge:memory.apply_governed` 时通过；把其中一个写成不带前缀的 `memory.evaluate`，或让普通 executor 节点引用 `memory_bridge:memory.evaluate`，加载期返回 TOOL_NOT_REGISTERED；把 mem_apply 节点的 `side_effect_policy` 写成 `pure`（而注册表 capability=mutating、节点实际按 irreversible 算），加载期返回 SIDE_EFFECT_UNDECLARED；只有 toolRef 前缀与能力声明都相符的引用能加载。
 45. **Q-45** mem_prepare 输出 21 条、单条正文超 64 KiB、client_key 重复、layer=L3，分别返回 MEMORY_BATCH_TOO_LARGE / MEMORY_PROPOSAL_INVALID，节点 failed，memory_batches 不落行；修正后重跑成功。
 46. **Q-46** 同一批次两条都指向同一个 target_id 且内容不同，返回 MEMORY_BATCH_CONFLICT（422），不调评估、不生成审批卡；同一 target 内容相同则合并为一条 skipped_duplicate，不报错。
 47. **Q-47** 裁判返回非 JSON、缺 items、verdict=maybe，均返回 MEMORY_EVAL_INVALID_OUTPUT；批次 failed、run failed、无审批卡、无写入；批次 failed 后剩余 proposed 条目全部 skipped，不留非终态条目；重跑产生新的 evaluation attempt，旧评估保留。
 47b. **Q-47b** 裁判对一条 truncated=true 的条目给 approve：服务端解析直接返回 MEMORY_EVAL_INVALID_OUTPUT，批次 failed、run failed、不进 ready；只有 verdict=needs_user 才允许 truncated=true，此时批次 blocked、无写入。
 48. **Q-48** 裁判对一条给 needs_user，recommendation=blocked；不生成审批卡，run 走 mem_report_blocked 并成功收口；批次 outcome=blocked，一条未写，全部 proposed 条目 skipped；任务详情显示「有 1 条拿不准，这次没写」。
-49. **Q-49** 裁判给 2 条 approve、1 条 reject，recommendation=ready；审批卡显示「建议写入 2 条，1 条不写」；人批准后 mem_apply 只写 2 条，第 3 条 status=skipped；批次 outcome=written、applied_count=2、skipped_count=1。
+49. **Q-49** 裁判给 2 条 approve、1 条 reject，recommendation=ready；审批卡显示「建议写入 2 条，1 条不写」；人批准后 mem_apply 只写 2 条，第 3 条 status=skipped；批次 outcome=written、applied_count=2、skipped_count=1。整个流程只出现一张审批卡；mem_apply 进 blocked_pre 时复用 mem_confirm 的同一 decision_id，不新建 pre_execution decision，事件记 pre_execution.reused；若复用条件不满足，引擎才补一张 pre_execution 卡。
 50. **Q-50** 人驳回审批卡：decision=rejected、批次 declined、run failed、memory.apply_governed 未被调用、记忆插件条目数不变；全部 proposed 条目 skipped；任务 run 仍是 succeeded，任务详情只显示「你选择先不写」。
 51. **Q-51** 审批卡超过 24 小时未确认：decision=expired、批次 expired、无写入；全部 proposed 条目 skipped；不自动批准、不自动改判、不生成第二条裁决；面板显示「超过 24 小时没确认，这次没写」。
-52. **Q-52** 用另一条批次的 decision_id，或改掉批次里某条 content 后再调 memory.apply_governed，返回 MEMORY_APPLY_BINDING_INVALID（403），整笔拒绝，一条不写；错误文案不含哈希与内部 id。再测「同时改 content 与 content_hash，并重算 proposal_hash」：apply 仍从当前条目重算哈希并与 approved_proposal_hash / approved_content_hash 快照比，返回 MEMORY_APPLY_BINDING_INVALID，不写入；批准后直接 UPDATE 批次或条目的正文、哈希或条目集合字段，也被数据库约束拒绝；状态迁移只走 memory bridge。
-52b. **Q-52b** 批准后直接对 memory_items 做 INSERT / DELETE，或 UPDATE action / target_id / title / tags_json / questions_json / key / importance / ttl_days / quote / reason 中任一字段：数据库触发器拒绝，apply 不会读到被改过的条目；若绕过触发器把当前条目集合改成新增、删除或换序，apply 重算的 proposal_hash 与有序 `(client_key, content_hash)` 数组均与 approved_* 快照不符，返回 MEMORY_APPLY_BINDING_INVALID（403），整笔拒绝。
+52. **Q-52** 用另一条批次的 decision_id，或改掉批次里某条 content 后再调 memory.apply_governed，返回 MEMORY_APPLY_BINDING_INVALID（403），整笔拒绝，一条不写；错误文案不含哈希与内部 id。再测「同时改 content 与 content_hash，并重算 proposal_hash」：apply 仍从当前条目按 5.4 的 canonical_proposal 重算哈希并与 approved_proposal_hash / approved_content_hash 快照比，返回 MEMORY_APPLY_BINDING_INVALID，不写入；批准后直接 UPDATE 批次或条目的正文、哈希或条目集合字段，也被数据库约束拒绝；状态迁移只走 memory bridge。另测：只把 status 从 proposed 改成 approved、不改正文，proposal_hash 与 approved_proposal_hash 不变；改任一白名单字段的值才变，tags 仅换顺序按规范化等价、不算改值。
+52b. **Q-52b** 批准后直接对 memory_items 做 INSERT / DELETE，或 UPDATE client_key / action / target_id / layer / title / content / tags_json / questions_json / key / importance / ttl_days / quote / reason 中任一字段：数据库触发器拒绝，apply 不会读到被改过的条目；若绕过触发器把当前条目集合改成新增、删除或改 client_key，apply 重算的 proposal_hash 与按 client_key 升序的 `(client_key, content_hash)` 数组均与 approved_* 快照不符，返回 MEMORY_APPLY_BINDING_INVALID（403），整笔拒绝。单纯调整行的物理顺序不改变集合，不属于内容篡改，不要求检出。
 53. **Q-53** 同一批次连续调两次 apply：第一次写 2 条，第二次返回 already_applied=true、applied_count=0、条目总数仍为 2；第二次不产生新的 memory.applied 事件，只记一条 replay。
-54. **Q-54** apply 的 tool.result 丢失，节点落 indeterminate_side_effect；memory.inspect_batch 返回 batch_id、逐条 status、written_count、missing_count、partial 与 evidence_id，并把 evidence_id 记进事件账本。人调 confirm_applied 或 confirm_not_applied 时，请求必须带 `stopped_at`（取 mem_apply 节点已记录的动作停止时刻；没有记录就说明停止事实不明，先补停止事件，补齐前不得走 confirm_*）与 `evidence_id`（取 memory.inspect_batch 的返回）；缺任一字段返回 VERIFICATION_TOO_WEAK，节点不动、批次不动。
+54. **Q-54** apply 的 tool.result 丢失，节点落 indeterminate_side_effect；**批次保持 applying、outcome 为空**，不得先写 indeterminate。memory.inspect_batch 返回 batch_id、逐条 status、written_count、missing_count、partial 与 evidence_id，并把 evidence_id 记进事件账本。人调 confirm_applied 或 confirm_not_applied 时，请求必须带 `stopped_at`（取 mem_apply 节点已记录的动作停止时刻；没有记录就说明停止事实不明，先补停止事件，补齐前不得走 confirm_*）与 `evidence_id`（取 memory.inspect_batch 的返回）；缺任一字段返回 VERIFICATION_TOO_WEAK，节点不动、批次不动。
 
-    - inspect 显示 2 条都在：confirm_applied 收 done，批次 applied / written，不重复写。
-    - 显示 0 条：confirm_not_applied 后重试成功，批次重新 applying→applied。
-    - 显示 1 条（部分写入事故）：批次 status=indeterminate、outcome=indeterminate，已写入条目 applied、未写入条目 approved，节点留 indeterminate_side_effect 并开 verify_human，run 保持 paused，allowed_resolutions 只给 abandon；人选 abandon 后节点 abandoned_unverified、run 仍 paused 并生成 abandon_ack，签字后 run 落 succeeded_with_unverified（没有副作用被核实为没发生），批次保持 indeterminate，不自动补写、不自动回滚、不重试本批次；任务 run 不受影响。
+    - inspect 显示 2 条都在：confirm_applied 收 done，批次 applying→applied / written，不重复写。
+    - 显示 0 条：confirm_not_applied 后旧 apply 节点 superseded、新 attempt 重跑；批次全程保持 applying，成功后 applied（不是先回 applying 再写）。
+    - 显示 1 条（部分写入事故）：批次 applying→indeterminate、outcome=indeterminate，已写入条目 applied、未写入条目 approved，节点留 indeterminate_side_effect 并开 verify_human，run 保持 paused，allowed_resolutions 只给 abandon；人选 abandon 后节点 abandoned_unverified、run 仍 paused 并生成 abandon_ack，签字后 run 落 succeeded_with_unverified（没有副作用被核实为没发生），批次保持 indeterminate，不自动补写、不自动回滚、不重试本批次；任务 run 不受影响。
 55. **Q-55** 源 run A 的批次不能用源 run B 的 decision_id 写入；归属核对失败返回 MEMORY_APPLY_BINDING_INVALID，B 的记忆条目数不变；A 的批次仍可正常批准写入。
 56. **Q-56** 一条记忆写入后，条目 source 能追回 source_run_id、memory_run_id、batch_id、decision_id、client_key；面板从条目详情能跳到源任务，从任务详情能看到这条条目；全程不展示 session_id / node_run_id 给普通视图。
 57. **Q-57** 对一个不存在或不属于该记忆 run 的 batch_id 调 memory.apply_governed：返回 MEMORY_BATCH_NOT_FOUND（404），不读批次内容、不写；面板显示「批次找不到了，刷新重取」。
@@ -2057,7 +2063,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 - **不新增节点类型**：只用 trigger / agent / tool / branch / approval。记忆流程是这五种节点的编排，不是第七种节点。
 - **不新增 run 状态**：记忆 run 与任务 run 共用 §8 的状态机与终态集合；blocked / empty / declined / expired / failed / indeterminate 是**批次结论**，不是 run 状态。
-- **不新增 decision kind / resolution**：审批用已有的 audit_result。它和 pre_execution 一样走 approval 节点的批准/驳回，不进入 §9 的异常出口映射，decision.resolve 的 payload 为空对象；本段不新增 resolution 值。§9 与 §4.6.3 已写明：只有异常出口的 approved 必须带 resolution；approval 节点的正常批准 / 驳回（含 audit_result）不要求，payload 为空对象。第五段与 §9 / §4.6.3 同一口径，不另立条件句。
+- **不新增 decision kind / resolution**：审批用已有的 audit_result。它和 pre_execution 一样走 approval 节点的批准/驳回，不进入 §9 的异常出口映射，decision.resolve 的 payload 为空对象；本段不新增 resolution 值。§9 与 §4.6.3 已写明：只有异常出口的 approved 必须带 resolution；approval 节点的正常批准 / 驳回（含 audit_result）不要求，payload 为空对象。第五段与 §9 / §4.6.3 同一口径，不另立条件句。**唯一例外是复用**：mem_confirm 的 audit_result 被绑定为 mem_apply 的 pre_execution 批准，复用同一条 decision_id，不新增 kind、不新增 resolution；复用条件见 §3.2 与 §8。
 - **不新增面板命令**：面板仍然只提交第四段白名单里的命令；记忆 run 的发起走核心大脑的 memory_start_run 工具，审批走现有 decision.resolve，不新增面板命令。
 - **不改直接通道**：记忆插件 audit.js 的 fail-open Hook 保持原样，只服务主聊天直写；受控通道不经过它。
 - **不直连插件存储**：编排只调 memory.evaluate / memory.apply_governed / memory.inspect_batch 三个内部端口；端口由插件提供，编排不读它的 JSON / SQLite 文件。
