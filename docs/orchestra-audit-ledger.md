@@ -114,3 +114,5 @@
 - 2026-11-11 23:25 第二十八轮已送：v26，1279 行，SHA256 62B9F857…F555，收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId 6e785359-bc9d-46f9-a1b9-58c479cc5279；只读复核第二十七轮 2 致命 / 4 重大 / 3 措辞与 v26 新增存储落点，待回包。第二十七轮回包判 fail：F1/F2 遗留、M1–M4 新增、W1–W3 措辞；第二十六轮旧 2 致命已修好。
 
 - 2026-11-11 23:54 第二十八轮回包判 fail：0 致命 / 1 重大（两阶段确认与 inbox 幂等未接上）/ 0 措辞。第二十九轮已送：v27，1289 行，SHA256 AE360E98…86B0，收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId 663edcf9-fd46-4cfd-bd4c-d69639ce36a3；只读复核「预检不落 command 行、challenge 先验于冲突、并发唯一键兜底、7 天回执窗口」与 §14.2 command 行 DDL，待回包。
+
+- 2026-11-12 00:00 第二十九轮回包判 fail：1 致命 / 3 重大 / 2 措辞（终态回执过期无承载字段、command 行 CHECK 遇 NULL 放行、唯一索引建在 idempotency_key、payload_hash 未覆盖 target/expected、回执窗口与过期优先未限定、MISMATCH 误含 revision）。v28 已修：新增 receipt_expired_at；request_hash = SHA256(JCS({command,target,expected,payload}))；CHECK 三支显式判 NULL；唯一索引改 operation_id；7 天窗口从 completed_at 起算；错误码与 Q-13/14/15/35 同步；§3.4q 为唯一 CURRENT。v28 1307 行，SHA256 02AB845F…2F8B，第三十轮已送：收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId bb8191bb-7fcf-4fa0-8805-74a7c981e257；待回包。
