@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-12 03:45。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-12 03:52。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**第三段 v23 已在第二十五轮拿到 pass；第四段 v33 已按第三十四轮 pass 收口；第五段 v37 已按第三十八轮 pass 收口，v38 清了两条非阻断措辞；第六段 v44 已按第 44 轮 0 致命 / 1 重大 / 8 措辞修入，2439 行、505410 bytes，第 45 轮只读审计已送，等回包；面板原型 v13 已收口（去掉可见优先级标签、任务卡与编排页统一人话），448946 bytes、5968 行、SHA256 `9D59CE6590CE0CB13E8856FF09249512929796F535F1737941FE23E76D8E63D9`，提交 `63adb98`，等主人评审；插件源码还没写。**
+现在做到哪：**第三段 v23 已在第二十五轮拿到 pass；第四段 v33 已按第三十四轮 pass 收口；第五段 v37 已按第三十八轮 pass 收口，v38 清了两条非阻断措辞；第六段 v44 已在第 45 轮拿到 pass（0 致命 / 0 重大 / 7 条不阻断的措辞），2439 行、505410 bytes；面板原型 v13 已收口（去掉可见优先级标签、任务卡与编排页统一人话），448946 bytes、5968 行、SHA256 `9D59CE6590CE0CB13E8856FF09249512929796F535F1737941FE23E76D8E63D9`，提交 `63adb98`，等主人评审；插件源码还没写。**
 
 ---
 
@@ -19,8 +19,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 2439 行 / 505410 bytes / SHA256 `D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793`；第五段 v38 已过第 38 轮；第六段 v44 已修第 44 轮 1 重大 / 8 措辞，第 45 轮已送，等回包 |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass、第 32/33 轮 fail、第 34 轮 pass；第五段第 35/36/37 轮 fail、第 38 轮 pass，v38 清两条措辞已记；第六段第 39 轮 fail（1 致命 / 15 重大 / 5 措辞），21 条已修；第 40 轮 fail（0 致命 / 9 重大 / 4 措辞），v40 已修；第 41 轮 fail（0 致命 / 5 重大 / 5 措辞），v41 已修；第 42 轮 fail（1 致命 / 7 重大 / 4 措辞），v42 已修；第 43 轮 fail（0 致命 / 2 重大 / 8 措辞），v43 已修；第 44 轮 fail（0 致命 / 1 重大 / 8 措辞），v44 已修，第 45 轮已送，等回包 |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 2439 行 / 505410 bytes / SHA256 `D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793`；第五段 v38 已过第 38 轮；第六段 v44 已过第 45 轮（0 致命 / 0 重大 / 7 措辞，措辞落 spec 时清） |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass、第 32/33 轮 fail、第 34 轮 pass；第五段第 35/36/37 轮 fail、第 38 轮 pass，v38 清两条措辞已记；第六段第 39 轮 fail（1 致命 / 15 重大 / 5 措辞），21 条已修；第 40 轮 fail（0 致命 / 9 重大 / 4 措辞），v40 已修；第 41 轮 fail（0 致命 / 5 重大 / 5 措辞），v41 已修；第 42 轮 fail（1 致命 / 7 重大 / 4 措辞），v42 已修；第 43 轮 fail（0 致命 / 2 重大 / 8 措辞），v43 已修；第 44 轮 fail（0 致命 / 1 重大 / 8 措辞），v44 已修；第 45 轮 pass（0 致命 / 0 重大 / 7 措辞，留 spec 清） |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
@@ -38,7 +38,7 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（2439 行，v44，第六段第 45 轮已送，等回包）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（2439 行，v44，第 45 轮 pass）
 │  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（见 §五）
 │  ├─ prototype\panel-v2.html     ← 面板 v13 单文件原型（浅色、可点击、字号已抬、人话文案）
 │  ├─ requirements.md             ← 原始需求与拍板口径
@@ -68,7 +68,7 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第五段第 38 轮 pass；第六段 v44 已修第 44 轮 0 致命 / 1 重大 / 8 措辞，第 45 轮已送，等回包（2026-11-12 03:45）
+### 4.1 当前状态：六段全过；第六段 v44 第 45 轮 pass，转写 spec（2026-11-12 03:52）
 
 第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
@@ -90,7 +90,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 
 第六段 v43 已按第 43 轮 0 致命 / 2 重大 / 8 措辞修入：EventView 与 SSE 事件补 `boot_id` / `monotonic_ns`，明确 `events.seq` 与 `node_run_events.event_seq` 不互换；`candidate_hash` 原像统一为 git sha、schema 版本、阶段开关，构建时间只进正文；6.10 第 1 段补 `gate` / `gate_run_id`，第 7 段补回滚对象，`exceptions[]` 增 `rollback_target`，`producer` 按门绑定；654 行改 `event_seq`，新增 §14.0 定义 `node_run_events` 列与 `payload_json` 唯一载体；6.4 标题改「十条不变量」；`clock_uncertain.clear` 命名；`abandoned_unverified` 进 `succeeded` 必须带 `side_effect_verified_none=true`。终稿 2439 行、504087 bytes、SHA256 `AE5B50F92A514FB4A49EAC519B37F97C35B418E5068A3F96A27230F16C8D2E24`；已提交 `6777ea4`，第 44 轮已送 subagent `1f208fe6-fd33-4824-b1c1-015a4e4bf101`。
 
-第六段 v44 已按第 44 轮 0 致命 / 1 重大 / 8 措辞修入：`candidate_hash` 原像改为 `git_sha` + GateArtifact `schema_version` 整数 + 单值 `phase`（S1–S6），删除 `phase_flags`；518 行改 `report_seq`；G2 必过项与矩阵补 G-05；无 run 的 artifact（G1–G5 与 G6 独立 artifact）`gate_run_id` 一律 null，无 run 门结论补固定值；`payload_json` 限定为 `node_run_events` 内结构化事件的唯一持久载体，`occurred_at` 与 `events.occurred_at` 同源同刻、只用于链内排序、不用于截止判断；`change_scope` 原像补 `capability_ids[]` / `touched_paths[]`；2402/2403 分离回滚目标 `rollback_target` 与回滚 target。终稿 2439 行、505410 bytes、SHA256 `D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793`；结构校验 10 围栏、90 标题、Q 69、G 16、48 表 0 列不一致；第 45 轮已送，等回包。
+第六段 v44 已按第 44 轮 0 致命 / 1 重大 / 8 措辞修入：`candidate_hash` 原像改为 `git_sha` + GateArtifact `schema_version` 整数 + 单值 `phase`（S1–S6），删除 `phase_flags`；518 行改 `report_seq`；G2 必过项与矩阵补 G-05；无 run 的 artifact（G1–G5 与 G6 独立 artifact）`gate_run_id` 一律 null，无 run 门结论补固定值；`payload_json` 限定为 `node_run_events` 内结构化事件的唯一持久载体，`occurred_at` 与 `events.occurred_at` 同源同刻、只用于链内排序、不用于截止判断；`change_scope` 原像补 `capability_ids[]` / `touched_paths[]`；2402/2403 分离回滚目标 `rollback_target` 与回滚 target。终稿 2439 行、505410 bytes、SHA256 `D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793`；结构校验 10 围栏、90 标题、Q 69、G 16、48 表 0 列不一致；第 45 轮 pass（0 致命 / 0 重大 / 7 措辞）；7 条措辞只在 spec 修正，设计稿保持 v44 冻结。
 
 - 画布与智能体同写一份 `WorkflowDefinition`；草稿可改、发布版本不可变；版本号连续，发布只影响之后新建的 run。
 - 图校验分两层：保存层允许不完整草稿，只拒无法解析、超限、重复 id、边端点不存在、坐标非法；发布层要求恰好一个 trigger、全图可达且无环、出度纪律、branch route、subworkflow pin 与深度。
@@ -98,12 +98,13 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 
 面板原型 `docs/prototype/panel-v2.html` 已到 v13：浅色、低密度、任务流程三栏（任务 / 步骤 / 现场）、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；无彩色左侧色条、无可见优先级标签。v11 把菜单、表头、卡片元信息、流程节点、抽屉与弹窗的可见字号统一抬到 12.5px 以上，导航 13px；v12 把任务卡下一步写具体（运行中「修订执行」交回后进「交叉审计」；另有 1 件等你决定；暂停的「补证脚本」没通过，等你决定是否接手），设计任务的 run 摘要与步骤状态对齐；v13 把优先级改成「最急 / 尽快 / 常规 / 有空再做」，任务卡去掉重复的下一步与「需要你」里的件数，编排页标题按任务类型切「七七怎么带这一队 / 这次运行怎么走」，状态词统一为「已完成 / 在做 / 等前一步」，并去掉可见的工作流版本号。文件 448946 bytes、5968 行、SHA256 `9D59CE6590CE0CB13E8856FF09249512929796F535F1737941FE23E76D8E63D9`，提交 `63adb98`；内联脚本 `new Function` 解析通过。v13 在 1600/1366/1200/1024 四档实测（over=0、screenOver=0、smallTotal=0、errs=[]）；七任务×四页、七弹窗与代理抽屉的 small/bad/jargon 全空，仅画布与 1024 宽的 `.tw-rail` 保留设计内横向滚动。主人会自己打开看，不再截图。
 
-### 4.2 下一步：等第 45 轮审计回包，原型交主人评审
+### 4.2 下一步：写 spec、自审、提交、交主人审
 
-1. 第六段 v44 已修第 44 轮 9 条，第 45 轮只读审计已送 subagent `a057acad-da91-4917-a844-1a936ed82ca0`，等回包；pass 前不写 spec。
-2. 原型 v13 已提交并交主人评审：浅色、低密度、人话、任务做到哪一步 / 发生了什么 / 结果 / 下一步；主人自己打开，不再截图。
-3. 第六段 pass 后六段全过，才写 spec、自审、提交、交主人审。
-4. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
+1. 六段设计已全部 pass：第六段 v44 第 45 轮 0 致命 / 0 重大 / 7 条措辞，设计稿保持 v44 冻结（2439 行 / 505410 bytes / SHA `D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793`）。
+2. 现在写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`：以设计稿 v44 为权威，写成实施契约；第 45 轮 7 条措辞在 spec 修正，不改设计稿。
+3. spec 自审（7 条措辞、结构、与设计稿行号一致）后提交 git，交主人审；通过后才转 `writing-plans`。
+4. 原型 v13 已提交并交主人评审：浅色、低密度、人话、任务做到哪一步 / 发生了什么 / 结果 / 下一步。
+5. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
 
 > ⚠️ 第三段内改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构）；从第四段起按六段路线新增 `## 第四段 …`，不要改动前三段标题。不要删 §3.4b–§3.4m 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
 
@@ -118,9 +119,9 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 | 三 | 九节点图（§3.0 两类契约 → §3.5） | ✅ 完成（v23，第二十五轮 pass；§4.1） |
 | 四 | 面板与查询 | ✅ 完成（v33，第三十四轮 pass；原型 v13 待主人评审） |
 | 五 | 记忆插件对接 memory-audit-v1 | ✅ 完成（v37 第 38 轮 pass；v38 清两条措辞；5.1–5.14，Q-43–Q-63） |
-| 六 | 分阶段落地与验收 | 🔄 v44 已修第 44 轮 1 重大 / 8 措辞，第 45 轮已送，等回包 |
+| 六 | 分阶段落地与验收 | ✅ 第 45 轮 pass（0 致命 / 0 重大 / 7 措辞，留 spec 清） |
 
-六段全过之后才写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`、自审、提交 git、交主人审阅，再转 `writing-plans`。
+六段已全过，现在写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`、自审、提交 git、交主人审阅，再转 `writing-plans`。
 
 ---
 
