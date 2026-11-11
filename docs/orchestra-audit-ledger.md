@@ -85,9 +85,9 @@
 - 第 3 轮是 pass（附四条在案），是第一、二段的收敛点。
 - 第 4 轮起审的是第三段（九种节点），轮次编号沿用全局计数。
 
-## 五、当前进度与续跑指引（2026-11-11 20:04 记）
+## 五、当前进度与续跑指引（2026-11-12 01:20 记）
 
-- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 866 行（SHA256 全值 2E529CDC209F8A2D538F3C5A987D429244040E8F54450708FAE7A2338150B054，文件头与第三段标题均已升 v23，§3.4o 为唯一 [CURRENT] 清单）。第二十五轮由 a8f7647d 判 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），第三段已收口，可进第四段（面板与查询）；3 条措辞留到第四段一并清理。
+- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 1528 行（SHA256 全值 78F9ED9209330B3671219951416DD7778D872295292C92ACA3039504D6266E26），文件头 v33，§3.4u 为唯一 [CURRENT] 清单。第三十四轮由 a8f7647d 判 **pass**（0 致命 / 0 重大 / 4 条非阻断措辞），v33 只做四条收口清理，不改变审查结论；第四段已收口，可进第五段（记忆插件对接）。
 
 - 项目已于 2026-11-11 16:50 整体迁到 D:\aboutAI\dsh-orchestra（设计稿、台账、requirements.md、design-notes.md、根目录 handoff.md 与 codebasemap.md、references\ 三份参考项目、四份 codebase-memory 图谱）；旧址 D:\aboutAI\dshQQ\docs\ 保留同内容副本，后续只改新址。
 - 第二十轮审计已出结论：fail，10 致命 + 2 重大结构性，措辞/性能 0 条。最易低估的风险：「节点终态」不等于「run 可以成功」；叠加 stopped_at 只证明动作停了、不证明副作用没发生。
@@ -136,3 +136,6 @@
 - 2026-11-12 01:15 v32 已按上轮 7 条修完：头部升 v32，§3.4t 降 HISTORY，新增 §3.4u [CURRENT] 七条；三处发布写序统一到 §4.6.5 模板（先查 workflow 行 404、读草稿 revision + published_version IS NULL、读 current_version、全量校验、插 version=base+1 且 based_on_version=CASE WHEN base=0 THEN NULL ELSE base END、UPDATE workflows 带 workflow_id + COALESCE、UPDATE drafts 带 workflow_id + revision + published_version IS NULL、事件与回执同事务）；保存层补 title/name 1–80 字与 WORKFLOW_TITLE_INVALID / WORKFLOW_NAME_INVALID（422）；Q-37 补 based_on_version 断言与不存在 workflow 的 404，Q-39 补 title/name 81 字用例；12 处历史指针改指当前 §3.4u（新增当前清单后同步再改，避免指到 HISTORY 的 §3.4t）；触发器映射拆开为 VERSION_SEQUENCE→409、VERSION_NOT_FOUND→404；保存层摘要补「节点 id 格式与重复」。终稿 1525 行、385466 bytes、SHA256 D6DCE45C403ABB0EE57E58B98DF95BA7B317305F33A1C53431B5C23BDA1FF7D4。第三十四轮待送。
 
 - 2026-11-12 01:16 第三十四轮已送：v32，1525 行，385466 bytes，SHA256 D6DCE45C403ABB0EE57E58B98DF95BA7B317305F33A1C53431B5C23BDA1FF7D4；收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId c3d2eec6-1dc1-4755-b09b-8bb3f5bc7b0c；只读复核 §3.4u 七条、三处发布写序、WORKFLOW_NOT_FOUND 三命令、历史指针、title/name 保存层、Q-37/Q-39 与结构回归，待回包。
+- 2026-11-12 01:20 第三十四轮回包判 **pass**：0 致命 / 0 重大 / 4 条非阻断措辞。四条：① `workflow.open_draft` 不能与 update/publish 共用「草稿行未命中按 published_version 分流」，已有草稿应 DRAFT_EXISTS、已消费应重置并 revision+1、从未发布应 NOT_PUBLISHED；② 名称校验要拆成 create 校验 `payload.name` 与 `definition.name` 一致、update 只校验 `definition.name`；③ Q-39 补 create 的 `payload.name` 81 字用例；④ 三处写序的占位符命名不同，L946 的「逐字一致」改为「语义一致」。v33 只做这四条收口清理，并同步 §3.4u 第 3/5 条与 §4.12 表，不改变审查结论。终稿 1528 行、387116 bytes、SHA256 78F9ED9209330B3671219951416DD7778D872295292C92ACA3039504D6266E26；`^### .*\[CURRENT\]` 仅 1 条，Q 共 42 条，H3 43 个。
+
+- 2026-11-12 01:20 第四段达到收口条件：第 31 轮 pass 之后，第 32、33 轮 fail 的 15 条已全部落正文，第 34 轮 pass；v33 只清收口措辞与测试覆盖。按主人「没通过、没获得正确结果前不能往后走」的口径，第四段闸门已开，可进第五段（记忆插件对接）。
