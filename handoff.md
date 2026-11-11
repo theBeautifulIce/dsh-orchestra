@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 收口；第五段（记忆插件对接）v37 已按第三十八轮 pass 收口，v38 清了两条非阻断措辞；第六段（分阶段落地与验收）v41 已按第 41 轮 5 重大 / 5 措辞修入，2437 行、496260 bytes，待第 42 轮送审；面板原型 v11 已把全部可见字号抬到 12.5px 以上（导航 13px），1600/1366/1200/1024 共 56 个上下文无页面溢出、无报错，只保留画布与窄屏任务侧栏的横向滚动区，等主人评审；插件源码还没写。**
+现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 收口；第五段（记忆插件对接）v37 已按第三十八轮 pass 收口，v38 清了两条非阻断措辞；第六段（分阶段落地与验收）v41 已按第 41 轮 5 重大 / 5 措辞修入，2437 行、496260 bytes，第 42 轮送审中；面板原型 v11 已把全部可见字号抬到 12.5px 以上（导航 13px），1600/1366/1200/1024 共 56 个上下文无页面溢出、无报错，只保留画布与窄屏任务侧栏的横向滚动区，等主人评审；插件源码还没写。**
 
 ---
 
@@ -19,8 +19,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 2437 行 / 496260 bytes / SHA256 `E047DFD0292F8703AFAB3FB650B0D37BE581B1A1A5B58D9FA4E93EEBD6CF56C2`；第五段 v38 已过第 38 轮；第六段 v41 已修第 41 轮 5 重大 / 5 措辞，待第 42 轮送审 |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass、第 32/33 轮 fail、第 34 轮 pass；第五段第 35/36/37 轮 fail、第 38 轮 pass，v38 清两条措辞已记；第六段第 39 轮 fail（1 致命 / 15 重大 / 5 措辞），21 条已修；第 40 轮 fail（0 致命 / 9 重大 / 4 措辞），v40 已修；第 41 轮 fail（0 致命 / 5 重大 / 5 措辞），v41 已修，待第 42 轮送审 |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 2437 行 / 496260 bytes / SHA256 `E047DFD0292F8703AFAB3FB650B0D37BE581B1A1A5B58D9FA4E93EEBD6CF56C2`；第五段 v38 已过第 38 轮；第六段 v41 已修第 41 轮 5 重大 / 5 措辞，第 42 轮送审中 |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass、第 32/33 轮 fail、第 34 轮 pass；第五段第 35/36/37 轮 fail、第 38 轮 pass，v38 清两条措辞已记；第六段第 39 轮 fail（1 致命 / 15 重大 / 5 措辞），21 条已修；第 40 轮 fail（0 致命 / 9 重大 / 4 措辞），v40 已修；第 41 轮 fail（0 致命 / 5 重大 / 5 措辞），v41 已修，第 42 轮送审中 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
@@ -38,7 +38,7 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（2437 行，v41，第六段待第 42 轮送审）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（2437 行，v41，第六段第 42 轮送审中）
 │  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（见 §五）
 │  ├─ prototype\panel-v2.html     ← 面板 v10 单文件原型（浅色、可点击、字号已抬）
 │  ├─ requirements.md             ← 原始需求与拍板口径
@@ -68,7 +68,7 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第五段第 38 轮 pass；第六段 v41 已修第 41 轮 5 重大 / 5 措辞，待第 42 轮送审（2026-11-12 03:02）
+### 4.1 当前状态：第五段第 38 轮 pass；第六段 v41 已修第 41 轮 5 重大 / 5 措辞，第 42 轮送审中（2026-11-12 03:02）
 
 第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
@@ -84,7 +84,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 
 第六段 v40 已按第 40 轮 fail 的 0 致命 / 9 重大 / 4 措辞修入：门 run 终态沿用第二段 §8 五值、policy 输出 `decision=pass|fail`、I4 证据表覆盖 node_run 与 run、辅门失败只追加补记不改主门结论、GateArtifact 去自指并补四个 canonical 哈希与八段映射、EventView 改 `occurred_at` 并按 boot_id+monotonic_ns+seq 处理时钟跳变、G-01/G-14 改条件回退、补门×注入矩阵与 G2 parallel 拒绝；S6 顺序统一为 R0→G6→R1→R2 且 R0 不计入。终稿 2409 行、487617 bytes、SHA256 `0C5FB3490E9C3FE0061AA1A883ACFFFC3194CC296CC4DF3BA1445003D43D7606`；第 41 轮送审中。
 
-第六段 v41 已按第 41 轮 fail 的 0 致命 / 5 重大 / 5 措辞修入：run 终态由 run 外收口器在门 run 结束后直抄 `runs.status`，run 内节点一律不读本 run 终态，部署脚本同时校验 `conclusion=pass` / `run_terminal=succeeded` / `gate_run_id` 指向的 run 仍为 succeeded；policy 只判 policy 之前节点全部终态且无未验证副作用；I4 的 run succeeded 行只留 done 强证据与 superseded 无副作用证据，abandoned_unverified 归 succeeded_with_unverified；GateArtifact 字段与八段一一对应，`must_pass_items[]` 逐项，`artifact_hash=` 锚点固定在补记之前；canonical_json 集合数组升序去重；截止字段成对带 boot_id/monotonic_ns，跨 boot 用 boots 投影扣 downtime，跳钟/漂移转 timer_uncertain；G-06/G-11 改先保持 applying、对账确认部分写入后才转 indeterminate；W1–W4 与 G1/G-15、G-01/G-14 阶段口径同步。终稿 2437 行、496260 bytes、SHA256 `E047DFD0292F8703AFAB3FB650B0D37BE581B1A1A5B58D9FA4E93EEBD6CF56C2`；待第 42 轮送审。
+第六段 v41 已按第 41 轮 fail 的 0 致命 / 5 重大 / 5 措辞修入：run 终态由 run 外收口器在门 run 结束后直抄 `runs.status`，run 内节点一律不读本 run 终态，部署脚本同时校验 `conclusion=pass` / `run_terminal=succeeded` / `gate_run_id` 指向的 run 仍为 succeeded；policy 只判 policy 之前节点全部终态且无未验证副作用；I4 的 run succeeded 行只留 done 强证据与 superseded 无副作用证据，abandoned_unverified 归 succeeded_with_unverified；GateArtifact 字段与八段一一对应，`must_pass_items[]` 逐项，`artifact_hash=` 锚点固定在补记之前；canonical_json 集合数组升序去重；截止字段成对带 boot_id/monotonic_ns，跨 boot 用 boots 投影扣 downtime，跳钟/漂移转 timer_uncertain；G-06/G-11 改先保持 applying、对账确认部分写入后才转 indeterminate；W1–W4 与 G1/G-15、G-01/G-14 阶段口径同步。终稿 2437 行、496260 bytes、SHA256 `E047DFD0292F8703AFAB3FB650B0D37BE581B1A1A5B58D9FA4E93EEBD6CF56C2`；第 42 轮送审中。
 
 - 画布与智能体同写一份 `WorkflowDefinition`；草稿可改、发布版本不可变；版本号连续，发布只影响之后新建的 run。
 - 图校验分两层：保存层允许不完整草稿，只拒无法解析、超限、重复 id、边端点不存在、坐标非法；发布层要求恰好一个 trigger、全图可达且无环、出度纪律、branch route、subworkflow pin 与深度。
@@ -94,7 +94,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 
 ### 4.2 下一步：送第六段第 42 轮并等回包，原型继续等主人评审
 
-1. 第六段 v41 已修第 41 轮 5 重大 / 5 措辞，待送第 42 轮；pass 前不写 spec。
+1. 第六段 v41 已修第 41 轮 5 重大 / 5 措辞，已送第 42 轮，等回包；pass 前不写 spec。
 2. 原型按主人评审意见继续改：浅色、低密度、人话、任务做到哪一步/发生了什么/结果/下一步；主人自己打开，不再截图。
 3. 第六段 pass 后六段全过，才写 spec、自审、提交、交主人审。
 4. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
@@ -112,7 +112,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 | 三 | 九节点图（§3.0 两类契约 → §3.5） | ✅ 完成（v23，第二十五轮 pass；§4.1） |
 | 四 | 面板与查询 | ✅ 完成（v33，第三十四轮 pass；原型 v11 待主人评审） |
 | 五 | 记忆插件对接 memory-audit-v1 | ✅ 完成（v37 第 38 轮 pass；v38 清两条措辞；5.1–5.14，Q-43–Q-63） |
-| 六 | 分阶段落地与验收 | 🔄 v41 已修第 41 轮 5 重大 / 5 措辞，待第 42 轮送审 |
+| 六 | 分阶段落地与验收 | 🔄 v41 已修第 41 轮 5 重大 / 5 措辞，第 42 轮送审中 |
 
 六段全过之后才写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`、自审、提交 git、交主人审阅，再转 `writing-plans`。
 
