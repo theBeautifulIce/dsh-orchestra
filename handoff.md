@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-12 02:01。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-12 02:16。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 收口；第五段（记忆插件对接）v37 已按第三十七轮 fail 的 10 条修完，2082 行、447818 bytes，已送第三十八轮复审，待回包；面板原型 v10 已把全部可见字号抬到 11.5px 以上，1600/1366 十六个上下文无溢出、无报错，等主人评审；插件源码还没写。**
+现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 收口；第五段（记忆插件对接）v37 已按第三十八轮 pass 收口，v38 清了两条非阻断措辞，2081 行、448133 bytes；第六段（分阶段落地与验收）开始写；面板原型 v10 已把全部可见字号抬到 11.5px 以上，1600/1366 十六个上下文无溢出、无报错，等主人评审；插件源码还没写。**
 
 ---
 
@@ -19,8 +19,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 2082 行 / 447818 bytes / SHA256 `B7D7475B735773A085955CCACD19DB6E5EAFC8A100E89A86DD3031409DCE6C94`；v33 第四段收口，v37 第五段 memory-audit-v1（5.1–5.14）已按第 37 轮 fail 修复，已送第 38 轮复审，待回包 |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass、第 32/33 轮 fail、第 34 轮 pass；第五段第 35/36/37 轮 fail，v37 修复已记，第 38 轮已送，待回包 |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 2081 行 / 448133 bytes / SHA256 `7872A5442ECE77950CAFDD7A5CF175331E0B10177D4463CAA9D33264578A78B5`；v38：第五段 v37 已过第 38 轮，两条非阻断措辞已清；第六段开始写 |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass、第 32/33 轮 fail、第 34 轮 pass；第五段第 35/36/37 轮 fail、第 38 轮 pass，v38 清两条措辞已记 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
@@ -38,7 +38,7 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（2082 行，v37，第五段待第 38 轮复审）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（2081 行，v38，第五段已 pass）
 │  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（见 §五）
 │  ├─ prototype\panel-v2.html     ← 面板 v10 单文件原型（浅色、可点击、字号已抬）
 │  ├─ requirements.md             ← 原始需求与拍板口径
@@ -68,7 +68,7 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第四段 v33 已收口；第五段 v37 已按第 37 轮修完（2026-11-12 02:12）
+### 4.1 当前状态：第四段 v33 已收口；第五段第 38 轮 pass，v38 清措辞；第六段开始（2026-11-12 02:16）
 
 第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
@@ -78,7 +78,7 @@ v30 新增「流程定义编辑」写模型：§4.6.5 四个命令、§4.12 定�
 
 v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三种草稿分支单独写（已有草稿 → DRAFT_EXISTS；已消费 → 重置 based_on_version、清 published_version、revision+1；从未发布 → NOT_PUBLISHED）；名称校验拆成 create 校验 `payload.name` 与 `definition.name` 一致、update 只校验 `definition.name`；Q-39 补 create 的 `payload.name` 81 字用例；L946 的「逐字一致」改为「语义一致」。终稿 1528 行、387116 bytes、SHA256 `78F9ED9209330B3671219951416DD7778D872295292C92ACA3039504D6266E26`，§3.4u 仍是唯一 `[CURRENT]` 清单，Q 共 42 条。
 
-第五段 v37 把记忆写入拆成两条通道：直接通道保留插件 audit.js 的 fail-open；受控通道由核心大脑发起独立 memory run `sys.memory_write@1`，新增 `memory.evaluate` / `memory.apply_governed` / `memory.inspect_batch` 三个内部端口，固定图 `mem_trigger → mem_prepare → mem_check → mem_route → ready/mem_confirm(audit_result) → mem_apply → mem_report`；新增 memory_batches / memory_items / memory_evaluations / memory_run_requests 四表、Q-43…Q-63；写入只收 decision_id，三道核对、原子、幂等，source 带 orchestra 元数据。v37 已按第 37 轮 fail 的 3 致命 / 4 重大 / 3 措辞修入：哈希原像白名单与 canonical 排序、tool.result 丢失时批次保持 applying 与同批次节点重试、audit_result 复用为 mem_apply 前置批准、toolRef 前缀统一、Q-44c 错误层、批准后 client_key 只读、inspect_batch 计数与三处措辞；终稿 2082 行、447818 bytes、SHA256 `B7D7475B735773A085955CCACD19DB6E5EAFC8A100E89A86DD3031409DCE6C94`；已送第三十八轮复审，待回包，第六段不写。
+第五段 v37 把记忆写入拆成两条通道：直接通道保留插件 audit.js 的 fail-open；受控通道由核心大脑发起独立 memory run `sys.memory_write@1`，新增 `memory.evaluate` / `memory.apply_governed` / `memory.inspect_batch` 三个内部端口，固定图 `mem_trigger → mem_prepare → mem_check → mem_route → ready/mem_confirm(audit_result) → mem_apply → mem_report`；新增 memory_batches / memory_items / memory_evaluations / memory_run_requests 四表、Q-43…Q-63；写入只收 decision_id，三道核对、原子、幂等，source 带 orchestra 元数据。v37 已按第 37 轮 fail 的 3 致命 / 4 重大 / 3 措辞修入：哈希原像白名单与 canonical 排序、tool.result 丢失时批次保持 applying 与同批次节点重试、audit_result 复用为 mem_apply 前置批准、toolRef 前缀统一、Q-44c 错误层、批准后 client_key 只读、inspect_batch 计数与三处措辞；v37 终稿 2082 行、447818 bytes、SHA256 `B7D7475B735773A085955CCACD19DB6E5EAFC8A100E89A86DD3031409DCE6C94`；第 38 轮判 pass（0 致命 / 0 重大 / 2 条非阻断措辞），两条已在 v38 清理（inspect_batch 返回体显式带 batch_id、apply 重算引用 canonical_proposal），v38 2081 行、448133 bytes、SHA256 `7872A5442ECE77950CAFDD7A5CF175331E0B10177D4463CAA9D33264578A78B5`；第五段闸门已开，进入第六段。
 
 - 画布与智能体同写一份 `WorkflowDefinition`；草稿可改、发布版本不可变；版本号连续，发布只影响之后新建的 run。
 - 图校验分两层：保存层允许不完整草稿，只拒无法解析、超限、重复 id、边端点不存在、坐标非法；发布层要求恰好一个 trigger、全图可达且无环、出度纪律、branch route、subworkflow pin 与深度。
@@ -86,11 +86,11 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 
 面板原型 `docs/prototype/panel-v2.html` 已到 v10：浅色、低密度、任务流程三栏（任务 / 步骤 / 现场）、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；无彩色左侧色条。v10 在 `</style>` 前加了四轮 `body.v5` 可读性覆盖层，把导航、表头、卡片元信息、流程节点、抽屉与弹窗的可见字号抬到 11.5px 以上；`.tmp/audit-final.js` 与 `.tmp/modal-audit.js` 在 1600×1000、1366×900 实测十六个上下文 over=0、screenOver=0、bad=[]、small=[]、errs=[]。主人会自己打开看，不再截图。
 
-### 4.2 下一步：等第三十八轮回包，原型继续等主人评审
+### 4.2 下一步：写第六段，原型继续等主人评审
 
-1. 第五段 v37 已按第 37 轮 fail 清单修完，已送第三十八轮复审，待回包；没 pass 前不写第六段。
+1. 第五段已过第 38 轮，v38 清完两条措辞；现在写第六段（分阶段落地与验收）。
 2. 原型按主人评审意见继续改：浅色、低密度、人话、任务做到哪一步/发生了什么/结果/下一步；主人自己打开，不再截图。
-3. 第五段 pass 后再写第六段（分阶段落地与验收）；六段全过后才写 spec、自审、提交、交主人审。
+3. 第六段写完后六段全过，才写 spec、自审、提交、交主人审。
 4. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
 
 > ⚠️ 第三段内改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构）；从第四段起按六段路线新增 `## 第四段 …`，不要改动前三段标题。不要删 §3.4b–§3.4m 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
@@ -105,8 +105,8 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 | 二 | 把「硬」落成规则（17 条：node_run 字段、代次、证据、半态、超时、重试、sweep、迁移表、声明式判定、版本、身份账本、payload、上下文预算、存储、边界、事件、来源分离） | ✅ 完成（L97–L418） |
 | 三 | 九节点图（§3.0 两类契约 → §3.5） | ✅ 完成（v23，第二十五轮 pass；§4.1） |
 | 四 | 面板与查询 | ✅ 完成（v33，第三十四轮 pass；原型 v10 待主人评审） |
-| 五 | 记忆插件对接 memory-audit-v1 | 🔄 v37 已按第 37 轮 fail 修复（5.1–5.14，Q-43–Q-63），第 38 轮已送，待回包 |
-| 六 | 分阶段落地与验收 | ⛔ 未开始 |
+| 五 | 记忆插件对接 memory-audit-v1 | ✅ 完成（v37 第 38 轮 pass；v38 清两条措辞；5.1–5.14，Q-43–Q-63） |
+| 六 | 分阶段落地与验收 | 🔄 正在写 |
 
 六段全过之后才写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`、自审、提交 git、交主人审阅，再转 `writing-plans`。
 
