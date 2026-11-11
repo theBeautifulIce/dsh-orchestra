@@ -3090,7 +3090,7 @@ body.v5 .drawer-foot [style*="font-size"],body.v5 .modal-foot [style*="font-size
 body.v5 .board-head span{font-size:11.5px!important}
 body.v5 .wf-panel-head span{font-size:11.5px!important}
 /* v10 pass 3：尾项抬齐 */
-body.v5 .brand-sub,body.v5 .ws-url,body.v5 .user-role{font-size:11.5px!important}
+body.v5 .brand-sub,body.v5 .ws-url,body.v5 .user-role{font-size:11.5px!important;line-height:1.45!important}
 body.v5 .ask-meta{font-size:11.5px!important}
 body.v5 .ask-why{font-size:12.5px!important;line-height:1.65}
 body.v5 .stat em{font-size:12px!important}
@@ -3294,13 +3294,13 @@ const WORKFLOWS = {
     mind: '我先把目标拆成四条支线，派给子代理并行做；证据不齐，不会收尾。',
     tasks: 3, runs: 48, success: 92.4, updated: '今天 20:42',
     nodes: [
-      { id: 'n_start', title: '接收目标', type: 'trigger', code: 'goal.intake', x: 18, y: 180, sub: '任务目标 + 验收条件', status: 'done' },
-      { id: 'n_plan', title: '拆成四条支线', type: 'parallel', code: 'plan.fanout', x: 192, y: 180, sub: '我 · 4 条支线', status: 'done' },
-      { id: 'n_research', title: '证据侦察', type: 'agent', code: 'agent.scout', x: 366, y: 40, sub: '只读检索 · 3 处引用', status: 'done' },
-      { id: 'n_draft', title: '修订执行', type: 'agent', code: 'agent.drafter', x: 366, y: 180, sub: '唯一键段落 · 64%', status: 'run' },
-      { id: 'n_audit', title: '交叉审计', type: 'agent', code: 'agent.auditor', x: 366, y: 320, sub: '等待 v25 草稿', status: 'wait' },
-      { id: 'n_gate', title: '收敛判断', type: 'policy', code: 'gate.policy', x: 540, y: 180, sub: '无证据不放行', status: 'blocked' },
-      { id: 'n_close', title: '回写与收尾', type: 'agent', code: 'agent.close', x: 714, y: 180, sub: '设计稿 + 台账 + L5', status: 'wait' }
+      { id: 'n_start', title: '接收目标', type: 'trigger', code: 'goal.intake', x: 20, y: 180, sub: '任务目标 + 验收条件', status: 'done' },
+      { id: 'n_plan', title: '拆成四条支线', type: 'parallel', code: 'plan.fanout', x: 212, y: 180, sub: '我 · 4 条支线', status: 'done' },
+      { id: 'n_research', title: '证据侦察', type: 'agent', code: 'agent.scout', x: 404, y: 40, sub: '只读检索 · 3 处引用', status: 'done' },
+      { id: 'n_draft', title: '修订执行', type: 'agent', code: 'agent.drafter', x: 404, y: 180, sub: '唯一键段落 · 64%', status: 'run' },
+      { id: 'n_audit', title: '交叉审计', type: 'agent', code: 'agent.auditor', x: 404, y: 320, sub: '等待 v25 草稿', status: 'wait' },
+      { id: 'n_gate', title: '收敛判断', type: 'policy', code: 'gate.policy', x: 596, y: 180, sub: '无证据不放行', status: 'blocked' },
+      { id: 'n_close', title: '回写与收尾', type: 'agent', code: 'agent.close', x: 788, y: 180, sub: '设计稿 + 台账 + L5', status: 'wait' }
     ],
     edges: [['n_start','n_plan'],['n_plan','n_research'],['n_plan','n_draft'],['n_plan','n_audit'],['n_research','n_gate'],['n_draft','n_gate'],['n_audit','n_gate'],['n_gate','n_close']],
     versions: [
@@ -3323,12 +3323,12 @@ const WORKFLOWS = {
     mind: '我先读候选，再让归并和冲突检查两条支线并行跑；只做能回退的归档。',
     tasks: 1, runs: 342, success: 98.8, updated: '今天 09:00',
     nodes: [
-      { id: 'n_start', title: '调度唤醒', type: 'trigger', code: 'schedule.wake', x: 18, y: 180, sub: '每天 09:00', status: 'done' },
-      { id: 'n_scan', title: '读取候选', type: 'tool', code: 'memory.scan', x: 192, y: 180, sub: '记忆 + 记事本', status: 'done' },
-      { id: 'n_merge', title: '归并判断', type: 'policy', code: 'memory.merge', x: 366, y: 80, sub: '按主题归并', status: 'done' },
-      { id: 'n_conflict', title: '冲突检查', type: 'policy', code: 'memory.conflict', x: 366, y: 280, sub: '重复 / 矛盾', status: 'done' },
-      { id: 'n_apply', title: '归档写回', type: 'tool', code: 'memory.apply', x: 540, y: 180, sub: '批量、可回退', status: 'done' },
-      { id: 'n_close', title: '生成日报', type: 'agent', code: 'agent.report', x: 714, y: 180, sub: '摘要 + 证据', status: 'done' }
+      { id: 'n_start', title: '调度唤醒', type: 'trigger', code: 'schedule.wake', x: 20, y: 180, sub: '每天 09:00', status: 'done' },
+      { id: 'n_scan', title: '读取候选', type: 'tool', code: 'memory.scan', x: 212, y: 180, sub: '记忆 + 记事本', status: 'done' },
+      { id: 'n_merge', title: '归并判断', type: 'policy', code: 'memory.merge', x: 404, y: 80, sub: '按主题归并', status: 'done' },
+      { id: 'n_conflict', title: '冲突检查', type: 'policy', code: 'memory.conflict', x: 404, y: 280, sub: '重复 / 矛盾', status: 'done' },
+      { id: 'n_apply', title: '归档写回', type: 'tool', code: 'memory.apply', x: 596, y: 180, sub: '批量、可回退', status: 'done' },
+      { id: 'n_close', title: '生成日报', type: 'agent', code: 'agent.report', x: 788, y: 180, sub: '摘要 + 证据', status: 'done' }
     ],
     edges: [['n_start','n_scan'],['n_scan','n_merge'],['n_scan','n_conflict'],['n_merge','n_apply'],['n_conflict','n_apply'],['n_apply','n_close']],
     versions: [
@@ -3350,12 +3350,12 @@ const WORKFLOWS = {
     mind: '我按严重程度把结果分开，先让子代理逐条复核；最急的才放到你面前。',
     tasks: 1, runs: 17, success: 88.2, updated: '今天 20:31',
     nodes: [
-      { id: 'n_start', title: '接收审计结果', type: 'trigger', code: 'event.intake', x: 18, y: 180, sub: '审计完成通知', status: 'done' },
-      { id: 'n_classify', title: '按严重程度分流', type: 'parallel', code: 'review.split', x: 192, y: 180, sub: '我 · 两条支线', status: 'done' },
-      { id: 'n_verify', title: '证据复核', type: 'agent', code: 'review.verify', x: 366, y: 80, sub: '逐条对照原文', status: 'run' },
-      { id: 'n_gate', title: '需要你决定', type: 'approval', code: 'review.approval', x: 540, y: 180, sub: '最急的先处理', status: 'wait' },
-      { id: 'n_triage', title: '定级判断', type: 'policy', code: 'review.policy', x: 366, y: 280, sub: '致命 / 重大 / 措辞', status: 'wait' },
-      { id: 'n_close', title: '归档回写', type: 'agent', code: 'agent.archive', x: 714, y: 180, sub: '结论 + 审计链', status: 'wait' }
+      { id: 'n_start', title: '接收审计结果', type: 'trigger', code: 'event.intake', x: 20, y: 180, sub: '审计完成通知', status: 'done' },
+      { id: 'n_classify', title: '按严重程度分流', type: 'parallel', code: 'review.split', x: 212, y: 180, sub: '我 · 两条支线', status: 'done' },
+      { id: 'n_verify', title: '证据复核', type: 'agent', code: 'review.verify', x: 404, y: 80, sub: '逐条对照原文', status: 'run' },
+      { id: 'n_gate', title: '需要你决定', type: 'approval', code: 'review.approval', x: 596, y: 180, sub: '最急的先处理', status: 'wait' },
+      { id: 'n_triage', title: '定级判断', type: 'policy', code: 'review.policy', x: 404, y: 280, sub: '致命 / 重大 / 措辞', status: 'wait' },
+      { id: 'n_close', title: '归档回写', type: 'agent', code: 'agent.archive', x: 788, y: 180, sub: '结论 + 审计链', status: 'wait' }
     ],
     edges: [['n_start','n_classify'],['n_classify','n_verify'],['n_classify','n_triage'],['n_verify','n_gate'],['n_triage','n_gate'],['n_gate','n_close']],
     versions: [
@@ -3373,12 +3373,12 @@ const WORKFLOWS = {
     mind: '我先找出缺证据的操作，让补证和修复并行试；补不到就停下来等你签字。',
     tasks: 1, runs: 26, success: 76.9, updated: '周一 10:00',
     nodes: [
-      { id: 'n_start', title: '调度唤醒', type: 'trigger', code: 'schedule.effect', x: 18, y: 180, sub: '每周一 10:00', status: 'done' },
-      { id: 'n_scan', title: '找出没有系统确认的操作', type: 'tool', code: 'effect.scan', x: 192, y: 180, sub: '待核实清单', status: 'done' },
-      { id: 'n_verify', title: '尝试补证', type: 'agent', code: 'effect.verify', x: 366, y: 80, sub: 'DB / 审计 / 外部', status: 'run' },
-      { id: 'n_repair', title: '修复脚本', type: 'agent', code: 'effect.repair', x: 366, y: 280, sub: '只读探测', status: 'wait' },
-      { id: 'n_gate', title: '证据核对', type: 'policy', code: 'effect.gate', x: 540, y: 180, sub: '无证据不关闭', status: 'blocked' },
-      { id: 'n_close', title: '签字接手', type: 'approval', code: 'effect.approval', x: 714, y: 180, sub: '人的后果', status: 'wait' }
+      { id: 'n_start', title: '调度唤醒', type: 'trigger', code: 'schedule.effect', x: 20, y: 180, sub: '每周一 10:00', status: 'done' },
+      { id: 'n_scan', title: '找出没有系统确认的操作', type: 'tool', code: 'effect.scan', x: 212, y: 180, sub: '待核实清单', status: 'done' },
+      { id: 'n_verify', title: '尝试补证', type: 'agent', code: 'effect.verify', x: 404, y: 80, sub: 'DB / 审计 / 外部', status: 'run' },
+      { id: 'n_repair', title: '修复脚本', type: 'agent', code: 'effect.repair', x: 404, y: 280, sub: '只读探测', status: 'wait' },
+      { id: 'n_gate', title: '证据核对', type: 'policy', code: 'effect.gate', x: 596, y: 180, sub: '无证据不关闭', status: 'blocked' },
+      { id: 'n_close', title: '签字接手', type: 'approval', code: 'effect.approval', x: 788, y: 180, sub: '人的后果', status: 'wait' }
     ],
     edges: [['n_start','n_scan'],['n_scan','n_verify'],['n_scan','n_repair'],['n_verify','n_gate'],['n_repair','n_gate'],['n_gate','n_close']],
     versions: [
