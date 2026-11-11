@@ -30,7 +30,7 @@
 | 22 | 第三段 v20 | fail | 3 | 5 | 4 | 约束写成了句子而不是数据库：UNIQUE(node_run_id, attempt) 在新 attempt 必换行时形同虚设；桥断仍从三处漏进 startup_unknown；hang_reason IS NULL 只在总则、逐行漏十处。另有三处落点缺失（uphold_report 无用例、状态未知重查不明无处可去、started→done 的时点判反）与一处键冲突（decision 四列键撞既有 partial index）；M-06 缺 has_tool_call 拒绝路径；四条措辞把五条分支写成四条 |
 | 23 | 第三段 v21 | fail | 3 | 3 | 2 | 冲突裁决的另一半没写死：uphold_decision 无独立迁移行、无执行用例、目标仍写 queued；uphold_report 从 startup_unknown 迁出不清钟；裁决收口代次把 uphold_report 统写 Gr；confirm_started 被错误对称成 has_tool_call=true 即拒（应只拒 confirm_not_started）；另有「两条 resolution 行」例外只列两处、Gr+1 包住终态出口两条措辞 |
 | 24 | 第三段 v22 | fail | 1 | 1 | 2 | 裁决终态出口代次互斥：L231/L279/L281/M-60/§3.4n 第 1 条仍带 Ga，与 §3.4h「裁决收口类只 Gr、唯一例外 uphold_report」冲突；M-60 缺新行 origin_node_run_id、attempt=旧+1 与 failed 支断言；另两处措辞（L288 路径数、L803 历史 M-59 代次） |
-| 25 | 第三段 v23 | 已送第二十五轮（a8f7647d），待回 | — | — | — | v23 按第 24 轮 4 条落稿：L231/L279/L281/M-60/§3.4n 第 1 条删终态出口的 Ga，只留 Gr；M-60 补 origin_node_run_id、attempt=旧+1、failed 支 status=failed 且不建新行；L288 补「共三处路径」，L803 补「v22 起不占 Gr」；§3.4n 降 HISTORY，新增 §3.4o [CURRENT] 四条清单；版本升 v23（866 行） |
+| 25 | 第三段 v23 | **pass** | 0 | 0 | 3 条措辞观察 | v23 按第 24 轮 4 条落稿：L231/L279/L281/M-60/§3.4n 第 1 条删终态出口的 Ga，只留 Gr；M-60 补 origin_node_run_id、attempt=旧+1、failed 支 status=failed 且不建新行；L288 补「共三处路径」，L803 补「v22 起不占 Gr」；§3.4n 降 HISTORY，新增 §3.4o [CURRENT] 四条清单；版本升 v23（866 行）；第二十五轮 7 项全过，判 pass（0 致命 / 0 重大 / 3 条非阻断措辞） |
 
 ## 二、几件能算出来的事
 
@@ -64,7 +64,9 @@
 
 **第 24 轮之后 v22 被判 fail。** 结论是 1 致命 + 1 重大 + 2 措辞。性质不是新规则缺，而是同一迁移的 CAS 代次写成两套：L231/L279/L281 三个人裁决终态出口、M-60 与 §3.4n 第 1 条都带 action_generation=Ga，而 §3.4h 明写裁决收口类用 Gr、唯一例外是 uphold_report；照 §3.4h 实现会过不了 M-60，照 M-60 实现又违反矩阵。M-60 还只断言 superseded 支回写 replacement_node_run_id，缺新行 origin_node_run_id、attempt=旧+1 与 failed 支不建新行。
 
-**v23 已按 4 条落稿。** 2026-11-11 20:25 设计稿升 v23（866 行，SHA256 全值 2E529CDC209F8A2D538F3C5A987D429244040E8F54450708FAE7A2338150B054）：L231/L279/L281/M-60/§3.4n 第 1 条删掉终态出口的 Ga，只留 rearm_generation=Gr；M-60 补 origin_node_run_id、attempt=旧+1、failed 支 status=failed 且不建新行；L288 补「共三处路径」，L803 补「v22 起不占 Gr」；§3.4n 降 HISTORY，新增 §3.4o [CURRENT] 四条清单；M 总数仍 M-01…M-61。第二十五轮已送，未过之前不动第四段。
+**v23 已按 4 条落稿。** 2026-11-11 19:59 设计稿升 v23（866 行，SHA256 全值 2E529CDC209F8A2D538F3C5A987D429244040E8F54450708FAE7A2338150B054）：L231/L279/L281/M-60/§3.4n 第 1 条删掉终态出口的 Ga，只留 rearm_generation=Gr；M-60 补 origin_node_run_id、attempt=旧+1、failed 支 status=failed 且不建新行；L288 补「共三处路径」，L803 补「v22 起不占 Gr」；§3.4n 降 HISTORY，新增 §3.4o [CURRENT] 四条清单；M 总数仍 M-01…M-61。第二十五轮已送，未过之前不动第四段。
+
+**第 25 轮 pass。** 2026-11-11 20:04 收到结论：7 项全过，0 致命、0 重大，只有 3 条非阻断措辞（旧历史标题仍指 §3.4n、L803 同句仍写 Gr、§3.3 未带 report_contradicted 不落 expired 例外）。第三段达到收口条件，按主人口径进第四段；措辞留到第四段一并清理。
 
 **审计子代理的任务就是挑刺**，它会一直找下去。其中「加固项」本质是加保险而非缺陷，保险没有归零的那天，这条线就不该按「清零」验收。
 
@@ -83,9 +85,9 @@
 - 第 3 轮是 pass（附四条在案），是第一、二段的收敛点。
 - 第 4 轮起审的是第三段（九种节点），轮次编号沿用全局计数。
 
-## 五、当前进度与续跑指引（2026-11-11 20:25 记）
+## 五、当前进度与续跑指引（2026-11-11 20:04 记）
 
-- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 866 行（SHA256 全值 2E529CDC209F8A2D538F3C5A987D429244040E8F54450708FAE7A2338150B054，文件头与第三段标题均已升 v23，§3.4o 为唯一 [CURRENT] 清单）。第二十四轮审计由 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7 判 fail（1 致命 + 1 重大 + 2 措辞），v23 修法已全部落稿，第二十五轮审计已送同一代理，未过前不写第四段。
+- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 866 行（SHA256 全值 2E529CDC209F8A2D538F3C5A987D429244040E8F54450708FAE7A2338150B054，文件头与第三段标题均已升 v23，§3.4o 为唯一 [CURRENT] 清单）。第二十五轮由 a8f7647d 判 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），第三段已收口，可进第四段（面板与查询）；3 条措辞留到第四段一并清理。
 
 - 项目已于 2026-11-11 16:50 整体迁到 D:\aboutAI\dsh-orchestra（设计稿、台账、requirements.md、design-notes.md、根目录 handoff.md 与 codebasemap.md、references\ 三份参考项目、四份 codebase-memory 图谱）；旧址 D:\aboutAI\dshQQ\docs\ 保留同内容副本，后续只改新址。
 - 第二十轮审计已出结论：fail，10 致命 + 2 重大结构性，措辞/性能 0 条。最易低估的风险：「节点终态」不等于「run 可以成功」；叠加 stopped_at 只证明动作停了、不证明副作用没发生。
@@ -103,7 +105,7 @@
   11. already_stopped 无合法目标行、confirm_not_started 的 dispose 违反「只在节点终态后 dispose」→ 补 already_stopped 行并写 stopped_at；dispose 前置改为「该 attempt 已收口或重试已落库」；confirm_not_started 加 executor 已删且桥断已确认的前置检查。
   12. report_registry.report_id 唯一键只在正文不在 DDL → §14 写 report_id PRIMARY KEY 或 UNIQUE 索引；补「行 → 幂等键」对照表（report_id / decision_id+revision / event_seq / attempt+Ga）；补一条 DDL 验收用例。
 - 执行者自留 7 处：第二十轮判 6 条必须补（policy 判定落成 evaluateEvidence、行→幂等键对照 + report_id DDL、桥断时钟矩阵、settling 与 failed_with_unverified 逐行对齐、补偿描述符注册校验落 §2、迁移表逐行生成用例清单）、1 条可接受（§3.5 标题已补回）。
-- 收敛判据（§三）不按条数归零验收。状态机这一族若在第二十五轮清零、剩下的只是措辞，就按主人口径收口进第四段（面板与查询）。
-- 按主人 2026-11-11 15:39 口径「审计这一步，没通过、没获得正确结果前，就不能往后走」：第三段没拿到 pass 之前不写第四段。
+- 收敛判据（§三）不按条数归零验收。状态机这一族已在第二十五轮清零（0 致命 0 重大，只剩 3 条非阻断措辞），按主人口径收口进第四段（面板与查询）。
+- 按主人 2026-11-11 15:39 口径「审计这一步，没通过、没获得正确结果前，就不能往后走」：第三段在 2026-11-11 20:04 拿到 pass，闸门已开，可进第四段。
 - 换会话不影响进度：设计稿、本台账、记忆底账（asset 记事本 mem_mwbqav4n_23bd4f8d）与在办条目（L5 mem_mwbq9pys_9139830f）都落在磁盘上，换会话后按这四处接手即可。
 - 审计口径的复用条目：pitfall mem_wbsf89z_3ac546f6（审计轮次不收敛的三条收敛判据）；记忆分层口径 L4 mem_wbtckln_5dd4de9f（项目细节进记事本，长期记忆只留一个待办和索引）。

@@ -334,9 +334,9 @@ CREATE UNIQUE INDEX decisions_node_kind_uq ON decisions(node_run_id, kind) WHERE
 
 ---
 
-## 六、下一步（按主人「审计没过不往后走」）
+## 六、下一步（第三段已过，进第四段）
 
-1. **第三段 v19 收口**：补 #7–#12（startup_unknown 出口、report_contradicted 挂起态、证据门统一 evaluateEvidence、capability 三值写死、already_stopped 目标行与 dispose 前置、report_id UNIQUE DDL）+ 行→幂等键对照表 + 迁移表逐行用例清单（M-01…）+ §3.4k [CURRENT] 清单 + 版本号 v19。
-2. **第二十一轮审计**：格式照旧（VERDICT: pass|fail、≤12 条带行号与最小修法、只审不改）。
-3. **通过后才写第四段**（面板与查询）、第五段（记忆插件对接 memory-audit-v1）、第六段（分阶段落地与验收）。
+1. **第三段已收口**：v23（866 行）在第二十五轮审计拿到 pass，0 致命、0 重大，只剩 3 条非阻断措辞，留到第四段一并清理。
+2. **第四段：面板与查询**：只写「人怎么看、怎么查、怎么操作」，不重开状态机语义；单独成稿、单独送审。
+3. **第五段：记忆插件对接 memory-audit-v1**；**第六段：分阶段落地与验收**。两段都在第四段 pass 后写。
 4. 六段全过后写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`、自审、提交 git、交主人审阅，再转 writing-plans。
