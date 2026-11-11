@@ -2592,6 +2592,8 @@ body.v5 .inbox-processed .dec-card{opacity:.78}
   body.v5 .tw-inspect{position:static}
   body.v5 .wf-body{grid-template-columns:1fr}
   body.v5 .wf-aside{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  body.v5 .wf-mind{flex-wrap:wrap}
+  body.v5 .wf-mind-stats{width:100%;margin-left:55px}
 }
 @media (max-width:760px){
   body.v5 .tw-step{grid-template-columns:26px minmax(0,1fr)}
@@ -2599,6 +2601,82 @@ body.v5 .inbox-processed .dec-card{opacity:.78}
   body.v5 .wf-stage{grid-template-columns:26px minmax(0,1fr)}
   body.v5 .wf-stage-foot{grid-column:2;grid-row:auto;flex-direction:row;justify-content:flex-start}
   body.v5 .wf-aside{grid-template-columns:1fr}
+  body.v5 .wf-mind-stats{margin-left:0}
+  body.v5 .wf-mind-copy p{white-space:normal}
+}
+
+/* ===== 工作流画布：可拖、可连、可读 ===== */
+body.v5 .wf-canvas-toolbar{padding:9px 12px;border-bottom:1px solid #eef2f7;background:#fbfdff}
+body.v5 .wf-toolbar-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+body.v5 .wf-canvas-tip{display:flex;align-items:center;gap:7px;font-size:10.5px;line-height:1.5;color:#94a3b8;min-width:0}
+body.v5 .wf-canvas-tip b{font-weight:550;color:#475569}
+body.v5 .wf-canvas-tip .sep{color:#cbd5e1}
+body.v5 .wf-palette{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+body.v5 .wf-palette-row{display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:8px;border-top:1px dashed #e9eff6}
+body.v5 .wf-palette-label{flex:none;font-size:9.5px;letter-spacing:.04em;color:#94a3b8}
+body.v5 .wf-mind{display:flex;align-items:center;gap:13px;margin:0 0 10px;padding:12px 14px;border:1px solid #d9e7e4;border-radius:12px;background:linear-gradient(105deg,#f7fdfb 0%,#f9fbff 62%,#ffffff 100%)}
+body.v5 .wf-mind-orb{width:42px;height:42px;border-radius:50%;flex:none;display:grid;place-items:center;background:radial-gradient(circle at 34% 28%,#ffffff 0%,#ccf5ed 48%,#8ee0d2 100%);box-shadow:inset 0 0 0 1px rgba(15,118,110,.12),0 6px 18px rgba(20,184,166,.13);color:#0f766e;font-family:var(--serif,Georgia,'Songti SC',serif);font-size:19px;font-weight:700}
+body.v5 .wf-mind-copy{flex:1;min-width:0}
+body.v5 .wf-mind-title{display:flex;align-items:center;gap:7px}
+body.v5 .wf-mind-title b{font-size:13px;font-weight:650;color:#0f172a;letter-spacing:.01em}
+body.v5 .wf-mind-role{font-size:9px;letter-spacing:.08em;color:#0f766e;background:#e9f9f5;border:1px solid #c9eee6;border-radius:20px;padding:1px 6px}
+body.v5 .wf-mind-copy p{margin:3px 0 0;font-size:11.5px;line-height:1.55;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.v5 .wf-mind-stats{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:none}
+body.v5 .wf-mind-stat{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid #e6edf4;border-radius:20px;background:#fff;color:#475569;font-size:10px;white-space:nowrap}
+body.v5 .wf-mind-stat .dot{width:6px;height:6px;border-radius:50%;background:#cbd5e1;flex:none}
+body.v5 .wf-mind-stat .dot.live{background:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166,.13)}
+body.v5 .wf-mind-stat .dot.wait{background:#f59e0b}
+body.v5 .wf-mind-stat .dot.done{background:#4ade80}
+body.v5 .wf-chip{display:inline-flex;align-items:center;gap:5px;height:27px;padding:0 9px;border:1px solid #e2e8f0;border-radius:6px;background:#fff;color:#475569;font:inherit;font-size:10.5px;cursor:grab;transition:border-color .12s,box-shadow .12s,color .12s}
+body.v5 .wf-chip:hover{border-color:#99f6e4;color:#0f172a;box-shadow:0 2px 6px rgba(15,23,42,.05)}
+body.v5 .wf-chip:active{cursor:grabbing}
+body.v5 .wf-chip .dot{width:6px;height:6px;border-radius:50%;flex:none}
+body.v5 .wf-canvas-actions{display:flex;align-items:center;gap:5px;flex:none}
+body.v5 .wf-canvas-actions .btn{height:27px;padding:0 9px;font-size:10.5px}
+body.v5 .wf-canvas-actions .btn[disabled]{opacity:.55;cursor:default}
+body.v5 .wf-canvas-shell{position:relative;height:560px;overflow:auto;overscroll-behavior:contain;background-color:#fbfdff;background-image:radial-gradient(#dfe8f1 1px,transparent 1px);background-size:18px 18px}
+body.v5 .wf-canvas{position:relative;min-width:920px;min-height:480px;outline:none}
+body.v5 .wf-canvas.drop-ready{background:rgba(240,253,250,.55);box-shadow:inset 0 0 0 2px #99f6e4}
+body.v5 .wf-canvas svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+body.v5 .wf-edge{fill:none;stroke:#cbd5e1;stroke-width:1.8;transition:stroke .12s}
+body.v5 .wf-edge.on{stroke:#0f766e;stroke-width:2.4}
+body.v5 .wf-edge-hit{fill:none;stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:pointer}
+body.v5 .wf-edge-hit:hover + .wf-edge{stroke:#5eead4}
+body.v5 .wf-edge-temp{fill:none;stroke:#14b8a6;stroke-width:2;stroke-dasharray:5 5;pointer-events:none}
+body.v5 .wf-canvas-footer{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #eef2f7;background:#fbfdff;font-size:10px;color:#94a3b8}
+body.v5 .wf-canvas-footer .right{margin-left:auto;display:flex;align-items:center;gap:6px}
+body.v5 .wf-node{position:absolute;width:156px;height:96px;padding:10px 12px;border:1px solid #dbe4ee;border-radius:10px;background:#fff;box-shadow:0 1px 2px rgba(15,23,42,.04),0 5px 14px rgba(15,23,42,.035);text-align:left;font:inherit;color:inherit;cursor:grab;user-select:none;touch-action:none;transition:border-color .12s,box-shadow .12s}
+body.v5 .wf-node:hover{border-color:#b6c7d9;box-shadow:0 2px 4px rgba(15,23,42,.05),0 8px 20px rgba(15,23,42,.07)}
+body.v5 .wf-node.on{border-color:#14b8a6;box-shadow:0 0 0 3px rgba(20,184,166,.14),0 8px 22px rgba(15,23,42,.08)}
+body.v5 .wf-node.dragging{cursor:grabbing;z-index:5;border-color:#14b8a6;box-shadow:0 10px 26px rgba(15,23,42,.14)}
+body.v5 .wf-node-top{display:flex;align-items:center;gap:5px;height:13px;font-size:9px;color:#94a3b8}
+body.v5 .wf-node-kind{display:inline-flex;align-items:center;gap:4px;padding:1px 5px;border-radius:3px;background:#f8fafc;color:#64748b;font-size:8.5px;letter-spacing:.02em}
+body.v5 .wf-node-kind .dot{width:5px;height:5px;border-radius:50%;flex:none}
+body.v5 .wf-node-state{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#64748b;white-space:nowrap}
+body.v5 .wf-node-state .dot{width:5px;height:5px;border-radius:50%}
+body.v5 .wf-node.is-done .wf-node-state{color:#15803d}
+body.v5 .wf-node.is-run .wf-node-state{color:#2563eb}
+body.v5 .wf-node.is-blocked .wf-node-state{color:#b45309}
+body.v5 .wf-node-title{margin-top:8px;font-size:12.5px;line-height:1.38;font-weight:600;color:#0f172a;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-height:35px}
+body.v5 .wf-node-sub{margin-top:5px;font-size:9.5px;line-height:1.3;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.v5 .wf-port{position:absolute;top:50%;width:11px;height:11px;margin-top:-5.5px;border-radius:50%;background:#fff;border:1.5px solid #94a3b8;z-index:2;transition:transform .1s,background .1s,border-color .1s}
+body.v5 .wf-port-in{left:-6px}
+body.v5 .wf-port-out{right:-6px;border-color:#14b8a6;background:#f0fdfa;cursor:crosshair}
+body.v5 .wf-port-out:hover,body.v5 .wf-port-out.active{background:#14b8a6;border-color:#14b8a6;transform:scale(1.25);box-shadow:0 0 0 4px rgba(20,184,166,.14)}
+body.v5 .wf-empty-canvas{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;padding:40px;text-align:center}
+body.v5 .wf-empty-canvas b{font-size:15px;color:#0f172a}
+body.v5 .wf-empty-canvas p{max-width:430px;margin:0;font-size:12px;line-height:1.7;color:#64748b}
+body.v5 .wf-empty-actions{display:flex;gap:7px;margin-top:8px}
+body.v5 .wf-edit-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+body.v5 .wf-edit-actions .btn{height:27px;padding:0 9px;font-size:10.5px}
+body.v5 .wf-edit-note{margin-top:10px;padding-top:9px;border-top:1px solid #eef2f7;font-size:10px;line-height:1.6;color:#94a3b8}
+body.v5 .wf-api-code{max-height:300px;overflow:auto;border:1px solid #e2e8f0;border-radius:7px;background:#f8fafc;padding:10px 11px}
+body.v5 .wf-api-code pre{margin:0;font-family:var(--mono);font-size:10px;line-height:1.65;color:#334155;white-space:pre}
+body.v5 .wf-api-hint{margin-top:8px;font-size:10.5px;line-height:1.6;color:#64748b}
+@media (max-width:1180px){
+  body.v5 .wf-canvas-toolbar{align-items:flex-start}
+  body.v5 .wf-palette{margin-left:0;order:3;width:100%}
+  body.v5 .wf-canvas-actions{margin-left:auto}
 }
 </style>
 </head>
@@ -2765,15 +2843,16 @@ const WORKFLOWS = {
     id: 'wf_design', name: '设计审计闭环', version: 'v24.0', status: 'published',
     trigger: 'continuous', triggerLabel: '持续目标 / 手动', owner: '七七',
     desc: '把设计目标拆成侦察、修订、审计、核验四条支线，收尾时必须带证据，冲突项回到人的收件箱。',
+    mind: '我先把目标拆成四条支线，派给子代理并行做；证据不齐，不会收尾。',
     tasks: 3, runs: 48, success: 92.4, updated: '今天 20:42',
     nodes: [
       { id: 'n_start', title: '接收目标', type: 'trigger', code: 'goal.intake', x: 18, y: 180, sub: '任务目标 + 验收条件', status: 'done' },
-      { id: 'n_plan', title: '总控拆解', type: 'supervisor', code: 'supervisor.plan', x: 192, y: 180, sub: '七七 · 4 个子目标', status: 'done' },
+      { id: 'n_plan', title: '拆成四条支线', type: 'parallel', code: 'plan.fanout', x: 192, y: 180, sub: '我 · 4 条支线', status: 'done' },
       { id: 'n_research', title: '证据侦察', type: 'agent', code: 'agent.scout', x: 366, y: 40, sub: '只读检索 · 3 处引用', status: 'done' },
       { id: 'n_draft', title: '修订执行', type: 'agent', code: 'agent.drafter', x: 366, y: 180, sub: '唯一键段落 · 64%', status: 'run' },
       { id: 'n_audit', title: '交叉审计', type: 'agent', code: 'agent.auditor', x: 366, y: 320, sub: '等待 v25 草稿', status: 'wait' },
-      { id: 'n_gate', title: '收敛判断', type: 'gate', code: 'decision.gate', x: 540, y: 180, sub: '无证据不放行', status: 'blocked' },
-      { id: 'n_close', title: '回写与收尾', type: 'close', code: 'ledger.close', x: 714, y: 180, sub: '设计稿 + 台账 + L5', status: 'wait' }
+      { id: 'n_gate', title: '收敛判断', type: 'policy', code: 'gate.policy', x: 540, y: 180, sub: '无证据不放行', status: 'blocked' },
+      { id: 'n_close', title: '回写与收尾', type: 'agent', code: 'agent.close', x: 714, y: 180, sub: '设计稿 + 台账 + L5', status: 'wait' }
     ],
     edges: [['n_start','n_plan'],['n_plan','n_research'],['n_plan','n_draft'],['n_plan','n_audit'],['n_research','n_gate'],['n_draft','n_gate'],['n_audit','n_gate'],['n_gate','n_close']],
     versions: [
@@ -2793,14 +2872,15 @@ const WORKFLOWS = {
     id: 'wf_memory', name: '记忆巡检与归并', version: 'v1.3.0', status: 'published',
     trigger: 'schedule', triggerLabel: '每天 09:00', owner: '七七',
     desc: '读取记忆与记事本候选，归并重复、标出矛盾；只做可回退的归档，不覆盖任何原文。',
+    mind: '我先读候选，再让归并和冲突检查两条支线并行跑；只做能回退的归档。',
     tasks: 1, runs: 342, success: 98.8, updated: '今天 09:00',
     nodes: [
       { id: 'n_start', title: '调度唤醒', type: 'trigger', code: 'schedule.wake', x: 18, y: 180, sub: '每天 09:00', status: 'done' },
       { id: 'n_scan', title: '读取候选', type: 'tool', code: 'memory.scan', x: 192, y: 180, sub: '记忆 + 记事本', status: 'done' },
-      { id: 'n_merge', title: '归并判断', type: 'supervisor', code: 'memory.merge', x: 366, y: 80, sub: '总控判定', status: 'done' },
-      { id: 'n_conflict', title: '冲突检查', type: 'gate', code: 'memory.conflict', x: 366, y: 280, sub: '重复 / 矛盾', status: 'done' },
+      { id: 'n_merge', title: '归并判断', type: 'policy', code: 'memory.merge', x: 366, y: 80, sub: '按主题归并', status: 'done' },
+      { id: 'n_conflict', title: '冲突检查', type: 'policy', code: 'memory.conflict', x: 366, y: 280, sub: '重复 / 矛盾', status: 'done' },
       { id: 'n_apply', title: '归档写回', type: 'tool', code: 'memory.apply', x: 540, y: 180, sub: '批量、可回退', status: 'done' },
-      { id: 'n_close', title: '生成日报', type: 'close', code: 'memory.report', x: 714, y: 180, sub: '摘要 + 证据', status: 'done' }
+      { id: 'n_close', title: '生成日报', type: 'agent', code: 'agent.report', x: 714, y: 180, sub: '摘要 + 证据', status: 'done' }
     ],
     edges: [['n_start','n_scan'],['n_scan','n_merge'],['n_scan','n_conflict'],['n_merge','n_apply'],['n_conflict','n_apply'],['n_apply','n_close']],
     versions: [
@@ -2819,14 +2899,15 @@ const WORKFLOWS = {
     id: 'wf_review', name: '审计结果分流', version: 'v2.1-draft', status: 'draft',
     trigger: 'event', triggerLabel: '审计完成通知', owner: '七七',
     desc: '接收独立审计结果，先按致命问题、重大问题、措辞问题分流，再进入复核与需要你决定的关口；同一条通知只处理一次。',
+    mind: '我按严重程度把结果分开，先让子代理逐条复核；最急的才放到你面前。',
     tasks: 1, runs: 17, success: 88.2, updated: '今天 20:31',
     nodes: [
       { id: 'n_start', title: '接收审计结果', type: 'trigger', code: 'event.intake', x: 18, y: 180, sub: '审计完成通知', status: 'done' },
-      { id: 'n_classify', title: '分级分类', type: 'supervisor', code: 'review.classify', x: 192, y: 180, sub: '致命 / 重大 / 措辞', status: 'done' },
+      { id: 'n_classify', title: '按严重程度分流', type: 'parallel', code: 'review.split', x: 192, y: 180, sub: '我 · 两条支线', status: 'done' },
       { id: 'n_verify', title: '证据复核', type: 'agent', code: 'review.verify', x: 366, y: 80, sub: '逐条对照原文', status: 'run' },
-      { id: 'n_gate', title: '需要你决定', type: 'gate', code: 'review.gate', x: 540, y: 180, sub: '最急的先处理', status: 'wait' },
-      { id: 'n_triage', title: '人工复核', type: 'tool', code: 'review.triage', x: 366, y: 280, sub: '等待分类结果', status: 'wait' },
-      { id: 'n_close', title: '归档回写', type: 'close', code: 'review.close', x: 714, y: 180, sub: '结论 + 审计链', status: 'wait' }
+      { id: 'n_gate', title: '需要你决定', type: 'approval', code: 'review.approval', x: 540, y: 180, sub: '最急的先处理', status: 'wait' },
+      { id: 'n_triage', title: '定级判断', type: 'policy', code: 'review.policy', x: 366, y: 280, sub: '致命 / 重大 / 措辞', status: 'wait' },
+      { id: 'n_close', title: '归档回写', type: 'agent', code: 'agent.archive', x: 714, y: 180, sub: '结论 + 审计链', status: 'wait' }
     ],
     edges: [['n_start','n_classify'],['n_classify','n_verify'],['n_classify','n_triage'],['n_verify','n_gate'],['n_triage','n_gate'],['n_gate','n_close']],
     versions: [
@@ -2841,14 +2922,15 @@ const WORKFLOWS = {
     id: 'wf_effects', name: '没有系统确认的操作清理', version: 'v1.1.0', status: 'published',
     trigger: 'schedule', triggerLabel: '每周一 10:00', owner: '七七',
     desc: '找出没有拿到系统确认的操作，先尝试补证；补不到证据就停下来等人接手，不自动关闭。',
+    mind: '我先找出缺证据的操作，让补证和修复并行试；补不到就停下来等你签字。',
     tasks: 1, runs: 26, success: 76.9, updated: '周一 10:00',
     nodes: [
       { id: 'n_start', title: '调度唤醒', type: 'trigger', code: 'schedule.effect', x: 18, y: 180, sub: '每周一 10:00', status: 'done' },
       { id: 'n_scan', title: '找出没有系统确认的操作', type: 'tool', code: 'effect.scan', x: 192, y: 180, sub: '待核实清单', status: 'done' },
       { id: 'n_verify', title: '尝试补证', type: 'agent', code: 'effect.verify', x: 366, y: 80, sub: 'DB / 审计 / 外部', status: 'run' },
       { id: 'n_repair', title: '修复脚本', type: 'agent', code: 'effect.repair', x: 366, y: 280, sub: '只读探测', status: 'wait' },
-      { id: 'n_gate', title: '证据核对', type: 'gate', code: 'effect.gate', x: 540, y: 180, sub: '无证据不关闭', status: 'blocked' },
-      { id: 'n_close', title: '签字接手', type: 'close', code: 'effect.sign', x: 714, y: 180, sub: '人的后果', status: 'wait' }
+      { id: 'n_gate', title: '证据核对', type: 'policy', code: 'effect.gate', x: 540, y: 180, sub: '无证据不关闭', status: 'blocked' },
+      { id: 'n_close', title: '签字接手', type: 'approval', code: 'effect.approval', x: 714, y: 180, sub: '人的后果', status: 'wait' }
     ],
     edges: [['n_start','n_scan'],['n_scan','n_verify'],['n_scan','n_repair'],['n_verify','n_gate'],['n_repair','n_gate'],['n_gate','n_close']],
     versions: [
@@ -3227,6 +3309,13 @@ const state = {
   wfTab: 'canvas',
   stepSel: null,
   wfNode: null,
+  wfEdge: null,
+  wfEditNode: null,
+  wfPendingPos: null,
+  wfPendingType: null,
+  wfPendingLink: null,
+  wfDirty: false,
+  wfApiJson: '',
   effectFilter: 'open',
   eventType: 'all',
   selectedDecisions: new Set(),
@@ -3695,26 +3784,156 @@ function wfNodeState(n){
   return n.status === 'run' ? 'run' : n.status === 'blocked' ? 'blocked' : n.status === 'wait' ? 'wait' : 'done';
 }
 
+const WF_KIND = {
+  trigger: { label: '开始', color: '#0891b2' },
+  agent: { label: '子代理', color: '#2563eb' },
+  tool: { label: '工具', color: '#0d9488' },
+  subworkflow: { label: '子流程', color: '#6d5ce7' },
+  approval: { label: '等你决定', color: '#d97706' },
+  parallel: { label: '并行分派', color: '#7c3aed' },
+  policy: { label: '规则检查', color: '#0f766e' },
+  branch: { label: '按条件分流', color: '#c2410c' },
+  wait: { label: '等待', color: '#64748b' }
+};
+const WF_PALETTE = ['trigger', 'agent', 'tool', 'subworkflow', 'approval', 'parallel', 'policy', 'branch', 'wait'];
+const WF_NODE_W = 156, WF_NODE_H = 96;
+const WF_STATE_COLOR = { done: '#4ade80', run: '#5aa9ff', blocked: '#fbbf24', wait: '#cbd5e1' };
+
+function wfKind(n){ return WF_KIND[n.type] ? n.type : 'agent'; }
+function wfNodeById(wf, id){ return wf.nodes.find(n => n.id === id); }
+function wfEdgeKey(e){ return e[0] + '|' + e[1]; }
+
+function wfAutoPos(wf){
+  const last = wf.nodes[wf.nodes.length - 1];
+  if(!last) return { x: 24, y: 40 };
+  if(last.x < 760) return { x: last.x + 190, y: last.y };
+  return { x: 24, y: Math.max.apply(null, wf.nodes.map(n => n.y)) + 132 };
+}
+
+function wfTouch(wf, note){
+  wf.updated = '刚刚';
+  if(wf.status === 'draft'){
+    if(wf.versions && wf.versions[0]) wf.versions[0].note = note;
+    state.wfDirty = true;
+  }
+}
+
+function wfEdgePath(a, b){
+  const x1 = a.x + WF_NODE_W, y1 = a.y + WF_NODE_H / 2;
+  const x2 = b.x, y2 = b.y + WF_NODE_H / 2;
+  if(Math.abs(b.x - a.x) < 46 && Math.abs(y2 - y1) > 42){
+    const sx = a.x + WF_NODE_W / 2, sy = a.y + WF_NODE_H;
+    const tx = b.x + WF_NODE_W / 2, ty = b.y;
+    const c = Math.max(38, Math.abs(ty - sy) * 0.42);
+    return 'M' + sx + ',' + sy + ' C' + sx + ',' + (sy + c) + ' ' + tx + ',' + (ty - c) + ' ' + tx + ',' + ty;
+  }
+  if(x2 < x1){
+    const c = 78;
+    return 'M' + x1 + ',' + y1 + ' C' + (x1 + c) + ',' + y1 + ' ' + (x2 - c) + ',' + y2 + ' ' + x2 + ',' + y2;
+  }
+  const c = Math.max(34, (x2 - x1) * 0.44);
+  return 'M' + x1 + ',' + y1 + ' C' + (x1 + c) + ',' + y1 + ' ' + (x2 - c) + ',' + y2 + ' ' + x2 + ',' + y2;
+}
+
+function wfCanvasSize(wf){
+  const maxX = wf.nodes.reduce((m, n) => Math.max(m, n.x + WF_NODE_W), 0);
+  const maxY = wf.nodes.reduce((m, n) => Math.max(m, n.y + WF_NODE_H), 0);
+  return { w: Math.max(920, maxX + 110), h: Math.max(480, maxY + 100) };
+}
+
+function wfSyncEdgeDom(wf){
+  const canvas = document.querySelector('#wfCanvas'); if(!canvas) return;
+  const byId = {}; wf.nodes.forEach(n => { byId[n.id] = n; });
+  canvas.querySelectorAll('[data-edge-from]').forEach(p => {
+    const a = byId[p.getAttribute('data-edge-from')], b = byId[p.getAttribute('data-edge-to')];
+    if(a && b) p.setAttribute('d', wfEdgePath(a, b));
+  });
+}
+
+function wfTempEdgeTo(wf, fromId, clientX, clientY){
+  const canvas = document.querySelector('#wfCanvas'); const p = document.querySelector('#wfTempEdge');
+  if(!canvas || !p) return;
+  const a = wfNodeById(wf, fromId); if(!a) return;
+  const r = canvas.getBoundingClientRect();
+  const px = clientX - r.left, py = clientY - r.top;
+  const x1 = a.x + WF_NODE_W, y1 = a.y + WF_NODE_H / 2;
+  const c = Math.max(34, Math.abs(px - x1) * 0.44);
+  p.setAttribute('d', 'M' + x1 + ',' + y1 + ' C' + (x1 + c) + ',' + y1 + ' ' + (px - c) + ',' + py + ' ' + px + ',' + py);
+  p.style.display = '';
+}
+
+function wfMind(wf){
+  const agents = wf.nodes.filter(n => wfKind(n) === 'agent');
+  const busy = agents.filter(n => n.status === 'run').length;
+  const need = new Set(wf.nodes.filter(n => n.status === 'blocked' || wfKind(n) === 'approval').map(n => n.id)).size;
+  const done = wf.nodes.filter(n => n.status === 'done').length;
+  const stats = [];
+  stats.push('<span class="wf-mind-stat"><i class="dot' + (busy ? ' live' : '') + '"></i>' + (busy ? busy + ' 个子代理在干' : agents.length ? agents.length + ' 个子代理待命' : '还没有子代理') + '</span>');
+  stats.push('<span class="wf-mind-stat"><i class="dot' + (need ? ' wait' : '') + '"></i>' + (need ? need + ' 个等你决定' : '没有卡住的') + '</span>');
+  stats.push('<span class="wf-mind-stat"><i class="dot done"></i>' + (wf.nodes.length ? done + ' / ' + wf.nodes.length + ' 步有结果' : '画布还是空的') + '</span>');
+  const line = wf.nodes.length ? (wf.mind || '我负责拆目标、派活、收结果；子代理只按各自边界做事。') : '这张画布还空着。先加第一步，或从模板开始；我会按你定的步骤派活。';
+  return '<div class="wf-mind"><div class="wf-mind-orb" aria-hidden="true">七</div><div class="wf-mind-copy"><div class="wf-mind-title"><b>七七在指挥</b><span class="wf-mind-role">主控</span></div><p>' + esc(line) + '</p></div><div class="wf-mind-stats">' + stats.join('') + '</div></div>';
+}
+
+function wfCanvasToolbar(wf){
+  if(wf.status !== 'draft'){
+    return '<div class="wf-canvas-toolbar"><div class="wf-toolbar-line"><div class="wf-canvas-tip"><b>已发布版本只读</b><span class="sep">·</span>要改流程，先开一份新版本草稿</div><div class="wf-canvas-actions"><button class="btn ghost sm" data-act="wf-api" data-wf="' + wf.id + '">智能体接口</button><button class="btn sm" data-act="new-version" data-wf="' + wf.id + '">开新版本</button></div></div></div>';
+  }
+  const chips = WF_PALETTE.map(k => {
+    const m = WF_KIND[k];
+    return '<button class="wf-chip" draggable="true" data-act="wf-add-kind" data-wf="' + wf.id + '" data-wf-kind="' + k + '"><span class="dot" style="background:' + m.color + '"></span>' + m.label + '</button>';
+  }).join('');
+  return '<div class="wf-canvas-toolbar"><div class="wf-toolbar-line"><div class="wf-canvas-tip"><b>拖动节点</b>改位置<span class="sep">·</span><b>从右侧圆点拉线</b>接下一步<span class="sep">·</span><b>双击空白</b>加一步</div><div class="wf-canvas-actions"><button class="btn ghost sm" data-act="wf-tidy" data-wf="' + wf.id + '">整理</button><button class="btn ghost sm" data-act="wf-api" data-wf="' + wf.id + '">智能体接口</button><button class="btn sm" data-act="wf-save" data-wf="' + wf.id + '"' + (state.wfDirty ? '' : ' disabled') + '>' + (state.wfDirty ? '保存改动' : '已保存') + '</button></div></div><div class="wf-palette-row"><span class="wf-palette-label">拖一个进来</span><div class="wf-palette">' + chips + '</div></div></div>';
+}
+
+function wfNodeHtml(wf, n, selected){
+  const st = wfNodeState(n), kind = WF_KIND[wfKind(n)], story = storyForNode(wf, n);
+  const on = selected && selected.id === n.id;
+  return '<button class="wf-node is-' + st + (on ? ' on' : '') + '" draggable="false" data-act="wf-step" data-wf="' + wf.id + '" data-node="' + n.id + '" style="left:' + n.x + 'px;top:' + n.y + 'px">' +
+    '<span class="wf-node-top"><span class="wf-node-kind"><span class="dot" style="background:' + kind.color + '"></span>' + kind.label + '</span><span class="wf-node-state"><span class="dot" style="background:' + WF_STATE_COLOR[st] + '"></span>' + esc(nodeWord(n)) + '</span></span>' +
+    '<span class="wf-node-title">' + esc(tidy(n.title)) + '</span>' +
+    '<span class="wf-node-sub">' + esc(tidy(story.actor)) + ' · ' + esc(story.dur) + '</span>' +
+    (wf.status === 'draft' ? '<span class="wf-port wf-port-in"></span><span class="wf-port wf-port-out" data-stop="1"></span>' : '') +
+  '</button>';
+}
+
 function wfCanvas(wf){
   const selected = wfSelectedNode(wf);
-  if(!wf.nodes.length){
-    return '<div class="wf-empty-canvas"><b>这张画布还是空的。</b><p>先加第一步，写清谁做、做什么、产出什么；也可以从现成的「设计评审」模板开始，再按需要改。</p><div class="wf-empty-actions"><button class="btn primary sm" data-act="wf-add-step" data-wf="' + wf.id + '">加第一步</button><button class="btn ghost sm" data-act="wf-use-template" data-wf="' + wf.id + '">从「设计评审」模板开始</button></div></div>';
-  }
-  return '<div class="wf-stage-list">' + wf.nodes.map((n, i) => {
-    const st = wfNodeState(n);
-    const story = storyForNode(wf, n);
-    const on = selected && selected.id === n.id;
-    return '<button class="wf-stage is-' + st + (on ? ' on' : '') + '" data-act="wf-step" data-wf="' + wf.id + '" data-node="' + n.id + '">' +
-      '<div class="wf-stage-top"><span class="wf-stage-idx">' + String(i + 1).padStart(2, '0') + '</span><span class="wf-stage-state"><span class="dot" style="background:' + (st === 'done' ? '#4ade80' : st === 'run' ? '#5aa9ff' : st === 'blocked' ? '#fbbf24' : '#cbd5e1') + '"></span>' + esc(nodeWord(n)) + '</span></div>' +
-      '<div class="wf-stage-body"><div class="wf-stage-title">' + esc(tidy(n.title)) + '<span class="who">' + esc(tidy(story.actor)) + '</span></div>' +
-      '<p class="wf-stage-process">' + esc(tidy(story.process)) + '</p>' +
-      '<div class="wf-stage-result"><b>结果</b>' + esc(tidy(story.result)) + '</div></div>' +
-      '<div class="wf-stage-foot"><span class="wf-stage-dur">' + esc(story.dur) + '</span><span class="wf-stage-open">查看现场 →</span></div>' +
-    '</button>';
-  }).join('') + '</div>' + '<p class="path-note">点任意一步，右侧会显示它的执行者、过程、结果和证据。流程按顺序走；某一步等你决定时，后面的步骤会停住。</p>';
+  const size = wfCanvasSize(wf);
+  const edgeMarkup = wf.edges.map(e => {
+    const a = wfNodeById(wf, e[0]), b = wfNodeById(wf, e[1]);
+    if(!a || !b) return '';
+    const d = wfEdgePath(a, b), key = wfEdgeKey(e), on = state.wfEdge === key;
+    return '<path class="wf-edge-hit" data-act="wf-edge" data-edge="' + esc(key) + '" data-edge-from="' + e[0] + '" data-edge-to="' + e[1] + '" d="' + d + '"></path>' +
+      '<path class="wf-edge' + (on ? ' on' : '') + '" data-edge-from="' + e[0] + '" data-edge-to="' + e[1] + '" d="' + d + '" marker-end="url(#' + (on ? 'wfArrowOn' : 'wfArrow') + ')"></path>';
+  }).join('');
+  const nodes = wf.nodes.map(n => wfNodeHtml(wf, n, selected)).join('');
+  const empty = wf.nodes.length ? '' : '<div class="wf-empty-canvas"><b>这张画布还是空的。</b><p>从下面的类型拖一个进来，或双击空白处加第一步；也可以从现成的「设计评审」模板开始，再按需要改。</p><div class="wf-empty-actions"><button class="btn primary sm" data-act="wf-add-step" data-wf="' + wf.id + '">加第一步</button><button class="btn ghost sm" data-act="wf-use-template" data-wf="' + wf.id + '">从「设计评审」模板开始</button></div></div>';
+  return wfMind(wf) + wfCanvasToolbar(wf) +
+    '<div class="wf-canvas-shell"><div class="wf-canvas" id="wfCanvas" data-wf="' + wf.id + '" data-act="wf-blank" style="width:' + size.w + 'px;height:' + size.h + 'px">' +
+      '<svg width="' + size.w + '" height="' + size.h + '" aria-hidden="true"><defs>' +
+        '<marker id="wfArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"></path></marker>' +
+        '<marker id="wfArrowOn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#0f766e"></path></marker>' +
+      '</defs>' + edgeMarkup + '<path id="wfTempEdge" class="wf-edge-temp" style="display:none" d=""></path></svg>' +
+      nodes + empty +
+    '</div></div>' +
+    '<div class="wf-canvas-footer"><span>箭头从前一步指向下一步；点连线可以选中并删掉。</span><span class="right">' + (wf.status === 'draft' ? '保存后，智能体通过同一个 workflow.update 看到这份定义。' : '已发布版本固定；改流程会开一份新草稿。') + '</span></div>';
 }
 
 function wfInspector(wf){
+  if(state.wfEdge){
+    const parts = state.wfEdge.split('|');
+    const a = wfNodeById(wf, parts[0]), b = wfNodeById(wf, parts[1]);
+    if(a && b){
+      return '<div class="wf-inspector"><div class="wf-inspector-head"><b>这条连线</b><span>先后顺序</span></div><div class="wf-inspector-body">' +
+        '<div class="wf-inspector-title">' + esc(tidy(a.title)) + ' → ' + esc(tidy(b.title)) + '</div>' +
+        '<div class="wf-inspector-meta">' + WF_KIND[wfKind(a)].label + ' → ' + WF_KIND[wfKind(b)].label + '</div>' +
+        '<div class="tw-block"><h4>它表示什么</h4><p>前一步交出结果后，这一步才会开始。删掉连线，两步就各自独立。</p></div>' +
+        (wf.status === 'draft' ? '<button class="btn ghost sm" data-act="wf-del-edge" data-wf="' + wf.id + '" data-edge="' + esc(state.wfEdge) + '" style="margin-top:10px;color:#b91c1c">删掉这条连线</button>' : '<p class="muted" style="font-size:10.5px;line-height:1.6;margin-top:10px">已发布版本只读。要改先开新版本。</p>') +
+      '</div></div>' +
+      '<div class="wf-side-card"><h4>怎么操作</h4><div class="muted" style="font-size:10.5px;line-height:1.65">点空白处取消选中。拖动节点只改位置，不会改连线；要改先后顺序，删掉旧的，再从圆点拉一条新的。</div></div>';
+    }
+  }
   const n = wfSelectedNode(wf);
   if(!n) return '<div class="wf-side-card" style="margin-top:10px"><h4>这一步的现场</h4><div class="muted" style="font-size:12px;line-height:1.6">点左边任意一步，这里会显示谁在做、做到哪了、产出了什么。</div></div>';
   const idx = wf.nodes.findIndex(x => x.id === n.id);
@@ -3730,7 +3949,8 @@ function wfInspector(wf){
     '<details class="tech-details"><summary>技术细节</summary><div class="tw-code">' + esc(story.evidence) + '</div></details>' +
     '<div class="tw-block"><h4>现在要做什么</h4><p>' + esc(stepInstruction(st)) + '</p></div>' +
     (runs.length ? '<button class="btn ghost sm" data-act="open-run" data-run="' + runs[0].id + '" style="margin-top:10px">打开最近一次运行</button>' : '') +
-    (wf.status === 'draft' ? '<button class="btn ghost sm" data-act="wf-del-step" data-wf="' + wf.id + '" data-node="' + n.id + '" style="margin-top:10px;color:#b91c1c">删掉这一步</button>' : '') +
+    (wf.status === 'draft' ? '<div class="wf-edit-actions"><button class="btn ghost sm" data-act="wf-edit-step" data-wf="' + wf.id + '" data-node="' + n.id + '">改这一步</button><button class="btn ghost sm" data-act="wf-del-step" data-wf="' + wf.id + '" data-node="' + n.id + '" style="color:#b91c1c">删掉这一步</button></div>' : '') +
+    '<div class="wf-edit-note">' + (wf.status === 'draft' ? '也可以直接拖动节点改位置，或从右侧圆点拉线连到下一步。' : '已发布版本只读；要改先开新版本。') + '</div>' +
   '</div></div>' +
   '<div class="wf-side-card"><h4>最近运行</h4>' + (runs.length ? runs.slice(0, 4).map(r => {
     const task = taskById(r.task);
@@ -4061,10 +4281,10 @@ function drawerNode(){
   const outs = wf.edges.filter(e => e[0] === n.id).map(e => wf.nodes.find(x => x.id === e[1])).filter(Boolean);
   return drawerShell({
     kicker: '流程步骤', title: esc(tidy(n.title)),
-    sub: '<span class="tag violet" style="height:18px;font-size:7.8px">' + esc(n.type === 'gate' ? '需要你决定' : n.type === 'agent' ? '子代理执行' : n.type === 'tool' ? '工具执行' : '触发') + '</span>' + statusTag(n.status === 'done' ? 'done' : n.status === 'run' ? 'running' : n.status === 'blocked' ? 'blocked' : 'queued'),
-    body: '<div class="section"><div class="callout info">' + icon('info') + '<div>' + esc(n.sub) + '。节点契约随工作流版本冻结；改契约必须发新版本。</div></div></div>' +
-      '<div class="section"><div class="section-h"><h3>输入 / 输出</h3></div><div class="card-box" style="display:grid;grid-template-columns:1fr 1fr;gap:14px"><div><div class="dec-label">输入（' + ins.length + '）</div>' + (ins.length ? ins.map(x => '<div style="font-size:9.2px;padding:4px 0">' + icon('arrow-right') + ' ' + esc(x.title) + '<span class="mono" style="font-size:7.8px;color:var(--ink3)"> ' + esc(x.code) + '</span></div>').join('') : '<div class="muted" style="font-size:8.8px">这是入口节点</div>') + '</div><div><div class="dec-label">输出（' + outs.length + '）</div>' + (outs.length ? outs.map(x => '<div style="font-size:9.2px;padding:4px 0">' + icon('arrow-right') + ' ' + esc(x.title) + '<span class="mono" style="font-size:7.8px;color:var(--ink3)"> ' + esc(x.code) + '</span></div>').join('') : '<div class="muted" style="font-size:8.8px">这是收尾节点</div>') + '</div></div></div>' +
-      '<div class="section"><div class="section-h"><h3>守卫与失败态</h3></div><div class="card-box"><div style="font-size:9.6px;color:var(--ink2);line-height:1.6">' + (n.type === 'gate' ? '没有证据不会放行；出现冲突就停下来，交给你决定。' : n.type === 'agent' ? '只能在约定范围内动手；失败回到总控，最多自己重试两次。' : n.type === 'tool' ? '每次调用都带防重复标记；没拿到系统确认就记「做完，等系统确认」，不记成功。' : '按上一步的输入执行；超时或输入缺失就停住等待。') + '</div></div></div>' +
+    sub: '<span class="tag violet" style="height:18px;font-size:7.8px">' + esc((WF_KIND[wfKind(n)] || {}).label || '步骤') + '</span>' + statusTag(n.status === 'done' ? 'done' : n.status === 'run' ? 'running' : n.status === 'blocked' ? 'blocked' : 'queued'),
+    body: '<div class="section"><div class="callout info">' + icon('info') + '<div>' + esc(n.sub) + '。这一步做什么、交什么，跟着流程版本一起固定；要改，得开一个新版本。</div></div></div>' +
+      '<div class="section"><div class="section-h"><h3>上一步 → 这一步</h3></div><div class="card-box" style="display:grid;grid-template-columns:1fr 1fr;gap:14px"><div><div class="dec-label">从哪来（' + ins.length + '）</div>' + (ins.length ? ins.map(x => '<div style="font-size:9.2px;padding:4px 0">' + icon('arrow-right') + ' ' + esc(x.title) + '<span class="mono" style="font-size:7.8px;color:var(--ink3)"> ' + esc(x.code) + '</span></div>').join('') : '<div class="muted" style="font-size:8.8px">这是第一步</div>') + '</div><div><div class="dec-label">接下来去哪（' + outs.length + '）</div>' + (outs.length ? outs.map(x => '<div style="font-size:9.2px;padding:4px 0">' + icon('arrow-right') + ' ' + esc(x.title) + '<span class="mono" style="font-size:7.8px;color:var(--ink3)"> ' + esc(x.code) + '</span></div>').join('') : '<div class="muted" style="font-size:8.8px">这是最后一步</div>') + '</div></div></div>' +
+      '<div class="section"><div class="section-h"><h3>什么时候会停</h3></div><div class="card-box"><div style="font-size:9.6px;color:var(--ink2);line-height:1.6">' + (n.type === 'approval' ? '没有你的决定，不会继续；超时就按记录里的规则处理。' : n.type === 'policy' ? '没有证据不会放行；出现冲突就停下来，交给你决定。' : n.type === 'parallel' ? '把同一批任务分给几条支线，各自交结果；任何一条失败，整批停住等你决定。' : n.type === 'branch' ? '按上一步的结果选一条路走；条件不明确就停住问你。' : n.type === 'subworkflow' ? '子流程按固定版本跑；它的结果只作为这一步的产出。' : n.type === 'wait' ? '等到约定的时间或事件再继续；等不到就停下来。' : n.type === 'trigger' ? '流程从这里开始；同一份输入只进来一次。' : n.type === 'agent' ? '只能在约定范围内动手；失败回到我这里，最多自己重试两次。' : n.type === 'tool' ? '每次调用都带防重复标记；没拿到系统确认就记「做完，等系统确认」，不记成功。' : '按上一步的输入执行；超时或输入缺失就停住等待。') + '</div></div></div>' +
       '<div class="section"><div class="section-h"><h3>最近证据</h3></div><div class="evidence-item">' + icon('shield') + '<div><div class="en">审计台账里的这次判定</div><div class="ed">第三段 v23 通过：没有致命问题、没有重大问题，只剩 3 条措辞。</div></div></div><div class="evidence-item">' + icon('doc') + '<div><div class="en">设计稿 ' + esc(wf.version) + '</div><div class="ed">SHA256 9979F18C… · 1185 行 · 2026-11-11。</div></div></div></div>',
     foot: '<span class="muted" style="font-size:8.4px">这一步只读</span><span class="right"><button class="btn ghost sm" data-act="close-drawer">关闭</button><button class="btn sm" data-act="open-wf" data-wf="' + wf.id + '">回到工作流</button></span>'
   });
@@ -4213,8 +4433,23 @@ function newWorkflowModal(){
   return modalShell('新建工作流', '新建工作流', '<div class="field"><label>名称 <span class="req">必填</span></label><input id="nwName" placeholder="例如：夜间回归巡检"></div><div class="field"><label>用途</label><textarea id="nwDesc" placeholder="这条工作流解决什么问题、做到什么程度算完…"></textarea></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>主触发方式</label><select id="nwTrigger"><option value="continuous">持续目标 / 手动</option><option value="schedule">按时间</option><option value="event">等一个事件</option></select></div><div class="field"><label>初始版本</label><input value="v0.1.0-draft" disabled></div></div><div class="field"><label>触发细节</label><input id="nwTriggerDetail" placeholder="按时间填 每天 09:00；等事件填事件名；手动可留空"></div><div class="callout warn">' + icon('alert') + '<div>新流程先是一张空画布。你可以加步骤，或从「设计评审」模板开始；试运行通过后才能发布。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-workflow">创建草稿</button></span>');
 }
 
-function newStepModal(wf){
-  return modalShell('加一步', '加一步：谁做、做什么、产出什么', '<div class="field"><label>这一步叫什么 <span class="req">必填</span></label><input id="nsTitle" placeholder="例如：核对系统确认是否到齐"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>谁来做</label><select id="nsActor"><option>主控</option><option>子代理</option><option>人</option></select></div><div class="field"><label>做完的标志</label><input id="nsDone" placeholder="例如：三笔系统确认都能对上"></div></div><div class="field"><label>具体做什么</label><textarea id="nsProcess" placeholder="写清动作、范围和不能碰的边界"></textarea></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>输入</label><input id="nsInput" placeholder="上一步的产出"></div><div class="field"><label>产出</label><input id="nsOutput" placeholder="下一步能直接用的东西"></div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-step" data-wf="' + wf.id + '">加进流程</button></span>');
+function newStepModal(wf, node){
+  const editing = !!node;
+  const story = node ? storyForNode(wf, node) : null;
+  const base = node ? ((STEP_STORY[wf.id] && STEP_STORY[wf.id][node.id]) || {}) : {};
+  const kind = node ? wfKind(node) : (state.wfPendingType || 'agent');
+  const actor0 = node ? (node.actor || (node.type === 'approval' || node.type === 'wait' ? '人' : /工具/.test(story.actor) ? '工具' : /子代理/.test(story.actor) ? '子代理' : '主控')) : '主控';
+  const title0 = node ? node.title : '';
+  const process0 = node ? ((node.contract && node.contract.process) || base.process || story.process) : '';
+  const input0 = node ? ((node.contract && node.contract.input) || base.input || story.input) : '';
+  const output0 = node ? ((node.contract && node.contract.output) || base.output || story.output) : '';
+  const done0 = node ? ((node.contract && node.contract.done) || '留下可核对的结果') : '';
+  const kindOpt = (v, l) => '<option value="' + v + '"' + (kind === v ? ' selected' : '') + '>' + l + '</option>';
+  const actorOpt = v => '<option' + (actor0 === v ? ' selected' : '') + '>' + v + '</option>';
+  const hint = editing
+    ? '只改这一步的内容；它在画布上的位置和前后连线都会保留。'
+    : (state.wfPendingLink ? '保存后会自动接在当前选中的步骤后面；也可以再手动拖线改。' : (state.wfPendingPos ? '落点已经记在画布上；保存后可以直接拖动微调。' : '保存后先放在画布的空位上，再拖动调整。'));
+  return modalShell(editing ? '改这一步' : '加一步', editing ? '只改内容，位置和连线保留' : '谁做、做什么、产出什么', '<div class="field"><label>这一步叫什么 <span class="req">必填</span></label><input id="nsTitle" value="' + esc(title0) + '" placeholder="例如：核对系统确认是否到齐"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>这一步是什么</label><select id="nsKind">' + kindOpt('agent', '子代理执行') + kindOpt('tool', '调用工具') + kindOpt('parallel', '并行分派') + kindOpt('policy', '规则检查') + kindOpt('approval', '等你决定') + kindOpt('branch', '按条件分流') + kindOpt('subworkflow', '子流程') + kindOpt('wait', '等待') + kindOpt('trigger', '开始 / 触发') + '</select></div><div class="field"><label>谁来做</label><select id="nsActor">' + actorOpt('主控') + actorOpt('子代理') + actorOpt('工具') + actorOpt('人') + '</select></div></div><div class="field"><label>做完的标志</label><input id="nsDone" value="' + esc(done0) + '" placeholder="例如：三笔系统确认都能对上"></div><div class="field"><label>具体做什么</label><textarea id="nsProcess" placeholder="写清动作、范围和不能碰的边界">' + esc(process0) + '</textarea></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>输入</label><input id="nsInput" value="' + esc(input0) + '" placeholder="上一步的产出"></div><div class="field"><label>产出</label><input id="nsOutput" value="' + esc(output0) + '" placeholder="下一步能直接用的东西"></div></div><div class="callout info">' + icon('info') + '<div>' + esc(hint) + '</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-step" data-wf="' + wf.id + '">' + (editing ? '保存这一步' : '加进流程') + '</button></span>');
 }
 function editWorkflowModal(wf){
   return modalShell('设置', '设置这条流程', '<div class="field"><label>名称</label><input id="ewName" value="' + esc(tidy(wf.name)) + '"></div><div class="field"><label>用途</label><textarea id="ewDesc">' + esc(wf.desc) + '</textarea></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>触发方式</label><select id="ewTrigger"><option value="continuous"' + (wf.trigger === 'continuous' ? ' selected' : '') + '>持续目标 / 手动</option><option value="schedule"' + (wf.trigger === 'schedule' ? ' selected' : '') + '>按时间</option><option value="event"' + (wf.trigger === 'event' ? ' selected' : '') + '>等一个事件</option></select></div><div class="field"><label>触发细节</label><input id="ewDetail" value="' + esc(wf.triggerDetail || '') + '" placeholder="例如 每天 09:00"></div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-wf-settings" data-wf="' + wf.id + '">保存设置</button></span>');
@@ -4234,6 +4469,51 @@ function publishModal(wf){
     return modalShell('发布检查', '还不能发布 ' + esc(tidy(wf.name)), '<div class="callout warn">' + icon('alert') + '<div><b>差一步。</b>' + esc(why) + '</div></div><div class="modal-summary" style="margin-top:10px"><div><dt>试跑</dt><dd>' + g.runs + ' 次，' + g.passed + ' 次通过</dd></div><div><dt>待你处理</dt><dd>' + g.openP0 + ' 件</dd></div><div><dt>步骤</dt><dd>' + wf.nodes.length + ' 个</dd></div></div>', '<span class="right"><button class="btn primary sm" data-act="close-modal">知道了</button></span>');
   }
   return modalShell('发布', '发布 ' + esc(tidy(wf.name)), '<div class="modal-summary"><div><dt>版本</dt><dd>' + esc(wf.version) + '</dd></div><div><dt>步骤与连线</dt><dd>' + wf.nodes.length + ' 个步骤 · ' + wf.edges.length + ' 条连线</dd></div><div><dt>还没处理的高优先级事项</dt><dd>' + g.openP0 + ' 件</dd></div><div><dt>试运行</dt><dd>已通过 · ' + esc(last ? last.time : '刚刚') + '</dd></div></div><div class="check-row"><input type="checkbox" id="pubAck"><div class="cm"><div class="cn">我确认这次发布后，这条流程就按当前版本固定下来</div><div class="cd">之后再改要发新版本；正在跑的任务仍然按旧版本走完。</div></div></div><div class="callout warn" style="margin-top:9px">' + icon('alert') + '<div>发布会写进记录，并通知所有用到这条流程的任务。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-publish" data-wf="' + wf.id + '">确认发布</button></span>');
+}
+
+function wfApiDefinition(wf){
+  return {
+    command: 'workflow.update',
+    workflow_id: wf.id,
+    version: wf.version,
+    status: wf.status,
+    name: wf.name,
+    trigger: { kind: wf.trigger, detail: wf.triggerDetail || wf.triggerLabel },
+    nodes: wf.nodes.map(n => {
+      const story = storyForNode(wf, n);
+      return { id: n.id, type: wfKind(n), title: n.title, actor: n.actor || story.actor, position: { x: n.x, y: n.y }, contract: n.contract || { process: story.process, input: story.input, output: story.output, done: '留下可核对的结果' } };
+    }),
+    edges: wf.edges.map(e => ({ from: e[0], to: e[1] }))
+  };
+}
+
+function wfApiModal(wf){
+  state.wfApiJson = JSON.stringify(wfApiDefinition(wf), null, 2);
+  return modalShell('智能体接口', '画布和智能体改的是同一份定义', '<div class="callout info">' + icon('info') + '<div>你在画布上拖出来的节点和连线，保存后提交的就是下面这份定义。智能体新建流程走 <code>workflow.create</code>，改流程走 <code>workflow.update</code>，和面板保存是同一条命令，不存在两套模型。</div></div><div class="wf-api-code" style="margin-top:10px"><pre id="wfApiCode">' + esc(state.wfApiJson) + '</pre></div><div class="wf-api-hint">这份定义里的位置、类型和连线都来自当前画布；智能体可以只改内容，也可以按同一结构整份提交。</div>', '<span class="right"><button class="btn ghost sm" data-act="wf-select-api">选中定义</button><button class="btn primary sm" data-act="close-modal">关闭</button></span>');
+}
+
+function wfTidy(wf){
+  if(!wf.nodes.length) return;
+  if(!wf.edges.length){
+    wf.nodes.forEach((n, i) => { n.x = 24 + (i % 3) * 196; n.y = 40 + Math.floor(i / 3) * 132; });
+  } else {
+    const level = {}; wf.nodes.forEach(n => { level[n.id] = 0; });
+    for(let k = 0; k < wf.nodes.length + 2; k++){
+      let changed = false;
+      wf.edges.forEach(e => {
+        if(level[e[0]] != null && level[e[1]] != null && level[e[1]] < level[e[0]] + 1){ level[e[1]] = level[e[0]] + 1; changed = true; }
+      });
+      if(!changed) break;
+    }
+    const groups = {};
+    wf.nodes.forEach(n => { const lv = level[n.id] || 0; (groups[lv] = groups[lv] || []).push(n); });
+    Object.keys(groups).map(Number).sort((a, b) => a - b).forEach(lv => {
+      groups[lv].sort((a, b) => a.y - b.y || a.x - b.x).forEach((n, i) => {
+        n.x = 24 + lv * 196; n.y = 40 + i * 132;
+      });
+    });
+  }
+  wfTouch(wf, '整理了一下画布布局');
 }
 
 function notesModal(){
@@ -4358,7 +4638,7 @@ function submitWorkflow(){
   const triggerLabel = trigger === 'schedule' ? (detail || '还没设时间') : trigger === 'event' ? (detail || '还没选事件') : '持续目标 / 手动';
   const id = 'wf_' + randHex(4);
   WORKFLOWS[id] = { id: id, name: name.trim(), version: 'v0.1.0-draft', status: 'draft', trigger: trigger, triggerLabel: triggerLabel, triggerDetail: detail, owner: '七七', desc: desc.trim(), tasks: 0, runs: 0, success: null, updated: '刚刚', nodes: [], edges: [], versions: [{ v: 'v0.1.0-draft', at: '刚刚', by: '七七', current: true, note: '空白草稿；先加步骤或从模板开始。' }], runRows: [] };
-  state.selectedWorkflow = id; state.wfTab = 'canvas'; state.screen = 'workflows';
+  state.selectedWorkflow = id; state.wfTab = 'canvas'; state.screen = 'workflows'; state.wfNode = null; state.wfEdge = null; state.wfDirty = false;
   addEvent('workflow.created', '啸春', '新建工作流 ' + id + '：' + name.trim(), { workflow: id, trigger: trigger });
   closeModal(); render(); toast('草稿已创建，画布还是空的。先加一步，或从模板开始。');
 }
@@ -4367,16 +4647,37 @@ function submitStep(wfId){
   const wf = WORKFLOWS[wfId]; if(!wf) return;
   const title = ($('#nsTitle') || {}).value || '';
   if(!title.trim()){ toast('先给这一步起个名字。', true); return; }
+  const kind = ($('#nsKind') || {}).value || 'agent';
   const actor = ($('#nsActor') || {}).value || '主控';
   const process = ($('#nsProcess') || {}).value || '按流程约定执行这一步。';
   const input = ($('#nsInput') || {}).value || '上一步产出';
   const output = ($('#nsOutput') || {}).value || '下一步输入';
   const done = ($('#nsDone') || {}).value || '留下可核对的结果';
-  const n = wf.nodes.length + 1;
-  const node = { id: 'n_' + randHex(4), title: title.trim(), type: 'task', code: 'STEP_' + String(n).padStart(2,'0'), x: 0, y: 0, sub: actor + ' · ' + process, status: 'wait', actor: actor, contract: { process: process, input: input, output: output, done: done } };
-  wf.nodes.push(node); wf.updated = '刚刚';
-  wf.versions[0].note = '加了一步：' + node.title;
-  state.wfNode = node.id; closeModal(); render(); toast('已加进流程。发布前先试跑一次。');
+  if(state.wfEditNode){
+    const node = wfNodeById(wf, state.wfEditNode);
+    if(node){
+      node.title = title.trim(); node.type = kind; node.actor = actor;
+      node.sub = actor + ' · ' + process;
+      node.contract = { process: process, input: input, output: output, done: done };
+      wfTouch(wf, '改了这一步：' + node.title);
+      addEvent('workflow.step_updated', '啸春', '改了 ' + wf.name + ' 的一步：' + node.title, { workflow: wf.id, node: node.id });
+      state.wfNode = node.id; state.wfEdge = null;
+    }
+    state.wfEditNode = null; state.wfPendingPos = null; state.wfPendingType = null; state.wfPendingLink = null;
+    closeModal(); render(); toast('这一步已保存；位置和连线没有动。'); return;
+  }
+  const pos = state.wfPendingPos || wfAutoPos(wf);
+  const codeMap = { trigger: 'START', agent: 'AGENT', tool: 'TOOL', subworkflow: 'SUB', approval: 'APPROVAL', parallel: 'PARALLEL', policy: 'POLICY', branch: 'BRANCH', wait: 'WAIT' };
+  const node = { id: 'n_' + randHex(4), title: title.trim(), type: kind, code: (codeMap[kind] || 'STEP') + '_' + String(wf.nodes.length + 1).padStart(2, '0'), x: Math.round(pos.x), y: Math.round(pos.y), sub: actor + ' · ' + process, status: 'wait', actor: actor, contract: { process: process, input: input, output: output, done: done } };
+  wf.nodes.push(node);
+  if(state.wfPendingLink && wfNodeById(wf, state.wfPendingLink) && !wf.edges.some(e => e[0] === state.wfPendingLink && e[1] === node.id)){
+    wf.edges.push([state.wfPendingLink, node.id]);
+  }
+  wfTouch(wf, '加了一步：' + node.title);
+  addEvent('workflow.step_added', '啸春', '给 ' + wf.name + ' 加了一步：' + node.title, { workflow: wf.id, node: node.id });
+  state.wfNode = node.id; state.wfEdge = null;
+  state.wfEditNode = null; state.wfPendingPos = null; state.wfPendingType = null; state.wfPendingLink = null;
+  closeModal(); render(); toast('已加进流程。要调先后顺序，从右侧圆点拖一条线。');
 }
 
 function wfUseTemplate(wfId){
@@ -4384,9 +4685,9 @@ function wfUseTemplate(wfId){
   if(!wf || !tpl) return;
   wf.nodes = tpl.nodes.map(n => ({ id: n.id, title: n.title, type: n.type, code: n.code, x: n.x, y: n.y, sub: n.sub, status: 'wait' }));
   wf.edges = tpl.edges.map(e => e.slice());
-  wf.updated = '刚刚';
-  wf.versions[0].note = '从「设计评审」模板开始；步骤与契约待按本流程改。';
+  wfTouch(wf, '从「设计评审」模板开始；步骤与契约待按本流程改。');
   state.wfNode = wf.nodes[0] ? wf.nodes[0].id : null;
+  state.wfEdge = null;
   closeModal(); render(); toast('模板已放进画布。改好步骤后再试跑。');
 }
 
@@ -4415,6 +4716,7 @@ function submitNewVersion(wfId){
   wf.versions.forEach((v, i) => { v.current = i === 0; });
   wf.runRows = [];
   wf.nodes.forEach(n => { n.status = 'wait'; });
+  state.wfEdge = null; state.wfDirty = false;
   addEvent('workflow.version', '啸春', '为 ' + wf.name + ' 开了新版本 ' + next, { workflow: wf.id });
   closeModal(); render(); toast('新版本草稿已创建：' + next + '。改完再试跑。');
 }
@@ -4452,12 +4754,14 @@ document.addEventListener('click', function(ev){
     if(act === 'open-task-runs'){ openTask(actEl.dataset.task, 'runs'); return; }
     if(act === 'open-run' || act === 'open-wf-run'){ openRun(actEl.dataset.run); return; }
     if(act === 'open-agent'){ openDrawer({ kind: 'agent', id: actEl.dataset.agent }); return; }
-    if(act === 'open-wf'){ state.selectedWorkflow = actEl.dataset.wf; state.wfNode = null; state.screen = 'workflows'; state.drawer = null; render(); return; }
+    if(act === 'open-wf'){ state.selectedWorkflow = actEl.dataset.wf; state.wfNode = null; state.wfEdge = null; state.wfEditNode = null; state.wfPendingPos = null; state.wfPendingType = null; state.wfPendingLink = null; state.wfDirty = false; state.screen = 'workflows'; state.drawer = null; render(); return; }
     if(act === 'wf-tab'){ state.wfTab = actEl.dataset.tab; render(); return; }
     if(act === 'task-pick'){ state.taskPick = actEl.dataset.task; state.stepSel = null; render(); return; }
     if(act === 'task-step'){ state.stepSel = { task: actEl.dataset.task, index: Number(actEl.dataset.index) }; render(); if(window.innerWidth < 1180){ setTimeout(function(){ const ins = document.querySelector('.tw-inspect'); if(ins) ins.scrollIntoView({block:'nearest', behavior:'smooth'}); }, 30); } return; }
     if(act === 'step-select'){ state.stepSel = { task: actEl.dataset.task, index: Number(actEl.dataset.index) }; render(); return; }
-    if(act === 'wf-step'){ state.wfNode = actEl.dataset.node; render(); return; }
+    if(act === 'wf-step'){ state.wfNode = actEl.dataset.node; state.wfEdge = null; render(); return; }
+    if(act === 'wf-edge'){ state.wfEdge = actEl.dataset.edge; state.wfNode = null; render(); return; }
+    if(act === 'wf-blank'){ if(state.wfNode || state.wfEdge){ state.wfNode = null; state.wfEdge = null; render(); } return; }
     if(act === 'open-node'){ openDrawer({ kind: 'node', id: actEl.dataset.node, wf: actEl.dataset.wf }); return; }
     if(act === 'open-decision'){ openDrawer({ kind: 'decision', id: actEl.dataset.dec }); return; }
     if(act === 'open-effect'){ openDrawer({ kind: 'effect', id: actEl.dataset.eff }); return; }
@@ -4505,7 +4809,7 @@ document.addEventListener('click', function(ev){
       const g = wfGateInfo(wf);
       if(!g.ready){ closeModal(); toast('还不能发布：' + (!wf.nodes.length ? '画布是空的。' : !g.runs ? '还没有试跑过。' : !g.passed ? '还没有一次跑通。' : '还有 ' + g.openP0 + ' 件高优先级事项没处理。'), true); return; }
       if(!$('#pubAck') || !$('#pubAck').checked){ toast('先勾选发布确认。', true); return; }
-      wf.status = 'published'; wf.version = wf.version.replace('-draft', ''); wf.updated = '刚刚';
+      wf.status = 'published'; wf.version = wf.version.replace('-draft', ''); wf.updated = '刚刚'; state.wfDirty = false;
       wf.versions.forEach(v => { v.current = false; }); wf.versions.unshift({ v: wf.version, at: '刚刚', by: '啸春', current: true, note: '首次发布；执行契约冻结。' });
       addEvent('workflow.published', '啸春', '发布工作流 ' + wf.id + ' ' + wf.version, { workflow: wf.id, version: wf.version });
       closeModal(); render(); toast('已发布 ' + wf.version + '，执行契约已冻结。');
@@ -4516,7 +4820,26 @@ document.addEventListener('click', function(ev){
     if(act === 'rollback-wf'){ toast('已回滚到 ' + actEl.dataset.ver + '；下一次运行使用该版本契约。'); return; }
     if(act === 'edit-wf'){ const wf = wfById(actEl.dataset.wf); state.modal = { kind: 'edit-wf', id: wf.id }; openModal(editWorkflowModal(wf)); return; }
     if(act === 'submit-wf-settings'){ submitWfSettings(actEl.dataset.wf); return; }
-    if(act === 'wf-add-step'){ const wf = wfById(actEl.dataset.wf); state.modal = { kind: 'new-step', id: wf.id }; openModal(newStepModal(wf)); return; }
+    if(act === 'wf-add-step' || act === 'wf-add-kind'){
+      const wf = wfById(actEl.dataset.wf);
+      state.wfPendingPos = null;
+      state.wfPendingType = act === 'wf-add-kind' ? actEl.dataset.wfKind : (wf && wf.nodes.length ? 'agent' : 'trigger');
+      state.wfPendingLink = act === 'wf-add-step' ? state.wfNode : null;
+      state.wfEditNode = null;
+      state.modal = { kind: 'new-step', id: wf.id };
+      openModal(newStepModal(wf));
+      return;
+    }
+    if(act === 'wf-edit-step'){
+      const wf = wfById(actEl.dataset.wf);
+      const node = wfNodeById(wf, actEl.dataset.node);
+      if(node && wf.status === 'draft'){
+        state.wfEditNode = node.id; state.wfPendingPos = null; state.wfPendingType = null; state.wfPendingLink = null;
+        state.modal = { kind: 'edit-step', id: wf.id };
+        openModal(newStepModal(wf, node));
+      }
+      return;
+    }
     if(act === 'submit-step'){ submitStep(actEl.dataset.wf); return; }
     if(act === 'wf-use-template'){ wfUseTemplate(actEl.dataset.wf); return; }
     if(act === 'wf-del-step'){
@@ -4525,9 +4848,38 @@ document.addEventListener('click', function(ev){
       const node = wf.nodes.find(n => n.id === actEl.dataset.node);
       wf.nodes = wf.nodes.filter(n => n.id !== actEl.dataset.node);
       wf.edges = wf.edges.filter(e => e[0] !== actEl.dataset.node && e[1] !== actEl.dataset.node);
-      state.wfNode = wf.nodes[0].id; wf.updated = '刚刚';
+      state.wfNode = wf.nodes[0].id; state.wfEdge = null; state.wfDirty = true;
+      wfTouch(wf, '删掉了一步：' + (node ? node.title : ''));
       addEvent('workflow.step_removed', '啸春', '从 ' + wf.name + ' 删掉一步：' + (node ? node.title : ''), { workflow: wf.id });
       render(); toast('这一步已删掉。发布前重新试跑。');
+      return;
+    }
+    if(act === 'wf-del-edge'){
+      const wf = wfById(actEl.dataset.wf);
+      const key = actEl.dataset.edge || '';
+      const before = wf.edges.length;
+      wf.edges = wf.edges.filter(e => wfEdgeKey(e) !== key);
+      if(wf.edges.length !== before){
+        state.wfEdge = null; state.wfNode = null;
+        wfTouch(wf, '删掉了一条连线');
+        addEvent('workflow.edge_removed', '啸春', '从 ' + wf.name + ' 删掉一条连线', { workflow: wf.id, edge: key });
+        render(); toast('这条连线已删掉；两步现在各自独立。');
+      }
+      return;
+    }
+    if(act === 'wf-tidy'){ const wf = wfById(actEl.dataset.wf); wfTidy(wf); state.wfEdge = null; render(); toast('已经按先后顺序排好；位置还能继续拖。'); return; }
+    if(act === 'wf-save'){
+      const wf = wfById(actEl.dataset.wf);
+      if(!state.wfDirty){ toast('没有新的改动要保存。'); return; }
+      state.wfDirty = false;
+      addEvent('workflow.updated', '啸春', '保存了 ' + wf.name + ' 的画布改动：' + wf.nodes.length + ' 步 / ' + wf.edges.length + ' 条连线', { workflow: wf.id });
+      render(); toast('画布改动已保存；智能体走同一个 workflow.update 看到这份定义。');
+      return;
+    }
+    if(act === 'wf-api'){ const wf = wfById(actEl.dataset.wf); state.modal = { kind: 'wf-api', id: wf.id }; openModal(wfApiModal(wf)); return; }
+    if(act === 'wf-select-api'){
+      const pre = document.querySelector('#wfApiCode');
+      if(pre){ const range = document.createRange(); range.selectNodeContents(pre); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); toast('已选中定义，按 Ctrl+C 复制。'); }
       return;
     }
     if(act === 'effect-filter'){ state.effectFilter = actEl.dataset.filter; render(); return; }
@@ -4561,6 +4913,144 @@ document.addEventListener('click', function(ev){
   if(wfEl){ state.selectedWorkflow = wfEl.dataset.wf; state.screen = 'workflows'; render(); return; }
   const agentEl = ev.target.closest('[data-agent]');
   if(agentEl){ openDrawer({ kind: 'agent', id: agentEl.dataset.agent }); return; }
+});
+
+let wfDrag = null;
+
+document.addEventListener('pointerdown', function(ev){
+  const nodeEl = ev.target.closest('#wfCanvas .wf-node');
+  if(!nodeEl) return;
+  const canvas = nodeEl.closest('.wf-canvas');
+  const wf = wfById(canvas.dataset.wf);
+  if(!wf || wf.status !== 'draft') return;
+  const node = wfNodeById(wf, nodeEl.dataset.node);
+  if(!node) return;
+  const port = ev.target.closest('.wf-port-out');
+  if(port){
+    ev.preventDefault();
+    wfDrag = { mode: 'link', wf: wf, from: node.id, portEl: port, moved: false };
+    port.classList.add('active');
+    return;
+  }
+  ev.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  wfDrag = { mode: 'move', wf: wf, node: node, nodeEl: nodeEl, canvas: canvas, startX: ev.clientX, startY: ev.clientY, origX: node.x, origY: node.y, moved: false };
+  nodeEl.classList.add('dragging');
+  try { nodeEl.setPointerCapture(ev.pointerId); } catch(e) {}
+});
+
+document.addEventListener('pointermove', function(ev){
+  if(!wfDrag) return;
+  ev.preventDefault();
+  if(wfDrag.mode === 'move'){
+    const dx = ev.clientX - wfDrag.startX, dy = ev.clientY - wfDrag.startY;
+    if(Math.abs(dx) > 2 || Math.abs(dy) > 2) wfDrag.moved = true;
+    const n = wfDrag.node;
+    n.x = Math.max(8, Math.round(wfDrag.origX + dx));
+    n.y = Math.max(8, Math.round(wfDrag.origY + dy));
+    wfDrag.nodeEl.style.left = n.x + 'px';
+    wfDrag.nodeEl.style.top = n.y + 'px';
+    wfSyncEdgeDom(wfDrag.wf);
+    state.wfDirty = true;
+  } else if(wfDrag.mode === 'link'){
+    wfDrag.moved = true;
+    wfTempEdgeTo(wfDrag.wf, wfDrag.from, ev.clientX, ev.clientY);
+  }
+});
+
+document.addEventListener('pointerup', function(ev){
+  if(!wfDrag) return;
+  const drag = wfDrag; wfDrag = null;
+  const temp = document.querySelector('#wfTempEdge'); if(temp) temp.style.display = 'none';
+  const port = document.querySelector('.wf-port-out.active'); if(port) port.classList.remove('active');
+  if(drag.mode === 'move'){
+    drag.nodeEl.classList.remove('dragging');
+    if(drag.moved){
+      wfTouch(drag.wf, '挪动了这一步的位置');
+      addEvent('workflow.node_moved', '啸春', '在 ' + drag.wf.name + ' 里挪动了一步：' + drag.node.title, { workflow: drag.wf.id, node: drag.node.id });
+      render();
+      toast('位置已改；点「保存改动」后智能体看到的位置也一起更新。');
+    }
+    return;
+  }
+  if(drag.mode === 'link'){
+    const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+    const targetEl = hit && hit.closest('.wf-node');
+    if(!targetEl){ if(drag.moved) toast('松手时没有接到步骤上；从右侧圆点再拉一次就行。', true); return; }
+    const wf = drag.wf, from = drag.from, to = targetEl.dataset.node;
+    if(to === from){ toast('不能把一步接回自己。', true); return; }
+    if(wf.edges.some(e => e[0] === from && e[1] === to)){ toast('这两步已经连着，不用重复接。'); return; }
+    wf.edges.push([from, to]);
+    wfTouch(wf, '加了一条连线');
+    addEvent('workflow.edge_added', '啸春', '在 ' + wf.name + ' 里接了一条线', { workflow: wf.id, edge: from + '|' + to });
+    state.wfEdge = from + '|' + to; state.wfNode = null;
+    render();
+    toast('已接上：前一步交出结果，后一步才开始。');
+  }
+});
+
+document.addEventListener('pointercancel', function(){
+  if(!wfDrag) return;
+  const drag = wfDrag; wfDrag = null;
+  const temp = document.querySelector('#wfTempEdge'); if(temp) temp.style.display = 'none';
+  const port = document.querySelector('.wf-port-out.active'); if(port) port.classList.remove('active');
+  if(drag.mode === 'move') drag.nodeEl.classList.remove('dragging');
+});
+
+document.addEventListener('dblclick', function(ev){
+  const canvas = ev.target.closest('#wfCanvas');
+  if(!canvas || ev.target.closest('.wf-node') || ev.target.closest('.wf-edge-hit')) return;
+  const wf = wfById(canvas.dataset.wf);
+  if(!wf || wf.status !== 'draft') return;
+  const r = canvas.getBoundingClientRect();
+  state.wfPendingPos = { x: Math.max(8, ev.clientX - r.left - WF_NODE_W / 2), y: Math.max(8, ev.clientY - r.top - WF_NODE_H / 2) };
+  state.wfPendingType = 'agent'; state.wfPendingLink = null; state.wfEditNode = null;
+  state.modal = { kind: 'new-step', id: wf.id };
+  openModal(newStepModal(wf));
+});
+
+document.addEventListener('dragstart', function(ev){
+  const chip = ev.target.closest('.wf-chip');
+  if(!chip || !ev.dataTransfer) return;
+  ev.dataTransfer.setData('text/plain', chip.dataset.wfKind || 'agent');
+  ev.dataTransfer.effectAllowed = 'copy';
+  chip.classList.add('dragging');
+});
+
+document.addEventListener('dragend', function(ev){
+  const chip = ev.target.closest('.wf-chip'); if(chip) chip.classList.remove('dragging');
+  document.querySelectorAll('.wf-canvas.drop-ready').forEach(c => c.classList.remove('drop-ready'));
+});
+
+document.addEventListener('dragover', function(ev){
+  const canvas = ev.target.closest('#wfCanvas');
+  if(!canvas) return;
+  const wf = wfById(canvas.dataset.wf);
+  if(!wf || wf.status !== 'draft') return;
+  ev.preventDefault();
+  if(ev.dataTransfer) ev.dataTransfer.dropEffect = 'copy';
+  canvas.classList.add('drop-ready');
+});
+
+document.addEventListener('dragleave', function(ev){
+  const canvas = ev.target.closest('#wfCanvas');
+  if(canvas && !canvas.contains(ev.relatedTarget)) canvas.classList.remove('drop-ready');
+});
+
+document.addEventListener('drop', function(ev){
+  const canvas = ev.target.closest('#wfCanvas');
+  if(!canvas) return;
+  const wf = wfById(canvas.dataset.wf);
+  if(!wf || wf.status !== 'draft') return;
+  ev.preventDefault();
+  canvas.classList.remove('drop-ready');
+  const kind = (ev.dataTransfer && ev.dataTransfer.getData('text/plain')) || 'agent';
+  const r = canvas.getBoundingClientRect();
+  state.wfPendingPos = { x: Math.max(8, ev.clientX - r.left - WF_NODE_W / 2), y: Math.max(8, ev.clientY - r.top - WF_NODE_H / 2) };
+  state.wfPendingType = WF_KIND[kind] ? kind : 'agent';
+  state.wfPendingLink = null; state.wfEditNode = null;
+  state.modal = { kind: 'new-step', id: wf.id };
+  openModal(newStepModal(wf));
 });
 
 document.addEventListener('keydown', function(ev){

@@ -120,3 +120,7 @@
 - 2026-11-12 00:26 第三十轮回包判 fail：0 致命 / 1 重大（in_flight 的 10 分钟超时只有起算、没有收口，调用方会一直收到 COMMAND_BUSY）/ 1 措辞（OPERATION_ID_CONFLICT 只写窗口内终结回执，漏了同 operation_id 的非终结行）。v29 已修：§4.6.2 增加维护扫描每分钟 CAS 置 rejected、写 completed_at 与 receipt_json=OPERATION_TIMEOUT、追加 command.rejected、不改业务状态；执行侧 applied 用同一 CAS，败方整笔回滚；错误码表新增 OPERATION_TIMEOUT（504），OPERATION_ID_CONFLICT 触发补非终结行；§4.6.4 面板行为与 §14.2 DDL 交叉引用同步；补 Q-36，Q 总数 36；§3.4r 为唯一 CURRENT，§3.4q 转历史。v29 1317 行、345529 bytes、SHA256 C7F91FC438993116FEFAF2093E31F60BF7EA14B81CE2001EE1E1D63852787F8F。
 
 - 2026-11-12 00:26 第三十一轮已送：收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId 958d7fc7-79d0-4560-a0bf-6a0c33fdadf7；只读复核 v29 的在途超时闭环、OPERATION_TIMEOUT 与 OPERATION_ID_CONFLICT 分界、Q-36、§14.2 CHECK，以及 10 分钟与 7 天两个窗口是否互相打架；待回包。
+
+- 2026-11-12 00:55 第三十一轮回包判 **pass**：0 致命 / 0 重大 / 3 条非阻断措辞（v29 L1175 在途超时收口未写明同一事务；L1175 与 L504 两个维护扫描同名不同周期；L856 的 [历史] 与 L850 的 [HISTORY] 不一致）。审查对象 v29 1317 行、SHA256 C7F91FC438993116FEFAF2093E31F60BF7EA14B81CE2001EE1E1D63852787F8F；三条措辞已在 v30 清。
+
+- 2026-11-12 00:55 第三十二轮已送：v30，1495 行、370746 bytes、SHA256 3AA6F847F449FCC45E0EA459682A4E284BBE2BE137949E30696F6C7B03115554；收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId 85952d82-ad4e-4a32-b362-6f7970703622。本轮新增流程定义三表 DDL（§14.3）、四个 workflow 命令（§4.6.5）、定义校验与发布门禁（§4.12）、Q-37…Q-42、§3.4s 当前清单；只读复核流程定义写模型，并查读模型/索引/结构回归，待回包。
