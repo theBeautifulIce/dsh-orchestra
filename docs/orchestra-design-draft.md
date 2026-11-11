@@ -1,6 +1,6 @@
 # dsh-orchestra 设计草案
 
-状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v30：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）；v30 新增流程定义编辑（四个 workflow 命令、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42）。上一版为 v31：第三十二轮审计 1 致命、6 重大、1 措辞已逐条修入正文（发布事务与回执同事务、版本 CAS 顺序与触发器、重复边/自环拒绝码、空草稿名称、已消费草稿优先级、子流程环与深度口径、publish_note 范围），送第三十三轮。v31 不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。本文件为 v33：第四段 v32 已按第三十四轮审计 pass（0 致命 / 0 重大 / 4 条非阻断措辞）收口；v33 只清理这四条措辞（open_draft 分支、create/update 名称校验、Q-39 create 用例、逐字→语义），不改变审查结论，不新增运行态状态、迁移、decision kind、终态或证据门。 第五段为 v37：第五段「记忆插件对接（memory-audit-v1）」已按第三十六轮审计（2 致命 / 4 重大 / 1 措辞）逐条修入：apply 从当前条目重算哈希并与有序快照逐项比对、批准后封死条目增删与全部提议字段、memory_run_requests 持久化 request_key 幂等、memory bridge 独立注册表接上 §11 闸门、blocked/failed 批次条目收口、Q-54 补齐 stopped_at / evidence_id 证据门、三面 toolPolicy 校验，并补 Q-43c / Q-44b / Q-44c / Q-52b；v35 的发布门禁、批准快照、空 payload、评估唯一键、items 契约、生命周期、错误码顺序与 truncated 强制继续有效；第一至第四段除 §3.2 的 trigger 来源口径、§11 的 bridge 注册表口径、§4.12 第 9 行与 §9/§4.6.3 的 resolution 适用范围外未改，不新增节点类型、run 状态或 resolution 值。v37 按第三十七轮审计（3 致命 / 4 重大 / 3 措辞）逐条修入：哈希原像白名单与 canonical 排序、tool.result 丢失时批次保持 applying 与同批次节点重试、audit_result 复用为 mem_apply 前置批准、toolRef 前缀统一、Q-44c 错误层、批准后 client_key 只读、inspect_batch 计数与三处措辞；送第三十八轮。 本文件为 v38：第五段 v37 已按第三十八轮审计 pass（0 致命 / 0 重大 / 2 条非阻断措辞）；v38 只清理这两条非阻断措辞（inspect_batch 返回体显式带 batch_id，apply 重算改为 canonical_proposal(当前 items)），不改变审查结论。 本文件为 v40：第六段「分阶段落地与验收」在 v39 基础上按第40轮审计（0 致命 / 9 重大 / 4 措辞）逐条修入：门 run 终态沿用 §8 五值、policy 输出 decision、I4 补 run 终态证据行、辅门失败只追加补记、GateArtifact 去自指并定义 canonical 哈希与八段映射、账本时间改用 occurred_at + 单调时钟、G-01/G-14 无旧构建分支、门×注入矩阵与 G2 parallel 拒绝用例、W1–W4 措辞；v39 原有内容：账本只追加不回退、阶段能力绑定、S6 拆 G6 与 R2、G6 双 artifact、node_run 状态名对齐 §8、门禁判据写死、终态证据表、I10 例外收窄、GateArtifact 契约、双向兼容窗口、F8 十种 resolution、补 G-14–G-16；不改变第一至第五段已通过的结论，也不新增节点类型、run 状态或记忆协议。
+状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v30：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）；v30 新增流程定义编辑（四个 workflow 命令、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42）。上一版为 v31：第三十二轮审计 1 致命、6 重大、1 措辞已逐条修入正文（发布事务与回执同事务、版本 CAS 顺序与触发器、重复边/自环拒绝码、空草稿名称、已消费草稿优先级、子流程环与深度口径、publish_note 范围），送第三十三轮。v31 不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。本文件为 v33：第四段 v32 已按第三十四轮审计 pass（0 致命 / 0 重大 / 4 条非阻断措辞）收口；v33 只清理这四条措辞（open_draft 分支、create/update 名称校验、Q-39 create 用例、逐字→语义），不改变审查结论，不新增运行态状态、迁移、decision kind、终态或证据门。 第五段为 v37：第五段「记忆插件对接（memory-audit-v1）」已按第三十六轮审计（2 致命 / 4 重大 / 1 措辞）逐条修入：apply 从当前条目重算哈希并与有序快照逐项比对、批准后封死条目增删与全部提议字段、memory_run_requests 持久化 request_key 幂等、memory bridge 独立注册表接上 §11 闸门、blocked/failed 批次条目收口、Q-54 补齐 stopped_at / evidence_id 证据门、三面 toolPolicy 校验，并补 Q-43c / Q-44b / Q-44c / Q-52b；v35 的发布门禁、批准快照、空 payload、评估唯一键、items 契约、生命周期、错误码顺序与 truncated 强制继续有效；第一至第四段除 §3.2 的 trigger 来源口径、§11 的 bridge 注册表口径、§4.12 第 9 行与 §9/§4.6.3 的 resolution 适用范围外未改，不新增节点类型、run 状态或 resolution 值。v37 按第三十七轮审计（3 致命 / 4 重大 / 3 措辞）逐条修入：哈希原像白名单与 canonical 排序、tool.result 丢失时批次保持 applying 与同批次节点重试、audit_result 复用为 mem_apply 前置批准、toolRef 前缀统一、Q-44c 错误层、批准后 client_key 只读、inspect_batch 计数与三处措辞；送第三十八轮。 本文件为 v38：第五段 v37 已按第三十八轮审计 pass（0 致命 / 0 重大 / 2 条非阻断措辞）；v38 只清理这两条非阻断措辞（inspect_batch 返回体显式带 batch_id，apply 重算改为 canonical_proposal(当前 items)），不改变审查结论。 本文件为 v41：第六段「分阶段落地与验收」在 v39 基础上按第40轮审计（0 致命 / 9 重大 / 4 措辞）逐条修入：门 run 终态由 run 外收口器直抄 §8 五值、policy 输出 decision、I4 补 run 终态证据行、辅门失败只追加补记、GateArtifact 去自指并定义 canonical 哈希与八段映射、账本时间改用 occurred_at + 单调时钟、G-01/G-14 无旧构建分支、门×注入矩阵与 G2 parallel 拒绝用例、W1–W4 措辞；v39 原有内容：账本只追加不回退、阶段能力绑定、S6 拆 G6 与 R2、G6 双 artifact、node_run 状态名对齐 §8、门禁判据写死、终态证据表、I10 例外收窄、GateArtifact 契约、双向兼容窗口、F8 十种 resolution、补 G-14–G-16；不改变第一至第五段已通过的结论，也不新增节点类型、run 状态或记忆协议。本文件为 v41：第六段在 v40 基础上按第41轮审计（0 致命 / 5 重大 / 5 措辞）逐条修入：policy 必过项补门 run 终态只认 succeeded、GateArtifact 增 gate_run_id/run_terminal 且八段字段一一对应、I4 的 run succeeded 按 done/superseded 与 abandoned_unverified 分叉取证、截止钟改为 boot_id+monotonic_ns 并定义跨 boot 换算式、G-06/G-11 统一为对账确认部分写入后才 applying→indeterminate、G6 超阈告警与放行口径、G1 补 G-15、G-01/G-14 停当前阶段、集合哈希升序去重、artifact_hash 固定为补记前的锚点；不改变第一至第五段已通过的结论，也不新增节点类型、run 状态或记忆协议。
 
 ## 第一段 骨架与落点
 
@@ -96,7 +96,31 @@ runTool 的边界写死（它是一个新的宿主执行面，必须比「只读
 
 ## 第二段 把「硬」落成规则
 
-**1. 执行单元**：node_run 字段（**schema_version = 1**；表结构变更走 schema_version 加迁移脚本，不许直接改列）——run_id、node_id、seq（节点在 run 内的拓扑序号，来自工作流版本的 node 顺序；同一 node_id 的多个 attempt 共用同一个 seq；只用于稳定排序，不参与 CAS）、attempt、parent_node_run_id、executor_session_id、executor_agent_id、verifier_agent_id、verifier_session_id、owner_epoch、lease_id、queued_at、dispatched_at、claimed_started_at、started_at、tool_start_at、deadline_at、action_deadline_at、cancel_requested_at、cancel_result、wait_extensions、action_generation、rearm_generation、stopped_at（动作被独立确认停止的时刻；abandoned_unverified 侧靠它落「已确认停止」这个事实，见 §8 第六条）、last_heartbeat_at、resume_state、resume_at、startup_state、startup_unknown_deadline_at（**统一 unknown_watchdog 的到期时刻**，节点级默认 120 秒；startup_unknown 两支与桥断预算共用这一个钟，见本节第 2 条）、unknown_reason（这个钟是哪一支点亮的：startup_deadline / bridge_absence / none；同一 tick 只许一个原因占位，桥断优先）、startup_unknown_paused_at（节点被挂到 paused_bridge_missing 时记下的暂停时刻，用于恢复时还原原钟的到期点）、bridge_absence_accumulated（**本次桥断事件的累计秒数**：每次桥断事件开始时清零，桥断期间逐秒累计；桥恢复时清零，下一次桥断从头计——**不跨桥断事件累加**，免得几次短桥断把预算吃成永久超预算；清零语义唯一，见 §3 桥断时钟矩阵）、bridge_down_since（本次桥断的起始时刻，恢复时清空）、verify_timeout（verifying 态的验证时限，节点级可配，默认 120 秒）、verify_started_at、verify_deadline_at、indeterminate_side_effect、side_effect_verified_none（证据核实到副作用没生效，true / false）、stop_evidence（独立确认停止所依据的证据引用：evidence_id 或确认来源）、origin_node_run_id（本行由哪一行重投而来；与旧行的 replacement_node_run_id 成对，重投链靠这两个指针重建）、replacement_node_run_id（旧行被新 attempt 取代后接上的新 node_run 的 id；**重投一律新建行、旧行落 `superseded` 终态**——orphaned 重投与 confirm_not_started / confirm_not_applied 的重试都只在这条边上记指针，旧行只读、不迁出，见 §8 的 `superseded` 与 `（建）→ queued` 重试行）、compensation_id（该 node_run 上补偿动作的幂等键：hash(node_run_id + attempt + descriptor_version)）。**节点行只存事实，不存派生结论**——settling / pending / reasons[] / display_status 一律由 `derive_run_state` 现算（§8）。**node_run 的终态集合只在 §8 写一份，这里不另列清单**（§2 / §7 / §9 / §11 / §14 一律引用 §8）。
+**1. 执行单元**：node_run 字段（**schema_version = 1**；表结构变更走 schema_version 加迁移脚本，不许直接改列）——run_id、node_id、seq（节点在 run 内的拓扑序号，来自工作流版本的 node 顺序；同一 node_id 的多个 attempt 共用同一个 seq；只用于稳定排序，不参与 CAS）、attempt、parent_node_run_id、executor_session_id、executor_agent_id、verifier_agent_id、verifier_session_id、owner_epoch、lease_id、queued_at、dispatched_at、claimed_started_at、started_at、tool_start_at、deadline_at（展示用墙钟，权威钟见本节第 2 条）、deadline_boot_id、deadline_monotonic_ns、action_deadline_at（展示用）、action_deadline_boot_id、action_deadline_monotonic_ns、cancel_requested_at、cancel_result、wait_extensions、action_generation、rearm_generation、stopped_at（动作被独立确认停止的时刻；abandoned_unverified 侧靠它落「已确认停止」这个事实，见 §8 第六条）、last_heartbeat_at、resume_state、resume_at、startup_state、startup_unknown_deadline_at（**统一 unknown_watchdog 的到期时刻**，节点级默认 120 秒；startup_unknown 两支与桥断预算共用这一个钟，见本节第 2 条）、startup_unknown_deadline_boot_id、startup_unknown_deadline_monotonic_ns、unknown_reason（这个钟是哪一支点亮的：startup_deadline / bridge_absence / none；同一 tick 只许一个原因占位，桥断优先）、startup_unknown_paused_at（节点被挂到 paused_bridge_missing 时记下的暂停时刻，用于恢复时还原原钟的到期点）、bridge_absence_accumulated（**本次桥断事件的累计秒数**：每次桥断事件开始时清零，桥断期间逐秒累计；桥恢复时清零，下一次桥断从头计——**不跨桥断事件累加**，免得几次短桥断把预算吃成永久超预算；清零语义唯一，见 §3 桥断时钟矩阵）、bridge_down_since（本次桥断的起始时刻，恢复时清空）、verify_timeout（verifying 态的验证时限，节点级可配，默认 120 秒）、verify_started_at、verify_deadline_at（展示用）、verify_deadline_boot_id、verify_deadline_monotonic_ns、indeterminate_side_effect、side_effect_verified_none（证据核实到副作用没生效，true / false）、stop_evidence（独立确认停止所依据的证据引用：evidence_id 或确认来源）、origin_node_run_id（本行由哪一行重投而来；与旧行的 replacement_node_run_id 成对，重投链靠这两个指针重建）、replacement_node_run_id（旧行被新 attempt 取代后接上的新 node_run 的 id；**重投一律新建行、旧行落 `superseded` 终态**——orphaned 重投与 confirm_not_started / confirm_not_applied 的重试都只在这条边上记指针，旧行只读、不迁出，见 §8 的 `superseded` 与 `（建）→ queued` 重试行）、compensation_id（该 node_run 上补偿动作的幂等键：hash(node_run_id + attempt + descriptor_version)）。**节点行只存事实，不存派生结论**——settling / pending / reasons[] / display_status 一律由 `derive_run_state` 现算（§8）。**node_run 的终态集合只在 §8 写一份，这里不另列清单**（§2 / §7 / §9 / §11 / §14 一律引用 §8）。
+
+**截止钟（所有超时判定只读这一套）**：`*_deadline_at` 只用于显示，判定一律读同名 `*_deadline_boot_id` + `*_deadline_monotonic_ns`。设钟时同一笔写三样：`wall_at = now_wall`、`boot_id = current_boot_id`、`monotonic_ns = now_monotonic_ns + duration`。
+
+- 同一 boot：`remaining_ns = deadline_monotonic_ns - now_monotonic_ns`，进程墙钟怎么跳都不影响。
+- 跨 boot：按 `boots` 换算——它是 events 里启动事件的投影，不是新增表，字段为 `boot_id, started_at, started_monotonic_ns, last_event_at, last_event_monotonic_ns, last_event_seq, clock_uncertain`。先在前一 boot 的最后一条事件上取 `remaining_at_last_event = deadline_monotonic_ns - last_event_monotonic_ns`；再用 `downtime = current_boot.started_at - prev.last_event_at` 扣掉停机时长：`remaining = remaining_at_last_event - downtime`。
+- 若 `downtime < 0`、`prev.clock_uncertain=true`、或当前 boot 的 `abs((wall_now - boot.started_at) - (mono_now - boot.started_monotonic_ns)) > 2s`，一律置 `timer_uncertain=true`，**不自动判超时**，转 blocked 等 sweep / 人核对；宁可晚判，不许误杀。
+- 跨 boot 重算后，同一笔把钟重挂到当前 boot：`deadline_boot_id=current_boot_id`、`deadline_monotonic_ns=now_monotonic_ns+max(0,remaining)`；剩余 ≤0 才允许按到点处理。
+- **成对维护**：凡清空、改写、续期 `*_deadline_at` 的迁移，都在同一笔 CAS 里成对清空 / 改写对应的 `*_deadline_boot_id` 与 `*_deadline_monotonic_ns`；下文只写墙钟字段的地方，一律按这条成对处理。
+
+**G-07 判定伪代码（重启与跳钟共用）：**
+
+    boot = boots[current_boot_id]
+    drift = (now_wall - boot.started_at) - (now_mono - boot.started_monotonic_ns)
+    if boot.clock_uncertain or abs(drift) > 2s: timer_uncertain = true; return "blocked"
+    if deadline_boot_id == current_boot_id:
+        remaining = deadline_monotonic_ns - now_mono
+    else:
+        prev = boots[deadline_boot_id]
+        if prev.clock_uncertain or prev.last_event_at > now_wall: timer_uncertain = true; return "blocked"
+        remaining = (deadline_monotonic_ns - prev.last_event_monotonic_ns) - (now_wall - prev.last_event_at)
+    if remaining <= 0: fire_deadline()
+    else: rebase(deadline_boot_id=current_boot_id, deadline_monotonic_ns=now_mono+remaining)
+
+重启用例：运行中把墙钟前跳 / 后跳十分钟，同一 boot 的超时点不变；带着旧 `deadline_boot_id` 重启，先按 `prev.last_event_monotonic_ns` 求剩余，再扣停机时长并重挂，不因墙钟跳变提前或延后；前一 boot 有 `clock_uncertain` 或停机时长为负时，节点进 blocked 等人核对。
 
 **2. 所有权、排队与计时**：三层分工写死。
 
@@ -411,7 +435,7 @@ run 迁移：running → succeeded / failed；running → settling → succeeded
 - **迁入与投影必须同事务**：节点迁到 `abandoned_unverified` 与 run 的 `paused_reasons` 增 `unverified_side_effect` 写在同一笔事务里（节点行 CAS + run 行 revision 更新同笔）。否则中间那一瞬会出现「节点已放弃、run 却显示 running」——面板让人以为一切正常，账上却压着一笔没验证的副作用。
 - 事件：`run.paused`（带 reasons[]）、`run.settling`、`run.resumed`、**`run.succeeded_with_unverified`**（run 落该终态时发一次，带未验证副作用的 node_run_id 列表）、**`run.failed_with_unverified`**（run 落该终态时发一次，同样带未验证副作用的 node_run_id 列表）。**`run.resumed` 只在 reasons 清空 且 settling=false 且 没有「副作用未验证」的 abandoned_unverified 时才发**（签字不算验证）——清掉一条 reason 就发一次 resumed 会让人以为全好了；理由未清空时只更新 `run.paused` 的 reasons；parallel run 还有未结算的不可逆子节点时，reasons 清空也不发 resumed，改发 run.settling。事件顺序固定：先 run.paused（加/减 reasons），再 run.settling，全部条件满足才 run.resumed。**run 落任一终态都要有对应事件**（`run.succeeded_with_unverified` 与 `run.failed_with_unverified` 都不许省——没有事件，面板与外部订阅者就看不见这次收口）。
 
-**终态 CAS 的统一前置条件**（paused → failed、paused → succeeded、paused → succeeded_with_unverified、paused → failed_with_unverified、settling → succeeded / failed / failed_with_unverified、running → succeeded / failed / failed_with_unverified 全走这一条）：`paused_reasons` 为空 且 `settling` 为 false 且 `pending_irreversible_children` 为空 且 该 run 下无非终态 node_run。四条有一条不满足就不许进终态，留在原地（paused 就继续挂着，settling 就继续等）。**第五条（直接查事实，不靠派生集合）**：该 run 下**没有活跃 decision**——`NOT EXISTS (SELECT 1 FROM decisions WHERE run_id = ? AND status IN ('pending','acknowledged','blocked_for_human'))`。前四条看的是派生集合，万一某条写路径漏清或早清（手工置空、bug），活跃 decision 还在，run 也进不了终态。`running` 标志由前四条派生，不单独存——避免出现「标志说 running、实际全停了」的自相矛盾。**第六条（唯一权威口径：停止 ≠ 结算；只约束「要落 `succeeded` 的那一支」）**：**`succeeded` 只认 `side_effect_verified_none = true` 且带 `stop_evidence`（强证据）这一条**——`stopped_at` 只证明「动作停了」，**不证明「副作用没发生」**；`stopped_at` 单独存在时**只能支撑 `succeeded_with_unverified`**。所以凡是要落 `succeeded` 的 run，该 run 下**不许存在任何未验证副作用**：判据直接读节点行上的事实字段——**`side_effect_verified_none = true`（证据核实到副作用没生效）且带 `stop_evidence`（引用 evidence_id 或确认来源）**；**`stopped_at` 非空不算数**（停止不等于结算）。**`unverified_side_effect` 这条派生理由不得因 `stopped_at` 而消失**——它只在副作用被**核实为未发生**（`side_effect_verified_none = true`）时才消失；人签字、decision 的措辞、人的口述、「executor 后来 idle 了」、动作已停，都**不算核实**，一律算「未验证副作用」。没有 `side_effect_verified_none = true` 的行，就算其余一切齐备也一律算「未验证副作用」。只要还有一笔未验证副作用，`succeeded` 这一支就走不了，改走第七条的分叉。**本条是全文唯一权威口径**：§3 裁决出口、§3 终态与半态、§7 sweep、§9 abandon_ack、本节第七条与 run 级结果判定**一律引用本条**，不许另写一套判据（尤其是「`stopped_at` OR `side_effect_verified_none`」这种把两件事混成一件的写法，不许再出现）。
+**终态 CAS 的统一前置条件**（paused → failed、paused → succeeded、paused → succeeded_with_unverified、paused → failed_with_unverified、settling → succeeded / failed / failed_with_unverified、running → succeeded / failed / failed_with_unverified 全走这一条）：`paused_reasons` 为空 且 `settling` 为 false 且 `pending_irreversible_children` 为空 且 该 run 下无非终态 node_run。四条有一条不满足就不许进终态，留在原地（paused 就继续挂着，settling 就继续等）。**第五条（直接查事实，不靠派生集合）**：该 run 下**没有活跃 decision**——`NOT EXISTS (SELECT 1 FROM decisions WHERE run_id = ? AND status IN ('pending','acknowledged','blocked_for_human'))`。前四条看的是派生集合，万一某条写路径漏清或早清（手工置空、bug），活跃 decision 还在，run 也进不了终态。`running` 标志由前四条派生，不单独存——避免出现「标志说 running、实际全停了」的自相矛盾。**第六条（唯一权威口径：停止 ≠ 结算；只约束「要落 `succeeded` 的那一支」）**：**`succeeded` 只认 `side_effect_verified_none = true` 且带 `stop_evidence`（强证据）这一条**——`stopped_at` 只证明「动作停了」，**不证明「副作用没发生」**；`stopped_at` 单独存在时**只能支撑 `succeeded_with_unverified`**。所以凡是要落 `succeeded` 的 run，该 run 下**不许存在任何未验证副作用**：判据直接读节点行上的事实字段——**`side_effect_verified_none = true`（证据核实到副作用没生效）且带 `stop_evidence`（引用 evidence_id 或确认来源）**；**`stopped_at` 非空不算数**（停止不等于结算）。**`unverified_side_effect` 这条派生理由不得因 `stopped_at` 而消失**——它只在副作用被**核实为未发生**（`side_effect_verified_none = true`）时才消失；人签字、decision 的措辞、人的口述、「executor 后来 idle 了」、动作已停，都**不算核实**，一律算「未验证副作用」。没有 `side_effect_verified_none = true` 的行，就算其余一切齐备也一律算「未验证副作用」。只要还有一笔未验证副作用，`succeeded` 这一支就走不了，改走第七条的分叉。**本条是全文唯一权威口径**：§3 裁决出口、§3 终态与半态、§7 sweep、§9 abandon_ack、本节第七条与 run 级结果判定**一律引用本条**，不许另写一套判据（尤其是「`stopped_at` OR `side_effect_verified_none`」这种把两件事混成一件的写法，不许再出现）。**范围限定**：本条里的 `side_effect_verified_none=true` 只适用于 `abandoned_unverified` 节点；`done` / `superseded` 的不可逆节点以「副作用已发生」的强证据（`evidence_state=strong` 的 `verified_effect`）加产物 artifact 哈希结算，不许要求它们填 true——那等于把做完了的节点判成没发生。
 
 **第七条（成功 / 失败两支都按「有没有未验证副作用」分叉）**：**成功支**——该 run 下存在 `abandoned_unverified` 节点、且其副作用**尚未被核实为未发生**（`side_effect_verified_none` 不为 true；**签字不算核实、`stopped_at` 也不算核实**，判据唯一见第六条）时，终态**只能落 `succeeded_with_unverified`，不许落 `succeeded`**。**失败支**——该 run 下有节点落 failed（或 failed_with_unverified），**且**仍有未验证副作用时（未验证 = 尚未被核实为未发生，判据见第六条），终态**只能落 `failed_with_unverified`，不许落 `failed`**：失败的账不许因为「反正失败了」就把未验证副作用一笔勾销，**节点层与 run 层同名同义**（节点落 failed_with_unverified = 补偿失败且未验证副作用清单保留；run 有一节点 failed、另一节点停在 abandoned_unverified → run 落 failed_with_unverified）。这两个终态里 `paused_reasons` 允许**只剩** `unverified_side_effect` 一条（其余 reason 必须为空，且 settling=false、pending_irreversible_children 为空、无非终态 node_run、无活跃 decision），它作为终态快照里的风险说明留在 run 行上——**它是风险的说明，不是没干完的活**。
 
@@ -2131,12 +2155,12 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 | 门 | 必过项 | 原始证据 | 失败动作 | 回滚演练 |
 | --- | --- | --- | --- | --- |
-| G1 | 迁移从空库到当前版本可重复；迁移中途被杀可重入；进程被杀后账本不丢已提交事件；备份能恢复到独立目录且行数/哈希一致；备份损坏能被检出；认证拒绝匿名写；阶段开关拒绝未知值 | 迁移日志、G-01/G-02/G-08/G-09/G-14 注入记录、崩溃注入记录、独立目录恢复后的行数与哈希比对、G-15 损坏备份拒绝记录、认证失败响应、启动拒绝日志 | 修到全过；不允许用「手工补一条」过门 | 停服务、保留线上账本；有旧构建则回退，无旧构建则停在 S1 修复；备份只恢复到独立目录校验，不覆盖线上账本；按事件日志重放到故障点，读回同一条事件 |
+| G1 | 迁移从空库到当前版本可重复；迁移中途被杀可重入；进程被杀后账本不丢已提交事件；备份能恢复到独立目录且行数/哈希一致；备份损坏能被检出；认证拒绝匿名写；阶段开关拒绝未知值；G-01/G-02/G-08/G-09/G-14/G-15 注入通过 | 迁移日志、G-01/G-02/G-08/G-09/G-14/G-15 注入记录、崩溃注入记录、独立目录恢复后的行数与哈希比对、G-15 损坏备份拒绝记录、认证失败响应、启动拒绝日志 | 修到全过；不允许用「手工补一条」过门 | 停服务、保留线上账本；有旧构建则回退，无旧构建则停在 S1 修复；备份只恢复到独立目录校验，不覆盖线上账本；按事件日志重放到故障点，读回同一条事件 |
 | G2 | 单节点从 queued 到终态只有一条路径；重复上报只落一次；租约过期后的迟到上报被拒；取消后不再产生新 attempt；终态必带证据引用；node_run 不出现裸 blocked；S2 加载 parallel 节点被拒；G-03/G-04/G-07 注入通过 | 单节点从 queued 到终态的用例输出、重复上报回执、迟到上报拒绝码、取消前后事件序列、证据引用清单、状态枚举断言、parallel 加载期拒绝码/日志、G-03/G-04/G-07 注入记录 | 冻结 S2，不接真实工具；只修单节点 | 停执行桥、把在途 agent 节点置 paused_bridge_missing（run 的 display_status 由 paused_reasons=[bridge_missing] 派生为 blocked）、重启后按账本恢复 |
 | G3 | M-01…M-61 全过；非法迁移全部被拒；并发推进只有一个赢家；并行扇出与汇聚计数一致；子流程环与深度被拒；补偿不重复执行；取消向子 run 传播；G-01/G-02/G-04/G-06/G-12/G-16 注入通过 | 61 条用例输出、非法迁移拒绝码表、并发 CAS 记录、扇出计数、环检测响应、补偿幂等回执、G-16 取消传播记录、G-01/G-02/G-04/G-06/G-12/G-16 注入记录 | 冻结 S3；未发布草稿保持；已固定 run 保持当前版本，不改进状态机 | 停新 run、等在途 run 收口、仅限双向兼容窗口内回退引擎构建、账本不回滚；窗口外只前滚修复 |
 | G4 | Q-37…Q-42 全过；发布事务与回执同笔；并发发布只有一个版本生效；在途 run 固定旧版本；非法图与空名称被拒；回滚发布不影响已固定 run；G-10 注入通过 | 命令回执、发布事务日志、并发发布结果、版本固定查询、拒绝码、回滚前后 run 版本对照、G-10 注入记录 | 撤下新版本，保留历史版本；在途 run 不动 | 取消发布、把草稿置回 open、重启后确认固定版本仍可读 |
 | G5 | Q-01…Q-36 与 Q-43…Q-63 全过（含 43b/43c/44b/44c/47b 等子用例，逐条列在门记录）；面板在 1600×1000 与 1366×900 无横向溢出；正文 ≥13px、辅助文字 ≥12px、左侧菜单与顶部导航 ≥12.5px（6.3 下限）；浅色主题对比度达到 6.3 判据（正文 4.5:1、大字/UI 3:1）；记忆批次部分写入能对账；S5 启动 wf_release_v1 被拒；G-06/G-11/G-12 注入通过 | 用例输出、两个视口的溢出检测、字号与对比度清单、批次对账记录、越阶段启动拒绝回执、G-06/G-11/G-12 注入记录 | 面板回退到只读排障视图；记忆写入关闭，只留提议 | 关面板路由与记忆路由，引擎与账本继续运行 |
-| G6 | G-01…G-16 全过；控制面 p95 达到 6.3 判据；事件滞后 p95>2s 或最大>10s 持续十分钟即触发告警；24 小时浸泡无泄漏与无孤儿 run；从上一版升级成功；双向兼容窗口内负载回滚成功；值班手册演练通过；独立 artifact 与 wf_release_v1 artifact 的 candidate/evidence/conclusion 一致 | 注入记录、性能报告、浸泡监控、升级与回滚日志、演练签到与时间线、两份 artifact 及一致性比对 | 退回上一个过门构建；R1 暂停进圈；R2 尚未开始，不适用「缩回 R1」 | 按运行手册回退到上一个过门构建；账本只前进不回退；窗口外只前滚修复 |
+| G6 | G-01…G-16 全过；控制面 p95 达到 6.3 判据；事件滞后超阈（p95>2s 或最大>10s）持续十分钟内告警必须触发，且放行全程 p95≤2s、最大≤10s；24 小时浸泡无泄漏与无孤儿 run；从上一版升级成功；双向兼容窗口内负载回滚成功；值班手册演练通过；独立 artifact 与 wf_release_v1 artifact 的 candidate/evidence/conclusion 一致 | 注入记录、性能报告、浸泡监控、升级与回滚日志、演练签到与时间线、两份 artifact 及一致性比对 | 退回上一个过门构建；R1 暂停进圈；R2 尚未开始，不适用「缩回 R1」 | 按运行手册回退到上一个过门构建；账本只前进不回退；窗口外只前滚修复 |
 
 **S6 不是一道门：** G6 是发布候选门（构建硬化门），R1 与 R2 是试用圈；S6 完成 = G6 + R1 + R2 出圈，R0 在 G6 前完成、不计入。G6 的必过项不看 R2，顺序写死 R0 → G6 → R1 → R2。
 
@@ -2145,7 +2169,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 - **对比度**：WCAG 2.2 AA，正文 4.5:1，大字（≥24px 或 ≥18.66px 粗体）与 UI 控件 3:1；用 Playwright + axe-core 扫描，争议项人工复核。
 - **控制面 p95**：沿用 §4.8 的口径——`list_tasks` 1 万任务 p95 < 100ms、`get_run` 1000 节点 p95 < 150ms、`list_nodes` / `list_events` 单页 200 条 p95 < 80ms / 50ms；事件滞后 p95 ≤ 2s、最大 ≤ 10s；预热 3 次取第 4 次。
 - **隔离区**：events 表中 `type='tool.result.quarantined'` 的只追加记录，payload 带 `report_id`、`received_at`、`payload_hash`、`reason`、`status`；保留 30 天，不回写业务状态。
-- **账本时间**：统一取事件提交时由服务写入的 `events.occurred_at`（EventView 已定义）；截止判断不用进程墙钟，按 `(boot_id, monotonic_ns)` 与事件 seq 派生；系统时钟跳变只影响时间显示，不影响超时判定。
+- **账本时间**：统一取事件提交时由服务写入的 `events.occurred_at`（EventView 已定义）；截止判断按 §2 的截止钟派生——同一 boot 只读 `deadline_monotonic_ns - now_monotonic_ns`，跨 boot 读 `boots` 表按最后事件的 monotonic 求剩余、再用 `occurred_at` 扣停机时长。系统时钟跳变不改变同一 boot 的超时点；跨 boot 检测到漂移或停机时长为负时置 `timer_uncertain`，转 blocked 等核对，不自动判超时。
 - **命令队列**：最大深度 1000；满时返回 `QUEUE_FULL`（503）；指数退避 50ms→2s，最多 5 次；已提交写不丢。
 - **P1**：账本损坏或数据丢失、安全边界突破、跨工作区不可用、门 artifact 失效；由当班人与阶段负责人共同判定，写进事故单。
 - **门记录冻结阈值**：以本节数值为准；要改先改文档再改门记录，不能口头冻结。
@@ -2176,18 +2200,18 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 | 层级 | 终态 | 可接受的证据 |
 | --- | --- | --- |
-| run | succeeded | 全部子 node_run 终态 + run 收口事件 + 每个不可逆子节点 `side_effect_verified_none=true` 且带 stop_evidence；无未验证清单 |
+| run | succeeded | 全部子 node_run 终态 + run 收口事件 + 每个不可逆子节点的分叉证据：done 给「副作用已发生」的强证据（`evidence_state=strong` 的 `verified_effect` + 产物 artifact 哈希）；superseded 给「旧行未产生不可逆副作用」的证据（未观测到 tool.start，或对账确认没写入），副作用由 replacement 行承担；不得存在 abandoned_unverified / indeterminate_side_effect 行 |
 | run | succeeded_with_unverified | `run.succeeded_with_unverified` 事件 + 未验证副作用清单（node_run_id / action / stopped_at）+ 每笔缺 `side_effect_verified_none` 的说明；不得签 pass |
 | run | failed | `run.failed` 事件 + 失败子节点证据 + run 级结果判定记录 |
 | run | failed_with_unverified | `run.failed_with_unverified` 事件 + 失败子节点证据 + 未验证副作用清单；不得折成 failed |
 | run | orphaned | orphan 扫描事件 + 最后心跳 + executor 身份 + 子节点证据引用 |
-| node_run | done | tool.result，或产物哈希 + 完成回执 |
+| node_run | done | tool.result，或产物哈希 + 完成回执；不可逆节点另带副作用已发生的强证据与产物 artifact 哈希 |
 | node_run | failed | 失败输出、错误码或 report |
 | node_run | timeout | deadline 事件 + 最后心跳 |
 | node_run | abandoned_unverified | abandon decision + 签字 + stop evidence |
 | node_run | failed_with_unverified | `compensation.failed` + verify 失败，或 no-executable-compensation 证据 |
 | node_run | orphaned | orphan 扫描事件 + 最后心跳 + executor 身份 |
-| node_run | superseded | supersede 迁移事件 + 新 attempt / node_run id |
+| node_run | superseded | supersede 迁移事件 + 新 attempt / node_run id + 旧行未产生不可逆副作用的证据（未观测到 tool.start，或对账确认没写入） |
 
 ### 6.5 十六种故障注入
 
@@ -2195,20 +2219,20 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 | 编号 | 注入什么 | 期望看到什么 | 落在哪道门 | 回滚动作 |
 | --- | --- | --- | --- | --- |
-| G-01 | 事务 BEGIN 之后、COMMIT 之前杀进程 | 账本没有半条记录；重启后从上一个已提交点继续；不出现「状态变了但事件没写」 | G1、G3 | 有旧构建则回退到上一个过门构建；无旧构建则停在 S1 修复，保留线上账本，按事件日志重放并读回同一条事件 |
+| G-01 | 事务 BEGIN 之后、COMMIT 之前杀进程 | 账本没有半条记录；重启后从上一个已提交点继续；不出现「状态变了但事件没写」 | G1、G3 | 有旧构建则回退到上一个过门构建；无旧构建则停在当前阶段（G1→S1、G3→S3）修复，保留线上账本，按事件日志重放并读回同一条事件 |
 | G-02 | COMMIT 成功、outbox 尚未投递时杀进程 | 恢复后事件恰好投递一次；订阅者按 event_id 去重；不丢事件、不重复副作用 | G1、G3 | 重放 outbox 并按 event_id 去重；不重复副作用；必要时回退构建 |
 | G-03 | 同一个 report_id 连发两次 | 第一次落库并回执；第二次返回同一结果；node_run 只推进一次 | G2 | 用原 report_id 返回同一回执；不新建 attempt |
 | G-04 | 租约到期，但原执行器还活着并晚到上报 | G2 只验迟到上报被拒、不产生第二个有效 attempt；G3 再验已有副作用时走补偿而不是重跑 | G2（迟到拒绝）、G3（补偿） | 拒收迟到上报；已有副作用走补偿；不重跑前向 |
 | G-05 | 工具执行中取消 | 取消赢；晚到的 tool.result 只进隔离区（6.3 的 quarantined 事件），不回写状态；不再新建 attempt | G2、G6 | 晚到 tool.result 只进隔离区；取消流程照常收口 |
-| G-06 | tool.result 丢失，执行器只收到半截回执 | 节点停在 verifying；记忆批次停在 applying（后者只在 G5 验）；对账确认前不重试；确认未写入后同批次重试；不出现双写 | G3（节点）、G5（记忆批次）、G6 | 节点留 verifying，对账确认后同批次重试；记忆批次进 indeterminate 对账 |
-| G-07 | 系统时钟向前或向后跳十分钟 | 截止时间以 events.occurred_at 记录界限、按 `(boot_id, monotonic_ns)` 与事件 seq 派生；不因时钟跳变提前判超时或延后判超时 | G2、G6 | 用同一 boot_id 的单调时钟重算截止；修正误判；必要时回退构建 |
+| G-06 | tool.result 丢失，执行器只收到半截回执 | G3 的普通节点停在 verifying；若该节点是 mem_apply，按 §5.8 落 indeterminate_side_effect（不是 verifying）；G5 的记忆批次先保持 applying、outcome 为空，对账确认部分写入后才转 indeterminate；确认全不在后同批次重试；不出现双写 | G3（节点）、G5（记忆批次）、G6 | 普通节点留 verifying，mem_apply 留 indeterminate_side_effect；批次先留 applying，对账后重试或转 indeterminate；不盲重试 |
+| G-07 | 系统时钟向前或向后跳十分钟，并覆盖跳钟后重启 | 同一 boot 的截止点按 `deadline_monotonic_ns - now_monotonic_ns` 判定，墙钟跳变不改变超时点；带旧 `deadline_boot_id` 重启时按 §2 截止钟用最后事件 monotonic 求剩余、用事件 `occurred_at` 扣停机时长后重挂；检测到漂移或停机时长为负时转 blocked 等核对，不提前也不延后判超时 | G2、G6 | 同 boot 重算截止、不动已挂的钟；跨 boot 重挂后核对剩余；`timer_uncertain` 的节点转 blocked 人工核对；修正误判；必要时回退构建 |
 | G-08 | 写锁被长事务占住，命令队列达到 1000 深度 | 队列有上限（1000）、有 QUEUE_FULL 拒绝码、有退避；已提交写不丢；读路径不被拖死 | G1、G6 | 队列满返回 QUEUE_FULL 并退避；已提交写不丢 |
 | G-09 | 事件订阅者离线十分钟后重连 | 从 cursor 续读；重放不产生重复业务效果；ack 之后不重复派发 | G1、G6 | 从 cursor 续读并按 event_id 去重；不重复派发 |
 | G-10 | 一条 run 在途时发布新 workflow 版本 | 在途 run 仍固定旧版本；新 run 用新版本；旧版本不被删除 | G4 | 在途 run 固定旧版本；新 run 用新版本；旧版本不删 |
-| G-11 | 记忆批次写入到一半进程被杀 | 批次进 indeterminate；对账后只补缺的条目；不整批盲重试、不重复写已落条目 | G5、G6 | 批次进 indeterminate，对账后补缺；不整批盲重试 |
+| G-11 | 记忆批次写入到一半进程被杀，或 tool.result 丢失后对账发现部分写入 | tool.result 丢失时批次先保持 applying、outcome 为空；对账确认部分写入后才 applying→indeterminate，已写入条目 applied、未写入条目 approved，不整批盲重试、不重复写；进程被杀后重跑同一批，原子写保证全在或全不在 | G5、G6 | 批次先留 applying；对账确认部分写入后才转 indeterminate；不整批盲重试 |
 | G-12 | 审批按钮双击，或同一决定重复提交 | 只产生一次批准；第二次幂等返回；不出现两个批准人、两个时间 | G3、G5（G5 只做回归） | 同一 decision 幂等返回；不重复批准 |
 | G-13 | 升级或回滚时仍有在途 run | 先停新 run、再等在途收口；双向兼容窗口内旧构建能忽略未知字段并读当前账本；窗口外只前滚修复；不出现孤儿 run 或无法解释的状态 | G6 | 停新 run、等在途收口；窗口内回退上一过门构建，窗口外前滚 |
-| G-14 | 迁移到一半杀进程，重启后重跑同一批迁移 | 迁移可重入；不重复建表/加列；未完成迁移不进入下一阶段；账本没有半条 schema 版本记录 | G1、G6 | 有旧构建则回退到上一个过门构建；无旧构建则停在 S1 修复，保留线上账本，按事件日志重放并读回同一条 schema 版本事件 |
+| G-14 | 迁移到一半杀进程，重启后重跑同一批迁移 | 迁移可重入；不重复建表/加列；未完成迁移不进入下一阶段；账本没有半条 schema 版本记录 | G1、G6 | 有旧构建则回退到上一个过门构建；无旧构建则停在当前阶段（G1→S1、G6→S6）修复，保留线上账本，按事件日志重放并读回同一条 schema 版本事件 |
 | G-15 | 备份文件被截断或篡改，恢复到独立目录 | 校验和/行数/哈希任一不符即拒绝；不覆盖线上账本；报出损坏点 | G1、G6 | 拒绝损坏备份，不覆盖线上；按事件日志重放 |
 | G-16 | 父 run 取消，子 run 仍在跑 | 取消向子 run 传播；子 run 不再产生新节点 attempt；父 run 终态后不产生新子 run；传播记录落账 | G3、G6 | 取消向子 run 传播；子 run 不再新 attempt；父终态后不新子 run |
 
@@ -2278,10 +2302,12 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 3. **parallel 节点**：按检查组扇出检查命令 `wf_gate_check_v1`（由 tool 节点调用；输入输出与 result_code 见 6.10）。默认六组：迁移与恢复、单节点闭环、状态机与并发、版本与发布、面板与记忆、性能与安全。
 4. **每个子流程内部**：tool 节点在沙箱里跑命令与注入；agent 节点只读输出，写一份有界摘要；最后产出 evidence 引用。子流程失败就整体失败，不允许「摘要写得好看就算过」。
 5. **wait 节点**：等所有子流程收口；超时进 paused（display_status=blocked），并在门卡上写清「哪一组没回来、等到什么时候」。
-6. **policy 节点**：确定性检查必过项是否齐、阈值是否达、证据哈希是否存在。它不调用模型，模型说「应该没问题」在这里没有权重。
+6. **policy 节点**：确定性检查必过项是否齐、阈值是否达、证据哈希是否存在；必过项固定包含「本 run 内 policy 之前的全部节点已终态、无 `indeterminate_side_effect`、无未验证副作用」（按 §8 的 node_run 终态集合读，不读 agent 摘要），不满足即 `decision=fail`。**run 终态不在 policy 内判**：policy 还在 run 里跑，读本 run 的 `terminal` 是自指；终态由第 8 步的收口器在 run 结束后补判。它不调用模型，模型说「应该没问题」在这里没有权重。
 7. **approval 节点**：人看到的是「还差哪一项、影响是什么、退路是什么」，不是一屏日志。批准绑定候选哈希与证据集合；证据变了，批准失效。
-8. **agent 节点（收口）**：按 6.10 的字段写 GateArtifact（完整字段与 canonical 哈希见 6.10）；门 run 的业务结论只有「通过」和「不通过」两种；状态名沿用第二段 §8 的 run 终态集合，门 run 的终态沿用 §8 五种，只有 succeeded 能映射为通过；succeeded_with_unverified / failed_with_unverified / orphaned 都不得签 pass，等待时 display_status 可以是 blocked，但 blocked 不作为通过。
-9. **branch 节点**：读 policy 输出的 `decision=pass/fail`，不读 run 终态；pass 才允许部署脚本消费 artifact，fail 停在当前阶段，不自动重试整条发布。门 run 结束后由部署脚本检查 `artifact.conclusion=pass`。
+8. **收口器（run 终态后，不是 run 内节点）**：门 run 进入终态后，收口器按 6.10 的字段写 GateArtifact（自动门由服务写；人工门由人写、服务按同一契约校验）；`gate_run_id` 指向刚结束的门 run，`run_terminal` 直抄 `runs.status`（§8 五种之一），`conclusion=pass` 当且仅当 policy 的 `must_pass_items[]` 全 pass、`failed_items[]` 为空、`run_terminal=succeeded`。run 内任何节点都不写 `run_terminal`，也不得读本 run 终态；收口器只写记录，不改 run 状态。`succeeded_with_unverified` / `failed_with_unverified` / `orphaned` 一律签 fail；等待时 display_status 可以是 blocked，但不作为通过。门 run 的业务结论只有「通过」和「不通过」两种：`run_terminal=succeeded` 且 policy 必过项全过才映射为通过，succeeded 本身不等于通过。
+9. **branch 节点与部署脚本（run 内外分开）**：branch 节点只读 policy 输出的 `decision=pass/fail` 做 run 内分流，不读 run 终态，也不直接消费 artifact；fail 停在当前阶段，不自动重试整条发布。是否允许部署由 run 外的部署脚本在收口器写完 artifact 后判：同时校验 `conclusion=pass`、`run_terminal=succeeded`、`gate_run_id` 指向的门 run 在账本里仍为 succeeded，三者缺一即拒绝部署。
+
+**终态消费口径：** run 内节点（含 policy、branch、收口草稿）一律不读本 run 终态；`run_terminal` 的唯一写入者是 run 外的服务收口器，唯一消费者是部署脚本与门记录查询。这样既不让 `succeeded_with_unverified` 签 pass，也不产生自指。
 
 **大脑的权力边界：**
 
@@ -2375,22 +2401,24 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 7. 回滚演练：动作、耗时、回滚后验证结果。
 8. 结论与签字：通过 / 不通过；批准人；时间；`producer`（human / s5_build / wf_release_v1）；下一道门的入口条件。
 
-**门的产物是一个 GateArtifact，不是一句口头结论。** 字段固定为：`gate`、`schema_version`、`candidate_hash`、`change_scope_hash`、`evidence_index_hash`、`invariants_hash`、`conclusion(pass|fail)`、`failed_items[]`、`exceptions[]`、`rollback_target`、`approver`、`approved_at`、`producer(human|s5_build|wf_release_v1)`。artifact 内部不放 `record_hash` / `artifact_hash`，避免自指；`S*.md` 是门记录全文，文末保存 `artifact_hash=SHA256(canonical_json(artifact))`。部署脚本只认 `conclusion=pass` 且 `candidate_hash`、`evidence_index_hash` 与部署候选一致的那一份。G6 要同时有独立 artifact 与 `wf_release_v1` artifact，两者一致才算数。记录合并后不再改；要补说明就追加一节「补记」，不改原结论。
+**门的产物是一个 GateArtifact，不是一句口头结论。** 字段固定为：`gate`、`schema_version`、`gate_run_id`、`candidate_hash`、`change_scope_hash`、`evidence_index_hash`、`invariants_hash`、`must_pass_items[]`、`failed_items[]`、`conclusion(pass|fail)`、`run_terminal`、`exceptions[]`、`rollback_target`、`approver`、`approved_at`、`producer(human|s5_build|wf_release_v1)`。`gate_run_id` 指向刚结束的门 run；`run_terminal` 由服务收口器从 `runs.status` 直抄，只取 §8 的五种 run 终态；run 内节点不得填写或读取本 run 终态。`must_pass_items[]` 每项固定为 `{id, result(pass|fail), evidence_ids[]}`，必过项逐条列，不许合并；`failed_items[]` 只列 result=fail 的 id 与原因。`conclusion=pass` 的充分必要条件是：`must_pass_items[]` 全部 pass、`failed_items[]` 为空、`run_terminal=succeeded`，三者缺一即 fail。GateArtifact 只在门 run 进入终态后由收口器写（自动门服务写，人工门人写、服务校验）；run 内 agent 只能准备 `must_pass_items[]` 与 `evidence_ids[]` 草稿，不得预写 `conclusion` 或 `run_terminal`。artifact 内部不放 `record_hash` / `artifact_hash`，避免自指；`S*.md` 是门记录全文，`artifact_hash=SHA256(canonical_json(artifact))` 固定在正文结论之后的 `artifact_hash=` 锚点，位置在所有「补记」之前；补记只追加在锚点之后，锚点本身不再移动，重算也不把补记算进哈希。部署脚本只认 `conclusion=pass` 且 `run_terminal=succeeded`、`candidate_hash` / `evidence_index_hash` 与部署候选一致、`gate_run_id` 指向的门 run 在账本里仍为 succeeded 的那一份，任一不符即拒绝。G6 要同时有独立 artifact 与 `wf_release_v1` artifact，两者一致才算数。记录合并后不再改；要补说明就追加一节「补记」，不改原结论。
 
-**canonical 哈希的定义（两份独立 artifact 必须可复现）：** `canonical_json` 用 UTF-8、对象键按 Unicode 码点升序、无多余空白、数组保持语义顺序。`candidate_hash=SHA256(canonical_json({git_sha, schema_version, phase_flags}))`；`change_scope_hash=SHA256(canonical_json({capability_ids[], touched_paths[]}))`；`evidence_index_hash=SHA256(canonical_json(evidence_index 按 evidence_id 升序，每项只取 {evidence_id, sha256, strength, source}))`；`invariants_hash=SHA256(canonical_json(I1…I10 逐条 {id, method, result}))`。证据索引先排序再算哈希，收集顺序不同不会造成假失败。
+**canonical 哈希的定义（两份独立 artifact 必须可复现）：** `canonical_json` 用 UTF-8、对象键按 Unicode 码点升序、无多余空白。集合语义的数组一律先按 Unicode 码点升序排序、再去重，然后才进哈希；只有明确带 `seq` 的序列才按 `seq` 排。`candidate_hash=SHA256(canonical_json({git_sha, schema_version, phase_flags}))`；`change_scope_hash=SHA256(canonical_json({capability_ids[] 升序去重, touched_paths[] 升序去重}))`；`evidence_index_hash=SHA256(canonical_json(evidence_index 按 evidence_id 升序，每项只取 {evidence_id, sha256, strength, source}))`；`invariants_hash=SHA256(canonical_json(I1…I10 逐条 {id, method, result}))`。证据索引与两份集合先排序再算哈希，收集顺序不同不会造成假失败。
 
 **八段与字段映射：**
 
 | 门记录八段 | GateArtifact 字段 |
 | --- | --- |
-| 1 候选构建 | gate, schema_version, candidate_hash, producer |
+| 1 候选构建 | gate, schema_version, gate_run_id, candidate_hash |
 | 2 变更范围 | change_scope_hash |
-| 3 必过项 | failed_items[], conclusion |
+| 3 必过项 | must_pass_items[], failed_items[] |
 | 4 原始证据 | evidence_index_hash |
 | 5 不变量核对 | invariants_hash |
 | 6 例外 | exceptions[] |
 | 7 回滚演练 | rollback_target |
-| 8 结论与签字 | conclusion, approver, approved_at, producer |
+| 8 结论与签字 | conclusion, run_terminal, approver, approved_at, producer |
+
+**字段只归一段**：`producer` 与 `conclusion` 只出现在第 8 段，第 1 段只放候选构建字段，不再重复；`run_terminal` 是第 8 段结论的一部分，由收口器从 `runs.status` 直抄（自动门服务写，人工门人写、服务校验）；policy 不读终态。
 
 **`wf_gate_check_v1` 的契约：** 它是 tool/命令，不是子流程；输入 `gate`、`candidate_hash`、`evidence_index`；输出检查组结果、evidence 引用、`evidence_index_hash` 与 `result_code=pass|fail|invalid_input|infra_error`。CLI 包装的退出码 0=通过、1=不通过、2=输入非法、3=基础设施错误只用于进程语义，工作流分支读 `result_code`。六组检查各写一条记录。它不写账本、不改门结论，只产出证据。
 
