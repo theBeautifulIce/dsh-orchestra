@@ -2001,7 +2001,7 @@ body.v5 .chip{
 }
 body.v5 .chip:hover{color:#0f172a;background:#ffffff!important}
 body.v5 .chip.on{border-color:#e2e8f0;background:#ffffff!important;color:#0f172a;font-weight:550}
-body.v5 .empty{padding:26px 0;border-top:1px dashed #bfdbfe;color:#64748b;font-size:11.5px;text-align:left}
+body.v5 .empty{padding:26px 0;border-top:1px dashed #bfdbfe;color:#64748b;font-size:12.5px;text-align:left}
 body.v5 .anno{display:none}
 body.v5 .callout{
   padding:9px 11px;border:1px solid #e2e8f0;border-radius:6px;
@@ -3395,6 +3395,54 @@ body.v5 .modal .empty:not(#v11),
 body.v5 .modal .wf-api-hint:not(#v11),
 body.v5 .modal pre:not(#v11){font-size:12.5px!important;line-height:1.6!important}
 
+/* v12 任务编排：把总控、支线交付物与共享任务板讲清楚；抽屉字号兜底不低于 12.5px */
+body.v5 .drawer .tag,body.v5 .drawer .type,body.v5 .drawer .muted,body.v5 .drawer .status{font-size:12.5px!important;line-height:1.5!important}
+body.v5 .drawer [style*="font-size:7"],body.v5 .drawer [style*="font-size:8"],body.v5 .drawer [style*="font-size:9"],body.v5 .drawer [style*="font-size:10"],body.v5 .drawer [style*="font-size:11"]{font-size:12.5px!important;line-height:1.6!important}
+body.v5 .drawer-body .canvas-hint{font-size:13px!important;line-height:1.65!important}
+body.v5 .drawer-body .run-history-row span{font-size:12.5px!important;line-height:1.5!important}
+body.v5 .orch{border:1px solid #e3e9f2;border-radius:14px;background:linear-gradient(180deg,#fbfdff,#f7fafd);padding:16px}
+body.v5 .orch-brain{background:#fff;border:1px solid #e5ebf4;border-radius:12px;padding:15px 16px;box-shadow:0 1px 2px rgba(16,24,40,.03)}
+body.v5 .orch-brain-top{display:flex;align-items:center;gap:11px}
+body.v5 .orch-avatar{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#f4eadb,#e9dac5);color:#6a5744;font-weight:650;font-size:16px;flex:none}
+body.v5 .orch-brain-copy{min-width:0;flex:1}
+body.v5 .orch-name{font-size:15px;font-weight:650;color:#172033;line-height:1.35}
+body.v5 .orch-sub{font-size:12.5px;color:#71809a;margin-top:2px;line-height:1.5}
+body.v5 .orch-pill{flex:none;font-size:12.5px;color:#4c6588;background:#f3f7fc;border:1px solid #e0e8f2;border-radius:999px;padding:4px 10px;line-height:1.4}
+body.v5 .orch-goal,body.v5 .orch-accept{display:grid;grid-template-columns:104px minmax(0,1fr);gap:10px;align-items:start;margin-top:12px;padding-top:12px;border-top:1px solid #eef2f7;font-size:13.5px;line-height:1.65;color:#33415c}
+body.v5 .orch-goal span,body.v5 .orch-accept span{font-size:12.5px;color:#7b889e;line-height:1.9}
+body.v5 .orch-goal b,body.v5 .orch-accept b{font-weight:550;color:#26344c}
+body.v5 .orch-accept{margin-top:8px;padding-top:8px;border-top-style:dashed}
+body.v5 .orch-split{display:flex;align-items:baseline;gap:10px;margin-top:14px;font-size:13px;color:#71809a;line-height:1.6}
+body.v5 .orch-k{flex:none;color:#22314d;font-weight:600}
+body.v5 .orch-team{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}
+body.v5 .orch-card{display:block;width:100%;text-align:left;background:#fff;border:1px solid #e3e9f2;border-radius:12px;padding:13px 14px;font-family:var(--font-ui);cursor:pointer;transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}
+body.v5 .orch-card:hover{border-color:#c9d6e8;box-shadow:0 4px 14px rgba(30,50,90,.07);transform:translateY(-1px)}
+body.v5 .orch-card.static{cursor:default}
+body.v5 .orch-card.static:hover{border-color:#e3e9f2;box-shadow:none;transform:none}
+body.v5 .orch-card-head{display:flex;align-items:center;gap:7px;font-size:13px;color:#1e2b42}
+body.v5 .orch-card-head b{font-weight:650}
+body.v5 .orch-dot{width:7px;height:7px;border-radius:50%;flex:none;background:#aab5c4}
+body.v5 .orch-dot.done{background:#3f9b74}
+body.v5 .orch-dot.running{background:#4b73c9}
+body.v5 .orch-dot.waiting{background:#c49a45}
+body.v5 .orch-dot.blocked,body.v5 .orch-dot.failed{background:#bf5a4a}
+body.v5 .orch-state{margin-left:auto;font-size:12.5px;color:#71809a;background:#f5f8fc;border-radius:999px;padding:2px 8px;line-height:1.4}
+body.v5 .orch-state.done{color:#2f7d5a;background:#eef8f2}
+body.v5 .orch-state.running{color:#315d9b;background:#eef4fd}
+body.v5 .orch-state.waiting{color:#8a6a2f;background:#fbf6ea}
+body.v5 .orch-state.blocked,body.v5 .orch-state.failed{color:#9b4639;background:#fbeeec}
+body.v5 .orch-task{font-size:13px;color:#5b6a82;line-height:1.55;margin-top:7px;min-height:20px}
+body.v5 .orch-bar{height:4px;border-radius:99px;background:#edf1f6;overflow:hidden;margin-top:10px}
+body.v5 .orch-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#a9bed8,#7f9bc0)}
+body.v5 .orch-foot{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-top:8px;font-size:12.5px;line-height:1.55;color:#7b889e}
+body.v5 .orch-foot span:first-child{min-width:0}
+body.v5 .orch-note{display:flex;align-items:flex-start;gap:8px;margin-top:12px;background:#f8fafc;border:1px solid #e6ecf4;border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.65;color:#5b6a82}
+body.v5 .orch-note .ic{width:14px;height:14px;flex:none;margin-top:3px;color:#7b8ca6}
+body.v5 .orch-board-row{display:grid;grid-template-columns:minmax(0,1fr) 130px 80px;align-items:center;gap:10px;padding:10px 0;border-top:1px solid #eef2f7;font-size:13px;color:#33415c}
+body.v5 .orch-board-row:first-child{border-top:0}
+body.v5 .orch-board-title{min-width:0;font-weight:550}
+body.v5 .orch-board-agent{font-size:12.5px;color:#7b889e}
+@media(max-width:1200px){body.v5 .orch-team{grid-template-columns:1fr}body.v5 .orch-goal,body.v5 .orch-accept{grid-template-columns:1fr;gap:3px}body.v5 .orch-board-row{grid-template-columns:minmax(0,1fr) 90px 72px}}
 </style>
 </head>
 <body class="v3 v5">
@@ -3674,7 +3722,7 @@ const RUNS = {
   run_1a66: { id: 'run_1a66', taskId: 'tsk_notes', status: 'failed', time: '11-07 23:00', duration: '9s', trigger: '定时唤醒', summary: '摘要写入冲突，已回滚', seq: 17555, stepStates: ['done','done','fail','wait','wait'] },
   run_5b18: { id: 'run_5b18', taskId: 'tsk_weekly', status: 'failed', time: '周一 10:00', duration: '1m12s', trigger: '定时唤醒', summary: '补证脚本超时，未产生写入；调度已自动暂停', seq: 18180, stepStates: ['done','done','fail','wait','wait','wait'] },
   run_4a07: { id: 'run_4a07', taskId: 'tsk_weekly', status: 'succeeded', time: '上周一 10:00', duration: '58s', trigger: '定时唤醒', summary: '补证 2 笔，签字接手 1 笔', seq: 17920, stepStates: ['done','done','done','done','done','done'] },
-  run_7f3a: { id: 'run_7f3a', taskId: 'tsk_design', status: 'running', time: '今天 20:42', duration: '2h14m', trigger: '持续目标', summary: '重写完唯一键段落，等待交叉复核', seq: 18418, stepStates: ['done','done','done','run','wait','wait'] },
+  run_7f3a: { id: 'run_7f3a', taskId: 'tsk_design', status: 'running', time: '今天 20:42', duration: '2h14m', trigger: '持续目标', summary: '正在重写唯一键段落，等交叉复核', seq: 18418, stepStates: ['done','done','run','wait','wait','wait'] },
   run_2d55: { id: 'run_2d55', taskId: 'tsk_design', status: 'blocked', time: '昨天 18:20', duration: '6m', trigger: '人工恢复', summary: '收尾检查发现 2 条引用对不上，停在需要你决定的一步', seq: 18010, stepStates: ['done','done','done','done','blocked','wait'] },
   run_1c44: { id: 'run_1c44', taskId: 'tsk_design', status: 'succeeded', time: '11-09 16:10', duration: '3h12m', trigger: '持续目标', summary: '第三段 v23 收尾，审计通过', seq: 17988, stepStates: ['done','done','done','done','done','done'] },
   run_6c02: { id: 'run_6c02', taskId: 'tsk_review', status: 'blocked', time: '今天 20:31', duration: '8m', trigger: '事件触发', summary: '审计结果分成 2 个致命问题、6 个重大问题、4 个措辞问题，等你复核', seq: 18416, stepStates: ['done','done','run','wait','wait','wait'] },
@@ -3693,12 +3741,12 @@ const TASKS = [
     acceptance: '归并结果可回退；冲突项不自动删除；日报包含每条变更的来源。',
     tags: ['记忆', '自动', '只读扫描'],
     chain: [
-      { label: '调度唤醒', state: 'done', dur: '0.1s' },
-      { label: '读取候选', state: 'done', dur: '6s' },
-      { label: '归并判断', state: 'done', dur: '18s' },
-      { label: '冲突检查', state: 'done', dur: '3s' },
-      { label: '归档写回', state: 'done', dur: '12s' },
-      { label: '生成日报', state: 'done', dur: '3s' }
+      { label: '调度唤醒', state: 'done', dur: '0.1s', out: '09:00 准点触发' },
+      { label: '读取候选', state: 'done', dur: '6s', out: '读到 4 条候选' },
+      { label: '归并判断', state: 'done', dur: '18s', out: '合并 2 条，保留 2 条' },
+      { label: '冲突检查', state: 'done', dur: '3s', out: '0 条冲突' },
+      { label: '归档写回', state: 'done', dur: '12s', out: '写入 2 条' },
+      { label: '生成日报', state: 'done', dur: '3s', out: '日报已生成' }
     ]
   },
   {
@@ -3728,11 +3776,11 @@ const TASKS = [
     tags: ['审计', '事件', 'v24'],
     trigger: '审计完成通知',
     chain: [
-      { label: '接收审计结果', state: 'done', dur: '0.2s' },
-      { label: '分级分类', state: 'done', dur: '8m' },
-      { label: '证据复核', state: 'run', dur: '8m' },
-      { label: '人工复核', state: 'wait', dur: '—' },
-      { label: '需要你决定', state: 'wait', dur: '—' },
+      { label: '接收审计结果', state: 'done', dur: '0.2s', out: '收到 12 条' },
+      { label: '分级分类', state: 'done', dur: '8m', out: '2 致命 / 6 重大 / 4 措辞' },
+      { label: '证据复核', state: 'run', dur: '8m', out: '已核对 8 条，还剩 4 条' },
+      { label: '人工复核', state: 'wait', dur: '—', out: '等你确认分级' },
+      { label: '需要你决定', state: 'wait', dur: '—', out: '还没到' },
       { label: '归档回写', state: 'wait', dur: '—' }
     ]
   },
@@ -3745,11 +3793,11 @@ const TASKS = [
     acceptance: '没有任何没有系统确认的操作被自动关掉；暂停原因与恢复条件都有记录。',
     tags: ['没有系统确认', '自动', '已暂停'],
     chain: [
-      { label: '调度唤醒', state: 'done', dur: '0.1s' },
-      { label: '找出没有系统确认的操作', state: 'done', dur: '7s' },
-      { label: '补证脚本', state: 'fail', dur: '1m05s' },
-      { label: '证据核对', state: 'wait', dur: '—' },
-      { label: '签字接手', state: 'wait', dur: '—' }
+      { label: '调度唤醒', state: 'done', dur: '0.1s', out: '周一 10:00 准点触发' },
+      { label: '找出没有系统确认的操作', state: 'done', dur: '7s', out: '找到 6 笔' },
+      { label: '补证脚本', state: 'fail', dur: '1m05s', out: '补到 3 笔，3 笔没补到' },
+      { label: '证据核对', state: 'wait', dur: '—', out: '等补证结果' },
+      { label: '签字接手', state: 'wait', dur: '—', out: '等你接手' }
     ]
   },
   {
@@ -3829,7 +3877,7 @@ const taskRuns = task => {
 const AGENTS = {
   orchestrator: {
     id: 'orchestrator', name: '七七', role: 'Superagent · 总控', status: 'running', progress: 78,
-    task: '拆解「第四段收尾」并派发 4 个子目标', parent: null, started: '2h 14m',
+    task: '拆解「第三段设计改到第二轮通过」并派发 4 个子目标', parent: null, started: '2h 14m',
     mission: '把目标拆成可并行的子任务，给每个子代理划定边界，守住证据关，最后只由总控收尾。',
     scope: ['任务目标', '子代理边界', '证据核对', '最终收尾'],
     tools: ['agent.dispatch', 'agent.wait', 'evidence.gate', 'ledger.write'],
@@ -3883,14 +3931,15 @@ const AGENTS = {
     ]
   },
   verifier: {
-    id: 'verifier', name: '证据核验', role: '子代理 · 核对证据', status: 'done', progress: 100,
-    task: '对照 61 条 M 用例', parent: 'orchestrator', started: '20:28',
+    id: 'verifier', name: '证据核验', role: '子代理 · 核对证据', status: 'waiting', progress: 0,
+    task: '等交叉审计交回后核对证据', parent: 'orchestrator', started: '—',
     mission: '把每条结论对到证据上；没有证据的条目不允许进入绿态，只允许停在未验证。',
     scope: ['61 条验收用例', '证据索引', '回归清单'],
     tools: ['read', 'diff', 'evidence.check'],
-    outputs: ['58 通过 / 3 待复核', '证据缺口 2 条'],
+    outputs: ['等待审计结果'],
     log: [
-      ['20:44', '输出 58 通过 / 3 待复核 / 2 证据缺口'],
+      ['20:55', '等交叉审计交回后核对证据'],
+      ['20:44', '上一轮输出 58 通过 / 3 待复核 / 2 证据缺口'],
       ['20:39', '对照 61 条 M 用例，发现 2 条无证据'],
       ['20:28', '受领：核验修订后的证据链']
     ]
@@ -3919,7 +3968,7 @@ const SHARED_BOARD = [
   { id: 'sub_01', title: '查清新版唯一键段落的引用', agent: '证据侦察', status: 'done' },
   { id: 'sub_02', title: '重写唯一键段落', agent: '修订执行', status: 'running' },
   { id: 'sub_03', title: '独立复核 v25', agent: '交叉审计', status: 'waiting' },
-  { id: 'sub_04', title: '核对 61 条 M 用例', agent: '证据核验', status: 'done' },
+  { id: 'sub_04', title: '等审计交回后核对证据', agent: '证据核验', status: 'waiting' },
   { id: 'sub_05', title: '回写台账与 L5', agent: '归档收尾', status: 'queued' }
 ];
 
@@ -4140,9 +4189,20 @@ function resultOf(t) {
 }
 
 function nextOf(t) {
+  const chain = t.chain || [];
   if (t.status === 'blocked') return '你来选：继续、改方案，还是回退';
-  if (t.attention) return person(t.owner) === '你' ? '处理完这件事，后面的步骤才会继续' : '等 ' + person(t.owner) + ' 处理';
-  if (t.status === 'running') return '做完会自动进入下一步';
+  if (t.status === 'running') {
+    const cur = chain.find(n => n.state === 'run');
+    const idx = cur ? chain.indexOf(cur) : -1;
+    const after = idx >= 0 ? chain.slice(idx + 1).find(n => n.state === 'wait' || n.state === 'run' || n.state === 'blocked') : null;
+    let s = cur && after ? '「' + cur.label + '」交回后进「' + after.label + '」' : cur ? '「' + cur.label + '」交回后收尾' : '做完会自动进入下一步';
+    if (t.attention) s += '；另有 ' + t.attention + ' 件等你决定';
+    return s;
+  }
+  if (t.attention) {
+    if (t.status === 'paused') { const bad = chain.find(n => n.state === 'fail' || n.state === 'blocked'); return bad ? '「' + bad.label + '」没通过，等你决定是否接手' : '等你恢复'; }
+    return person(t.owner) === '你' ? '处理完这件事，后面的步骤才会继续' : '等 ' + person(t.owner) + ' 处理';
+  }
   if (t.status === 'scheduled') return '到点自动开始';
   if (t.status === 'done') return '无需动作';
   if (t.status === 'done_unverified') return '等系统确认，或人工核实';
@@ -4214,7 +4274,7 @@ function renderCommand() {
       '<button class="btn" data-act="open-notes">评审说明</button><button class="btn primary" data-act="new-task">新建任务</button>') +
     '<div class="overview-grid">' +
       '<section class="ops' + (paused ? ' paused' : '') + '">' +
-        '<div class="ops-head"><div><p class="ops-kicker">Superagent · 正在总控</p><h2 class="ops-title"><span class="dot"></span>七七 · ' + (paused ? '已暂停' : '在跑') + '</h2><p class="ops-goal">当前目标：把第四段收尾拆成四条能同时推进的支线，守住「0 致命 / 0 重大」的检查关。</p></div>' +
+        '<div class="ops-head"><div><p class="ops-kicker">Superagent · 正在总控</p><h2 class="ops-title"><span class="dot"></span>七七 · ' + (paused ? '已暂停' : '在跑') + '</h2><p class="ops-goal">当前目标：把第三段设计改到第二轮通过，拆成四条能同时推进的支线，守住「0 致命 / 0 重大」的检查关。</p></div>' +
         '<div class="ops-ctrl"><button data-act="toggle-orch-full">全屏</button><button data-act="toggle-orch-pause">' + (paused ? '继续' : '暂停') + '</button></div></div>' +
         '<div class="ops-body"><div class="ops-map"><svg class="ops-links" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M45 46 L38 36"/><path d="M45 54 L38 64"/><path d="M55 46 L62 36"/><path d="M55 54 L62 64"/></svg>' + lane('scout', 'auditor') +
           '<div class="brain"><div class="brain-ring"><div class="brain-name">七七</div><div class="brain-role">Superagent</div><div class="brain-state' + (paused ? ' paused' : '') + '">' + (paused ? '已暂停 · 78%' : '运行中 · 78%') + '</div></div></div>' +
@@ -4264,7 +4324,7 @@ function taskCard(t) {
     '<div class="tc-head"><span class="tc-type t-' + t.type + '">' + typeWord(t.type) + '</span><span class="tc-pri ' + (t.priority === 'P0' ? 'p0' : '') + '">' + esc(t.priority) + '</span><span class="tc-when">' + esc(whenOf(t)) + '</span></div>' +
     '<h3 class="tc-title">' + esc(tidy(t.title)) + '</h3>' +
     '<div class="tc-stage"><span class="dot" style="background:' + (t.status === 'blocked' ? '#a63f2b' : t.status === 'running' ? '#b8862f' : '#8b8579') + '"></span><span>' + esc(stageOf(t)) + '</span></div>' +
-    '<div class="tc-result"><b>' + (t.latestRun ? '上次' : '状态') + '</b> · ' + esc(resultOf(t)) + '</div>' +
+    '<div class="tc-result"><b>' + (t.status === 'running' ? '进展' : t.latestRun ? '上次' : '状态') + '</b> · ' + esc(resultOf(t)) + '</div>' +
     '<div class="tc-next"><b>下一步</b> · ' + esc(nextOf(t)) + '</div>' +
     (t.attention ? '<div class="tc-call">需要你：' + esc(t.attention) + '</div>' : '') +
     progress +
@@ -4917,15 +4977,59 @@ function taskOverview(t){
 
 function taskOrchestration(t){
   const wf = wfOfTask(t);
-  const agents = [AGENTS.orchestrator, AGENTS.scout, AGENTS.drafter, AGENTS.auditor, AGENTS.verifier].filter(Boolean);
-  return '<div class="section"><div class="section-h"><h3>Superagent 指挥链</h3><div class="right"><span class="tag violet" style="height:17px;font-size:7.6px">总控只收尾，不代做</span></div></div>' +
-    '<div class="orchestration-tree"><div class="ot-root"><div class="ot-ico">' + icon('cpu') + '</div><div style="flex:1"><div class="ot-name">七七 · Superagent 总控</div><div class="ot-role">拆解目标 · 派发边界 · 守住最后一道复核</div></div><div class="mono" style="font-size:8px;color:var(--ink3)">' + (wf ? esc(wf.version) : 'manual') + '</div></div>' +
-      '<div class="ot-branch">' + agents.filter(a => a.id !== 'orchestrator').map(a => '<div class="ot-child" data-act="open-agent" data-agent="' + a.id + '" style="cursor:pointer"><span class="dot" style="background:' + (a.status === 'running' ? '#4b73ef' : a.status === 'done' ? '#249b72' : a.status === 'waiting' ? '#d29a38' : '#aab2bf') + '"></span><b style="font-weight:600">' + esc(a.name) + '</b><span style="color:var(--ink3)">' + esc(a.task) + '</span><span class="right">' + esc(a.progress) + '%</span></div>').join('') + '</div></div></div>' +
-    '<div class="section"><div class="section-h"><h3>共享任务板</h3><div class="right"><span class="muted" style="font-size:8.2px">子代理只领板上的活</span></div></div><div class="card-box" style="padding:4px 12px">' +
-      SHARED_BOARD.map(b => '<div style="display:flex;align-items:center;gap:7px;padding:7px 0;border-top:1px solid var(--line);font-size:9.2px"><span style="flex:1">' + esc(b.title) + '</span><span class="muted">' + esc(b.agent) + '</span>' + statusTag(b.status === 'running' ? 'running' : b.status === 'done' ? 'done' : b.status === 'waiting' ? 'blocked' : 'queued') + '</div>').join('') +
-    '</div><div class="canvas-hint">' + icon('branch') + '总控可以并行派发，但收尾只能发生一次；子代理之间的结论冲突会回到收件箱，而不是互相覆盖。</div></div>';
+  const latest = taskRuns(t)[0] || null;
+  const chain = t.chain || [];
+  const isDesign = t.id === 'tsk_design';
+  const stateWord = { done:'已交回', running:'在做', waiting:'等上游', blocked:'停住', queued:'排队', failed:'没通过' };
+  const chainState = { done:'done', run:'running', wait:'waiting', fail:'failed', blocked:'blocked' };
+  const goal = t.desc || t.title;
+  const accept = t.acceptance || '任务完成后由你确认结果。';
+  let team = [];
+  if(isDesign){
+    team = ['scout','drafter','auditor','verifier'].map(id => {
+      const a = AGENTS[id];
+      const c = chain.find(x => x.label === a.name);
+      const st = c ? chainState[c.state] : a.status;
+      const pct = c ? (c.state === 'done' ? 100 : c.state === 'run' ? (/%$/.test(c.dur) ? parseInt(c.dur,10) : 55) : 0) : a.progress;
+      return { id:a.id, name:a.name, status:st, pct:pct, task:a.task, returns:(a.outputs || []).slice(0,2).join(' · ') || '等结果', clickable:true };
+    });
+  } else {
+    team = chain.map((c, i) => {
+      const st = chainState[c.state] || 'waiting';
+      const pct = c.state === 'done' ? 100 : c.state === 'run' ? (/%$/.test(c.dur) ? parseInt(c.dur,10) : 55) : 0;
+      return { id:'step_' + i, name:c.label, status:st, pct:pct,
+        task: c.out || (c.state === 'done' ? '这一步已经交回。' : c.state === 'run' ? '正在做，做完交回总控。' : c.state === 'fail' ? '没通过，停在这里等你决定。' : '等前一步交回后开始。'),
+        returns: c.state === 'done' ? '已完成 · ' + c.dur : c.state === 'run' ? '在做 · ' + (c.dur || '—') : c.state === 'fail' ? '没通过 · ' + c.dur : '还没开始',
+        clickable:false };
+    });
+  }
+  const cards = team.map(a => {
+    const inner = '<div class="orch-card-head"><span class="orch-dot ' + a.status + '"></span><b>' + esc(a.name) + '</b><span class="orch-state ' + a.status + '">' + (stateWord[a.status] || '排队') + '</span></div>' +
+      '<div class="orch-task">' + esc(tidy(a.task)) + '</div>' +
+      '<div class="orch-bar"><i style="width:' + a.pct + '%"></i></div>' +
+      '<div class="orch-foot"><span>交回：' + esc(tidy(a.returns)) + '</span><span>' + a.pct + '%</span></div>';
+    return a.clickable
+      ? '<button class="orch-card" type="button" data-act="open-agent" data-agent="' + a.id + '">' + inner + '</button>'
+      : '<div class="orch-card static">' + inner + '</div>';
+  }).join('');
+  const splitLabel = isDesign ? '拆成四条支线' : '按 ' + team.length + ' 步推进';
+  const splitHint = isDesign ? '点开任一条，能看这个子代理在做什么、做到哪、拿回了什么。' : '每一步按顺序来；需要并行的步骤，七七会拆给子代理。';
+  const note = isDesign ? '四条支线可以同时跑；收尾只发生一次。两条支线的结论对不上时，不互相覆盖，回到收件箱由你定；你定完之后，归档子代理才去更新台账与交接说明。' : '这条任务按固定步骤走，不额外分派子代理；任何一步失败都会停住，交回给你决定。';
+  const board = isDesign ? '<div class="section"><div class="section-h"><h3>共享任务板</h3><div class="right"><span class="muted">子代理只领板上的活</span></div></div><div class="card-box" style="padding:2px 12px">' +
+      SHARED_BOARD.map(b => '<div class="orch-board-row"><span class="orch-board-title">' + esc(tidy(b.title)) + '</span><span class="orch-board-agent">' + esc(tidy(b.agent)) + '</span>' + statusTag(b.status === 'running' ? 'running' : b.status === 'done' ? 'done' : b.status === 'waiting' ? 'blocked' : 'queued') + '</div>').join('') +
+    '</div></div>' : '';
+  return '<div class="section"><div class="section-h"><h3>七七怎么带这一队</h3><div class="right"><span class="tag violet">总控只收尾，不代做</span></div></div>' +
+    '<div class="orch">' +
+      '<div class="orch-brain">' +
+        '<div class="orch-brain-top"><div class="orch-avatar">七</div><div class="orch-brain-copy"><div class="orch-name">七七 · Superagent 总控</div><div class="orch-sub">' + (wf ? esc(tidy(wf.name)) + ' · ' + esc(wf.version) : '人工推进') + '</div></div><div class="orch-pill">' + (latest ? esc(STATUS[latest.status].label) : '还没开始') + '</div></div>' +
+        '<div class="orch-goal"><span>这一轮交什么</span><b>' + esc(tidy(goal)) + '</b></div>' +
+        '<div class="orch-accept"><span>算通过的条件</span><b>' + esc(tidy(accept)) + '</b></div>' +
+        '<div class="orch-split"><span class="orch-k">' + splitLabel + '</span><span>' + splitHint + '</span></div>' +
+      '</div>' +
+      '<div class="orch-team">' + (cards || '<div class="empty">这条任务的步骤还没记录。</div>') + '</div>' +
+      '<div class="orch-note">' + icon('branch') + '<span>' + note + '</span></div>' +
+    '</div></div>' + board;
 }
-
 function taskEvents(t){
   const list = EVENTS.filter(e => e.taskId === t.id);
   return '<div class="section"><div class="section-h"><h3>相关事件</h3><div class="right">' + list.length + ' 条</div></div>' + (list.length ? '<div class="card-box" style="padding:4px 12px">' + list.map(e => '<div data-act="open-event" data-event="' + e.seq + '" style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-top:1px solid var(--line);cursor:pointer"><span style="flex:1"><div style="font-size:9.2px;color:var(--ink2)">' + esc(tidy(e.summary)) + '</div><div style="font-size:7.7px;color:var(--ink3);margin-top:2px">' + eventTypeWord(e.type) + ' · ' + esc(e.time) + '</div></span>' + icon('chevron-right') + '</div>').join('') + '</div>' : '<div class="empty">还没有关联事件。</div>') + '</div>';
