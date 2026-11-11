@@ -303,16 +303,17 @@ CREATE UNIQUE INDEX decisions_node_kind_uq ON decisions(node_run_id, kind) WHERE
 
 **没照抄的**：DS-Bot 的实现语言（JavaScript）与部署形态（独立 app + docker）与 DSH 插件不同；只取架构思路，不取代码。
 
-### 4.3 pi-harnessmm（最小 harness 范式）
+### 4.3 pi-harnessmm（重点：提升效率与降低 token 消耗）
 
-**学到的**：
-- **四件套最小闭环**：harness（`extensions/harnessmm.ts`）+ 消息投影（`src/pi-messages.ts`）+ 准入（`src/admission.ts`）+ 收据（`src/bank.ts` / `src/guard.ts`）——**本插件的最小实现骨架可以照这个分层**。
-- **`admit` / `compactState` / `actionType` 三件**：准入判定、状态压缩、动作分类——对应本插件的加载期校验、上下文预算、动作类型化。
-- **`hash` fan_in 7 / `record` fan_in 5 的热点结构**：hash 是所有 receipt 的公共依赖点——对应本插件的 `compensation_id` / `report_id` 幂等键设计（幂等键必须统一算，不能各处各算）。
-- **`policy.ts` 的 `validateCotJev` 与 `loadPolicy`**：策略加载与校验分离——对应本插件「policy 由服务端从不可变模板加载」的方向。
-- **`terminal.ts` 的 `killTree` / `runRoot` / `collect` / `onAbort`**：进程树终止与结果收集——对应本插件 §1.1 的 `executor.cancel` / `whenIdle`。
+**主借鉴点**：
+- **用便宜的快速选择器替代一次昂贵的慢推理**：慢 CoT 在 `<CHISEL_PLAN>` 里预先写好「参数已确定」的后续动作库，fast selector 只在公共 receipt 上选一个已声明候选；选不出就回慢推理。省的是「再一次慢调用」的 token，不是省掉推理本身。
+- **快路径必须真的更省才走**：`admit` 用 `fastUpper = byteUpper(SELECTOR_SYSTEM) + byteUpper(compactState) + 1 + 128` 估快路径开销，`fastUpper * 4 > prior.median_tokens` 就拒绝（`fast_cost_above_quarter_of_slow`）——快路径成本超过慢调用中位数的四分之一，就不值得替换。对应本插件的 token 记账与预算门槛。
+- **压缩的是上下文，不是动作语义**：`compactMessages` 在慢上下文里剥掉 `<CHISEL_PLAN>`，原件按 toolCall id 存起来；`projectionBinding` 用 hash 校验剥离前后 toolCall 不变。对应本插件「raw payload 不进带工具权限的 agent」「压缩后动作语义必须保持」。
+- **选择器只看最小状态**：`compactState` 只给任务 id、receipt hash、候选动作、guard 结果、schema，不喂完整历史；`slowTokensOf` 用上一笔慢调用的 `usage.totalTokens` 作节省基线。对应本插件的有界 payload 与上下文预算。
 
-**没照抄的**：它是单进程 harness，没有持久账本与多写者问题。
+**次要参考**：四件套分层（harness + 消息投影 + 准入 + 收据）、`actionType` 的动作分类、`hash` 热点、`policy` 的 load/validate 分离、`terminal` 的进程树终止——这些是实现骨架与边界，不是主借鉴点。
+
+**没照抄的**：它是单进程 harness，没有持久账本与多写者问题；它的 `fastUpper` 是 UTF-8 字节上界，不是实测 token，不能直接当本插件的预算判据。
 
 ---
 
