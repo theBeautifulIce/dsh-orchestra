@@ -1,0 +1,9 @@
+# 参考项目是独立克隆的第三方仓库（含各自 .git），不入本仓库
+references/
+
+# 图谱持久化产物（体积大，用 index_repository(persistence=true) 单独产出）
+.codebase-memory/
+
+# 本地临时件
+tmp/
+*.log

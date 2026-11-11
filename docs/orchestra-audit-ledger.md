@@ -1,0 +1,85 @@
+# dsh-orchestra 设计审计台账
+
+用途：把每一轮独立审计的结论按统一口径记下来，好看清「问题是在变多、变少，还是只是变难」。统计口径说明在末尾。
+
+## 一、逐轮记录
+
+| 轮次 | 审的范围 | 结论 | 致命 | 加固 | 小项 | 这一轮挖出来的主要性质 |
+|---|---|---|---|---|---|---|
+| 1 | 第一、二段 | fail | — | — | 11 条 | 骨架级硬伤：回写「接收/接受」不分、超时从派发起算、重启只救已超时、上下文随节点数平方增长、回写身份无防、payload 自由文本、判定规则无执行模型、重试打回语义缺、SQLite 读写分离误解、与原生双账本、接入无回执契约 |
+| 2 | 第一、二段 | fail | 2 | 10 | — | 执行载体自相矛盾、orphan sweep 覆盖不全、received 阶段多余、started 靠模型自报、外部验证与「引擎不执行工具」冲突、重试缺副作用策略、会话存活未分三态、事件投递语义缺失、checkpoint 与实例锁不成立、payload 契约过重 |
+| 3 | 第一、二段 | **pass**（附四条在案） | 0 | 0 | 0 | 会话池上限与归档、活跃数由 slot 租约限制、ctx.agents.get 空值按「判不准即 orphan」、补两类并发测试 |
+| 4 | 第三段 v1 | fail | 1 | 8 | — | 批次边界按类型切应改按来源、tool_runner 成第二执行组件、wait 唤醒排队丢事件、parallel 与单活跃投递互斥、decision 缺 N/A、子工作流递归哈希、branch 措辞 |
+| 5 | 第三段 v1 | fail | 2 | 6 | 2 | resume 不看不可逆标志会重放、工具闭包绑旧引擎、子图 visited key 未定义、wait 事件丢失、parallel 无未结算语义、slot 无心跳、decision 缺「等人」态、artifact 缺类型分支 |
+| 6 | 第三段 v1 | fail | 3 | 5 | — | 独立进程缺宿主锚点与收尸、代次没进 CAS 的 WHERE、原子性边界自欺、能力矩阵未校验声明与实现、wait 边沿触发、parallel 无 run 级结算、never_started 计时混排队、sweep 漏 indeterminate |
+| 7 | 第三段 v1 | fail | 3 | 5 | — | 缺 executor.cancel 与事件重放、三个态未进恢复表、blocked 缺回派边、watchdog 与 drain 无交接、60 分钟写成全局常数、decision 缺终态、verifier 证据半闭合、prev_hash 不是真链 |
+| 8 | 第三段 v1 | fail | 3 | 5 | — | 桥缺 cancel 与事件重放、三个态未进恢复表、blocked 缺回派边、watchdog 与 drain 只有锁没有交接、不可逆 60 分钟全局化且心跳依赖主循环、decision 缺终态、verifier 缺证据来源、哈希链可重算 |
+| 9 | 第三段 v1 | fail | 3 | 5 | — | 引擎改独立进程后的所有权与收尸、代次进 WHERE、原子性边界写实、能力矩阵校验、wait 边沿触发、parallel 的 run 级结算、启动计时与排队计时混、sweep 漏 indeterminate |
+| 10 | 第三段 v1 | fail | 3 | 5 | — | 桥 RPC 表补全（cancel/runTool/事件订阅）、sweep 恢复表逐态映射、blocked 拆前后两条边、控制面加 service.state、不可逆时限按节点/工具级、心跳独立线程、decision 加终态、证据与核验策略分离、哈希链移到 append-only 事件表 |
+| 11 | 第三段 v1 | fail | 2 | 8 | — | 超时把「立围栏」与「动作停下」混成一件、恢复表一一映射没闭合、blocked_pre 入口与租约写错、run 单枚举表达不了并存状态、核验基线可被作者写空、桥缓冲归档后归属、任务会话仍带工具、runTool 边界只写四个字 |
+| 12 | 第三段 v1 | fail | 2 | 5 | 1 | stopping 的计时锚点与兜底、blocked_pre 的租约与 CAS、run 对外投影、passCondition 未受约束、stopping 依赖桥、保留期与 dispose-ack 口径、run 终态前置条件、runTool 禁用后的证据链 |
+| 13 | 第三段 v1 | fail | 5 | 6 | — | 插件卸载与宿主死亡分不开、stopping 迁出后脱离监管、「放弃」无合法目标、计时锚点仍未落在真起跑时刻、弱证据可被作者滥用、sweep 恢复不查期限、旧定时器仍能推走节点、桥恢复可无限延期、run.resumed 条件不全、跨行线性化与代次持久化、证据分强弱、裁决合并去重 |
+| 14 | 第三段 v1 | fail | 5 | 4 | — | 先问能不能停再决定立围栏、迟到完成被自己的时限挡掉、代次没进执行器回写、插件与宿主死亡仍无法区分、abandon_ack 三出口没闭环、启动层把「没观测到」当「没发生」、裁决出口没进状态机、两个 60 秒并存、版本残留 |
+| 15 | 第三段 v1 | fail | 5 | 6 | 1 | 代次双重语义、围栏撤销无回写通道且 whenIdle 无出口、启动层「不明」被塞进 stopping、executor 报不出「没发过 tool.call」、continue_wait 与 decision 行自相矛盾、abandon_ack 与迁移表冲突、终态 CAS 不查活跃 decision、未结算集合生命周期、派生无单一来源、弱证据闸门可绕、called_no_start 被当执行中、桥缓冲无上限 |
+| 16 | 第三段 v1 | fail | 7 | 4 | 1 性能项 | 代次矩阵化、被挡回写要有幂等账、timing_out 恢复同步、continue_wait 回边、结论态收口边、startup_unknown 补齐 kind 与出口、桥预算只作用于没开跑的节点、confirm_started 锚点与拒绝、abandon_ack 改 run 级键、三个出口的副作用、capability 覆盖全部节点、派生不许全量扫描 |
+| 17 | 第三段 v1 | fail | 4 | 6 | 2 | startup_unknown 缺执行器回写边、迁移表与启动层判定冲突、abandoned_unverified 与 run succeeded 可同时成立、capability 与 compensable 自相矛盾、三个出口的 executor 落点没写完、registry 与旧标量双来源、恢复路径缺代次自增、registry 查重与应用未同事务、confirm_started 是死路、capability 仍漏执行面、run 级唯一键在 SQLite 下不成立、registry 不在哈希链上 |
+| 18 | 第三段 v16 | fail | 3 | 5 | 2 | startup_unknown「仍活」分支无时钟也不在 paused_bridge_missing 五态内、「已失联」分支未拆到 deleted/未知/桥断、abandoned_unverified 的独立确认停止无迁移也无字段、display_status 与 succeeded_with_unverified 冲突且无 run 事件、startup_unknown→done/failed 不继承 schema/判定/证据门、超时表绕过「先问停不停得下来」、startup_unknown 的迟到 report 无账可入、补偿证据只有要求没有事件名与字段、verdict 归类与 Ga 初始化时点不一致、「已在正文生效」检查口径要改成机器可判定 |
+| 19 | 第三段 v17 | fail | 9 | 3 | 0 | indeterminate_side_effect 无出边、orphaned 未列终态也无 replacement、verifying 没有时钟、startup_unknown 四支的钟与出口清理没写全、两个 120 秒钟没有先后且桥预算无持久字段、stopping 缺人裁决行（confirm_applied 无迁移）、stopped_at 被当成 succeeded 的通行证、pending_irreversible_children 只硬编码四态、compensable 的前向动作过不了能力闸门、applyReport 只有文字复用没有单一入口、迟到 report 只留账不阻断会重复副作用、succeeded_with_unverified 与 failed 的边界没写死 |
+| 20 | 第三段 v18 | fail | 10 | 2 | 0 | failed_with_unverified 只进终态集合没有入边、stopped_at 仍被当成副作用没发生的通行证、run 终态 CAS 不按子节点结果分叉、applyReport 缺 attempt 且新 attempt 把 Ga 重置成 1、continue_wait 的 approved→pending 与结论落地即 closed 互相抵消、verifying 与 timing_out 在桥断期间钟没口径且 verify_* 未清、startup_unknown 出口仍有两处不闭合、report_contradicted 只有 kind 没有挂起态与过期规则、证据门不是统一可执行路径且人工裁决可绕过、capability 规则自相矛盾致 compensable 不可达 |
+
+## 二、几件能算出来的事
+
+**轮次与问题数不是一条下降曲线。** 第一段三轮收敛（第三轮 pass）；第三段从第 4 轮起一路 fail 到第 17 轮，致命项在 1–7 之间摆动，加固项长期在 4–8 之间。总数不减。
+
+**原因不是「没改对」，是范围一直在长。** 每写一段新内容就回头和前面所有规则对照，新旧撞车本身是新问题；每加一个状态格就多一对要核对的边。第 13 轮之后新增的 startup_unknown、stopping、abandoned_unverified、report_registry，全是为了让规则可执行才长出来的格子——格子刚长出来时干净，长到十几轮才被看出毛病。
+
+**性质在变硬。** 早期挖的是「两段话自相矛盾」；中后期挖的是边界与竞态：旧 attempt 的队头挡住当前 attempt、旧定时器推走已续期的节点、SQLite 里带 NULL 的唯一约束不生效。这类要跑起来才碰得到，纯纸面想只会越想越细。
+
+**致命项的来源在换。** 第 11–17 轮的致命项几乎都出在「人裁决之后节点去哪」「不可中断动作还在跑怎么办」「代次与围栏谁说了算」这三处——它们不是新设计出来的，是前面每一轮修一处、就挤出一处。第 18 轮又集中到另一族：「半态的时钟与出口没写全」——startup_unknown 一旦拆成两支，两支各自都要时钟、证据门、迟到回写与账目位置，第十八轮把这一族一次挖出三条致命。
+
+**第 18 轮之后仍不能收口。** 审计给出的收敛判断是：结构性/致命 8 条（含 1 条补偿证据契约）、措辞/口径 2 条、性能 0 条，尚未到可进第四段。性能这一类从第 16 轮起已经清零，说明剩下的确实集中在语义而不是速度上；致命项集中在 startup_unknown 这一个半态的两支上，而这一支是第 15 轮才长出来的格子，到第 18 轮才被审到四层不齐（时钟、证据门、迟到回写、账目位置）。
+
+**第 19 轮之后仍不能收口。** 审计给出的收敛判断是：结构性/致命 12 条（9 条致命 + 3 条重大结构性）、措辞/性能/文档卫生 0 条，仍未到可进第四段。最易低估的风险是：`stopped_at` 只证明动作不再跑、不证明副作用没发生，把它当 `succeeded` 的通行证，会让一笔已写出、只是不再动的副作用从 `succeeded_with_unverified` 里消失。这一轮的致命项开始成族地落在同一件事上——**半态没有自己的时钟、证据门、迟到回写路径和账目位置**：indeterminate_side_effect 无出边、orphaned 未列终态、verifying 无时钟、startup_unknown 四支清理不齐，都是这一族。主人 15:39 的口径「状态机啃得更死一点，毕竟这是流程的核心」正是对症的：审计火力从措辞转向状态机本身，第十四条硬教训里的「半态要有出口」「超时是两件事」「恢复表逐态闭合」「时限分层」「证据分强弱」在这一轮被逐条兑现成检查项。
+
+**第 20 轮之后仍不能收口。** 审计给出的收敛判断是：结构性/致命 10 条、契约/高优先 2 条、措辞/性能/文档卫生 0 条，仍未到可进第四段。这一轮的致命项不再分散在「半态时钟」一族，而是**收尾判据**一族——`failed_with_unverified` 只进了终态集合没有入边、`stopped_at` 仍被当成「副作用没发生」的通行证、run 终态 CAS 不按子节点结果分叉、capability 规则自相矛盾导致 compensable 分支不可达、证据门由调用方传 policy 所以人工裁决可绕过。审计点出的最易低估风险是一句话：**「节点终态」不等于「run 可以成功」**——`failed / timeout / orphaned / failed_with_unverified` 都是终态，若 run 只查「无非终态 node_run」，账本会在工作失败或失联时收成 `succeeded`；叠加 `stopped_at` 只证明动作停了、不证明副作用没发生，就会在现实仍可能落刀时把账做平。这与第十四条硬教训里的「停止不等于结算」「证据分强弱」同源，但此前都停在字段级，没有落成一条可执行的判定。
+
+**审计子代理的任务就是挑刺**，它会一直找下去。其中「加固项」本质是加保险而非缺陷，保险没有归零的那天，这条线就不该按「清零」验收。
+
+## 三、收敛判据（自定，用于第四段起的门禁）
+
+不按「条数归零」验收，改按这三条：
+
+1. 连续两轮没有新的致命项（剩下的只有措辞、命名与性能口径）；
+2. 致命项必须落在实现期能验证的点上（有明确用例、能写成测试），而不是需要靠读文档想象才能判断；
+3. 纸面审计的边际收益低于真实运行的边际收益时，把风险挪到实现期——先落最小可用（一个 trigger + 一个 agent 节点 + 记忆审计工作流），用真实运行暴露剩下的。
+
+## 四、统计口径
+
+- 「致命」= 会让账本与现实不一致、或让流程卡死无出口的错；「加固」= 健壮性与性能层面的改进，不改也不至于出错；「小项」= 措辞、命名、索引、事务边界一类。
+- 第 1 轮原始记录未分严重度，记在「小项」列的 11 条里，但实际含致命项，故只作参考，不计入趋势判断。
+- 第 3 轮是 pass（附四条在案），是第一、二段的收敛点。
+- 第 4 轮起审的是第三段（九种节点），轮次编号沿用全局计数。
+
+## 五、当前进度与续跑指引（2026-11-11 17:20 记）
+
+- 项目已于 2026-11-11 16:50 整体迁到 D:\aboutAI\dsh-orchestra（设计稿、台账、requirements.md、design-notes.md、根目录 handoff.md 与 codebasemap.md、references\ 三份参考项目、四份 codebase-memory 图谱）；旧址 D:\aboutAI\dshQQ\docs\ 保留同内容副本，后续只改新址。
+- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 670 行（SHA256 前缀 DFCEA51FF9D53AC4，文件头与第三段标题仍写 v18）——（注：第二十轮判 fail 后派出的首个 v19 执行子代理 e15fbc7c-f849-4571-97a2-9f89f32f4855 在动手前失败；随后改派 149af4fd-7844-416f-a5a4-4fd3cd147f02，主人叫停审计时它已落盘 #1–#6。）v19 已部分落盘：#1–#6 六条已逐条核实进正文（L130 applyReport 加 attempt、L213 Ga 只增不重置、L243/L244 stopped_at 与 side_effect_verified_none 分离、L244/L277/L278 failed_with_unverified 入边、L265/L270/L271/L273 离开 verifying 清钟、L115–124 桥断时钟矩阵与 bridge_absence_accumulated 清零语义、L282–284 run 级结果判定三条、L337/L343/L349/L350 continue_wait 只留一套口径）；#7–#12 未落，另需补「行→幂等键对照表」「迁移表逐行用例清单」「§3.4k [CURRENT] 清单」与版本号 v19。审计代理 b4841d70-f28c-4f51-9458-9c0918894376 可用 send_message 续；执行代理 e15fbc7c-f849-4571-97a2-9f89f32f4855 已失败不可用。
+- 第二十轮审计已出结论：fail，10 致命 + 2 重大结构性，措辞/性能 0 条。最易低估的风险：「节点终态」不等于「run 可以成功」；叠加 stopped_at 只证明动作停了、不证明副作用没发生。
+- v19 必须落的 12 条（第二十轮原文要点）：
+  1. failed_with_unverified 只有终态集合没有入边 → 补「verifying → failed_with_unverified」、补偿失败来源 → failed_with_unverified、compensable 无可执行补偿 → failed_with_unverified 三条显式迁移行；L229 那行的「到」列改成条件二选。
+  2. stopped_at 被当成副作用没发生的通行证 → succeeded 只认 side_effect_verified_none=true 且带 stop_evidence；stopped_at 单独存在只能支撑 succeeded_with_unverified；unverified_side_effect 不得因 stopped_at 消失。L297 / L301 / L303 统一引用这一句。
+  3. run 终态 CAS 不按子节点结果分叉 → 存在 failed / timeout / failed_with_unverified 子节点则 run 只能 failed 或 failed_with_unverified；存在未被 replacement_node_run_id 替换的 orphaned 子节点则 run 只能 orphaned 或留 paused；全部 done 才允许 succeeded。
+  4. applyReport 缺 attempt、新 attempt 把 Ga 重置成 1 → 签名加 attempt，所有回写 CAS 带「attempt + Ga + report_id」；首次 Ga=1，其余一律 Ga+1，删掉 leased→dispatched 硬写 1。
+  5. continue_wait 的 approved → pending 与「结论落地即 closed」互斥 → 只留一套（推荐：对 pending / acknowledged 追加 revision 保持活跃、不经过 approved）。
+  6. verifying 与 timing_out 在桥断期间的钟无口径、verify_* 未清 → 补桥断时钟矩阵表（每钟 × 桥断行为 × 恢复处理）、写死 bridge_absence_accumulated 清零语义、每条离开 verifying 的行显式清 verify_started_at / verify_deadline_at。
+  7. startup_unknown 出口两处不闭合 → 只保留 unknown_watchdog 一个钟；continue_tracking 对「executor 仍活」与「桥断未删」统一开放；deleted 支出口按 L139 收窄或改 L139。
+  8. report_contradicted 只有 kind → 补挂起状态与理由、resolution 取值与节点迁移、围栏规则、过期只落账不释放围栏。
+  9. 证据门可绕过 → applyReport 不收调用方 policy，按 node_run_id + workflow_version 从不可变模板加载；落成 evaluateEvidence(policy, evidence) → {pass, reason}；所有人工裁决迁移行必须调同一函数。
+  10. capability 规则自相矛盾致 compensable 不可达 → 删掉「mutating 只能是 irreversible」，写死「mutating + 可执行 compensation → compensable；无 compensation → irreversible；作者声明只能更严」。
+  11. already_stopped 无合法目标行、confirm_not_started 的 dispose 违反「只在节点终态后 dispose」→ 补 already_stopped 行并写 stopped_at；dispose 前置改为「该 attempt 已收口或重试已落库」；confirm_not_started 加 executor 已删且桥断已确认的前置检查。
+  12. report_registry.report_id 唯一键只在正文不在 DDL → §14 写 report_id PRIMARY KEY 或 UNIQUE 索引；补「行 → 幂等键」对照表（report_id / decision_id+revision / event_seq / attempt+Ga）；补一条 DDL 验收用例。
+- 执行者自留 7 处：第二十轮判 6 条必须补（policy 判定落成 evaluateEvidence、行→幂等键对照 + report_id DDL、桥断时钟矩阵、settling 与 failed_with_unverified 逐行对齐、补偿描述符注册校验落 §2、迁移表逐行生成用例清单）、1 条可接受（§3.5 标题已补回）。
+- 收敛判据（§三）不按条数归零验收。状态机这一族若在第二十一轮清零、剩下的只是措辞，就按主人口径收口进第四段（面板与查询）。
+- 按主人 2026-11-11 15:39 口径「审计这一步，没通过、没获得正确结果前，就不能往后走」：第三段没拿到 pass 之前不写第四段。
+- 换会话不影响进度：设计稿、本台账、记忆底账（asset 记事本 mem_mwbqav4n_23bd4f8d）与在办条目（L5 mem_mwbq9pys_9139830f）都落在磁盘上，换会话后按这四处接手即可。
+- 审计口径的复用条目：pitfall mem_wbsf89z_3ac546f6（审计轮次不收敛的三条收敛判据）；记忆分层口径 L4 mem_wbtckln_5dd4de9f（项目细节进记事本，长期记忆只留一个待办和索引）。
