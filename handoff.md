@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-11 19:36。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-11 20:05。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**规则设计已写到第三段（九种节点图），v20 已按第二十一轮审计修完并送第二十二轮审计；代码一行没写。**
+现在做到哪：**规则设计已写到第三段（九种节点图），v21 已按第二十二轮审计修完并送第二十三轮审计；代码一行没写。**
 
 ---
 
@@ -19,8 +19,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 809 行 / SHA256 前缀 `0C90060F7D0ACFCC`；v20 已落稿，第二十二轮审计待回 |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 94 行；已跑 21 轮，第 21 轮判 **fail**（6 致命 + 4 重大 + 4 措辞），第 22 轮已送待回 |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 838 行 / SHA256 `AE771DB18D7CFBEC30C5832D3416D69DA7D873BC239120ADAFA34F9DF4D885B0`；v21 已落稿，第二十三轮审计待回 |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 99 行；已跑 22 轮，第 22 轮判 **fail**（3 致命 + 5 重大 + 4 措辞），第 23 轮已送待回 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
@@ -37,8 +37,8 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（809 行，v20）
-│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（94 行）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（838 行，v21）
+│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（99 行）
 │  ├─ requirements.md             ← 原始需求与拍板口径
 │  └─ design-notes.md             ← 设计思路与决策理由
 ├─ references\           ← 只读参考，不是本项目代码
@@ -66,26 +66,26 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第三段 v20 已送第二十二轮审计（2026-11-11 19:29）
+### 4.1 当前状态：第三段 v21 已送第二十三轮审计（2026-11-11 20:05）
 
-第二十一轮审计判 **fail**，给了 6 致命 + 4 重大 + 4 措辞，逐条性质与最小改法见台账 §一 第 21 行、§二 19:24 段。v20 已把 14 条修法逐条落进正文，并新增 `§3.4l [CURRENT]` 修订清单；全文 `[CURRENT]` 只剩这一处，终态集合只在 §8 写一份。
+第二十二轮审计判 **fail**，给了 3 致命 + 5 重大 + 4 措辞，逐条性质与最小改法见台账 §一 第 22 行、§二 20:05 段。v21 已把 12 条修法逐条落进正文，并新增 `§3.4m [CURRENT]` 十二条清单；§3.4l 降为 v20 历史，全文 `[CURRENT]` 只剩 §3.4m。
 
 修法主线（读稿先认这五条）：
 
-- **重试一律新建行**：旧行落 `superseded`（中性终态，run 判定算通过），新行 `attempt = 旧 + 1`，双指针 `origin_node_run_id` / `replacement_node_run_id`；M 用例扩到 M-01…M-58（M-56 是跨行闸门，M-57 continue_tracking，M-58 建行）。
-- **桥断只有一个时间基**：executor-bound 六态在桥断时一律转 `paused_bridge_missing`，watchdog 暂停，只由 `bridge_absence_accumulated` 累计；超预算只生成一条 `startup_unknown` decision（同 kind 唯一键去重），桥断期间不迁 `startup_unknown`；`continue_tracking` 只对「executor 仍活且桥可用」开放。
-- **人工证据分档**：`confirm_applied` / `confirm_not_applied` 必须走 `evaluateEvidence` 拿 `evidence_id`；`confirm_started_attested` 豁免，只记 `attestation_id` 与 `action_start_source=human_attested`，不写 `evidence_id`。
-- **contradicted 挂起闸门**：两格迁出 CAS 带 `AND hang_reason IS NULL`，普通出口一律被挡；`applyReport` 第 6 个可选参 `decision {decision_id, revision, resolution}`，`uphold_report` → approved、`uphold_decision` → rejected，且不落 expired。
-- **confirm_not_started 四支对称**：has_tool_call=true 拒 / deleted 按人证接受 / unloaded 先 resume 再查 / 状态未知先重查 / 桥断先转 paused_bridge_missing。
+- **唯一约束落到数据库**：`UNIQUE(run_id, node_id, attempt)` 守同一节点同一代次，跨行替换由 `origin_node_run_id` 部分唯一索引守；M-58 测「换新 node_run_id 仍被拒」，§14 补同 origin 建第二行被拒。
+- **桥断不进 startup_unknown**：桥断一律转 `paused_bridge_missing`，`startup_unknown` 只由 `startup_timeout` 进入；恢复先查 executor.state，桥断期间只累积 `bridge_absence_accumulated`。
+- **hang 闸门逐行内联**：两格所有普通出口都带 `hang_reason IS NULL`，例外只有清 hang（uphold_report）与桥断边。
+- **状态未知必须收口**：重查仍不明一律落 `RESOLUTION_NOT_AVAILABLE`，只有 `indeterminate_side_effect` / `abandoned_unverified` 两类留独立人工确认。
+- **五条分支与三个新落点**：`has_tool_call` 闸门 + 四个 executor.state 分支（共五条）；`started→done` 用 `now <= effective_deadline_at`；`decision` 唯一键统一 `(node_run_id, kind)` partial index；M 扩到 M-59（uphold_report）；`applyReport(node_run_id, attempt, report, expected_status, generation, decision?)` 为唯一入口，policy 内部加载。
 
 ### 4.2 审计回包后的动作
 
-1. 逐条核 verdict；有致命/重大就按「最小改法」落 v21，重复「改稿 → 自检 → 送审」直到 pass 或只剩措辞。
-2. 台账补第 22 行结论（pass/fail、分类计数、性质），§二 补结论段，§五 改当前状态与下一轮派发对象。
+1. 逐条核 verdict；有致命/重大就按「最小改法」落 v22，重复「改稿 → 自检 → 送审」直到 pass 或只剩措辞。
+2. 台账补第 24 行结论（pass/fail、分类计数、性质），§二 补结论段，§五 改当前状态与下一轮派发对象。
 3. 审计 pass 后才动第四段（面板与查询）；主人 2026-11-11 15:39 口径：「审计这一步，没通过、没获得正确结果前，就不能往后走」。
 4. 每次改稿后同步版本号、SHA256 与行数；改完提交 git。
 
-> ⚠️ 改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构），不要删 §3.4b–§3.4l 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
+> ⚠️ 改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构），不要删 §3.4b–§3.4m 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
 
 ---
 
@@ -95,7 +95,7 @@ D:\aboutAI\dsh-orchestra\
 | --- | --- | --- |
 | 一 | 骨架与落点（桥 / 生命周期 / 控制面） | ✅ 完成（设计稿 L5–L96） |
 | 二 | 把「硬」落成规则（17 条：node_run 字段、代次、证据、半态、超时、重试、sweep、迁移表、声明式判定、版本、身份账本、payload、上下文预算、存储、边界、事件、来源分离） | ✅ 完成（L97–L418） |
-| 三 | 九节点图（§3.0 两类契约 → §3.5） | 🔄 v20 已送第二十二轮审计（§4.1） |
+| 三 | 九节点图（§3.0 两类契约 → §3.5） | 🔄 v21 已送第二十三轮审计（§4.1） |
 | 四 | 面板与查询 | ⛔ 未开始（要审计通过） |
 | 五 | 记忆插件对接 memory-audit-v1 | ⛔ 未开始 |
 | 六 | 分阶段落地与验收 | ⛔ 未开始 |
@@ -164,6 +164,7 @@ D:\aboutAI\dsh-orchestra\
 - 仓库已初始化：`D:\aboutAI\dsh-orchestra\.git`，分支 `main`，首个提交 `fc92495`
   （docs: dsh-orchestra 项目落地（设计稿/台账/需求/设计思路/handoff/图谱索引）），共 7 个文件、1787 行。
 - `.gitignore` 忽略 `references/`（三份参考项目各自带 `.git`，不并入本仓库）、`.codebase-memory/`、`tmp/`、`*.log`。
+- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、v21 收口提交（本轮 HEAD）。
 - 每次改设计稿后要提交（主人硬约束：改代码/文档后同步更新版本号并留痕）。
 
 ---
@@ -180,4 +181,4 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md | Measure-Ob
 Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 ```
 
-然后按 §4.1 的五条主线读 v20 → 等第二十二轮审计回包 → 按 §4.2 处置。
+然后按 §4.1 的五条主线读 v21 → 等第二十三轮审计回包 → 按 §4.2 处置。
