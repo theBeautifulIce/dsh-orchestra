@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-11 17:12。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-11 19:36。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**规则设计已写到第三段（九种节点图），正被第二轮审计逼着修 v19；代码一行没写。**
+现在做到哪：**规则设计已写到第三段（九种节点图），v20 已按第二十一轮审计修完并送第二十二轮审计；代码一行没写。**
 
 ---
 
@@ -19,8 +19,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 670 行 / 215KB / SHA256 前缀 `DFCEA51FF9D53AC4`；v19 改到一半（#1–#6 已落，#7–#12 未落） |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 84 行；已跑 20 轮，第 20 轮判 **fail**（10 致命 + 2 重大） |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 809 行 / SHA256 前缀 `0C90060F7D0ACFCC`；v20 已落稿，第二十二轮审计待回 |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 94 行；已跑 21 轮，第 21 轮判 **fail**（6 致命 + 4 重大 + 4 措辞），第 22 轮已送待回 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
@@ -37,8 +37,8 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（670 行）
-│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（84 行）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（809 行，v20）
+│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（94 行）
 │  ├─ requirements.md             ← 原始需求与拍板口径
 │  └─ design-notes.md             ← 设计思路与决策理由
 ├─ references\           ← 只读参考，不是本项目代码
@@ -66,44 +66,26 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前唯一阻塞项：把设计稿修到 v19 收口
+### 4.1 当前状态：第三段 v20 已送第二十二轮审计（2026-11-11 19:29）
 
-第二十轮审计判 **fail**，给了 12 条（#1–#12）+ 执行者自留 7 处。**现状：#1–#6 已落盘，#7–#12 未落。**
+第二十一轮审计判 **fail**，给了 6 致命 + 4 重大 + 4 措辞，逐条性质与最小改法见台账 §一 第 21 行、§二 19:24 段。v20 已把 14 条修法逐条落进正文，并新增 `§3.4l [CURRENT]` 修订清单；全文 `[CURRENT]` 只剩这一处，终态集合只在 §8 写一份。
 
-已落（已在 670 行稿里逐条核实过行号）：
-- #1 `failed_with_unverified` 入边 → L244（verifying→failed_with_unverified，幂等键 `(node_run_id, attempt, verify_deadline_at)`）、L277（补偿失败）、L278（无可执行补偿）
-- #2 `stopped_at` 与 `side_effect_verified_none` 分离 → L243/L244（`succeeded` 只认 `side_effect_verified_none=true`）
-- #3 run 级结果判定三条（顺序不可调：先失败类子节点 → 再未替换 orphaned → 最后全 done 才 succeeded）→ L282–284
-- #4 `applyReport` 加 `attempt`、四处回写边都带 attempt、Ga 只增不重置 → L130 / L213 / L234 / L241 / L255 / L267
-- #5 `continue_wait` 只留一套口径（同一行追加 revision、状态保持 pending/acknowledged，不经过 approved）→ L337 / L343 / L349 / L350
-- #6 桥断时钟矩阵（6 行）+ `bridge_absence_accumulated` 清零语义 + 离开 verifying 显式清 `verify_started_at`/`verify_deadline_at` → L113–124 / L265 / L270 / L271 / L273
+修法主线（读稿先认这五条）：
 
-**待做（#7–#12）**，逐条最小修法（来自第二十轮审计原文，行号对应 670 行稿）：
+- **重试一律新建行**：旧行落 `superseded`（中性终态，run 判定算通过），新行 `attempt = 旧 + 1`，双指针 `origin_node_run_id` / `replacement_node_run_id`；M 用例扩到 M-01…M-58（M-56 是跨行闸门，M-57 continue_tracking，M-58 建行）。
+- **桥断只有一个时间基**：executor-bound 六态在桥断时一律转 `paused_bridge_missing`，watchdog 暂停，只由 `bridge_absence_accumulated` 累计；超预算只生成一条 `startup_unknown` decision（同 kind 唯一键去重），桥断期间不迁 `startup_unknown`；`continue_tracking` 只对「executor 仍活且桥可用」开放。
+- **人工证据分档**：`confirm_applied` / `confirm_not_applied` 必须走 `evaluateEvidence` 拿 `evidence_id`；`confirm_started_attested` 豁免，只记 `attestation_id` 与 `action_start_source=human_attested`，不写 `evidence_id`。
+- **contradicted 挂起闸门**：两格迁出 CAS 带 `AND hang_reason IS NULL`，普通出口一律被挡；`applyReport` 第 6 个可选参 `decision {decision_id, revision, resolution}`，`uphold_report` → approved、`uphold_decision` → rejected，且不落 expired。
+- **confirm_not_started 四支对称**：has_tool_call=true 拒 / deleted 按人证接受 / unloaded 先 resume 再查 / 状态未知先重查 / 桥断先转 paused_bridge_missing。
 
-| # | 问题 | 最小修法 | 落点 |
-| --- | --- | --- | --- |
-| 7 | `startup_unknown` 出口两处不闭合 | 只保留 `unknown_watchdog` 一个钟，删掉或定义 `action_deadline` 锚点；`continue_tracking` 对「executor 仍活 / 桥断未删」统一开放或补另一条合法出口；deleted 支出口按 L139 收窄或改 L139 | L135 / L137 / L139 / L146 / L216 / L217 / L338 |
-| 8 | `report_contradicted` 只有 kind，无挂起状态/resolution/过期规则 | 复用 `startup_unknown` 挂起并写 `reason=contradicted`，定义 resolution 与节点迁移，收口与过期「不释放」规则，补迁移行 | L124 / L292 / L322 / L324 |
-| 9 | 证据门不是统一可执行路径，人工裁决可绕过 | `applyReport` 不由调用方传 policy，按 `node_run_id + workflow_version` 从不可变模板加载；所有人工 confirm 也必须调同一个 `evaluateEvidence(policy, evidence)` | L117–121 / L241 / L251 / L259 |
-| 10 | capability 规则自相矛盾，`compensable` 实际不可达 | 删掉「mutating 的工具只能是 irreversible」，改写为「mutating + 可执行 compensation → compensable；无 compensation → irreversible；作者声明只能往更严一侧写」，补加载期用例 | L359 / L618 |
-| 11 | `cancel_result=already_stopped` 没有合法目标行；`confirm_not_started` 的 dispose 与 L37 冲突 | 补 `dispatched/started → done/failed`（或 →indeterminate）的 already_stopped 行并写 `stopped_at`；dispose 前置改为「该 attempt 收口/重试已落库」；`confirm_not_started` 加 `executor.state`/桥断前置检查 | L36 / L128 / L233–236 / L238 / L335 / L37 |
-| 12 | `report_id` 唯一键只在正文，存储定义里没有 | §14 写 `report_id PRIMARY KEY` 或 `CREATE UNIQUE INDEX`；增加行级表 `report_id` / `decision_id+revision` / `event_seq` / `attempt`；补一条 DDL 验收用例 | L15 / L115 / L383 |
+### 4.2 审计回包后的动作
 
-**执行者自留 7 处**（6 必须补 + 1 可接受）：①policy 判定落成服务端加载的单一 `evaluateEvidence`（= #9）；②§8 缺「行→幂等键/唯一约束」完整对照 + report_registry 缺 report_id 唯一键 DDL（= #12）；③桥断期间 verifying/timing_out 的钟无暂停或继续口径（= #6 已落部分）；④settling 与 failed_with_unverified 交互未逐行对齐（= #3 已落部分）；⑤补偿描述符注册校验未落到 §2 加载期字段/闸门（= #10 相关）；⑥**迁移表只有「补用例」文字，没有逐行生成的测试清单**；⑦§3.5 标题已补回，可接受。
+1. 逐条核 verdict；有致命/重大就按「最小改法」落 v21，重复「改稿 → 自检 → 送审」直到 pass 或只剩措辞。
+2. 台账补第 22 行结论（pass/fail、分类计数、性质），§二 补结论段，§五 改当前状态与下一轮派发对象。
+3. 审计 pass 后才动第四段（面板与查询）；主人 2026-11-11 15:39 口径：「审计这一步，没通过、没获得正确结果前，就不能往后走」。
+4. 每次改稿后同步版本号、SHA256 与行数；改完提交 git。
 
-### 4.2 v19 收口还要补的三块（不是 #7–#12，是配套）
-
-1. **行→幂等键/唯一约束对照表**（§8 下方新增一张表，每行迁移给 `(node_run_id, attempt, <动作>)` 的幂等键）——这是 #12 的另一半。
-2. **迁移表逐行用例清单**（M-01…M-NN，每行一个 `(from, to, condition, CAS)` case）——执行者自留第 6 条，主人要求「严格严谨」，DS-Bot 的 `memory.test.js` 160KB 就是这个量级的参照。
-3. **`§3.4k [CURRENT]` 修订清单 + 文件头版本号改 v19** —— 硬约束（pitfall `mem_wbqyx5g_d07af920`）：改长文档必须同步版本号。当前 `[CURRENT]` 还停在 L632 的 §3.4j。
-
-> ⚠️ 改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构），不要删 §3.4b–§3.4j 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**，L263）。
-
-### 4.3 做完之后
-
-- 台账加第 21 行（`docs/orchestra-audit-ledger.md` §一），并更新 §二 收敛段与 §五 续跑指引。
-- 送第二十一轮审计（挑刺代理：`b4841d70-f28c-4f51-9458-9c0918894376`，用 `send_message` 续；上一任执行代理 `e15fbc7c-f849-4571-97a2-9f89f32f4855` 已失败不可用）。
-- **审计不过就不写第四段**（主人的口径，见 `requirements.md` §四）。
+> ⚠️ 改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构），不要删 §3.4b–§3.4l 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
 
 ---
 
@@ -113,7 +95,7 @@ D:\aboutAI\dsh-orchestra\
 | --- | --- | --- |
 | 一 | 骨架与落点（桥 / 生命周期 / 控制面） | ✅ 完成（设计稿 L5–L96） |
 | 二 | 把「硬」落成规则（17 条：node_run 字段、代次、证据、半态、超时、重试、sweep、迁移表、声明式判定、版本、身份账本、payload、上下文预算、存储、边界、事件、来源分离） | ✅ 完成（L97–L418） |
-| 三 | 九节点图（§3.0 两类契约 → §3.5） | 🔄 v19 修订中（§4.1） |
+| 三 | 九节点图（§3.0 两类契约 → §3.5） | 🔄 v20 已送第二十二轮审计（§4.1） |
 | 四 | 面板与查询 | ⛔ 未开始（要审计通过） |
 | 五 | 记忆插件对接 memory-audit-v1 | ⛔ 未开始 |
 | 六 | 分阶段落地与验收 | ⛔ 未开始 |
@@ -198,4 +180,4 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md | Measure-Ob
 Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 ```
 
-然后按 §4.1 表格逐条改稿 → §4.2 补三块 → 更新版本号 → 送第二十一轮审计。
+然后按 §4.1 的五条主线读 v20 → 等第二十二轮审计回包 → 按 §4.2 处置。

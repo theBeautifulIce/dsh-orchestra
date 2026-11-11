@@ -26,6 +26,8 @@
 | 18 | 第三段 v16 | fail | 3 | 5 | 2 | startup_unknown「仍活」分支无时钟也不在 paused_bridge_missing 五态内、「已失联」分支未拆到 deleted/未知/桥断、abandoned_unverified 的独立确认停止无迁移也无字段、display_status 与 succeeded_with_unverified 冲突且无 run 事件、startup_unknown→done/failed 不继承 schema/判定/证据门、超时表绕过「先问停不停得下来」、startup_unknown 的迟到 report 无账可入、补偿证据只有要求没有事件名与字段、verdict 归类与 Ga 初始化时点不一致、「已在正文生效」检查口径要改成机器可判定 |
 | 19 | 第三段 v17 | fail | 9 | 3 | 0 | indeterminate_side_effect 无出边、orphaned 未列终态也无 replacement、verifying 没有时钟、startup_unknown 四支的钟与出口清理没写全、两个 120 秒钟没有先后且桥预算无持久字段、stopping 缺人裁决行（confirm_applied 无迁移）、stopped_at 被当成 succeeded 的通行证、pending_irreversible_children 只硬编码四态、compensable 的前向动作过不了能力闸门、applyReport 只有文字复用没有单一入口、迟到 report 只留账不阻断会重复副作用、succeeded_with_unverified 与 failed 的边界没写死 |
 | 20 | 第三段 v18 | fail | 10 | 2 | 0 | failed_with_unverified 只进终态集合没有入边、stopped_at 仍被当成副作用没发生的通行证、run 终态 CAS 不按子节点结果分叉、applyReport 缺 attempt 且新 attempt 把 Ga 重置成 1、continue_wait 的 approved→pending 与结论落地即 closed 互相抵消、verifying 与 timing_out 在桥断期间钟没口径且 verify_* 未清、startup_unknown 出口仍有两处不闭合、report_contradicted 只有 kind 没有挂起态与过期规则、证据门不是统一可执行路径且人工裁决可绕过、capability 规则自相矛盾致 compensable 不可达 |
+| 21 | 第三段 v19 | fail | 6 | 4 | 4 | 重试行模型自相矛盾（同一行 attempt+1 与「新 attempt 必新行」并存）；桥断口径三套（continue_tracking 两支、watchdog 暂停与桥断预算两个时间基、paused_bridge_missing 与 startup_unknown 互撞）；人工证据门自相矛盾（attested 既要 evidence_id 又说不作验证证据）；report_contradicted 有挂起格却没有出口闸门，decision 表也没有 uphold_report / uphold_decision 的落点；confirm_not_started 缺 executor 三支；终态集合四处重复；另有三条措辞口径 |
+| 22 | 第三段 v20 | 已送第二十二轮（a8f7647d），待回 | — | — | — | v20 按第 21 轮 14 条逐条落稿：重试改「旧行落 superseded + 新行 attempt+1」；桥断只走 bridge_absence_accumulated 一个时间基，continue_tracking 只对 executor 仍活且桥可用开放；人工证据分档（applied / not_applied 走 evaluateEvidence，attested 豁免只记 attestation_id）；两格迁出一律带 hang_reason IS NULL；applyReport 加第 6 参 decision，decision 表补 uphold 映射；confirm_not_started 补四支 executor.state；终态集合只在 §8 写一份并含 superseded；M 扩到 58；新增 §3.4l [CURRENT] 十四条清单 |
 
 ## 二、几件能算出来的事
 
@@ -42,6 +44,12 @@
 **第 19 轮之后仍不能收口。** 审计给出的收敛判断是：结构性/致命 12 条（9 条致命 + 3 条重大结构性）、措辞/性能/文档卫生 0 条，仍未到可进第四段。最易低估的风险是：`stopped_at` 只证明动作不再跑、不证明副作用没发生，把它当 `succeeded` 的通行证，会让一笔已写出、只是不再动的副作用从 `succeeded_with_unverified` 里消失。这一轮的致命项开始成族地落在同一件事上——**半态没有自己的时钟、证据门、迟到回写路径和账目位置**：indeterminate_side_effect 无出边、orphaned 未列终态、verifying 无时钟、startup_unknown 四支清理不齐，都是这一族。主人 15:39 的口径「状态机啃得更死一点，毕竟这是流程的核心」正是对症的：审计火力从措辞转向状态机本身，第十四条硬教训里的「半态要有出口」「超时是两件事」「恢复表逐态闭合」「时限分层」「证据分强弱」在这一轮被逐条兑现成检查项。
 
 **第 20 轮之后仍不能收口。** 审计给出的收敛判断是：结构性/致命 10 条、契约/高优先 2 条、措辞/性能/文档卫生 0 条，仍未到可进第四段。这一轮的致命项不再分散在「半态时钟」一族，而是**收尾判据**一族——`failed_with_unverified` 只进了终态集合没有入边、`stopped_at` 仍被当成「副作用没发生」的通行证、run 终态 CAS 不按子节点结果分叉、capability 规则自相矛盾导致 compensable 分支不可达、证据门由调用方传 policy 所以人工裁决可绕过。审计点出的最易低估风险是一句话：**「节点终态」不等于「run 可以成功」**——`failed / timeout / orphaned / failed_with_unverified` 都是终态，若 run 只查「无非终态 node_run」，账本会在工作失败或失联时收成 `succeeded`；叠加 `stopped_at` 只证明动作停了、不证明副作用没发生，就会在现实仍可能落刀时把账做平。这与第十四条硬教训里的「停止不等于结算」「证据分强弱」同源，但此前都停在字段级，没有落成一条可执行的判定。
+
+**第 20 轮之后，v19 已按 12 条落稿。** 2026-11-11 19:08 设计稿升 v19（769 行，SHA256 前缀 4C50EB6B41732026），#7–#12 逐条落进正文：startup_unknown 只留 unknown_watchdog 一个钟、report_contradicted 有挂起格与两个 resolution、applyReport 内部加载 policy 且人工裁决同走 evaluateEvidence、capability 三值推导与加载期用例、already_stopped 两条出边与 confirm_not_started 闸门、§14 行级唯一约束；另补行→幂等键对照表与 M-01…M-56 逐行用例。第二十一轮审计已送，等结论；未过之前不动第四段。
+
+**第 21 轮之后 v19 被判 fail。** 结论是 6 致命 + 4 重大 + 4 措辞。这一轮的性质不是新格子不够，而是同一件事被写成了两三套：重试一处写旧行 attempt+1、一处写新 attempt 必新行；桥断期间 continue_tracking、watchdog 暂停与桥断预算各有一套时间基；人工证据门对 attested 既要求 evidence_id 又说只作状态事实；report_contradicted 造了挂起格却没有出口闸门，decision 表也没有 uphold_report / uphold_decision 的落点；confirm_not_started 的 executor 闸门比 confirm_started 少了三支；终态集合在 §8 与 §3.4j 各写了一份；§14 只覆盖四类行级唯一约束。
+
+**v20 已按 14 条落稿。** 2026-11-11 19:27 设计稿升 v20（809 行，SHA256 前缀 0C90060F7D0ACFCC；19:24 落稿后自检又修正回写边计数与 deleted 例外三处）：重试一律新建行、旧行落中性终态 superseded；桥断只走 bridge_absence_accumulated 一个时间基、continue_tracking 只对 executor 仍活且桥可用开放；confirm_applied / confirm_not_applied 必须走 evaluateEvidence，confirm_started_attested 豁免只记 attestation_id；两格迁出一律带 hang_reason IS NULL；applyReport 加第 6 参 decision、decision 表补 uphold 映射；confirm_not_started 补四支 executor.state；终态集合只在 §8 写一份并含 superseded（run 级五个名字）；另补 §3.4l [CURRENT] 十四条清单。第二十二轮审计待送。
 
 **审计子代理的任务就是挑刺**，它会一直找下去。其中「加固项」本质是加保险而非缺陷，保险没有归零的那天，这条线就不该按「清零」验收。
 
@@ -60,26 +68,27 @@
 - 第 3 轮是 pass（附四条在案），是第一、二段的收敛点。
 - 第 4 轮起审的是第三段（九种节点），轮次编号沿用全局计数。
 
-## 五、当前进度与续跑指引（2026-11-11 17:20 记）
+## 五、当前进度与续跑指引（2026-11-11 19:24 记）
+
+- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 809 行（SHA256 前缀 0C90060F7D0ACFCC，文件头与第三段标题均已升 v20）。v19 由执行代理 149af4fd-7844-416f-a5a4-4fd3cd147f02 落 #1–#6（首个子代理 e15fbc7c-f849-4571-97a2-9f89f32f4855 动手前失败），#7–#12 与三张表由本会话补齐；第二十一轮审计由 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7 判 fail（6 致命 + 4 重大 + 4 措辞），v20 修法已全部落稿，第二十二轮审计 2026-11-11 19:29 已送 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，未过前不写第四段。
 
 - 项目已于 2026-11-11 16:50 整体迁到 D:\aboutAI\dsh-orchestra（设计稿、台账、requirements.md、design-notes.md、根目录 handoff.md 与 codebasemap.md、references\ 三份参考项目、四份 codebase-memory 图谱）；旧址 D:\aboutAI\dshQQ\docs\ 保留同内容副本，后续只改新址。
-- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 670 行（SHA256 前缀 DFCEA51FF9D53AC4，文件头与第三段标题仍写 v18）——（注：第二十轮判 fail 后派出的首个 v19 执行子代理 e15fbc7c-f849-4571-97a2-9f89f32f4855 在动手前失败；随后改派 149af4fd-7844-416f-a5a4-4fd3cd147f02，主人叫停审计时它已落盘 #1–#6。）v19 已部分落盘：#1–#6 六条已逐条核实进正文（L130 applyReport 加 attempt、L213 Ga 只增不重置、L243/L244 stopped_at 与 side_effect_verified_none 分离、L244/L277/L278 failed_with_unverified 入边、L265/L270/L271/L273 离开 verifying 清钟、L115–124 桥断时钟矩阵与 bridge_absence_accumulated 清零语义、L282–284 run 级结果判定三条、L337/L343/L349/L350 continue_wait 只留一套口径）；#7–#12 未落，另需补「行→幂等键对照表」「迁移表逐行用例清单」「§3.4k [CURRENT] 清单」与版本号 v19。审计代理 b4841d70-f28c-4f51-9458-9c0918894376 可用 send_message 续；执行代理 e15fbc7c-f849-4571-97a2-9f89f32f4855 已失败不可用。
 - 第二十轮审计已出结论：fail，10 致命 + 2 重大结构性，措辞/性能 0 条。最易低估的风险：「节点终态」不等于「run 可以成功」；叠加 stopped_at 只证明动作停了、不证明副作用没发生。
-- v19 必须落的 12 条（第二十轮原文要点）：
+- v19 落定的 12 条（第二十轮原文要点，v20 在其上加固）：
   1. failed_with_unverified 只有终态集合没有入边 → 补「verifying → failed_with_unverified」、补偿失败来源 → failed_with_unverified、compensable 无可执行补偿 → failed_with_unverified 三条显式迁移行；L229 那行的「到」列改成条件二选。
   2. stopped_at 被当成副作用没发生的通行证 → succeeded 只认 side_effect_verified_none=true 且带 stop_evidence；stopped_at 单独存在只能支撑 succeeded_with_unverified；unverified_side_effect 不得因 stopped_at 消失。L297 / L301 / L303 统一引用这一句。
   3. run 终态 CAS 不按子节点结果分叉 → 存在 failed / timeout / failed_with_unverified 子节点则 run 只能 failed 或 failed_with_unverified；存在未被 replacement_node_run_id 替换的 orphaned 子节点则 run 只能 orphaned 或留 paused；全部 done 才允许 succeeded。
   4. applyReport 缺 attempt、新 attempt 把 Ga 重置成 1 → 签名加 attempt，所有回写 CAS 带「attempt + Ga + report_id」；首次 Ga=1，其余一律 Ga+1，删掉 leased→dispatched 硬写 1。
   5. continue_wait 的 approved → pending 与「结论落地即 closed」互斥 → 只留一套（推荐：对 pending / acknowledged 追加 revision 保持活跃、不经过 approved）。
   6. verifying 与 timing_out 在桥断期间的钟无口径、verify_* 未清 → 补桥断时钟矩阵表（每钟 × 桥断行为 × 恢复处理）、写死 bridge_absence_accumulated 清零语义、每条离开 verifying 的行显式清 verify_started_at / verify_deadline_at。
-  7. startup_unknown 出口两处不闭合 → 只保留 unknown_watchdog 一个钟；continue_tracking 对「executor 仍活」与「桥断未删」统一开放；deleted 支出口按 L139 收窄或改 L139。
+  7. startup_unknown 出口两处不闭合 → 只保留 unknown_watchdog 一个钟；continue_tracking 只对「executor 仍活且桥可用」开放（v20 起桥断已转 paused_bridge_missing）；deleted 支出口按 L139 收窄或改 L139。
   8. report_contradicted 只有 kind → 补挂起状态与理由、resolution 取值与节点迁移、围栏规则、过期只落账不释放围栏。
   9. 证据门可绕过 → applyReport 不收调用方 policy，按 node_run_id + workflow_version 从不可变模板加载；落成 evaluateEvidence(policy, evidence) → {pass, reason}；所有人工裁决迁移行必须调同一函数。
   10. capability 规则自相矛盾致 compensable 不可达 → 删掉「mutating 只能是 irreversible」，写死「mutating + 可执行 compensation → compensable；无 compensation → irreversible；作者声明只能更严」。
   11. already_stopped 无合法目标行、confirm_not_started 的 dispose 违反「只在节点终态后 dispose」→ 补 already_stopped 行并写 stopped_at；dispose 前置改为「该 attempt 已收口或重试已落库」；confirm_not_started 加 executor 已删且桥断已确认的前置检查。
   12. report_registry.report_id 唯一键只在正文不在 DDL → §14 写 report_id PRIMARY KEY 或 UNIQUE 索引；补「行 → 幂等键」对照表（report_id / decision_id+revision / event_seq / attempt+Ga）；补一条 DDL 验收用例。
 - 执行者自留 7 处：第二十轮判 6 条必须补（policy 判定落成 evaluateEvidence、行→幂等键对照 + report_id DDL、桥断时钟矩阵、settling 与 failed_with_unverified 逐行对齐、补偿描述符注册校验落 §2、迁移表逐行生成用例清单）、1 条可接受（§3.5 标题已补回）。
-- 收敛判据（§三）不按条数归零验收。状态机这一族若在第二十一轮清零、剩下的只是措辞，就按主人口径收口进第四段（面板与查询）。
+- 收敛判据（§三）不按条数归零验收。状态机这一族若在第二十二轮清零、剩下的只是措辞，就按主人口径收口进第四段（面板与查询）。
 - 按主人 2026-11-11 15:39 口径「审计这一步，没通过、没获得正确结果前，就不能往后走」：第三段没拿到 pass 之前不写第四段。
 - 换会话不影响进度：设计稿、本台账、记忆底账（asset 记事本 mem_mwbqav4n_23bd4f8d）与在办条目（L5 mem_mwbq9pys_9139830f）都落在磁盘上，换会话后按这四处接手即可。
 - 审计口径的复用条目：pitfall mem_wbsf89z_3ac546f6（审计轮次不收敛的三条收敛判据）；记忆分层口径 L4 mem_wbtckln_5dd4de9f（项目细节进记事本，长期记忆只留一个待办和索引）。
