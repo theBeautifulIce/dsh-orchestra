@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-11 20:05。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-11 23:55。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；下一步写第四段（面板与查询），代码一行没写。**
+现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v27 已送第二十九轮，面板原型 v7 已落在 `docs/prototype/panel-v2.html`，等主人评审与审计回包；插件源码还没写。**
 
 ---
 
@@ -19,13 +19,14 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 866 行 / SHA256 `2E529CDC209F8A2D538F3C5A987D429244040E8F54450708FAE7A2338150B054`；v23 已定稿，第二十五轮审计 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞） |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 109 行；已跑 25 轮，第 25 轮判 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞） |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 1289 行 / SHA256 `AE360E985616AB66E41D41B0F6A5A857DCBEC9E48DBDFEB5F86094712AE186B0`；v27 已送第二十九轮（第二十八轮 fail：0 致命 / 1 重大） |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 116 行；第三段第 25 轮 pass；第四段已跑 26–28 轮，v27 送第 29 轮 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
 | 参考项目 `references/` | 三份已克隆并建图谱 |
 | **源码** | **没有。还没开始写。** |
+| 面板原型 `docs/prototype/panel-v2.html` | v7 单文件浅色原型；任务看板四列、任务流程竖向步骤、流程页、全局搜索、决策弹窗 |
 | 图谱 | `pi-harnessmm` 124/294、`dsh-superagent-prototype` 2012/8492、`DS-Bot` 10539/33229、`dsh-orchestra-docs` 97/96 |
 
 ---
@@ -37,8 +38,9 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（866 行，v23）
-│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（109 行）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（1289 行，v27）
+│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（116 行）
+│  ├─ prototype\panel-v2.html     ← 面板 v7 单文件原型（浅色、可点击）
 │  ├─ requirements.md             ← 原始需求与拍板口径
 │  └─ design-notes.md             ← 设计思路与决策理由
 ├─ references\           ← 只读参考，不是本项目代码
@@ -66,26 +68,25 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第三段 v23 已通过第二十五轮审计（2026-11-11 20:04）
+### 4.1 当前状态：第四段 v27 已送第二十九轮（2026-11-11 23:54）
 
-第二十五轮审计由 a8f7647d 判 **pass**：7 个重点项全过，0 致命、0 重大，只有 3 条非阻断措辞观察。v23 的 4 条修法均已核过；设计稿 866 行、HEAD `bdf9c17`。第三段到此收口，不再送第三段审计。
+第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
-v23 已核过的 4 条修法（留作记录）：
+第四段 v24–v26 过了第二十六、二十七、二十八轮。第二十八轮判 **fail：0 致命 / 1 重大**，唯一重大是「高风险 `decision.resolve` 的两阶段确认与 inbox 幂等账没接上」。v27 已修并送第二十九轮：
 
-- **裁决终态出口只 CAS `Gr`**：L231 / L279 / L281 三个人裁决终态出口、M-60、§3.4n 第 1 条都删掉 `action_generation = Ga`，只留 `rearm_generation = Gr`（不 +1）；`uphold_report` 的 Ga 例外不变。照 §3.4h 的矩阵实现与 M-60 的断言从此一致。
-- **M-60 补执行断言**：`superseded` 支断言新行 `origin_node_run_id = 旧行.node_run_id`、`attempt = 旧 attempt + 1`、旧行 `replacement_node_run_id` 回写；`failed` 支断言 `status=failed` 且不建新行。
-- **两处措辞**：L288 补「共三处路径」；L803 的历史 M-59 补注「v22 起不占 Gr」。
+- 第一次不带 `confirm_challenge` 的高风险 `decision.resolve` 只做预检，不落 command 行、不写回执、不占 `operation_id`。
+- 第二次先看终结回执与在途行，没有才验 challenge；预检之后、正式执行之前换 payload / resolution / operation_id 报 `CONFIRMATION_MISMATCH`，不会被 `OPERATION_ID_CONFLICT` 抢先。
+- 落 command 行靠 `operation_id` 的 partial unique index 兜底；并发撞唯一键的请求重读，已有终态按回执复放，仍非终态返回 `COMMAND_BUSY`。
+- 回执可查 7 天；command 行不物理删除、只清 `receipt_json`，过期后同 `operation_id` 返回 `OPERATION_EXPIRED`，不重新执行。§14.2 补了 command 行字段、CHECK 与唯一索引，event 行不受影响。
+- Q-14 / Q-15 已改成可验收断言：预检不落 command 行、换 payload 命中 mismatch、成功后同 payload `replayed=true`、成功后换 payload 命中 conflict。
 
-3 条措辞观察留到第四段一并清理，不单独再开一轮：
-- 旧历史标题 L596/L608/L619/L635/L652/L665/L680/L695/L710/L724 仍写「以 §3.4n 为准」；L712/L746 仍称当前生效清单为 §3.4l。§3.4n 已声明被 §3.4o 取代，后续统一指向 §3.4o。
-- L803 同句仍保留「并写 `rearm_generation = Gr`」，与后半句「v22 起不占 Gr」字面冲突；已有「历史条目以此注为准」收口，再修时改成「原写……」。
-- L590（§3.3）概括 decision 状态机时未带 `report_contradicted` 不落 `expired` 的例外；该段已写「见 §8」，摘要可补半句。
+面板原型 `docs/prototype/panel-v2.html` 已到 v7：浅色、低密度、任务流程竖向步骤、流程页、全局搜索、决策弹窗；主人会自己打开看，不再截图。原型独立审计 agent `8bb0d82f-b1e0-41b4-baa0-af02b2e2b4e5` 仍在跑，回包未到。
 
-### 4.2 下一步：写第四段（面板与查询）
+### 4.2 下一步：等第二十九轮，再进第五段
 
-1. 先读 requirements §4.1、design-notes §六与第三段末尾的对外投影字段，确定第四段只写「人怎么看、怎么查、怎么操作」，不重开状态机语义。
-2. 第四段单独成稿、单独送审；审计口径沿用「只审不改、致命/重大/措辞分类、带行号与最小改法」。
-3. 第四段 pass 后再写第五段（记忆插件对接）与第六段（分阶段落地与验收）。
+1. 等第二十九轮 pass；fail 就按「只审不改、致命/重大/措辞分类、带行号与最小改法」逐条修，不跳段。
+2. 原型按主人评审意见继续改：浅色、低密度、人话、任务做到哪一步/发生了什么/结果/下一步；主人自己打开，不再截图。
+3. 第四段 pass 后再写第五段（记忆插件对接）与第六段（分阶段落地与验收）；六段全过后才写 spec、自审、提交、交主人审。
 4. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
 
 > ⚠️ 第三段内改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构）；从第四段起按六段路线新增 `## 第四段 …`，不要改动前三段标题。不要删 §3.4b–§3.4m 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
@@ -99,7 +100,7 @@ v23 已核过的 4 条修法（留作记录）：
 | 一 | 骨架与落点（桥 / 生命周期 / 控制面） | ✅ 完成（设计稿 L5–L96） |
 | 二 | 把「硬」落成规则（17 条：node_run 字段、代次、证据、半态、超时、重试、sweep、迁移表、声明式判定、版本、身份账本、payload、上下文预算、存储、边界、事件、来源分离） | ✅ 完成（L97–L418） |
 | 三 | 九节点图（§3.0 两类契约 → §3.5） | ✅ 完成（v23，第二十五轮 pass；§4.1） |
-| 四 | 面板与查询 | 🔄 下一段 |
+| 四 | 面板与查询 | 🔄 设计稿 v27 送第二十九轮；原型 v7 等主人评审 |
 | 五 | 记忆插件对接 memory-audit-v1 | ⛔ 未开始 |
 | 六 | 分阶段落地与验收 | ⛔ 未开始 |
 
@@ -184,4 +185,4 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md | Measure-Ob
 Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 ```
 
-第三段已 pass；按 §4.2 进入第四段（面板与查询）。
+第四段 v27 已送审；按 §4.2 等回包并收原型反馈。

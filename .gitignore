@@ -6,4 +6,12 @@ references/
 
 # 本地临时件
 tmp/
+.tmp/
 *.log
+*.bak
+
+# 原型目录：只提交 panel-v2.html，截图与一次性脚本不入库
+docs/prototype/*.png
+docs/prototype/.*.js
+docs/prototype/.*.css
+docs/prototype/.chrome-profile/
