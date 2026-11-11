@@ -19,7 +19,7 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 1495 行 / 370746 bytes / SHA256 `3AA6F847F449FCC45E0EA459682A4E284BBE2BE137949E30696F6C7B03115554`；v30 已送第三十二轮（第三十一轮 pass：0 致命 / 0 重大 / 3 条措辞，已在 v30 清） |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 1495 行 / 371142 bytes / SHA256 `5B39674E606D7E4C7F09ED61080050F880456E2E54A465DC7CD8FF00C4A7BF9B`；v30 已送第三十二轮（第三十一轮 pass：0 致命 / 0 重大 / 3 条措辞，已在 v30 清） |
 | 审计台账 `docs/orchestra-audit-ledger.md` | 127 行；第三段第 25 轮 pass；第四段第 31 轮 pass，v30 送第 32 轮 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |

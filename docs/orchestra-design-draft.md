@@ -1330,11 +1330,11 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | 命令 | target | expected | payload | 成功返回 | 语义 |
 |---|---|---|---|---|---|
 | `workflow.create` | `{}` | `{"revision": 0}` | `{"name", "definition"?}` | `workflow_id`, `draft_revision`, `validation` | 新建流程与草稿；`definition` 省略时建空草稿。不自动发布。 |
-| `workflow.open_draft` | `{"workflow_id"}` | `{"base_version": N}` | `{}` | `draft_revision`, `based_on_version` | 从当前发布版本复制出可编辑草稿。已有未发布草稿返回 `WORKFLOW_DRAFT_EXISTS`；从未发布返回 `WORKFLOW_NOT_PUBLISHED`。 |
+| `workflow.open_draft` | `{"workflow_id"}` | `{"base_version": N}` | `{}` | `draft_revision`, `based_on_version` | 从当前发布版本复制出可编辑草稿。`N` 必须等于 `current_version`，不等返回 `WORKFLOW_VERSION_CONFLICT`；已有未发布草稿返回 `WORKFLOW_DRAFT_EXISTS`；从未发布返回 `WORKFLOW_NOT_PUBLISHED`。 |
 | `workflow.update` | `{"workflow_id"}` | `{"revision": R}` | `{"definition"}` | `draft_revision`, `changed`, `validation` | 整份替换草稿，不做字段级 patch；`R` 是当前草稿 revision。内容 hash 未变时不递增 revision，返回 `changed=false`。 |
 | `workflow.publish` | `{"workflow_id"}` | `{"revision": R, "base_version": N}` | `{"publish_note"}` | `version`, `definition_hash`, `published_at` | 全量校验通过后生成不可变版本；`N` 必须等于当前 `current_version`。发布后草稿转为已消费，编辑前先 `open_draft`。 |
 
-- **发布已消费草稿返回 `WORKFLOW_DRAFT_NOT_OPEN`：** `workflow_drafts.published_version` 非空即表示这份草稿已经发布过；要再发先 `open_draft`，不拿旧 revision 再发一次。
+- **发布已消费草稿返回 `WORKFLOW_DRAFT_NOT_OPEN`：** `workflow_drafts.published_version` 非空即表示这份草稿已经发布过；要再发先 `open_draft`，不拿旧 revision 再发一次。**错误优先级写死：** 同一个 publish 同时遇到「草稿已消费」与「base_version 不等于 current_version」时，先返回 `WORKFLOW_DRAFT_NOT_OPEN`；只有草稿仍未消费、只是 base_version 给错时，才返回 `WORKFLOW_VERSION_CONFLICT`。
 - **发布不做两阶段 challenge。** 它不碰在途 run、不产生外部副作用、失败可重试；发布只影响之后新建的 run。面板在按钮上做一次普通确认，agent 调用必须带一句 `publish_note`。
 - **版本号从 1 开始，只增不减、不复用。** `workflow.publish` 在同一个写事务里按 `expected.revision` CAS 草稿、按 `expected.base_version` CAS `workflows.current_version`、插入 `workflow_versions`、更新 `current_version`、把草稿标为已消费、追加 `workflow.published` 事件；任何一步失败整笔回滚。
 - **草稿保存不要求全图可发布。** `workflow.update` 只拒绝无法解析、超限、节点 id 重复、边端点不存在、坐标非法这几类；缺入口、有环、branch 没配路由等作为 `validation.errors[]` 返回并照样保存，让人可以分步改。发布时才要求全量通过。
@@ -1436,7 +1436,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 36. **Q-36** 一条 command 行卡在 `in_flight`：`created_at` 起未满 10 分钟时，重发同 operation_id 返回 `COMMAND_BUSY`；满 10 分钟后在途超时扫描以 CAS 置 `rejected` 并写 `OPERATION_TIMEOUT` 回执，不改业务状态；随后 `get_operation` 返回 `rejected` / `OPERATION_TIMEOUT`，面板提示先核对现状、换新 operation_id 重做；执行侧若仍在跑，提交时因 CAS 失败整笔回滚，不会覆盖这次终态。
 
 37. **Q-37** `workflow.create` 建出草稿 revision 1；`workflow.update` 改成可发布图；`workflow.publish` 生成版本 1 并写 `workflow_versions`。发布后再 `workflow.update` 返回 `WORKFLOW_DRAFT_NOT_OPEN`；`workflow.open_draft` 以 `base_version=1` 复制出草稿，再发布得版本 2。版本 1 的 `definition_json` / `definition_hash` 一字节未变；已启动的 run 仍读版本 1，新建 run 读版本 2。
-38. **Q-38** 两个面板同时用 revision 2 改同一草稿：先到的落 revision 3，后到的返回 `WORKFLOW_REVISION_CONFLICT` 且 `details.current_revision=3`，不覆盖。同一 `operation_id` + 同一 `request_hash` 重发返回 `replayed=true`，不重复递增；内容 hash 未变的 `workflow.update` 返回 `changed=false`、revision 不动。两个 `workflow.publish` 同用 `base_version=1`：一个成功生成版本 2；另一个读到的草稿已消费，返回 `WORKFLOW_DRAFT_NOT_OPEN`，不生成重复版本；若第二个用的是另一份以 `base_version=1` 为基础、但在版本 2 发布后才开的草稿，则返回 `WORKFLOW_VERSION_CONFLICT`。
+38. **Q-38** 两个面板同时用 revision 2 改同一草稿：先到的落 revision 3，后到的返回 `WORKFLOW_REVISION_CONFLICT` 且 `details.current_revision=3`，不覆盖。同一 `operation_id` + 同一 `request_hash` 重发返回 `replayed=true`，不重复递增；内容 hash 未变的 `workflow.update` 返回 `changed=false`、revision 不动。两个 `workflow.publish` 同用 `base_version=1`：一个成功生成版本 2；另一个读到的草稿已消费，按固定优先级返回 `WORKFLOW_DRAFT_NOT_OPEN`，不生成重复版本。另测一次草稿尚未消费、但 `base_version` 与 `current_version` 不等的 publish：返回 `WORKFLOW_VERSION_CONFLICT`，不插版本、不改 `current_version`。
 39. **Q-39** 一份没有 trigger、有环、branch 出边缺 route 的草稿可以 `workflow.update` 保存，返回 `validation.errors[]`；`workflow.publish` 返回 `WORKFLOW_VALIDATION_FAILED`（422），`details.errors[]` 的 `path` 能定位到节点或边，`current_version` 不变、`workflow_versions` 不新增行。再补两条出度用例：`trigger` 两条出边返回 `WORKFLOW_TRIGGER_FANOUT`；普通节点两条出边返回 `WORKFLOW_NODE_FANOUT_INVALID`，`path` 指向该节点。修好后重新发布成功。
 40. **Q-40** `subworkflow` 指向不存在的 `(workflow_id, pinned_version)` 时发布报 `WORKFLOW_SUBWORKFLOW_VERSION_MISSING`；两个已发布流程互相引用报 `SUBWORKFLOW_CYCLE`；三层嵌套报 `SUBWORKFLOW_DEPTH_EXCEEDED`。子流程后来发布新版本，父流程已发布版本仍按 pinned version 解释，不漂移。
 41. **Q-41** 在草稿里只拖动节点、不改边：`definition_hash` 变化，发布生成新版本；节点 `seq` 仍按拓扑序与 `node_id` 排，不按坐标排。已发布画布只读，拖动不生效；版本 1 的 run 节点顺序与结果不因版本 2 的布局变化而变。
