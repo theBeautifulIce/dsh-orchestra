@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsh-orchestra · 控制面原型 v9</title>
+<title>dsh-orchestra · 控制面原型 v11</title>
 <style>
 :root{
   --bg:#f3f4f7;
@@ -3123,8 +3123,277 @@ body.v5 .modal .check-row .cn{font-size:12.5px!important}
 body.v5 .modal .check-row .cd{font-size:12px!important;line-height:1.6!important}
 body.v5 .wf-api-code{padding:10px 9px!important}
 
+/* v11 字号层：正文 14px 起，先让人看清，再谈密度 */
+body.v5{font-size:14px!important;line-height:1.6}
+body.v5 .brand{padding:18px 16px 16px!important}
+body.v5 .brand-name{font-size:16px!important;line-height:1.3!important}
+body.v5 .brand-sub{font-size:12.5px!important;letter-spacing:.1em!important;line-height:1.5!important}
+body.v5 .workspace{margin:0 12px 10px!important;padding:11px 12px!important}
+body.v5 .ws-name{font-size:13.5px!important}
+body.v5 .ws-url{font-size:12.5px!important}
+body.v5 .nav-scroll{padding:4px 10px 10px!important}
+body.v5 .nav-label{font-size:12.5px!important;letter-spacing:.1em!important;padding:16px 10px 7px!important}
+body.v5 .nav-item{height:38px!important;padding:0 11px!important;font-size:14px!important;gap:10px!important}
+body.v5 .nav-item .ic{width:17px!important;height:17px!important}
+body.v5 .nav-item .nb{font-size:12px!important;min-width:23px!important;height:20px!important}
+body.v5 .note-entry{font-size:12.5px!important;padding:10px!important}
+body.v5 .user-name{font-size:13.5px!important}
+body.v5 .user-role{font-size:12px!important;letter-spacing:.08em!important}
+body.v5 .user-avatar{width:30px!important;height:30px!important;font-size:12.5px!important}
+body.v5 .topbar{height:60px!important;padding:0 24px!important;gap:14px!important}
+body.v5 .crumb{font-size:13px!important}
+body.v5 .searchbox{width:340px!important;height:36px!important}
+body.v5 .searchbox input{font-size:13.5px!important}
+body.v5 .searchbox .kbd{font-size:11.5px!important}
+body.v5 .top-status{font-size:12.5px!important;padding:6px 10px!important}
+body.v5 .icon-btn{width:30px!important;height:30px!important}
+body.v5 .avatar-btn{width:32px!important;height:32px!important;font-size:12px!important}
+body.v5 #screen{padding:22px 26px 72px!important}
+body.v5 .masthead{padding:2px 0 16px!important}
+body.v5 .masthead h1{font-size:24px!important;line-height:1.3!important}
+body.v5 .mast-kicker{font-size:12px!important;letter-spacing:.12em!important}
+body.v5 .mast-lede{font-size:13.5px!important;line-height:1.65!important}
+body.v5 .task-top p{font-size:13.5px!important;line-height:1.6!important}
+body.v5 .btn{height:34px!important;padding:0 14px!important;font-size:13px!important}
+body.v5 .btn.sm{height:29px!important;padding:0 10px!important;font-size:12.5px!important}
+body.v5 .task-toolbar{padding:9px 10px!important;margin-bottom:14px!important}
+body.v5 .filter{height:32px!important;padding:0 12px!important;font-size:13px!important;gap:6px!important}
+body.v5 .filter .n{font-size:11.5px!important}
+body.v5 .mini-search{width:220px!important;height:32px!important}
+body.v5 .mini-search input{font-size:13px!important}
+body.v5 .view-btn{height:27px!important;font-size:12.5px!important}
+body.v5 .view-toggle{padding:2px!important}
+body.v5 .board{grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:12px!important}
+body.v5 .bcol{padding:10px!important;border-radius:10px!important}
+body.v5 .bcol-head{padding:2px 2px 9px!important}
+body.v5 .bcol-name{font-size:13px!important}
+body.v5 .bcol-count{font-size:12px!important}
+body.v5 .bcol-drop{gap:10px!important}
+body.v5 .task-card{padding:14px 14px 12px!important;border-radius:10px!important}
+body.v5 .tc-head{font-size:12px!important;gap:6px!important;flex-wrap:wrap!important}
+body.v5 .tc-type{font-size:12px!important;padding:2px 6px!important}
+body.v5 .tc-pri{font-size:12px!important}
+body.v5 .tc-when{font-size:12.5px!important;line-height:1.5!important;text-align:right!important}
+body.v5 .tc-title{font-size:15px!important;line-height:1.45!important;margin:7px 0 6px!important;font-weight:650!important}
+body.v5 .tc-stage{font-size:13.5px!important;line-height:1.6!important;margin:0 0 8px!important}
+body.v5 .tc-result,body.v5 .tc-next{font-size:13px!important;line-height:1.65!important;margin-top:6px!important}
+body.v5 .tc-call{font-size:13px!important;line-height:1.55!important;padding:8px 10px!important;margin-top:9px!important}
+body.v5 .tc-progress{font-size:12px!important;margin-top:9px!important}
+body.v5 .tc-progress em{font-size:12px!important}
+body.v5 .tc-foot{font-size:12.5px!important;margin-top:10px!important;padding-top:9px!important}
+body.v5 .hist-btn{font-size:12px!important;height:26px!important}
+body.v5 .tasks-list-table{font-size:13px!important}
+body.v5 .tasks-list-table th{font-size:12.5px!important}
+body.v5 .tl-title{font-size:14px!important;line-height:1.45!important}
+body.v5 .tl-sub{font-size:12.5px!important}
+body.v5 .tl-when{font-size:12.5px!important}
+body.v5 .tl-stage,body.v5 .tl-result,body.v5 .tl-next{font-size:13px!important;line-height:1.55!important}
+body.v5 .tt-sub{font-size:12.5px!important}
+body.v5 .tw-task-title{font-size:15px!important}
+body.v5 .tw-task-sub{font-size:13px!important}
+body.v5 .tw-task-type,body.v5 .tw-task-pri{font-size:12px!important}
+body.v5 .tw-task-foot{font-size:12px!important}
+body.v5 .tw-step-state{font-size:12px!important}
+body.v5 .tw-step-meta{font-size:12.5px!important}
+body.v5 .tw-step-title{font-size:14px!important}
+body.v5 .tw-step-sub{font-size:13px!important;line-height:1.65!important}
+body.v5 .tw-step-result{font-size:13px!important;line-height:1.6!important}
+body.v5 .tw-step-result b{font-size:12px!important}
+body.v5 .tw-block h4{font-size:13px!important}
+body.v5 .tw-block p{font-size:13.5px!important;line-height:1.7!important}
+body.v5 .tw-code{font-size:12.5px!important}
+body.v5 .tw-ev{font-size:13px!important}
+body.v5 .wf-top-kicker{font-size:12.5px!important}
+body.v5 .wf-top p{font-size:13.5px!important;line-height:1.65!important}
+body.v5 .wf-top-meta{font-size:12.5px!important}
+body.v5 .wf-pill{font-size:13px!important}
+body.v5 .wf-pill em{font-size:12px!important}
+body.v5 .wf-tab{font-size:13px!important}
+body.v5 .wf-tab .n{font-size:11.5px!important}
+body.v5 .wf-stage-top,body.v5 .wf-stage-state,body.v5 .wf-stage-foot{font-size:12px!important}
+body.v5 .wf-stage-title{font-size:14px!important;line-height:1.5!important}
+body.v5 .wf-stage-process,body.v5 .wf-stage-result{font-size:13px!important;line-height:1.6!important}
+body.v5 .wf-stage-result b{font-size:12px!important}
+body.v5 .wf-inspector-title{font-size:14px!important}
+body.v5 .wf-inspector-meta{font-size:12.5px!important}
+body.v5 .wf-side-card h4{font-size:13px!important}
+body.v5 .wf-side-row{font-size:12.5px!important}
+body.v5 .wf-mini-run{font-size:12.5px!important}
+body.v5 .wf-mini-run .t,body.v5 .wf-mini-run .dur,
+body.v5 .run-history-row .t,body.v5 .run-history-row .dur{font-size:12px!important}
+body.v5 .wf-canvas-tip{font-size:12.5px!important}
+body.v5 .wf-palette-label{font-size:12px!important}
+body.v5 .dec-why{font-size:13.5px!important;line-height:1.65!important}
+body.v5 .dec-meta{font-size:12.5px!important}
+body.v5 .dec-label{font-size:12px!important}
+body.v5 .dec-choice b{font-size:13px!important}
+body.v5 .dec-choice span{font-size:12.5px!important}
+body.v5 .dec-foot{font-size:12px!important}
+body.v5 .estate{font-size:12.5px!important}
+body.v5 .effect-card{font-size:13px!important}
+body.v5 .effect-card .eff-why{font-size:13.5px!important;line-height:1.65!important}
+body.v5 .eff-evidence{font-size:12.5px!important}
+body.v5 .summary-cell span{font-size:12.5px!important}
+body.v5 .batchbar{font-size:12px!important}
+body.v5 .tbl{font-size:13px!important}
+body.v5 .tbl th{font-size:12.5px!important}
+body.v5 .tbl .mono{font-size:12.5px!important}
+body.v5 .drawer-kicker{font-size:12px!important}
+body.v5 .drawer-sub{font-size:13px!important}
+body.v5 .drawer-tab{font-size:13px!important}
+body.v5 .section-h h3{font-size:15px!important}
+body.v5 .drawer-body [style*="font-size:8"],body.v5 .drawer-body [style*="font-size:9"],
+body.v5 .drawer-body [style*="font-size:10"],body.v5 .drawer-body [style*="font-size:11"],
+body.v5 .drawer-body [style*="font-size:12"]{font-size:13.5px!important;line-height:1.7!important}
+body.v5 .drawer-body pre[style*="font-size"],body.v5 .drawer-body .mono[style*="font-size"]{font-size:12.5px!important;line-height:1.65!important}
+body.v5 .drawer-foot [style*="font-size"]{font-size:12.5px!important}
+body.v5 .modal [style*="font-size:8"],body.v5 .modal [style*="font-size:9"],
+body.v5 .modal [style*="font-size:10"],body.v5 .modal [style*="font-size:11"],
+body.v5 .modal [style*="font-size:12"]{font-size:13.5px!important;line-height:1.7!important}
+body.v5 .modal pre[style*="font-size"],body.v5 .modal .mono[style*="font-size"]{font-size:12.5px!important;line-height:1.65!important}
+body.v5 .modal-foot [style*="font-size"]{font-size:12.5px!important}
+body.v5 .modal .section-h h3{font-size:15px!important}
+body.v5 .modal .req{font-size:12px!important}
+body.v5 .modal-summary dt{font-size:12.5px!important}
+body.v5 .modal-summary dd{font-size:13.5px!important;line-height:1.6!important}
+body.v5 .modal .check-row .cn{font-size:13.5px!important}
+body.v5 .modal .check-row .cd{font-size:13px!important;line-height:1.65!important}
+@media (max-width:1400px){
+  body.v5 .board{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  body.v5 #screen{padding:20px 24px 72px!important}
+  body.v5 .task-toolbar{flex-wrap:wrap!important}
+  body.v5 .mini-search{width:200px!important}
+}
+@media (max-width:1180px){
+  body.v5 .top-status{display:none!important}
+  body.v5 .searchbox{width:240px!important}
+  body.v5 .board{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  body.v5 .masthead h1{font-size:22px!important}
+}
+@media (max-width:760px){
+  body.v5 .board{grid-template-columns:1fr!important}
+  body.v5 #screen{padding:16px 14px 72px!important}
+  body.v5 .searchbox{display:none!important}
+}
 
+/* v11 pass 2：残留小字抬到 12.5px 以上；窄屏任务列表改为四列，不再横向溢出 */
+body.v5 .ops-kicker,
+body.v5 .agent-state,
+body.v5 .brain-role,
+body.v5 .brain-state,
+body.v5 .log-head,
+body.v5 .log-time,
+body.v5 .event-time,
+body.v5 .event-out,
+body.v5 .flow-pct,
+body.v5 .ask-meta span,
+body.v5 .board-head span,
+body.v5 .ask-pri,
+body.v5 .n,
+body.v5 .nb,
+body.v5 .user-role,
+body.v5 .mast-kicker,
+body.v5 .task-kicker,
+body.v5 .drawer-kicker,
+body.v5 .avatar-btn,
+body.v5 .stat-label,
+body.v5 .tw-task-type,
+body.v5 .tw-task-pri,
+body.v5 .tw-task-foot span,
+body.v5 .tw-run-kicker,
+body.v5 .tw-num,
+body.v5 .tw-step-state,
+body.v5 .tw-step-result b,
+body.v5 .tw-run-facts,
+body.v5 .tw-timeline-head span,
+body.v5 .tw-inspect-meta,
+body.v5 .tw-inspect-head span,
+body.v5 .tw-rail-head span,
+body.v5 .task-list .tl-sub,
+body.v5 .type.continuous,
+body.v5 .tag.red,
+body.v5 .meta,
+body.v5 .policy-k,
+body.v5 .wf-gate.ok,
+body.v5 .wf-mind-role,
+body.v5 .wf-mind-stat,
+body.v5 .wf-mind-copy p,
+body.v5 .drawer-tab .n,
+body.v5 .filter .n,
+body.v5 .drawer-sub .right,
+body.v5 .drawer-sub .right div,
+body.v5 .drawer-head .status{font-size:12.5px!important;line-height:1.55!important}
+body.v5 .ops-goal,
+body.v5 .agent-name,
+body.v5 .log-text,
+body.v5 .agent-task,
+body.v5 .event-text,
+body.v5 .board-agent,
+body.v5 .flow-name,
+body.v5 .ask-go,
+body.v5 .rail-more,
+body.v5 .block-head a{font-size:13px!important;line-height:1.55!important}
+body.v5 .flow-name small{font-size:12.5px!important}
+@media (max-width:1180px){
+  body.v5 .task-list-row{grid-template-columns:minmax(0,1.55fr) minmax(0,1fr) minmax(0,1.1fr) minmax(0,1.1fr)!important;gap:12px!important}
+  body.v5 .task-list-row .tl-when{display:none!important}
+  body.v5 .flow-line{grid-template-columns:minmax(0,1fr) 64px 38px!important;gap:8px!important}
+  body.v5 .flow-name{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;line-height:1.45!important}
+  body.v5 .wf-mind-stats{width:auto!important;flex:1 1 100%!important;margin-left:0!important}
+  body.v5 .wf-switch{flex-wrap:wrap!important;overflow:visible!important}
+}
 
+/* v11 pass 2b：用 id 权重压过各模块更具体的小字规则，确保可见文字落在 12.5/13px */
+body.v5 :is(.ops-kicker,.agent-state,.brain-role,.brain-state,.log-head,.log-time,.event-time,.event-out,.flow-pct,.ask-pri,.n,.nb,.user-role,.mast-kicker,.task-kicker,.drawer-kicker,.avatar-btn,.stat-label,.tw-task-type,.tw-task-pri,.tw-run-kicker,.tw-num,.tw-step-state,.tw-run-facts,.tw-inspect-meta,.tl-sub,.type.continuous,.tag.red,.meta,.policy-k,.wf-gate.ok,.wf-mind-role,.wf-mind-stat,.wf-mind-copy p,.drawer-sub .right,.drawer-head .status,.right,.version-now,.version-meta,.version-current,.trigger-top,.tag.amber,.ed,.eff-level,.eff-age,.wf-edit-note,.wf-node-kind,.wf-node-state,.wf-node-sub,.bcol-count,.tc-type,.tc-pri,.hist-btn):not(#v11){font-size:12.5px!important;line-height:1.55!important}
+body.v5 :is(.ops-goal,.agent-name,.log-text,.agent-task,.event-text,.board-agent,.flow-name,.ask-go,.rail-more,.block-head a):not(#v11){font-size:13px!important;line-height:1.55!important}
+body.v5 .ask-meta span:not(#v11),
+body.v5 .board-head span:not(#v11),
+body.v5 .tw-task-foot span:not(#v11),
+body.v5 .tw-timeline-head span:not(#v11),
+body.v5 .tw-inspect-head span:not(#v11),
+body.v5 .tw-rail-head span:not(#v11),
+body.v5 .tw-step-result b:not(#v11),
+body.v5 .drawer-sub .right div:not(#v11),
+body.v5 .flow-name small:not(#v11){font-size:12.5px!important;line-height:1.55!important}
+body.v5 .ops-ctrl button:not(#v11),
+body.v5 summary:not(#v11){font-size:12.5px!important;line-height:1.55!important}
+body.v5 em:not(#v11){font-size:inherit!important}
+body.v5 .wf-top-meta{font-size:13px!important}
+body.v5 .wf-top-meta span:not(#v11){font-size:13px!important}
+body.v5 .wf-trigger-head{font-size:13px!important}
+body.v5 .wf-panel-head b:not(#v11){font-size:13px!important}
+body.v5 .wf-panel-head span:not(#v11){font-size:12.5px!important}
+body.v5 .eff-evidence{font-size:12.5px!important}
+body.v5 .eff-evidence b:not(#v11),
+body.v5 .dec-label:not(#v11),
+body.v5 .status:not(#v11){font-size:12.5px!important}
+body.v5 .batchbar{font-size:13px!important}
+body.v5 .hash-banner{font-size:13px!important}
+body.v5 .hash-banner .right:not(#v11){font-size:12.5px!important}
+body.v5 .path-note{font-size:12.5px!important}
+body.v5 .tc-progress{font-size:12.5px!important}
+body.v5 .tc-progress em:not(#v11){font-size:12.5px!important}
+body.v5 .batch-check{font-size:13px!important}
+body.v5 .run-history-row .t:not(#v11),
+body.v5 .run-history-row .dur:not(#v11),
+body.v5 .wf-mini-run .t:not(#v11),
+body.v5 .wf-mini-run .dur:not(#v11){font-size:12.5px!important}
+body.v5 .version-mark:not(#v11){font-size:12.5px!important}
+body.v5 .trigger-note:not(#v11){font-size:12.5px!important}
+body.v5 .wf-canvas-footer:not(#v11){font-size:12.5px!important}
+body.v5 .wf-canvas-footer span:not(#v11){font-size:12.5px!important}
+body.v5 .wf-inspector-head span:not(#v11){font-size:12.5px!important}
+body.v5 .log-text b:not(#v11){font-size:13px!important}
+body.v5 .wf-side-row b:not(#v11){font-size:13px!important}
+body.v5 .dec-foot span:not(#v11){font-size:12.5px!important}
+body.v5 .rail-head span:not(#v11){font-size:12.5px!important}
+body.v5 .flow-line{grid-template-columns:minmax(0,1fr) 88px 42px!important}
+body.v5 .modal-kicker:not(#v11){font-size:12.5px!important;line-height:1.5!important}
+body.v5 .modal label:not(#v11){font-size:12.5px!important}
+body.v5 .modal .req:not(#v11),
+body.v5 .modal .empty:not(#v11),
+body.v5 .modal .wf-api-hint:not(#v11),
+body.v5 .modal pre:not(#v11){font-size:12.5px!important;line-height:1.6!important}
 
 </style>
 </head>
