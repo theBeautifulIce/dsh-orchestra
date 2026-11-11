@@ -85,9 +85,9 @@
 - 第 3 轮是 pass（附四条在案），是第一、二段的收敛点。
 - 第 4 轮起审的是第三段（九种节点），轮次编号沿用全局计数。
 
-## 五、当前进度与续跑指引（2026-11-12 01:20 记）
+## 五、当前进度与续跑指引（2026-11-12 01:37 记）
 
-- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 1528 行（SHA256 全值 78F9ED9209330B3671219951416DD7778D872295292C92ACA3039504D6266E26），文件头 v33，§3.4u 为唯一 [CURRENT] 清单。第三十四轮由 a8f7647d 判 **pass**（0 致命 / 0 重大 / 4 条非阻断措辞），v33 只做四条收口清理，不改变审查结论；第四段已收口，可进第五段（记忆插件对接）。
+- 设计稿：D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md，当前 2006 行（SHA256 全值 683F3D6C2B347E5C0728E487A875B6E051ECB1A38ED59D181CB9D42733F76FD9），文件头 v34；§3.4u 仍是唯一 [CURRENT] 清单。第三十四轮由 a8f7647d 判 **pass**（0 致命 / 0 重大 / 4 条非阻断措辞），v33 只做四条收口清理；第四段已收口。v34 新增第五段「记忆插件对接（memory-audit-v1）」初稿 5.1–5.14、Q-43–Q-56，尚未送审。
 
 - 项目已于 2026-11-11 16:50 整体迁到 D:\aboutAI\dsh-orchestra（设计稿、台账、requirements.md、design-notes.md、根目录 handoff.md 与 codebasemap.md、references\ 三份参考项目、四份 codebase-memory 图谱）；旧址 D:\aboutAI\dshQQ\docs\ 保留同内容副本，后续只改新址。
 - 第二十轮审计已出结论：fail，10 致命 + 2 重大结构性，措辞/性能 0 条。最易低估的风险：「节点终态」不等于「run 可以成功」；叠加 stopped_at 只证明动作停了、不证明副作用没发生。
@@ -139,3 +139,5 @@
 - 2026-11-12 01:20 第三十四轮回包判 **pass**：0 致命 / 0 重大 / 4 条非阻断措辞。四条：① `workflow.open_draft` 不能与 update/publish 共用「草稿行未命中按 published_version 分流」，已有草稿应 DRAFT_EXISTS、已消费应重置并 revision+1、从未发布应 NOT_PUBLISHED；② 名称校验要拆成 create 校验 `payload.name` 与 `definition.name` 一致、update 只校验 `definition.name`；③ Q-39 补 create 的 `payload.name` 81 字用例；④ 三处写序的占位符命名不同，L946 的「逐字一致」改为「语义一致」。v33 只做这四条收口清理，并同步 §3.4u 第 3/5 条与 §4.12 表，不改变审查结论。终稿 1528 行、387116 bytes、SHA256 78F9ED9209330B3671219951416DD7778D872295292C92ACA3039504D6266E26；`^### .*\[CURRENT\]` 仅 1 条，Q 共 42 条，H3 43 个。
 
 - 2026-11-12 01:20 第四段达到收口条件：第 31 轮 pass 之后，第 32、33 轮 fail 的 15 条已全部落正文，第 34 轮 pass；v33 只清收口措辞与测试覆盖。按主人「没通过、没获得正确结果前不能往后走」的口径，第四段闸门已开，可进第五段（记忆插件对接）。
+
+- 2026-11-12 01:37 第五段 v34 初稿已落：记忆写入分直接通道（插件 audit.js，fail-open）与受控通道（核心大脑发起的独立 memory run `sys.memory_write@1`，fail-closed）；新增 `memory.evaluate` / `memory.apply_governed` / `memory.inspect_batch` 三个内部端口；固定图 `mem_trigger → mem_prepare → mem_check → mem_route → ready/mem_confirm(audit_result) → mem_apply → mem_report`，empty/blocked 各有报告叶子；新增 memory_batches / memory_items / memory_evaluations 三表；评估裁判无工具、4000 字截断、ready/empty/blocked；审批一张卡整批、24h 过期、audit_result 的 allowed_resolutions 为空；写入只收 decision_id，三道核对、原子、按 (batch_id, client_key) 幂等，source 带 orchestra 元数据；Q-43–Q-56。边界：不新增节点类型/run 状态/decision kind/resolution，不新增面板命令；blocked/empty run succeeded，declined/expired/failed run failed。终稿 2006 行、424679 bytes、SHA256 683F3D6C2B347E5C0728E487A875B6E051ECB1A38ED59D181CB9D42733F76FD9。第五段尚未送审，第六段不写。

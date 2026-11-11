@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-12 01:20。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-12 01:37。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 的四条措辞收口，第四段已收口，下一步进第五段（记忆插件对接）；面板原型 v10 已把全部可见字号抬到 11.5px 以上，1600/1366 十六个上下文无溢出、无报错，等主人评审；插件源码还没写。**
+现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 收口；第五段（记忆插件对接）v34 初稿已写，2006 行，待第五段审计；面板原型 v10 已把全部可见字号抬到 11.5px 以上，1600/1366 十六个上下文无溢出、无报错，等主人评审；插件源码还没写。**
 
 ---
 
@@ -19,8 +19,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 1528 行 / 387116 bytes / SHA256 `78F9ED9209330B3671219951416DD7778D872295292C92ACA3039504D6266E26`；v33 已按第三十四轮 pass（0 致命 / 0 重大 / 4 条非阻断措辞）收口，第四段完成 |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass，第 32 轮 fail（1 致命 / 6 重大 / 1 措辞），第 33 轮 fail（1 致命 / 4 重大 / 2 措辞），第 34 轮 pass（0 致命 / 0 重大 / 4 条非阻断措辞），v33 收口 |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 2006 行 / 424679 bytes / SHA256 `683F3D6C2B347E5C0728E487A875B6E051ECB1A38ED59D181CB9D42733F76FD9`；v33 第四段收口，v34 新增第五段 memory-audit-v1 初稿（5.1–5.14），待审计 |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 逐轮记录；第三段第 25 轮 pass；第四段第 31 轮 pass、第 32/33 轮 fail、第 34 轮 pass；第五段 v34 初稿已记，待审计 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
@@ -38,8 +38,8 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（1528 行，v33）
-│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（141 行）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（2006 行，v34，第五段初稿）
+│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（见 §五）
 │  ├─ prototype\panel-v2.html     ← 面板 v10 单文件原型（浅色、可点击、字号已抬）
 │  ├─ requirements.md             ← 原始需求与拍板口径
 │  └─ design-notes.md             ← 设计思路与决策理由
@@ -68,7 +68,7 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第四段 v33 已收口（2026-11-12 01:20）
+### 4.1 当前状态：第四段 v33 已收口；第五段 v34 初稿已写（2026-11-12 01:37）
 
 第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
@@ -78,17 +78,19 @@ v30 新增「流程定义编辑」写模型：§4.6.5 四个命令、§4.12 定�
 
 v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三种草稿分支单独写（已有草稿 → DRAFT_EXISTS；已消费 → 重置 based_on_version、清 published_version、revision+1；从未发布 → NOT_PUBLISHED）；名称校验拆成 create 校验 `payload.name` 与 `definition.name` 一致、update 只校验 `definition.name`；Q-39 补 create 的 `payload.name` 81 字用例；L946 的「逐字一致」改为「语义一致」。终稿 1528 行、387116 bytes、SHA256 `78F9ED9209330B3671219951416DD7778D872295292C92ACA3039504D6266E26`，§3.4u 仍是唯一 `[CURRENT]` 清单，Q 共 42 条。
 
+第五段 v34 把记忆写入拆成两条通道：直接通道保留插件 audit.js 的 fail-open；受控通道由核心大脑发起独立 memory run `sys.memory_write@1`，新增 `memory.evaluate` / `memory.apply_governed` / `memory.inspect_batch` 三个内部端口，固定图 `mem_trigger → mem_prepare → mem_check → mem_route → ready/mem_confirm(audit_result) → mem_apply → mem_report`；新增 memory_batches / memory_items / memory_evaluations 三表、Q-43…Q-56；写入只收 decision_id，三道核对、原子、幂等，source 带 orchestra 元数据。终稿 2006 行、424679 bytes、SHA256 `683F3D6C2B347E5C0728E487A875B6E051ECB1A38ED59D181CB9D42733F76FD9`；第五段尚未送审，第六段不写。
+
 - 画布与智能体同写一份 `WorkflowDefinition`；草稿可改、发布版本不可变；版本号连续，发布只影响之后新建的 run。
 - 图校验分两层：保存层允许不完整草稿，只拒无法解析、超限、重复 id、边端点不存在、坐标非法；发布层要求恰好一个 trigger、全图可达且无环、出度纪律、branch route、subworkflow pin 与深度。
 - 读模型补 `WorkflowView.current` 空态、§4.8 索引与 §14.3 对齐；Q-38 / Q-39 补并发发布与扇出用例。
 
 面板原型 `docs/prototype/panel-v2.html` 已到 v10：浅色、低密度、任务流程三栏（任务 / 步骤 / 现场）、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；无彩色左侧色条。v10 在 `</style>` 前加了四轮 `body.v5` 可读性覆盖层，把导航、表头、卡片元信息、流程节点、抽屉与弹窗的可见字号抬到 11.5px 以上；`.tmp/audit-final.js` 与 `.tmp/modal-audit.js` 在 1600×1000、1366×900 实测十六个上下文 over=0、screenOver=0、bad=[]、small=[]、errs=[]。主人会自己打开看，不再截图。
 
-### 4.2 下一步：进第五段，原型继续等主人评审
+### 4.2 下一步：送第五段审计，原型继续等主人评审
 
-1. 第三十四轮已判 pass，直接进第五段；第五段写完照样先审计，不跳段。
+1. 第五段 v34 初稿已写，先送独立审计；没 pass 前不写第六段。
 2. 原型按主人评审意见继续改：浅色、低密度、人话、任务做到哪一步/发生了什么/结果/下一步；主人自己打开，不再截图。
-3. 第四段已 pass，现在写第五段（记忆插件对接），之后写第六段（分阶段落地与验收）；六段全过后才写 spec、自审、提交、交主人审。
+3. 第五段 pass 后再写第六段（分阶段落地与验收）；六段全过后才写 spec、自审、提交、交主人审。
 4. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
 
 > ⚠️ 第三段内改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构）；从第四段起按六段路线新增 `## 第四段 …`，不要改动前三段标题。不要删 §3.4b–§3.4m 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
@@ -103,7 +105,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 | 二 | 把「硬」落成规则（17 条：node_run 字段、代次、证据、半态、超时、重试、sweep、迁移表、声明式判定、版本、身份账本、payload、上下文预算、存储、边界、事件、来源分离） | ✅ 完成（L97–L418） |
 | 三 | 九节点图（§3.0 两类契约 → §3.5） | ✅ 完成（v23，第二十五轮 pass；§4.1） |
 | 四 | 面板与查询 | ✅ 完成（v33，第三十四轮 pass；原型 v10 待主人评审） |
-| 五 | 记忆插件对接 memory-audit-v1 | 🔄 进行中 |
+| 五 | 记忆插件对接 memory-audit-v1 | 🔄 v34 初稿已写（5.1–5.14，Q-43–Q-56），待审计 |
 | 六 | 分阶段落地与验收 | ⛔ 未开始 |
 
 六段全过之后才写 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`、自审、提交 git、交主人审阅，再转 `writing-plans`。
@@ -170,7 +172,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 - 仓库已初始化：`D:\aboutAI\dsh-orchestra\.git`，分支 `main`，首个提交 `fc92495`
   （docs: dsh-orchestra 项目落地（设计稿/台账/需求/设计思路/handoff/图谱索引）），共 7 个文件、1787 行。
 - `.gitignore` 忽略 `references/`（三份参考项目各自带 `.git`，不并入本仓库）、`.codebase-memory/`、`tmp/`、`.tmp/`、`*.log`、`*.bak`；`docs/prototype/` 只提交 `panel-v2.html`，截图与一次性脚本不入库。
-- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节。
+- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口。
 - 每次改设计稿后要提交（主人硬约束：改代码/文档后同步更新版本号并留痕）。
 
 ---
@@ -187,4 +189,4 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md | Measure-Ob
 Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 ```
 
-第四段 v33 已收口（第三十四轮 pass）；按 §4.2 进第五段，并收原型反馈。
+第四段 v33 已收口；第五段 v34 初稿已写，待审计；按 §4.2 送审，并收原型反馈。
