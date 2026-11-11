@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 收口；第五段（记忆插件对接）v37 已按第三十八轮 pass 收口，v38 清了两条非阻断措辞；第六段（分阶段落地与验收）v42 已按第 42 轮 1 致命 / 7 重大 / 4 措辞修入，2437 行、502632 bytes，第 43 轮送审中；面板原型 v11 已把全部可见字号抬到 12.5px 以上（导航 13px），1600/1366/1200/1024 共 56 个上下文无页面溢出、无报错，只保留画布与窄屏任务侧栏的横向滚动区，等主人评审；插件源码还没写。**
+现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v33 已按第三十四轮 pass 收口；第五段（记忆插件对接）v37 已按第三十八轮 pass 收口，v38 清了两条非阻断措辞；第六段（分阶段落地与验收）v42 已按第 42 轮 1 致命 / 7 重大 / 4 措辞修入，2437 行、502632 bytes，第 43 轮送审中（subagent `c479b7de`）；面板原型 v11 已把全部可见字号抬到 12.5px 以上（导航 13px），1600/1366/1200/1024 共 56 个上下文无页面溢出、无报错，只保留画布与窄屏任务侧栏的横向滚动区，等主人评审；插件源码还没写。**
 
 ---
 
@@ -68,7 +68,7 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第五段第 38 轮 pass；第六段 v42 已修第 42 轮 1 致命 / 7 重大 / 4 措辞，第 43 轮送审中（2026-11-12 03:16）
+### 4.1 当前状态：第五段第 38 轮 pass；第六段 v42 已修第 42 轮 1 致命 / 7 重大 / 4 措辞，第 43 轮送审中（2026-11-12 03:17）
 
 第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
@@ -86,7 +86,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 
 第六段 v41 已按第 41 轮 fail 的 0 致命 / 5 重大 / 5 措辞修入：run 终态由 run 外收口器在门 run 结束后直抄 `runs.status`，run 内节点一律不读本 run 终态，部署脚本同时校验 `conclusion=pass` / `run_terminal=succeeded` / `gate_run_id` 指向的 run 仍为 succeeded；policy 只判 policy 之前节点全部终态且无未验证副作用；I4 的 run succeeded 行只留 done 强证据与 superseded 无副作用证据，abandoned_unverified 归 succeeded_with_unverified；GateArtifact 字段与八段一一对应，`must_pass_items[]` 逐项，`artifact_hash=` 锚点固定在补记之前；G1 无 run，固定 `gate_run_id=null` / `run_terminal=not_applicable` / `producer=human`，仅 G1 允许；canonical_json 集合数组升序去重；截止字段成对带 boot_id/monotonic_ns，跨 boot 用 boots 投影扣 downtime，跳钟/漂移转 timer_uncertain；G-06/G-11 改先保持 applying、对账确认部分写入后才转 indeterminate；W1–W4 与 G1/G-15、G-01/G-14 阶段口径同步。终稿 2437 行、496819 bytes、SHA256 `EE9BBD028B67CF59036F0B3B51D99357DDA11F3C03D688C812C1198B59861EDD`；第 42 轮送审中。
 
-第六段 v42 已按第 42 轮 N1–N12 修入：G1–G5 与 G6 独立 artifact 明确无 run，只有 G6 的 `wf_release_v1` artifact 有 run；run_terminal 唯一来源改为 `runs.status`；I4 放开已核实无副作用的 `abandoned_unverified`；report CAS 改读单调钟；EventView 补 `boot_id` / `monotonic_ns`，`boots` 改投影并写 `clock_uncertain` 生产者；桥断暂停冻结 `startup_unknown_remaining_ns` / `verify_remaining_ns`，恢复按剩余重挂；`node_run` schema_version 升 2（只加两列可空列）；GateArtifact 定义 `exceptions[]` / `rollback{}` 对象；policy 输出固定 payload 并写 `policy.evaluated`；G6 告警与放行拆句；跨 boot 公式统一；G1 的 `gate_run_id` 固定 null。终稿 2437 行、502632 bytes、SHA256 `0E17A01F6BFC1818EE5C4C3B62CED165F3452E17C124CA986FDF14D185B53C65`；第 43 轮送审中。
+第六段 v42 已按第 42 轮 N1–N12 修入：G1–G5 与 G6 独立 artifact 明确无 run，只有 G6 的 `wf_release_v1` artifact 有 run；run_terminal 唯一来源改为 `runs.status`；I4 放开已核实无副作用的 `abandoned_unverified`；report CAS 改读单调钟；EventView 补 `boot_id` / `monotonic_ns`，`boots` 改投影并写 `clock_uncertain` 生产者；桥断暂停冻结 `startup_unknown_remaining_ns` / `verify_remaining_ns`，恢复按剩余重挂；`node_run` schema_version 升 2（只加两列可空列）；GateArtifact 定义 `exceptions[]` / `rollback{}` 对象；policy 输出固定 payload 并写 `policy.evaluated`；G6 告警与放行拆句；跨 boot 公式统一；G1 的 `gate_run_id` 固定 null。终稿 2437 行、502632 bytes、SHA256 `0E17A01F6BFC1818EE5C4C3B62CED165F3452E17C124CA986FDF14D185B53C65`；已提交 `0f950e6`，第 43 轮已送 subagent `c479b7de-a658-4b81-b0fb-44fb1020e676`。
 
 - 画布与智能体同写一份 `WorkflowDefinition`；草稿可改、发布版本不可变；版本号连续，发布只影响之后新建的 run。
 - 图校验分两层：保存层允许不完整草稿，只拒无法解析、超限、重复 id、边端点不存在、坐标非法；发布层要求恰好一个 trigger、全图可达且无环、出度纪律、branch route、subworkflow pin 与深度。
@@ -180,7 +180,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 - 仓库已初始化：`D:\aboutAI\dsh-orchestra\.git`，分支 `main`，首个提交 `fc92495`
   （docs: dsh-orchestra 项目落地（设计稿/台账/需求/设计思路/handoff/图谱索引）），共 7 个文件、1787 行。
 - `.gitignore` 忽略 `references/`（三份参考项目各自带 `.git`，不并入本仓库）、`.codebase-memory/`、`tmp/`、`.tmp/`、`*.log`、`*.bak`；`docs/prototype/` 只提交 `panel-v2.html`，截图与一次性脚本不入库。
-- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮。
+- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮、`8bfdc30` v39 第六段送第 39 轮、`3d4f59d` 原型 v11 字号层、`a1afa13` v41 第六段主体、`fd0df0b` G1 无 run 例外、`b747419` 记录重送与 G1、`0f950e6` v42 修第 42 轮 12 条并送第 43 轮。
 - 每次改设计稿后要提交（主人硬约束：改代码/文档后同步更新版本号并留痕）。
 
 ---
