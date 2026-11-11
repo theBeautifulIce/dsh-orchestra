@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-12 00:00。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-12 00:26。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -11,7 +11,7 @@
 **dsh-orchestra** 是要给 DSH（DeepSeek Harness）做的一个**编排插件**：把「跑一个 agent 任务」这件事变成有状态、可恢复、可审计的节点图，
 每个节点的状态、证据、代次都落在 SQLite 账本里，崩溃/断线/宿主退出后能扫回来继续跑。
 
-现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v28 已送第三十轮，面板原型 v8 已落在 `docs/prototype/panel-v2.html`，等主人评审与审计回包；插件源码还没写。**
+现在做到哪：**第三段（九种节点图）v23 已在第二十五轮审计拿到 pass；第四段（面板与查询）设计稿 v29 已送第三十一轮，面板原型 v9 已落在 `docs/prototype/panel-v2.html`，等主人评审与审计回包；插件源码还没写。**
 
 ---
 
@@ -19,14 +19,14 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 规则设计稿 `docs/orchestra-design-draft.md` | 1307 行 / SHA256 `02AB845F8BB107CA2B87E53836EF030A56498D9C1420BA3F0C4022D90F8C2F8B`；v28 已送第三十轮（第二十九轮 fail：1 致命 / 3 重大 / 2 措辞） |
-| 审计台账 `docs/orchestra-audit-ledger.md` | 119 行；第三段第 25 轮 pass；第四段已跑 26–29 轮，v28 送第 30 轮 |
+| 规则设计稿 `docs/orchestra-design-draft.md` | 1317 行 / 345529 bytes / SHA256 `C7F91FC438993116FEFAF2093E31F60BF7EA14B81CE2001EE1E1D63852787F8F`；v29 已送第三十一轮（第三十轮 fail：0 致命 / 1 重大 / 1 措辞） |
+| 审计台账 `docs/orchestra-audit-ledger.md` | 123 行；第三段第 25 轮 pass；第四段已跑 26–30 轮，v29 送第 31 轮 |
 | 原始需求 `docs/requirements.md` | 已写（R1–R23 主人原话 + 拍板口径 + 验收标准） |
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
 | 参考项目 `references/` | 三份已克隆并建图谱 |
 | **源码** | **没有。还没开始写。** |
-| 面板原型 `docs/prototype/panel-v2.html` | v8 单文件浅色原型；任务看板四列、任务流程竖向步骤、流程页、全局搜索、决策弹窗；已去掉彩色左侧色条 |
+| 面板原型 `docs/prototype/panel-v2.html` | v9 单文件浅色原型；任务看板、任务流程三栏（任务 / 步骤 / 现场）、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；已去掉彩色左侧色条 |
 | 图谱 | `pi-harnessmm` 124/294、`dsh-superagent-prototype` 2012/8492、`DS-Bot` 10539/33229、`dsh-orchestra-docs` 97/96 |
 
 ---
@@ -38,9 +38,9 @@ D:\aboutAI\dsh-orchestra\
 ├─ handoff.md            ← 你正在读的这份（接手入口）
 ├─ codebasemap.md        ← 代码/图谱在哪、怎么更新、要看哪块用哪个工具
 ├─ docs\
-│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（1307 行，v28）
-│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（119 行）
-│  ├─ prototype\panel-v2.html     ← 面板 v8 单文件原型（浅色、可点击）
+│  ├─ orchestra-design-draft.md   ← 规则条文唯一权威（1317 行，v29）
+│  ├─ orchestra-audit-ledger.md   ← 逐轮审计台账（123 行）
+│  ├─ prototype\panel-v2.html     ← 面板 v9 单文件原型（浅色、可点击）
 │  ├─ requirements.md             ← 原始需求与拍板口径
 │  └─ design-notes.md             ← 设计思路与决策理由
 ├─ references\           ← 只读参考，不是本项目代码
@@ -68,23 +68,21 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：第四段 v28 已送第三十轮（2026-11-12 00:00）
+### 4.1 当前状态：第四段 v29 已送第三十一轮（2026-11-12 00:26）
 
 第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
-第四段 v24–v27 过了第二十六、二十七、二十八轮。第二十九轮判 **fail：1 致命 / 3 重大 / 2 措辞**，集中在命令回执的过期承载、SQLite CHECK 的 NULL 语义、唯一键落点与请求指纹。v28 已逐条修：
+第四段 v24–v28 先后送第二十六至第三十轮。第三十轮判 **fail：0 致命 / 1 重大 / 1 措辞**：`in_flight` 的 10 分钟超时只有起算、没有收口；`OPERATION_ID_CONFLICT` 漏了同 operation_id 的非终结行。v29 已逐条修：
 
-- 新增 `receipt_expired_at`；回执窗口 7 天一律从 `completed_at` 起算，到期扫描同事务置位并清空 `receipt_json`；`in_flight` 行按 `created_at` 判 10 分钟在途超时，不进回执窗口。
-- command 行 CHECK 显式判 `result_state IS NOT NULL`，按 `in_flight` / 未过期终态 / 已过期终态三支闭合；唯一索引改到 `operation_id`，`idempotency_key` 只服务 event 行。
-- 请求指纹改为 `request_hash = SHA256(JCS({command,target,expected,payload}))`，排除 `operation_id`、`confirm_challenge`、`client`；成功后换 decision / revision / payload 都会改变哈希。
-- 判定顺序统一为「先看 `receipt_expired_at` → `OPERATION_EXPIRED`；未过期才看终结回执、在途行、challenge」；MISMATCH 只含 operation_id / decision_id / request_hash，revision 走 `DECISION_REVISION_CONFLICT`。
-- Q-13 / Q-14 / Q-15 已改口径，新增 Q-35；§3.4q 为唯一 CURRENT，§3.4p 降 HISTORY。
+- §4.6.2 明确在途超时闭环：维护扫描（启动时与每分钟）对 `created_at` 早于 now−10 分钟且仍为 `in_flight` 的 command 行做 CAS，置 `rejected`、写 `completed_at` 与 `OPERATION_TIMEOUT` 回执、追加 `command.rejected`、不改业务状态；执行侧 `applied` 用同一 CAS，败方整笔回滚。
+- 错误码表新增 `OPERATION_TIMEOUT`（504）；`OPERATION_ID_CONFLICT` 触发补「同 operation_id 的非终结行」；§4.6.4 面板行为与 §14.2 DDL 同步。
+- Q-35 / Q-36 覆盖 7 天回执窗口与 10 分钟在途超时；§3.4r 为唯一 CURRENT，§3.4q 转历史。
 
-面板原型 `docs/prototype/panel-v2.html` 已到 v8：浅色、低密度、任务流程竖向步骤、流程页、全局搜索、决策弹窗，彩色左侧色条已去掉；主人会自己打开看，不再截图。原型独立审计 agent `8bb0d82f-b1e0-41b4-baa0-af02b2e2b4e5` 仍在跑，回包未到。
+面板原型 `docs/prototype/panel-v2.html` 已到 v9：浅色、低密度、任务流程三栏（任务 / 步骤 / 现场）、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；彩色左侧色条已去掉，主视图工程词扫描无命中，1600/1366 两档无横向溢出。主人会自己打开看，不再截图。
 
-### 4.2 下一步：等第三十轮，再进第五段
+### 4.2 下一步：等第三十一轮，再进第五段
 
-1. 等第三十轮 pass；fail 就按「只审不改、致命/重大/措辞分类、带行号与最小改法」逐条修，不跳段。
+1. 等第三十一轮 pass；fail 就按「只审不改、致命/重大/措辞分类、带行号与最小改法」逐条修，不跳段。
 2. 原型按主人评审意见继续改：浅色、低密度、人话、任务做到哪一步/发生了什么/结果/下一步；主人自己打开，不再截图。
 3. 第四段 pass 后再写第五段（记忆插件对接）与第六段（分阶段落地与验收）；六段全过后才写 spec、自审、提交、交主人审。
 4. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
@@ -100,7 +98,7 @@ D:\aboutAI\dsh-orchestra\
 | 一 | 骨架与落点（桥 / 生命周期 / 控制面） | ✅ 完成（设计稿 L5–L96） |
 | 二 | 把「硬」落成规则（17 条：node_run 字段、代次、证据、半态、超时、重试、sweep、迁移表、声明式判定、版本、身份账本、payload、上下文预算、存储、边界、事件、来源分离） | ✅ 完成（L97–L418） |
 | 三 | 九节点图（§3.0 两类契约 → §3.5） | ✅ 完成（v23，第二十五轮 pass；§4.1） |
-| 四 | 面板与查询 | 🔄 设计稿 v28 送第三十轮；原型 v8 等主人评审 |
+| 四 | 面板与查询 | 🔄 设计稿 v29 送第三十一轮；原型 v9 已改完待主人评审 |
 | 五 | 记忆插件对接 memory-audit-v1 | ⛔ 未开始 |
 | 六 | 分阶段落地与验收 | ⛔ 未开始 |
 
@@ -185,4 +183,4 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md | Measure-Ob
 Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 ```
 
-第四段 v28 已送审；按 §4.2 等回包并收原型反馈。
+第四段 v29 已送第三十一轮；按 §4.2 等回包并收原型反馈。

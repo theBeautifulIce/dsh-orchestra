@@ -116,3 +116,7 @@
 - 2026-11-11 23:54 第二十八轮回包判 fail：0 致命 / 1 重大（两阶段确认与 inbox 幂等未接上）/ 0 措辞。第二十九轮已送：v27，1289 行，SHA256 AE360E98…86B0，收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId 663edcf9-fd46-4cfd-bd4c-d69639ce36a3；只读复核「预检不落 command 行、challenge 先验于冲突、并发唯一键兜底、7 天回执窗口」与 §14.2 command 行 DDL，待回包。
 
 - 2026-11-12 00:00 第二十九轮回包判 fail：1 致命 / 3 重大 / 2 措辞（终态回执过期无承载字段、command 行 CHECK 遇 NULL 放行、唯一索引建在 idempotency_key、payload_hash 未覆盖 target/expected、回执窗口与过期优先未限定、MISMATCH 误含 revision）。v28 已修：新增 receipt_expired_at；request_hash = SHA256(JCS({command,target,expected,payload}))；CHECK 三支显式判 NULL；唯一索引改 operation_id；7 天窗口从 completed_at 起算；错误码与 Q-13/14/15/35 同步；§3.4q 为唯一 CURRENT。v28 1307 行，SHA256 02AB845F…2F8B，第三十轮已送：收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId bb8191bb-7fcf-4fa0-8805-74a7c981e257；待回包。
+
+- 2026-11-12 00:26 第三十轮回包判 fail：0 致命 / 1 重大（in_flight 的 10 分钟超时只有起算、没有收口，调用方会一直收到 COMMAND_BUSY）/ 1 措辞（OPERATION_ID_CONFLICT 只写窗口内终结回执，漏了同 operation_id 的非终结行）。v29 已修：§4.6.2 增加维护扫描每分钟 CAS 置 rejected、写 completed_at 与 receipt_json=OPERATION_TIMEOUT、追加 command.rejected、不改业务状态；执行侧 applied 用同一 CAS，败方整笔回滚；错误码表新增 OPERATION_TIMEOUT（504），OPERATION_ID_CONFLICT 触发补非终结行；§4.6.4 面板行为与 §14.2 DDL 交叉引用同步；补 Q-36，Q 总数 36；§3.4r 为唯一 CURRENT，§3.4q 转历史。v29 1317 行、345529 bytes、SHA256 C7F91FC438993116FEFAF2093E31F60BF7EA14B81CE2001EE1E1D63852787F8F。
+
+- 2026-11-12 00:26 第三十一轮已送：收件同一子代理 a8f7647d-1f41-49f7-90d2-fa38a3c3bce7，messageId 958d7fc7-79d0-4560-a0bf-6a0c33fdadf7；只读复核 v29 的在途超时闭环、OPERATION_TIMEOUT 与 OPERATION_ID_CONFLICT 分界、Q-36、§14.2 CHECK，以及 10 分钟与 7 天两个窗口是否互相打架；待回包。

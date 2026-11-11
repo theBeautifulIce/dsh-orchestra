@@ -1,6 +1,6 @@
 # dsh-orchestra 设计草案
 
-状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。本文件为 v28：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）与第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）修完，送第三十轮；本版不新增状态、迁移、decision kind、终态或证据门，只补回执过期字段、命令行约束与请求指纹。
+状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。本文件为 v29：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，送第三十一轮；本版不新增状态、迁移、decision kind、终态或证据门，只补在途命令的超时收口与冲突错误码范围。
 
 ## 第一段 骨架与落点
 
@@ -501,7 +501,7 @@ decision 迁移：
 
 **14.1 第四段新增存储落点（v26）**：`node_runs` 补 `seq INTEGER NOT NULL CHECK (seq >= 0)`（节点拓扑序号，来自工作流版本；同一 `node_id` 的多个 attempt 共用同一个 `seq`，只用于排序）；新增 `attestations(attestation_id PRIMARY KEY, run_id, node_run_id, attempt, claim, attested_by, attested_at, action_start_source, summary, created_at)`，索引 `attestations(node_run_id, attempt, created_at)`，只插不改，纠错新建一条；`NodeRunView.attestation_id` 取该 attempt 最新一条。新增 `unverified_resolutions(node_run_id PRIMARY KEY, run_id, resolution_basis, evidence_id, decision_id, stop_evidence, resolved_at)`，`resolution_basis ∈ {verified_none, evidence, decision}`，分别要求 `stop_evidence` / `evidence_id` / `decision_id` 非空；只由 §9 收口事务插入，不更新；`resolved` / `resolved_at` / `resolution_basis` 以这张表为唯一来源，不在 `node_runs` 上另存结论。索引另加 `unverified_resolutions(run_id, resolved_at)`。
 
-**14.2 第四段命令回执行（v28）**：`inbox` 的 command 行至少含 `operation_id TEXT`、`kind TEXT NOT NULL`、`request_hash TEXT`、`result_state TEXT`、`receipt_json TEXT`、`receipt_expired_at TEXT`、`completed_at TEXT`、`created_at TEXT NOT NULL`。command 行的幂等键就是 `operation_id`；`idempotency_key` 继续只服务 event 行去重，不承担 command 行唯一性。`request_hash = SHA256(JCS({command,target,expected,payload}))`，不含 `operation_id`、`confirm_challenge` 与 `client`。用表级 CHECK 闭合 command 行（SQLite 的 CHECK 遇 NULL 会放行，所以每个分支都显式判 NULL）：`CHECK (kind <> 'command' OR (operation_id IS NOT NULL AND request_hash IS NOT NULL AND result_state IS NOT NULL AND result_state IN ('in_flight','applied','rejected') AND ((result_state = 'in_flight' AND receipt_json IS NULL AND completed_at IS NULL AND receipt_expired_at IS NULL) OR (result_state IN ('applied','rejected') AND completed_at IS NOT NULL AND receipt_json IS NOT NULL AND receipt_expired_at IS NULL) OR (result_state IN ('applied','rejected') AND completed_at IS NOT NULL AND receipt_json IS NULL AND receipt_expired_at IS NOT NULL))))`，event 行这些列可为空。唯一约束写成 partial unique index：`CREATE UNIQUE INDEX inbox_command_operation_uq ON inbox(operation_id) WHERE kind='command'`，只作用于 command 行，event 行不受影响。`receipt_json` 在 `in_flight` 时为空，窗口内终态必须非空；`completed_at` 在终态必须非空；`receipt_expired_at` 只在窗口到期后置位，置位时 `receipt_json` 必须为空。回执可查窗口 7 天，一律从 `completed_at` 起算；`in_flight` 行没有 `completed_at`，以 `created_at` 起算在途超时（10 分钟），不进入回执窗口。到期由维护扫描（启动时与每小时）在同一事务里置 `receipt_expired_at` 并清空 `receipt_json`，command 行不物理删除。过期后 `get_operation` 与任何同 `operation_id` 的复放都返回 `OPERATION_EXPIRED`，不重新执行；要重做必须由人核对现状后换新 `operation_id`。
+**14.2 第四段命令回执行（v29）**：`inbox` 的 command 行至少含 `operation_id TEXT`、`kind TEXT NOT NULL`、`request_hash TEXT`、`result_state TEXT`、`receipt_json TEXT`、`receipt_expired_at TEXT`、`completed_at TEXT`、`created_at TEXT NOT NULL`。command 行的幂等键就是 `operation_id`；`idempotency_key` 继续只服务 event 行去重，不承担 command 行唯一性。`request_hash = SHA256(JCS({command,target,expected,payload}))`，不含 `operation_id`、`confirm_challenge` 与 `client`。用表级 CHECK 闭合 command 行（SQLite 的 CHECK 遇 NULL 会放行，所以每个分支都显式判 NULL）：`CHECK (kind <> 'command' OR (operation_id IS NOT NULL AND request_hash IS NOT NULL AND result_state IS NOT NULL AND result_state IN ('in_flight','applied','rejected') AND ((result_state = 'in_flight' AND receipt_json IS NULL AND completed_at IS NULL AND receipt_expired_at IS NULL) OR (result_state IN ('applied','rejected') AND completed_at IS NOT NULL AND receipt_json IS NOT NULL AND receipt_expired_at IS NULL) OR (result_state IN ('applied','rejected') AND completed_at IS NOT NULL AND receipt_json IS NULL AND receipt_expired_at IS NOT NULL))))`，event 行这些列可为空。唯一约束写成 partial unique index：`CREATE UNIQUE INDEX inbox_command_operation_uq ON inbox(operation_id) WHERE kind='command'`，只作用于 command 行，event 行不受影响。`receipt_json` 在 `in_flight` 时为空，窗口内终态必须非空；`completed_at` 在终态必须非空；`receipt_expired_at` 只在窗口到期后置位，置位时 `receipt_json` 必须为空。回执可查窗口 7 天，一律从 `completed_at` 起算；`in_flight` 行没有 `completed_at`，以 `created_at` 起算在途超时（10 分钟），不进入回执窗口；在途超时的收口见 §4.6.2。到期由维护扫描（启动时与每小时）在同一事务里置 `receipt_expired_at` 并清空 `receipt_json`，command 行不物理删除。过期后 `get_operation` 与任何同 `operation_id` 的复放都返回 `OPERATION_EXPIRED`，不重新执行；要重做必须由人核对现状后换新 `operation_id`。
 
 **15. 与原生对账**：账本做跨工作流查询与审计，执行态以执行桥的 state / whenIdle 为准。会话存活分 loaded / unloaded / deleted：unloaded 走 resume 或跳过，不判死；deleted 才标 session_gone。启动一次、其后低频对账（默认五分钟）。
 
@@ -853,9 +853,9 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 
 1. **[重大] 预检不占幂等账，challenge 先验于冲突判定（第二十八轮重大 1）**：原 L1137 要求每条命令先落 inbox，L1138 / L1139 的幂等与冲突判定又排在 challenge 校验之前；高风险 resolve 的第一次预检因此会占掉 operation_id，第二次带 challenge 的请求要么被当成重放、要么在换 payload 时先报 OPERATION_ID_CONFLICT，Q-15 的 CONFIRMATION_MISMATCH 永远走不到。规则写死：**第一次不带 challenge 的高风险 resolve 只做预检，不落 command 行、不写回执、不占 operation_id；第二次带 challenge 的请求先看终结回执与在途行，没有才验 challenge 绑定；终结回执的复放优先于 challenge 过期 / 消费检查；落行靠 operation_id 唯一键兜底，并发撞键重读后按回执复放或 COMMAND_BUSY 处理。**「预检之后、正式执行之前」换 payload / resolution / operation_id → CONFIRMATION_MISMATCH；执行成功后换 payload → OPERATION_ID_CONFLICT。落在 §4.6.2、§4.6.3、Q-15。补断言：Q-15 的换 payload 分支必须命中 CONFIRMATION_MISMATCH 且 inbox 无 command 行；成功后的同 payload 重发命中 replayed=true；成功后的换 payload 命中 OPERATION_ID_CONFLICT。
 
-### 3.4q [CURRENT] 第二十九轮审计修订清单（v28，已在正文生效）
+### 3.4q [历史] 第二十九轮审计修订清单（v28，已在正文生效）
 
-本清单是当前唯一生效清单，§3.4 – §3.4p 全部为历史条目。**第二十九轮审计的 1 条致命 + 3 条重大 + 2 条措辞**逐条落到正文，版本升 v28。这一轮不新增状态格、不改 M 总数（仍 M-01…M-61），只补命令回执的过期字段、命令行约束与请求指纹；Q 总数 34→35。
+本清单为 v28 的历史修订记录，§3.4 – §3.4p 亦为历史条目。**第二十九轮审计的 1 条致命 + 3 条重大 + 2 条措辞**逐条落到正文，版本升 v28。这一轮不新增状态格、不改 M 总数（仍 M-01…M-61），只补命令回执的过期字段、命令行约束与请求指纹；Q 总数 34→35。
 
 1. **[致命] 终态回执过期要有承载字段（第二十九轮致命 1）**：v27 一边说终态 `receipt_json` 必须非空，一边说 7 天后只清 `receipt_json`，同一字段两套规范；持久化状态又只有 `in_flight` / `applied` / `rejected`，过期后无法区分「从未有回执」和「回执已过期」。规则写死：**新增 `receipt_expired_at TEXT`；回执可查窗口 7 天一律从 `completed_at` 起算；到期由维护扫描（启动时与每小时）在同一事务里置 `receipt_expired_at` 并清空 `receipt_json`；置位后 `receipt_json` 必须为空，终态未过期时 `receipt_json` 必须非空；`in_flight` 行没有 `completed_at`，以 `created_at` 起算在途超时（10 分钟），不进入回执窗口。** 落在 §14.2、§4.6.2；补 Q-35。
 
@@ -868,6 +868,14 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 5. **[措辞] 回执窗口与过期判定写在同一顺序里（第二十九轮措辞 1）**：v27 的 §4.6.2「先看终结回执」与「过期判定优先于复放与冲突」都没限定窗口，同一 operation_id 在「已有回执且已满 7 天」时读出两种错误码。规则写死：**判定顺序统一为「先看 `receipt_expired_at`；已置位 → `OPERATION_EXPIRED`；未过期才看终结回执、在途行、challenge」；错误码表的 `OPERATION_ID_CONFLICT` 补「窗口内」。** 落在 §4.6.2、§4.6.3、错误码表。
 
 6. **[措辞] MISMATCH 与 REVISION_CONFLICT 分界（第二十九轮措辞 2）**：v27 的 §4.6.3 说「任一字段不符返回 `CONFIRMATION_MISMATCH`」，紧接着又说 revision 变返回 `DECISION_REVISION_CONFLICT`，字面上把 revision 算进 MISMATCH；Q-15 的 mismatch 用例也没列 decision_id。规则写死：**「除 revision 外的绑定字段（operation_id / decision_id / request_hash）不符 → `CONFIRMATION_MISMATCH`；revision 不符（challenge 记录、expected.revision、当前 revision 三者任一不一致）→ `DECISION_REVISION_CONFLICT`」；Q-15 的 mismatch 用例补 decision_id。** 落在 §4.6.3、错误码表、Q-15。
+
+### 3.4r [CURRENT] 第三十轮审计修订清单（v29，已在正文生效）
+
+本清单是当前唯一生效清单，§3.4 – §3.4q 全部为历史条目。**第三十轮审计的 0 条致命 + 1 条重大 + 1 条措辞**逐条落到正文，版本升 v29。这一轮不新增状态格、不改 M 总数（仍 M-01…M-61），只补 `in_flight` 的 10 分钟超时闭环与冲突错误码的触发范围；Q 总数 35→36。
+
+1. **[重大] `in_flight` 的 10 分钟超时要有闭环（第三十轮重大 1）**：v28 只说 `in_flight` 以 `created_at` 起算 10 分钟，没写超时后这行怎么收、重发怎么结束、执行侧迟到提交怎么处理，调用方会永远收到 `COMMAND_BUSY`。规则写死：**维护扫描（启动时与每分钟）对 `created_at` 早于 now−10 分钟且仍为 `in_flight` 的 command 行做 CAS——命中则置 `rejected`、写 `completed_at` 与 `receipt_json={"error":"OPERATION_TIMEOUT","reason":"execution_timeout"}`、追加 `command.rejected`、不改业务状态；执行侧写 `applied` 用同一 CAS，双方只有一方命中，败方整笔回滚。** 落在 §4.6.2、§4.6.4、错误码表；补 Q-36。
+
+2. **[措辞] `OPERATION_ID_CONFLICT` 要覆盖非终结行（第三十轮措辞 1）**：错误码表的触发只写「已有窗口内终结回执」，与 §4.6.2 的「同 `operation_id`、不同 `request_hash` 的非终结行也返回冲突」不一致。规则写死：**触发改成「已有窗口内终结回执，或同 operation_id 的非终结行」，处置保持「不重试，人工核查」。** 落在 §4.6.2、错误码表。
 
 ### 3.5 本段最容易被低估的一处
 
@@ -1164,7 +1172,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 - 没有终结回执、但 `inbox` 里已有同一 `operation_id` 的非终结行：`request_hash` 相同 → `COMMAND_BUSY`，不覆盖、不并行执行；`request_hash` 不同 → `OPERATION_ID_CONFLICT`。落 command 行时由 `operation_id` 唯一键兜底；并发插入撞唯一键的请求重读该行，按同一规则处理。
 - 没有终结回执、也没有非终结行时：带 `confirm_challenge` 的请求先验签名与过期（过期 → `CONFIRMATION_EXPIRED`）；`challenge.revision` 与请求的 `expected.revision` 不符、或当前 revision 与 `expected.revision` 不符，都返回 `DECISION_REVISION_CONFLICT`；再核对 `operation_id`、`decision_id` 与 `request_hash`，任一不符返回 `CONFIRMATION_MISMATCH`；通过后落 command 行并执行。这样「预检之后、正式执行之前」换 decision_id / resolution / payload / operation_id 会报 `CONFIRMATION_MISMATCH`，不会被 `OPERATION_ID_CONFLICT` 抢先。
 - 不带 challenge 且该命令需要确认：只做预检并签发 challenge，不落 command 行；不需要确认的命令直接落 command 行并执行。预检不做幂等复放：重复预检每次签发新 challenge，旧 challenge 未使用仍有效至过期，但同一 operation_id 最终只能执行一次。
-- 持久化的 command 行只有 `in_flight` / `applied` / `rejected` 三种 `result_state`；面板的「结果未知」是查询态，不是第四种落库状态。回执可查窗口 7 天，从 `completed_at` 起算；到期由维护扫描置 `receipt_expired_at` 并清空 `receipt_json`，command 行本身不物理删除。窗口内先看终结回执；窗口外先判过期，`get_operation` 与任何同 `operation_id` 的复放都返回 `OPERATION_EXPIRED`，不重新执行；要重做必须由人核对现状后换新 `operation_id`。`in_flight` 行没有 `completed_at`，以 `created_at` 起算在途超时（10 分钟），不进入回执窗口。
+- 持久化的 command 行只有 `in_flight` / `applied` / `rejected` 三种 `result_state`；面板的「结果未知」是查询态，不是第四种落库状态。回执可查窗口 7 天，从 `completed_at` 起算；到期由维护扫描置 `receipt_expired_at` 并清空 `receipt_json`，command 行本身不物理删除。窗口内先看终结回执；窗口外先判过期，`get_operation` 与任何同 `operation_id` 的复放都返回 `OPERATION_EXPIRED`，不重新执行；要重做必须由人核对现状后换新 `operation_id`。`in_flight` 行没有 `completed_at`，以 `created_at` 起算在途超时（10 分钟），不进入回执窗口。**在途超时闭环**：维护扫描（启动时与每分钟）对 `created_at` 早于 now−10 分钟且仍为 `in_flight` 的 command 行做 CAS——`WHERE operation_id=? AND kind='command' AND result_state='in_flight'`，命中则置 `result_state='rejected'`、写 `completed_at`、写 `receipt_json={"error":"OPERATION_TIMEOUT","reason":"execution_timeout"}`、追加 `command.rejected` 事件，不改任何业务状态。执行侧提交成功时也以同一 `result_state='in_flight'` 条件 CAS 写 `applied`；两边只有一方能命中，败方整笔回滚（业务状态与回执本来就在同一事务里，不存在只改一半）。
 - `inbox` 的 `kind='command'` 行不参与 §7 的 wait 匹配；wait 只读 `kind='event'`。
 - 命令成功后追加 `command.applied` 事件，并把该 inbox 行落为 `applied` 终态；进入执行阶段的命令校验失败时，追加 `command.rejected`（`operation_id`、错误码、actor），把该行落为 `rejected` 终态，但不写业务状态。`inbox` command 行的字段（至少 `operation_id`、`request_hash`、`result_state`、`receipt_json`、`receipt_expired_at`、`completed_at`）与唯一键在 §14.2 DDL 收口，唯一键只作用于 `kind='command'` 行；本节只定语义。
 
@@ -1190,8 +1198,9 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | `CONFIRMATION_REQUIRED` | 409 | 高风险 resolve 第一步未带 challenge；未改状态、未落 command 行、未写回执 | 用 `details.confirm_challenge` 重发同一请求 |
 | `CONFIRMATION_MISMATCH` | 409 | 预检之后、正式执行之前，challenge 与 operation_id / decision_id / request_hash 不符（revision 变化走 `DECISION_REVISION_CONFLICT`） | 不执行，重新取 challenge |
 | `CONFIRMATION_EXPIRED` | 409 | challenge 过期 | 重新取 challenge |
-| `OPERATION_ID_CONFLICT` | 409 | 同一 operation_id 换了请求（`request_hash` 不同），且已有窗口内终结回执 | 不重试，人工核查 |
+| `OPERATION_ID_CONFLICT` | 409 | 同一 operation_id 换了请求（`request_hash` 不同），且已有窗口内终结回执，或同 operation_id 的非终结行 | 不重试，人工核查 |
 | `OPERATION_EXPIRED` | 410 | `receipt_expired_at` 已置位（`completed_at` 起满 7 天）；同 operation_id 不再执行 | 先 `get_decision` 核对现状；要重做换新 operation_id，不盲重试 |
+| `OPERATION_TIMEOUT` | 504 | `in_flight` 超过 10 分钟未完成，维护扫描以 CAS 置 `rejected` 并写该回执；业务状态未改 | 不重试；先 `get_decision` 核对现状，要重做换新 operation_id |
 | `COMMAND_BUSY` | 503 | 同一 operation_id 已有 `request_hash` 相同的非终结行，或写锁等待超过 5 秒 | 可重试，必须复用同一 operation_id |
 
 - **高风险裁决的确认分两步，challenge 必须绑定具体动作。** 第一次 `decision.resolve` 不带 `confirm_challenge` 时，服务只校验请求与 policy（含 `expected.revision`），通过则返回 `CONFIRMATION_REQUIRED`，`details.confirm_challenge` 是一次性 HMAC 签名，覆盖 `operation_id`、`request_hash`、`decision_id`、`revision` 与过期时间（120 秒）；`request_hash` 已覆盖 command / target / expected / payload，`confirm_challenge` 本身不入哈希。**预检不是命令**：不改状态、不落 command 行、不写回执、不占 `operation_id`。第二次用同一 `operation_id`、同一组字段带 challenge 重发；服务**先看 `receipt_expired_at`，未过期时查终结回执与在途行，没有才验 challenge**；revision 不符（challenge 记录、`expected.revision` 与当前 revision 三者任一不一致）返回 `DECISION_REVISION_CONFLICT`，除 revision 外的绑定字段（`operation_id` / `decision_id` / `request_hash`）不符返回 `CONFIRMATION_MISMATCH`，challenge 过期返回 `CONFIRMATION_EXPIRED`。challenge 只能用一次，消费与 inbox 终态在同一事务提交；成功后的重放，在回执窗口内先命中终结回执，返回 `replayed=true`，不重复执行，也不因 challenge 已消费或过期而失败。
@@ -1201,7 +1210,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 
 - 命令 **10 秒是客户端响应超时**；超时后面板显示「结果未知」，**不显示失败**，并用 `get_operation(operation_id)` 查回执。
 - 服务端写事务是短事务，`busy_timeout = 5000ms`；锁等待超过 5 秒返回 `COMMAND_BUSY`（503，`retryable=true`），面板重试必须复用同一 `operation_id`。客户端 10 秒与服务端 5 秒不是同一个超时：前者管「等响应多久」，后者管「等锁多久」。
-- 回执为 `applied` → 刷新目标实体；`rejected` → 显示错误；`in_flight` 或查不到回执 → 保持「结果未知」，允许用同一 `operation_id` 重发；重发命中在途行返回 `COMMAND_BUSY`，不会重复执行。
+- 回执为 `applied` → 刷新目标实体；`rejected` → 显示错误（含 `OPERATION_TIMEOUT`）；`in_flight` 未满 10 分钟或查不到回执 → 保持「结果未知」，允许用同一 `operation_id` 重发，重发命中在途行返回 `COMMAND_BUSY`，不会重复执行；满 10 分钟由维护扫描落 `rejected`，面板刷新后按 `OPERATION_TIMEOUT` 显示，不再停在「结果未知」。
 - `409` 类冲突不自动重试。
 - 命令进行中禁用按钮；同一 decision 同时只允许一个面板命令在飞。
 
@@ -1294,6 +1303,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 33. **Q-33** `human_attested` 不出现在 `evidence_strength`，也不出现在「已验证」列；`get_evidence` 不返回人证，人证只能走 `get_attestation`，且固定标「人证，不是系统证据」。
 34. **Q-34** 子智能体持同一 `orchestra.secret` 调 `decision.resolve` 被拒（路由只注册在面板上下文，校验 webview origin + 一次性 nonce，工具层无此命令）；服务记录的 actor 是认证主体，不是子智能体自报的 surface。
 35. **Q-35** 一条 `applied` command 行 `completed_at` 已满 7 天，维护扫描置 `receipt_expired_at` 并清空 `receipt_json`；`get_operation` 与同 operation_id 复放均返回 `OPERATION_EXPIRED`，不重新执行；`in_flight` 行不参与该窗口，按 `created_at` 判在途超时。
+36. **Q-36** 一条 command 行卡在 `in_flight`：`created_at` 起未满 10 分钟时，重发同 operation_id 返回 `COMMAND_BUSY`；满 10 分钟后维护扫描以 CAS 置 `rejected` 并写 `OPERATION_TIMEOUT` 回执，不改业务状态；随后 `get_operation` 返回 `rejected` / `OPERATION_TIMEOUT`，面板提示先核对现状、换新 operation_id 重做；执行侧若仍在跑，提交时因 CAS 失败整笔回滚，不会覆盖这次终态。
 
 ### 4.12 与其它段的边界
 
