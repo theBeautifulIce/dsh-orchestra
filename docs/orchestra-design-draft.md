@@ -1,6 +1,6 @@
 # dsh-orchestra 设计草案
 
-状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v30：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）；v30 新增流程定义编辑（四个 workflow 命令、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42）。上一版为 v31：第三十二轮审计 1 致命、6 重大、1 措辞已逐条修入正文（发布事务与回执同事务、版本 CAS 顺序与触发器、重复边/自环拒绝码、空草稿名称、已消费草稿优先级、子流程环与深度口径、publish_note 范围），送第三十三轮。v31 不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。本文件为 v33：第四段 v32 已按第三十四轮审计 pass（0 致命 / 0 重大 / 4 条非阻断措辞）收口；v33 只清理这四条措辞（open_draft 分支、create/update 名称校验、Q-39 create 用例、逐字→语义），不改变审查结论，不新增运行态状态、迁移、decision kind、终态或证据门。 第五段为 v37：第五段「记忆插件对接（memory-audit-v1）」已按第三十六轮审计（2 致命 / 4 重大 / 1 措辞）逐条修入：apply 从当前条目重算哈希并与有序快照逐项比对、批准后封死条目增删与全部提议字段、memory_run_requests 持久化 request_key 幂等、memory bridge 独立注册表接上 §11 闸门、blocked/failed 批次条目收口、Q-54 补齐 stopped_at / evidence_id 证据门、三面 toolPolicy 校验，并补 Q-43c / Q-44b / Q-44c / Q-52b；v35 的发布门禁、批准快照、空 payload、评估唯一键、items 契约、生命周期、错误码顺序与 truncated 强制继续有效；第一至第四段除 §3.2 的 trigger 来源口径、§11 的 bridge 注册表口径、§4.12 第 9 行与 §9/§4.6.3 的 resolution 适用范围外未改，不新增节点类型、run 状态或 resolution 值。v37 按第三十七轮审计（3 致命 / 4 重大 / 3 措辞）逐条修入：哈希原像白名单与 canonical 排序、tool.result 丢失时批次保持 applying 与同批次节点重试、audit_result 复用为 mem_apply 前置批准、toolRef 前缀统一、Q-44c 错误层、批准后 client_key 只读、inspect_batch 计数与三处措辞；送第三十八轮。 本文件为 v38：第五段 v37 已按第三十八轮审计 pass（0 致命 / 0 重大 / 2 条非阻断措辞）；v38 只清理这两条非阻断措辞（inspect_batch 返回体显式带 batch_id，apply 重算改为 canonical_proposal(当前 items)），不改变审查结论。 本文件为 v39：新增第六段「分阶段落地与验收」，含六阶段、六道门、十条例不变量、十六种故障注入、验收矩阵、发布大脑、回滚与三圈试用；v39 已按第39轮审计（1 致命 / 15 重大 / 5 措辞）逐条修入：账本只追加不回退、阶段能力绑定、S6 拆 G6 与 R2、G6 双 artifact、node_run 状态名对齐 §8、门禁判据写死、终态证据表、I10 例外收窄、GateArtifact 契约、双向兼容窗口、F8 十种 resolution、补 G-14–G-16；不改变第一至第五段已通过的结论，也不新增节点类型、run 状态或记忆协议。
+状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v30：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）；v30 新增流程定义编辑（四个 workflow 命令、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42）。上一版为 v31：第三十二轮审计 1 致命、6 重大、1 措辞已逐条修入正文（发布事务与回执同事务、版本 CAS 顺序与触发器、重复边/自环拒绝码、空草稿名称、已消费草稿优先级、子流程环与深度口径、publish_note 范围），送第三十三轮。v31 不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。本文件为 v33：第四段 v32 已按第三十四轮审计 pass（0 致命 / 0 重大 / 4 条非阻断措辞）收口；v33 只清理这四条措辞（open_draft 分支、create/update 名称校验、Q-39 create 用例、逐字→语义），不改变审查结论，不新增运行态状态、迁移、decision kind、终态或证据门。 第五段为 v37：第五段「记忆插件对接（memory-audit-v1）」已按第三十六轮审计（2 致命 / 4 重大 / 1 措辞）逐条修入：apply 从当前条目重算哈希并与有序快照逐项比对、批准后封死条目增删与全部提议字段、memory_run_requests 持久化 request_key 幂等、memory bridge 独立注册表接上 §11 闸门、blocked/failed 批次条目收口、Q-54 补齐 stopped_at / evidence_id 证据门、三面 toolPolicy 校验，并补 Q-43c / Q-44b / Q-44c / Q-52b；v35 的发布门禁、批准快照、空 payload、评估唯一键、items 契约、生命周期、错误码顺序与 truncated 强制继续有效；第一至第四段除 §3.2 的 trigger 来源口径、§11 的 bridge 注册表口径、§4.12 第 9 行与 §9/§4.6.3 的 resolution 适用范围外未改，不新增节点类型、run 状态或 resolution 值。v37 按第三十七轮审计（3 致命 / 4 重大 / 3 措辞）逐条修入：哈希原像白名单与 canonical 排序、tool.result 丢失时批次保持 applying 与同批次节点重试、audit_result 复用为 mem_apply 前置批准、toolRef 前缀统一、Q-44c 错误层、批准后 client_key 只读、inspect_batch 计数与三处措辞；送第三十八轮。 本文件为 v38：第五段 v37 已按第三十八轮审计 pass（0 致命 / 0 重大 / 2 条非阻断措辞）；v38 只清理这两条非阻断措辞（inspect_batch 返回体显式带 batch_id，apply 重算改为 canonical_proposal(当前 items)），不改变审查结论。 本文件为 v40：第六段「分阶段落地与验收」在 v39 基础上按第40轮审计（0 致命 / 9 重大 / 4 措辞）逐条修入：门 run 终态沿用 §8 五值、policy 输出 decision、I4 补 run 终态证据行、辅门失败只追加补记、GateArtifact 去自指并定义 canonical 哈希与八段映射、账本时间改用 occurred_at + 单调时钟、G-01/G-14 无旧构建分支、门×注入矩阵与 G2 parallel 拒绝用例、W1–W4 措辞；v39 原有内容：账本只追加不回退、阶段能力绑定、S6 拆 G6 与 R2、G6 双 artifact、node_run 状态名对齐 §8、门禁判据写死、终态证据表、I10 例外收窄、GateArtifact 契约、双向兼容窗口、F8 十种 resolution、补 G-14–G-16；不改变第一至第五段已通过的结论，也不新增节点类型、run 状态或记忆协议。
 
 ## 第一段 骨架与落点
 
@@ -625,7 +625,7 @@ CREATE INDEX workflow_drafts_updated ON workflow_drafts(updated_at);
 固定图的唯一例外：mem_apply 的 pre_execution 批准复用 mem_confirm 的 audit_result（同一 decision_id，不新建卡，不产生第二张审批卡）；复用条件见 5.7 与 §3.2。
 两者共用：状态机（§8）、artifact 契约（decision_ref）、超时默认动作（升级链路）。用例：无显式 approval 节点 + irreversible agent/tool → 断言引擎自动生成前置 decision，节点停在 blocked_pre；批准 → 重新 queued → leased → dispatched（attempt 不变）；驳回 → failed；**审批等两小时期间 slot 不被占**；**租约过期后批准仍能重新派发**。
 
-**五、policy。** 纯声明式求值，输出 matched / ruleId / 依据字段，artifact=none，无模型参与。
+**五、policy。** 纯声明式求值，输出 `matched` / `ruleId` / `decision(pass|fail)` / 依据字段；`decision` 由命中的规则确定性映射，branch 只读这个字段，不自行解释 `matched`。artifact=none，无模型参与。
 
 **六、branch。** 静态同标签重复 = 加载期错误；运行期多命中 = BRANCH_AMBIGUOUS。每条出边须声明 priority 或 default；收不住就生成 decision 并进 blocked_post（带命中 ruleId 列表）。
 
@@ -1052,7 +1052,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | `WorkflowVersionView` | workflow_id, version, based_on_version, definition, definition_hash, publish_note, published_at, published_by | 发布后不可变；run 固定引用 `(workflow_id, version)`，不随 `current_version` 漂移 |
 | `NodeRunView` | node_run_id, node_id, seq, node_type, attempt, parent_node_run_id, origin_node_run_id, status, display_status, side_effect_policy, declared_effect, verified_effect, evidence_strength, evidence_state, action_start_source, attestation_id, executor{}, hang_reason, decision_id, started_at, deadline_at, action_deadline_at, heartbeat_age_ms | `display_status` 是服务给的展示映射，不替代 `status`；`evidence_strength` 只取 `strong` / `weak`；`attestation_id` 只进人证栏；`seq` 是节点拓扑序号，同一 `node_id` 的多个 attempt 共用同一个 `seq`，与 `report_registry` 的报告队列 `seq` 不是一回事 |
 | `DecisionView` | decision_id, run_id, node_run_id, kind, status, priority, priority_reason, age_seconds, expires_at, expiry_effect, expiry_effect_reason, allowed_resolutions[], required_evidence[], current_revision, target_summary, confirm_required | `allowed_resolutions` 由服务给，面板不硬编码；`required_evidence[]` 只用于展示，不决定放行；`expiry_effect_reason` 是服务给的一句人话，缺默认动作时写「默认动作未定义」 |
-| `EventView` | seq, event_id, type, occurred_at, run_id, node_run_id, decision_id, actor, summary, payload_redacted, payload_ref | `payload` 默认脱敏；原文走 artifact |
+| `EventView` | seq, event_id, type, occurred_at, run_id, node_run_id, decision_id, actor, summary, payload_redacted, payload_ref | `payload` 默认脱敏；原文走 artifact。`occurred_at` 是服务提交事件时写入的账本时间；超时判定不读进程墙钟，用 `(boot_id, monotonic_ns)` 与事件 seq 派生 |
 | `ArtifactView` | artifact_id, kind, media_type, bytes, sha256, created_at, retention_until, download | `download` 是短时签名句柄，不是本地路径 |
 | `EvidenceView` | evidence_id, strength, source, observed_at, summary, artifact_id | `strength` 只取 `strong` / `weak`；本视图不承载人证 |
 | `AttestationView` | attestation_id, claim, attested_by, attested_at, action_start_source, summary | 只证明「人看见动作开跑」这一状态事实；**不是证据，不进证据强弱，不支撑「已验证」** |
@@ -2081,7 +2081,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 
 
-## 第六段 分阶段落地与验收（v39）
+## 第六段 分阶段落地与验收（v40）
 
 一句话定位：这一段不排工期，只排「哪一步可以交给真实的人用、用什么证据证明它能用、出事怎么退回来」。六个阶段是六层楼板，不是六次演示；每层楼板都要能单独承重，上一层才允许开工。
 
@@ -2102,7 +2102,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 | S3 九节点与状态机 | 九种节点、迁移表、CAS 与代次、decision 八种 kind、审批、并行、等待、子流程、补偿 | 跑真实的多节点流程，能停在任何一个人工口，能恢复、能追责 | 不做流程定义的在线编辑与发布；面板只做只读排障视图 | G3 |
 | S4 流程定义与版本 | 四个 workflow 命令、定义校验、发布事务、版本固定、在途 run 不换版本、回滚发布 | 建流程、改草稿、发布、把某条 run 固定在某个版本上 | 不做记忆写入；不做发布门禁的自动编排（先人工按文档跑） | G4 |
 | S5 面板与记忆 | 查询 API、实时更新、六屏面板、memory run 全链路（提议、评估、审批、执行、汇报） | 在面板上看清「到哪、为什么停、下一步」，批准或驳回记忆 | 不做发布硬化；不做多工作区配额 | G5 |
-| S6 硬化与发布 | S6a 硬化（故障注入、性能基线、安全加固、升级与回滚、运行手册）→ G6 → R1 → R2 三圈试用 | 在受控工作区里长期跑，出事能按手册退回来 | 不新增节点类型、不新增 run 状态、不改第五段记忆协议 | G6 → R1 → R2（S6 完成 = G6 + R1 + R2） |
+| S6 硬化与发布 | S6a 硬化（故障注入、性能基线、安全加固、升级与回滚、运行手册）→ R0 合成圈 → G6 → R1 → R2 三圈试用 | 在受控工作区里长期跑，出事能按手册退回来 | 不新增节点类型、不新增 run 状态、不改第五段记忆协议 | R0 → G6 → R1 → R2（S6 完成 = G6 + R1 + R2；R0 不计入） |
 
 **阶段之间的依赖是硬的：**
 
@@ -2131,21 +2131,21 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 | 门 | 必过项 | 原始证据 | 失败动作 | 回滚演练 |
 | --- | --- | --- | --- | --- |
-| G1 | 迁移从空库到当前版本可重复；迁移中途被杀可重入；进程被杀后账本不丢已提交事件；备份能恢复到独立目录且行数/哈希一致；备份损坏能被检出；认证拒绝匿名写；阶段开关拒绝未知值 | 迁移日志、G-14 注入记录、崩溃注入记录、独立目录恢复后的行数与哈希比对、G-15 损坏备份拒绝记录、认证失败响应、启动拒绝日志 | 修到全过；不允许用「手工补一条」过门 | 停服务、保留线上账本；有旧构建则回退，无旧构建则停在 S1 修复；备份只恢复到独立目录校验，不覆盖线上账本；按事件日志重放到故障点，读回同一条事件 |
-| G2 | 单节点从 queued 到终态只有一条路径；重复上报只落一次；租约过期后的迟到上报被拒；取消后不再产生新 attempt；终态必带证据引用；node_run 不出现裸 blocked | 单节点从 queued 到终态的用例输出、重复上报回执、迟到上报拒绝码、取消前后事件序列、证据引用清单、状态枚举断言 | 冻结 S2，不接真实工具；只修单节点 | 停执行桥、把在途 agent 节点置 paused_bridge_missing（run 的 display_status 由 paused_reasons=[bridge_missing] 派生为 blocked）、重启后按账本恢复 |
-| G3 | M-01…M-61 全过；非法迁移全部被拒；并发推进只有一个赢家；并行扇出与汇聚计数一致；子流程环与深度被拒；补偿不重复执行；取消向子 run 传播 | 61 条用例输出、非法迁移拒绝码表、并发 CAS 记录、扇出计数、环检测响应、补偿幂等回执、G-16 取消传播记录 | 冻结 S3；未发布草稿保持；已固定 run 保持当前版本，不改进状态机 | 停新 run、等在途 run 收口、仅限双向兼容窗口内回退引擎构建、账本不回滚；窗口外只前滚修复 |
-| G4 | Q-37…Q-42 全过；发布事务与回执同笔；并发发布只有一个版本生效；在途 run 固定旧版本；非法图与空名称被拒；回滚发布不影响已固定 run | 命令回执、发布事务日志、并发发布结果、版本固定查询、拒绝码、回滚前后 run 版本对照 | 撤下新版本，保留历史版本；在途 run 不动 | 取消发布、把草稿置回 open、重启后确认固定版本仍可读 |
-| G5 | Q-01…Q-36 与 Q-43…Q-63 全过（含 43b/43c/44b/44c/47b 等子用例，逐条列在门记录）；面板在 1600×1000 与 1366×900 无横向溢出；正文 ≥13px、辅助文字 ≥12px、左侧菜单与顶部导航 ≥12.5px（6.3 下限）；浅色主题对比度达到 6.3 判据（正文 4.5:1、大字/UI 3:1）；记忆批次部分写入能对账；S5 启动 wf_release_v1 被拒 | 用例输出、两个视口的溢出检测、字号与对比度清单、批次对账记录、越阶段启动拒绝回执 | 面板回退到只读排障视图；记忆写入关闭，只留提议 | 关面板路由与记忆路由，引擎与账本继续运行 |
-| G6 | G-01…G-16 全过；控制面 p95 达到 6.3 判据；事件滞后 p95≤2s、最大≤10s；24 小时浸泡无泄漏与无孤儿 run；从上一版升级成功；双向兼容窗口内负载回滚成功；值班手册演练通过；独立 artifact 与 wf_release_v1 artifact 的 candidate/evidence/conclusion 一致 | 注入记录、性能报告、浸泡监控、升级与回滚日志、演练签到与时间线、两份 artifact 及一致性比对 | 退回上一个过门构建；R1 暂停进圈；R2 尚未开始，不适用「缩回 R1」 | 按运行手册回退到上一个过门构建；账本只前进不回退；窗口外只前滚修复 |
+| G1 | 迁移从空库到当前版本可重复；迁移中途被杀可重入；进程被杀后账本不丢已提交事件；备份能恢复到独立目录且行数/哈希一致；备份损坏能被检出；认证拒绝匿名写；阶段开关拒绝未知值 | 迁移日志、G-01/G-02/G-08/G-09/G-14 注入记录、崩溃注入记录、独立目录恢复后的行数与哈希比对、G-15 损坏备份拒绝记录、认证失败响应、启动拒绝日志 | 修到全过；不允许用「手工补一条」过门 | 停服务、保留线上账本；有旧构建则回退，无旧构建则停在 S1 修复；备份只恢复到独立目录校验，不覆盖线上账本；按事件日志重放到故障点，读回同一条事件 |
+| G2 | 单节点从 queued 到终态只有一条路径；重复上报只落一次；租约过期后的迟到上报被拒；取消后不再产生新 attempt；终态必带证据引用；node_run 不出现裸 blocked；S2 加载 parallel 节点被拒；G-03/G-04/G-07 注入通过 | 单节点从 queued 到终态的用例输出、重复上报回执、迟到上报拒绝码、取消前后事件序列、证据引用清单、状态枚举断言、parallel 加载期拒绝码/日志、G-03/G-04/G-07 注入记录 | 冻结 S2，不接真实工具；只修单节点 | 停执行桥、把在途 agent 节点置 paused_bridge_missing（run 的 display_status 由 paused_reasons=[bridge_missing] 派生为 blocked）、重启后按账本恢复 |
+| G3 | M-01…M-61 全过；非法迁移全部被拒；并发推进只有一个赢家；并行扇出与汇聚计数一致；子流程环与深度被拒；补偿不重复执行；取消向子 run 传播；G-01/G-02/G-04/G-06/G-12/G-16 注入通过 | 61 条用例输出、非法迁移拒绝码表、并发 CAS 记录、扇出计数、环检测响应、补偿幂等回执、G-16 取消传播记录、G-01/G-02/G-04/G-06/G-12/G-16 注入记录 | 冻结 S3；未发布草稿保持；已固定 run 保持当前版本，不改进状态机 | 停新 run、等在途 run 收口、仅限双向兼容窗口内回退引擎构建、账本不回滚；窗口外只前滚修复 |
+| G4 | Q-37…Q-42 全过；发布事务与回执同笔；并发发布只有一个版本生效；在途 run 固定旧版本；非法图与空名称被拒；回滚发布不影响已固定 run；G-10 注入通过 | 命令回执、发布事务日志、并发发布结果、版本固定查询、拒绝码、回滚前后 run 版本对照、G-10 注入记录 | 撤下新版本，保留历史版本；在途 run 不动 | 取消发布、把草稿置回 open、重启后确认固定版本仍可读 |
+| G5 | Q-01…Q-36 与 Q-43…Q-63 全过（含 43b/43c/44b/44c/47b 等子用例，逐条列在门记录）；面板在 1600×1000 与 1366×900 无横向溢出；正文 ≥13px、辅助文字 ≥12px、左侧菜单与顶部导航 ≥12.5px（6.3 下限）；浅色主题对比度达到 6.3 判据（正文 4.5:1、大字/UI 3:1）；记忆批次部分写入能对账；S5 启动 wf_release_v1 被拒；G-06/G-11/G-12 注入通过 | 用例输出、两个视口的溢出检测、字号与对比度清单、批次对账记录、越阶段启动拒绝回执、G-06/G-11/G-12 注入记录 | 面板回退到只读排障视图；记忆写入关闭，只留提议 | 关面板路由与记忆路由，引擎与账本继续运行 |
+| G6 | G-01…G-16 全过；控制面 p95 达到 6.3 判据；事件滞后 p95>2s 或最大>10s 持续十分钟即触发告警；24 小时浸泡无泄漏与无孤儿 run；从上一版升级成功；双向兼容窗口内负载回滚成功；值班手册演练通过；独立 artifact 与 wf_release_v1 artifact 的 candidate/evidence/conclusion 一致 | 注入记录、性能报告、浸泡监控、升级与回滚日志、演练签到与时间线、两份 artifact 及一致性比对 | 退回上一个过门构建；R1 暂停进圈；R2 尚未开始，不适用「缩回 R1」 | 按运行手册回退到上一个过门构建；账本只前进不回退；窗口外只前滚修复 |
 
-**S6 不是一道门：** G6 是发布候选门（构建硬化门），R1 与 R2 是试用圈；S6 完成 = G6 + R1 + R2 出圈。G6 的必过项不看 R2，顺序写死 G6 → R1 → R2。
+**S6 不是一道门：** G6 是发布候选门（构建硬化门），R1 与 R2 是试用圈；S6 完成 = G6 + R1 + R2 出圈，R0 在 G6 前完成、不计入。G6 的必过项不看 R2，顺序写死 R0 → G6 → R1 → R2。
 
 **门禁共用的判据（不写死就不算门）：**
 
 - **对比度**：WCAG 2.2 AA，正文 4.5:1，大字（≥24px 或 ≥18.66px 粗体）与 UI 控件 3:1；用 Playwright + axe-core 扫描，争议项人工复核。
 - **控制面 p95**：沿用 §4.8 的口径——`list_tasks` 1 万任务 p95 < 100ms、`get_run` 1000 节点 p95 < 150ms、`list_nodes` / `list_events` 单页 200 条 p95 < 80ms / 50ms；事件滞后 p95 ≤ 2s、最大 ≤ 10s；预热 3 次取第 4 次。
 - **隔离区**：events 表中 `type='tool.result.quarantined'` 的只追加记录，payload 带 `report_id`、`received_at`、`payload_hash`、`reason`、`status`；保留 30 天，不回写业务状态。
-- **账本时间**：统一取事件提交时的 `events.recorded_at`；截止判断不用进程墙钟。
+- **账本时间**：统一取事件提交时由服务写入的 `events.occurred_at`（EventView 已定义）；截止判断不用进程墙钟，按 `(boot_id, monotonic_ns)` 与事件 seq 派生；系统时钟跳变只影响时间显示，不影响超时判定。
 - **命令队列**：最大深度 1000；满时返回 `QUEUE_FULL`（503）；指数退避 50ms→2s，最多 5 次；已提交写不丢。
 - **P1**：账本损坏或数据丢失、安全边界突破、跨工作区不可用、门 artifact 失效；由当班人与阶段负责人共同判定，写进事故单。
 - **门记录冻结阈值**：以本节数值为准；要改先改文档再改门记录，不能口头冻结。
@@ -2161,7 +2161,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 | I1 | 一个 node_run 最多一个终态；一个 run 最多一个终态 | 对账查询：按 id 分组统计终态数，必须全为 0 或 1 |
 | I2 | 账本只追加，已提交事件不被改写；事件序号单调 | 哈希链重算、按 run 重放、比对事件数与最大序号 |
 | I3 | 所有状态迁移带 CAS 条件；CAS 失败不产生副作用 | 并发推进用例、注入旧代次上报、检查副作用计数 |
-| I4 | 每个终态都有对应类型的证据；不可逆动作必须有强证据与产物哈希 | 按下表终态证据表扫描、扫不可逆节点弱证据、校验产物哈希 |
+| I4 | 每个 node_run 与 run 的终态都有对应类型的证据；不可逆动作必须有强证据与产物哈希 | 按下表终态证据表扫描 node_run 与 run、扫不可逆节点弱证据、校验产物哈希 |
 | I5 | 一条 run 只在一个 workflow 版本上跑；发布不改在途 run | 发布前后查 run 的 version_id、并发发布用例 |
 | I6 | 审批绑定内容哈希与有效期；内容变了审批失效 | 改审批对象后重放、过期审批重放、双批准用例 |
 | I7 | 记忆批次按条目原子；request_key 幂等；部分写入只能进 indeterminate 并对账 | 重复 request_key、注入半写、对账后重试 |
@@ -2169,20 +2169,25 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 | I9 | 恢复决策必须确定且留痕；同一现场重放得到同一结论 | 杀进程后重启两次、比对恢复决策与事件 |
 | I10 | 没有门记录与批准人，构建不得进入下一阶段；例外不得覆盖 I1…I9 | 发布脚本校验门产物哈希与批准人；扫例外清单 |
 
-**I10 是元规则：** 它管的是「门能不能被绕过」，不是某一个业务状态。例外只用于不影响门结论的非门禁优化，必须写清到期时间与补偿动作；以下不可例外：I1…I9、G1 认证、G5 字号与对比度硬下限、G6 升级/回滚/浸泡、任何必过项。例外不得把必过项改成通过；到期未完成即回滚。
+**I10 是元规则：** 它管的是「门能不能被绕过」，不是某一个业务状态。例外只用于不影响门结论的非门禁优化，必须写清到期时间、补偿动作与回滚对象；回滚对象写死为「上一过门构建」，无上一过门构建时停在当前阶段修复、不回退账本；例外项对应的优化只做前滚修复，不拿例外当回滚目标。以下不可例外：I1…I9、G1 认证、G5 字号与对比度硬下限、G6 升级/回滚/浸泡、任何必过项。例外不得把必过项改成通过；到期未完成即回滚。
 
 
-**终态证据表（I4 的扫描按这张表认，空证据不等于有证据）：**
+**终态证据表（I4 同时扫 node_run 与 run，空证据不等于有证据）：**
 
-| 终态 | 可接受的证据 |
-| --- | --- |
-| done | tool.result，或产物哈希 + 完成回执 |
-| failed | 失败输出、错误码或 report |
-| timeout | deadline 事件 + 最后心跳 |
-| abandoned_unverified | abandon decision + 签字 + stop evidence |
-| failed_with_unverified | `compensation.failed` + verify 失败，或 no-executable-compensation 证据 |
-| orphaned | orphan 扫描事件 + 最后心跳 + executor 身份 |
-| superseded | supersede 迁移事件 + 新 attempt / node_run id |
+| 层级 | 终态 | 可接受的证据 |
+| --- | --- | --- |
+| run | succeeded | 全部子 node_run 终态 + run 收口事件 + 每个不可逆子节点 `side_effect_verified_none=true` 且带 stop_evidence；无未验证清单 |
+| run | succeeded_with_unverified | `run.succeeded_with_unverified` 事件 + 未验证副作用清单（node_run_id / action / stopped_at）+ 每笔缺 `side_effect_verified_none` 的说明；不得签 pass |
+| run | failed | `run.failed` 事件 + 失败子节点证据 + run 级结果判定记录 |
+| run | failed_with_unverified | `run.failed_with_unverified` 事件 + 失败子节点证据 + 未验证副作用清单；不得折成 failed |
+| run | orphaned | orphan 扫描事件 + 最后心跳 + executor 身份 + 子节点证据引用 |
+| node_run | done | tool.result，或产物哈希 + 完成回执 |
+| node_run | failed | 失败输出、错误码或 report |
+| node_run | timeout | deadline 事件 + 最后心跳 |
+| node_run | abandoned_unverified | abandon decision + 签字 + stop evidence |
+| node_run | failed_with_unverified | `compensation.failed` + verify 失败，或 no-executable-compensation 证据 |
+| node_run | orphaned | orphan 扫描事件 + 最后心跳 + executor 身份 |
+| node_run | superseded | supersede 迁移事件 + 新 attempt / node_run id |
 
 ### 6.5 十六种故障注入
 
@@ -2190,24 +2195,35 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 | 编号 | 注入什么 | 期望看到什么 | 落在哪道门 | 回滚动作 |
 | --- | --- | --- | --- | --- |
-| G-01 | 事务 BEGIN 之后、COMMIT 之前杀进程 | 账本没有半条记录；重启后从上一个已提交点继续；不出现「状态变了但事件没写」 | G1、G3 | 保留线上账本，按事件日志重放到故障前；回退到上一个过门构建 |
+| G-01 | 事务 BEGIN 之后、COMMIT 之前杀进程 | 账本没有半条记录；重启后从上一个已提交点继续；不出现「状态变了但事件没写」 | G1、G3 | 有旧构建则回退到上一个过门构建；无旧构建则停在 S1 修复，保留线上账本，按事件日志重放并读回同一条事件 |
 | G-02 | COMMIT 成功、outbox 尚未投递时杀进程 | 恢复后事件恰好投递一次；订阅者按 event_id 去重；不丢事件、不重复副作用 | G1、G3 | 重放 outbox 并按 event_id 去重；不重复副作用；必要时回退构建 |
 | G-03 | 同一个 report_id 连发两次 | 第一次落库并回执；第二次返回同一结果；node_run 只推进一次 | G2 | 用原 report_id 返回同一回执；不新建 attempt |
 | G-04 | 租约到期，但原执行器还活着并晚到上报 | G2 只验迟到上报被拒、不产生第二个有效 attempt；G3 再验已有副作用时走补偿而不是重跑 | G2（迟到拒绝）、G3（补偿） | 拒收迟到上报；已有副作用走补偿；不重跑前向 |
 | G-05 | 工具执行中取消 | 取消赢；晚到的 tool.result 只进隔离区（6.3 的 quarantined 事件），不回写状态；不再新建 attempt | G2、G6 | 晚到 tool.result 只进隔离区；取消流程照常收口 |
 | G-06 | tool.result 丢失，执行器只收到半截回执 | 节点停在 verifying；记忆批次停在 applying（后者只在 G5 验）；对账确认前不重试；确认未写入后同批次重试；不出现双写 | G3（节点）、G5（记忆批次）、G6 | 节点留 verifying，对账确认后同批次重试；记忆批次进 indeterminate 对账 |
-| G-07 | 系统时钟向前或向后跳十分钟 | 截止时间以 events.recorded_at（6.3）为准；不因时钟跳变提前判超时或延后判超时 | G2、G6 | 以 events.recorded_at 重算截止；修正误判；必要时回退构建 |
+| G-07 | 系统时钟向前或向后跳十分钟 | 截止时间以 events.occurred_at 记录界限、按 `(boot_id, monotonic_ns)` 与事件 seq 派生；不因时钟跳变提前判超时或延后判超时 | G2、G6 | 用同一 boot_id 的单调时钟重算截止；修正误判；必要时回退构建 |
 | G-08 | 写锁被长事务占住，命令队列达到 1000 深度 | 队列有上限（1000）、有 QUEUE_FULL 拒绝码、有退避；已提交写不丢；读路径不被拖死 | G1、G6 | 队列满返回 QUEUE_FULL 并退避；已提交写不丢 |
 | G-09 | 事件订阅者离线十分钟后重连 | 从 cursor 续读；重放不产生重复业务效果；ack 之后不重复派发 | G1、G6 | 从 cursor 续读并按 event_id 去重；不重复派发 |
 | G-10 | 一条 run 在途时发布新 workflow 版本 | 在途 run 仍固定旧版本；新 run 用新版本；旧版本不被删除 | G4 | 在途 run 固定旧版本；新 run 用新版本；旧版本不删 |
 | G-11 | 记忆批次写入到一半进程被杀 | 批次进 indeterminate；对账后只补缺的条目；不整批盲重试、不重复写已落条目 | G5、G6 | 批次进 indeterminate，对账后补缺；不整批盲重试 |
 | G-12 | 审批按钮双击，或同一决定重复提交 | 只产生一次批准；第二次幂等返回；不出现两个批准人、两个时间 | G3、G5（G5 只做回归） | 同一 decision 幂等返回；不重复批准 |
 | G-13 | 升级或回滚时仍有在途 run | 先停新 run、再等在途收口；双向兼容窗口内旧构建能忽略未知字段并读当前账本；窗口外只前滚修复；不出现孤儿 run 或无法解释的状态 | G6 | 停新 run、等在途收口；窗口内回退上一过门构建，窗口外前滚 |
-| G-14 | 迁移到一半杀进程，重启后重跑同一批迁移 | 迁移可重入；不重复建表/加列；未完成迁移不进入下一阶段；账本没有半条 schema 版本记录 | G1、G6 | 迁移重跑可重入；未完成不进下一阶段；回退构建 |
+| G-14 | 迁移到一半杀进程，重启后重跑同一批迁移 | 迁移可重入；不重复建表/加列；未完成迁移不进入下一阶段；账本没有半条 schema 版本记录 | G1、G6 | 有旧构建则回退到上一个过门构建；无旧构建则停在 S1 修复，保留线上账本，按事件日志重放并读回同一条 schema 版本事件 |
 | G-15 | 备份文件被截断或篡改，恢复到独立目录 | 校验和/行数/哈希任一不符即拒绝；不覆盖线上账本；报出损坏点 | G1、G6 | 拒绝损坏备份，不覆盖线上；按事件日志重放 |
 | G-16 | 父 run 取消，子 run 仍在跑 | 取消向子 run 传播；子 run 不再产生新节点 attempt；父 run 终态后不产生新子 run；传播记录落账 | G3、G6 | 取消向子 run 传播；子 run 不再新 attempt；父终态后不新子 run |
 
 **每条注入都要留三样东西：** 注入脚本与参数、注入前后的账本片段、恢复后的对账查询。表里的「回滚动作」是门记录的最低要求；具体到阶段再按 6.8 展开，门记录写实际动作与耗时。只写「已演练」不算证据。
+
+**门 × 注入矩阵（门记录按这张表列必过注入，不靠读者从「落在哪道门」自己猜）：**
+
+| 门 | 必过注入 | 证据 |
+| --- | --- | --- |
+| G1 | G-01, G-02, G-08, G-09, G-14, G-15 | 注入记录、重启后事件读回、队列拒绝码、cursor 续读、迁移重入、损坏备份拒绝 |
+| G2 | G-03, G-04, G-07 | 重复上报回执、迟到拒绝码、时钟跳变前后截止对照 |
+| G3 | G-01, G-02, G-04, G-06, G-12, G-16 | 半条事务、outbox 重放、补偿、verifying 对账、重复批准、取消传播 |
+| G4 | G-10 | 在途 run 版本固定、旧版本可调度 |
+| G5 | G-06, G-11, G-12 | 记忆批次对账、半写恢复、重复批准幂等 |
+| G6 | G-01…G-16 全过 | 全部注入记录与回滚演练 |
 
 ### 6.6 验收矩阵
 
@@ -2245,7 +2261,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 1. 每个 F 与 N 至少落一道门；只写在需求文档里、没有门接的条目，退回需求阶段重拆。
 2. 每道门至少有一条失败用例；只有 happy path 的门，不算门。
 
-**辅门规则：** 主门签字；辅门只补证据，任一辅门红则主门不得签字。跨阶段条目（如 F2）在主门过门时登记「待辅门」，最后一道辅门过门时才完成验收签字；辅门补不齐，主门结论改为不通过。
+**辅门规则：** 主门先签字时，辅门未完成的只签「条件通过 / 待辅门」，最终验收状态等最后一道辅门过门后再定；任一辅门红，最终验收状态改为不通过。跨阶段条目（如 F2）在主门过门时登记「待辅门」，最后一道辅门过门时才完成验收签字。门记录合并后不再改原结论；辅门失败只追加一节「补记」，写清哪道辅门红、影响哪条验收，原门记录与签字保持原样。
 
 ### 6.7 超级大脑怎么指挥一次发布
 
@@ -2259,12 +2275,12 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 1. **trigger 节点**：候选构建进入，带 git sha、schema 版本、目标阶段、变更摘要。
 2. **agent 节点（发布大脑）**：只读账本、证据索引、上次门记录与本次变更摘要；判断这次该重点跑哪些检查组，排出派发顺序。它不执行命令、不写账本、不批准。
-3. **parallel 节点**：按检查组扇出子流程 `wf_gate_check_v1`（输入输出与退出码见 6.10）。默认六组：迁移与恢复、单节点闭环、状态机与并发、版本与发布、面板与记忆、性能与安全。
+3. **parallel 节点**：按检查组扇出检查命令 `wf_gate_check_v1`（由 tool 节点调用；输入输出与 result_code 见 6.10）。默认六组：迁移与恢复、单节点闭环、状态机与并发、版本与发布、面板与记忆、性能与安全。
 4. **每个子流程内部**：tool 节点在沙箱里跑命令与注入；agent 节点只读输出，写一份有界摘要；最后产出 evidence 引用。子流程失败就整体失败，不允许「摘要写得好看就算过」。
 5. **wait 节点**：等所有子流程收口；超时进 paused（display_status=blocked），并在门卡上写清「哪一组没回来、等到什么时候」。
 6. **policy 节点**：确定性检查必过项是否齐、阈值是否达、证据哈希是否存在。它不调用模型，模型说「应该没问题」在这里没有权重。
 7. **approval 节点**：人看到的是「还差哪一项、影响是什么、退路是什么」，不是一屏日志。批准绑定候选哈希与证据集合；证据变了，批准失效。
-8. **agent 节点（收口）**：按 6.10 的字段写 GateArtifact，至少带 `conclusion`、`failed_items[]`、`exceptions[]`、`rollback_target`、`approver`、`producer`；门 run 的业务结论只有「通过」和「不通过」两种；状态名沿用第二段 §8 的 run 终态集合，门 run 的终态只有 succeeded/failed，等待时 display_status 可以是 blocked，但 blocked 不作为通过。
+8. **agent 节点（收口）**：按 6.10 的字段写 GateArtifact（完整字段与 canonical 哈希见 6.10）；门 run 的业务结论只有「通过」和「不通过」两种；状态名沿用第二段 §8 的 run 终态集合，门 run 的终态沿用 §8 五种，只有 succeeded 能映射为通过；succeeded_with_unverified / failed_with_unverified / orphaned 都不得签 pass，等待时 display_status 可以是 blocked，但 blocked 不作为通过。
 9. **branch 节点**：读 policy 输出的 `decision=pass/fail`，不读 run 终态；pass 才允许部署脚本消费 artifact，fail 停在当前阶段，不自动重试整条发布。门 run 结束后由部署脚本检查 `artifact.conclusion=pass`。
 
 **大脑的权力边界：**
@@ -2299,7 +2315,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 - 出现 I1…I9 中任意一条被破坏的证据。
 - 同类 P1 事故（判据见 6.3）在 24 小时内出现两次，或一次事故影响超过一个工作区。
-- 事件滞后持续超过 6.3 的 p95≤2s、最大≤10s 十分钟，且扩容无效。
+- 事件滞后 p95 > 2s 或最大 > 10s，持续十分钟，且扩容无效（阈值见 6.3）。
 - 迁移后出现无法用账本解释的状态，或对账查询结果自相矛盾。
 - 安全边界被突破：越权写、命令逃逸、凭据泄露。
 
@@ -2330,7 +2346,7 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 
 三圈不是三个环境名，是三种「人可以承担的错误」。
 
-顺序写死：G6 → R1 → R2。G6 不看 R2，R1 与 R2 都是 S6 的完成条件，不是 G6 的必过项。
+顺序写死：R0 → G6 → R1 → R2。R0 在 G6 前完成，不计入 S6 完成；G6 不看 R2，R1 与 R2 都是 S6 的完成条件，不是 G6 的必过项。
 
 | 圈 | 谁能进 | 能开什么 | 不能开什么 | 出圈条件 |
 | --- | --- | --- | --- | --- |
@@ -2359,13 +2375,28 @@ memory.apply_governed 是唯一写入端口。它只接受一个参数：decisio
 7. 回滚演练：动作、耗时、回滚后验证结果。
 8. 结论与签字：通过 / 不通过；批准人；时间；`producer`（human / s5_build / wf_release_v1）；下一道门的入口条件。
 
-**门的产物是一个 GateArtifact，不是一句口头结论。** 字段固定为：`gate`、`candidate_hash`、`evidence_index_hash`、`conclusion(pass|fail)`、`failed_items[]`、`exceptions[]`、`rollback_target`、`approver`、`approved_at`、`producer(human|s5_build|wf_release_v1)`、`record_hash`。`S*.md` 是它的可读渲染，`record_hash` 指向 artifact；部署脚本只认 `conclusion=pass` 且 `candidate_hash`、`evidence_index_hash` 与部署候选一致的那一份。G6 要同时有独立 artifact 与 `wf_release_v1` artifact，两者一致才算数。记录合并后不再改；要补说明就追加一节「补记」，不改原结论。
+**门的产物是一个 GateArtifact，不是一句口头结论。** 字段固定为：`gate`、`schema_version`、`candidate_hash`、`change_scope_hash`、`evidence_index_hash`、`invariants_hash`、`conclusion(pass|fail)`、`failed_items[]`、`exceptions[]`、`rollback_target`、`approver`、`approved_at`、`producer(human|s5_build|wf_release_v1)`。artifact 内部不放 `record_hash` / `artifact_hash`，避免自指；`S*.md` 是门记录全文，文末保存 `artifact_hash=SHA256(canonical_json(artifact))`。部署脚本只认 `conclusion=pass` 且 `candidate_hash`、`evidence_index_hash` 与部署候选一致的那一份。G6 要同时有独立 artifact 与 `wf_release_v1` artifact，两者一致才算数。记录合并后不再改；要补说明就追加一节「补记」，不改原结论。
 
-**`wf_gate_check_v1` 的契约：** 输入 `gate`、`candidate_hash`、`evidence_index`；输出检查组结果与 evidence 引用；退出码 0=通过、1=不通过、2=输入非法、3=基础设施错误；六组检查各写一条记录。它不写账本、不改门结论，只产出证据。
+**canonical 哈希的定义（两份独立 artifact 必须可复现）：** `canonical_json` 用 UTF-8、对象键按 Unicode 码点升序、无多余空白、数组保持语义顺序。`candidate_hash=SHA256(canonical_json({git_sha, schema_version, phase_flags}))`；`change_scope_hash=SHA256(canonical_json({capability_ids[], touched_paths[]}))`；`evidence_index_hash=SHA256(canonical_json(evidence_index 按 evidence_id 升序，每项只取 {evidence_id, sha256, strength, source}))`；`invariants_hash=SHA256(canonical_json(I1…I10 逐条 {id, method, result}))`。证据索引先排序再算哈希，收集顺序不同不会造成假失败。
+
+**八段与字段映射：**
+
+| 门记录八段 | GateArtifact 字段 |
+| --- | --- |
+| 1 候选构建 | gate, schema_version, candidate_hash, producer |
+| 2 变更范围 | change_scope_hash |
+| 3 必过项 | failed_items[], conclusion |
+| 4 原始证据 | evidence_index_hash |
+| 5 不变量核对 | invariants_hash |
+| 6 例外 | exceptions[] |
+| 7 回滚演练 | rollback_target |
+| 8 结论与签字 | conclusion, approver, approved_at, producer |
+
+**`wf_gate_check_v1` 的契约：** 它是 tool/命令，不是子流程；输入 `gate`、`candidate_hash`、`evidence_index`；输出检查组结果、evidence 引用、`evidence_index_hash` 与 `result_code=pass|fail|invalid_input|infra_error`。CLI 包装的退出码 0=通过、1=不通过、2=输入非法、3=基础设施错误只用于进程语义，工作流分支读 `result_code`。六组检查各写一条记录。它不写账本、不改门结论，只产出证据。
 
 **整个项目的完成定义：**
 
-- 六道门全过，且每道门都有可复核的 GateArtifact；S6 另加 R1、R2 出圈。
+- 六道门全过，且每道门都有可复核的 GateArtifact；R0 在 G6 前完成，S6 另加 R1、R2 出圈。
 - R2 受控圈连续两周无 P1，至少处理过一次真实阻塞并留下复盘。
 - 运行手册能让一个没参与开发的人独立完成起停、升级、回滚与事故定位。
 - 账本、面板、记忆三条链路都能用一句人话回答「现在到哪、为什么停、下一步做什么」。
