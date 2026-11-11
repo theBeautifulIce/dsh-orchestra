@@ -177,6 +177,15 @@ D:\aboutAI\dsh-orchestra\
 
 ---
 
+## 9.5 Git 状态
+
+- 仓库已初始化：`D:\aboutAI\dsh-orchestra\.git`，分支 `main`，首个提交 `fc92495`
+  （docs: dsh-orchestra 项目落地（设计稿/台账/需求/设计思路/handoff/图谱索引）），共 7 个文件、1787 行。
+- `.gitignore` 忽略 `references/`（三份参考项目各自带 `.git`，不并入本仓库）、`.codebase-memory/`、`tmp/`、`*.log`。
+- 每次改设计稿后要提交（主人硬约束：改代码/文档后同步更新版本号并留痕）。
+
+---
+
 ## 10. 第一条命令建议
 
 接手先做这两件（不写代码）：
