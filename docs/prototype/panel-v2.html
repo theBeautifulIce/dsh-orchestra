@@ -2678,6 +2678,454 @@ body.v5 .wf-api-hint{margin-top:8px;font-size:10.5px;line-height:1.6;color:#6474
   body.v5 .wf-palette{margin-left:0;order:3;width:100%}
   body.v5 .wf-canvas-actions{margin-left:auto}
 }
+/* ============================================================
+   v10 · 可读性排版层
+   目标：嵌入 DSH 后不靠缩小字号压信息。
+   只调字号、行高、间距、宽度；颜色保持浅色。
+   ============================================================ */
+body.v5{
+  font-size:13.5px;
+  line-height:1.6;
+  color:#1e293b;
+  --fs-meta:11.5px;
+  --fs-small:12px;
+  --fs-body:13px;
+  --fs-card-title:14px;
+  --fs-page-title:24px;
+}
+body.v5 p,body.v5 li,body.v5 .mast-lede,body.v5 .task-top p,body.v5 .wf-top p,
+body.v5 .tc-stage,body.v5 .tc-result,body.v5 .tc-next,body.v5 .tw-step-sub,
+body.v5 .tw-step-result,body.v5 .dec-why,body.v5 .eff-why{text-wrap:pretty}
+
+/* 侧栏 */
+body.v5 .sidebar{width:236px;background:#f8fafc}
+body.v5 .main{margin-left:236px}
+body.v5 .brand{padding:20px 18px 16px}
+body.v5 .brand-name{font-size:15.5px;letter-spacing:.01em}
+body.v5 .brand-sub{margin-top:3px;font-size:11px;letter-spacing:.1em}
+body.v5 .workspace{margin:12px 12px 10px;width:calc(100% - 24px);padding:10px 12px;border-radius:7px}
+body.v5 .ws-name{font-size:13px}
+body.v5 .ws-url{margin-top:2px;font-size:11px}
+body.v5 .nav-scroll{padding:4px 10px 12px}
+body.v5 .nav-label{padding:16px 10px 7px;font-size:11.5px;letter-spacing:.08em}
+body.v5 .nav-item{
+  height:36px;padding:0 11px;margin:2px 0;border-radius:7px;
+  font-size:13.5px;gap:10px;
+}
+body.v5 .nav-item .nb{
+  min-width:22px;height:20px;padding:0 6px;border:1px solid #e2e8f0;
+  font-size:11.5px;line-height:18px;
+}
+body.v5 .sidebar-foot{padding:12px 12px 14px}
+body.v5 .note-entry{padding:9px 10px;font-size:12.5px;line-height:1.5}
+body.v5 .user-row{margin-top:8px;padding:10px 8px 4px;gap:9px}
+body.v5 .user-avatar{width:28px;height:28px;font-size:12px}
+body.v5 .user-name{font-size:13px}
+body.v5 .user-role{font-size:11px;letter-spacing:.06em}
+
+/* 顶栏与搜索 */
+body.v5 .topbar{height:52px;padding:0 24px}
+body.v5 .crumb{font-size:12.5px;gap:7px}
+body.v5 .searchbox{width:320px;height:32px;margin-left:22px;padding:0 10px;gap:7px;border-radius:7px}
+body.v5 .searchbox input{font-size:13px}
+body.v5 .searchbox .kbd{height:20px;min-width:20px;padding:0 5px;font-size:10.5px;line-height:18px}
+body.v5 .top-status{font-size:12px;gap:7px}
+body.v5 .top-actions{gap:4px;margin-left:10px}
+body.v5 .icon-btn{width:32px;height:32px}
+body.v5 .avatar-btn{width:30px;height:30px;font-size:12px}
+body.v5 .sp-head{padding:10px 13px;font-size:11.5px;letter-spacing:.08em}
+body.v5 .sp-head b{font-size:11px}
+body.v5 .sp-item{padding:10px 13px;gap:10px}
+body.v5 .sp-type{min-width:40px;font-size:11px}
+body.v5 .sp-title{font-size:13px}
+body.v5 .sp-sub{margin-top:2px;font-size:11.5px}
+body.v5 .sp-arrow{font-size:12px}
+body.v5 .sp-empty{padding:16px 14px;font-size:12.5px}
+body.v5 .sp-foot{padding:8px 13px;font-size:10.5px}
+
+/* 页面骨架 */
+body.v5 #screen{padding:26px 32px 80px}
+body.v5 .masthead{margin-bottom:20px}
+body.v5 .mast-kicker{margin-bottom:6px;font-size:12px;letter-spacing:.08em}
+body.v5 .masthead h1,body.v5 .task-top h1,body.v5 .wf-top h1{
+  font-size:24px;line-height:1.3;letter-spacing:-.015em;
+}
+body.v5 .mast-lede{margin-top:7px;font-size:13.5px;line-height:1.7}
+body.v5 .ops-kicker{font-size:11.5px;letter-spacing:.08em}
+body.v5 .ops-title{font-size:19px}
+body.v5 .rail-head span{font-size:12px}
+
+/* 按钮、标签、筛选 */
+body.v5 .btn{height:34px;padding:0 14px;border-radius:7px;font-size:13px;gap:6px}
+body.v5 .btn.sm{height:30px;padding:0 11px;font-size:12px}
+body.v5 .btn .ic{width:15px;height:15px}
+body.v5 .filter{height:28px;padding:0 10px;border-radius:6px;font-size:12.5px}
+body.v5 .filter .n{font-size:11px}
+body.v5 .task-toolbar{padding:8px 10px;border-radius:8px}
+body.v5 .mini-search{width:210px;height:30px;padding:0 9px;border-radius:6px}
+body.v5 .mini-search input{font-size:12.5px}
+body.v5 .view-switch{padding:2px;border-radius:7px}
+body.v5 .view-btn{height:26px;padding:0 10px;font-size:12px}
+body.v5 .chip{height:30px;padding:0 12px;border-radius:15px;font-size:12.5px}
+body.v5 .tag,body.v5 .type{font-size:11.5px!important}
+body.v5 .status{font-size:12px!important}
+body.v5 .estate{font-size:12px}
+body.v5 .path-note{font-size:12px}
+body.v5 .batchbar{padding:9px 12px;font-size:12px}
+body.v5 .batch-check{font-size:12px}
+
+/* 表格 */
+body.v5 .tbl{font-size:13px}
+body.v5 .tbl th{padding:11px 12px;font-size:12px;letter-spacing:.04em}
+body.v5 .tbl td{padding:12px;font-size:12.5px;line-height:1.55}
+body.v5 .tbl .mono{font-size:12px}
+body.v5 .event-table td{font-size:12.5px;padding:12px}
+body.v5 .event-table .etype{font-size:11px;padding:3px 6px}
+body.v5 .event-table .eseq{font-size:11px}
+body.v5 .event-table .esum{font-size:12.5px;max-width:420px}
+body.v5 .hash-banner{padding:10px 12px;font-size:12px}
+body.v5 .hash-banner .right{font-size:11px}
+
+/* 任务看板 */
+body.v5 .board{gap:12px}
+body.v5 .bcol{padding:10px;border-radius:9px}
+body.v5 .bcol-head{padding:2px 2px 9px;margin-bottom:9px}
+body.v5 .bcol-name{font-size:13px}
+body.v5 .bcol-count{font-size:11.5px}
+body.v5 .bcol-drop{gap:9px}
+body.v5 .task-card{padding:13px 13px 11px;border-radius:8px}
+body.v5 .tc-head{gap:6px;font-size:11.5px}
+body.v5 .tc-type{font-size:11.5px;letter-spacing:.04em}
+body.v5 .tc-pri{font-size:11.5px}
+body.v5 .tc-when{font-size:11.5px}
+body.v5 .tc-title{margin:8px 0 7px;font-size:14px;line-height:1.45}
+body.v5 .tc-stage{font-size:12.5px;line-height:1.55}
+body.v5 .tc-stage .dot{width:5px;height:5px;margin-top:6px}
+body.v5 .tc-result,body.v5 .tc-next{margin-top:5px;font-size:12px;line-height:1.65}
+body.v5 .tc-call{margin-top:9px;padding:7px 9px;font-size:12px;line-height:1.6}
+body.v5 .tc-progress{margin-top:9px;font-size:11.5px}
+body.v5 .tc-progress em{font-size:11px}
+body.v5 .tc-foot{margin-top:9px;padding-top:8px;font-size:11.5px;gap:6px}
+body.v5 .hist-btn{height:24px;padding:0 8px;font-size:11.5px}
+body.v5 .history-row{padding:5px 0;font-size:11.5px;line-height:1.5}
+
+/* 任务页 · 左中右 */
+body.v5 .task-top{margin:4px 0 16px}
+body.v5 .task-kicker{font-size:12px}
+body.v5 .task-top p{font-size:13.5px}
+body.v5 .tw-shell{grid-template-columns:300px minmax(0,1fr) 420px;gap:14px}
+body.v5 .tw-rail{border-radius:10px}
+body.v5 .tw-rail-head{padding:12px 14px}
+body.v5 .tw-rail-head b{font-size:13px}
+body.v5 .tw-rail-head span{font-size:11.5px}
+body.v5 .tw-task{padding:12px 14px}
+body.v5 .tw-task-top{gap:6px;margin-bottom:5px}
+body.v5 .tw-task-type{padding:2px 6px;font-size:11px}
+body.v5 .tw-task-pri{font-size:11px}
+body.v5 .tw-task-title{font-size:13.5px;line-height:1.5}
+body.v5 .tw-task-sub{font-size:12px;line-height:1.55}
+body.v5 .tw-task-foot{margin-top:7px;font-size:11.5px}
+body.v5 .tw-run-head{padding:16px 18px;margin-bottom:12px}
+body.v5 .tw-run-kicker{font-size:12px}
+body.v5 .tw-run-title{font-size:21px;line-height:1.35}
+body.v5 .tw-run-sub{font-size:13.5px;line-height:1.65}
+body.v5 .tw-run-facts{gap:16px;margin-top:11px;padding-top:11px;font-size:12px}
+body.v5 .tw-timeline-head{padding:11px 14px;font-size:12px}
+body.v5 .tw-timeline-head b{font-size:13px}
+body.v5 .tw-step{grid-template-columns:34px minmax(0,1fr) 150px;gap:12px;min-height:96px;padding:14px 16px}
+body.v5 .tw-num{font-size:12px}
+body.v5 .tw-step-state{font-size:11.5px;line-height:1.35}
+body.v5 .tw-step-title{font-size:14.5px;line-height:1.4;margin-bottom:5px}
+body.v5 .tw-step-meta{font-size:12px;line-height:1.45;margin-bottom:5px}
+body.v5 .tw-step-sub{font-size:13px;line-height:1.6}
+body.v5 .tw-step-result{padding-left:12px;font-size:12.5px;line-height:1.6}
+body.v5 .tw-step-result b{font-size:11px;letter-spacing:.04em;margin-bottom:3px}
+body.v5 .tw-inspect-head{padding:12px 14px}
+body.v5 .tw-inspect-head b{font-size:13px}
+body.v5 .tw-inspect-head span{font-size:11.5px}
+body.v5 .tw-inspect-body{padding:14px}
+body.v5 .tw-inspect-title{font-size:16.5px;line-height:1.4}
+body.v5 .tw-inspect-meta{font-size:12px;margin-bottom:11px}
+body.v5 .tw-inspect .tw-block{margin-top:12px;padding-top:12px}
+body.v5 .tw-inspect .tw-block p{font-size:13px;line-height:1.7}
+body.v5 .tw-inspect .tw-block h4{font-size:11.5px;letter-spacing:.04em}
+body.v5 .tw-inspect-empty{font-size:13px;padding:20px 14px}
+body.v5 .tw-empty-note{font-size:12.5px}
+
+/* 流程页 */
+body.v5 .wf-pill{height:32px;padding:0 12px;font-size:12.5px}
+body.v5 .wf-pill .ver,body.v5 .wf-pill em{font-size:11px}
+body.v5 .wf-hero-top{padding:16px 18px 14px}
+body.v5 .wf-hero-kicker{font-size:11.5px;letter-spacing:.08em}
+body.v5 .wf-hero-title{font-size:19px;line-height:1.4}
+body.v5 .wf-hero-desc{font-size:13px;line-height:1.65}
+body.v5 .wf-stat{padding:11px 16px 12px}
+body.v5 .wf-stat b{font-size:16px}
+body.v5 .wf-stat span{font-size:11.5px}
+body.v5 .wf-tab{height:36px;padding:0 12px;font-size:12.5px}
+body.v5 .wf-tab .n{font-size:11px}
+body.v5 .wf-stage-panel-head{padding:11px 14px}
+body.v5 .wf-stage-panel-head b{font-size:13px}
+body.v5 .wf-stage-panel-head span{font-size:11.5px}
+body.v5 .wf-stage{padding:14px 16px 15px}
+body.v5 .wf-stage-top{font-size:11.5px}
+body.v5 .wf-stage-idx{font-size:11.5px}
+body.v5 .wf-stage-title{margin:7px 0 5px;font-size:15px}
+body.v5 .wf-stage-title .who{font-size:11.5px;font-family:inherit}
+body.v5 .wf-stage-process{font-size:13px;line-height:1.65}
+body.v5 .wf-stage-result{margin-top:9px;padding:9px 11px;font-size:12.5px;line-height:1.65}
+body.v5 .wf-stage-result b{font-size:11px;letter-spacing:.04em}
+body.v5 .wf-stage-foot{font-size:11.5px;gap:9px}
+body.v5 .wf-inspector-head{padding:11px 14px}
+body.v5 .wf-inspector-head b{font-size:13px}
+body.v5 .wf-inspector-head span{font-size:11px}
+body.v5 .wf-inspector-body{padding:13px 14px}
+body.v5 .wf-inspector-title{font-size:16px}
+body.v5 .wf-inspector-meta{font-size:11.5px;margin-bottom:10px}
+body.v5 .wf-inspector .tw-block p{font-size:13px;line-height:1.7}
+body.v5 .wf-inspector .tw-block h4{font-size:11.5px}
+body.v5 .wf-side-card{padding:13px 14px}
+body.v5 .wf-side-card h4{font-size:11.5px}
+body.v5 .wf-side-row{padding:6px 0;font-size:12px}
+body.v5 .wf-side-row b{font-size:12px}
+body.v5 .wf-mini-run{padding:8px 0;font-size:12.5px}
+body.v5 .wf-mini-run .t,body.v5 .wf-mini-run .dur{font-size:11px}
+body.v5 .wf-eyebrow{font-size:11.5px;letter-spacing:.08em}
+body.v5 .wf-title{font-size:19px}
+body.v5 .wf-desc{font-size:13px}
+body.v5 .wf-meta{font-size:11.5px}
+body.v5 .version-mark{font-size:12px}
+body.v5 .version-title{font-size:13px}
+body.v5 .version-now{font-size:11px}
+body.v5 .version-meta{font-size:11.5px}
+body.v5 .version-desc{font-size:12.5px;line-height:1.6}
+body.v5 .version-current{font-size:11.5px}
+body.v5 .trigger-card{padding:11px 12px}
+body.v5 .trigger-top{font-size:11px;letter-spacing:.04em}
+body.v5 .trigger-val{font-size:13px}
+body.v5 .trigger-note{font-size:12px;line-height:1.6}
+body.v5 .policy-k{font-size:11px}
+body.v5 .policy-v{font-size:12.5px}
+
+/* 流程画布 */
+body.v5 .wf-canvas-toolbar{padding:10px 12px}
+body.v5 .wf-canvas-tip{font-size:12px;line-height:1.55}
+body.v5 .wf-palette-label{font-size:11.5px}
+body.v5 .wf-mind{gap:14px;margin-bottom:12px;padding:14px 16px}
+body.v5 .wf-mind-orb{width:44px;height:44px;font-size:20px}
+body.v5 .wf-mind-title b{font-size:14px}
+body.v5 .wf-mind-role{font-size:11px;padding:2px 7px}
+body.v5 .wf-mind-copy p{
+  margin-top:4px;font-size:12.5px;line-height:1.6;color:#475569;
+  white-space:normal;overflow:hidden;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;
+}
+body.v5 .wf-mind-stat{padding:5px 10px;font-size:11.5px}
+body.v5 .wf-chip{height:30px;padding:0 10px;font-size:12px}
+body.v5 .wf-canvas-actions .btn{height:30px;padding:0 11px;font-size:12px}
+body.v5 .wf-canvas-shell{height:600px}
+body.v5 .wf-canvas{min-width:920px}
+body.v5 .wf-canvas-footer{padding:9px 12px;font-size:11.5px}
+body.v5 .wf-node{width:176px;height:112px;padding:11px 13px;border-radius:11px}
+body.v5 .wf-node-top{height:15px;font-size:11px}
+body.v5 .wf-node-kind{padding:2px 6px;font-size:11px}
+body.v5 .wf-node-state{font-size:11px}
+body.v5 .wf-node-title{margin-top:8px;font-size:13px;line-height:1.38;max-height:36px}
+body.v5 .wf-node-sub{margin-top:5px;font-size:11.5px;line-height:1.3}
+body.v5 .wf-empty-canvas b{font-size:17px}
+body.v5 .wf-empty-canvas p{font-size:13px}
+body.v5 .wf-edit-actions .btn{height:30px;padding:0 11px;font-size:12px}
+body.v5 .wf-edit-note{font-size:11.5px}
+body.v5 .wf-api-code pre{font-size:11.5px}
+body.v5 .wf-api-hint{font-size:12px}
+
+/* 待你决定 */
+body.v5 .summary-cell{padding:12px 15px}
+body.v5 .summary-cell b{font-size:19px}
+body.v5 .summary-cell span{font-size:11.5px}
+body.v5 .batchbar{font-size:12px}
+body.v5 .dec-head{gap:12px;padding:15px 16px}
+body.v5 .dec-meta{font-size:11.5px}
+body.v5 .ask-pri{font-size:11.5px}
+body.v5 .dec-title{font-size:14.5px;line-height:1.5}
+body.v5 .dec-why{font-size:12.5px;line-height:1.65}
+body.v5 .dec-choice{padding:10px 11px}
+body.v5 .dec-choice b{font-size:12.5px}
+body.v5 .dec-choice span{font-size:12px;line-height:1.55}
+body.v5 .dec-foot{font-size:11.5px}
+body.v5 .dec-label{font-size:11px}
+body.v5 .inbox-processed>summary{padding:11px 14px;font-size:12px}
+
+/* 待核实 */
+body.v5 .effect-banner{font-size:12px;line-height:1.6}
+body.v5 .effect-card{padding:14px;border-radius:9px}
+body.v5 .eff-level{font-size:11.5px}
+body.v5 .estate{font-size:12px}
+body.v5 .eff-title{font-size:14px;line-height:1.5}
+body.v5 .eff-why{font-size:12px;line-height:1.65}
+body.v5 .eff-evidence{font-size:12px;line-height:1.65}
+body.v5 .eff-evidence b{font-size:11.5px}
+body.v5 .eff-age{font-size:11.5px}
+
+/* 抽屉 */
+body.v5 .drawer{width:min(720px,94vw)}
+body.v5 .drawer-head{padding:20px 22px 16px}
+body.v5 .drawer-close{top:16px;right:16px;width:30px;height:30px}
+body.v5 .drawer-kicker{font-size:11.5px;letter-spacing:.08em}
+body.v5 .drawer-title{font-size:21px;line-height:1.35}
+body.v5 .drawer-sub{margin-top:7px;font-size:12px}
+body.v5 .drawer-tabs{padding:0 16px}
+body.v5 .drawer-tab{height:38px;padding:0 10px;font-size:12.5px}
+body.v5 .drawer-tab .n{font-size:11px}
+body.v5 .drawer-body{padding:18px 22px 32px;font-size:13px;line-height:1.65}
+body.v5 .drawer-body .muted{font-size:12px}
+body.v5 .drawer-body .mono{font-size:12px}
+body.v5 .drawer-body .section-h h3{font-size:12px;letter-spacing:.05em}
+body.v5 .drawer-body .card-box{padding:12px 13px}
+body.v5 .drawer-body .callout{font-size:12.5px}
+body.v5 .drawer-body .run-hero .big{font-size:24px}
+body.v5 .drawer-body .run-hero .meta,body.v5 .drawer-body .run-hero .right{font-size:11.5px}
+body.v5 .drawer-body .run-step{font-size:12px;padding:10px}
+body.v5 .drawer-body .run-step .sd{font-size:11.5px}
+body.v5 .drawer-body .run-step .sdur{font-size:11px}
+body.v5 .drawer-body .run-history-row{font-size:12px;padding:9px 10px}
+body.v5 .drawer-body .run-history-row .t,body.v5 .drawer-body .run-history-row .id,body.v5 .drawer-body .run-history-row .dur{font-size:11px}
+body.v5 .drawer-body .ot-name{font-size:12.5px}
+body.v5 .drawer-body .ot-role{font-size:11px}
+body.v5 .drawer-body .ot-child{font-size:11.5px}
+body.v5 .drawer-body .ot-child .right{font-size:11px}
+body.v5 .drawer-body .evidence-item .en{font-size:12.5px}
+body.v5 .drawer-body .evidence-item .ed{font-size:11.5px}
+body.v5 .drawer-body .dec-target{font-size:11.5px}
+body.v5 .drawer-body .dec-target .mono,body.v5 .drawer-body .dec-evidence .mono{font-size:11px}
+body.v5 .drawer-body .dec-title .id,body.v5 .drawer-body .dec-foot .rev,body.v5 .drawer-body .dec-note{font-size:11px}
+body.v5 .drawer-body .dec-opt{font-size:11.5px;padding:4px 7px}
+body.v5 .drawer-body .dec-evidence{font-size:12px}
+body.v5 .drawer-foot{font-size:12.5px}
+
+/* 弹窗 */
+body.v5 .modal{width:min(660px,100%)}
+body.v5 .modal-head{padding:20px 22px 14px}
+body.v5 .modal-kicker{font-size:11.5px;letter-spacing:.08em}
+body.v5 .modal-title{font-size:20px;line-height:1.35}
+body.v5 .modal-body{padding:18px 22px 22px;max-height:70vh}
+body.v5 .modal-foot{padding:13px 22px}
+body.v5 .modal-foot .btn{height:34px;font-size:13px}
+body.v5 .form-field{margin-bottom:13px}
+body.v5 .form-field label{font-size:12px;letter-spacing:.03em;margin-bottom:5px}
+body.v5 .input,body.v5 .select,body.v5 .textarea{padding:9px 11px;font-size:13px;border-radius:6px}
+body.v5 .field{margin-bottom:13px}
+body.v5 .field label{font-size:12px;margin-bottom:5px}
+body.v5 .field label .req{font-size:11px}
+body.v5 .field input,body.v5 .field textarea,body.v5 .field select{padding:9px 11px;font-size:13px;border-radius:6px}
+body.v5 .opt-card{padding:10px 11px}
+body.v5 .opt-title{font-size:13px}
+body.v5 .opt-desc{font-size:12px;line-height:1.55}
+body.v5 .opt-code{font-size:11px}
+body.v5 .check-row{padding:9px 10px;font-size:12px}
+body.v5 .check-row .cd{font-size:11.5px}
+body.v5 .modal-summary{font-size:12px}
+body.v5 .modal-summary dt{font-size:11px}
+body.v5 .challenge-box .hint{font-size:11.5px}
+
+/* 响应式：窄屏先保证画布和正文不被右栏挤坏 */
+@media (max-width:1520px){
+  body.v5 .wf-body{grid-template-columns:minmax(0,1fr)}
+  body.v5 .wf-aside{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+}
+@media (max-width:1400px){
+  body.v5 .tw-shell{grid-template-columns:240px minmax(0,1fr) 340px;gap:12px}
+  body.v5 #screen{padding:24px 26px 72px}
+  body.v5 .board{gap:10px}
+}
+@media (max-width:1180px){
+  body.v5 .tw-shell{grid-template-columns:1fr}
+  body.v5 .tw-rail{display:flex;overflow-x:auto;position:static;max-height:none}
+  body.v5 .tw-rail-head{display:none}
+  body.v5 .tw-task{min-width:250px;border-bottom:0;border-right:1px solid #eef2f7}
+  body.v5 .tw-task:last-child{border-right:0}
+  body.v5 .tw-inspect{position:static}
+  body.v5 .wf-aside{grid-template-columns:1fr}
+  body.v5 .wf-mind{flex-wrap:wrap}
+  body.v5 .wf-mind-stats{width:100%;margin-left:58px}
+}
+@media (max-width:760px){
+  body.v5 .sidebar{width:70px;padding:0}
+  body.v5 .main{margin-left:70px}
+  body.v5 .tw-step{grid-template-columns:30px minmax(0,1fr)}
+  body.v5 .tw-step-result{grid-column:2;border-left:0;padding-left:0}
+  body.v5 .wf-stage{display:block}
+  body.v5 .wf-stage-foot{grid-column:2;grid-row:auto;flex-direction:row;justify-content:flex-start}
+}
+/* v10 pass 2：可读性兜底 */
+body.v5 .nav-item .nb{font-size:11.5px!important;min-width:22px;height:20px;padding:0 6px!important}
+body.v5 .brain-role{font-size:11.5px!important;letter-spacing:.12em}
+body.v5 .log-time{font-size:11.5px!important}
+body.v5 .board-agent{font-size:11.5px!important}
+body.v5 .board-title{font-size:13px!important;line-height:1.45;white-space:normal!important;overflow:visible!important;text-overflow:clip!important}
+body.v5 .agent-state,body.v5 .brain-state,body.v5 .log-head,
+body.v5 .event-time,body.v5 .flow-pct,body.v5 .event-out{font-size:11.5px!important}
+body.v5 .flow-name small{font-size:11.5px!important}
+body.v5 .stat-label{font-size:12px!important}
+body.v5 .agent-task,body.v5 .log-text{font-size:12px!important}
+body.v5 .rail-lede{font-size:12.5px!important}
+body.v5 .ask-go,body.v5 .rail-more{font-size:12px!important}
+body.v5 .ops-ctrl button{font-size:12px!important}
+body.v5 .block-head a{font-size:12px!important}
+body.v5 .hist-btn{height:24px;padding:0 8px;font-size:11.5px!important;gap:4px}
+body.v5 .hist-btn .ic{width:11px;height:11px}
+body.v5 .tech-details summary{font-size:12px!important;padding:4px 0}
+body.v5 .tech-details summary:before{font-size:12px}
+body.v5 .tw-block h4{font-size:11.5px}
+body.v5 .tw-block p{font-size:13px}
+body.v5 .tw-code{font-size:11.5px;line-height:1.65}
+body.v5 .tw-ev{font-size:12px}
+body.v5 .tw-empty{font-size:12px}
+body.v5 .wf-top-kicker{font-size:12px!important}
+body.v5 .canvas-hint{font-size:12px!important;line-height:1.6}
+body.v5 .drawer-body [style*="font-size:8"],body.v5 .drawer-body [style*="font-size:9"],body.v5 .drawer-body [style*="font-size:10"]{font-size:12.5px!important;line-height:1.6!important}
+body.v5 .drawer-body pre[style*="font-size"],body.v5 .drawer-body .mono[style*="font-size"]{font-size:11.5px!important;line-height:1.65!important}
+body.v5 .drawer-foot [style*="font-size"],body.v5 .modal-foot [style*="font-size"]{font-size:11.5px!important}
+
+body.v5 .board-head span{font-size:11.5px!important}
+body.v5 .wf-panel-head span{font-size:11.5px!important}
+/* v10 pass 3：尾项抬齐 */
+body.v5 .brand-sub,body.v5 .ws-url,body.v5 .user-role{font-size:11.5px!important}
+body.v5 .ask-meta{font-size:11.5px!important}
+body.v5 .ask-why{font-size:12.5px!important;line-height:1.65}
+body.v5 .stat em{font-size:12px!important}
+body.v5 .n{font-size:11.5px!important}
+body.v5 .tl-sub{font-size:12px!important;margin-top:3px}
+body.v5 .tl-stage,body.v5 .tl-result,body.v5 .tl-next{font-size:12.5px!important;line-height:1.6}
+body.v5 .tl-when{font-size:11.5px!important}
+body.v5 .tw-task-type,body.v5 .tw-task-pri,body.v5 .dec-label,body.v5 .policy-k{font-size:11.5px!important}
+body.v5 .wf-top-meta span{font-size:11.5px!important}
+body.v5 .wf-panel-head b{font-size:12px!important}
+body.v5 .wf-mind-role,body.v5 .wf-node-kind,body.v5 .wf-node-state{font-size:11.5px!important}
+body.v5 .wf-mini-run .t,body.v5 .wf-mini-run .dur,
+body.v5 .run-history-row .t,body.v5 .run-history-row .dur{font-size:11.5px!important}
+body.v5 .version-now{font-size:11.5px!important}
+body.v5 .trigger-top{font-size:11.5px!important}
+body.v5 .right{font-size:11.5px!important}
+body.v5 .callout{font-size:12.5px!important;line-height:1.65}
+body.v5 .tw-step-result b{font-size:11.5px!important}
+body.v5 .wf-pill em{font-size:11.5px!important}
+body.v5 .wf-inspector-head span{font-size:11.5px!important}
+body.v5 .tc-progress em{font-size:11.5px!important}
+body.v5 .modal [style*="font-size:8"],body.v5 .modal [style*="font-size:9"],body.v5 .modal [style*="font-size:10"]{font-size:12.5px!important;line-height:1.6!important}
+body.v5 .modal pre[style*="font-size"],body.v5 .modal .mono[style*="font-size"]{font-size:11.5px!important;line-height:1.65!important}
+body.v5 .modal-foot [style*="font-size"]{font-size:11.5px!important}
+body.v5 .modal .section-h h3{font-size:13px!important;line-height:1.4!important}
+body.v5 .modal .req{font-size:11.5px!important}
+body.v5 .modal-summary dt{font-size:11.5px!important}
+body.v5 .modal-summary dd{font-size:12.5px!important;line-height:1.55!important}
+body.v5 .modal .check-row .cn{font-size:12.5px!important}
+body.v5 .modal .check-row .cd{font-size:12px!important;line-height:1.6!important}
+body.v5 .wf-api-code{padding:10px 9px!important}
+
+
+
+
 </style>
 </head>
 <body class="v3 v5">
@@ -3796,7 +4244,7 @@ const WF_KIND = {
   wait: { label: '等待', color: '#64748b' }
 };
 const WF_PALETTE = ['trigger', 'agent', 'tool', 'subworkflow', 'approval', 'parallel', 'policy', 'branch', 'wait'];
-const WF_NODE_W = 156, WF_NODE_H = 96;
+const WF_NODE_W = 176, WF_NODE_H = 112;
 const WF_STATE_COLOR = { done: '#4ade80', run: '#5aa9ff', blocked: '#fbbf24', wait: '#cbd5e1' };
 
 function wfKind(n){ return WF_KIND[n.type] ? n.type : 'agent'; }

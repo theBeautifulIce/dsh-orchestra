@@ -1,6 +1,6 @@
 # dsh-orchestra 设计草案
 
-状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v29：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）。本文件为 v30：先清三条措辞，再新增第四段「流程定义编辑」——面板画布与智能体工具共用 workflow.create / open_draft / update / publish 四个命令，补定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42，送第三十二轮。本版不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。
+状态：第一、二段第三轮通过；第三段 v23 已按第二十五轮审计通过（0 致命、0 重大、3 条非阻断措辞）；第三段三条措辞已在 v24 清理。上一版为 v30：第四段「面板与查询」已按第二十六轮（2 致命、9 重大、7 措辞）、第二十七轮（2 致命、4 重大、3 措辞）、第二十八轮（0 致命、1 重大；两阶段确认与 inbox 幂等未接上）、第二十九轮（1 致命、3 重大、2 措辞；终态回执过期、命令行 CHECK 的 NULL 语义、唯一键与请求指纹未闭合）与第三十轮（0 致命、1 重大、1 措辞；in_flight 10 分钟超时闭环未定义、OPERATION_ID_CONFLICT 未覆盖非终结行）修完，第三十一轮 pass（0 致命、0 重大、3 条非阻断措辞）；v30 新增流程定义编辑（四个 workflow 命令、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42）。本文件为 v31：第三十二轮审计 1 致命、6 重大、1 措辞已逐条修入正文（发布事务与回执同事务、版本 CAS 顺序与触发器、重复边/自环拒绝码、空草稿名称、已消费草稿优先级、子流程环与深度口径、publish_note 范围），送第三十三轮。v31 不新增运行态状态、迁移、decision kind、终态或证据门；发布只影响后续 run，不改在途 run。
 
 ## 第一段 骨架与落点
 
@@ -549,11 +549,11 @@ CREATE INDEX workflow_drafts_updated ON workflow_drafts(updated_at);
 ```
 
 - **已发布版本只插不改：** `workflow_versions` 上加 `BEFORE UPDATE` / `BEFORE DELETE` 触发器，直接 `RAISE(ABORT, 'WORKFLOW_VERSION_IMMUTABLE')`；服务没有 UPDATE / DELETE 路径。
-- **版本号连续且只增：** `workflow_versions` 插入前触发器要求 `NEW.version = COALESCE(workflows.current_version, 0) + 1`，否则 `WORKFLOW_VERSION_SEQUENCE`；`workflows.current_version` 只许从 NULL 或旧值上调，不许下调。触发器错误码是内部约束，命令层统一映射为 409 `WORKFLOW_VERSION_CONFLICT`，不把 SQLite 文本透给面板。
-- **当前版本必须存在：** `workflows` 的 `BEFORE UPDATE OF current_version` 触发器检查 `NEW.current_version IS NULL OR (workflow_id, current_version)` 在 `workflow_versions` 里存在，否则 `WORKFLOW_VERSION_NOT_FOUND`。
+- **版本号连续且只增：** `workflow_versions` 插入前触发器要求 `NEW.version = COALESCE(workflows.current_version, 0) + 1`，否则 `WORKFLOW_VERSION_SEQUENCE`。**发布必须先插入 `base_version+1` 再上调 `current_version`**：插入时 `current_version` 仍是 `base_version`，触发器才通过；禁止先改 `current_version` 再插版本。触发器错误码是内部约束，命令层统一映射为 409 `WORKFLOW_VERSION_CONFLICT`，不把 SQLite 文本透给面板。
+- **当前版本只许上调且必须存在：** `workflows` 的 `BEFORE UPDATE OF current_version` 触发器：`OLD.current_version IS NULL` 时只许 `NEW.current_version = 1`；`OLD.current_version` 非 NULL 时只许 `NEW.current_version > OLD.current_version`；禁止 `NEW.current_version IS NULL`；且 `(workflow_id, NEW.current_version)` 必须已在 `workflow_versions` 里存在。前两类违例报 `WORKFLOW_VERSION_SEQUENCE`，版本不存在报 `WORKFLOW_VERSION_NOT_FOUND`。
 - **草稿 revision 只增：** `workflow_drafts` 的 `BEFORE UPDATE OF revision` 触发器要求 `NEW.revision > OLD.revision`，否则 `WORKFLOW_REVISION_CONFLICT`；`workflow_id` 是主键，天然一行。发布只改 `published_version`，不碰 `revision`，因此不触发这条约束。
 - **草稿消费：** `published_version` 非空表示这份草稿已发布、不可再 `workflow.update`；`open_draft` 把 `based_on_version` 设为当前 `current_version`、`published_version` 清空、`revision` 加一。
-- **DDL 验收用例：** 同一 `(workflow_id, version)` 第二次插入被主键拒；改 / 删已发布版本被触发器拒；插入 `version != current_version+1` 被触发器拒；把 `current_version` 改成不存在的版本被触发器拒；把草稿 revision 改成同值或更小被触发器拒；同一 `workflow_id` 建第二份草稿被主键拒。
+- **DDL 验收用例：** 同一 `(workflow_id, version)` 第二次插入被主键拒；改 / 删已发布版本被触发器拒；插入 `version != current_version+1` 被触发器拒；把 `current_version` 从 3 改成 1 被触发器拒；把 `current_version` 改成 NULL 被触发器拒；首次把 `current_version` 从 NULL 改成 2（跳过 1）被触发器拒；把 `current_version` 改成不存在的版本被触发器拒；把草稿 revision 改成同值或更小被触发器拒；同一 `workflow_id` 建第二份草稿被主键拒。
 
 **15. 与原生对账**：账本做跨工作流查询与审计，执行态以执行桥的 state / whenIdle 为准。会话存活分 loaded / unloaded / deleted：unloaded 走 resume 或跳过，不判死；deleted 才标 session_gone。启动一次、其后低频对账（默认五分钟）。
 
@@ -591,11 +591,11 @@ CREATE INDEX workflow_drafts_updated ON workflow_drafts(updated_at);
 | approval | 面板与 QQ 双端 | — | — |
 | parallel | 不注册 | all / any / quorum 与取消语义 | NODE_NOT_SUPPORTED |
 | wait | 不注册 | source ∈ {human, run.completed} | WAIT_SOURCE_NOT_SUPPORTED |
-| subworkflow | 不注册 | max_depth = 2 | SUBWORKFLOW_DEPTH_EXCEEDED |
+| subworkflow | 不注册 | max_depth = 2（depth = 从根到叶经过的 subworkflow 边数，根为 0） | SUBWORKFLOW_DEPTH_EXCEEDED |
 
 批一只六种进生产（trigger、agent、tool、policy、branch、approval，正好是记忆审计那条链）；其余批二一次做完再进生产，不做部分可用；未注册类型加载期即拒引用。
 
-**subworkflow 深度的加载期解析**：visited key 用 `(workflow_id, pinned_version)`；引用必须 pin 版本否则加载期报错；路径 DFS 判环返回 SUBWORKFLOW_CYCLE；按 `(id, version)` memo 最深层数；加节点数与扇出上限。**subworkflow 里的执行面在加载期递归校验**——子流程每个节点的 verifier toolPolicy、runTool 命令、trigger effect 原语、补偿描述符都要过 §11 的同一道 capability 闸门（子流程不得成为绕过闸门的洞）；报错要指明是哪一层、哪个节点。
+**subworkflow 深度的加载期解析**：visited key 用 `(workflow_id, pinned_version)`；引用必须 pin 版本否则加载期报错；路径 DFS 判环返回 SUBWORKFLOW_CYCLE；**depth 口径统一为从根到叶经过的 subworkflow 边数，根为 0，max_depth=2**；按 `(id, version)` memo 最深层数；加节点数与扇出上限。**subworkflow 里的执行面在加载期递归校验**——子流程每个节点的 verifier toolPolicy、runTool 命令、trigger effect 原语、补偿描述符都要过 §11 的同一道 capability 闸门（子流程不得成为绕过闸门的洞）；报错要指明是哪一层、哪个节点。
 
 ### 3.2 九种各自的推进
 
@@ -639,7 +639,7 @@ CREATE INDEX workflow_drafts_updated ON workflow_drafts(updated_at);
 
 进入 waiting 释放 executor 租约；唤醒按优先级队列重抢 slot，记 woke_at 与 queued_at，唤醒到派发计入总 deadline。`event_timeout` 与 `wake_dispatch_starvation` 分开记，后者保留事件可重试或人工重放。匹配到的 payload 持久化进 wait_registrations。sweep 按谓词过期，不看 agent 存活。
 
-**九、subworkflow（批二）。** 有效 side_effect_policy 取子工作流所有节点的最大值；最大值为 irreversible 时，本节点强制走前置审批，artifact 与审批项不许填 N/A。子 run 补偿按逆序执行 compensable 并逐条记录，置 irreversible_already_applied 标志；**补偿失败 → 该节点落 `failed_with_unverified`**（不是 failed：没退回去的副作用要留在账上；§8 有对应的迁移行：`indeterminate_side_effect / abandoned_unverified → failed_with_unverified`，条件是 `compensation.failed` 事件带 `compensation_id` 且补偿的 verify 证据不成立），上报，不静默重试。父 node_run 存 pin 版本与 resume_from，重试默认 resume，只有声明 restart 才重跑整个子 run；resume 遇子 run 内任何 indeterminate_side_effect 必须停。有序调用栈落库并跨重启继承；max_depth=2 加载期强制。
+**九、subworkflow（批二）。** 有效 side_effect_policy 取子工作流所有节点的最大值；最大值为 irreversible 时，本节点强制走前置审批，artifact 与审批项不许填 N/A。子 run 补偿按逆序执行 compensable 并逐条记录，置 irreversible_already_applied 标志；**补偿失败 → 该节点落 `failed_with_unverified`**（不是 failed：没退回去的副作用要留在账上；§8 有对应的迁移行：`indeterminate_side_effect / abandoned_unverified → failed_with_unverified`，条件是 `compensation.failed` 事件带 `compensation_id` 且补偿的 verify 证据不成立），上报，不静默重试。父 node_run 存 pin 版本与 resume_from，重试默认 resume，只有声明 restart 才重跑整个子 run；resume 遇子 run 内任何 indeterminate_side_effect 必须停。有序调用栈落库并跨重启继承；max_depth=2 由发布层强制、加载期复核（depth = 从根到叶经过的 subworkflow 边数，根为 0）。
 
 ### 3.3 升级链路：终态要真终态
 
@@ -765,7 +765,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 
 ### 3.4i 第十九轮修订清单（历史条目，部分已被后续轮次取代，以 §3.4s 为准）
 
-本清单已成历史：**第十九轮审计的 9 条致命 + 3 条重大**已在 v18 落进正文；**第二十轮审计的 10 条致命 + 2 条重大**由 §3.4j（v19）取代；历史清单见 §3.4o（v23），当前生效清单见 §3.4s（v30）。两轮计数各自成立，不许混成一轮。下面每条保留原文，供回溯「当时为什么这么改」。
+本清单已成历史：**第十九轮审计的 9 条致命 + 3 条重大**已在 v18 落进正文；**第二十轮审计的 10 条致命 + 2 条重大**由 §3.4j（v19）取代；历史清单见 §3.4o（v23），当前生效清单见 §3.4t（v31）。两轮计数各自成立，不许混成一轮。下面每条保留原文，供回溯「当时为什么这么改」。
 
 1. **[致命] startup_unknown 的「executor 仍活」分支补时钟**：加 `startup_unknown_deadline`（unknown_watchdog，默认 120 秒）。落在 §2 字段表、§3 启动层、§7 sweep 表、§8 迁移表。规则：executor 仍活那一支起算 `startup_unknown_deadline`，**到点是生成一条 startup_unknown decision，不是直接迁出**；这一格纳入 `paused_bridge_missing` 覆盖，桥恢复不重置这个钟；`continue_tracking` 也受同一个钟约束。补用例：executor 仍活且 120 秒内不回 report → 自动生成 startup_unknown decision；桥断后恢复，该钟继续走、不被重置。
 2. **[致命] startup_unknown「executor 已失联」分支拆三支闭合**：落在 §3 启动层、§7 sweep 表、§8 迁移表（新增三行）。规则：① executor 已 deleted → 出口只到 indeterminate_side_effect 或 abandoned_unverified；② 状态未知 → 先重查 executor.state 再定，不许直接判停；③ 桥断 → 转 paused_bridge_missing。`continue_tracking` 只许第 ③ 支且 executor 未删；`confirm_started` 与 `confirm_started_attested` **共用同一 executor.state 前置检查**（deleted / unloaded / 状态未知 / 桥断）。补用例：executor 已删时 confirm_started 被拒；状态未知时先重查再定去向；executor 已删时 continue_tracking 被拒。
@@ -779,7 +779,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 10. **[小项]「已在正文生效」的检查改成机器可判定**：落在 §3.4i 标题、§3.4 – §3.4h 历史条目标题。规则：标题行正则 `^### .*（已在正文生效）$` **只许命中当前清单一条**；当前清单标题另带一个方括号包住的 CURRENT 唯一标记（全文件只出现一次）；历史条目正文里作为旧检查项被引述的「已在正文生效」字样**不参与计数**；历史条目 §3.4 – §3.4h 统一指向 §3.4i；**版本同步 v17**（文件头状态行与第三段标题）。补用例：把 §3.4h 标题里的「（已在正文生效）」去掉后，正则命中数仍为 1；正文里引述再多也不影响计数。
 ### 3.4j 第二十轮修订清单（历史条目，部分已被后续轮次取代，以 §3.4s 为准）
 
-本清单记录第二十轮的落法；当时生效清单是 §3.4k，历史清单见 §3.4o（v23），当前生效清单见 §3.4s（v30），§3.4 – §3.4i 为更早的历史条目。**第十九轮审计的 9 条致命 + 3 条重大结构性意见**按条落到正文，下面每条写明落在哪一节、规则怎么定、配什么用例。**这一轮的主战场是状态机本身**：半态要有自己的时钟、证据门、迟到回写路径和账目位置；停止不等于结算；终态枚举只留一处权威。
+本清单记录第二十轮的落法；当时生效清单是 §3.4k，历史清单见 §3.4o（v23），当前生效清单见 §3.4t（v31），§3.4 – §3.4i 为更早的历史条目。**第十九轮审计的 9 条致命 + 3 条重大结构性意见**按条落到正文，下面每条写明落在哪一节、规则怎么定、配什么用例。**这一轮的主战场是状态机本身**：半态要有自己的时钟、证据门、迟到回写路径和账目位置；停止不等于结算；终态枚举只留一处权威。
 
 **本清单记录的是 v18 的落法；其中「`applyReport` 带 `policy` 参数」「`report_contradicted` 只有生成 decision、没有挂起格与 resolution」「重试原地 attempt+1」三处已被后续版本取代，以 §3.4s 为准。**
 
@@ -799,7 +799,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 
 ### 3.4k 第二十一轮修订清单（v19，历史）
 
-本清单已成历史（v19）：**第二十轮审计的 10 条致命 + 2 条重大**按条落到正文；当前生效清单是 §3.4s（v30）。v19 的三条自留产物在这里交代：行 → 幂等键对照表、M-01…M-56 逐行用例（v20 扩到 58）、本节本身。
+本清单已成历史（v19）：**第二十轮审计的 10 条致命 + 2 条重大**按条落到正文；当前生效清单是 §3.4t（v31）。v19 的三条自留产物在这里交代：行 → 幂等键对照表、M-01…M-56 逐行用例（v20 扩到 58）、本节本身。
 
 1. **[致命] startup_unknown 出口闭合（#7）**：只留 `unknown_watchdog` 一个钟；`continue_tracking` 只对「executor 仍活且桥可用」开放；桥断已转 `paused_bridge_missing`，deleted 与状态不明只能走裁决出口；`startup_unknown` 永不生成 `action_deadline_at`。落在 §3、§7 sweep 表、§8 迁移表。补用例：continue_tracking 多次后 watchdog 到点照样生成 decision；deleted 支 continue_tracking 被拒。
 2. **[致命] report_contradicted 有挂起格与两条 resolution（#8）**：节点停在原格不迁出，`hang_reason=report_contradicted`，新 attempt 被挡；`uphold_report` / `uphold_decision` 二选一；`expired` 对它无效，24 小时只升级通知、不释放闸门。落在 §3、§8 decision 迁移表、§9。补用例：confirm_not_started 后旧 report 到达 → 节点不迁出、新 attempt 不跑；超过 48 小时仍保持 paused。
@@ -929,14 +929,27 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 
 2. **[措辞] `OPERATION_ID_CONFLICT` 要覆盖非终结行（第三十轮措辞 1）**：错误码表的触发只写「已有窗口内终结回执」，与 §4.6.2 的「同 `operation_id`、不同 `request_hash` 的非终结行也返回冲突」不一致。规则写死：**触发改成「已有窗口内终结回执，或同 operation_id 的非终结行」，处置保持「不重试，人工核查」。** 落在 §4.6.2、错误码表。
 
-### 3.4s [CURRENT] 第三十一轮通过后的 v30 扩展（流程定义编辑）
+### 3.4s [HISTORY] 第三十一轮通过后的 v30 扩展（流程定义编辑）
 
-本清单是当前唯一生效清单，§3.4 – §3.4r 全部为历史条目。第三十一轮审计 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条措辞按原样清理：在途超时收口写明同一事务与事件回滚、两个维护扫描分别命名为「在途超时扫描」与「回执过期扫描」、§3.4q 标题统一 `[HISTORY]`。v30 不新增运行态状态、迁移、decision kind、终态或证据门；只补第四段流程定义写模型（面板画布与智能体工具共用四个 workflow 命令）、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42。
+本清单为 v30 的历史记录，§3.4 – §3.4r 亦为历史条目，当前生效清单是 §3.4t。第三十一轮审计 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条措辞按原样清理：在途超时收口写明同一事务与事件回滚、两个维护扫描分别命名为「在途超时扫描」与「回执过期扫描」、§3.4q 标题统一 `[HISTORY]`。v30 不新增运行态状态、迁移、decision kind、终态或证据门；只补第四段流程定义写模型（面板画布与智能体工具共用四个 workflow 命令）、定义校验、发布门禁、§14.3 版本表与 Q-37…Q-42。
 
 1. **[扩展] 画布与智能体写同一份定义（v30）**：新增 `WorkflowDefinition` 的最小形状、九种节点类型与 DAG/出度/branch route/version pin 规则；`workflow.create` / `open_draft` / `update` / `publish` 四个命令共用 4.6.1 信封与 4.6.2 幂等，草稿 revision 做 CAS，发布按 `base_version` 做版本 CAS；面板与主控 agent 工具都只调命令层。落在 §4.6.5、§4.1。
 2. **[扩展] 校验分保存层与发布层（v30）**：保存层只拒不可解析、超限、id 重复、边端点缺失、坐标非法；缺入口、有环、branch 缺 route 等作为 `validation.errors[]` 返回并照样保存。发布层按 12 项检查全量校验，错误项带 RFC 6901 `path`，发布失败不改 `current_version`、不插版本。落在 §4.12、Q-39。
 3. **[扩展] 版本表与不可变约束（v30）**：`workflows` / `workflow_versions` / `workflow_drafts` 三表；版本只插不改、版本号连续、current_version 必须存在、草稿 revision 只增、草稿发布后消费；run 固定写 `(workflow_id, workflow_version)`，不随 current_version 漂移。落在 §14.3、Q-37、Q-41。
 4. **[扩展] 智能体入口只给主控会话（v30）**：`workflow_*` 工具只发给带 `orchestra.author` 能力的编排主控会话；executor 子会话与任务会话没有这些工具。工具超时回传 `operation_id`，重试复用。落在 §4.1、§4.6.5、Q-42。
+
+### 3.4t [CURRENT] 第三十二轮审计修订（v31）
+
+本清单是当前唯一生效清单，§3.4 – §3.4s 全部为历史条目。第三十二轮审计 **fail**（1 致命 / 6 重大 / 1 措辞），全部落进正文；v31 不新增运行态状态、迁移、decision kind、终态或证据门，只闭合流程发布写路径与子流程校验的可实现性。
+
+1. **[致命] 发布回执与业务事务同提交**：v30 的「回执在事务提交后写」会在提交后、写回执前崩溃时留下「版本已生成、command 仍 in_flight/无回执」，同 operation_id 重试得到 COMMAND_BUSY 或被在途超时扫描误判 OPERATION_TIMEOUT。规则写死：**成功路径把 command 行置 applied、写 receipt_json、写 completed_at、追加 command.applied，与插版本/更新 current_version/消费草稿放在同一事务；校验失败路径在写任何业务状态之前就判定，失败只写 rejected 回执与 command.rejected 事件，不碰业务表。** 落在 §4.6.2、§4.12。
+2. **[重大] 发布写序统一**：先 CAS current_version 再插版本会撞版本连续触发器，或把 CAS 写成同值空操作。规则写死：**BEGIN IMMEDIATE → 读草稿（revision=R 且 published_version IS NULL）→ 读 current_version=base_version → 全量校验 → 插入 version=base+1 → UPDATE workflows SET current_version=base+1 WHERE current_version=base → UPDATE workflow_drafts SET published_version=base+1 WHERE revision=R AND published_version IS NULL → 事件与回执同事务。** 插入版本前不改 current_version；任何一步未命中都整笔回滚。落在 §4.6.5、§4.12、§14.3。
+3. **[重大] current_version 触发器只许上调**：v30 的 BEFORE UPDATE 只查新值非空与版本存在，允许从 3 改回 1 或改成 NULL。规则写死：**OLD 为 NULL 时只许 NEW=1；OLD 非 NULL 时只许 NEW > OLD；禁止回到 NULL；新值必须已在 workflow_versions 中存在。** 补 DDL 验收用例。落在 §14.3。
+4. **[重大] 重复边与自环要有拒绝码**：保存层与发布层都禁止自环、重复 (from,to)，却没有对应错误码，重复边能落草稿并在 parallel 上发布成重复派发。规则写死：**保存层与发布层都返回 WORKFLOW_EDGE_SELF_LOOP / WORKFLOW_EDGE_DUPLICATE，不落草稿；发布层第 12 项复用同两个码。** 落在 §4.6.5、§4.12、Q-39。
+5. **[重大] 空草稿的 definition.name 有来源**：definition 省略时建空草稿，但 definition_json 的 name 没定义。规则写死：**空草稿固定写 {"schema_version":1,"name":payload.name,"nodes":[],"edges":[]}；workflow.create 无论是否带 definition 都要求 definition.name=payload.name。** 落在 §4.6.5。
+6. **[重大] 已消费草稿的优先级进 CAS 谓词**：v30 只按 revision CAS，草稿已消费时 revision 不变，会先撞 VERSION_CONFLICT，违反 DRAFT_NOT_OPEN 优先。规则写死：**读草稿与消费草稿都用 revision=R AND published_version IS NULL 谓词；未命中先读 published_version，非空返回 WORKFLOW_DRAFT_NOT_OPEN，否则返回 WORKFLOW_REVISION_CONFLICT。** 落在 §4.6.5、Q-38。
+7. **[重大] 子流程环与深度口径**：pin 已发布版本使跨流程环在正常发布路径不可达，Q-40 却要求正常发布构造环；depth 的单位也没定义。规则写死：**depth = 从根到叶经过的 subworkflow 边数，根为 0，max_depth=2；发布层强制、加载期防御性复核；环用例改用直接插入两版已发布定义的测试夹具，正常路径只断言 pin 使环不可构造；深度用例改为 2 通过、3 拒绝。** 落在 §3.1、§3.3、§4.12、Q-40。
+8. **[措辞] publish_note 所有调用方必填**：面板、agent、工具都必须带 1–500 字，面板输入框必填；空值返回 WORKFLOW_VALIDATION_FAILED 的 422。落在 §4.6.5、§4.12。
 
 ### 3.5 本段最容易被低估的一处
 
@@ -1322,22 +1335,22 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 - `edges[].from/to` 必须指向本版本内的节点；不允许自环、重复 `(from,to)`。`branch` 节点的每条出边必须带 `route`，`route` 恰好是 `{"priority": 0..999}` 或 `{"default": true}` 之一；同一 branch 的 priority 不重复、default 至多一条。非 branch 节点不带 `route`。
 - 图的执行语义是 **DAG**：恰好一个 `trigger` 入口、入口没有入边、其余节点从入口可达、全图无环。本版不支持回边；要重复执行用节点重试或新 run，不在图上画环。
 - **出度纪律：** `trigger` 出度恰好 1；`parallel` / `branch` 出度 ≥ 1；其他节点出度 ≤ 1（0 表示末端）。普通节点要分叉必须先接 `parallel` 或 `branch`，不许偷偷扇出。
-- **名称只有一个真值：** `definition.name` 是人看到的流程名，`workflows.name` 是同一事务写入的查询副本，两处必须一致。`workflow.create` 的 `payload.name` 用于建表；带 `definition` 时 `definition.name` 必须与它相同。`workflow.update` 在 `definition.name` 变化时同事务更新 `workflows.name`，不允许只改副本。
+- **名称只有一个真值：** `definition.name` 是人看到的流程名，`workflows.name` 是同一事务写入的查询副本，两处必须一致。`workflow.create` 的 `payload.name` 用于建表；带 `definition` 时 `definition.name` 必须与它相同。`workflow.update` 在 `definition.name` 变化时同事务更新 `workflows.name`，不允许只改副本。`workflow.create` 不带 `definition` 时，空草稿固定写 `{"schema_version":1,"name":payload.name,"nodes":[],"edges":[]}`，`definition.name` 一律取 `payload.name`。
 - 节点 `seq` 由拓扑序决定：Kahn 算法，同层按 `node_id` 升序；同一版本内稳定，`node_run.seq` 直接取它。
 
 **四个命令**（共用 4.6.1 信封与 4.6.2 幂等；`target` 里的 id 与 `expected` 都进 `request_hash`）：
 
 | 命令 | target | expected | payload | 成功返回 | 语义 |
 |---|---|---|---|---|---|
-| `workflow.create` | `{}` | `{"revision": 0}` | `{"name", "definition"?}` | `workflow_id`, `draft_revision`, `validation` | 新建流程与草稿；`definition` 省略时建空草稿。不自动发布。 |
+| `workflow.create` | `{}` | `{"revision": 0}` | `{"name", "definition"?}` | `workflow_id`, `draft_revision`, `validation` | 新建流程与草稿；`definition` 省略时建空草稿，固定写 `{"schema_version":1,"name":payload.name,"nodes":[],"edges":[]}`。不自动发布。 |
 | `workflow.open_draft` | `{"workflow_id"}` | `{"base_version": N}` | `{}` | `draft_revision`, `based_on_version` | 从当前发布版本复制出可编辑草稿。`N` 必须等于 `current_version`，不等返回 `WORKFLOW_VERSION_CONFLICT`；已有未发布草稿返回 `WORKFLOW_DRAFT_EXISTS`；从未发布返回 `WORKFLOW_NOT_PUBLISHED`。 |
 | `workflow.update` | `{"workflow_id"}` | `{"revision": R}` | `{"definition"}` | `draft_revision`, `changed`, `validation` | 整份替换草稿，不做字段级 patch；`R` 是当前草稿 revision。内容 hash 未变时不递增 revision，返回 `changed=false`。 |
-| `workflow.publish` | `{"workflow_id"}` | `{"revision": R, "base_version": N}` | `{"publish_note"}` | `version`, `definition_hash`, `published_at` | 全量校验通过后生成不可变版本；`N` 必须等于当前 `current_version`。发布后草稿转为已消费，编辑前先 `open_draft`。 |
+| `workflow.publish` | `{"workflow_id"}` | `{"revision": R, "base_version": N}` | `{"publish_note"}` | `version`, `definition_hash`, `published_at` | 全量校验通过后生成不可变版本；`N` 必须等于当前 `current_version`，从未发布时 `current_version` 为 NULL，`N=0`。`publish_note` 所有调用方必填 1–500 字。发布后草稿转为已消费，编辑前先 `open_draft`。 |
 
-- **发布已消费草稿返回 `WORKFLOW_DRAFT_NOT_OPEN`：** `workflow_drafts.published_version` 非空即表示这份草稿已经发布过；要再发先 `open_draft`，不拿旧 revision 再发一次。**错误优先级写死：** 同一个 publish 同时遇到「草稿已消费」与「base_version 不等于 current_version」时，先返回 `WORKFLOW_DRAFT_NOT_OPEN`；只有草稿仍未消费、只是 base_version 给错时，才返回 `WORKFLOW_VERSION_CONFLICT`。
-- **发布不做两阶段 challenge。** 它不碰在途 run、不产生外部副作用、失败可重试；发布只影响之后新建的 run。面板在按钮上做一次普通确认，agent 调用必须带一句 `publish_note`。
-- **版本号从 1 开始，只增不减、不复用。** `workflow.publish` 在同一个写事务里按 `expected.revision` CAS 草稿、按 `expected.base_version` CAS `workflows.current_version`、插入 `workflow_versions`、更新 `current_version`、把草稿标为已消费、追加 `workflow.published` 事件；任何一步失败整笔回滚。
-- **草稿保存不要求全图可发布。** `workflow.update` 只拒绝无法解析、超限、节点 id 重复、边端点不存在、坐标非法这几类；缺入口、有环、branch 没配路由等作为 `validation.errors[]` 返回并照样保存，让人可以分步改。发布时才要求全量通过。
+- **发布已消费草稿返回 `WORKFLOW_DRAFT_NOT_OPEN`：** `workflow_drafts.published_version` 非空即表示这份草稿已经发布过；要再发先 `open_draft`，不拿旧 revision 再发一次。**错误优先级写死：** 服务在 `BEGIN IMMEDIATE` 内先按 `workflow_id + revision + published_version IS NULL` 读草稿；未命中先重读该行，`published_version` 非空返回 `WORKFLOW_DRAFT_NOT_OPEN`，否则返回 `WORKFLOW_REVISION_CONFLICT`。同一个 publish 同时遇到「草稿已消费」与「base_version 不等于 current_version」时，先返回 `WORKFLOW_DRAFT_NOT_OPEN`；只有草稿仍未消费、只是 base_version 给错时，才返回 `WORKFLOW_VERSION_CONFLICT`。
+- **发布不做两阶段 challenge。** 它不碰在途 run、不产生外部副作用、失败可重试；发布只影响之后新建的 run。面板在按钮上做一次普通确认；面板、agent、工具都必须带 1–500 字 `publish_note`，面板输入框必填，空值返回 `WORKFLOW_VALIDATION_FAILED`（422）。
+- **版本号从 1 开始，只增不减、不复用。** `workflow.publish` 的写事务顺序写死：`BEGIN IMMEDIATE` → 按 `workflow_id + expected.revision + published_version IS NULL` 读草稿（未命中先重读 `published_version`，非空 → `WORKFLOW_DRAFT_NOT_OPEN`，否则 → `WORKFLOW_REVISION_CONFLICT`）→ 读 `current_version`，必须等于 `expected.base_version`（从未发布时两边都按 0 处理，否则 → `WORKFLOW_VERSION_CONFLICT`）→ 全量校验 → 插入 `workflow_versions(version=base+1)` → `UPDATE workflows SET current_version=base+1 WHERE workflow_id=? AND COALESCE(current_version,0)=base`（未命中整笔回滚）→ `UPDATE workflow_drafts SET published_version=base+1 WHERE workflow_id=? AND revision=? AND published_version IS NULL`（未命中整笔回滚）→ 追加 `workflow.published` → 把 command 行置 `applied`、写 `receipt_json` 与 `completed_at`、追加 `command.applied`。业务写入、草稿消费、事件与回执全在同一事务；任何一步失败整笔回滚。
+- **草稿保存不要求全图可发布。** `workflow.update` 只拒绝无法解析、超限、节点 id 重复、边端点不存在、坐标非法、自环、重复 `(from,to)` 这几类；缺入口、有环、branch 没配路由等作为 `validation.errors[]` 返回并照样保存，让人可以分步改。发布时才要求全量通过。
 - **冲突码：** `WORKFLOW_NOT_FOUND`（404）、`WORKFLOW_VERSION_NOT_FOUND`（404）、`WORKFLOW_REVISION_CONFLICT`（409，带 `current_revision`）、`WORKFLOW_VERSION_CONFLICT`（409，带 `current_version`）、`WORKFLOW_DRAFT_NOT_OPEN`（409，先 `open_draft`）、`WORKFLOW_DRAFT_EXISTS`（409）、`WORKFLOW_NOT_PUBLISHED`（409）、`WORKFLOW_VALIDATION_FAILED`（422，带 `errors[]`）、`WORKFLOW_DEFINITION_TOO_LARGE`（413）。
 
 **智能体接口。** 主控会话的工具名是 `workflow_create` / `workflow_open_draft` / `workflow_update` / `workflow_publish` / `workflow_get` / `workflow_list`，参数与上表同义，只是把 `operation_id` 换成工具层生成并回传。工具只做三件事：校验参数形状、生成或复用 `operation_id`、把信封转给命令层；不直连 DB，不复制校验规则，不替 agent 猜 revision。工具调用超时时必须把回传的 `operation_id` 交给调用方，重试复用同一个，避免同一份定义写两次。
@@ -1435,10 +1448,10 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 35. **Q-35** 一条 `applied` command 行 `completed_at` 已满 7 天，维护扫描置 `receipt_expired_at` 并清空 `receipt_json`；`get_operation` 与同 operation_id 复放均返回 `OPERATION_EXPIRED`，不重新执行；`in_flight` 行不参与该窗口，按 `created_at` 判在途超时。
 36. **Q-36** 一条 command 行卡在 `in_flight`：`created_at` 起未满 10 分钟时，重发同 operation_id 返回 `COMMAND_BUSY`；满 10 分钟后在途超时扫描以 CAS 置 `rejected` 并写 `OPERATION_TIMEOUT` 回执，不改业务状态；随后 `get_operation` 返回 `rejected` / `OPERATION_TIMEOUT`，面板提示先核对现状、换新 operation_id 重做；执行侧若仍在跑，提交时因 CAS 失败整笔回滚，不会覆盖这次终态。
 
-37. **Q-37** `workflow.create` 建出草稿 revision 1；`workflow.update` 改成可发布图；`workflow.publish` 生成版本 1 并写 `workflow_versions`。发布后再 `workflow.update` 返回 `WORKFLOW_DRAFT_NOT_OPEN`；`workflow.open_draft` 以 `base_version=1` 复制出草稿，再发布得版本 2。版本 1 的 `definition_json` / `definition_hash` 一字节未变；已启动的 run 仍读版本 1，新建 run 读版本 2。
-38. **Q-38** 两个面板同时用 revision 2 改同一草稿：先到的落 revision 3，后到的返回 `WORKFLOW_REVISION_CONFLICT` 且 `details.current_revision=3`，不覆盖。同一 `operation_id` + 同一 `request_hash` 重发返回 `replayed=true`，不重复递增；内容 hash 未变的 `workflow.update` 返回 `changed=false`、revision 不动。两个 `workflow.publish` 同用 `base_version=1`：一个成功生成版本 2；另一个读到的草稿已消费，按固定优先级返回 `WORKFLOW_DRAFT_NOT_OPEN`，不生成重复版本。另测一次草稿尚未消费、但 `base_version` 与 `current_version` 不等的 publish：返回 `WORKFLOW_VERSION_CONFLICT`，不插版本、不改 `current_version`。
-39. **Q-39** 一份没有 trigger、有环、branch 出边缺 route 的草稿可以 `workflow.update` 保存，返回 `validation.errors[]`；`workflow.publish` 返回 `WORKFLOW_VALIDATION_FAILED`（422），`details.errors[]` 的 `path` 能定位到节点或边，`current_version` 不变、`workflow_versions` 不新增行。再补两条出度用例：`trigger` 两条出边返回 `WORKFLOW_TRIGGER_FANOUT`；普通节点两条出边返回 `WORKFLOW_NODE_FANOUT_INVALID`，`path` 指向该节点。修好后重新发布成功。
-40. **Q-40** `subworkflow` 指向不存在的 `(workflow_id, pinned_version)` 时发布报 `WORKFLOW_SUBWORKFLOW_VERSION_MISSING`；两个已发布流程互相引用报 `SUBWORKFLOW_CYCLE`；三层嵌套报 `SUBWORKFLOW_DEPTH_EXCEEDED`。子流程后来发布新版本，父流程已发布版本仍按 pinned version 解释，不漂移。
+37. **Q-37** `workflow.create` 建出草稿 revision 1；`workflow.update` 改成可发布图；`workflow.publish` 用 `base_version=0` 生成版本 1 并写 `workflow_versions`。发布后再 `workflow.update` 返回 `WORKFLOW_DRAFT_NOT_OPEN`；`workflow.open_draft` 以 `base_version=1` 复制出草稿，再发布得版本 2。版本 1 的 `definition_json` / `definition_hash` 一字节未变；已启动的 run 仍读版本 1，新建 run 读版本 2。
+38. **Q-38** 两个面板同时用 revision 2 改同一草稿：先到的落 revision 3，后到的返回 `WORKFLOW_REVISION_CONFLICT` 且 `details.current_revision=3`，不覆盖。同一 `operation_id` + 同一 `request_hash` 重发返回 `replayed=true`，不重复递增；内容 hash 未变的 `workflow.update` 返回 `changed=false`、revision 不动。两个 `workflow.publish` 同用 `base_version=1`：一个成功生成版本 2；另一个按 `revision + published_version IS NULL` 读草稿未命中，重读 `published_version` 非空，按固定优先级返回 `WORKFLOW_DRAFT_NOT_OPEN`，不生成重复版本。另测一次草稿尚未消费、但 `base_version` 与 `current_version` 不等的 publish：返回 `WORKFLOW_VERSION_CONFLICT`，不插版本、不改 `current_version`。
+39. **Q-39** 一份没有 trigger、有环、branch 出边缺 route 的草稿可以 `workflow.update` 保存，返回 `validation.errors[]`；`workflow.publish` 返回 `WORKFLOW_VALIDATION_FAILED`（422），`details.errors[]` 的 `path` 能定位到节点或边，`current_version` 不变、`workflow_versions` 不新增行。再补两条出度用例：`trigger` 两条出边返回 `WORKFLOW_TRIGGER_FANOUT`；普通节点两条出边返回 `WORKFLOW_NODE_FANOUT_INVALID`，`path` 指向该节点。修好后重新发布成功。再补两条保存层用例：`parallel` 加两条相同 `(from,to)` 返回 `WORKFLOW_EDGE_DUPLICATE`，节点自环返回 `WORKFLOW_EDGE_SELF_LOOP`，两者都返回 422 且不落草稿。
+40. **Q-40** `subworkflow` 指向不存在的 `(workflow_id, pinned_version)` 时发布报 `WORKFLOW_SUBWORKFLOW_VERSION_MISSING`；depth 按从根到叶经过的 subworkflow 边数（根 0）算，depth=2 通过、depth=3 报 `SUBWORKFLOW_DEPTH_EXCEEDED`。pin 已发布版本使跨流程环在正常发布路径不可达：正常 publish 两个流程只断言 pin 指向旧版本、不构成环；另用测试夹具直接插入两张互相引用的已发布定义，加载期复核报 `SUBWORKFLOW_CYCLE`。子流程后来发布新版本，父流程已发布版本仍按 pinned version 解释，不漂移。
 41. **Q-41** 在草稿里只拖动节点、不改边：`definition_hash` 变化，发布生成新版本；节点 `seq` 仍按拓扑序与 `node_id` 排，不按坐标排。已发布画布只读，拖动不生效；版本 1 的 run 节点顺序与结果不因版本 2 的布局变化而变。
 42. **Q-42** 编排主控会话通过 `workflow_create` / `workflow_update` / `workflow_publish` 工具完成与面板相同的建改发布；工具与面板走同一个命令层，审计事件记到同一个 actor 与 surface。executor 子会话与任务会话拿不到这些工具。`workflow_publish` 不带 `publish_note` 被拒；工具超时后复用回传的 `operation_id` 重试，只生成一个版本。
 
@@ -1454,6 +1467,7 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | `definition_json` ≤ 1 MiB、节点 ≤ 500、边 ≤ 2000 | `WORKFLOW_DEFINITION_TOO_LARGE` | 413；不落草稿 |
 | `node_id` 格式与版本内唯一 | `WORKFLOW_NODE_ID_INVALID` / `WORKFLOW_NODE_ID_DUPLICATE` | 422；不落草稿 |
 | 边的两端都在本版本节点里 | `WORKFLOW_EDGE_ENDPOINT_MISSING` | 422；不落草稿，避免画布画出悬空线 |
+| 无自环、无重复 `(from,to)` | `WORKFLOW_EDGE_SELF_LOOP` / `WORKFLOW_EDGE_DUPLICATE` | 422；不落草稿 |
 | `position` 是 0–20000 整数 | `WORKFLOW_LAYOUT_INVALID` | 422；不落草稿 |
 
 缺入口、多入口、有环、branch 没配路由、节点契约不合法这些**不阻断保存**，作为 `validation.errors[]` 返回；画布照常保存，检查面板列出问题。
@@ -1472,11 +1486,12 @@ wait 过期、approval 超时、审计失败、indeterminate_side_effect 四条�
 | 8 | 每种类型的必填 config 齐全（含 approval / wait 的超时默认动作、parallel 的 join 与 quorum、trigger 的来源与幂等键） | `WORKFLOW_NODE_CONFIG_INVALID` |
 | 9 | 契约、能力矩阵、证据来源、payload schema 过 §3 / §11 / §12 的同一道闸门 | `SIDE_EFFECT_UNDECLARED` / `TOOL_NOT_REGISTERED` / `TOOL_NOT_ALLOWED` / `EVIDENCE_SOURCE_UNAVAILABLE` / `PAYLOAD_SCHEMA_INVALID` |
 | 10 | `subworkflow` 的 `(workflow_id, pinned_version)` 已发布、存在 | `WORKFLOW_SUBWORKFLOW_VERSION_MISSING` |
-| 11 | 子流程引用无环、深度 ≤ 2 | `SUBWORKFLOW_CYCLE` / `SUBWORKFLOW_DEPTH_EXCEEDED` |
-| 12 | 节点与边的数量、id、边端点仍满足保存层 | 复用保存层错误码 |
+| 11 | 子流程引用无环、深度 ≤ 2（depth = 从根到叶经过的 subworkflow 边数，根为 0） | `SUBWORKFLOW_CYCLE` / `SUBWORKFLOW_DEPTH_EXCEEDED` |
+| 12 | 节点与边的数量、id、边端点、自环、重复边仍满足保存层 | 复用保存层错误码 |
 
 - **错误项形状固定：** `{"path": "/nodes/3/config/join", "code": "WORKFLOW_NODE_CONFIG_INVALID", "message": "并行分派要说明怎么收口：全部、任一或达到几份。"}`。`path` 是 RFC 6901 JSON Pointer；面板按它选中节点或连线。最多返回 100 条，超出在 `details.truncated=true` 与 `details.total` 里报总数，不静默截断。
-- **发布事务顺序：** 进入写事务后先按 `expected.revision` 读草稿、按 `expected.base_version` 读 `current_version`，再全量校验；校验失败写 `rejected` 回执并返回 422，不插版本、不改 `current_version`。校验通过后插入 `workflow_versions`、更新 `workflows.current_version`、把草稿标为已消费、追加 `workflow.published`，全部同一事务；回执在事务提交后写。
+- **发布事务顺序：** 进入写事务（`BEGIN IMMEDIATE`）后，先按 `workflow_id + expected.revision + published_version IS NULL` 读草稿；未命中先重读 `published_version`，非空返回 `WORKFLOW_DRAFT_NOT_OPEN`，否则 `WORKFLOW_REVISION_CONFLICT`。再读 `current_version`，必须等于 `expected.base_version`（从未发布时按 0），否则 `WORKFLOW_VERSION_CONFLICT`。随后全量校验；校验失败时业务表尚未写入，只把本命令的 command 行置 `rejected`、写 `receipt_json` 与 `completed_at`、追加 `command.rejected`，在同一事务提交；不插版本、不改 `current_version`、不消费草稿。成功路径的 `applied` 回执与业务写入同事务提交，**不存在业务已提交、回执还没写的窗口**。校验通过后按固定顺序写：插入 `workflow_versions(version=base+1)` → `UPDATE workflows SET current_version=base+1 WHERE COALESCE(current_version,0)=base` → `UPDATE workflow_drafts SET published_version=base+1 WHERE revision=R AND published_version IS NULL` → 追加 `workflow.published` → 把 command 行置 `applied`、写回执与 `completed_at`、追加 `command.applied`。这些写入在同一事务；任何一步失败整笔回滚，回执不会单独留在提交之后。
+- **子流程深度口径：** depth = 从根到叶经过的 subworkflow 边数，根为 0；`max_depth=2` 表示最多两层子流程。发布层强制，加载期只做防御性复核。pin 已发布版本使跨流程环在正常发布路径不可达；`SUBWORKFLOW_CYCLE` 用例用直接注入两张已发布版本的测试夹具，或对损坏数据做加载期复核，不能要求正常 publish 构造环。
 - **发布门禁只做静态校验，不要求试跑。** 本版没有 `workflow.trial` 命令；任何「试跑通过」都不能作为放行凭据，也不能写运行态。要验证真实行为，就新建一个任务跑真 run。
 - **版本真值：** `definition_hash = SHA256(JCS(definition))`，布局字段也进 hash；已发布版本的任何字节都不许改。要改布局或改节点，开新草稿、发新版本。
 - **运行固定版本：** 新建 run 时在同一个事务里读 `workflows.current_version` 并写入 `runs.workflow_id` 与 `runs.workflow_version`；`current_version` 为空返回 `WORKFLOW_NOT_PUBLISHED`。执行面只按 `(workflow_id, workflow_version)` 读 `workflow_versions`，读不到就停在原地报 `WORKFLOW_VERSION_NOT_FOUND`，不许回退到「最新版本」。
