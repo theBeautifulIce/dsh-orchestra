@@ -12,13 +12,14 @@
 
 ## 1. 规格来源与硬约束
 
-- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.1，1306 行 / 92209 bytes / SHA256 `9B47AB32B7EA122E05148D12088CDD02083170BF6AEA6B069AC7186D6EFCC4A3，commit `4e646eb`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
+- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.2，1401 行 / 97769 bytes / SHA256 `EB46CA604B1C1DB6E95FEFBE3A0AF3EA0D3E2E7061009BB9689483C710315CE7`，commit `待回填`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
 - 设计稿论证与用例：`docs/orchestra-design-draft.md` v44。
 - 不得写的事（规格 1.2 / 10.3）：内嵌编排脚本、与原生 workflowEngine 半兼容、让模型做最终裁决、接受口头副作用等级、节点层跨节点业务判断、自动兜底放行、v1 记忆删除与跨运行补偿、把执行器全量 transcript 给大脑。
 - 账本只追加；已提交事件不改写；事件序号单调（不变量 I2）。
 - 所有迁移带 CAS；CAS 失败不产生副作用（不变量 I3）。
 - 一个 node_run 与一个 run 最多一个终态（不变量 I1）。
 - 每道门都要有 GateArtifact；没有门记录与批准人不得进下一阶段（不变量 I10）。
+- 查询清单以规格 8.3 为准（18 条）；本总纲不重复列举，以免两处口径漂移。
 
 ## 2. 六批计划与依赖
 
@@ -47,7 +48,19 @@ dsh-orchestra/
 │  ├─ index.ts                 # cordis 插件入口（组合根）
 │  ├─ client/
 │  │  ├─ index.tsx             # 面板入口
-│  │  ├─ panel/                # 六屏组件
+│  │  ├─ panel/                # 六屏 + 支撑件（文件名以本树为准）
+│  │  │  ├─ task-list.tsx       # 屏 1 任务列表
+│  │  │  ├─ task-detail.tsx     # 屏 2 任务详情
+│  │  │  ├─ decision-inbox.tsx  # 屏 3 待你决定
+│  │  │  ├─ unverified-effects.tsx # 屏 4 待核实
+│  │  │  ├─ workflow-list.tsx   # 屏 5 流程列表
+│  │  │  ├─ workflow-canvas.tsx # 屏 6 流程画布
+│  │  │  ├─ memory-panel.tsx    # 记忆面板（挂在任务详情内）
+│  │  │  ├─ shell.tsx           # 外壳与导航
+│  │  │  ├─ components.tsx      # 通用展示件
+│  │  │  ├─ copy.ts             # 人话文案词表
+│  │  │  ├─ tokens.ts           # 浅色主题 token
+│  │  │  └─ contrast.ts         # 对比度校验
 │  │  └─ api/                  # 读模型客户端 + SSE
 │  ├─ core/                    # 纯领域逻辑，无 IO，可单测
 │  │  ├─ config.ts             # 配置 schema + 阶段判定
@@ -143,6 +156,7 @@ package.json 侧对应：`main: lib/index.js`、`types: lib/index.d.ts`、`expor
   - `withTx<T>(db: Db, fn: (tx: Tx) => T): T` —— `BEGIN IMMEDIATE` → 校验 `service_meta.instance_epoch` 等于当前 epoch（连只读 INSERT 前也校验）→ 执行 → `COMMIT`；抛错则 `ROLLBACK` 并原样上抛；
   - `execSchema(db: Db, statements: string[]): void` —— 按顺序跑迁移语句，逐条写 `schema_migrations(version, checksum, applied_at)`。
 - 其余模块一律不许直接 import `node:sqlite`，也不许另开第二条连接；跨模块访问只经 `src/infra` 的仓储函数。
+- `src/infra/db/`（`open.ts` / `tx.ts` / `migrate.ts`）是服务侧封装层：它自己不 import `node:sqlite`，连接与事务一律经 `src/infra/sqlite/driver.ts` 取；S1 里唯一出现 `node:sqlite` import 的文件就是 `driver.ts`。
 - 迁移脚本放 `src/infra/sqlite/migrations/NNN-name.sql`，按编号顺序执行；已执行版本不重跑，内容改动一律新开编号，不改老文件。
 - 编号按批次分段，同批内按执行顺序递增两位：S1＝`001_` 段（`001_init.sql`）、S2＝`002_` 段、S3＝`010_`–`019_` 段、S4＝`020_`–`029_` 段、S5＝`030_`–`039_` 段、S6＝`040_`–`049_` 段。理由：六批并行推进时，编号若各批自定会撞号；分段后新增迁移只会落在本批段内，谁先落盘都不影响别人。
 ### 4.2 错误与信封

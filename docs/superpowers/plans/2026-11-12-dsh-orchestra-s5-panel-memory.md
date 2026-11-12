@@ -16,18 +16,18 @@
 
 **本批能做什么**：读模型与规格 8.3 的十八个查询、SSE 事件流与失效信号、面板六屏、面板控制面六命令、记忆三端口与固定图、记忆四表、提议校验与 canonical 哈希、评估与审批、写入与部分写入对账、记忆面板、视觉硬门槛与字号/对比度审计、G5 门记录与三条必过注入（G-06 / G-11 / G-12）。
 
-**本批不能做什么**（规格 11.1 行 845 的 S5 阶段能力表禁止项：R2 受控圈）。落到实现上就是这几条：
+**本批不能做什么**（规格 11.1 行 938 的 S5 阶段能力表禁止项：R2 受控圈）。落到实现上就是这几条：
 
-- 不启用 release 能力。wf_release_v1 只在 S6 启用（规格 11.4 行 895），S5 的阶段闸必须能把它拒掉——这正是 G5 必过项之一。
-- 不做三圈试用与晋级。R0 / R1 / R2 的准入与留痕属 S6（规格 11.6 行 913-919）。
+- 不启用 release 能力。wf_release_v1 只在 S6 启用（规格 11.4 行 988），S5 的阶段闸必须能把它拒掉——这正是 G5 必过项之一。
+- 不做三圈试用与晋级。R0 / R1 / R2 的准入与留痕属 S6（规格 11.6 行 1006-1012）。
 - 不做 G-01 到 G-16 的全量故障注入、24 小时浸泡、发布包与安装说明。这三样是 S6 的活。
 - 不越阶段写门记录。G5 记录里不许出现 release、R1/R2 或 S6 的结论。
 
-**对应门 G5 必过项**（规格 11.2 行 858，原文引用）：
+**对应门 G5 必过项**（规格 11.2 行 951，原文引用）：
 
 > G5 必过：Q-01 到 Q-36 与 Q-43 到 Q-63（含 43b / 43c / 44b / 44c / 47b / 52b）、两个视口无横向溢出、正文不小于 13px、辅助不小于 12px、菜单与顶导不小于 12.5px、浅色对比度正文 4.5:1、大字与 UI 3:1、记忆部分写入可对账、S5 启动 wf_release_v1 被拒、G-06 / G-11 / G-12。
 
-每条注入用例都要留三样东西（规格 12.3 行 984 原文口径）：注入脚本与参数、前后账本片段、恢复后对账查询。没有对账查询的注入不算通过。
+每条注入用例都要留三样东西（规格 12.3 行 1077 原文口径）：注入脚本与参数、前后账本片段、恢复后对账查询。没有对账查询的注入不算通过。
 
 **未决参数**（总纲 §7 口径：每一项在对应批次定值并写进门记录；定值前实现按规格默认值与安全侧行为运行，不许用「还没定」作为放行理由）：
 
@@ -36,7 +36,7 @@
 | 写队列上限与溢出策略 | 第 1 项 | 沿用 S1 定值：上限 1000 条，超限返回 `SERVICE_UNAVAILABLE`（503）并记 warning，读路径不受影响。S5 不改这个值；若 S6 复查要改，先改 G1 门记录再改代码。 |
 | 事件与证据的保留期 | 第 2 项 | 本批只做读侧展示口径（artifact 过保留期显示「已过保留期」，不删账本事实），具体天数在 S6 Task 9 定值并写进 G6 门记录。 |
 | 记忆裁判的模型与提示词版本 | 第 3 项 | 本批把裁判调用收在 `src/core/memory-eval.ts` 的唯一出口，模型与提示词版本写进 `memory_evaluations` 的模型信息列；本批不锁具体模型。 |
-| 记忆三端口的入参出参字段名 | 总纲 §7 未列 | 规格只点名了 `memory.apply_governed` 只收 `decision_id`（规格 9.7 行 735）与 `memory.inspect_batch` 的返回形状（设计稿 Q-54）。本批只实现规格点名的字段，其余集中在 `src/core/memory-eval.ts` 一处并标注未决，不在别处另造协议。 |
+| 记忆三端口的入参出参字段名 | 总纲 §7 未列 | 规格只点名了 `memory.apply_governed` 只收 `decision_id`（规格 9.7 行 737）与 `memory.inspect_batch` 的返回形状（设计稿 Q-54）。本批只实现规格点名的字段，其余集中在 `src/core/memory-eval.ts` 一处并标注未决，不在别处另造协议。 |
 | 值班人与升级联系人名单 | 第 4 项 | 属 S6 Task 13，本批不预置。 |
 | R1/R2 工作区白名单 | 第 5 项 | 属 S6 Task 14，本批不预置。 |
 | 24h 浸泡采样频率与判定脚本 | 第 6 项 | 属 S6 Task 7，本批不预置。 |
@@ -44,7 +44,7 @@
 **口径说明（三处合并定案）**：
 
 - 目录合并沿用 S1 的定案：驱动与 SQL 迁移放 `src/infra/sqlite/`（`driver.ts`、`migrations/NNN-name.sql`），连接、事务与迁移执行器放 `src/infra/db/`（`open.ts`、`tx.ts`、`migrate.ts`）。两套目录不并存，本批不再重复这个决定。
-- 记忆批次的 status 取值取设计稿 §5.4 的枚举（draft/evaluating/awaiting_human/approved/applying/applied/empty/blocked/declined/expired/failed/indeterminate），它与规格 9.9 行 760 的面板文案表一一对应。规格 §9 没有逐字列这组值——记为口径差异，报给主人，不在代码里另造一套。
+- 记忆批次的 status 取值取设计稿 §5.4 的枚举（draft/evaluating/awaiting_human/approved/applying/applied/empty/blocked/declined/expired/failed/indeterminate），它与规格 9.9 行 762 的面板文案表一一对应。规格 §9 没有逐字列这组值——记为口径差异，报给主人，不在代码里另造一套。
 - 读模型只做展示，不改原文。节点半态不许折成 run 的三态，status 原文永远并列在 display_status 旁边；证据没有就不许显绿（规格 8.6 行 666、设计稿 §4.4）。
 
 ---
@@ -527,7 +527,7 @@ export function getDecision(ctx: ReadCtx, decisionId: string): DecisionView {
 }
 ```
 
-5. 定 `get_artifact` 与 `verify_ledger`。产物只按登记的 artifact id 取，传伪造 id 或路径穿越一律 `NOT_FOUND`，错误文案不回显路径（Q-24）；保留期外的产物不删事实，只回「已过保留期」并禁下载（规格 12.5 行 1000）。账本校验按 node_run 逐条重算 HMAC 链，命中第一条断链即停（Q-25）。
+5. 定 `get_artifact` 与 `verify_ledger`。产物只按登记的 artifact id 取，传伪造 id 或路径穿越一律 `NOT_FOUND`，错误文案不回显路径（Q-24）；保留期外的产物不删事实，只回「已过保留期」并禁下载（规格 12.5 行 1093）。账本校验按 node_run 逐条重算 HMAC 链，命中第一条断链即停（Q-25）。
 
 ```ts
 // src/service/queries/artifacts.ts
@@ -605,7 +605,7 @@ export function verifyLedger(ctx: ReadCtx, secret: string): LedgerCheck {
   - `stopped_at` 非空但 `side_effect_verified_none` 不为 true 时，仍在「待核实」页且显示「未验证」（Q-29）。
   - `get_decision` 的 `allowed_resolutions` 与 kind 一致（Q-11）。
   - `get_artifact` 传伪造 id 或 `../` 路径穿越返回 `NOT_FOUND`，错误文案不含文件系统路径（Q-24）。
-  - 产物过了 `retain_until` 仍能读到记录，但标「已过保留期」且不给下载句柄（规格 12.5 行 1000）。
+  - 产物过了 `retain_until` 仍能读到记录，但标「已过保留期」且不给下载句柄（规格 12.5 行 1093）。
   - 篡改第 100 条 `node_run_events` 的 summary 后 `verify_ledger` 返回 `valid=false` 且 `first_bad_event_seq=100`（Q-25）。
 
 **验收：**
@@ -782,7 +782,7 @@ export function replayOrConflict(existing: ReceiptRow | undefined, hash: string)
 }
 ```
 
-4. 定控制面白名单与 actor 派生。面板只开六条命令，其余一律拒；actor 由认证主体派生，不由 payload 自报（规格 12.5 行 998）。
+4. 定控制面白名单与 actor 派生。面板只开六条命令，其余一律拒；actor 由认证主体派生，不由 payload 自报（规格 12.5 行 1091）。
 
 ```ts
 // src/service/commands/router.ts
@@ -1096,7 +1096,7 @@ git commit -m "feat(client): 建面板 API 层与回执查询纪律"
 
 ### Task 7：面板骨架与视觉硬门槛
 
-**目标：** 立起面板外壳与设计令牌，把规格 8.6 行 661-667 的视觉硬门槛变成可测的断言：字号下限、对比度下限、浅色主题、无黑底、无菜单彩色左条（规格 13.3 行 1025-1027）。
+**目标：** 立起面板外壳与设计令牌，把规格 8.6 行 661-667 的视觉硬门槛变成可测的断言：字号下限、对比度下限、浅色主题、无黑底、无菜单彩色左条（规格 13.3 行 1118-1120）。
 
 **Files:**
 - Create: `src/client/panel/tokens.ts` —— 颜色与字号令牌，以及各项下限常量。
@@ -1192,11 +1192,11 @@ export const COPY = {
 **测试：**
 
 - Create: `tests/panel-visual.spec.ts`
-  - 计算后的正文不小于 13px、辅助不小于 12px、菜单与顶导不小于 12.5px；断言的是渲染后的计算字号，不是令牌常量本身（规格 13.3 行 1026）。
-  - `TEXT_PAIRS` 每对都达到各自下限：正文 4.5:1，链接 3:1（规格 13.3 行 1027）。
+  - 计算后的正文不小于 13px、辅助不小于 12px、菜单与顶导不小于 12.5px；断言的是渲染后的计算字号，不是令牌常量本身（规格 13.3 行 1119）。
+  - `TEXT_PAIRS` 每对都达到各自下限：正文 4.5:1，链接 3:1（规格 13.3 行 1120）。
   - 浅色主题：画布与表面色不是黑色，亮度高于 0.8；菜单项没有彩色左边条（规格 8.6 行 661）。
   - 在 1600×1000 与 1366×900 两个视口下，`document.documentElement.scrollWidth <= clientWidth`；长标题截断且 `title` 属性含全文。
-  - 默认视图渲染结果里不出现 session_id / agent_id / node_run_id / event_id / batch_id 这些字面量（规格 13.3 行 1029）。
+  - 默认视图渲染结果里不出现 session_id / agent_id / node_run_id / event_id / batch_id 这些字面量（规格 13.3 行 1122）。
 
 **验收：**
 
@@ -1218,7 +1218,7 @@ git commit -m "feat(client): 立面板外壳与视觉硬门槛令牌"
 
 ### Task 8：六屏之一二——任务列表与任务详情
 
-**目标：** 交出任务列表与任务详情两屏，行内元素与风险栏按规格 8.5 行 652-653 的清单逐条落实（规格 13.3 行 1028 的逐屏走查）。
+**目标：** 交出任务列表与任务详情两屏，行内元素与风险栏按规格 8.5 行 652-653 的清单逐条落实（规格 13.3 行 1121 的逐屏走查）。
 
 **Files:**
 - Create: `src/client/panel/task-list.tsx` —— 任务列表屏。
@@ -1299,7 +1299,7 @@ export function TaskDetailHeader(props: { task: TaskSummary; runs: RunSummary[] 
 **测试：**
 
 - Create: `tests/panel-task.spec.ts`
-  - 任务行显示标题、流程与版本、到哪一步、等你决定几条、几笔改动没核实、更新时间六项，且不显示 session_id（规格 13.3 行 1029）。
+  - 任务行显示标题、流程与版本、到哪一步、等你决定几条、几笔改动没核实、更新时间六项，且不显示 session_id（规格 13.3 行 1122）。
   - 排序按服务端 attention 顺序渲染，前端不再本地重排。
   - 详情页风险栏同时出现未决裁决、未验证副作用、孤儿、桥断四类条目；抽屉打开后当前页不跳转。
   - 节点列表按 seq 与 attempt 排列；`status` 原文可见；未验证副作用与失败同屏可见，不只显示绿色成功（规格 8.6 行 667）。
@@ -1388,7 +1388,7 @@ export function EffectRow({ effect }: { effect: UnverifiedEffectView }) {
 **测试：**
 
 - Create: `tests/panel-decision.spec.ts`
-  - 待你决定按服务端 priority 与 age 降序；卡上四问都能答出：为什么卡、谁能解、可选什么、需要什么证据、过期会怎样（规格 13.3 行 1030）。
+  - 待你决定按服务端 priority 与 age 降序；卡上四问都能答出：为什么卡、谁能解、可选什么、需要什么证据、过期会怎样（规格 13.3 行 1123）。
   - 批量按钮只对 acknowledge 可用；resolve 一次一条；界面上没有「忽略」。
   - 待核实是独立一级页，顶部固定句一字不差；`stopped_at` 非空但未确认未发生的一行仍显示「未验证」（Q-29）。
   - 默认视图不出现 node_run_id / batch_id；开发者视图才出现。
@@ -1498,7 +1498,7 @@ git commit -m "feat(client): 交出流程列表与流程画布两屏"
 
 ### Task 11：记忆三端口、固定图与四张表
 
-**目标：** 把记忆支线的地基铺好：三个内部端口、只给编排服务的固定图、四张记忆表，以及发布期与加载期的写工具禁令（规格 9.1 行 671-678、9.2 行 682-688、9.3 行 692-702、3.9 行 256-260）。
+**目标：** 把记忆支线的地基铺好：三个内部端口、只给编排服务的固定图、四张记忆表，以及发布期与加载期的写工具禁令（规格 9.1 行 671-678、9.2 行 682-688、9.3 行 693-703、3.9 行 256-260）。
 
 **Files:**
 - Create: `src/infra/sqlite/migrations/030_memory.sql` —— 记忆四张表、索引与批准后只读触发器。
@@ -1587,7 +1587,7 @@ CREATE TABLE memory_run_requests (
 );
 ```
 
-2. 建批准后只读的触发器（规格 9.8 行 754、Q-52b）。批准后 `memory_items` 禁 INSERT / DELETE，除 status 与 applied_item_id 外只读；绕过触发器改集合则由写入前的快照比对兜住，报 `MEMORY_APPLY_BINDING_INVALID`。
+2. 建批准后只读的触发器（规格 9.8 行 756、Q-52b）。批准后 `memory_items` 禁 INSERT / DELETE，除 status 与 applied_item_id 外只读；绕过触发器改集合则由写入前的快照比对兜住，报 `MEMORY_APPLY_BINDING_INVALID`。
 
 ```sql
 -- src/infra/sqlite/migrations/030_memory.sql 续
@@ -1614,7 +1614,7 @@ BEGIN
 END;
 ```
 
-3. 定固定图。规格 9.3 行 692-702：`mem_trigger→mem_prepare→mem_check→mem_route`，ready 走 `mem_confirm→mem_apply→mem_report`，empty 走 `mem_report_empty`，blocked 走 `mem_report_blocked`；三个终态叶子各唯一入边、不合并。
+3. 定固定图。规格 9.3 行 693-703：`mem_trigger→mem_prepare→mem_check→mem_route`，ready 走 `mem_confirm→mem_apply→mem_report`，empty 走 `mem_report_empty`，blocked 走 `mem_report_blocked`；三个终态叶子各唯一入边、不合并。
 
 ```ts
 // src/core/memory-graph.ts
@@ -1706,7 +1706,7 @@ git commit -m "feat(memory): 建记忆四表与三端口固定图"
 
 ### Task 12：记忆发起、幂等与 canonical 哈希
 
-**目标：** 交出 `memory_start_run` 的幂等发起、提议条目的边界校验、canonical 原像与两个哈希（规格 9.4 行 703-710、9.5 行 711-722、9.8 行 749-755）。
+**目标：** 交出 `memory_start_run` 的幂等发起、提议条目的边界校验、canonical 原像与两个哈希（规格 9.4 行 704-711、9.5 行 712-724、9.8 行 751-757）。
 
 **Files:**
 - Create: `src/core/memory-canonical.ts` —— canonical_item、canonical_proposal 与两个哈希。
@@ -1715,7 +1715,7 @@ git commit -m "feat(memory): 建记忆四表与三端口固定图"
 
 **步骤：**
 
-1. 定 canonical 原像。规格 9.8 行 751-753：canonical_item 只取十三个字段，tags 升序去重，questions 保序；content_hash = SHA256(JCS(canonical_item))，不含自身与 status；proposal_hash 按 client_key 升序，status 不入原像。
+1. 定 canonical 原像。规格 9.8 行 753-755：canonical_item 只取十三个字段，tags 升序去重，questions 保序；content_hash = SHA256(JCS(canonical_item))，不含自身与 status；proposal_hash 按 client_key 升序，status 不入原像。
 
 ```ts
 // src/core/memory-canonical.ts
@@ -1770,7 +1770,7 @@ export function proposalHash(items: MemoryItemInput[]): string {
 }
 ```
 
-2. 定边界校验。规格 9.5 行 713-714：items 不超过 20 条、单条 content 不超过 64KiB、整批不超过 256KiB、title 1–120 字、quote 1–1000 字、reason 1–500 字、questions 不超过 4 条、tags 不超过 12 个。超尺寸报 `MEMORY_BATCH_TOO_LARGE`（413），超内容规范报 `MEMORY_PROPOSAL_INVALID`（422）。
+2. 定边界校验。规格 9.5 行 714-715：items 不超过 20 条、单条 content 不超过 64KiB、整批不超过 256KiB、title 1–120 字、quote 1–1000 字、reason 1–500 字、questions 不超过 4 条、tags 不超过 12 个。超尺寸报 `MEMORY_BATCH_TOO_LARGE`（413），超内容规范报 `MEMORY_PROPOSAL_INVALID`（422）。
 
 ```ts
 // src/core/memory-canonical.ts 续
@@ -1806,9 +1806,9 @@ export function assertProposalSize(items: MemoryItemInput[]): void {
 }
 ```
 
-3. 定同目标冲突的处置（规格 9.5 行 716、设计稿 Q-46）。同批两条同 target_id 但内容不同报 `MEMORY_BATCH_CONFLICT`（422），不调评估、不生成审批卡；同 target 同内容合并为一条 skipped_duplicate，不报错。
+3. 定同目标冲突的处置（规格 9.5 行 717、设计稿 Q-46）。同批两条同 target_id 但内容不同报 `MEMORY_BATCH_CONFLICT`（422），不调评估、不生成审批卡；同 target 同内容合并为一条 skipped_duplicate，不报错。
 
-4. 定 `memory_start_run` 的幂等（规格 9.4 行 705-709）。同 (source_run_id, request_key) 返回同一个 memory_run_id 与 attempt 且 `replayed=true`；同源已有未终结的记忆运行且换 key 报 `MEMORY_RUN_ACTIVE`（409）并返回既有 run_id；源运行未 succeeded 报 `MEMORY_SOURCE_RUN_NOT_SETTLED`（409）；只有 `retry=true` 才把 attempt 加一。映射与建批在同一事务里落。
+4. 定 `memory_start_run` 的幂等（规格 9.4 行 706-710）。同 (source_run_id, request_key) 返回同一个 memory_run_id 与 attempt 且 `replayed=true`；同源已有未终结的记忆运行且换 key 报 `MEMORY_RUN_ACTIVE`（409）并返回既有 run_id；源运行未 succeeded 报 `MEMORY_SOURCE_RUN_NOT_SETTLED`（409）；只有 `retry=true` 才把 attempt 加一。映射与建批在同一事务里落。
 
 ```ts
 // src/service/commands/memory.ts
@@ -1897,7 +1897,7 @@ git commit -m "feat(memory): 实现发起幂等与 canonical 哈希"
 
 ### Task 13：评估端口与审批卡
 
-**目标：** 交出 `memory.evaluate` 的评估口径与审批卡生成、批准与驳回的落库语义（规格 9.5 行 711-722、9.6 行 723-732）。
+**目标：** 交出 `memory.evaluate` 的评估口径与审批卡生成、批准与驳回的落库语义（规格 9.5 行 712-724、9.6 行 725-734）。
 
 **Files:**
 - Create: `src/core/memory-eval.ts` —— 评估端口的唯一出口、裁判结果解析与 recommendation 推导。
@@ -1906,7 +1906,7 @@ git commit -m "feat(memory): 实现发起幂等与 canonical 哈希"
 
 **步骤：**
 
-1. 定评估端口的出口（规格 9.2 行 681-690、9.5 行 711-722）。评估只做四件事：按 prepare_node_run_id 找批次、确定性查重与冲突、调裁判、返回逐条建议；不写记忆、不写 audit store。端口不可用、超时、开关关闭分别报 `MEMORY_EVAL_UNAVAILABLE`（503）、`MEMORY_EVAL_TIMEOUT`（504）、`MEMORY_EVAL_DISABLED`（503），批次与运行都 failed，不写任何记忆。
+1. 定评估端口的出口（规格 9.2 行 681-691、9.5 行 712-724）。评估只做四件事：按 prepare_node_run_id 找批次、确定性查重与冲突、调裁判、返回逐条建议；不写记忆、不写 audit store。端口不可用、超时、开关关闭分别报 `MEMORY_EVAL_UNAVAILABLE`（503）、`MEMORY_EVAL_TIMEOUT`（504）、`MEMORY_EVAL_DISABLED`（503），批次与运行都 failed，不写任何记忆。
 
 ```ts
 // src/core/memory-eval.ts
@@ -1937,7 +1937,7 @@ export function assertEvalShape(items: EvalItem[], truncated: boolean): void {
 
 2. 定解析失败的处置。裁判返回非 JSON、缺 items、verdict=maybe 都报 `MEMORY_EVAL_INVALID_OUTPUT`（502）；批次 failed、run failed、不生成审批卡、不写入，剩余 proposed 全部 skipped；重跑产生新的 evaluation attempt，旧评估保留（唯一键 (batch_id, eval_attempt)）。
 
-3. 定审批卡。只有 `recommendation=ready` 才生成审批卡，挂 `mem_confirm`，kind 为 `audit_result`；`allowed_resolutions` 为空，resolve 的 payload 是空对象，只产生 approved 或 rejected 两种结果（规格 9.6 行 723-731）。
+3. 定审批卡。只有 `recommendation=ready` 才生成审批卡，挂 `mem_confirm`，kind 为 `audit_result`；`allowed_resolutions` 为空，resolve 的 payload 是空对象，只产生 approved 或 rejected 两种结果（规格 9.6 行 725-733）。
 
 ```ts
 // src/service/commands/memory.ts 续
@@ -2010,7 +2010,7 @@ git commit -m "feat(memory): 实现评估口径与审批卡落库"
 
 ### Task 14：记忆写入与部分写入对账
 
-**目标：** 交出 `memory.apply_governed` 的三道核对、判定顺序、原子写入与幂等，以及 tool.result 丢失后的对账三走向（规格 9.7 行 733-748、Q-52 / Q-52b / Q-54 / Q-57 / Q-58 / Q-59 / Q-62）。
+**目标：** 交出 `memory.apply_governed` 的三道核对、判定顺序、原子写入与幂等，以及 tool.result 丢失后的对账三走向（规格 9.7 行 735-750、Q-52 / Q-52b / Q-54 / Q-57 / Q-58 / Q-59 / Q-62）。
 
 **Files:**
 - Modify: `src/service/commands/memory.ts` —— apply、confirm_applied、confirm_not_applied。
@@ -2019,7 +2019,7 @@ git commit -m "feat(memory): 实现评估口径与审批卡落库"
 
 **步骤：**
 
-1. 定三道核对与判定顺序（规格 9.7 行 735-740）。顺序不能颠倒：批次不存在 → `MEMORY_BATCH_NOT_FOUND`（404）；批次非 approved 或 decision 非 approved / 已过期 → `MEMORY_BATCH_NOT_APPROVED`（409）；归属不符或快照不符 → `MEMORY_APPLY_BINDING_INVALID`（403）；同键同批已存在且哈希不同 → `MEMORY_APPLY_CONFLICT`（409）；其余写失败 → `MEMORY_APPLY_FAILED`（500）。
+1. 定三道核对与判定顺序（规格 9.7 行 737-742）。顺序不能颠倒：批次不存在 → `MEMORY_BATCH_NOT_FOUND`（404）；批次非 approved 或 decision 非 approved / 已过期 → `MEMORY_BATCH_NOT_APPROVED`（409）；归属不符或快照不符 → `MEMORY_APPLY_BINDING_INVALID`（403）；同键同批已存在且哈希不同 → `MEMORY_APPLY_CONFLICT`（409）；其余写失败 → `MEMORY_APPLY_FAILED`（500）。
 
 ```ts
 // src/service/commands/memory.ts 续
@@ -2081,7 +2081,7 @@ export function assertVerificationProof(args: {
 
 5. 定 inspect 的返回形状。返回 batch_id、逐条 status、written_count、missing_count、partial、evidence_id，并把 evidence_id 记进事件账本（Q-54）。
 
-6. 定 v1 的边界：不删除记忆、不做跨运行补偿（规格 9.7 行 747）。
+6. 定 v1 的边界：不删除记忆、不做跨运行补偿（规格 9.7 行 749）。
 
 **测试：**
 
@@ -2117,7 +2117,7 @@ git commit -m "feat(memory): 实现受控写入与部分写入对账"
 
 ### Task 15：记忆面板与审批卡
 
-**目标：** 把记忆做成面板里的一等公民：审批卡进「待你决定」，另有一块记忆区只答四问（规格 9.9 行 756-760；设计稿 §5.9）。
+**目标：** 把记忆做成面板里的一等公民：审批卡进「待你决定」，另有一块记忆区只答四问（规格 9.9 行 758-762；设计稿 §5.9）。
 
 **Files:**
 - Create: `src/client/panel/memory-panel.tsx` —— 记忆区与十二句状态文案。
@@ -2126,7 +2126,7 @@ git commit -m "feat(memory): 实现受控写入与部分写入对账"
 
 **步骤：**
 
-1. 定状态文案表。十二句一字不改（规格 9.9 行 760）：正在整理 / 管家在看有没有重复 / 有 N 条等你确认 / 开始写入 / 正在写入 / 写了 N 条 / 这次没有需要写的 / 有 1 条拿不准，这次没写 / 你选择先不写 / 超过 24 小时没确认，这次没写 / 没写成：裁判没给出结果 / 写到一半，等你确认。
+1. 定状态文案表。十二句一字不改（规格 9.9 行 762）：正在整理 / 管家在看有没有重复 / 有 N 条等你确认 / 开始写入 / 正在写入 / 写了 N 条 / 这次没有需要写的 / 有 1 条拿不准，这次没写 / 你选择先不写 / 超过 24 小时没确认，这次没写 / 没写成：裁判没给出结果 / 写到一半，等你确认。
 
 ```ts
 // src/client/panel/memory-panel.tsx
@@ -2187,7 +2187,7 @@ git commit -m "feat(client): 交出记忆面板与审批卡"
 
 ### Task 16：阶段闸、G5 门记录与三条必过注入
 
-**目标：** 让 S5 启动时拒掉 wf_release_v1，把 G5 的必过项逐条跑成证据，并交出 `docs/gates/G5.md` 与 GateArtifact（规格 11.2 行 858、11.3 行 864-893、13.5 行 1046-1050）。
+**目标：** 让 S5 启动时拒掉 wf_release_v1，把 G5 的必过项逐条跑成证据，并交出 `docs/gates/G5.md` 与 GateArtifact（规格 11.2 行 951、11.3 行 957-986、13.5 行 1139-1143）。
 
 **Files:**
 - Create: `src/core/gate-artifact.ts` —— GateArtifact 构造、结论推导与四个哈希原像。
@@ -2210,7 +2210,7 @@ export function assertPhaseAllows(phase: string, capability: string): void {
 }
 ```
 
-2. 定 GateArtifact 的构造与结论。规格 11.3 行 864-893：字段固定；`conclusion=pass` 当且仅当 must_pass_items 全 pass、failed_items 为空、run_terminal=succeeded（无 run 的门为 not_applicable 且 gate_run_id=null）；artifact 内部不放 record_hash / artifact_hash 自指字段。
+2. 定 GateArtifact 的构造与结论。规格 11.3 行 957-986：字段固定；`conclusion=pass` 当且仅当 must_pass_items 全 pass、failed_items 为空、run_terminal=succeeded（无 run 的门为 not_applicable 且 gate_run_id=null）；artifact 内部不放 record_hash / artifact_hash 自指字段。
 
 ```ts
 // src/core/gate-artifact.ts
@@ -2242,7 +2242,7 @@ export function buildGateArtifact(input: Omit<GateArtifact, 'conclusion' | 'fail
 }
 ```
 
-3. 定四个哈希的原像（规格 15.2 行 1103-1119）。全部先 canonical_json 再 SHA256。G5 的 `candidate_hash` 用同一结构，phase 取 `"S5"`。
+3. 定四个哈希的原像（规格 15.2 行 1196-1212）。全部先 canonical_json 再 SHA256。G5 的 `candidate_hash` 用同一结构，phase 取 `"S5"`。
 
 ```ts
 // src/core/gate-artifact.ts 续
@@ -2258,9 +2258,9 @@ export function changeScopeHashOf(capabilityIds: string[], touchedPaths: string[
 }
 ```
 
-4. 跑必过项。Q-01 到 Q-36 与 Q-43 到 Q-63（含 43b / 43c / 44b / 44c / 47b / 52b）逐条跑并留下证据编号；两条视口检查、正文与辅助字号、菜单与顶导字号、浅色对比度、记忆部分写入可对账、S5 启动 wf_release_v1 被拒，逐条留证据。**G5 的清单里必须显式列出 Q-52b**，只列 Q-52 不列 Q-52b 则 G5 不算完整（规格 15.5 行 1131-1134）。
+4. 跑必过项。Q-01 到 Q-36 与 Q-43 到 Q-63（含 43b / 43c / 44b / 44c / 47b / 52b）逐条跑并留下证据编号；两条视口检查、正文与辅助字号、菜单与顶导字号、浅色对比度、记忆部分写入可对账、S5 启动 wf_release_v1 被拒，逐条留证据。**G5 的清单里必须显式列出 Q-52b**，只列 Q-52 不列 Q-52b 则 G5 不算完整（规格 15.5 行 1224-1227）。
 
-5. 跑三条必过注入：G-06（tool.result 丢失）、G-11（记忆批次写一半杀）、G-12（审批双击与同决定重复提交）。每条注入留下注入脚本与参数、前后账本片段、恢复后对账查询三样东西；没有对账查询的注入不算通过（规格 12.3 行 984）。
+5. 跑三条必过注入：G-06（tool.result 丢失）、G-11（记忆批次写一半杀）、G-12（审批双击与同决定重复提交）。每条注入留下注入脚本与参数、前后账本片段、恢复后对账查询三样东西；没有对账查询的注入不算通过（规格 12.3 行 1077）。
 
 6. 写门记录。正文先写结论，结论后放固定锚点：
 
@@ -2272,7 +2272,7 @@ export function changeScopeHashOf(capabilityIds: string[], touchedPaths: string[
 artifact_hash=SHA256(canonical_json(artifact))
 ```
 
-补记只追加在锚点后，不移动锚点，也不算进哈希（规格 11.3 行 891、15.7 行 1141-1143）。G5 是无 run 的门：`gate_run_id=null`、`run_terminal=not_applicable`、`producer=s5_build`。
+补记只追加在锚点后，不移动锚点，也不算进哈希（规格 11.3 行 984、15.7 行 1234-1236）。G5 是无 run 的门：`gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`。
 
 **测试：**
 
@@ -2315,7 +2315,7 @@ git commit -m "feat(gate): 交出阶段闸与 G5 门记录"
 
 **回退**
 
-- 阶段回滚按规格 11.5 行 908 的 S5 档：关面板与记忆路由，引擎账本继续跑。已经写到一半的记忆先对账再处置，不补写、不回滚（规格 9.7 行 747）。
+- 阶段回滚按规格 11.5 行 1001 的 S5 档：关面板与记忆路由，引擎账本继续跑。已经写到一半的记忆先对账再处置，不补写、不回滚（规格 9.7 行 749）。
 - 数据回退：`030_memory.sql` 是扩展型迁移，只加表与触发器。回退时关闭记忆路由即可，不删表、不改已落批次的状态。
 - 面板回退：面板是纯客户端，关掉面板路由不影响账本与执行；读模型投影出的缓存可整段丢弃重建，账本事实不动。
 - 门回退：G5 结论为 fail 时，不许进 S6；已写的 G5 记录按规格 15.7 只在锚点后追加补记，不改结论、不移动锚点。
@@ -2330,11 +2330,11 @@ S5 完成的判定，同时满足以下每一条：
 2. 七种读视图的字段与规格 8.2 一致；attention 排序、priority、三数聚合、证据四列、未验证副作用判定全部由服务端给全。
 3. 控制面只开六条命令；幂等顺序、确认预检、revision CAS、actor 派生按规格 3.7 与 8.4 落地。
 4. SSE 只作失效信号：断号整页重取、重复事件按 event_id 去重、断线保留最后快照并标 stale。
-5. 六屏齐活，逐屏能回答规格 13.3 行 1028 的走查项；默认视图不出现 session_id / agent_id / node_run_id / event_id / batch_id。
+5. 六屏齐活，逐屏能回答规格 13.3 行 1121 的走查项；默认视图不出现 session_id / agent_id / node_run_id / event_id / batch_id。
 6. 视觉硬门槛在两个视口下成立：正文不小于 13px、辅助不小于 12px、菜单与顶导不小于 12.5px、正文对比度 4.5:1、大字与 UI 3:1、浅色主题无黑底无菜单彩色左条、无横向溢出。
 7. 记忆三端口、固定图、四张表就位；`memory_start_run` 幂等；canonical 与两个哈希符合规格 9.8；评估四件事与失败口径齐全；审批卡文案与落库语义齐全；apply 三道核对、幂等、原子与部分写入对账齐全。
 8. 批准后 `memory_items` 的四种篡改（INSERT / DELETE / 非 content 字段 UPDATE / 换序）都被拒，报 `MEMORY_APPLY_BINDING_INVALID`（Q-52b）。
 9. 三条必过注入 G-06 / G-11 / G-12 跑完并各留三样东西（注入脚本与参数、前后账本片段、恢复后对账查询）。
 10. S5 启动 wf_release_v1 被拒；R2 受控圈、发布、三圈、G-01 到 G-16 全量与 24 小时浸泡均未开工。
 11. `pnpm check` 通过（typecheck + test + build），`pnpm gate --gate G5` 全绿。
-12. `docs/gates/G5.md` 存在，结论之后有固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`，且 artifact 的 must_pass_items 逐项有证据、failed_items 为空、producer=s5_build、gate_run_id=null、run_terminal=not_applicable。
+12. `docs/gates/G5.md` 存在，结论之后有固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`，且 artifact 的 must_pass_items 逐项有证据、failed_items 为空、producer=human、gate_run_id=null、run_terminal=not_applicable。

@@ -16,19 +16,19 @@
 
 **本批能做什么**：服务骨架、配置与阶段闸、认证、单写者连接、迁移框架与最小表、事件哈希链、epoch 栅栏、备份与恢复、损坏检出、只读查询、G1 用例与门记录。
 
-**本批不能做什么**（规格 11.1 行 841 的 S1 禁止项，逐条照抄）：真实桥、并行、发布流程、面板接真实账本。因此：不建桥 RPC 客户端，不实现 parallel / subworkflow 节点，不实现 workflow.* 四个命令，不让面板读真实账本。
+**本批不能做什么**（规格 11.1 行 934 的 S1 禁止项，逐条照抄）：真实桥、并行、发布流程、面板接真实账本。因此：不建桥 RPC 客户端，不实现 parallel / subworkflow 节点，不实现 workflow.* 四个命令，不让面板读真实账本。
 
-**对应门 G1 必过项**（规格 11.2 行 850，原文引用）：
+**对应门 G1 必过项**（规格 11.2 行 943，原文引用）：
 
 > G1 必过：迁移空库可重复、中途杀可重入、进程杀不丢已提交事件、备份独立目录行数与哈希一致、损坏备份可检出、认证拒匿名写、阶段开关拒未知值、G-01 / G-02 / G-08 / G-09 / G-14 / G-15。
 
-每条注入用例都要留三样东西（规格 12.3 行 984 原文口径）：注入脚本与参数、前后账本片段、恢复后对账查询。没有对账查询的注入不算通过。
+每条注入用例都要留三样东西（规格 12.3 行 1077 原文口径）：注入脚本与参数、前后账本片段、恢复后对账查询。没有对账查询的注入不算通过。
 
 **口径说明（两处总纲内部小歧义，本批合并定案）**：
 
 - 总纲 §3 把存储文件列在 `src/infra/db/`，§4.1.1 把驱动与迁移脚本列在 `src/infra/sqlite/`。本批合并为一套：驱动与迁移脚本放 `src/infra/sqlite/`（`driver.ts`、`migrations/NNN-name.sql`），连接、事务与迁移执行器放 `src/infra/db/`（`open.ts`、`tx.ts`、`migrate.ts`）。两套目录不并存。
 - 总纲 4.1.1 写的 `execSchema(db, statements)` 少了版本号与校验和两个必需字段，本批落成 `execSchema(db, steps)`，`steps` 每项带 `version`、`name`、`checksum`、`statements`；迁移文件枚举仍由 `src/infra/db/migrate.ts` 负责。
-- 规格 17.1 没有专门的「配置非法」错误码。本批配置加载失败统一用 `SCHEMA_VERSION_UNSUPPORTED`（422，规格 17.1 行 1198），并在 `details` 里带上具体字段。若 S6 复查认为需要独立错误码，先改规格 17.1 再改代码。
+- 规格 17.1 没有专门的「配置非法」错误码。本批配置加载失败统一用 `SCHEMA_VERSION_UNSUPPORTED`（422，规格 17.1 行 1291），并在 `details` 里带上具体字段。若 S6 复查认为需要独立错误码，先改规格 17.1 再改代码。
 
 **S1 定值（规格未定的项在本批定值，并写进 G1 门记录，总纲 §7 口径）**：写队列上限 1000 条，超限返回 `SERVICE_UNAVAILABLE`（503）并记 warning，读路径不受影响；回执窗口 7 天、在途超时 10 分钟（取规格 17.2 的 retention 默认值）。
 
@@ -36,7 +36,7 @@
 
 ## Task 1：配置 schema 与阶段闸
 
-**目标：** 把 `orchestra.config.json` 变成带类型、带边界、带阶段判定的唯一配置源；未知 phase、未知键、越界值一律拒绝启动，不用默认值掩盖配置错误（规格 17.2 行 1292）。
+**目标：** 把 `orchestra.config.json` 变成带类型、带边界、带阶段判定的唯一配置源；未知 phase、未知键、越界值一律拒绝启动，不用默认值掩盖配置错误（规格 17.2 行 1385）。
 
 **Files:**
 - Create: `src/core/config.ts` —— 配置 schema、加载、阶段闸。
@@ -56,7 +56,7 @@ export function phaseIndex(phase: Phase): number {
   return PHASES.indexOf(phase)
 }
 
-// 规格 11.1 行 841-846 的阶段能力表；S1 只放行账本、迁移、备份、只读查询。
+// 规格 11.1 行 934-939 的阶段能力表；S1 只放行账本、迁移、备份、只读查询。
 export const PHASE_CAPABILITIES: Record<Phase, readonly string[]> = {
   S1: ['ledger', 'migration', 'backup', 'readonly_query'],
   S2: ['ledger', 'migration', 'backup', 'readonly_query', 'bridge', 'agent_node'],
@@ -561,7 +561,7 @@ git commit -m "feat(service): 建立 SQLite 单写者连接与 epoch 栅栏"
 ---
 ## Task 5：迁移框架与最小表
 
-**目标：** 建可重入的迁移框架，并把规格 14.1 行 1057 点名的十张最小表一次落齐（`service_meta`、`tasks`、`runs`、`node_runs`、`events`、`node_run_events`、`inbox`、`leases`、`artifacts`、`report_registry`）。
+**目标：** 建可重入的迁移框架，并把规格 14.1 行 1150 点名的十张最小表一次落齐（`service_meta`、`tasks`、`runs`、`node_runs`、`events`、`node_run_events`、`inbox`、`leases`、`artifacts`、`report_registry`）。
 
 **Files:**
 - Create: `src/infra/db/migrate.ts` —— 迁移执行器：枚举、校验、按序执行、记账。
@@ -927,7 +927,7 @@ git commit -m "feat(ledger): 加 node_run 事件哈希链与账本写入口"
 ---
 ## Task 7：服务骨架、认证与统一信封
 
-**目标：** 把服务起起来：读配置、拿锁、抢 epoch、写 `service.state`、开一个只监听 127.0.0.1 的 HTTP 端口；所有写路径必须带认证主体，匿名写一律拒（规格 12.5 行 998）。
+**目标：** 把服务起起来：读配置、拿锁、抢 epoch、写 `service.state`、开一个只监听 127.0.0.1 的 HTTP 端口；所有写路径必须带认证主体，匿名写一律拒（规格 12.5 行 1091）。
 
 **Files:**
 - Create: `src/infra/logger.ts` —— 结构化日志与脱敏。
@@ -938,7 +938,7 @@ git commit -m "feat(ledger): 加 node_run 事件哈希链与账本写入口"
 
 **步骤：**
 
-1. 写日志：JSON 行、默认脱敏（不打印 token、密钥、完整 payload、executor 全量 transcript，规格 12.5 行 1001）。
+1. 写日志：JSON 行、默认脱敏（不打印 token、密钥、完整 payload、executor 全量 transcript，规格 12.5 行 1094）。
 
 ```ts
 // src/infra/logger.ts
@@ -1340,7 +1340,7 @@ git commit -m "feat(query): 加只读查询、游标与账本校验"
 
 ## Task 10：故障注入脚本与 G1 用例
 
-**目标：** 把 G1 的七条用例与六条注入（G-01 / G-02 / G-08 / G-09 / G-14 / G-15）跑成可重复的脚本，每条都留下注入参数、前后账本片段与恢复后的对账查询（规格 12.3 行 984）。
+**目标：** 把 G1 的七条用例与六条注入（G-01 / G-02 / G-08 / G-09 / G-14 / G-15）跑成可重复的脚本，每条都留下注入参数、前后账本片段与恢复后的对账查询（规格 12.3 行 1077）。
 
 **Files:**
 - Create: `scripts/fault-inject.ts` —— 按 case 跑注入并打印账本前后片段。
@@ -1443,7 +1443,7 @@ git commit -m "test(gate): 补 G1 故障注入与门必过用例"
 
 **步骤：**
 
-1. 写门检查命令：读门记录里的 GateArtifact JSON，核对字段齐全、`must_pass_items` 全 pass、`failed_items` 为空、`conclusion=pass` 的规则成立（规格 11.3 行 889），再核对正文锚点 `artifact_hash=SHA256(canonical_json(artifact))`（规格 11.3 行 891）。G1 无 run，所以 `gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`。
+1. 写门检查命令：读门记录里的 GateArtifact JSON，核对字段齐全、`must_pass_items` 全 pass、`failed_items` 为空、`conclusion=pass` 的规则成立（规格 11.3 行 982），再核对正文锚点 `artifact_hash=SHA256(canonical_json(artifact))`（规格 11.3 行 984）。G1 无 run，所以 `gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`。
 
 ```ts
 // scripts/gate-check.ts —— 用法：pnpm tsx scripts/gate-check.ts docs/gates/G1.md
@@ -1476,7 +1476,7 @@ if (anchor[1] !== expect) throw new Error('artifact_hash 与正文不符：' + a
 console.log('gate ' + artifact.gate + ' 通过')
 ```
 
-2. 写门记录正文：结论段 + 逐项必过项与证据 ID + 失败项（空）+ 回滚说明 + 批准人 + GateArtifact JSON 块 + `artifact_hash` 锚点。锚点之后的补记只追加，不移动锚点、不算进哈希（规格 11.3 行 891）。
+2. 写门记录正文：结论段 + 逐项必过项与证据 ID + 失败项（空）+ 回滚说明 + 批准人 + GateArtifact JSON 块 + `artifact_hash` 锚点。锚点之后的补记只追加，不移动锚点、不算进哈希（规格 11.3 行 984）。
 3. 跑门检查命令，确认通过。
 
 **测试：**

@@ -2,7 +2,7 @@
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
-**Goal:** 让一个 agent 节点从排队走到终态走通一条完整路径——桥 RPC 最小集、租约与心跳、executor 子智能体、上报收口（applyReport 六步）、证据判定、取消与超时围栏、单调时钟截止判定——并交出 G2 门记录。规格 11.1 行 831 写的 S2 目标是「单节点闭环 | 仅 agent；桥、租约、上报、终态、取消、证据、超时 | G2」，本批把这行字逐条变成可跑的代码与可验的门。
+**Goal:** 让一个 agent 节点从排队走到终态走通一条完整路径——桥 RPC 最小集、租约与心跳、executor 子智能体、上报收口（applyReport 六步）、证据判定、取消与超时围栏、单调时钟截止判定——并交出 G2 门记录。规格 11.1 行 924 写的 S2 目标是「单节点闭环 | 仅 agent；桥、租约、上报、终态、取消、证据、超时 | G2」，本批把这行字逐条变成可跑的代码与可验的门。
 
 **Architecture:** 账本侧仍由 S1 的单写者 SQLite 服务承担，本批只加列与两个语义列，不改写入拓扑：所有状态迁移写回 `node_runs`，所有迁移带 CAS（`UPDATE` 语句的 `WHERE` 条件里含 revision / attempt / action_generation 之一，受影响行数必须恰为 1），所有终态、拒绝与扫描决策写 `node_run_events` 哈希链。执行侧新增「执行桥客户端 + executor 子智能体」：编排服务通过桥把节点派给一个不继承主会话历史的子智能体，子智能体只拿节点输入、工具策略与输出 schema；它做不做得由编排服务说了算——完成状态只能由 `applyReport` 收口，agent 不能自报完成。证据分强弱两档：`runTool` 以宿主只读身份跑注册表里的固定命令产出强证据，模型侧 `tool_result` 只是弱证据，不可逆节点只认产物哈希。代际分两支：`Ga` 跟动作走，`rearm_generation` 跟续期走，两者不许合并成一个数。门是 G2：单节点一条路径、重复上报只落一次、租约过期迟到上报被拒、取消后不产生新 attempt、终态必带证据、无裸 blocked、S2 加载 parallel 被拒，外加 G-03 / G-04 / G-05 / G-07 四条故障注入。
 
@@ -16,13 +16,13 @@
 
 **本批能做什么**：桥 RPC 最小集（spawn / subscribe / send / cancel / dispose / state / whenIdle）与桥事件缓冲；工具注册表与前向能力推导；`runTool` 只读执行与强证据；节点租约与心跳；agent 节点执行器；node_run 状态机与 Ga / Gr；`applyReport` 六步与 `report_registry`；证据门与判定规则；取消与超时围栏；截止时间与单调时钟；S2 阶段开关与加载期拒；G2 用例与门记录。
 
-**本批不能做什么**（规格 11.1 行 842 的 S2 阶段能力表逐条照抄）：S2 允许「单 agent 节点闭环」，禁止 `parallel`、`subworkflow`、`workflow 发布`。因此：不实现 parallel / subworkflow 节点，不实现 `workflow.*` 四个命令，不发布流程版本。S1 遗留的禁止项「面板接真实账本」在本批仍然禁止——面板这一批连壳都不建，面板能力属于 S5。
+**本批不能做什么**（规格 11.1 行 935 的 S2 阶段能力表逐条照抄）：S2 允许「单 agent 节点闭环」，禁止 `parallel`、`subworkflow`、`workflow 发布`。因此：不实现 parallel / subworkflow 节点，不实现 `workflow.*` 四个命令，不发布流程版本。S1 遗留的禁止项「面板接真实账本」在本批仍然禁止——面板这一批连壳都不建，面板能力属于 S5。
 
-**对应门 G2 必过项**（规格 11.2 行 852，原文引用）：
+**对应门 G2 必过项**（规格 11.2 行 945，原文引用）：
 
 > G2 必过：单节点 queued 到终态一条路径、重复上报只落一次、租约过期迟到上报被拒、取消后不产生新 attempt、终态必带证据、无裸 blocked、S2 加载 parallel 被拒、G-03 / G-04 / G-05 / G-07。
 
-每条注入用例都要留三样东西（规格 12.3 行 984 原文口径）：注入脚本与参数、前后账本片段、恢复后对账查询。没有对账查询的注入不算通过。
+每条注入用例都要留三样东西（规格 12.3 行 1077 原文口径）：注入脚本与参数、前后账本片段、恢复后对账查询。没有对账查询的注入不算通过。
 
 **口径说明（七处合并定案）**：
 
@@ -332,7 +332,7 @@ export class BridgeClient {
     await this.transport.request('executor.send', params)
   }
 
-  // cancel 回四值之一；不在枚举里按协议不合处理（规格 7.2 行 585、4.5 行 341）
+  // cancel 回四值之一；不在枚举里按协议不合处理（规格 7.2 行 585、4.5 行 349-353）
   async cancel(params: { executorAgentId: string; attempt: number }): Promise<CancelResult> {
     const res = await this.transport.request<CancelResult>('executor.cancel', params)
     const values: CancelResult[] = ['interrupted', 'not_interruptible', 'already_stopped', 'unknown']
@@ -937,7 +937,7 @@ git commit -m "feat(tools): 加 runTool 只读执行与强证据"
 1. 先把租约的读与校验写出来：过期就是过期，不因为执行器还在跑就网开一面。
 
 ```ts
-// src/service/commands/lease.ts —— 租约与心跳（规格 4.9 行 425-429、12.3 行 970）
+// src/service/commands/lease.ts —— 租约与心跳（规格 4.9 行 425-429、12.3 行 1063）
 import { OrchError, proposedError } from '../../core/errors.ts'
 import { uuidv7 } from '../../core/ids.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
@@ -1050,11 +1050,11 @@ export function releaseLease(tx: Tx, params: { nodeRunId: string; now: string })
 }
 ```
 
-3. 租约校验与过期扫描。过期后原执行器的迟到上报必须被拒（规格 12.3 行 970）。
+3. 租约校验与过期扫描。过期后原执行器的迟到上报必须被拒（规格 12.3 行 1063）。
 
 ```ts
 // src/service/commands/lease.ts 追加：过期判定与扫描
-// 租约过期即失效：迟到上报不许再推进节点（规格 12.3 行 970）
+// 租约过期即失效：迟到上报不许再推进节点（规格 12.3 行 1063）
 export function assertLeaseValid(row: NodeRunRow, now: string): void {
   if (!row.lease_expires_at) return
   if (Date.parse(row.lease_expires_at) <= Date.parse(now)) {
@@ -1325,7 +1325,7 @@ git commit -m "feat(executor): 加 agent 节点执行器与输出三件套"
 1. 状态集合与迁移表。
 
 ```ts
-// src/core/state-machine.ts —— node_run 状态集合与合法迁移表（规格 3.5 行 177-179、4.8 行 400）
+// src/core/state-machine.ts —— node_run 状态集合与合法迁移表（规格 3.5 行 177-179、4.8 行 401-417）
 export const NON_TERMINAL_STATUSES = [
   'queued',
   'leased',
@@ -1913,7 +1913,7 @@ export function evaluatePassConditions(conditions: PassCondition[], evidence: Re
 }
 ```
 
-3. 证据不足的落点：报告拒收，节点转 `blocked_post` 并记人工核验请求（规格 4.7 行 389、11.2 行 850）。
+3. 证据不足的落点：报告拒收，节点转 `blocked_post` 并记人工核验请求（规格 4.7 行 389、11.2 行 943）。
 
 ```ts
 // src/core/policy.ts 追加：证据不足的落点
@@ -2141,7 +2141,7 @@ git commit -m "feat(cancel): 加取消四值与超时围栏排队重放"
 1. 写时钟抽象：截止只看单调钟，墙钟只用于展示（规格 3.4 行 171）。
 
 ```ts
-// src/core/clock.ts —— 单调时钟与截止判定（规格 3.4 行 171、12.3 行 973）
+// src/core/clock.ts —— 单调时钟与截止判定（规格 3.4 行 171、12.3 行 1066）
 import { OrchError } from './errors.ts'
 
 export type BootId = string
@@ -2294,7 +2294,7 @@ git commit -m "feat(clock): 加单调时钟判定与维护扫描"
 1. 定义节点类型与阶段兼容检查。
 
 ```ts
-// src/core/workflow-def.ts —— 定义校验与阶段兼容（规格 2.4 行 122、11.1 行 837-844）
+// src/core/workflow-def.ts —— 定义校验与阶段兼容（规格 2.4 行 122、11.1 行 930-937）
 import { OrchError } from './errors.ts'
 import { PHASE_CAPABILITIES, requireCapability, type Phase } from './config.ts'
 
@@ -2343,10 +2343,10 @@ export function assertCommandAllowed(command: string, phase: Phase, needed: stri
 }
 ```
 
-2. 把阶段能力表补齐：S2 允许单 agent 闭环，禁止 parallel / subworkflow / workflow 发布（规格 11.1 行 842）。
+2. 把阶段能力表补齐：S2 允许单 agent 闭环，禁止 parallel / subworkflow / workflow 发布（规格 11.1 行 935）。
 
 ```ts
-// src/core/config.ts 里 PHASE_CAPABILITIES 的 S2 行（规格 11.1 行 842）
+// src/core/config.ts 里 PHASE_CAPABILITIES 的 S2 行（规格 11.1 行 935）
 // S2 允许：账本、迁移、备份、只读查询、桥、agent 节点
 // S2 禁止：parallel、subworkflow、workflow 发布、面板接真实账本
 export const PHASE_CAPABILITIES: Record<Phase, readonly string[]> = {
@@ -2400,7 +2400,7 @@ git commit -m "feat(phase): 加 S2 阶段开关与加载期拒"
 
 **步骤：**
 
-1. 先把注入脚本的用例类型补齐。G-03 / G-04 / G-05 / G-07 各留注入参数、前后账本片段、恢复后对账查询三段（规格 12.3 行 984）。
+1. 先把注入脚本的用例类型补齐。G-03 / G-04 / G-05 / G-07 各留注入参数、前后账本片段、恢复后对账查询三段（规格 12.3 行 1077）。
 
 ```ts
 // scripts/fault-inject.ts 追加：S2 的四条注入
@@ -2423,7 +2423,7 @@ export type InjectionSpec = {
   params: Record<string, unknown>
   // 注入动作
   inject: 'repeat_report' | 'late_report_after_lease_expiry' | 'cancel_during_tool' | 'wall_clock_jump'
-  // 恢复后的对账查询：没有对账查询的注入不算通过（规格 12.3 行 984）
+  // 恢复后的对账查询：没有对账查询的注入不算通过（规格 12.3 行 1077）
   reconciliation: string
 }
 
@@ -2462,7 +2462,7 @@ export const S2_INJECTIONS: InjectionSpec[] = [
 2. 写 G2 集成用例：八条必过项一条一条对。
 
 ```ts
-// tests/integration/g2.spec.ts —— G2 必过项集成用例（规格 11.2 行 852）
+// tests/integration/g2.spec.ts —— G2 必过项集成用例（规格 11.2 行 945）
 import { describe, expect, it } from 'vitest'
 import { applyReport } from '../../src/service/commands/apply-report.ts'
 import { acquireLease } from '../../src/service/commands/lease.ts'
@@ -2814,7 +2814,7 @@ git commit -m "test(gate): 加 G2 集成用例与门记录"
 
 | 提案码 | HTTP | 场景 | 理由 |
 | --- | --- | --- | --- |
-| `LEASE_EXPIRED` | 409 | 租约过期后原执行器的迟到上报被拒 | 规格 12.3 行 970 要求「迟到报告被拒」，但 §17.1 表里没有对应的点名错误码；用 `STALE_GENERATION` 会把「动作代过期」和「租约过期」两种语义混在一起，排查时分不开，所以单列一个码。 |
+| `LEASE_EXPIRED` | 409 | 租约过期后原执行器的迟到上报被拒 | 规格 12.3 行 1063 要求「迟到报告被拒」，但 §17.1 表里没有对应的点名错误码；用 `STALE_GENERATION` 会把「动作代过期」和「租约过期」两种语义混在一起，排查时分不开，所以单列一个码。 |
 | `BRIDGE_ACK_LAG` | 409 | `dispose` 前置条件不满足（`service_ack_seq < bridge_last_seq`） | 规格 7.2 行 586 只写了前置条件，没给错误码；这一条属于「服务没跟上」，与 `BRIDGE_NOT_SUBSCRIBED` 的「还没订阅」不同义，单列一个码。 |
 
 ### 指向总纲 §7 的开放项

@@ -1,9 +1,9 @@
 # dsh-orchestra 工作流编排插件设计规格
 
-- 规格版本：1.1
-- 状态：自审通过（v1.1 已按设计稿 v44 校准校验分层与错误码），待主人审阅
+- 规格版本：1.2
+- 状态：自审通过（v1.2 已裁定九处规格／总纲／设计稿不一致，结论一律回到设计稿 v44），待主人审阅
 - 日期：2026-11-12
-- 修订：v1.1（2026-11-12）修正 §6.1 校验分层（保存层不阻断图语义问题、发布层全量校验）、§6.1/§6.2 发布入参与版本比对口径，并按设计稿 v44 §4.12 补齐 §17.1 流程定义类错误码。改的是规格自己的落笔漂移，结论一律回到设计稿 v44。
+- 修订：v1.2（2026-11-12）按九处不一致裁定补齐：§9.10 批次与条目状态枚举、§9.11 三端口字段契约、§11.3 门 artifact 的三类 producer 绑定、§17.2 写队列上限与保留期定值口径。来源是设计稿 v44 §5.4（行 1618-1727）、§5.6（行 1807-1865）、§5.8（行 1922-1963）、§6.8（行 2296 与 2404）；结论一律回到设计稿 v44，冻结稿未改。
 - 设计来源：docs/orchestra-design-draft.md v44，2439 行 / 505410 bytes / SHA256 D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793
 - 实施目录：D:/aboutAI/dsh-orchestra
 - 目标插件名：dsh-orchestra
@@ -687,6 +687,7 @@ attention 排序权重：decision > unverified > failed > orphaned > running > n
 | memory.inspect_batch | read_only | 无 | 只给编排服务 |
 
 bridge_id = memory-audit-v1；toolRef 前缀 memory_bridge: 走独立注册表，不与其他工具混查。
+三端口的请求与响应字段见 §9.11。
 
 ### 9.3 固定图
 
@@ -719,6 +720,7 @@ bridge_id = memory-audit-v1；toolRef 前缀 memory_bridge: 走独立注册表�
 - truncated=true 且 verdict 不是 needs_user，服务端直接 MEMORY_EVAL_INVALID_OUTPUT（502），不许把截断内容当完整判断。
 - 失败：超时 120 秒 → MEMORY_EVAL_TIMEOUT（504）；解析失败 → INVALID_OUTPUT（502）；端口不可用 → UNAVAILABLE（503）；开关关闭 → DISABLED（503）。批次与运行都 failed，不写。
 - 评估唯一键 (batch_id, eval_attempt)；响应 JSON 不超过 64 KiB。
+批次与条目的状态枚举、终态与不变式见 §9.10。
 
 ### 9.6 审批
 
@@ -759,6 +761,97 @@ bridge_id = memory-audit-v1；toolRef 前缀 memory_bridge: 走独立注册表�
 
 状态文案只用：正在整理 / 管家在看有没有重复 / 有 N 条等你确认 / 开始写入 / 正在写入 / 写了 N 条 / 这次没有需要写的 / 有 1 条拿不准，这次没写 / 你选择先不写 / 超过 24 小时没确认，这次没写 / 没写成：裁判没给出结果 / 写到一半，等你确认。
 
+### 9.10 批次与条目状态枚举
+
+批次状态 memory_batches.status：draft / evaluating / awaiting_human / approved / applying / applied / empty / blocked / declined / expired / failed / indeterminate。
+
+- 非终态五种：draft、evaluating、awaiting_human、approved、applying；这五种状态 outcome 必须为 NULL。
+- 终态七值与 outcome 一一对应（CHECK 约束）：applied→written、empty→nothing_to_write、blocked→blocked、declined→declined、expired→expired、failed→failed、indeterminate→indeterminate；不许出现「status=applying 但 outcome=written」这类组合。
+- 同一源运行的下一次尝试必须新建批次（attempt 加一），不复活旧行；批次内某次 apply 因 tool.result 丢失而重试时不新建批次，节点 attempt 加一。
+- 批次终态不变式：批次进入终态时不得留 proposed 条目；empty / blocked / declined / expired / failed 在收口事务里把剩余 proposed 全部迁 skipped，verdict 保留供查看。indeterminate 是唯一允许留 approved 的终态（已写 applied、未写 approved），但同样不得留 proposed。
+
+条目状态 memory_items.status：proposed / approved / skipped / applied / failed；applied、skipped、failed 是终态。条目评估结论 memory_items.verdict：approve / reject / merge / needs_user。评估结论 memory_evaluations.recommendation：ready / empty / blocked。
+
+- 批准后条目正文、层级、client_key、content_hash 与 approved_content_hash 一律只读；indeterminate 批次里已写入的条目保持 applied、未写入的保持 approved，不自动补写、不自动回滚。
+- 批次状态是 run / node / decision / apply 事件的投影，不新增 run 状态；唯一写者是编排服务的 memory bridge，面板、executor、agent 只读；每次迁移与对应事件同事务提交，另一条路径不得直接改行。
+
+### 9.11 三端口字段契约
+
+三个端口的请求与响应字段固定如下；字段名以本节为准，实施可加内部字段，不得改名、不得改语义。
+
+memory.evaluate（只读，评估端口）请求：
+
+    {
+      "batch_id": "01J...",
+      "prepare_node_run_id": "nr_...",
+      "source": {
+        "run_id": "run_...",
+        "task_title": "……",
+        "goal": "……",
+        "result_summary": "……",
+        "evidence_refs": ["artifact:...", "decision:..."]
+      },
+      "policy": {
+        "allowed_layers": ["L2", "L4", "L5", "L6"],
+        "max_items": 20,
+        "max_content_bytes": 65536,
+        "allow_update": true,
+        "require_quote": true,
+        "judge_content_limit": 4000
+      },
+      "items": [
+        {
+          "client_key": "audit-fail-closed",
+          "action": "create",
+          "target_id": null,
+          "layer": "L4",
+          "title": "……",
+          "content": "……",
+          "content_hash": "sha256:...",
+          "quote": "……",
+          "similar": [
+            {"id": "mem_...", "title": "……", "summary": "……", "score": 0.82}
+          ]
+        }
+      ]
+    }
+
+响应：
+
+    {
+      "ok": true,
+      "batch_id": "01J...",
+      "recommendation": "ready",
+      "items": [
+        {
+          "client_key": "audit-fail-closed",
+          "verdict": "approve",
+          "confidence": 0.86,
+          "reason": "和已有条目主题一致，但结论更新，建议写入",
+          "conflict_with": null
+        }
+      ],
+      "summary": "3 条建议写入，1 条和已有记忆重复",
+      "model": {"provider": "spawn", "name": "default", "prompt_version": "memory-audit-v1"},
+      "duration_ms": 4210
+    }
+
+memory.apply_governed（写入端口）：入参只有 decision_id 一个字段，批次、条目、哈希都由服务按 decision_id 反查，执行器传不进第二套内容。响应：
+
+    {
+      "ok": true,
+      "batch_id": "01J...",
+      "outcome": "written",
+      "applied_count": 2,
+      "skipped_count": 1,
+      "already_applied": false,
+      "items": [
+        {"client_key": "audit-fail-closed", "applied_item_id": "mem_...", "status": "applied"},
+        {"client_key": "old-note", "status": "skipped", "reason": "裁判建议不写"}
+      ]
+    }
+
+memory.inspect_batch（只读，对账端口）：入参只有 batch_id；返回体带同一个 batch_id 与每条 client_key 在插件里的状态（applied / skipped / missing / conflict）、applied_item_id 与 content_hash，并返回本次对账的 written_count、missing_count、partial 与 evidence_id（写进事件账本，供 confirm_applied / confirm_not_applied 引用）；计数必须能由逐条状态重算，不许与逐条状态矛盾。它不写、不修复、不猜。
 ## 10. 超级大脑：计划、执行、记忆三个循环
 
 ### 10.1 核心大脑是什么
@@ -885,7 +978,7 @@ G6 必过：G-01 到 G-16 全过、控制面 p95 达 8.3、事件滞后 p95 不�
 规则：
 
 - 有 run 的门：收口器在 run 终态后写，gate_run_id 指向门 run，run_terminal 直抄 runs.status。
-- 无 run 的门：gate_run_id=null，run_terminal=not_applicable，人工门 producer=human，S5 构建门 producer=s5_build；G1 到 G5 与 G6 的独立 artifact 都是无 run。
+- 无 run 的门：gate_run_id=null，run_terminal=not_applicable；G1 到 G5 的主 artifact producer=human（这几道门由人按同一张卷子手工跑）；G6 的独立 artifact producer 取 human 或 s5_build（S5 过门构建，按实际执行者）；G6 的发布大脑 artifact producer=wf_release_v1，是唯一有 run 的门。G1 到 G5 与 G6 的独立 artifact 都是无 run。
 - conclusion=pass 当且仅当 must_pass_items 全 pass、failed_items 为空、run_terminal=succeeded（无 run 为 not_applicable 且 gate_run_id=null）。
 - run 内节点（含 policy / branch / 收口草稿）一律不读本 run 终态；运行终态由 run 外收口器注入。
 - artifact 内部不放 record_hash / artifact_hash 自指字段；S*.md 正文结论后固定锚点 artifact_hash=SHA256(canonical_json(artifact))，补记只追加在锚点后，不移动锚点、不算进哈希。
@@ -1290,6 +1383,8 @@ artifact_hash 只指 GateArtifact 的锚点哈希：SHA256(canonical_json(artifa
     }
 
 未知 phase、未知键、越界值一律拒绝启动；不用默认值掩盖配置错误。
+写队列上限：S1 定值 1000 条，队列满返回 SERVICE_UNAVAILABLE（503）并记 warning，读路径不受阻塞；该值写进 G1 门记录，不进配置键（规格 16.3 开放项，定值后回填本样例）。
+事件与证据保留期：属规格 16.3 开放项，未定前不启用清理任务，artifact 过期只显示「已过保留期」，不删账本事实（规格 12.5）。
 
 ### 17.3 验收清单（提交前逐项勾）
 
