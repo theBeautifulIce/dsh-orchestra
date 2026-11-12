@@ -10,8 +10,13 @@ tmp/
 *.log
 *.bak
 
-# 原型目录：只提交 panel-v2.html，截图与一次性脚本不入库
+# 原型目录：提交 panel-v2.html 与 polish-log.md，截图、备份与一次性脚本不入库
 docs/prototype/*.png
 docs/prototype/.*.js
 docs/prototype/.*.css
 docs/prototype/.chrome-profile/
+docs/prototype/*-backup.html
+
+# 本地素材与工具产物
+output/
+.workbuddy/
