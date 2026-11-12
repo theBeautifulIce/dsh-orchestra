@@ -11,11 +11,11 @@
 落在总纲 §3 的四层里：
 
 - 引擎层（`src/core` + `src/service`）：`src/core/workflow-def.ts` 放定义类型、两层校验与 `definition_hash` 计算，纯函数、不引 IO；`src/service/commands/workflows.ts` 放四条命令与发布事务，写路径统一走 `src/infra/sqlite/driver.ts` 的 `withTx`。
-- 存储层（`src/infra`）：新增迁移 `src/infra/sqlite/migrations/NNN-workflow-tables.sql`，建三张表与版本不可变触发器（规格 §3.8 第 221–252 行）。
+- 存储层（`src/infra`）：新增迁移 `src/infra/sqlite/migrations/NNN-workflow-tables.sql`，建三张表与版本不可变触发器（规格 §3.8 第 222–253 行）。
 - 执行层（`src/executor`）：不改桥；只让运行侧按 `(workflow_id, workflow_version)` 读不可变版本，不回退到最新草稿（规格 §6.4）。
-- 接入层：智能体侧给 `workflow_create`/`workflow_open_draft`/`workflow_update`/`workflow_publish`/`workflow_get`/`workflow_list` 六个工具；画布侧复用同一份定义文档与同一条保存接口。规格 §11.1 第 842 行禁止「面板接真实账本」，所以本批画布只发命令信封，不做读模型查询。
+- 接入层：智能体侧给 `workflow_create`/`workflow_open_draft`/`workflow_update`/`workflow_publish`/`workflow_get`/`workflow_list` 六个工具；画布侧复用同一份定义文档与同一条保存接口。规格 §11.1 第 844 行禁止「面板接真实账本」，所以本批画布只发命令信封，不做读模型查询。
 
-阶段闸门按规格 §2.4（第 117–122 行）：`workflow.publish` 从 S4 起才允许，S3 运行期加载到发布命令要报错；未知 phase 拒绝启动。
+阶段闸门按规格 §2.4（第 118–123 行）：`workflow.publish` 从 S4 起才允许，S3 运行期加载到发布命令要报错；未知 phase 拒绝启动。
 
 ## Tech Stack
 
@@ -27,12 +27,12 @@
 - 两层校验：保存层拒结构性问题，发布层拒图语义问题，错误项形状固定为 `{path, code, message}`，path 是 RFC 6901 JSON Pointer，最多 100 条（规格 §6.1 与设计稿 §4.12）。
 - 四条命令与发布事务（规格 §6.1–§6.3）。
 - 版本固定：发布只影响之后新建的 run，在途 run 固定旧版本（规格 §6.4、§12.1 的 I5）。
-- 智能体工具接口与画布同源定义、保存接口（规格 §14.4 第 1075–1076 行）。
+- 智能体工具接口与画布同源定义、保存接口（规格 §14.4 第 1077–1078 行）。
 - Q-37 到 Q-42 用例与 G-10 注入。
 
 ## 本批不能做什么
 
-规格 §11.1 阶段能力表（第 842 行）原文：
+规格 §11.1 阶段能力表（第 844 行）原文：
 
 > | S4 | 流程定义与版本 | 面板接真实账本、记忆写入 |
 
@@ -46,7 +46,7 @@
 
 ## 门 G4 必过项
 
-规格 §11.2 第 854 行原文：
+规格 §11.2 第 856 行原文：
 
 > G4 必过：Q-37 到 Q-42、发布事务与回执同笔、并发发布只有一个版本、在途 run 固定旧版本、非法图与空名称拒、回滚发布不影响已固定 run、G-10。
 
@@ -62,7 +62,7 @@
 | 回滚发布不影响已固定 run | Task 10 |
 | G-10 | Task 12 |
 
-门记录按规格 §11.3（第 860–891 行）：G4 属无 run 门（`gate_run_id=null`、`run_terminal='not_applicable'`、`producer='human'`），正文结论后固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`（总纲 §4.5）；四个哈希原像按规格 §15.2。
+门记录按规格 §11.3（第 862–893 行）：G4 属无 run 门（`gate_run_id=null`、`run_terminal='not_applicable'`、`producer='human'`），正文结论后固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`（总纲 §4.5）；四个哈希原像按规格 §15.2。
 
 ## 未决参数
 
@@ -75,7 +75,7 @@
 实现层未决两条：
 
 - `OrchError` 的构造签名以 S1 落地的 `src/core/errors.ts` 为准；本计划按 `new OrchError({ code, message, retryable, details })` 书写（总纲 §4.2 的字段口径）。
-- 错误码只允许规格 §17.1（第 1189–1277 行）那一套。设计稿 §4.12 给「缺入口、多入口、有环、不可达、出度纪律、branch route、节点类型未注册、config 缺失、子流程深度超限」各起了细分码；规格 v1.1 已按设计稿 §4.12 把这批码补进 §17.1（`WORKFLOW_DEFINITION_INVALID`、`WORKFLOW_NODE_ID_INVALID`、`WORKFLOW_NODE_ID_DUPLICATE`、`WORKFLOW_EDGE_ENDPOINT_MISSING`、`WORKFLOW_LAYOUT_INVALID`、`WORKFLOW_NO_TRIGGER`、`WORKFLOW_MULTIPLE_TRIGGERS`、`WORKFLOW_TRIGGER_HAS_INBOUND`、`WORKFLOW_TRIGGER_FANOUT`、`WORKFLOW_NODE_FANOUT_INVALID`、`WORKFLOW_NODE_UNREACHABLE`、`WORKFLOW_GRAPH_CYCLE`、`WORKFLOW_BRANCH_ROUTE_INVALID`、`WORKFLOW_BRANCH_PRIORITY_DUPLICATE`、`WORKFLOW_BRANCH_DEFAULT_DUPLICATE`、`NODE_NOT_SUPPORTED`、`WORKFLOW_NODE_CONFIG_INVALID`、`TOOL_NOT_ALLOWED`、`PAYLOAD_SCHEMA_INVALID`、`WORKFLOW_SUBWORKFLOW_VERSION_MISSING`、`SUBWORKFLOW_DEPTH_EXCEEDED`），本批照细分码回，不再一律降级。已收录的码照原样用：`WORKFLOW_TITLE_INVALID`、`WORKFLOW_NAME_INVALID`、`WORKFLOW_DEFINITION_TOO_LARGE`、`WORKFLOW_EDGE_SELF_LOOP`、`WORKFLOW_EDGE_DUPLICATE`、`SUBWORKFLOW_CYCLE`、`WORKFLOW_VERSION_NOT_FOUND`、`WORKFLOW_NOT_FOUND`、`WORKFLOW_REVISION_CONFLICT`、`WORKFLOW_VERSION_CONFLICT`、`WORKFLOW_DRAFT_NOT_OPEN`、`WORKFLOW_DRAFT_EXISTS`、`WORKFLOW_NOT_PUBLISHED`、`WORKFLOW_VERSION_IMMUTABLE`。
+- 错误码只允许规格 §17.1（第 1191–1300 行）那一套。设计稿 §4.12 给「缺入口、多入口、有环、不可达、出度纪律、branch route、节点类型未注册、config 缺失、子流程深度超限」各起了细分码；规格 v1.1 已按设计稿 §4.12 把这批码补进 §17.1（`WORKFLOW_DEFINITION_INVALID`、`WORKFLOW_NODE_ID_INVALID`、`WORKFLOW_NODE_ID_DUPLICATE`、`WORKFLOW_EDGE_ENDPOINT_MISSING`、`WORKFLOW_LAYOUT_INVALID`、`WORKFLOW_NO_TRIGGER`、`WORKFLOW_MULTIPLE_TRIGGERS`、`WORKFLOW_TRIGGER_HAS_INBOUND`、`WORKFLOW_TRIGGER_FANOUT`、`WORKFLOW_NODE_FANOUT_INVALID`、`WORKFLOW_NODE_UNREACHABLE`、`WORKFLOW_GRAPH_CYCLE`、`WORKFLOW_BRANCH_ROUTE_INVALID`、`WORKFLOW_BRANCH_PRIORITY_DUPLICATE`、`WORKFLOW_BRANCH_DEFAULT_DUPLICATE`、`NODE_NOT_SUPPORTED`、`WORKFLOW_NODE_CONFIG_INVALID`、`TOOL_NOT_ALLOWED`、`PAYLOAD_SCHEMA_INVALID`、`WORKFLOW_SUBWORKFLOW_VERSION_MISSING`、`SUBWORKFLOW_DEPTH_EXCEEDED`），本批照细分码回，不再一律降级。已收录的码照原样用：`WORKFLOW_TITLE_INVALID`、`WORKFLOW_NAME_INVALID`、`WORKFLOW_DEFINITION_TOO_LARGE`、`WORKFLOW_EDGE_SELF_LOOP`、`WORKFLOW_EDGE_DUPLICATE`、`SUBWORKFLOW_CYCLE`、`WORKFLOW_VERSION_NOT_FOUND`、`WORKFLOW_NOT_FOUND`、`WORKFLOW_REVISION_CONFLICT`、`WORKFLOW_VERSION_CONFLICT`、`WORKFLOW_DRAFT_NOT_OPEN`、`WORKFLOW_DRAFT_EXISTS`、`WORKFLOW_NOT_PUBLISHED`、`WORKFLOW_VERSION_IMMUTABLE`。
 - 迁移脚本编号接续既有迁移（本批从 020 起，若实际不同则顺延），路径按总纲 §4.1.1 放 `src/infra/sqlite/migrations/NNN-name.sql`。
 
 ## 任务
@@ -722,12 +722,12 @@ pnpm gate
 - 风险：并发发布可能插出两个版本。缓解：靠「草稿 revision + published_version IS NULL」的单次 CAS 命中，败方读到已消费草稿后报 `WORKFLOW_DRAFT_NOT_OPEN`；Q-38 用例专门盯这条。
 - 风险：发布事务与回执分两笔写会留下「版本已出、回执没出」的缝。缓解：回执写入与业务写入同事务（Task 8、Task 9）。
 - 风险：版本固定写松会让在途 run 漂到新版本。缓解：建 run 时同事务读 `current_version` 并写 `runs.workflow_version`；执行面读不到指定版本一律报 `WORKFLOW_VERSION_NOT_FOUND`，不回退。
-- 回退：S4 只新增三张表与新命令，不改 S3 的运行语义；出问题可停在 S3 阶段继续跑已发布之外的路径（规格 §11.2 第 906 行的阶段回滚口径：S4 撤问题版本、不动已固定 run）。已发布的版本行受不可变触发器保护，回退靠停用问题版本而不是改行。
+- 回退：S4 只新增三张表与新命令，不改 S3 的运行语义；出问题可停在 S3 阶段继续跑已发布之外的路径（规格 §11.5 第 908 行的阶段回滚口径：S4 撤问题版本、不动已固定 run）。已发布的版本行受不可变触发器保护，回退靠停用问题版本而不是改行。
 - 一致性提醒（只报告不自行改）：规格 §6.1 表里 `workflow.publish` 的 `expected` 只写「草稿 revision」，设计稿 §4.6.5 写 `{revision, base_version}`；本计划以 `revision` 为必需字段，版本一致性按规格 §6.2 第 4 步用 `current_version` 与草稿 `based_on_version` 比对。
 
 ## 完成定义
 
-- 规格 §11.1 第 842 行的 S4 能力全部落地：流程定义与版本。
+- 规格 §11.1 第 844 行的 S4 能力全部落地：流程定义与版本。
 - Q-37 到 Q-42 六组用例全绿；发布事务与回执同笔；并发发布只有一个版本；在途 run 固定旧版本；非法图与空名称被拒；回滚发布不影响已固定 run。
 - G-10 注入跑通并留注入脚本、参数、前后账本片段与对账查询。
 - `docs/gates/G4.md` 存在，含逐项证据、failed_items 为空、conclusion、approver、approved_at，结论后有 `artifact_hash=SHA256(canonical_json(artifact))` 锚点。

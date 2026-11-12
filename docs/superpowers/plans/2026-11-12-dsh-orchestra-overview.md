@@ -12,7 +12,7 @@
 
 ## 1. 规格来源与硬约束
 
-- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（1283 行 / SHA256 `73119E7FDC8DC69ED9C9C1F0A57EFF1D1F406C796E2B00EFDBC78F3E99C2F6B9`，commit `ee17d03`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
+- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.1，1306 行 / 92209 bytes / SHA256 `9B47AB32B7EA122E05148D12088CDD02083170BF6AEA6B069AC7186D6EFCC4A3，commit `4e646eb`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
 - 设计稿论证与用例：`docs/orchestra-design-draft.md` v44。
 - 不得写的事（规格 1.2 / 10.3）：内嵌编排脚本、与原生 workflowEngine 半兼容、让模型做最终裁决、接受口头副作用等级、节点层跨节点业务判断、自动兜底放行、v1 记忆删除与跨运行补偿、把执行器全量 transcript 给大脑。
 - 账本只追加；已提交事件不改写；事件序号单调（不变量 I2）。
@@ -62,7 +62,7 @@ dsh-orchestra/
 │  ├─ infra/
 │  │  ├─ sqlite/             # 唯一允许 import node:sqlite 的目录
 │  │  │  ├─ driver.ts          # 单写者连接 + BEGIN IMMEDIATE 事务 + 迁移执行器（busy_timeout 5000、epoch 校验）
-│  │  │  └─ migrations/        # 001_init.sql、002_*.sql …（SQL 脚本，按版本号递增）
+│  │  │  └─ migrations/        # 按批次分段编号：001(S1)、002(S2)、010(S3)、020(S4)、030(S5)、040(S6)
 │  │  ├─ db/                  # 服务侧封装，不直接碰 node:sqlite
 │  │  │  ├─ open.ts            # 单写者连接与 epoch 自增
 │  │  │  ├─ tx.ts              # CAS 辅助与 runCas
@@ -144,6 +144,7 @@ package.json 侧对应：`main: lib/index.js`、`types: lib/index.d.ts`、`expor
   - `execSchema(db: Db, statements: string[]): void` —— 按顺序跑迁移语句，逐条写 `schema_migrations(version, checksum, applied_at)`。
 - 其余模块一律不许直接 import `node:sqlite`，也不许另开第二条连接；跨模块访问只经 `src/infra` 的仓储函数。
 - 迁移脚本放 `src/infra/sqlite/migrations/NNN-name.sql`，按编号顺序执行；已执行版本不重跑，内容改动一律新开编号，不改老文件。
+- 编号按批次分段，同批内按执行顺序递增两位：S1＝`001_` 段（`001_init.sql`）、S2＝`002_` 段、S3＝`010_`–`019_` 段、S4＝`020_`–`029_` 段、S5＝`030_`–`039_` 段、S6＝`040_`–`049_` 段。理由：六批并行推进时，编号若各批自定会撞号；分段后新增迁移只会落在本批段内，谁先落盘都不影响别人。
 ### 4.2 错误与信封
 
 - 错误码表以规格 17.1 为准，不新增码；`src/core/errors.ts` 用 zod 枚举固定 code 与 HTTP 状态映射，抛 `OrchError{code,message,retryable,details}`。
@@ -417,5 +418,5 @@ git commit -m "chore(repo): 建立 dsh-orchestra 插件仓库骨架与工具链"
 本轮计划阶段的补充开放项：
 
 - report_registry 语义缺口：规格 §4.2 只许 rejected / replayed / applied / stale 四态，§4.5 要求围栏已立时收到的报告「进 registry(rejected) 排队」，但没有字段区分「排队待重放」与「已拒绝不再重放」。S3 按状态值原样落库、重放规则写进步骤，等主人定是否加字段（如 `queued_for_replay`）。
-- 迁移脚本编号序列：总纲未定编号规则，S3/S4 里的 020_、030_ 等是按惯例占位，实际接续既有迁移号，不同则顺延。
+- 迁移脚本编号序列：已定（见 §4.1.1 迁移编号分段），S1＝001 段、S2＝002 段、S3＝010–019 段、S4＝020–029 段、S5＝030–039 段、S6＝040–049 段；若实施时既有迁移号与该分段冲突，整批顺延到不撞号的下一段，并在门记录里写明实际编号。
 - 桥 RPC 与宿主插件 API 的对应名：S2 写的是规格 §7.2 的七个方法名（spawn / subscribe / send / cancel / dispose / state / whenIdle），落到 DSH 插件侧的确切绑定名待宿主侧对齐。

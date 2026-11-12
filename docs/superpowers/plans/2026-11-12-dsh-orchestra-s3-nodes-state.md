@@ -13,9 +13,9 @@
 - 引擎层（`src/core` + `src/service`）：`src/core/state-machine.ts` 放状态枚举、迁移表、guard 与半态时钟规则，纯函数、不引 IO（总纲 §3 领域逻辑约定）；`src/service/commands/` 下放带事务的写路径，`src/service/sweep.ts` 放恢复扫描。写路径一律经 `src/infra/sqlite/driver.ts` 的 `withTx`，每个迁移写成带 CAS 条件的单条 UPDATE（总纲 §4.4）。
 - 存储层（`src/infra`）：本批只加迁移脚本 `src/infra/sqlite/migrations/NNN-*.sql`（总纲 §4.1.1）。表与列全小写下划线；`node_run_events` 哈希链按总纲 §4.3 追加。
 - 执行层（`src/executor`）：S2 已有桥，本批只消费它的 RPC（spawn/subscribe/send/cancel/state/whenIdle，规格 §7），不新增桥方法。
-- 接入层：本批不接面板与记忆。规格 §11.1 阶段能力表第 841 行明写 S3 禁止「workflow 发布、面板接真实账本」，面板读模型属 S5（规格 §8）。
+- 接入层：本批不接面板与记忆。规格 §11.1 阶段能力表第 843 行明写 S3 禁止「workflow 发布、面板接真实账本」，面板读模型属 S5（规格 §8）。
 
-阶段闸门按规格 §2.4（第 117–122 行）：S3 加载期必须拒绝越阶段能力，`workflow.publish` 在 S3 启动要报错；`parallel`/`subworkflow` 从 S3 起才允许加载。
+阶段闸门按规格 §2.4（第 118–123 行）：S3 加载期必须拒绝越阶段能力，`workflow.publish` 在 S3 启动要报错；`parallel`/`subworkflow` 从 S3 起才允许加载。
 
 ## Tech Stack
 
@@ -24,16 +24,16 @@
 ## 本批能做什么
 
 - 九种节点（trigger/agent/tool/policy/branch/approval/parallel/wait/subworkflow）的类型注册、配置校验与运行时行为（规格 §5）。
-- 全量状态迁移与 CAS：非终态十三种、终态七种（规格 §3.5 第 174–185 行）。
-- 八种 decision 的生成、去重、收口、续期与超时升级（规格 §3.6 第 187–197 行）。
-- 半态五格与时钟规则：startup_timeout、unknown_watchdog、verify_timeout、桥断冻结与跨 boot 剩余量重挂（规格 §4.4 第 312–341 行）。
+- 全量状态迁移与 CAS：非终态十三种、终态七种（规格 §3.5 第 175–186 行）。
+- 八种 decision 的生成、去重、收口、续期与超时升级（规格 §3.6 第 188–198 行）。
+- 半态五格与时钟规则：startup_timeout、unknown_watchdog、verify_timeout、桥断冻结与跨 boot 剩余量重挂（规格 §4.4 第 313–342 行）。
 - 取消与超时围栏、报告冲突与 uphold 收口、恢复扫描（规格 §4.5/§4.6/§4.9）。
-- 补偿执行与未验证副作用落账（规格 §4.7 第 368–398 行）。
+- 补偿执行与未验证副作用落账（规格 §4.7 第 369–399 行）。
 - M-01 到 M-61 的迁移用例与六个故障注入（G-01/G-02/G-04/G-06/G-12/G-16）。
 
 ## 本批不能做什么
 
-规格 §11.1 阶段能力表（第 841 行）原文：
+规格 §11.1 阶段能力表（第 843 行）原文：
 
 > | S3 | 九节点、状态机、补偿 | workflow 发布、面板接真实账本 |
 
@@ -47,7 +47,7 @@
 
 ## 门 G3 必过项
 
-规格 §11.2 第 852 行原文：
+规格 §11.2 第 854 行原文：
 
 > G3 必过：M-01 到 M-61 全过、非法迁移全拒、并发只有一个赢家、并行扇出与汇聚一致、子流程环与深度拒、补偿不重复、取消向子 run 传播、G-01 / G-02 / G-04 / G-06 / G-12 / G-16。
 
@@ -64,7 +64,7 @@
 | 取消向子 run 传播 | Task 10（子 run 取消）、Task 14（G-16） |
 | G-01 / G-02 / G-04 / G-06 / G-12 / G-16 | Task 14（scripts/fault-inject.ts） |
 
-门记录按规格 §11.3（第 860–891 行）：G1 到 G5 的独立 artifact 都是无 run 门（`gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`），正文结论后固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`（总纲 §4.5）。
+门记录按规格 §11.3（第 862–893 行）：G1 到 G5 的独立 artifact 都是无 run 门（`gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`），正文结论后固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`（总纲 §4.5）。
 
 ## 未决参数
 
@@ -171,7 +171,7 @@ pnpm test
 
 步骤：
 
-1. 新建迁移脚本 `src/infra/sqlite/migrations/010-node-run-transitions.sql`：补 `action_generation`、`rearm_generation`、`hang_reason`、`contradiction_decision_id`、`startup_unknown_remaining_ns`、`verify_remaining_ns` 列（规格 §3.4 第 158–172 行；schema_version=2，两个新列可空且不回填），并建唯一索引 `UNIQUE(run_id, node_id, attempt)` 与 `node_runs_origin_uq(origin_node_run_id)`（M-58 断言）。
+1. 新建迁移脚本 `src/infra/sqlite/migrations/010-node-run-transitions.sql`：补 `action_generation`、`rearm_generation`、`hang_reason`、`contradiction_decision_id`、`startup_unknown_remaining_ns`、`verify_remaining_ns` 列（规格 §3.4 第 159–173 行；schema_version=2，两个新列可空且不回填），并建唯一索引 `UNIQUE(run_id, node_id, attempt)` 与 `node_runs_origin_uq(origin_node_run_id)`（M-58 断言）。
 
 2. 新建 `src/service/commands/nodes.ts`，写执行器。CAS 条件至少含 attempt，dispatch/started/收口类再带 action_generation（总纲 §4.4）：
 
@@ -844,12 +844,12 @@ pnpm gate
 - 风险：跨 boot 剩余量算错会让墙钟跳变误判超时。缓解：截止判定只读 boot_id + monotonic_ns，测试用固定数值断言公式，不靠真实等待。
 - 风险：决策升级与扫描同时改同一行。缓解：两类写都走 CAS，冲突一方整笔回滚，扫描可重入。
 - 风险：规格 §3.6 的 partial unique index 与普通 UNIQUE 语义混用会漏掉 NULL 冲突。缓解：迁移脚本里为 run 级与节点级各建一个 partial unique index，测试断言两类行互不冲突。
-- 回退：本批不改 S1/S2 的既有表结构语义，只加可空列与索引；出问题可把编排服务停在 S2 阶段继续跑单 agent 闭环（规格 §11.2 第 906 行的阶段回滚口径：S3 停新 run、等在途收口）。已写下的迁移脚本不回收，只按 §4.1.1 的顺序执行规则跳过已执行版本。
+- 回退：本批不改 S1/S2 的既有表结构语义，只加可空列与索引；出问题可把编排服务停在 S2 阶段继续跑单 agent 闭环（规格 §11.5 第 908 行的阶段回滚口径：S3 停新 run、等在途收口）。已写下的迁移脚本不回收，只按 §4.1.1 的顺序执行规则跳过已执行版本。
 - 一致性提醒（只报告不自行改）：总纲 §3 的目录树把驱动与迁移写在 `src/infra/db/`，而总纲 §4.1.1 要求唯一驱动文件在 `src/infra/sqlite/driver.ts`、迁移在 `src/infra/sqlite/migrations/`。本计划按 §4.1.1 书写，实施前请确认。
 
 ## 完成定义
 
-- 规格 §11.1 第 841 行的 S3 能力全部落地：九节点、状态机、补偿。
+- 规格 §11.1 第 843 行的 S3 能力全部落地：九节点、状态机、补偿。
 - M-01 到 M-61 逐行用例全绿；非法迁移全拒；并发只有一个赢家；并行扇出与汇聚一致；子流程环与深度拒；补偿不重复；取消向子 run 传播。
 - G-01/G-02/G-04/G-06/G-12/G-16 六个注入各跑一遍并留注入脚本、参数、前后账本片段与对账查询。
 - `docs/gates/G3.md` 存在，含逐项证据、failed_items 为空、conclusion、approver、approved_at，结论后有 `artifact_hash=SHA256(canonical_json(artifact))` 锚点。
