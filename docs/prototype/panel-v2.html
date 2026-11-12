@@ -3588,6 +3588,30 @@ body.v5 .neural-node-pct{font-family:var(--mono);font-size:12px;color:#636970}
 /* v16 · 焦点与状态点：焦点环改中性深色，状态点不再用彩色 */
 body.v5 .input:focus,body.v5 .select:focus,body.v5 .textarea:focus{border-color:#111316!important;box-shadow:0 0 0 2px rgba(17,19,22,.06)!important}
 body.v5 .neural-node-state i{background:#9aa0a8!important}
+/* ---- v17：数字不抢眼，说明文字看得清；执行注意事项落在任务流里 ---- */
+body.v5 .summary-cell b{font-family:var(--font-ui);font-size:15px;font-weight:600;color:#4a4f57;line-height:1.35;letter-spacing:0}
+body.v5 .summary-cell span{margin-top:3px;font-size:13.5px;font-weight:500;color:#2b2f34;letter-spacing:0}
+body.v5 .summary-cell.hot b{color:#a35a12}
+body.v5 .wf-stat b{font-family:var(--font-ui);font-size:15px;font-weight:600;color:#4a4f57;line-height:1.35;letter-spacing:0}
+body.v5 .wf-stat span{margin-top:3px;font-size:13.5px;font-weight:500;color:#2f343a;letter-spacing:0}
+body.v5 .stat-num{font-size:22px!important;font-weight:600!important;color:#4a4f57!important;letter-spacing:0!important}
+body.v5 .stat-label{margin-top:6px;font-size:13.5px;letter-spacing:0;color:#3c4147}
+body.v5 .core-do-k{font-size:13px;color:#6b7079}
+body.v5 .core-do-v{font-size:14px;font-weight:600;color:#3c4147}
+body.v5 .notes-panel{margin-top:14px;border:1px solid #e6e7ea;border-radius:10px;background:#ffffff;overflow:hidden}
+body.v5 .notes-head{display:flex;align-items:baseline;gap:10px;padding:11px 15px;background:#fafbfb;border-bottom:1px solid #eef0f2}
+body.v5 .notes-head b{font-size:13.5px;font-weight:650;color:#111316}
+body.v5 .notes-head span{font-size:12.5px;color:#6b7079}
+body.v5 .note{padding:13px 15px;border-top:1px solid #f1f2f4}
+body.v5 .note:first-child{border-top:0}
+body.v5 .note-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+body.v5 .note-kind{font-size:11.5px;letter-spacing:.3px;color:#3c4147;background:#f1f2f4;border-radius:4px;padding:2px 7px}
+body.v5 .note-where{font-size:12.5px;color:#6b7079}
+body.v5 .note-at{margin-left:auto;font-size:12px;color:#8b9099}
+body.v5 .note-title{margin-top:8px;font-size:13.5px;font-weight:650;color:#111316}
+body.v5 .note-body{margin:5px 0 0;font-size:13px;line-height:1.72;color:#3c4147}
+body.v5 .note-foot{margin-top:8px;font-size:12px;color:#8b9099}
+body.v5 .notes-empty{padding:14px 15px;font-size:12.5px;line-height:1.72;color:#6b7079}
 </style>
 </head>
 <body class="v3 v5">
@@ -4117,6 +4141,48 @@ const SHARED_BOARD = [
   { id: 'sub_04', title: '等审计交回后核对证据', agent: '证据核验', status: 'waiting' },
   { id: 'sub_05', title: '回写台账与 L5', agent: '归档收尾', status: 'queued' }
 ];
+const AGENT_NOTES = [
+  { id:'note_cron_01', kind:'cron', kindLabel:'定时任务注意事项', task:'tsk_memory', node:'读取候选',
+    title:'开跑前先确认上一轮已经停干净',
+    body:'11-07 那轮读候选超时后调度直接续跑，两轮的候选叠在一起，归并时多算了 3 条。现在跑之前先看上一轮是不是已经结束。',
+    by:'证据侦察', at:'11 月 8 日 09:12' },
+  { id:'note_cron_02', kind:'cron', kindLabel:'定时任务注意事项', task:'tsk_weekly', node:'补证',
+    title:'补证超时就停下，不要自己重试',
+    body:'周一 10:00 那轮补证脚本超时，重试会把外部接口打满。超时属于没人确认的结果，交给人签字，不要自动续跑。',
+    by:'修复脚本', at:'11 月 10 日 10:06' },
+  { id:'note_pit_01', kind:'pit', kindLabel:'节点踩坑', task:'tsk_design', node:'交叉审计',
+    title:'一轮里只改一处，改完再送审',
+    body:'「生效清单」和「历史清单」在同一次修订里一起改，审计分不清哪一处是新口径，整轮被打回一次。要改就只动一处，说明里写清哪一处是新的。',
+    by:'交叉审计', at:'11 月 10 日 21:05' },
+  { id:'note_pit_02', kind:'pit', kindLabel:'节点踩坑', task:'tsk_migrate', node:'写入迁移',
+    title:'没有系统确认的写入不能记成功',
+    body:'迁移脚本回执只说进程退出，没有逐条的系统确认。这两笔只能挂「待核实」，不能进完成清单。',
+    by:'证据侦察', at:'今天 20:08' },
+  { id:'note_reject_01', kind:'reject', kindLabel:'被打回记录', task:'tsk_review', node:'送审',
+    title:'结论先分致命、重大、措辞三档',
+    body:'上一轮把三档混在一张清单里，复核的人看不出哪些必须现在改。送审时按三档分开写，致命项单独置顶。',
+    by:'交叉审计', at:'今天 20:31' }
+];
+
+function agentNotesPanel(taskId){
+  const list = AGENT_NOTES.filter(n => !taskId || n.task === taskId);
+  const body = list.length ? list.map(n => {
+    const t = TASKS.find(x => x.id === n.task);
+    return '<article class="note is-' + n.kind + '">' +
+      '<div class="note-top"><span class="note-kind">' + esc(n.kindLabel) + '</span>' +
+        '<span class="note-where">' + esc(tidy(t ? t.title : n.node)) + ' · ' + esc(n.node) + '</span>' +
+        '<span class="note-at">' + esc(n.at) + '</span></div>' +
+      '<div class="note-title">' + esc(tidy(n.title)) + '</div>' +
+      '<p class="note-body">' + esc(tidy(n.body)) + '</p>' +
+      '<div class="note-foot">记下的人：' + esc(n.by) + '</div>' +
+    '</article>';
+  }).join('') : '<div class="notes-empty">这条任务还没有记下注意事项。等它跑完一次，把踩到的坑记在这里，下一次就不用再踩一遍。</div>';
+  return '<section class="notes-panel">' +
+    '<div class="notes-head"><b>执行注意事项</b><span>给执行的智能体看 · 开跑前先读一遍</span></div>' +
+    '<div class="notes-list">' + body + '</div>' +
+  '</section>';
+}
+
 
 /* ================= decisions / effects / events ================= */
 const DECISIONS = [
@@ -4406,11 +4472,7 @@ function renderCommand() {
   const lane = (a, b) => '<div class="lane lane-l">' + agentLine(a) + agentLine(b) + '</div>';
   const laneR = (a, b) => '<div class="lane lane-r">' + agentLine(a) + agentLine(b) + '</div>';
 
-  const board = '<div class="ops-board"><div class="board-head"><span>共享任务板</span><span>5 项 · 2 项已交付</span></div><div class="board-row">' +
-    SHARED_BOARD.map(b => {
-      const color = b.status === 'done' ? '#4ade80' : b.status === 'running' ? '#60a5fa' : b.status === 'waiting' ? '#fbbf24' : '#5b6b82';
-      return '<div class="board-item"><div class="board-title"><span class="board-dot" style="background:' + color + '"></span>' + esc(tidy(b.title)) + '</div><div class="board-agent">' + esc(tidy(b.agent)) + '</div></div>';
-    }).join('') + '</div></div>';
+  const board = agentNotesPanel(null);
 
   return '<section class="page command-page">' +
     pageHead('今天 · 11 月 11 日', '总览',
@@ -4656,7 +4718,7 @@ function renderTasksWorkflow(list) {
     '<button class="btn ghost sm" data-act="open-task" data-task="' + t.id + '" style="margin-top:10px">看这次运行的全部记录</button>' +
   '</div></aside>' : '<aside class="tw-inspect"><div class="tw-inspect-empty">这条任务还没有执行步骤。等它开始后，点左边任意一步，就能在这里看到过程、结果和下一步。</div></aside>';
 
-  return '<div class="tw-shell">' + rail + '<div class="tw-main">' + header + timeline + '</div>' + inspect + '</div>';
+  return '<div class="tw-shell">' + rail + '<div class="tw-main">' + header + timeline + agentNotesPanel(t.id) + '</div>' + inspect + '</div>';
 }
 
 function renderTasksList(list) {
@@ -5162,9 +5224,7 @@ function taskOrchestration(t){
   const splitLabel = isDesign ? '拆成四条支线' : (latest && latest.status === 'succeeded' ? '这次走完 ' + team.length + ' 步' : '按 ' + team.length + ' 步推进');
   const splitHint = isDesign ? '点开任一条，能看它做到哪、拿回了什么。' : '每一步按顺序走，结果都在下面。';
   const note = isDesign ? '四条支线可以同时跑，收尾只做一次。结论对不上时，不互相覆盖，回到收件箱由你定。' : '按固定步骤走，不额外分派子代理；哪一步失败就停住，交回给你。';
-  const board = isDesign ? '<div class="section"><div class="section-h"><h3>共享任务板</h3><div class="right"><span class="muted">子代理只做板上列出的活</span></div></div><div class="card-box" style="padding:2px 12px">' +
-      SHARED_BOARD.map(b => '<div class="orch-board-row"><span class="orch-board-title">' + esc(tidy(b.title)) + '</span><span class="orch-board-agent">' + esc(tidy(b.agent)) + '</span>' + statusTag(b.status === 'running' ? 'running' : b.status === 'done' ? 'done' : b.status === 'waiting' ? 'blocked' : 'queued') + '</div>').join('') +
-    '</div></div>' : '';
+  const board = agentNotesPanel(t.id);
   return '<div class="section"><div class="section-h"><h3>' + heading + '</h3><div class="right"><span class="tag violet">' + roleTag + '</span></div></div>' +
     '<div class="orch">' +
       '<div class="orch-brain">' +
@@ -5490,7 +5550,7 @@ function notesModal(){
 }
 
 function annoModal(){
-  return modalShell('设计标注', '设计标注', '<div class="callout info">' + icon('spark') + '<div>页面上的 01–08 是设计标注，点右上角「标注」可以显示或隐藏。它们解释每个关键交互背后的取舍，不是装饰。</div></div><div class="card-box" style="margin-top:10px;font-size:12px;line-height:1.8;color:var(--ink2)"><div><b>01 总控核</b> · 当前目标、进度、升级状态。</div><div><b>02 共享任务板</b> · 子代理唯一交换工作的面。</div><div><b>03 任务类型</b> · 定时任务不因唤醒增殖。</div><div><b>04 工作流画布</b> · 按版本固定的流程，不是一串任务。</div><div><b>05 需要你决定的关口</b> · 没有证据不放行。</div><div><b>06 没有系统确认的操作</b> · 只能签字接手，不能关闭。</div><div><b>07 事件链</b> · 只追加，不改写。</div><div><b>08 运行历史</b> · 同一任务下的多次运行。</div></div>', '<span class="right"><button class="btn primary sm" data-act="close-modal">知道了</button></span>');
+  return modalShell('设计标注', '设计标注', '<div class="callout info">' + icon('spark') + '<div>页面上的 01–08 是设计标注，点右上角「标注」可以显示或隐藏。它们解释每个关键交互背后的取舍，不是装饰。</div></div><div class="card-box" style="margin-top:10px;font-size:12px;line-height:1.8;color:var(--ink2)"><div><b>01 总控核</b> · 当前目标、进度、升级状态。</div><div><b>02 执行注意事项</b> · 给执行的智能体看的一页，坑记在这儿。</div><div><b>03 任务类型</b> · 定时任务不因唤醒增殖。</div><div><b>04 工作流画布</b> · 按版本固定的流程，不是一串任务。</div><div><b>05 需要你决定的关口</b> · 没有证据不放行。</div><div><b>06 没有系统确认的操作</b> · 只能签字接手，不能关闭。</div><div><b>07 事件链</b> · 只追加，不改写。</div><div><b>08 运行历史</b> · 同一任务下的多次运行。</div></div>', '<span class="right"><button class="btn primary sm" data-act="close-modal">知道了</button></span>');
 }
 
 function randHex(n){
@@ -6189,11 +6249,6 @@ function neuralInspector(){
   '</div></aside>';
 }
 
-function neuralBoard(){
-  return '<div class="ops-board"><div class="board-head"><span>共享任务板 · SHARED WORKSPACE</span><span>' + SHARED_BOARD.length + ' 项 · ' + SHARED_BOARD.filter(b => b.status === 'done').length + ' 项已交付</span></div><div class="board-row">' +
-    SHARED_BOARD.map((b, i) => '<button class="board-item" data-act="neural-select" data-node="' + NEURAL_NODE_IDS[i] + '"><span class="board-title"><span class="board-dot" style="background:' + (b.status === 'done' ? '#42b895' : b.status === 'running' ? '#7282ee' : b.status === 'waiting' ? '#d2a453' : '#a9b4c7') + '"></span>' + esc(tidy(b.title)) + '</span><span class="board-agent">' + esc(tidy(b.agent)) + ' · ' + neuralStatusWord(b.status) + '</span></button>').join('') + '</div></div>';
-}
-
 renderCommand = function(){
   const open = openDecisions();
   const paused = !!state.orchPaused;
@@ -6213,7 +6268,7 @@ renderCommand = function(){
           '<div class="neural-stage-label"><i></i>指挥台 · 主脑统筹 ' + NEURAL_NODE_IDS.length + ' 条支线</div>' +
           neuralCorePanel(paused, open.length) +
           '<div class="branch-grid">' + NEURAL_NODE_IDS.map(neuralNodeCard).join('') + '</div>' +
-        '</div>' + neuralInspector() + '</div>' + neuralBoard() +
+        '</div>' + neuralInspector() + '</div>' +
       '</section>' +
       '<aside class="asks"><div class="rail-head"><h2>需要你决定</h2><span>' + open.length + '</span></div><p class="rail-lede">只有承担后果的决定，才会打断你。</p>' +
         open.slice(0, 3).map(d => '<button class="ask" data-dec="' + d.id + '"><div class="ask-meta"><span class="ask-pri ' + (d.priority === 'P0' ? 'p0' : '') + '">' + esc(urgencyWord(d.priority)) + '</span><span>' + esc(d.created) + '</span></div><div class="ask-title">' + esc(tidy(d.title)) + '</div><div class="ask-why">' + esc(tidy(d.why)) + '</div><div class="ask-go">处理 →</div></button>').join('') +
