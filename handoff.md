@@ -72,7 +72,7 @@ D:\aboutAI\dsh-orchestra\
 
 ## 4. 现在该动手的活（唯一主线）
 
-### 4.1 当前状态：六段全过；spec 已落盘自审通过，待主人审阅（2026-11-12 04:02）
+### 4.1 当前状态：六段全过；spec v1.2 与七份实施计划已落盘，待主人审阅（2026-11-12 17:52）
 
 第三段 v23 已在第二十五轮拿到 **pass**（0 致命 / 0 重大 / 3 条非阻断措辞），三条遗留措辞已在 v24 清理，不再单开第三段轮次。
 
@@ -96,7 +96,9 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 
 第六段 v44 已按第 44 轮 0 致命 / 1 重大 / 8 措辞修入：`candidate_hash` 原像改为 `git_sha` + GateArtifact `schema_version` 整数 + 单值 `phase`（S1–S6），删除 `phase_flags`；518 行改 `report_seq`；G2 必过项与矩阵补 G-05；无 run 的 artifact（G1–G5 与 G6 独立 artifact）`gate_run_id` 一律 null，无 run 门结论补固定值；`payload_json` 限定为 `node_run_events` 内结构化事件的唯一持久载体，`occurred_at` 与 `events.occurred_at` 同源同刻、只用于链内排序、不用于截止判断；`change_scope` 原像补 `capability_ids[]` / `touched_paths[]`；2402/2403 分离回滚目标 `rollback_target` 与回滚 target。终稿 2439 行、505410 bytes、SHA256 `D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793`；结构校验 10 围栏、90 标题、Q 69、G 16、48 表 0 列不一致；第 45 轮 pass（0 致命 / 0 重大 / 7 措辞）；7 条措辞只在 spec 修正，设计稿保持 v44 冻结。
 
-实施规格已按 v44 落盘并提交：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`，1283 行 / 88785 bytes / SHA256 `73119E7FDC8DC69ED9C9C1F0A57EFF1D1F406C796E2B00EFDBC78F3E99C2F6B9`，commit `ee17d03`。第 45 轮 7 条措辞已在规格第 15 章逐条清；自审覆盖结构、表列、非终态 13 值、GateArtifact 示例与四个哈希原像。现在等主人审阅，通过后转 `writing-plans`。
+实施规格已按 v44 落盘并提交，现为 **v1.2**：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`，1401 行 / 97769 bytes / SHA256 `EB46CA604B1C1DB6E95FEFBE3A0AF3EA0D3E2E7061009BB9689483C710315CE7`，commit `f094760`。第 45 轮 7 条措辞已在规格第 15 章逐条清；自审覆盖结构、表列、非终态 13 值、GateArtifact 示例与四个哈希原像。
+
+2026-11-12 17:22 主人点名裁定子代理核出的九处规格 / 总纲 / 设计稿不一致，已逐条裁定并落成 v1.2（详见台账尾部「九处不一致逐条裁定」）：新增 §9.10 批次与条目状态枚举、§9.11 记忆三端口字段契约（逐字取设计稿 §5.4 / §5.6 / §5.8）、§11.3 门 artifact 的三类 producer 绑定、§17.2 写队列上限与保留期口径；六份批次计划的 468 处规格行号引用同步重校准，逐条核对引用内容与小节归属均通过。现在等主人审阅，通过后转 `executing-plans` 从 S1 起步。
 
 - 画布与智能体同写一份 `WorkflowDefinition`；草稿可改、发布版本不可变；版本号连续，发布只影响之后新建的 run。
 - 图校验分两层：保存层允许不完整草稿，只拒无法解析、超限、重复 id、边端点不存在、坐标非法；发布层要求恰好一个 trigger、全图可达且无环、出度纪律、branch route、subworkflow pin 与深度。
@@ -107,10 +109,10 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 ### 4.2 下一步：交主人审 spec 与七份实施计划，通过后转实施
 
 1. 六段设计已全部 pass：第六段 v44 第 45 轮 0 致命 / 0 重大 / 7 条措辞，设计稿保持 v44 冻结（2439 行 / 505410 bytes / SHA `D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793`）。
-2. 规格已落 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`：1283 行 / 88785 bytes / SHA256 `73119E7FDC8DC69ED9C9C1F0A57EFF1D1F406C796E2B00EFDBC78F3E99C2F6B9`，commit `ee17d03`。以设计稿 v44 为权威，第 45 轮 7 条措辞已在规格第 15 章逐条清，设计稿保持冻结。
-3. 规格自审已过：120 标题、章 0–17、14 个表块 0 列不一致、非终态 13 值、全文 0 反引号；GateArtifact 为 G6 有 run 示例，四个哈希原像均为合法 JSON、sha256 全 64 位 hex。等主人审阅；通过后才转 `writing-plans`。
+2. 规格已落 `docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.2）：1401 行 / 97769 bytes / SHA256 `EB46CA604B1C1DB6E95FEFBE3A0AF3EA0D3E2E7061009BB9689483C710315CE7`，commit `f094760`。以设计稿 v44 为权威，第 45 轮 7 条措辞已在规格第 15 章逐条清，设计稿保持冻结；九处不一致已裁定并落成 v1.2。
+3. 规格自审已过：120 标题、章 0–17、14 个表块 0 列不一致、非终态 13 值、全文 0 反引号；GateArtifact 为 G6 有 run 示例，四个哈希原像均为合法 JSON、sha256 全 64 位 hex。v1.2 后重校：六份计划 468 处规格引用逐条核对，内容不一致 0、小节归属不符 0。等主人审阅。
 4. 原型 v13 已提交并交主人评审：浅色、低密度、人话、任务做到哪一步 / 发生了什么 / 结果 / 下一步。
-5. 实施计划已写完（总纲 + S1–S6，提交 `b8352db`）：等主人过目后按 `executing-plans` 或 `subagent-driven-development` 从 S1 起步，先跑 G1 门再进 S2。
+5. 实施计划已写完（总纲 + S1–S6，提交 `f094760`，含规格行号重校准）：等主人过目后按 `executing-plans` 或 `subagent-driven-development` 从 S1 起步，先跑 G1 门再进 S2。
 6. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
 
 > ⚠️ 第三段内改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构）；从第四段起按六段路线新增 `## 第四段 …`，不要改动前三段标题。不要删 §3.4b–§3.4m 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
@@ -192,7 +194,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 - 仓库已初始化：`D:\aboutAI\dsh-orchestra\.git`，分支 `main`，首个提交 `fc92495`
   （docs: dsh-orchestra 项目落地（设计稿/台账/需求/设计思路/handoff/图谱索引）），共 7 个文件、1787 行。
 - `.gitignore` 忽略 `references/`（三份参考项目各自带 `.git`，不并入本仓库）、`.codebase-memory/`、`tmp/`、`.tmp/`、`*.log`、`*.bak`；`docs/prototype/` 只提交 `panel-v2.html`，截图与一次性脚本不入库。
-- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮、`8bfdc30` v39 第六段送第 39 轮、`3d4f59d` 原型 v11 字号层、`a1afa13` v41 第六段主体、`fd0df0b` G1 无 run 例外、`b747419` 记录重送与 G1、`0f950e6` v42 修第 42 轮 12 条并送第 43 轮、`6777ea4` v43 修第 43 轮 10 条 + 原型 v12、`63adb98` 原型 v13 去掉优先级标签并统一人话文案、`fb7d1f1` v44 修第 44 轮 9 条、`408df76` 记录 v44 送第 45 轮、`b068ca4` 记录第 45 轮 pass 并同步 handoff、`ee17d03` 落 v44 实施规格、`89d8836` 同步 v44 实施规格落盘与待审状态、`aea1b24` 共享面提案留档、`eeb7558` 原型 v15 纯白平面系统、`f3b7e94` 原型 v16 核心指挥台、`65b69c5` 原型 v17 执行注意事项落进任务流并重排数字字号、`b8352db` 落齐 S1–S6 六份批次计划并校准规格行号引用。
+- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮、`8bfdc30` v39 第六段送第 39 轮、`3d4f59d` 原型 v11 字号层、`a1afa13` v41 第六段主体、`fd0df0b` G1 无 run 例外、`b747419` 记录重送与 G1、`0f950e6` v42 修第 42 轮 12 条并送第 43 轮、`6777ea4` v43 修第 43 轮 10 条 + 原型 v12、`63adb98` 原型 v13 去掉优先级标签并统一人话文案、`fb7d1f1` v44 修第 44 轮 9 条、`408df76` 记录 v44 送第 45 轮、`b068ca4` 记录第 45 轮 pass 并同步 handoff、`ee17d03` 落 v44 实施规格、`89d8836` 同步 v44 实施规格落盘与待审状态、`aea1b24` 共享面提案留档、`eeb7558` 原型 v15 纯白平面系统、`f3b7e94` 原型 v16 核心指挥台、`65b69c5` 原型 v17 执行注意事项落进任务流并重排数字字号、`b8352db` 落齐 S1–S6 六份批次计划、`f094760` 规格升 v1.2 裁定九处不一致并重校六份计划的规格行号。
 - 每次改设计稿后要提交（主人硬约束：改代码/文档后同步更新版本号并留痕）。
 
 ---
@@ -209,4 +211,4 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-design-draft.md | Measure-Ob
 Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 ```
 
-六段设计全部过审（第三段第 25 轮、第四段第 34 轮、第五段第 38 轮、第六段第 45 轮）；实施规格 v1.1 已落盘待审（`4e646eb`），实施计划总纲 + S1–S6 六份已落盘待审（`b8352db`）；面板原型 v17 已提交（`65b69c5`）等主人评审；共享面（黑板）提案按主人意见暂不做，留档 `docs/superpowers/specs/2026-11-12-run-shared-context-addendum.md`。
+六段设计全部过审（第三段第 25 轮、第四段第 34 轮、第五段第 38 轮、第六段第 45 轮）；实施规格 v1.2 已落盘待审（`f094760`），实施计划总纲 + S1–S6 六份已落盘待审（同在 `f094760`）；面板原型 v17 已提交（`65b69c5`）等主人评审；共享面（黑板）提案按主人意见暂不做，留档 `docs/superpowers/specs/2026-11-12-run-shared-context-addendum.md`。
