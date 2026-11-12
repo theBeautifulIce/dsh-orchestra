@@ -60,11 +60,13 @@ dsh-orchestra/
 │  │  ├─ report.ts             # applyReport 六步骨架
 │  │  └─ policy.ts             # policy 节点的白名单算子求值
 │  ├─ infra/
-│  │  ├─ db/
-│  │  │  ├─ open.ts            # 单写者连接（busy_timeout 5000、epoch 校验）
-│  │  │  ├─ tx.ts              # BEGIN IMMEDIATE 事务封装
-│  │  │  ├─ migrate.ts         # 迁移框架
-│  │  │  └─ migrations/        # 001_*.ts、002_*.ts …
+│  │  ├─ sqlite/             # 唯一允许 import node:sqlite 的目录
+│  │  │  ├─ driver.ts          # 单写者连接 + BEGIN IMMEDIATE 事务 + 迁移执行器（busy_timeout 5000、epoch 校验）
+│  │  │  └─ migrations/        # 001_init.sql、002_*.sql …（SQL 脚本，按版本号递增）
+│  │  ├─ db/                  # 服务侧封装，不直接碰 node:sqlite
+│  │  │  ├─ open.ts            # 单写者连接与 epoch 自增
+│  │  │  ├─ tx.ts              # CAS 辅助与 runCas
+│  │  │  └─ migrate.ts         # 迁移步骤枚举与 applySteps
 │  │  ├─ lock.ts               # proper-lockfile 进程所有权
 │  │  ├─ backup.ts             # 备份、独立目录校验、损坏检出
 │  │  ├─ logger.ts
@@ -411,3 +413,9 @@ git commit -m "chore(repo): 建立 dsh-orchestra 插件仓库骨架与工具链"
 ## 7. 未决参数（规格 16.3 的六个开放项）
 
 写队列上限与溢出策略、事件与证据保留期、记忆裁判模型与提示词版本、值班人与升级联系人、R1/R2 工作区白名单、24h 浸泡采样频率与判定脚本——每一项在对应批次定值并写进门记录；定值前按规格默认值与安全侧行为运行，不许用「还没定」当放行理由。
+
+本轮计划阶段的补充开放项：
+
+- report_registry 语义缺口：规格 §4.2 只许 rejected / replayed / applied / stale 四态，§4.5 要求围栏已立时收到的报告「进 registry(rejected) 排队」，但没有字段区分「排队待重放」与「已拒绝不再重放」。S3 按状态值原样落库、重放规则写进步骤，等主人定是否加字段（如 `queued_for_replay`）。
+- 迁移脚本编号序列：总纲未定编号规则，S3/S4 里的 020_、030_ 等是按惯例占位，实际接续既有迁移号，不同则顺延。
+- 桥 RPC 与宿主插件 API 的对应名：S2 写的是规格 §7.2 的七个方法名（spawn / subscribe / send / cancel / dispose / state / whenIdle），落到 DSH 插件侧的确切绑定名待宿主侧对齐。

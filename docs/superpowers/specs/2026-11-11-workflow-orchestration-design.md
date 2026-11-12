@@ -1,8 +1,9 @@
 # dsh-orchestra 工作流编排插件设计规格
 
-- 规格版本：1.0
-- 状态：自审通过，待主人审阅
+- 规格版本：1.1
+- 状态：自审通过（v1.1 已按设计稿 v44 校准校验分层与错误码），待主人审阅
 - 日期：2026-11-12
+- 修订：v1.1（2026-11-12）修正 §6.1 校验分层（保存层不阻断图语义问题、发布层全量校验）、§6.1/§6.2 发布入参与版本比对口径，并按设计稿 v44 §4.12 补齐 §17.1 流程定义类错误码。改的是规格自己的落笔漂移，结论一律回到设计稿 v44。
 - 设计来源：docs/orchestra-design-draft.md v44，2439 行 / 505410 bytes / SHA256 D534FA8317A74C48286C83A65C994FC80D812B6B26110BCC533A7BA82699B793
 - 实施目录：D:/aboutAI/dsh-orchestra
 - 目标插件名：dsh-orchestra
@@ -530,10 +531,11 @@ side_effect_policy 三值：pure、compensable、irreversible。
 | --- | --- | --- | --- | --- |
 | workflow.create | 无 | 0 | name、definition、publish_note 可选 | 建 workflows 行与草稿 revision=1；名称与 definition.name 必须一致 |
 | workflow.open_draft | workflow_id | base_version | 无 | 以 current_version 为基打开草稿；已有草稿、已消费、从未发布的处理见 6.3 |
-| workflow.update | workflow_id | draft revision | definition | 全量校验后写草稿，revision 加一 |
-| workflow.publish | workflow_id | draft revision | publish_note（1 到 500 字） | 生成不可变版本，current_version 上调，消费草稿 |
+| workflow.update | workflow_id | draft revision | definition | 保存层校验后写草稿并返回 validation.errors[]，revision 加一；图语义问题不阻断保存 |
+| workflow.publish | workflow_id | draft revision + base_version | publish_note（1 到 500 字） | 生成不可变版本，current_version 上调，消费草稿 |
 
-保存层与发布层共用同一套校验；保存层拒绝的图，发布层也不许放过。错误码分开：保存层给 WORKFLOW_VALIDATION_FAILED / WORKFLOW_TITLE_INVALID / WORKFLOW_NAME_INVALID / WORKFLOW_EDGE_SELF_LOOP / WORKFLOW_EDGE_DUPLICATE；发布层另有版本冲突与事务错误。
+校验分两层。保存层（workflow.create / workflow.update）只保证这份草稿还能被打开与继续改：拒绝不可解析、超限、节点 id 格式与重复、边端点缺失、坐标非法、自环与重复边、节点标题与流程名非法；缺入口、多入口、有环、branch 缺路由、节点契约不合法这些不阻断保存，作为 validation.errors[] 返回，错误项带 RFC 6901 path。发布层（workflow.publish）做全量校验（恰好一个 trigger、trigger 无入边、出度纪律、全图可达、无环、branch 路由、节点类型已注册、节点必填 config、契约与能力与证据源与 payload schema 闸门、subworkflow 版本与深度），任一不通过返回 WORKFLOW_VALIDATION_FAILED（422，details.errors[] 带 path），不插版本、不改 current_version、不消费草稿。保存层拒绝的项，发布层照拒不误。
+保存层拒绝码：WORKFLOW_DEFINITION_INVALID / WORKFLOW_DEFINITION_TOO_LARGE / WORKFLOW_NODE_ID_INVALID / WORKFLOW_NODE_ID_DUPLICATE / WORKFLOW_EDGE_ENDPOINT_MISSING / WORKFLOW_LAYOUT_INVALID / WORKFLOW_EDGE_SELF_LOOP / WORKFLOW_EDGE_DUPLICATE / WORKFLOW_TITLE_INVALID / WORKFLOW_NAME_INVALID；发布层另有 WORKFLOW_VALIDATION_FAILED / WORKFLOW_NO_TRIGGER / WORKFLOW_MULTIPLE_TRIGGERS / WORKFLOW_TRIGGER_HAS_INBOUND / WORKFLOW_TRIGGER_FANOUT / WORKFLOW_NODE_FANOUT_INVALID / WORKFLOW_NODE_UNREACHABLE / WORKFLOW_GRAPH_CYCLE / WORKFLOW_BRANCH_ROUTE_INVALID / WORKFLOW_BRANCH_PRIORITY_DUPLICATE / WORKFLOW_BRANCH_DEFAULT_DUPLICATE / NODE_NOT_SUPPORTED / WORKFLOW_NODE_CONFIG_INVALID / TOOL_NOT_ALLOWED / PAYLOAD_SCHEMA_INVALID / WORKFLOW_SUBWORKFLOW_VERSION_MISSING / SUBWORKFLOW_CYCLE / SUBWORKFLOW_DEPTH_EXCEEDED / MEMORY_WRITE_TOOL_FORBIDDEN，以及版本冲突与事务错误。
 
 ### 6.2 发布事务顺序
 
@@ -542,7 +544,7 @@ side_effect_policy 三值：pure、compensable、irreversible。
 1. BEGIN IMMEDIATE。
 2. 读 workflows 行；不存在返回 WORKFLOW_NOT_FOUND（404）。
 3. 读草稿：workflow_id + revision + published_version IS NULL。草稿不存在：已消费返回 WORKFLOW_DRAFT_NOT_OPEN（409）；否则 WORKFLOW_REVISION_CONFLICT（409）。
-4. 读 current_version；必须等于草稿的 based_on_version，否则 WORKFLOW_VERSION_CONFLICT（409）。
+4. 读 current_version；必须等于 expected.base_version（从未发布时按 0），否则 WORKFLOW_VERSION_CONFLICT（409）。
 5. 全量校验 definition：节点、边、route、可达性、无环、名称、长度、大小。
 6. 插 workflow_versions，version = base + 1；based_on_version = CASE WHEN base = 0 THEN NULL ELSE base END。
 7. UPDATE workflows，语句必须带 workflow_id 且用 COALESCE 处理首发 NULL：current_version 只许从 NULL 或 base 上调到 base+1，不许回退。
@@ -1231,12 +1233,33 @@ artifact_hash 只指 GateArtifact 的锚点哈希：SHA256(canonical_json(artifa
 | WORKFLOW_DRAFT_NOT_OPEN | 409 | 草稿已消费 |
 | WORKFLOW_DRAFT_EXISTS | 409 | 已有草稿 |
 | WORKFLOW_NOT_PUBLISHED | 409 | 从未发布 |
-| WORKFLOW_VALIDATION_FAILED | 422 | 定义校验失败 |
+| WORKFLOW_VALIDATION_FAILED | 422 | 定义校验失败（details.errors[] 带 RFC 6901 path） |
 | WORKFLOW_TITLE_INVALID | 422 | 节点标题非法 |
 | WORKFLOW_NAME_INVALID | 422 | 流程名称非法 |
 | WORKFLOW_DEFINITION_TOO_LARGE | 413 | 定义超过 1 MiB |
 | WORKFLOW_EDGE_SELF_LOOP | 422 | 自环 |
 | WORKFLOW_EDGE_DUPLICATE | 422 | 重复边 |
+| WORKFLOW_DEFINITION_INVALID | 422 | 定义不可解析或顶层字段类型错 |
+| WORKFLOW_NODE_ID_INVALID | 422 | 节点 id 格式非法 |
+| WORKFLOW_NODE_ID_DUPLICATE | 422 | 节点 id 在版本内重复 |
+| WORKFLOW_EDGE_ENDPOINT_MISSING | 422 | 边的端点不在本版本节点里 |
+| WORKFLOW_LAYOUT_INVALID | 422 | 节点坐标不是 0–20000 整数 |
+| WORKFLOW_NO_TRIGGER | 422 | 流程没有触发节点 |
+| WORKFLOW_MULTIPLE_TRIGGERS | 422 | 流程有多个触发节点 |
+| WORKFLOW_TRIGGER_HAS_INBOUND | 422 | 触发节点有入边 |
+| WORKFLOW_TRIGGER_FANOUT | 422 | 触发节点出度不是 1 |
+| WORKFLOW_NODE_FANOUT_INVALID | 422 | 节点出度不合规 |
+| WORKFLOW_NODE_UNREACHABLE | 422 | 节点从入口不可达 |
+| WORKFLOW_GRAPH_CYCLE | 422 | 全图有环 |
+| WORKFLOW_BRANCH_ROUTE_INVALID | 422 | 分支出边缺路由或路由重复 |
+| WORKFLOW_BRANCH_PRIORITY_DUPLICATE | 422 | 同源分支优先级重复 |
+| WORKFLOW_BRANCH_DEFAULT_DUPLICATE | 422 | 默认路由多于一条 |
+| NODE_NOT_SUPPORTED | 422 | 节点类型未注册 |
+| WORKFLOW_NODE_CONFIG_INVALID | 422 | 节点必填配置缺失或不合法 |
+| TOOL_NOT_ALLOWED | 422 | 工具不在节点允许集内 |
+| PAYLOAD_SCHEMA_INVALID | 422 | 负载 schema 不合法 |
+| WORKFLOW_SUBWORKFLOW_VERSION_MISSING | 422 | 子流程引用的版本不存在或未发布 |
+| SUBWORKFLOW_DEPTH_EXCEEDED | 422 | 子流程层级超过上限 |
 | BRANCH_AMBIGUOUS | 422 | 分支多命中 |
 | SUBWORKFLOW_CYCLE | 422 | 子流程环 |
 | MEMORY_BATCH_TOO_LARGE | 413 | 记忆批次超限 |
