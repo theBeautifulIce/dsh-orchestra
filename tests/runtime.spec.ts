@@ -146,7 +146,7 @@ describe('生产路径跑通单节点', () => {
     expect(calls).toBe(1)
     expect(nodeRow(orchestra.db).status).toBe('blocked_post')
     const human = orchestra.db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nrun_1' AND type='verify_human'").get() as { payload: string }
-    expect(JSON.parse(human.payload).reason).toContain('verdict_unmet')
+    expect(JSON.parse(human.payload).reason).toContain('tool_execution_failed')
     orchestra.close()
     rmSync(dir, { recursive: true, force: true })
   })

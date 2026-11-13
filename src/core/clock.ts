@@ -96,3 +96,81 @@ export function remainingAcrossBoot(prev: PreviousClock, currentBoot: { startedA
   const remainingMs = Math.min(budgetMs, budgetMs - downtimeMs)
   return remainingMs > 0 ? remainingMs : 0
 }
+
+// 判定用的时钟提供方：生产用系统时钟，测试与注入脚本用可编排时钟（规格 3.4 行 171）
+export type ClockProvider = {
+  readonly bootId: BootId
+  sample(): ClockSample
+  decide(deadline: Deadline): ClockDecision
+}
+
+// 生产时钟：墙钟与单调钟同时取样，漂移超过 2 秒就判不确定（规格 3.4 行 171）
+export class SystemClock implements ClockProvider {
+  private readonly clock: MonotonicClock
+
+  constructor(bootId: BootId) {
+    this.clock = new MonotonicClock(bootId, {
+      wallClockMs: Date.now(),
+      monotonicNs: Number(process.hrtime.bigint()),
+    })
+  }
+
+  get bootId(): BootId { return this.clock.id }
+
+  sample(): ClockSample {
+    const wallClockMs = Date.now()
+    const monotonicNs = Number(process.hrtime.bigint())
+    this.clock.sample(wallClockMs, monotonicNs)
+    return { bootId: this.bootId, monotonicNs, wallClockMs }
+  }
+
+  decide(deadline: Deadline): ClockDecision {
+    return this.clock.decide(deadline, this.sample())
+  }
+}
+
+// 可编排时钟：测试与注入脚本用它模拟墙钟跳变、跨 boot 与漂移（规格 3.4 行 171、12.3 行 1066）
+export class ScriptedClock implements ClockProvider {
+  private currentBootId: BootId
+  private wallMs: number
+  private monoNs: number
+  private originWallMs: number
+  private originMonoNs: number
+
+  constructor(bootId: BootId, opts: { wallClockMs?: number; monotonicNs?: number } = {}) {
+    this.currentBootId = bootId
+    this.wallMs = opts.wallClockMs ?? Date.parse('2026-11-13T03:00:00.000Z')
+    this.monoNs = opts.monotonicNs ?? 0
+    this.originWallMs = this.wallMs
+    this.originMonoNs = this.monoNs
+  }
+
+  get bootId(): BootId { return this.currentBootId }
+
+  // 墙钟跳变：模拟 NTP 校正或人工改表
+  setWallClockMs(ms: number): void { this.wallMs = ms }
+
+  // 单调钟推进：模拟真实流逝
+  advanceMs(ms: number): void { this.monoNs += Math.round(ms * 1e6) }
+
+  // 重启：换 boot，漂移基准跟着重置
+  reboot(bootId: BootId): void {
+    this.currentBootId = bootId
+    this.originWallMs = this.wallMs
+    this.originMonoNs = this.monoNs
+  }
+
+  sample(): ClockSample {
+    return { bootId: this.currentBootId, monotonicNs: this.monoNs, wallClockMs: this.wallMs }
+  }
+
+  decide(deadline: Deadline): ClockDecision {
+    if (deadline.bootId !== this.currentBootId) return { kind: 'uncertain', reason: 'boot_changed' }
+    const expectedWall = this.originWallMs + (this.monoNs - this.originMonoNs) / 1e6
+    const drift = Math.abs(expectedWall - this.wallMs)
+    if (drift > CLOCK_DRIFT_TOLERANCE_MS) return { kind: 'uncertain', reason: 'clock_drift' }
+    const remainingNs = deadline.monotonicNs - this.monoNs
+    if (remainingNs <= 0) return { kind: 'expired' }
+    return { kind: 'pending', remainingMs: remainingNs / 1e6 }
+  }
+}

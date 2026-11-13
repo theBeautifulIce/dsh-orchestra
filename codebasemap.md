@@ -168,13 +168,32 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `docs/orchestra-audit-ledger.md` | 84 行 / 18KB | 逐轮审计台账：§一 逐轮记录（1–20 轮）、§二 几件能算出来的事、§三 收敛判据、§四 统计口径、§五 当前进度与续跑指引 |
 | `docs/requirements.md` | 约 330 行 / 19KB | 原始需求（R1–R23 主人原话表）、需求分解 F1–F13 / N1–N7、拍板口径 §3.1–§3.7、验收标准 |
 | `docs/design-notes.md` | 约 300 行 / 28KB | 设计思路：16 条决策（问题→决策→理由→被否方案→代价）、五个坑族、参考项目学了什么、风险清单 |
-| `docs/audits/` | 每轮一份报告 + 一份整改对照表 | 独立审计报告（S1 / S2 第一轮 / 第二轮）与整改对照表（S2-round2-response.md）：放行依据是审计报告本身，对照表只是实现者自证 |
+| `docs/audits/` | 每轮一份报告 + 一份整改对照表 | 独立审计报告（S1 / S2 第一轮 / 第二轮 / 第三轮 `S2-independent-audit-round3.md`）与整改对照表（`S2-round2-response.md`、`S2-round3-response.md`）：放行依据是审计报告本身，对照表只是实现者自证 |
 
 **查法**：
 - 「某条规则写在哪一行」 → 直接读设计稿（`orchestra-design-draft.md`），行号见下方 §四。
 - 「为什么这么设计」 → `design-notes.md` §2 对应小节。
 - 「主人定了什么」 → `requirements.md` §3 拍板口径。
 - 「上一轮审到哪、下一轮改什么」 → `orchestra-audit-ledger.md` §五。
+
+### S2 源码与门证据落点（2026-11-13 第三轮整改后）
+
+| 文件 | 作用 |
+| --- | --- |
+| `src/core/clock.ts` | 墙钟、预算、跨 boot 的时钟口径（unknown 判定、verify 超时） |
+| `src/core/workflow-def.ts` | 流程定义与代次校验（workflow_version、代次单调） |
+| `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收） |
+| `src/service/commands/node-state.ts` | 节点状态写入（verify_deadline_at 起钟、verify_remaining_ns 落列） |
+| `src/service/commands/runtime.ts` | 运行时装配（policy 按 run.workflow_version 取，请求体带不进 policy） |
+| `src/service/runs.ts` | 生产装配：createRun 建 task/run/node_runs |
+| `src/service/dispatcher.ts` | 生产装配：dispatchRun 拾 queued 节点走 runNode |
+| `src/service/sweep.ts` | 围栏与过期扫描（逐行事务，回收 verifying 超时） |
+| `src/infra/sqlite/migrations/003_s2_round3.sql` | 第三轮新增迁移（账本列与索引） |
+| `scripts/fault-inject.ts` | 故障注入取证（1133 行；InjectionCase `ev-g2-01`…`ev-g2-11`，写 `docs/gates/evidence/`） |
+| `scripts/gate-check.ts` | 门检查校验链（562 行：必过项 / 证据 / 不变量 / 正文表 / 候选 / 哈希） |
+| `scripts/sign-gate.ts` | 门记录重签（78 行：回填证据 sha256 与各类哈希，自检后写回） |
+| `docs/gates/G1.md`、`docs/gates/G2.md` | 两道门记录（必过项表、证据表、不变量表、artifact） |
+| `docs/gates/evidence/G1/`（6 份）、`docs/gates/evidence/G2/`（15 份） | 门证据原文，哈希逐份复核 |
 
 ---
 

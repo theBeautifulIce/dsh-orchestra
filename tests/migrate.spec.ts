@@ -37,11 +37,11 @@ const codeOf = (fn: () => unknown): string => {
 describe('迁移框架', () => {
   it('空库跑一次：十张表齐、迁移记一行', () => {
     const db = openDb(dbFile())
-    expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([1, 2])
+    expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([1, 2, 3])
     const names = tables(db.raw)
     for (const name of TEN_TABLES) expect(names).toContain(name)
     const rows = appliedRows(db.raw) as { version: number }[]
-    expect(rows.map((r) => r.version)).toEqual([1, 2])
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3])
     db.raw.close()
   })
 
@@ -50,7 +50,7 @@ describe('迁移框架', () => {
     const steps = loadSteps(defaultMigrationsDir())
     applySteps(db, steps)
     expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([])
-    expect(appliedRows(db.raw).length).toBe(2)
+    expect(appliedRows(db.raw).length).toBe(3)
     db.raw.close()
   })
 

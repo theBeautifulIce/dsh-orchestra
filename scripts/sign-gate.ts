@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { assertClean, candidateEntries, GATE_SPECS, verifyGateRecord, type EvidenceEntry, type InvariantEntry } from './gate-check.ts'
+import { assertClean, bodyHash, candidateEntries, GATE_SPECS, verifyGateRecord, type EvidenceEntry, type InvariantEntry } from './gate-check.ts'
 
 const path = process.argv[2] ?? 'docs/gates/G1.md'
 const root = resolve(process.cwd())
@@ -50,12 +50,28 @@ const git = (args: string[]) => execFileSync('git', args, { cwd: root, maxBuffer
 const { paths, files } = candidateEntries(root, spec)
 artifact.candidate_hash = sha256Hex(canonicalJson(files))
 artifact.change_scope_hash = sha256Hex(canonicalJson(paths))
+// 前序门哈希链：本门指向前序门记录在 HEAD 里的 artifact_hash，重签链断了门检查会拒（审计 R3-08）
+if (spec.prevGate) {
+  const prevSpec = GATE_SPECS[spec.prevGate]
+  const prevText = execFileSync('git', ['show', 'HEAD:' + prevSpec.gateFile], { cwd: root, maxBuffer: 64 * 1024 * 1024 }).toString('utf8')
+  const prevAnchor = /artifact_hash=([0-9a-f]{64})/.exec(prevText)
+  if (!prevAnchor) throw new Error('前序门记录里找不到 artifact_hash 锚点: ' + prevSpec.gateFile)
+  artifact.previous_artifact_hash = prevAnchor[1] ?? ''
+} else {
+  artifact.previous_artifact_hash = '0'.repeat(64)
+}
 
 const newArtifactJson = JSON.stringify(artifact, null, 2)
 text = text.slice(0, artifactMatch.index) + '```json\n' + newArtifactJson + '\n```' + text.slice(artifactMatch.index! + artifactMatch[0].length)
 const artifactHash = sha256Hex(canonicalJson(artifact))
 text = text.replace(/artifact_hash=[0-9a-f]{64}/, 'artifact_hash=' + artifactHash)
+// 正文自锚：除了两个自锚点与反引号里的 sha256，正文任何改动都会改掉这个值（审计 R3-08）
+if (!/body_hash=[0-9a-f]{64}/.test(text)) {
+  text = text.replace(/(artifact_hash=[0-9a-f]{64})/, '$1\nbody_hash=' + '0'.repeat(64))
+}
+const bodyValue = bodyHash(text)
+text = text.replace(/body_hash=[0-9a-f]{64}/, 'body_hash=' + bodyValue)
 // 写回之前先按门检查跑一遍：签出来的记录必须是能过的
-verifyGateRecord(text, { root })
+verifyGateRecord(text, { root, path, selfCheck: true })
 writeFileSync(path, text)
-console.log('重签完成：证据 ' + String(entries.length) + ' 份，candidate=' + artifact.candidate_hash.slice(0, 12) + '…，artifact_hash=' + artifactHash.slice(0, 12) + '…，改动文件 ' + String(paths.length) + ' 个')
+console.log('重签完成：证据 ' + String(entries.length) + ' 份，candidate=' + artifact.candidate_hash.slice(0, 12) + '…，artifact_hash=' + artifactHash.slice(0, 12) + '…，body_hash=' + bodyValue.slice(0, 12) + '…，改动文件 ' + String(paths.length) + ' 个')

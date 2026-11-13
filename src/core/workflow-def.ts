@@ -11,12 +11,16 @@ export type WorkflowNodeDef = {
   tools?: { allow?: string[]; deny?: string[] }
   // 节点自带的通过条件；和模板条件取 AND（规格 6.1 行 837）
   pass_conditions?: PassCondition[]
+  // 节点要求的必留哈希；和模板要求取并集（规格 4.7 行 380）
+  required_hashes?: string[]
 }
 
 export type WorkflowDefinition = {
   workflow_version: string
   // 模板级通过条件，作为基线（规格 6.1 行 838）
   pass_conditions?: PassCondition[]
+  // 模板级必留哈希；不可逆节点的通过凭据（规格 4.7 行 380）
+  required_hashes?: string[]
   nodes: WorkflowNodeDef[]
 }
 

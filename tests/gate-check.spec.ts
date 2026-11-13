@@ -5,6 +5,7 @@ import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
 import { verifyGateRecord } from '../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
+const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
 // 测试在开发期的脏树上跑：显式放行脏树，脏树拒绝另有一条专门的用例
 const check = (text: string) => verifyGateRecord(text, { allowDirty: true })
 
@@ -114,6 +115,48 @@ describe('门记录校验', () => {
   it('回滚缺可执行动作时拒绝（审计 N-09）', () => {
     const text = tamper(read(), (a) => { a.rollback = { target: 'x' } })
     expect(() => check(text)).toThrow(/rollback 缺 action/)
+  })
+
+  it('producer 不是 human 时拒绝（规格 11.3 行 981；审计 R3-05）', () => {
+    const text = tamper(read(), (a) => { a.producer = 'agent:七七' })
+    expect(() => check(text)).toThrow(/producer 必须是 human/)
+  })
+
+  it('必过项换绑证据时拒绝（审计 R3-08）', () => {
+    const text = tamper(read(), (a) => {
+      const items = a.must_pass_items as { id: string; evidence_ids: string[] }[]
+      const target = items.find((i) => i.id === 'G1-01')
+      if (target) target.evidence_ids = ['ev-chain']
+    })
+    expect(() => check(text)).toThrow(/固定映射/)
+  })
+
+  it('正文证据表的哈希被改时拒绝（审计 R3-06）', () => {
+    const text = read().replace(/(\| ev-g15 \| `docs\/gates\/evidence\/G1\/G-15\.md` \| `)[0-9a-f]{64}/, '$1' + '0'.repeat(64))
+    expect(text).not.toBe(read())
+    expect(() => check(text)).toThrow(/正文证据表里 ev-g15 的 sha256/)
+  })
+
+  it('正文不变量说明被改时拒绝（审计 R3-06）', () => {
+    const text = read().replace('| I3 | 事务失败不留半条记录，CAS 失败无副作用 | ev-g01,ev-g02 |', '| I3 | 随便写 | ev-g01,ev-g02 |')
+    expect(text).not.toBe(read())
+    expect(() => check(text)).toThrow(/不变量/)
+  })
+
+  it('前序门哈希链断了时拒绝（审计 R3-08）', () => {
+    const text = tamper(readG2(), (a) => { a.previous_artifact_hash = 'b'.repeat(64) })
+    expect(() => check(text)).toThrow(/重签链断了/)
+  })
+
+  it('审计轮次与审计报告对不上时拒绝（审计 R3-08）', () => {
+    const text = tamper(read(), (a) => { a.audit_round = 9 })
+    expect(() => check(text)).toThrow(/audit_round/)
+  })
+
+  it('正文自锚 body_hash 被改时拒绝（审计 R3-08）', () => {
+    const text = read().replace(/body_hash=[0-9a-f]{64}/, 'body_hash=' + 'c'.repeat(64))
+    expect(text).not.toBe(read())
+    expect(() => check(text)).toThrow(/body_hash/)
   })
 
   it('工作树有未提交改动时拒绝签门（审计 N-09）', () => {

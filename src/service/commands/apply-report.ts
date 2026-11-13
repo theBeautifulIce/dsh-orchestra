@@ -43,6 +43,15 @@ function nextReportSeq(tx: Tx, nodeRunId: string): number {
   return (row?.max_seq ?? 0) + 1
 }
 
+// 同一个 report_id 的同类事件只留一条：账本不许被重试刷膨胀（审计 R3-04）
+function hasNodeRunEvent(tx: Tx, nodeRunId: string, type: string, reportId: string): boolean {
+  const row = tx.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = ? AND payload LIKE ?",
+    [nodeRunId, type, '%"report_id":"' + reportId + '"%'],
+  )
+  return (row?.n ?? 0) > 0
+}
+
 // 拒绝也要留痕：registry 落 rejected，哈希链追加 report_rejected（规格 4.2 行 298）
 function rejectReport(tx: Tx, secret: string, params: {
   nodeRunId: string
@@ -102,20 +111,19 @@ export function applyReport(
     if (existing.state === 'applied') {
       // 已经落过账：不许再落一次，只把状态记成 replayed
       tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['replayed', params.now, report.report_id])
-      appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
-        report_id: report.report_id,
-        report_seq: existing.report_seq,
-        reason: 'already_applied',
-      })
+      // 同一条报告反复重发：事件只留一条，账本不许被重试刷膨胀（审计 R3-04）
+      if (!hasNodeRunEvent(tx, params.nodeRunId, 'report_replayed', report.report_id)) {
+        appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
+          report_id: report.report_id,
+          report_seq: existing.report_seq,
+          reason: 'already_applied',
+        })
+      }
       return { accepted: false, reason: 'already_applied', registry_state: 'replayed' }
     }
     if (existing.state === 'replayed') {
       // 同一条报告反复重发：事件只留一条，账本不许被重试刷膨胀（审计 N-06）
-      const dup = tx.get<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = ? AND payload LIKE ?",
-        [params.nodeRunId, 'report_replayed', '%"report_id":"' + report.report_id + '"%'],
-      )
-      if ((dup?.n ?? 0) === 0) {
+      if (!hasNodeRunEvent(tx, params.nodeRunId, 'report_replayed', report.report_id)) {
         appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
           report_id: report.report_id,
           report_seq: existing.report_seq,
@@ -142,11 +150,14 @@ export function applyReport(
       return { accepted: false, reason: 'replay_not_head', registry_state: 'rejected' }
     }
     tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['replayed', params.now, report.report_id])
-    appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
-      report_id: report.report_id,
-      report_seq: existing.report_seq,
-      reason: 'replay_after_reject',
-    })
+    // 重放事件同一 report_id 只留一条：rejected↔replayed 来回翻也不许把账本刷膨胀（审计 R3-04）
+    if (!hasNodeRunEvent(tx, params.nodeRunId, 'report_replayed', report.report_id)) {
+      appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
+        report_id: report.report_id,
+        report_seq: existing.report_seq,
+        reason: 'replay_after_reject',
+      })
+    }
   }
   // 第二步：schema 校验
   if (!report.report_id || report.report_id.length === 0) {
@@ -188,13 +199,25 @@ export function applyReport(
   // 第四、五步只对“完成”上报做证据与判定：失败、阻塞的回报不该被要求带通过证据
   let evidenceDigest: string | null = null
   if (report.status === 'done') {
+    // 证据强度先按模板要求校验：不可逆节点只给 exitCode 不许收口（规格 4.7 行 380）
     const evidence = evaluateEvidence(report, policy.requiredHashes ?? [])
     if (!evidence.ok) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
     }
+    // 系统级证据门：弱证据、工具失败都不许直落 done（审计 R3-03）
+    const systemReason = systemEvidenceGate(report)
+    if (systemReason) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: systemReason, now: params.now })
+    }
+    // 判定条件：模板条件是基线，节点只能追加更严的条件（规格 4.7 行 390）
     const verdict = evaluatePassConditions(policy.passConditions, evidence.normalized)
     if (!verdict.pass) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: verdict.reason ?? 'verdict_unmet', now: params.now })
+    }
+    // 证据要跟账本里的工具执行痕迹对得上：伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
+    const bindReason = traceBindingGate(tx, params, report)
+    if (bindReason) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: bindReason, now: params.now })
     }
     evidenceDigest = evidence.digest
   }
@@ -244,4 +267,29 @@ export function applyReport(
     evidence_digest: evidenceDigest,
   })
   return { accepted: true, next_status: report.status, registry_state: 'applied' }
+}
+
+// 系统级证据门：done 报告的证据必须来自执行器真跑出来的工具，而且工具本身得成功
+// 空证据、弱证据（模型侧 tool_result）、工具失败都不许直落终态（审计 R3-03）
+function systemEvidenceGate(report: Report): string | null {
+  const ev = report.evidence
+  if (!ev) return 'evidence_missing'
+  // 只有执行器跑出来的强证据能收口（规格 4.7 行 380-383）
+  if (ev.source !== 'run_tool') return 'verification_too_weak'
+  if (typeof ev.exitCode !== 'number') return 'evidence_missing'
+  if (ev.exitCode !== 0) return 'tool_execution_failed'
+  return null
+}
+
+// 痕迹绑定门：证据要跟账本里的工具执行痕迹对得上，伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
+function traceBindingGate(tx: Tx, params: ApplyReportParams, report: Report): string | null {
+  const ev = report.evidence
+  if (!ev) return 'evidence_missing'
+  const rows = tx.all<{ exit_code: number; stdout_hash: string | null }>(
+    'SELECT exit_code, stdout_hash FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
+    [params.nodeRunId, params.attempt],
+  )
+  const matched = rows.some((r) => r.exit_code === ev.exitCode && (r.stdout_hash ?? '') === (ev.stdoutHash ?? ''))
+  if (!matched) return 'evidence_unverifiable'
+  return null
 }

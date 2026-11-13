@@ -12,11 +12,11 @@ import { WriteQueue } from '../src/service/write-queue.ts'
 import { backup, restore, sha256File, verifyBackup } from '../src/infra/backup.ts'
 import { eventSeqs, freshLedger, seed, TEST_SECRET } from '../tests/fixtures/ledger.ts'
 import { inTx } from '../src/infra/db/tx.ts'
-import { acquireLease } from '../src/service/commands/lease.ts'
+import { acquireLease, loadNodeRun } from '../src/service/commands/lease.ts'
 import { applyReport } from '../src/service/commands/apply-report.ts'
 import { applyCancel } from '../src/service/commands/cancel.ts'
-import { MonotonicClock, deadlineFromRow } from '../src/core/clock.ts'
-import { rearmDeadline } from '../src/service/commands/node-state.ts'
+import { MonotonicClock, deadlineFromRow, ScriptedClock } from '../src/core/clock.ts'
+import { rearmDeadline, transitionNode } from '../src/service/commands/node-state.ts'
 import { sweep } from '../src/service/sweep.ts'
 import { createOrchestra } from '../src/index.ts'
 import { startServer } from '../src/service/server.ts'
@@ -26,7 +26,8 @@ import type { HostAgentFactory } from '../src/executor/session.ts'
 import type { Db } from '../src/infra/sqlite/driver.ts'
 
 export type InjectionCase = 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-07' | 'G-08' | 'G-09' | 'G-14' | 'G-15'
-  | 'ev-g2-01' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
+  | 'ev-g2-01' | 'ev-g2-02' | 'ev-g2-03' | 'ev-g2-04' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
+  | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11'
 
 export type InjectionResult = {
   case: InjectionCase
@@ -530,14 +531,16 @@ async function caseG07(): Promise<InjectionResult> {
 type HttpBoot = { endpoint: string; file: string; db: Db; close: () => Promise<void> }
 
 // 起真服务：真库、真路由、真执行器；工具固定回 ok，重跑字节一致
-async function bootHttp(secret: string): Promise<HttpBoot> {
+async function bootHttp(secret: string, opts?: { failingTool?: boolean }): Promise<HttpBoot> {
   const dir = mkdtempSync(join(tmpdir(), 'orch-ev-'))
   const file = join(dir, 'orchestra.db')
   const registry = new ToolRegistry()
   registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
+  // 故意失败的工具：宿主直接回非零退出码，用来验「工具失败不许落完成」
+  if (opts?.failingTool) registry.register({ name: 'ro.fail', capability: 'read_only', command: { bin: 'ro-fail-bin', args: ['boom'] } })
   const host: HostRunner = {
     readonlyAvailable: () => true,
-    run: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '' }),
+    run: async (input) => (input.bin === 'ro-fail-bin' ? { exitCode: 1, stdout: '', stderr: 'boom: 工具故意失败' } : { exitCode: 0, stdout: 'ok\n', stderr: '' }),
   }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_ev', sessionId: 'sess_ev' }) }
   const runner = new ReadOnlyToolRunner(registry, host, dir)
@@ -742,6 +745,357 @@ async function caseEvG207(): Promise<InjectionResult> {
       + '；账本事件=' + JSON.stringify(eventRows),
   }
 }
+// ev-g2-08：工具失败不许落完成——失败由系统判，节点卡在 blocked_post 并留 verify_human（审计 R3-01）
+async function caseEvG208(): Promise<InjectionResult> {
+  const secret = 'ev-g2-08-secret'
+  const boot = await bootHttp(secret, { failingTool: true })
+  const before = dumpProduction(boot.file)
+  // 判定条件故意留空：失败必须由系统判，不许外包给模板条件
+  const def = { workflow_version: '8', pass_conditions: [], nodes: [{ node_id: 'check', type: 'agent' }] }
+  const loaded = await postJson(boot.endpoint, '/v1/workflows/load', def, secret)
+  const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '工具失败不许落完成', workflowVersion: '8', now: EV_NOW }, secret)
+  const createdData = created.body?.data ?? {}
+  const dispatched = await postJson(boot.endpoint, '/v1/runs/dispatch', {
+    runId: createdData.run_id,
+    nodes: { check: { toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.fail', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    now: EV_NOW,
+  }, secret)
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, action_generation, tool_start_at, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()
+  const toolRows = boot.db.raw.prepare('SELECT node_run_id, attempt, tool, exit_code, stdout_hash, command_hash FROM tool_executions ORDER BY node_run_id ASC').all()
+  const registry = boot.db.raw.prepare('SELECT report_id, attempt, report_seq, state FROM report_registry ORDER BY report_seq ASC').all()
+  const human = boot.db.raw.prepare("SELECT seq, type, payload FROM node_run_events WHERE type = 'verify_human' ORDER BY seq ASC").all()
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-08',
+    params: { db: boot.file, 入口: 'POST /v1/workflows/load → POST /v1/runs → POST /v1/runs/dispatch', workflow_version: '8', 工具: 'ro.fail（宿主回 exitCode 1）', 判定条件: '空（失败必须由系统判，不外包给模板）' },
+    before, after,
+    reconcile: '加载 HTTP=' + String(loaded.status)
+      + '；建 run HTTP=' + String(created.status)
+      + '；派发 HTTP=' + String(dispatched.status) + ' 返回=' + JSON.stringify(dispatched.body?.data ?? dispatched.body)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；工具痕迹=' + JSON.stringify(toolRows)
+      + '；上报登记=' + JSON.stringify(registry)
+      + '；verify_human=' + JSON.stringify(human)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
+// ev-g2-09：判定时限只认 boot_id 与单调纳秒——墙钟跳变、跨 boot、没锚点都不许误判超时（审计 R3-02）
+async function caseEvG209(): Promise<InjectionResult> {
+  const secret = 'ev-g2-09-secret'
+  const boot = await bootHttp(secret)
+  const before = dumpProduction(boot.file)
+  const def = { workflow_version: '9', pass_conditions: [], nodes: [{ node_id: 'check', type: 'agent' }] }
+  await postJson(boot.endpoint, '/v1/workflows/load', def, secret)
+
+  // 真入口建节点并推到 started
+  const startNode = async (title: string, tag: string): Promise<{ nodeRunId: string; generation: number }> => {
+    const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: title, workflowVersion: '9', now: EV_NOW }, secret)
+    const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+    const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+    const generation = Number(leased.body?.data?.action_generation ?? 0)
+    await postJson(boot.endpoint, '/v1/node-runs/report', {
+      nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation, now: EV_NOW,
+      report: { report_id: 'rpt_ev09_started_' + tag, node_run_id: nodeRunId, attempt: 1, status: 'started' },
+    }, secret)
+    return { nodeRunId, generation }
+  }
+
+  // 挂判定锚点：墙钟只作展示，判定列写 boot_id 与单调纳秒（规格 3.4 行 171）
+  const anchorVerifying = (nodeRunId: string, bootId: string): void => {
+    withTx(boot.db, (tx) => {
+      const row = loadNodeRun(tx, nodeRunId)
+      transitionNode(tx, secret, {
+        nodeRunId, from: 'started', to: 'verifying',
+        attempt: row.attempt, revision: row.revision, now: EV_NOW, reason: 'work_submitted',
+        verifyTimeoutMs: 10000,
+        verifyAnchor: { bootId, monotonicNs: 0, wallClockMs: Date.parse(EV_NOW) },
+      })
+    })
+  }
+
+  // 场景一：墙钟向前跳十分钟、单调钟只走五秒——漂移超差只能判不确定，不许误判超时
+  const a = await startNode('墙钟跳变不误判超时', 'a')
+  anchorVerifying(a.nodeRunId, 'boot_ev09_a')
+  const clockA = new ScriptedClock('boot_ev09_a', { wallClockMs: Date.parse(EV_NOW), monotonicNs: 0 })
+  clockA.advanceMs(5000)
+  clockA.setWallClockMs(Date.parse(EV_NOW) + 600000)
+  const sweepA = sweep(boot.db, secret, { now: EV_NOW, clock: clockA })
+
+  // 场景二：单调钟与墙钟同步走满预算——判定时限真的到点，才转阻塞
+  const b = await startNode('判定预算走完转阻塞', 'b')
+  anchorVerifying(b.nodeRunId, 'boot_ev09_a')
+  const clockB = new ScriptedClock('boot_ev09_a', { wallClockMs: Date.parse(EV_NOW), monotonicNs: 0 })
+  clockB.advanceMs(11000)
+  clockB.setWallClockMs(Date.parse(EV_NOW) + 11000)
+  const sweepB = sweep(boot.db, secret, { now: EV_NOW, clock: clockB })
+
+  // 场景三：判定中途重启——跨 boot 只能判不确定，不许拿旧预算硬判超时
+  const c = await startNode('跨 boot 不误判超时', 'c')
+  anchorVerifying(c.nodeRunId, 'boot_ev09_a')
+  const clockC = new ScriptedClock('boot_ev09_a', { wallClockMs: Date.parse(EV_NOW), monotonicNs: 0 })
+  clockC.advanceMs(5000)
+  clockC.setWallClockMs(Date.parse(EV_NOW) + 5000)
+  clockC.reboot('boot_ev09_b')
+  const sweepC = sweep(boot.db, secret, { now: EV_NOW, clock: clockC })
+
+  // 场景四：报告入口没有锚点——没有判定依据就等人来看，不自动判超时
+  const d = await startNode('没有锚点不自动判超时', 'd')
+  await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId: d.nodeRunId, attempt: 1, expectedStatus: 'started', generation: d.generation, now: EV_NOW,
+    report: { report_id: 'rpt_ev09_verifying_d', node_run_id: d.nodeRunId, attempt: 1, status: 'verifying' },
+  }, secret)
+  const clockD = new ScriptedClock('boot_ev09_a', { wallClockMs: Date.parse(EV_NOW) + 600000, monotonicNs: 0 })
+  const sweepD = sweep(boot.db, secret, { now: EV_NOW, clock: clockD })
+
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, verify_deadline_at, verify_deadline_boot_id, verify_deadline_monotonic_ns, verify_remaining_ns FROM node_runs ORDER BY node_run_id ASC').all()
+  const human = boot.db.raw.prepare("SELECT seq, type, payload FROM node_run_events WHERE type = 'verify_human' ORDER BY seq ASC").all()
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  const registry = boot.db.raw.prepare('SELECT report_id, attempt, report_seq, state FROM report_registry ORDER BY report_seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-09',
+    params: { db: boot.file, 入口: 'POST /v1/runs → POST /v1/node-runs/lease → POST /v1/node-runs/report → sweep', workflow_version: '9', 判定预算: '10000 毫秒', 锚点: 'boot_ev09_a / 单调纳秒 0' },
+    before, after,
+    reconcile: '墙钟跳十分钟：超时=' + JSON.stringify(sweepA.verify_timed_out) + ' 不确定=' + JSON.stringify(sweepA.verify_uncertain)
+      + '；预算走完：超时=' + JSON.stringify(sweepB.verify_timed_out) + ' 不确定=' + JSON.stringify(sweepB.verify_uncertain)
+      + '；跨 boot：超时=' + JSON.stringify(sweepC.verify_timed_out) + ' 不确定=' + JSON.stringify(sweepC.verify_uncertain)
+      + '；没有锚点：超时=' + JSON.stringify(sweepD.verify_timed_out) + ' 不确定=' + JSON.stringify(sweepD.verify_uncertain)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；verify_human=' + JSON.stringify(human)
+      + '；上报登记=' + JSON.stringify(registry)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
+// ev-g2-10：报告入口的系统级证据门——伪造的完成进不来，真跑出来的照样收口（审计 R3-03）
+async function caseEvG210(): Promise<InjectionResult> {
+  const secret = 'ev-g2-10-secret'
+  const boot = await bootHttp(secret)
+  const before = dumpProduction(boot.file)
+  const loaded = await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
+  const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '报告入口证据门', workflowVersion: '1', now: EV_NOW }, secret)
+  const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const gen = Number(leased.body?.data?.action_generation ?? 0)
+  await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev10_started', node_run_id: nodeRunId, attempt: 1, status: 'started' },
+  }, secret)
+  await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'started', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev10_verifying', node_run_id: nodeRunId, attempt: 1, status: 'verifying' },
+  }, secret)
+  // 伪造的强证据：看着像执行器跑出来的，其实账本里没有这条工具痕迹
+  const forged = await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'verifying', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev10_forged_done', node_run_id: nodeRunId, attempt: 1, status: 'done', evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'deadbeef', stderrHash: 'deadbeef', hashes: {}, producedAt: EV_NOW } },
+  }, secret)
+  // 弱来源的证据：来源不是执行器跑出来的
+  const weak = await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'verifying', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev10_weak_done', node_run_id: nodeRunId, attempt: 1, status: 'done', evidence: { source: 'tool_result', exitCode: 0, stdoutHash: 'deadbeef' } },
+  }, secret)
+  // 空证据：什么都没带
+  const empty = await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'verifying', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev10_empty_done', node_run_id: nodeRunId, attempt: 1, status: 'done' },
+  }, secret)
+  // 对照组：真派发真工具，证据门不许把正常路堵死
+  const control = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '真派发对照', workflowVersion: '1', now: EV_NOW }, secret)
+  const controlDispatch = await postJson(boot.endpoint, '/v1/runs/dispatch', {
+    runId: control.body?.data?.run_id,
+    nodes: { check: { toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    now: EV_NOW,
+  }, secret)
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()
+  const toolRows = boot.db.raw.prepare('SELECT node_run_id, attempt, tool, exit_code, stdout_hash FROM tool_executions ORDER BY node_run_id ASC').all()
+  const registry = boot.db.raw.prepare('SELECT report_id, node_run_id, attempt, report_seq, state FROM report_registry ORDER BY report_seq ASC').all()
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-10',
+    params: { db: boot.file, 入口: 'POST /v1/node-runs/report（伪造三条）＋对照真派发', workflow_version: '1', 伪造证据: 'run_tool 强证据 / tool_result 弱来源 / 空证据' },
+    before, after,
+    reconcile: '加载 HTTP=' + String(loaded.status)
+      + '；建 run HTTP=' + String(created.status)
+      + '；伪造强证据返回=' + JSON.stringify(forged.body?.data ?? forged.body)
+      + '；弱来源证据返回=' + JSON.stringify(weak.body?.data ?? weak.body)
+      + '；空证据返回=' + JSON.stringify(empty.body?.data ?? empty.body)
+      + '；对照派发 HTTP=' + String(controlDispatch.status) + ' 返回=' + JSON.stringify(controlDispatch.body?.data ?? controlDispatch.body)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；工具痕迹=' + JSON.stringify(toolRows)
+      + '；上报登记=' + JSON.stringify(registry)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+// ev-g2-02：重复上报只落一次——同一个 report_id 连投三次，账本只留一条落账（审计 R3-04）
+async function caseEvG202(): Promise<InjectionResult> {
+  const secret = 'ev-g2-02-secret'
+  const boot = await bootHttp(secret)
+  const before = dumpProduction(boot.file)
+  await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
+  const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '重复上报只落一次', workflowVersion: '1', now: EV_NOW }, secret)
+  const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const gen = Number(leased.body?.data?.action_generation ?? 0)
+  const body = {
+    nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev02_same', node_run_id: nodeRunId, attempt: 1, status: 'started' },
+  }
+  const first = await postJson(boot.endpoint, '/v1/node-runs/report', body, secret)
+  const second = await postJson(boot.endpoint, '/v1/node-runs/report', body, secret)
+  const third = await postJson(boot.endpoint, '/v1/node-runs/report', body, secret)
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision, action_generation FROM node_runs ORDER BY node_run_id ASC').all()
+  const applied = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_applied'").get() as { n: number }
+  const replayed = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_replayed'").get() as { n: number }
+  const rejected = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_rejected'").get() as { n: number }
+  const registry = boot.db.raw.prepare('SELECT report_id, attempt, report_seq, state FROM report_registry ORDER BY report_seq ASC').all()
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-02',
+    params: { db: boot.file, 入口: 'POST /v1/node-runs/report', 节点: nodeRunId, 报告: '同一个 report_id 连投三次' },
+    before, after,
+    reconcile: '第一次 HTTP=' + String(first.status) + ' 返回=' + JSON.stringify(first.body?.data ?? first.body)
+      + '；第二次 HTTP=' + String(second.status) + ' 返回=' + JSON.stringify(second.body?.data ?? second.body)
+      + '；第三次 HTTP=' + String(third.status) + ' 返回=' + JSON.stringify(third.body?.data ?? third.body)
+      + '；report_applied 条数=' + String(applied.n)
+      + '；report_replayed 条数=' + String(replayed.n)
+      + '；report_rejected 条数=' + String(rejected.n)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；上报登记=' + JSON.stringify(registry)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
+// ev-g2-03：租约过期迟到上报被拒——租约只给 1 秒，执行器 5 秒后才回话（审计 R3-11）
+async function caseEvG203(): Promise<InjectionResult> {
+  const secret = 'ev-g2-03-secret'
+  const boot = await bootHttp(secret)
+  const before = dumpProduction(boot.file)
+  await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
+  const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '租约过期迟到上报被拒', workflowVersion: '1', now: EV_NOW }, secret)
+  const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 1000, now: EV_NOW }, secret)
+  const gen = Number(leased.body?.data?.action_generation ?? 0)
+  const late = await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: '2026-11-13T03:00:05.000Z',
+    report: { report_id: 'rpt_ev03_late', node_run_id: nodeRunId, attempt: 1, status: 'started' },
+  }, secret)
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision, action_generation, lease_expires_at FROM node_runs ORDER BY node_run_id ASC').all()
+  const registry = boot.db.raw.prepare('SELECT report_id, attempt, report_seq, state FROM report_registry ORDER BY report_seq ASC').all()
+  const applied = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_applied'").get() as { n: number }
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-03',
+    params: { db: boot.file, 入口: 'POST /v1/node-runs/lease → POST /v1/node-runs/report', 节点: nodeRunId, 租约毫秒: 1000, 迟到毫秒: 5000 },
+    before, after,
+    reconcile: '租约 HTTP=' + String(leased.status) + ' 到期=' + String(leased.body?.data?.expires_at ?? '')
+      + '；迟到上报 HTTP=' + String(late.status) + ' 错误=' + JSON.stringify(late.body?.error ?? late.body)
+      + '；report_applied 条数=' + String(applied.n)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；上报登记=' + JSON.stringify(registry)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
+// ev-g2-04：取消后不产生新 attempt——作废后 attempt 仍是 1，迟到上报按 attempt 不符被拒（审计 R3-11）
+async function caseEvG204(): Promise<InjectionResult> {
+  const secret = 'ev-g2-04-secret'
+  const boot = await bootHttp(secret)
+  const before = dumpProduction(boot.file)
+  await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
+  // 节点一：还没派发就取消——直接作废，不进围栏、不产生新 attempt
+  const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '取消后不产生新 attempt', workflowVersion: '1', now: EV_NOW }, secret)
+  const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  const rev1 = Number((boot.db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId) as { revision: number }).revision)
+  const cancelled = await postJson(boot.endpoint, '/v1/node-runs/cancel', {
+    nodeRunId, attempt: 1, revision: rev1, cancelResult: 'not_interruptible', now: EV_NOW, graceMs: 1000,
+  }, secret)
+  // 取消后还想按新 attempt 上报：按 attempt 不符被拒，不许新起一轮
+  const lateNewAttempt = await postJson(boot.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 2, expectedStatus: 'superseded', generation: 0, now: EV_NOW,
+    report: { report_id: 'rpt_ev04_new_attempt', node_run_id: nodeRunId, attempt: 2, status: 'started' },
+  }, secret)
+  // 节点二：派发后取消——只立一次围栏，attempt 同样不涨
+  const created2 = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '派发后取消只立一次围栏', workflowVersion: '1', now: EV_NOW }, secret)
+  const nodeRunId2 = String(created2.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId: nodeRunId2, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const rev2 = Number((boot.db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId2) as { revision: number }).revision)
+  const cancelled2 = await postJson(boot.endpoint, '/v1/node-runs/cancel', {
+    nodeRunId: nodeRunId2, attempt: 1, revision: rev2, cancelResult: 'interrupted', now: EV_NOW, graceMs: 1000,
+  }, secret)
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision, action_generation, fence_state, cancel_result FROM node_runs ORDER BY node_run_id ASC').all()
+  const armed = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'fence_armed'").get() as { n: number }
+  const registry = boot.db.raw.prepare('SELECT report_id, attempt, report_seq, state FROM report_registry ORDER BY report_seq ASC').all()
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-04',
+    params: { db: boot.file, 入口: 'POST /v1/node-runs/cancel → POST /v1/node-runs/report', 节点: nodeRunId, 取消结果: 'not_interruptible（未派发） / interrupted（派发后）' },
+    before, after,
+    reconcile: '未派发就取消 HTTP=' + String(cancelled.status) + ' 返回=' + JSON.stringify(cancelled.body?.data ?? cancelled.body)
+      + '；取消后按 attempt=2 上报 HTTP=' + String(lateNewAttempt.status) + ' 返回=' + JSON.stringify(lateNewAttempt.body?.data ?? lateNewAttempt.body)
+      + '；派发后取消 HTTP=' + String(cancelled2.status) + ' 返回=' + JSON.stringify(cancelled2.body?.data ?? cancelled2.body)
+      + '；fence_armed 条数=' + String(armed.n)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；上报登记=' + JSON.stringify(registry)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
+// ev-g2-11：反复重投同一条被拒的报告——账本不许被重试刷膨胀（审计 R3-04）
+async function caseEvG211(): Promise<InjectionResult> {
+  const secret = 'ev-g2-11-secret'
+  const boot = await bootHttp(secret)
+  const before = dumpProduction(boot.file)
+  await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
+  const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '反复重投被拒报告', workflowVersion: '1', now: EV_NOW }, secret)
+  const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  // 节点还在排队，故意报一个对不上的状态：每次都被拒，登记在 rejected 与 replayed 之间来回翻
+  const body = {
+    nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: 0, now: EV_NOW,
+    report: { report_id: 'rpt_ev11_retry', node_run_id: nodeRunId, attempt: 1, status: 'started' },
+  }
+  const codes: number[] = []
+  const results: unknown[] = []
+  for (let i = 0; i < 4; i += 1) {
+    const res = await postJson(boot.endpoint, '/v1/node-runs/report', body, secret)
+    codes.push(res.status)
+    results.push(res.body?.data ?? res.body)
+  }
+  const rejected = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_rejected'").get() as { n: number }
+  const replayed = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_replayed'").get() as { n: number }
+  const applied = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_applied'").get() as { n: number }
+  const registry = boot.db.raw.prepare('SELECT report_id, attempt, report_seq, state FROM report_registry ORDER BY report_seq ASC').all()
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision FROM node_runs ORDER BY node_run_id ASC').all()
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-11',
+    params: { db: boot.file, 入口: 'POST /v1/node-runs/report', 节点: nodeRunId, 报告: '同一个 report_id 连投四次（每次都被拒）' },
+    before, after,
+    reconcile: '四次 HTTP 码=' + JSON.stringify(codes)
+      + '；逐次返回=' + JSON.stringify(results)
+      + '；report_rejected 条数=' + String(rejected.n)
+      + '；report_replayed 条数=' + String(replayed.n)
+      + '；report_applied 条数=' + String(applied.n)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；上报登记=' + JSON.stringify(registry)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
 export async function runCase(name: InjectionCase): Promise<InjectionResult> {
   switch (name) {
     case 'G-01': return caseG01()
@@ -758,6 +1112,13 @@ export async function runCase(name: InjectionCase): Promise<InjectionResult> {
     case 'ev-g2-05': return caseEvG205()
     case 'ev-g2-06': return caseEvG206()
     case 'ev-g2-07': return caseEvG207()
+    case 'ev-g2-08': return caseEvG208()
+    case 'ev-g2-09': return caseEvG209()
+    case 'ev-g2-10': return caseEvG210()
+    case 'ev-g2-02': return caseEvG202()
+    case 'ev-g2-03': return caseEvG203()
+    case 'ev-g2-04': return caseEvG204()
+    case 'ev-g2-11': return caseEvG211()
   }
 }
 
@@ -765,7 +1126,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const idx = process.argv.indexOf('--case')
   const name = (idx >= 0 ? process.argv[idx + 1] : 'G-01') as InjectionCase
   const out = await runCase(name)
-  const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07'].includes(name) ? 'G2' : 'G1'
+  const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11'].includes(name) ? 'G2' : 'G1'
   writeEvidence(join(process.cwd(), 'docs/gates/evidence/' + gate), out)
   console.log(JSON.stringify(out, null, 2))
 }

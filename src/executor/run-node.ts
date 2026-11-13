@@ -11,6 +11,7 @@ import { acquireNodeRun, submitReport, type RuntimeDeps } from '../service/comma
 import { checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
 import { assertCommandHash, commandHashOf, resolveInside, type ReadOnlyToolRunner, type StrongEvidence, type ToolRegistry } from './tools.ts'
 import { canTransition } from '../core/state-machine.ts'
+import type { ClockProvider } from '../core/clock.ts'
 
 export type RunNodeParams = {
   nodeRunId: string
@@ -106,12 +107,49 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
         stderrHash: out.evidence.stderrHash,
         commandHash: out.evidence.commandHash,
       })
+      // 工具执行痕迹落库：收口时拿它核对「这条 done 报告的证据是不是真跑出来的」（审计 R3-03）
+      withTx(deps.db, (tx) => {
+        tx.run(
+          'INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            p.nodeRunId,
+            p.attempt,
+            tool.command,
+            out.evidence.exitCode,
+            out.evidence.stdoutHash ?? null,
+            out.evidence.stderrHash ?? null,
+            out.evidence.commandHash ?? null,
+            p.now,
+            p.now,
+          ],
+        )
+        appendNodeRunEvent(tx, deps.secret, p.nodeRunId, 'tool_finished', {
+          tool: tool.command,
+          attempt: p.attempt,
+          exit_code: out.evidence.exitCode,
+          stdout_hash: out.evidence.stdoutHash ?? null,
+          stderr_hash: out.evidence.stderrHash ?? null,
+          command_hash: out.evidence.commandHash ?? null,
+        })
+      })
       if (out.evidence.exitCode !== 0) break
     }
   } catch (err) {
     // 执行器抛错也要把节点落到可被人看见的位置，不许留在 verifying 死等
     markBlocked(deps, p, 'tool_execution_failed')
     throw err
+  }
+
+  // 系统级判失败：任一工具 exitCode≠0 就中断后续工具，节点不许落 done（审计 R3-01）
+  const failedTool = trace.find((t) => t.exitCode !== 0)
+  if (failedTool) {
+    // 工具失败就不许收口：节点落 blocked_post，异常抛出去让调用方看见（审计 R3-01）
+    markBlocked(deps, p, 'tool_execution_failed')
+    throw new OrchError('VERDICT_POLICY_UNMET', '节点没过判定条件：工具 exitCode 不是 0，收口被拒', {
+      nodeRunId: p.nodeRunId,
+      tool: failedTool.tool,
+      exit_code: failedTool.exitCode,
+    })
   }
 
   withTx(deps.db, (tx) => {
@@ -125,6 +163,8 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
       now: p.now,
       reason: 'work_submitted',
       verifyTimeoutMs: p.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+      // 判定锚点：墙钟只作展示，判定只读 boot_id 与单调纳秒（规格 3.4 行 171）
+      verifyAnchor: deps.runtime.clock ? anchorOf(deps.runtime.clock, p.now) : undefined,
     })
   })
 
@@ -146,6 +186,12 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
     })
   }
   return { node_run_id: p.nodeRunId, final_status: applied.next_status ?? 'unknown', evidence, agent_id: agent.agentId }
+}
+
+// 判定锚点：取一次时钟采样，墙钟给展示用，单调纳秒给判定用（规格 3.4 行 171）
+function anchorOf(clock: ClockProvider, now: string): { bootId: string; monotonicNs: number; wallClockMs: number } {
+  const sample = clock.sample()
+  return { bootId: sample.bootId, monotonicNs: sample.monotonicNs, wallClockMs: Date.parse(now) }
 }
 
 // 失败或证据不足：从当前非终态落到 blocked_post，并留一条 verify_human 说明为什么卡住

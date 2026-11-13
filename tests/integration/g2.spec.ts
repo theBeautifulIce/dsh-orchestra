@@ -51,6 +51,10 @@ describe('G2 门必过项', () => {
     const { db } = freshLedger(); seed(db)
     seedQueued(db, 'nrun_g2_01')
     lease(db, 'nrun_g2_01')
+    // 工具执行痕迹：done 报告的证据要对得上它（审计 R3-03）
+    inTx(db, (tx) => {
+      tx.run("INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nrun_g2_01', 1, 'ro.echo', 0, ?, NULL, 'cmdhash', ?, ?)", [HASH_A, NOW, NOW])
+    })
     let expected = 'dispatched'
     for (const target of ['started', 'verifying', 'done']) {
       const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {

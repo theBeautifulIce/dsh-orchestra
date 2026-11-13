@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { freshLedger, seed, TEST_SECRET } from './fixtures/ledger.ts'
 import { withTx } from '../src/infra/sqlite/driver.ts'
-import { acquireLease } from '../src/service/commands/lease.ts'
+import { acquireLease, loadNodeRun } from '../src/service/commands/lease.ts'
 import { applyCancel } from '../src/service/commands/cancel.ts'
 import { applyReport, type ApplyPolicy } from '../src/service/commands/apply-report.ts'
 import { sweep } from '../src/service/sweep.ts'
+import { ScriptedClock } from '../src/core/clock.ts'
+import { transitionNode } from '../src/service/commands/node-state.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const GRACE = '2026-11-13T03:00:30.000Z'
@@ -21,6 +23,32 @@ function setup(nodeRunId = 'nr_sw') {
     )
   })
   withTx(db, (tx) => acquireLease(tx, TEST_SECRET, { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: NOW }))
+  return db
+}
+
+// 单调钟与墙钟一起推进：只推进单调钟会被当成漂移（阈值 2 秒，规格 3.4 行 171）
+const tick = (clock: ScriptedClock, ms: number) => {
+  clock.advanceMs(ms)
+  clock.setWallClockMs(clock.sample().wallClockMs + ms)
+}
+
+// 走到 verifying 并挂上判定锚点：墙钟只作展示，判定读 boot_id 与单调纳秒（规格 3.4 行 171）
+function setupVerifying(clock: ScriptedClock, nodeRunId = 'nr_sw') {
+  const db = setup(nodeRunId)
+  const anchor = { bootId: clock.bootId, monotonicNs: clock.sample().monotonicNs, wallClockMs: Date.parse(NOW) }
+  withTx(db, (tx) => {
+    const dispatched = loadNodeRun(tx, nodeRunId)
+    transitionNode(tx, TEST_SECRET, {
+      nodeRunId, from: 'dispatched', to: 'started',
+      attempt: dispatched.attempt, revision: dispatched.revision, now: NOW, reason: 'executor_started',
+    })
+    const started = loadNodeRun(tx, nodeRunId)
+    transitionNode(tx, TEST_SECRET, {
+      nodeRunId, from: 'started', to: 'verifying',
+      attempt: started.attempt, revision: started.revision, now: NOW, reason: 'work_submitted',
+      verifyTimeoutMs: 10000, verifyAnchor: anchor,
+    })
+  })
   return db
 }
 
@@ -117,21 +145,67 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(again.lease_expired).toEqual([])
   })
 
-  it('判定时限到点：verifying 转 blocked_post 并留 verify_human；没到点不动', () => {
-    const db = setup()
-    withTx(db, (tx) => {
-      tx.run("UPDATE node_runs SET status='verifying', verify_deadline_at=? WHERE node_run_id='nr_sw'", ['2026-11-13T03:00:10.000Z'])
-    })
-    const early = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:05.000Z' })
-    expect(early.verify_timed_out).toEqual([])
+  it('判定时限没到点：节点还留在 verifying', () => {
+    const clock = new ScriptedClock('boot_a', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const db = setupVerifying(clock)
+    tick(clock, 5000)
+    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:05.000Z', clock })
+    expect(out.verify_timed_out).toEqual([])
+    expect(out.verify_uncertain).toEqual([])
     expect(row(db).status).toBe('verifying')
+  })
 
-    const late = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:11.000Z' })
-    expect(late.verify_timed_out).toEqual(['nr_sw'])
+  it('判定时限到点：转 blocked_post 并留 verify_human（verify_timeout）', () => {
+    const clock = new ScriptedClock('boot_a', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const db = setupVerifying(clock)
+    tick(clock, 11000)
+    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:11.000Z', clock })
+    expect(out.verify_timed_out).toEqual(['nr_sw'])
     expect(row(db).status).toBe('blocked_post')
     expect(row(db).verify_deadline_at).toBeNull()
     expect(evCount(db, 'verify_human')).toBe(1)
     const payload = db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nr_sw' AND type='verify_human'").get() as { payload: string }
     expect(JSON.parse(payload.payload).reason).toBe('verify_timeout')
+  })
+
+  it('墙钟跳十分钟：不误判超时，按不确定转阻塞（clock_drift）', () => {
+    const clock = new ScriptedClock('boot_a', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const db = setupVerifying(clock)
+    tick(clock, 5000)
+    clock.setWallClockMs(Date.parse(NOW) + 5000 + 600000)
+    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:10:05.000Z', clock })
+    expect(out.verify_timed_out).toEqual([])
+    expect(out.verify_uncertain).toEqual(['nr_sw'])
+    expect(row(db).status).toBe('blocked_post')
+    const payload = db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nr_sw' AND type='verify_human'").get() as { payload: string }
+    expect(JSON.parse(payload.payload).reason).toBe('timer_uncertain')
+    expect(JSON.parse(payload.payload).missing).toContain('clock_drift')
+  })
+
+  it('跨 boot：按不确定转阻塞，不拿墙钟硬判超时（boot_changed）', () => {
+    const clock = new ScriptedClock('boot_a', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const db = setupVerifying(clock)
+    clock.reboot('boot_b')
+    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:05.000Z', clock })
+    expect(out.verify_timed_out).toEqual([])
+    expect(out.verify_uncertain).toEqual(['nr_sw'])
+    const payload = db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nr_sw' AND type='verify_human'").get() as { payload: string }
+    expect(JSON.parse(payload.payload).reason).toBe('timer_uncertain')
+    expect(JSON.parse(payload.payload).missing).toContain('boot_changed')
+  })
+
+  it('没有判定锚点：按不确定转阻塞，不自动判超时', () => {
+    const clock = new ScriptedClock('boot_a', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const db = setup()
+    withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status='verifying', verify_deadline_at=? WHERE node_run_id='nr_sw'", ['2026-11-13T03:00:10.000Z'])
+    })
+    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:11.000Z', clock })
+    expect(out.verify_timed_out).toEqual([])
+    expect(out.verify_uncertain).toEqual(['nr_sw'])
+    expect(row(db).status).toBe('blocked_post')
+    const payload = db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nr_sw' AND type='verify_human'").get() as { payload: string }
+    expect(JSON.parse(payload.payload).reason).toBe('timer_uncertain')
+    expect(JSON.parse(payload.payload).missing).toContain('verify_deadline_anchor_missing')
   })
 })

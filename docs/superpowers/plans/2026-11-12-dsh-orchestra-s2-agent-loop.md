@@ -2878,7 +2878,7 @@ git commit -m "test(gate): 加 G2 集成用例与门记录"
 | `POST /v1/node-runs/lease` | 取租约（queued → leased → dispatched） | `nodeRunId`、`ownerEpoch`、`leaseTtlMs`、`now` |
 | `POST /v1/node-runs/report` | 上报收口（`applyReport` 六步） | `nodeRunId`、`attempt`、`report`、`expectedStatus`、`generation`、`now` |
 | `POST /v1/node-runs/run` | 执行器主链（`runNode`） | `nodeRunId`、`nodeId`、`attempt`、`toolPolicy`、`tools`、`now` |
-| `POST /v1/node-runs/cancel` | 取消与围栏（`cancelResult` 只许四个枚举值，非法值 400） | `nodeRunId`、`attempt`、`revision`、`cancelResult`、`now`、`graceMs` |
+| `POST /v1/node-runs/cancel` | 取消与围栏（`cancelResult` 只许四个枚举值，非法值 422） | `nodeRunId`、`attempt`、`revision`、`cancelResult`、`now`、`graceMs` |
 | `GET /health`、`GET /v1/tasks`、`GET /v1/events`、`POST /v1/ledger/events` | 健康、只读列表与账本追加 | — |
 
 这组路由是 S2 服务装配的入口，不实现也不声称实现规格 §6.1 的 workflow 命令语义。

@@ -10,12 +10,15 @@ import type { ApplyResult } from '../../core/report.ts'
 import { acquireLease, renewLease, loadNodeRun } from './lease.ts'
 import { sweep, type SweepResult } from '../sweep.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
+import type { ClockProvider } from '../../core/clock.ts'
 
 export type RuntimeDeps = {
   db: Db
   secret: string
   phase: Phase
   catalog: WorkflowCatalog
+  // 判定用的时钟：生产用系统时钟，测试与注入脚本用可编排时钟（规格 3.4 行 171）
+  clock?: ClockProvider
 }
 
 export type AcquireNodeRunResult = { lease_id: string; expires_at: string; action_generation: number }
@@ -66,5 +69,5 @@ export function submitCancel(deps: RuntimeDeps, p: {
 }
 
 export function sweepNow(deps: RuntimeDeps, now: string): SweepResult {
-  return sweep(deps.db, deps.secret, { now })
+  return sweep(deps.db, deps.secret, { now, clock: deps.clock })
 }

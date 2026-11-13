@@ -40,10 +40,15 @@ export class WorkflowCatalog {
   }
 
   // 节点收口用的判定条件：模板条件为基线，节点条件按 AND 追加（规格 6.1 行 837）
-  policyFor(version: string | number, nodeId: string): { passConditions: PassCondition[] } {
+  policyFor(version: string | number, nodeId: string): { passConditions: PassCondition[]; requiredHashes: string[] } {
     const def = this.get(version)
     const node = def.nodes.find((n) => n.node_id === nodeId)
     if (!node) throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '节点不在这个工作流版本里', { workflow_version: String(version), nodeId })
-    return { passConditions: mergePassConditions(def.pass_conditions ?? [], node.pass_conditions ?? []) }
+    // 必留哈希：模板要求与节点要求取并集，缺一个都不许收口（规格 4.7 行 380）
+    const requiredHashes = Array.from(new Set([...(def.required_hashes ?? []), ...(node.required_hashes ?? [])]))
+    return {
+      passConditions: mergePassConditions(def.pass_conditions ?? [], node.pass_conditions ?? []),
+      requiredHashes,
+    }
   }
 }

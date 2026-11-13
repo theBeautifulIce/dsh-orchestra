@@ -78,7 +78,7 @@ G-03 / G-04 / G-05 / G-07 四份证据由 `scripts/fault-inject.ts` 生成，各
 
 ### N-08 重大：queued 取消抛错；非法 cancelResult 被当 unknown → 已修
 
-- 改法：`src/service/commands/cancel.ts:40-53`——queued / leased 取消直接落 `superseded`，不进围栏、不产生新 attempt；`src/service/server.ts:67`、`220-232`——HTTP 边界校验 `cancelResult ∈ {interrupted, not_interruptible, already_stopped, unknown}`，非法值按 `PAYLOAD_SCHEMA_INVALID` 拒（400），不再被当成 unknown 静默接受。
+- 改法：`src/service/commands/cancel.ts:40-53`——queued / leased 取消直接落 `superseded`，不进围栏、不产生新 attempt；`src/service/server.ts:67`、`220-232`——HTTP 边界校验 `cancelResult ∈ {interrupted, not_interruptible, already_stopped, unknown}`，非法值按 `PAYLOAD_SCHEMA_INVALID` 拒（422），不再被当成 unknown 静默接受。
 - 用例：`tests/cancel.spec.ts`「queued 取消直接变 superseded，不进围栏」、`tests/routes.spec.ts` 边界用例。
 
 ### N-09 重大：门候选范围忽略删除，证据/签名可被重做 → 已修

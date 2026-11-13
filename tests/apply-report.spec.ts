@@ -8,13 +8,22 @@ import type { Report } from '../src/core/report.ts'
 const NOW = '2026-11-13T03:00:00.000Z'
 const POLICY: ApplyPolicy = { passConditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }] }
 
-function setup(opts: { ttl?: number; now?: string } = {}) {
+function setup(opts: { ttl?: number; now?: string; trace?: boolean } = {}) {
   const { db } = freshLedger(); seed(db)
   withTx(db, (tx) => {
     tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_ar', 'r1', 'n_ar', 5, 'agent', 2, 'queued', 10, ?, ?)", [NOW, NOW])
   })
   withTx(db, (tx) => acquireLease(tx, TEST_SECRET, { nodeRunId: 'nr_ar', ownerEpoch: 1, leaseTtlMs: opts.ttl ?? 600000, now: opts.now ?? NOW }))
   withTx(db, (tx) => tx.run("UPDATE node_runs SET status='verifying' WHERE node_run_id='nr_ar'"))
+  // 工具执行痕迹：done 报告的证据要对得上这条痕迹，伪造的 done 才分得开（审计 R3-03）
+  if (opts.trace !== false) {
+    withTx(db, (tx) => {
+      tx.run(
+        "INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nr_ar', 2, 'ro.echo', 0, 'h', NULL, 'cmdhash', ?, ?)",
+        [NOW, NOW],
+      )
+    })
+  }
   return db
 }
 
@@ -99,11 +108,11 @@ describe('applyReport 六步收口', () => {
     expect(events(db, 'report_applied')).toBe(0)
   })
 
-  it('第六步之前不许有副作用：判定不通过时 revision 不变、无 report_applied', () => {
+  it('第六步之前不许有副作用：工具失败时 revision 不变、无 report_applied', () => {
     const db = setup()
     const before = Number(nodeRow(db).revision)
     const out = apply(db, { evidence: { source: 'run_tool', exitCode: 1, hashes: {} } })
-    expect(out.reason).toContain('verdict_unmet')
+    expect(out.reason).toContain('tool_execution_failed')
     expect(Number(nodeRow(db).revision)).toBe(before)
     expect(events(db, 'report_applied')).toBe(0)
     expect(events(db, 'report_rejected')).toBe(1)
@@ -227,5 +236,71 @@ describe('阻塞凭据：卡住必须挂 verify_human（审计 N-01）', () => {
     expect(events(db, 'verify_human')).toBe(1)
     const ev = db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nr_ar' AND type='verify_human'").get() as { payload: string }
     expect(JSON.parse(ev.payload).reason).toBe('TOOL_FAILED')
+  })
+})
+
+describe('同一 report_id 的同类事件只留一条（审计 R3-04）', () => {
+  it('成功落账后反复重投：report_replayed 只留一条，节点不二次迁移', () => {
+    const db = setup()
+    apply(db)
+    const afterFirst = Number(nodeRow(db).revision)
+    for (let i = 0; i < 3; i += 1) {
+      const out = apply(db)
+      expect(out.accepted).toBe(false)
+    }
+    expect(events(db, 'report_applied')).toBe(1)
+    expect(events(db, 'report_replayed')).toBe(1)
+    expect(Number(nodeRow(db).revision)).toBe(afterFirst)
+  })
+
+  it('反复重投同一条被拒的报告：事件与登记都不许膨胀', () => {
+    const db = setup()
+    for (let i = 0; i < 4; i += 1) {
+      const out = apply(db, {}, 'dispatched')
+      expect(out.accepted).toBe(false)
+      expect(out.reason).toBe('status_mismatch')
+    }
+    expect(events(db, 'report_rejected')).toBe(1)
+    expect(events(db, 'report_replayed')).toBe(1)
+    expect(events(db, 'report_applied')).toBe(0)
+    const rows = db.raw.prepare("SELECT COUNT(*) AS n FROM report_registry WHERE report_id='rep_1'").get() as { n: number }
+    expect(rows.n).toBe(1)
+    expect(Number(registry(db).report_seq)).toBe(1)
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+})
+
+describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
+  it('伪造的 done：账本里没有工具执行痕迹 → evidence_unverifiable，节点不动', () => {
+    const db = setup({ trace: false })
+    const out = apply(db)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_unverifiable')
+    expect(nodeRow(db).status).toBe('verifying')
+    expect(events(db, 'report_applied')).toBe(0)
+  })
+
+  it('弱证据（模型侧 tool_result）→ verification_too_weak', () => {
+    const db = setup()
+    const out = apply(db, { evidence: { source: 'tool_result', exitCode: 0, stdoutHash: 'h', hashes: {} } })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('verification_too_weak')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('工具 exitCode 不是 0 → tool_execution_failed', () => {
+    const db = setup()
+    const out = apply(db, { evidence: { source: 'run_tool', exitCode: 2, stdoutHash: 'h', hashes: {} } })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('tool_execution_failed')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('痕迹里的 stdout_hash 对不上 → evidence_unverifiable', () => {
+    const db = setup()
+    const out = apply(db, { evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'other', hashes: {} } })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_unverifiable')
+    expect(nodeRow(db).status).toBe('verifying')
   })
 })

@@ -23,6 +23,8 @@ export type TransitionParams = {
   verifyHuman?: { reason: string; missing: string[] }
   // 进 verifying 时挂判定时限；不传就用默认 120 秒（规格 4.4 行 333）
   verifyTimeoutMs?: number
+  // 判定锚点：墙钟只作展示，判定只读 boot_id 与单调纳秒（规格 3.4 行 171）
+  verifyAnchor?: { bootId: string; monotonicNs: number; wallClockMs: number }
 }
 
 // verifying 的判定时限：规格 4.4 行 333 定的是 120 秒
@@ -53,14 +55,36 @@ export function transitionNode(tx: Tx, secret: string, params: TransitionParams)
     values.push(params.rearmGeneration)
   }
   // verify 时钟：进 verifying 挂钟，离开半态清钟（规格 4.4 行 328、333）
+  // 判定只读 boot_id 与单调纳秒；墙钟只是给人看的（规格 3.4 行 171）
   let verifyDeadlineAt: string | null = null
+  let verifyDeadlineBootId: string | null = null
+  let verifyDeadlineMonotonicNs: number | null = null
+  let verifyRemainingNs: number | null = null
   if (params.to === 'verifying') {
     const budgetMs = params.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS
-    verifyDeadlineAt = new Date(Date.parse(params.now) + budgetMs).toISOString()
+    const anchor = params.verifyAnchor
+    if (anchor) {
+      verifyDeadlineAt = new Date(anchor.wallClockMs + budgetMs).toISOString()
+      verifyDeadlineBootId = anchor.bootId
+      verifyDeadlineMonotonicNs = anchor.monotonicNs + Math.round(budgetMs * 1e6)
+      verifyRemainingNs = Math.round(budgetMs * 1e6)
+    } else {
+      // 没有锚点就没有判定依据：只留展示用墙钟，判定列留空，扫描时按不确定处理，不自动判超时（规格 3.4 行 171）
+      verifyDeadlineAt = new Date(Date.parse(params.now) + budgetMs).toISOString()
+    }
     sets.push('verify_deadline_at = ?')
     values.push(verifyDeadlineAt)
+    sets.push('verify_deadline_boot_id = ?')
+    values.push(verifyDeadlineBootId)
+    sets.push('verify_deadline_monotonic_ns = ?')
+    values.push(verifyDeadlineMonotonicNs)
+    sets.push('verify_remaining_ns = ?')
+    values.push(verifyRemainingNs)
   } else if (params.from === 'verifying') {
     sets.push('verify_deadline_at = NULL')
+    sets.push('verify_deadline_boot_id = NULL')
+    sets.push('verify_deadline_monotonic_ns = NULL')
+    sets.push('verify_remaining_ns = NULL')
   }
   values.push(params.nodeRunId, params.from, params.attempt, params.revision)
   // 条件里必须带 revision 与 attempt；受影响行数必须恰为 1（总纲 §4.4）
@@ -80,6 +104,8 @@ export function transitionNode(tx: Tx, secret: string, params: TransitionParams)
     decision_id: params.decisionId,
     verify_human: params.verifyHuman ?? null,
     verify_deadline_at: verifyDeadlineAt,
+    verify_deadline_boot_id: verifyDeadlineBootId,
+    verify_deadline_monotonic_ns: verifyDeadlineMonotonicNs,
   })
   // 没有裁决卡时，verify_human 事件就是 S2 的阻塞凭据；S3 按它生成真正的裁决卡
   if (blocking && !params.decisionId && params.verifyHuman) {

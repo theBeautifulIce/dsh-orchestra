@@ -14,6 +14,8 @@ import {
 import type { Phase } from './core/config.ts'
 import type { CancelResult } from './service/commands/cancel.ts'
 import { runNode, type RunNodeDeps } from './executor/run-node.ts'
+import { SystemClock } from './core/clock.ts'
+import { randomUUID } from 'node:crypto'
 
 export const name = 'dsh-orchestra'
 export const version = '0.1.0'
@@ -40,7 +42,9 @@ export function createOrchestra(opts: OrchestraOptions): Orchestra {
   const db = openDb(opts.dbFile)
   applySteps(db, loadSteps(defaultMigrationsDir()))
   const catalog = new WorkflowCatalog(opts.phase)
-  const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog }
+  // 生产时钟：墙钟与单调钟同时取样，漂移超过 2 秒就判不确定（规格 3.4 行 171）
+  const clock = new SystemClock(randomUUID())
+  const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
   const commands: NodeCommands = {
     acquireLease: (b) => acquireNodeRun(runtime, b),
     report: (b) => submitReport(runtime, b as Parameters<typeof submitReport>[1]),
