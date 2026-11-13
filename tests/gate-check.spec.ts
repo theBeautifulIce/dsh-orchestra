@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -240,6 +240,30 @@ describe('门记录校验', { timeout: 30000 }, () => {
     }
   })
 
+  it('证据文件进入候选范围，门记录自身不进入（S1 第十一轮 P2）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gate-evidence-cand-'))
+    const run = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: root })
+    try {
+      run('init', '-q')
+      mkdirSync(join(root, 'docs/gates/evidence/G1'), { recursive: true })
+      writeFileSync(join(root, 'docs/gates/G1.md'), 'gate\n')
+      writeFileSync(join(root, 'docs/gates/G2.md'), 'gate2\n')
+      writeFileSync(join(root, 'docs/gates/evidence/G1/e.md'), 'old\n')
+      writeFileSync(join(root, 'code.txt'), 'code\n')
+      run('add', '.')
+      run('commit', '-q', '-m', 'base')
+      const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString('utf8').trim()
+      writeFileSync(join(root, 'docs/gates/evidence/G1/e.md'), 'new\n')
+      run('add', '-A')
+      run('commit', '-q', '-m', 'change evidence')
+      const out = candidateEntries(root, { scopeBase: base, excludes: ['docs/gates/G1.md', 'docs/gates/G2.md'] })
+      expect(out.paths).toContain('docs/gates/evidence/G1/e.md')
+      expect(out.paths).not.toContain('docs/gates/G1.md')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('工作树有未提交改动时拒绝签门（审计 N-09）', () => {
     const scratch = join(process.cwd(), 'dirty-check-file.txt')
     writeFileSync(scratch, 'x')
@@ -342,6 +366,13 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('本报告结论为不通过\n\n>    结论：pass')).toBeNull()
     // 一个空格加一个 Tab 也是缩进代码。
     expect(auditConclusionOf('本报告结论为不通过\n\n \t结论：pass')).toBeNull()
+  })
+
+  it('链接引用定义的续行也不参与判定（S1 第十一轮 P1）', () => {
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]:\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]:\n<https://example.com>\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('[x]: https://example.com\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('[x]: https://example.com\n  "title"\n\n结论：fail')).toBe('fail')
   })
 
   it('原始 HTML 一律拒绝，避免 details/summary/div hidden 的可见性绕过（S1 第十轮、S2 第十三轮 P1-1）', () => {
