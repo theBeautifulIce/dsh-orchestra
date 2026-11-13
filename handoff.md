@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-13 13:22。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-13 13:56。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -306,4 +306,29 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 
 **下一步**：按主人要求交独立子代理做 S2 审计（不自测），审计报告落 `docs/audits/S2-independent-audit.md`，结论写进票 #9；审计过再开 S3。
 
+### 11.8 S2 独立审计整改与重签（2026-11-13 13:56，提交 `ac13080` + `234e934`）
+
+**审计结论**：独立子代理给出「G2 建议不通过」，致命 7 条、重大 12 条，11 项必过 pass 2 / fail 8 / 存疑 1。报告在 `docs/audits/S2-independent-audit.md`（191 行）。
+
+**七条致命与改法**（每条都配了回归用例）：
+
+| 编号 | 审计说的 | 改法 |
+| --- | --- | --- |
+| F-01 | S2 命令与执行器没接生产路径，只有单元测试自证 | 新增 `src/executor/run-node.ts`、`src/service/commands/runtime.ts`、`src/service/workflows.ts`；`src/index.ts` 装配 `createOrchestra`；`server.ts` 挂 `/v1/workflows/load` 与 `/v1/node-runs/{lease,report,cancel}`；`tests/runtime.spec.ts` 从建库一路跑到 done |
+| F-02 | 当前 HEAD 的 G1/G2 门检查都 exit 1（candidate_hash 失效） | 候选范围排除 `handoff.md`；门记录正文必过项表与 GateArtifact 做交叉校验（`checkBodyTable`） |
+| F-03 | G-03/04/05/07 证据前后两段相同（只 dump events），且随机 id 不可复现 | `scripts/fault-inject.ts` 加 `dumpState`（events + node_runs + node_run_events + report_registry）；`writeEvidence` 归一事件 id 与临时路径，重跑字节一致 |
+| F-04 | 重放只查 COUNT(*)，不验链不验队头 | `apply-report.ts` 重放走 attempt 校验 → `chainBreakOf` 断链回 `replay_chain_broken` → `MIN(report_seq)` 队头不符回 `replay_not_head` |
+| F-05 | 围栏期间 done 仍被 applied | 围栏 armed 时收口一律拒绝（`fence_armed`），`sweep.ts` 到点撤围栏并取队头重放 |
+| F-06 | 桥二次 spill 覆盖同名文件，丢 1..10 | spill 改多段文件 `agentId-first-last.jsonl`，`takeFrom` 合并全部片段与内存、按 seq 去重排序 |
+| F-07 | 取消 CAS 没有 status 条件，done 能被改回 timing_out | `cancel.ts` 前置终态判断（`already_stopped` / `terminal_no_out_edge`），CAS 带可取消状态集；重复取消回 `fence_already_armed`；`revokeFence` 要求宽限到点 |
+
+**重大项同步改的**：判定条件合并改成「模板为基线 + 节点同 path 同 op 的不同值两条都留（AND）」；跨 boot 剩余预算按 `min(budget, budget-downtime)` 取；阻塞迁移必须带 `decision_id`（没有就出 `DECISION_REQUIRED` 提案码）；提案码 `LEASE_EXPIRED` / `DECISION_REQUIRED` 记在 G2 的例外表。
+
+**重签结果**：G1 candidate=`0cba89a94232…`、artifact_hash=`b490e301078a…`；G2 candidate=`9d468e8aeda4…`、artifact_hash=`75c41b95f0a8…`。`node scripts/gate-check.ts docs/gates/G1.md` 与 G2 均通过（13 项 / 11 项必过，证据 13 份 / 11 份哈希复核）。`pnpm check` 全绿：typecheck 0 错、29 spec / 227 用例 passed、build `lib/index.js` 48.70 kB + `lib/client.js` 0.29 kB。
+
+**测试与证据口径**：`tests/integration/g2.spec.ts` 13 条（原 11 条 + 阻塞裁决卡 + 已完节点取消）；`tests/runtime.spec.ts` 2 条生产路径；`tests/routes.spec.ts` 2 条命令路由；G2 证据 7 份用例说明 + 4 份故障注入，四份注入重跑后字节不变（G-03 连跑两次 SHA256 相同）。
+
+**下一步**：把这一版交第二轮独立审计（同样不许自测）；若过，S2 收口，开 S3 九节点与状态机。
+
+**未做的**：`workflow_versions` 表与发布流程留给 S4；inbox/裁决卡界面留给 S5；24 小时浸泡留给 S6。
 
