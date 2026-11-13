@@ -9,6 +9,7 @@ import { assertLeaseValid, loadNodeRun, type NodeRunRow } from './lease.ts'
 import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
 import { canTransition } from '../../core/state-machine.ts'
+import type { WorkflowCatalog } from '../workflows.ts'
 
 export type ApplyReportParams = {
   nodeRunId: string
@@ -86,12 +87,25 @@ function rejectReport(tx: Tx, secret: string, params: {
   return { accepted: false, reason: params.reason, registry_state: 'rejected' }
 }
 
+// 判定条件由服务端按 run 绑定的工作流版本取：调用方传不进来，执行器也改不了（规格 4.2 行 293、6.1 行 839）
+function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): ApplyPolicy {
+  const run = tx.get<{ workflow_version: number | string | null }>(
+    'SELECT workflow_version FROM runs WHERE run_id = ?',
+    [row.run_id],
+  )
+  if (!run) throw new OrchError('NOT_FOUND', 'node_run 没有对应的 run', { nodeRunId: row.node_run_id })
+  if (run.workflow_version === null) {
+    throw new OrchError('VERDICT_UNSUPPORTED', '这个 run 没有绑定工作流版本', { nodeRunId: row.node_run_id })
+  }
+  return catalog.policyFor(run.workflow_version, row.node_id)
+}
+
 // 六步固定顺序，全部在同一笔 BEGIN IMMEDIATE 事务里（规格 4.2 行 294-300）
 export function applyReport(
   tx: Tx,
   secret: string,
   params: ApplyReportParams,
-  policy: ApplyPolicy,
+  catalog: WorkflowCatalog,
 ): ApplyResult {
   const report = params.report
   // 第一步：幂等查重
@@ -199,6 +213,8 @@ export function applyReport(
   // 第四、五步只对“完成”上报做证据与判定：失败、阻塞的回报不该被要求带通过证据
   let evidenceDigest: string | null = null
   if (report.status === 'done') {
+    // 判定条件只从 run 绑定的工作流版本取，不在请求体、也不在函数参数里（规格 4.2 行 293）
+    const policy = policyForReport(tx, row, catalog)
     // 证据强度先按模板要求校验：不可逆节点只给 exitCode 不许收口（规格 4.7 行 380）
     const evidence = evaluateEvidence(report, policy.requiredHashes ?? [])
     if (!evidence.ok) {

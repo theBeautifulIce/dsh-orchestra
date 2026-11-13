@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { verifyGateRecord } from '../scripts/gate-check.ts'
+import { candidateEntries, verifyGateRecord } from '../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
@@ -27,7 +29,8 @@ function tamper(text: string, fn: (a: Record<string, unknown>) => void): string 
   throw new Error('门记录里没有 GateArtifact 块')
 }
 
-describe('门记录校验', () => {
+// 门检查要逐份重算 HEAD 字节：并行满负载下单个用例可到十几秒，超时放宽（审计 N4）
+describe('门记录校验', { timeout: 30000 }, () => {
   it('G1 门记录通过', () => {
     const out = check(read())
     expect(out.gate).toBe('G1')
@@ -157,6 +160,29 @@ describe('门记录校验', () => {
     const text = read().replace(/body_hash=[0-9a-f]{64}/, 'body_hash=' + 'c'.repeat(64))
     expect(text).not.toBe(read())
     expect(() => check(text)).toThrow(/body_hash/)
+  })
+
+  it('批内新增又删除的文件留在候选清单里（审计 N2）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gate-cand-'))
+    const run = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: root })
+    try {
+      run('init', '-q')
+      writeFileSync(join(root, 'keep.txt'), 'keep\n')
+      run('add', '.')
+      run('commit', '-q', '-m', 'base')
+      const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString('utf8').trim()
+      writeFileSync(join(root, 'gone.txt'), 'gone\n')
+      run('add', '.')
+      run('commit', '-q', '-m', 'add gone')
+      rmSync(join(root, 'gone.txt'))
+      run('add', '-A')
+      run('commit', '-q', '-m', 'delete gone')
+      const out = candidateEntries(root, { scopeBase: base, excludes: [] })
+      expect(out.paths).toContain('gone.txt')
+      expect(out.files.find((f) => f.path === 'gone.txt')?.sha256).toBe(sha256Hex(Buffer.from('ADDED_THEN_DELETED\n')))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('工作树有未提交改动时拒绝签门（审计 N-09）', () => {

@@ -131,7 +131,7 @@ async function runNodeActions(
       const descriptor = deps.registry.require(tool.command)
       const args = tool.args.length > 0 ? tool.args : descriptor.command.args
       // 期望哈希用执行器实际解析过的绝对 cwd，和 runner 落证据时同一口径
-      assertCommandHash(out.evidence, commandHashOf(descriptor.command.bin, args, resolveInside(deps.runner.root, tool.cwd)))
+      assertCommandHash(out.evidence, commandHashOf(descriptor.command.bin, args, resolveInside(deps.runner.root, tool.cwd), deps.runner.root))
       evidence = out.evidence
       trace.push({
         tool: tool.command,

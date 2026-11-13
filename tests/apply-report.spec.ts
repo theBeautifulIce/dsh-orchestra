@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { freshLedger, seed, TEST_SECRET } from './fixtures/ledger.ts'
+import { bindRunVersion, catalogFor, freshLedger, seed, TEST_SECRET } from './fixtures/ledger.ts'
 import { withTx } from '../src/infra/sqlite/driver.ts'
 import { acquireLease } from '../src/service/commands/lease.ts'
-import { applyReport, type ApplyPolicy } from '../src/service/commands/apply-report.ts'
+import { applyReport } from '../src/service/commands/apply-report.ts'
 import type { Report } from '../src/core/report.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
-const POLICY: ApplyPolicy = { passConditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }] }
+const CATALOG = catalogFor(['n_ar', 'n_other'])
 
 function setup(opts: { ttl?: number; now?: string; trace?: boolean } = {}) {
-  const { db } = freshLedger(); seed(db)
+  const { db } = freshLedger(); seed(db); bindRunVersion(db)
   withTx(db, (tx) => {
     tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_ar', 'r1', 'n_ar', 5, 'agent', 2, 'queued', 10, ?, ?)", [NOW, NOW])
   })
@@ -33,8 +33,8 @@ const rep = (over: Partial<Report> = {}): Report => ({
   ...over,
 })
 
-function apply(db: any, over: Partial<Report> = {}, expectedStatus = 'verifying', generation = 1, now = NOW, policy = POLICY) {
-  return withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 2, report: rep(over), expectedStatus, generation, now }, policy))
+function apply(db: any, over: Partial<Report> = {}, expectedStatus = 'verifying', generation = 1, now = NOW, catalog = CATALOG) {
+  return withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 2, report: rep(over), expectedStatus, generation, now }, catalog))
 }
 
 const nodeRow = (db: any) => db.raw.prepare("SELECT * FROM node_runs WHERE node_run_id='nr_ar'").get() as any
@@ -68,7 +68,7 @@ describe('applyReport 六步收口', () => {
 
   it('attempt 不符 → rejected + attempt_mismatch + report_rejected', () => {
     const db = setup()
-    const out = withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 1, report: rep(), expectedStatus: 'verifying', generation: 1, now: NOW }, POLICY))
+    const out = withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 1, report: rep(), expectedStatus: 'verifying', generation: 1, now: NOW }, CATALOG))
     expect(out.registry_state).toBe('rejected')
     expect(out.reason).toBe('attempt_mismatch')
     expect(events(db, 'report_rejected')).toBe(1)
@@ -102,7 +102,7 @@ describe('applyReport 六步收口', () => {
 
   it('证据不足（不可逆节点只给 exitCode）→ rejected 且 reason 含 verification_too_weak', () => {
     const db = setup()
-    const out = apply(db, {}, 'verifying', 1, NOW, { passConditions: POLICY.passConditions, requiredHashes: ['artifact'] })
+    const out = apply(db, {}, 'verifying', 1, NOW, catalogFor(['n_ar'], { requiredHashes: ['artifact'] }))
     expect(out.registry_state).toBe('rejected')
     expect(out.reason).toContain('verification_too_weak')
     expect(events(db, 'report_applied')).toBe(0)
@@ -122,7 +122,7 @@ describe('applyReport 六步收口', () => {
 describe('报告身份与跨节点（审计 N-05 / N-06 / N-07）', () => {
   it('report.attempt 与请求不一致 → attempt_mismatch，节点不动', () => {
     const db = setup()
-    const out = withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 2, report: rep({ attempt: 999 }), expectedStatus: 'verifying', generation: 1, now: NOW }, POLICY))
+    const out = withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 2, report: rep({ attempt: 999 }), expectedStatus: 'verifying', generation: 1, now: NOW }, CATALOG))
     expect(out.registry_state).toBe('rejected')
     expect(out.reason).toBe('attempt_mismatch')
     expect(nodeRow(db).status).toBe('verifying')
@@ -135,7 +135,7 @@ describe('报告身份与跨节点（审计 N-05 / N-06 / N-07）', () => {
     withTx(db, (tx) => {
       tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_other', 'r1', 'n_other', 6, 'agent', 2, 'verifying', 3, ?, ?)", [NOW, NOW])
     })
-    expect(() => withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_other', attempt: 2, report: rep({ node_run_id: 'nr_other' }), expectedStatus: 'verifying', generation: 1, now: NOW }, POLICY))).toThrowError(/别的节点/)
+    expect(() => withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_other', attempt: 2, report: rep({ node_run_id: 'nr_other' }), expectedStatus: 'verifying', generation: 1, now: NOW }, CATALOG))).toThrowError(/别的节点/)
     const other = db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id='nr_other'").get() as { status: string }
     expect(other.status).toBe('verifying')
   })

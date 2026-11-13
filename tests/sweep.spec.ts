@@ -1,21 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { freshLedger, seed, TEST_SECRET } from './fixtures/ledger.ts'
+import { bindRunVersion, catalogFor, freshLedger, seed, TEST_SECRET } from './fixtures/ledger.ts'
 import { withTx } from '../src/infra/sqlite/driver.ts'
 import { acquireLease, loadNodeRun } from '../src/service/commands/lease.ts'
 import { applyCancel } from '../src/service/commands/cancel.ts'
-import { applyReport, type ApplyPolicy } from '../src/service/commands/apply-report.ts'
+import { applyReport } from '../src/service/commands/apply-report.ts'
 import { sweep } from '../src/service/sweep.ts'
 import { ScriptedClock } from '../src/core/clock.ts'
 import { transitionNode } from '../src/service/commands/node-state.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const GRACE = '2026-11-13T03:00:30.000Z'
-const POLICY: ApplyPolicy = { passConditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }] }
+const CATALOG = catalogFor(['n_sw'])
 
 // 一个已派发（dispatched）的节点：租约拿到手、执行器还没起
 function setup(nodeRunId = 'nr_sw') {
   const { db } = freshLedger()
   seed(db)
+  bindRunVersion(db)
   withTx(db, (tx) => {
     tx.run(
       "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES (?, 'r1', 'n_sw', 5, 'agent', 2, 'queued', 10, ?, ?)",
@@ -103,7 +104,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     cancel(db, 'interrupted')
     const rejected = withTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nr_sw', attempt: 2, report: lateReport(), expectedStatus: 'verifying', generation: 1, now: NOW,
-    }, POLICY))
+    }, CATALOG))
     expect(rejected.accepted).toBe(false)
     expect(rejected.reason).toBe('fence_armed')
     expect(rejected.registry_state).toBe('rejected')
@@ -118,7 +119,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     cancel(db, 'interrupted')
     withTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nr_sw', attempt: 2, report: lateReport(), expectedStatus: 'verifying', generation: 1, now: NOW,
-    }, POLICY))
+    }, CATALOG))
     const first = sweep(db, TEST_SECRET, { now: GRACE })
     expect(first.fence_revoked).toEqual(['nr_sw'])
     const second = sweep(db, TEST_SECRET, { now: GRACE })

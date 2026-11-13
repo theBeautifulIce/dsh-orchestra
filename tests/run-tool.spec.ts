@@ -59,7 +59,7 @@ describe('runTool 只读执行与强证据', () => {
     expect(res.evidence.stderrHash).toBe(sha256Hex(''))
     expect(res.evidence.hashes.stdout).toBe(sha256Hex('ok'))
     expect(res.evidence.producedAt.length).toBeGreaterThan(0)
-    expect(res.evidence.commandHash).toBe(commandHashOf('git', ['status', '--short'], resolve(ROOT, 'sub')))
+    expect(res.evidence.commandHash).toBe(commandHashOf('git', ['status', '--short'], resolve(ROOT, 'sub'), ROOT))
     expect(run).toHaveBeenCalledWith({ bin: 'git', args: ['status', '--short'], cwd: resolve(ROOT, 'sub'), timeoutMs: 5000 })
   })
 

@@ -1,5 +1,5 @@
 // src/executor/tools.ts —— 工具注册表与 capability 推导（规格 4.7 行 371-399）
-import { resolve, sep } from 'node:path'
+import { relative, resolve, sep } from 'node:path'
 import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 
@@ -155,9 +155,11 @@ export type RunToolResult = {
   stderr: string
 }
 
-// 命令哈希：把命令与参数固定成一段可核对的串
-export function commandHashOf(command: string, args: string[], cwd: string): string {
-  return sha256Hex(JSON.stringify({ command, args, cwd }))
+// 命令哈希：把命令与参数固定成一段可核对的串。
+// 给了工作区根时 cwd 归一成相对路径：同一命令在不同临时工作区重跑哈希不变（审计 N1）
+export function commandHashOf(command: string, args: string[], cwd: string, root?: string): string {
+  const where = root === undefined ? cwd : relative(resolve(root), resolve(cwd))
+  return sha256Hex(JSON.stringify({ command, args, cwd: where }))
 }
 
 export class ReadOnlyToolRunner {
@@ -208,7 +210,7 @@ export class ReadOnlyToolRunner {
       stderrHash: sha256Hex(res.stderr),
       hashes: { stdout: sha256Hex(res.stdout), stderr: sha256Hex(res.stderr) },
       producedAt: new Date().toISOString(),
-      commandHash: commandHashOf(descriptor.command.bin, args, cwd),
+      commandHash: commandHashOf(descriptor.command.bin, args, cwd, this.workspaceRoot),
     }
     return { evidence, stdout: res.stdout, stderr: res.stderr }
   }

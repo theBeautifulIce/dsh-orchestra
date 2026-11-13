@@ -6,7 +6,7 @@ import { assertDefinitionAllowed } from '../../src/core/workflow-def.ts'
 import { MonotonicClock } from '../../src/core/clock.ts'
 import { transitionNode } from '../../src/service/commands/node-state.ts'
 import { inTx } from '../../src/infra/db/tx.ts'
-import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
+import { bindRunVersion, catalogFor, freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 import type { Db } from '../../src/infra/sqlite/driver.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -44,11 +44,14 @@ function goodReport(nodeRunId: string, reportId: string, status: string) {
   }
 }
 
-const PASS = { passConditions: [{ path: 'evidence.exitCode', op: 'eq' as const, value: 0 }] }
+const CATALOG = catalogFor(['node_a'])
+
+// M5：判定条件从 run 绑定的工作流版本取，每个用例先把 run 绑上版本
+function seedV(db: Db): void { seed(db); bindRunVersion(db) }
 
 describe('G2 门必过项', () => {
   it('单节点 queued 到终态一条路径', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_01')
     lease(db, 'nrun_g2_01')
     // 工具执行痕迹：done 报告的证据要对得上它（审计 R3-03）
@@ -60,7 +63,7 @@ describe('G2 门必过项', () => {
       const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
         nodeRunId: 'nrun_g2_01', attempt: 1, expectedStatus: expected, generation: 1, now: NOW,
         report: goodReport('nrun_g2_01', 'rpt_g2_01_' + target, target),
-      }, PASS))
+      }, CATALOG))
       expect(res.registry_state).toBe('applied')
       expected = target
     }
@@ -69,19 +72,19 @@ describe('G2 门必过项', () => {
   })
 
   it('重复上报只落一次', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_02'); lease(db, 'nrun_g2_02')
     const report = goodReport('nrun_g2_02', 'rpt_g2_02', 'started')
     const args = { nodeRunId: 'nrun_g2_02', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: NOW } as const
-    expect(inTx(db, (tx) => applyReport(tx, TEST_SECRET, { ...args, report }, PASS)).accepted).toBe(true)
-    const second = inTx(db, (tx) => applyReport(tx, TEST_SECRET, { ...args, report }, PASS))
+    expect(inTx(db, (tx) => applyReport(tx, TEST_SECRET, { ...args, report }, CATALOG)).accepted).toBe(true)
+    const second = inTx(db, (tx) => applyReport(tx, TEST_SECRET, { ...args, report }, CATALOG))
     expect(second.accepted).toBe(false)
     expect(second.registry_state).toBe('replayed')
     expect(countOf(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = 'report_applied'", ['nrun_g2_02'])).toBe(1)
   })
 
   it('租约过期迟到上报被拒', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_03'); lease(db, 'nrun_g2_03')
     db.raw.prepare("UPDATE node_runs SET lease_expires_at = '2026-11-11T00:00:00.000Z' WHERE node_run_id = 'nrun_g2_03'").run()
     let code = ''
@@ -89,14 +92,14 @@ describe('G2 门必过项', () => {
       inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
         nodeRunId: 'nrun_g2_03', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: NOW,
         report: goodReport('nrun_g2_03', 'rpt_g2_03', 'started'),
-      }, PASS))
+      }, CATALOG))
     } catch (err) { code = (err as { code?: string }).code ?? '' }
     expect(code).toBe('LEASE_EXPIRED')
     expect(rowOf(db, 'nrun_g2_03').status).toBe('dispatched')
   })
 
   it('取消后不产生新 attempt', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_04'); lease(db, 'nrun_g2_04')
     const revision = Number(rowOf(db, 'nrun_g2_04').revision)
     const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
@@ -108,7 +111,7 @@ describe('G2 门必过项', () => {
   })
 
   it('终态必带证据：走到 verifying 再报 done，没证据就拒在证据门', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_05'); lease(db, 'nrun_g2_05')
     // 先从 dispatched 走到 verifying：只有站在 verifying 上，done 才真的走到证据门
     let expected = 'dispatched'
@@ -116,7 +119,7 @@ describe('G2 门必过项', () => {
       const step = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
         nodeRunId: 'nrun_g2_05', attempt: 1, expectedStatus: expected, generation: 1, now: NOW,
         report: goodReport('nrun_g2_05', 'rpt_g2_05_' + target, target),
-      }, PASS))
+      }, CATALOG))
       expect(step.registry_state).toBe('applied')
       expected = target
     }
@@ -124,7 +127,7 @@ describe('G2 门必过项', () => {
     const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nrun_g2_05', attempt: 1, expectedStatus: 'verifying', generation: 1, now: NOW,
       report: { report_id: 'rpt_g2_05_done', node_run_id: 'nrun_g2_05', attempt: 1, status: 'done' },
-    }, PASS))
+    }, CATALOG))
     expect(res.accepted).toBe(false)
     expect(res.registry_state).toBe('rejected')
     expect(res.reason).toBe('evidence_missing')
@@ -132,13 +135,13 @@ describe('G2 门必过项', () => {
   })
 
   it('无裸 blocked：没凭据的阻塞上报被拒，节点状态不动', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_06'); lease(db, 'nrun_g2_06')
     inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_06', from: 'dispatched', to: 'started', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_06').revision), now: NOW, reason: 'executor_started' }))
     const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nrun_g2_06', attempt: 1, expectedStatus: 'started', generation: 1, now: NOW,
       report: { report_id: 'rpt_g2_06', node_run_id: 'nrun_g2_06', attempt: 1, status: 'blocked_post' },
-    }, PASS))
+    }, CATALOG))
     expect(res.accepted).toBe(false)
     expect(res.registry_state).toBe('rejected')
     expect(res.reason).toBe('decision_required')
@@ -150,13 +153,13 @@ describe('G2 门必过项', () => {
   })
 
   it('带凭据的阻塞才算数：blocked_post 必须挂 verify_human 事件', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_06b'); lease(db, 'nrun_g2_06b')
     inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_06b', from: 'dispatched', to: 'started', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_06b').revision), now: NOW, reason: 'executor_started' }))
     const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nrun_g2_06b', attempt: 1, expectedStatus: 'started', generation: 1, now: NOW,
       report: { report_id: 'rpt_g2_06b', node_run_id: 'nrun_g2_06b', attempt: 1, status: 'blocked_post', output: { request: { reason: '证据不足', missing: ['artifact'] } } },
-    }, PASS))
+    }, CATALOG))
     expect(res.accepted).toBe(true)
     expect(rowOf(db, 'nrun_g2_06b').status).toBe('blocked_post')
     expect(countOf(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = 'verify_human'", ['nrun_g2_06b'])).toBe(1)
@@ -177,17 +180,17 @@ describe('G2 门必过项', () => {
   })
 
   it('G-03 同一个 report_id 上报两次只落一次', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_07'); lease(db, 'nrun_g2_07')
     const report = goodReport('nrun_g2_07', 'rpt_g2_07', 'started')
     const args = { nodeRunId: 'nrun_g2_07', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: NOW } as const
-    for (let i = 0; i < 2; i += 1) inTx(db, (tx) => applyReport(tx, TEST_SECRET, { ...args, report }, PASS))
+    for (let i = 0; i < 2; i += 1) inTx(db, (tx) => applyReport(tx, TEST_SECRET, { ...args, report }, CATALOG))
     expect((db.raw.prepare("SELECT state FROM report_registry WHERE report_id = 'rpt_g2_07'").get() as { state: string }).state).toBe('replayed')
     expect(countOf(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = 'report_applied'", ['nrun_g2_07'])).toBe(1)
   })
 
   it('G-04 租约到期后原执行器迟到上报被拒', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_08'); lease(db, 'nrun_g2_08')
     db.raw.prepare("UPDATE node_runs SET lease_expires_at = '2026-11-11T00:00:00.000Z' WHERE node_run_id = 'nrun_g2_08'").run()
     let code = ''
@@ -195,14 +198,14 @@ describe('G2 门必过项', () => {
       inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
         nodeRunId: 'nrun_g2_08', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: NOW,
         report: goodReport('nrun_g2_08', 'rpt_g2_08', 'started'),
-      }, PASS))
+      }, CATALOG))
     } catch (err) { code = (err as { code?: string }).code ?? '' }
     expect(code).toBe('LEASE_EXPIRED')
     expect(rowOf(db, 'nrun_g2_08').status).toBe('dispatched')
   })
 
   it('G-05 工具执行中取消只立一次围栏', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_09'); lease(db, 'nrun_g2_09')
     const revision = Number(rowOf(db, 'nrun_g2_09').revision)
     const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
@@ -225,7 +228,7 @@ describe('G2 门必过项', () => {
   })
 
   it('G2-06 阻塞必须挂裁决卡：没卡不许卡住，有卡才落 blocked_post', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_10'); lease(db, 'nrun_g2_10')
     inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_10', from: 'dispatched', to: 'started', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_10').revision), now: NOW, reason: 'executor_started' }))
     let code = ''
@@ -241,7 +244,7 @@ describe('G2 门必过项', () => {
   })
 
   it('G2-04 已完节点取消不动状态、不产生新 attempt', () => {
-    const { db } = freshLedger(); seed(db)
+    const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_11'); lease(db, 'nrun_g2_11')
     db.raw.prepare("UPDATE node_runs SET status = 'done', revision = revision + 1 WHERE node_run_id = 'nrun_g2_11'").run()
     const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {

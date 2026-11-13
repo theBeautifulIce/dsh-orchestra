@@ -384,6 +384,8 @@ export function remainingNs(prev: {
 
 4. `tests/clock.spec.ts`：用固定输入断言跨 boot 剩余量公式；断言墙钟前后跳十分钟不改变剩余量；断言桥断时 unknown_watchdog 的 remaining 冻结、startup_timeout 的 remaining 继续递减。
 
+5. e5 收口（第四轮审计 e5；必做，不许留死列）：`verify_remaining_ns` 与 `startup_unknown_remaining_ns` 必须各有读点。进半态时把该钟剩余量冻结进列；恢复时按 `now + remaining` 重挂截止点（remaining=0 立即到点，NULL 才补满额并升 Gr）；跨 boot 用 `remainingNs` 按规格 §4.4 第 330/341/342 行的同一公式折算。验收：`tests/clock.spec.ts` 加「桥断恢复后验证窗剩余量不变」「remaining=0 恢复即超时」「NULL 才补满额」三例，并在 `tests/node-run.spec.ts` 断言恢复写入的截止点等于重挂公式。
+
 测试：
 
 - `tests/clock.spec.ts`：断言 `remainingNs` 在给定三组数值上等于手工计算结果；断言冻结策略四行矩阵；断言漂移超过 2 秒时置 `timer_uncertain` 并不判超时。

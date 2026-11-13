@@ -10,7 +10,7 @@ import { applySteps, defaultMigrationsDir, loadSteps } from '../src/infra/db/mig
 import { listEvents } from '../src/service/queries/list_events.ts'
 import { WriteQueue } from '../src/service/write-queue.ts'
 import { backup, restore, sha256File, verifyBackup } from '../src/infra/backup.ts'
-import { eventSeqs, freshLedger, seed, TEST_SECRET } from '../tests/fixtures/ledger.ts'
+import { bindRunVersion, catalogFor, eventSeqs, freshLedger, seed, TEST_SECRET } from '../tests/fixtures/ledger.ts'
 import { inTx } from '../src/infra/db/tx.ts'
 import { acquireLease, loadNodeRun } from '../src/service/commands/lease.ts'
 import { applyReport } from '../src/service/commands/apply-report.ts'
@@ -348,14 +348,14 @@ const strongReport = (nodeRunId: string, reportId: string, status: string) => ({
 const NODE_ROW = (db: Db, id: string) => db.raw.prepare('SELECT status, action_generation, attempt, fence_state, cancel_result, lease_expires_at FROM node_runs WHERE node_run_id = ?').get(id)
 
 async function caseG03(): Promise<InjectionResult> {
-  const { file, db } = freshLedger(); seed(db)
+  const { file, db } = freshLedger(); seed(db); bindRunVersion(db)
   const before = dumpState(file)
   injectQueued(db, 'nrun_g03')
-  const policy = { passConditions: [{ path: 'evidence.exitCode', op: 'eq' as const, value: 0 }] }
+  const catalog = catalogFor(['n1'])
   const run = () => inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
     nodeRunId: 'nrun_g03', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: '2026-11-13T03:00:00.000Z',
     report: strongReport('nrun_g03', 'rpt_g03_1', 'started'),
-  }, policy))
+  }, catalog))
   const first = run()
   const second = run()
   const applied = (db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nrun_g03' AND type = 'report_applied'").get() as { n: number }).n
@@ -371,7 +371,7 @@ async function caseG03(): Promise<InjectionResult> {
 }
 
 async function caseG04(): Promise<InjectionResult> {
-  const { file, db } = freshLedger(); seed(db)
+  const { file, db } = freshLedger(); seed(db); bindRunVersion(db)
   const before = dumpState(file)
   injectQueued(db, 'nrun_g04')
   db.raw.prepare("UPDATE node_runs SET lease_expires_at = '2026-11-11T00:00:00.000Z' WHERE node_run_id = 'nrun_g04'").run()
@@ -380,7 +380,7 @@ async function caseG04(): Promise<InjectionResult> {
     inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nrun_g04', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: '2026-11-13T03:00:00.000Z',
       report: strongReport('nrun_g04', 'rpt_g04_1', 'started'),
-    }, { passConditions: [] }))
+    }, catalogFor(['n1'])))
   } catch (err) {
     code = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
   }
@@ -430,7 +430,7 @@ async function caseG05(): Promise<InjectionResult> {
     { runtime: orchestra.runtime, db: orchestra.db, secret, registry, agents, runner },
     {
       nodeRunId: 'nrun_g05', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
-      toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+      toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
       tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
       now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
     },
@@ -453,7 +453,7 @@ async function caseG05(): Promise<InjectionResult> {
       report_id: 'rpt_g05_late', node_run_id: 'nrun_g05', attempt: 1, status: 'done',
       evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'a'.repeat(64), stderrHash: 'b'.repeat(64), hashes: {}, producedAt: NOW },
     },
-  }, { passConditions: [] }))
+  }, orchestra.catalog))
   // 工具这时才落地：节点已经在围栏里，收口必须被挡住
   gate.release?.({ exitCode: 0, stdout: 'ok\n', stderr: '' })
   let runErr = ''
@@ -612,7 +612,7 @@ async function caseEvG201(): Promise<InjectionResult> {
   const createdData = created.body?.data ?? {}
   const dispatched = await postJson(boot.endpoint, '/v1/runs/dispatch', {
     runId: createdData.run_id,
-    nodes: { check: { toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    nodes: { check: { toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
     now: EV_NOW,
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, action_generation, tool_start_at, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()
@@ -757,7 +757,7 @@ async function caseEvG208(): Promise<InjectionResult> {
   const createdData = created.body?.data ?? {}
   const dispatched = await postJson(boot.endpoint, '/v1/runs/dispatch', {
     runId: createdData.run_id,
-    nodes: { check: { toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.fail', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    nodes: { check: { toolPolicy: { allow: ['ro.fail'], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.fail', args: [], cwd: '.', timeoutMs: 5000 }] } },
     now: EV_NOW,
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, action_generation, tool_start_at, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()
@@ -908,7 +908,7 @@ async function caseEvG210(): Promise<InjectionResult> {
   const control = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '真派发对照', workflowVersion: '1', now: EV_NOW }, secret)
   const controlDispatch = await postJson(boot.endpoint, '/v1/runs/dispatch', {
     runId: control.body?.data?.run_id,
-    nodes: { check: { toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    nodes: { check: { toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
     now: EV_NOW,
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()

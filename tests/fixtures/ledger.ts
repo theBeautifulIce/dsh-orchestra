@@ -5,8 +5,32 @@ import { join } from 'node:path'
 import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
+import { WorkflowCatalog } from '../../src/service/workflows.ts'
+import type { PassCondition } from '../../src/core/policy.ts'
 
 export const TEST_SECRET = 'test-secret-for-g1'
+
+// M5 之后判定条件只从 run 绑定的工作流版本取，测试也得建真实目录，不能再手传 policy
+export const DEFAULT_PASS: PassCondition[] = [{ path: 'evidence.exitCode', op: 'eq', value: 0 }]
+
+export function catalogFor(
+  nodeIds: string[],
+  opts: { version?: string; passConditions?: PassCondition[]; requiredHashes?: string[] } = {},
+): WorkflowCatalog {
+  const catalog = new WorkflowCatalog('S2')
+  catalog.load({
+    workflow_version: opts.version ?? '1',
+    pass_conditions: opts.passConditions ?? DEFAULT_PASS,
+    required_hashes: opts.requiredHashes,
+    nodes: nodeIds.map((node_id) => ({ node_id, type: 'agent' as const })),
+  })
+  return catalog
+}
+
+// 让 run 绑上工作流版本：没有版本就没有判定条件，done 报告会被 VERDICT_UNSUPPORTED 拒
+export function bindRunVersion(db: Db, version: number | string = 1, runId = 'r1'): void {
+  withTx(db, (tx) => tx.run('UPDATE runs SET workflow_version = ? WHERE run_id = ?', [version, runId]))
+}
 
 export function freshLedger(dir?: string): { dir: string; file: string; db: Db } {
   const base = dir ?? mkdtempSync(join(tmpdir(), 'orchestra-g1-'))
