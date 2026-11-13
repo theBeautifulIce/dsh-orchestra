@@ -419,6 +419,26 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     ]) expect(auditConclusionOf(base + safe), safe).toBe('pass')
   })
 
+  it('S1 第二十四轮 P0：放行/clear/fit/release 同义否定也要拒绝', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '本报告不能放行。', '本次审计未达到放行条件。',
+      'This audit does not clear the gate.', 'The gate is not fit to advance.',
+      '本报告\n不能\n放行。', '上一轮审计未通过，本轮已整改。本报告不能放行。',
+      '本次审计未获放行。', 'The gate cannot be released.', '本门记录不能放行。',
+      '本报告不予放行。', '本报告不能晋级。', '本次审计未就绪。', '本报告未达放行标准。',
+      'This audit is inconclusive.', 'The gate is not ready for release.',
+      'The gate remains blocked.', 'This report is incomplete.', 'The audit was unsatisfactory.',
+      '本报告未满足放行要求。', '本次审计不符合准入条件。',
+      'The gate is not eligible for release.',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).toBeNull()
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    for (const line of negatives) expect(bodyConclusionOf(head + line), line).toBe('fail')
+    expect(auditConclusionOf(base + '本轮已整改，未发现新的阻断项。')).toBe('pass')
+    expect(bodyConclusionOf(head + '未发现新的阻断项。')).toBe('pass')
+  })
+
   it('S2 第二十七轮 P0-1/P0-2：报告宾语与英文否决/结论行都要拒绝', () => {
     const base = '结论：pass\n\n'
     const negatives = [

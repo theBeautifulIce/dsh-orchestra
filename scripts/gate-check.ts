@@ -651,6 +651,8 @@ const FAIL_SUBJECTS = [
   'the report', 'this report', 'the audit report', 'audit report', 'report', 'reports',
   // 本轮未整改/未完成整改这类“完成度”否定没有“审计”二字，仍要能挂在裸主语上（S1 第二十二轮 P1）。
   '本轮', '本輪', '审计组', '审计小组', '審計組', '審計小組', '报告', '報告', 'approval', 'gate',
+  // 门正文的否定主语：本门记录不能放行（S1 第二十四轮 P0-2）。
+  '本门记录', '本門記錄', '门记录', '門記錄', '本门', '本門', 'the gate', 'this gate', 'gate record',
   'recommendation', 'recommendations',
 ].sort((a, b) => b.length - a.length)
 
@@ -700,6 +702,10 @@ const FAIL_VERDICTS = [
   // 不推荐/不予采信/不建议通过这类收口语（S2 第二十九轮 P0）。
   '不予推荐', '不推荐', '不建议', '不予采信', '不采信', '未予推荐', '未推荐',
   'recommend against', 'not recommend', 'does not recommend',
+  // 常见负面结果词：阻断、未定、不足、不完整、未就绪（S1 第二十四轮后的系统性补强）。
+  'blocked', 'inconclusive', 'insufficient', 'unsatisfactory', 'inadequate', 'incomplete',
+  'unready', 'not ready', 'no-go', 'nogo', 'on hold', 'red',
+  '不予放行', '不放行', '不予晋级', '不晋级', '未就绪', '不具备', '不充分', '未达成', '未满足', '不满足', '未符合', '不符合', '不完整', '待补', '退回', '打回', '悬而未决',
 ].sort((a, b) => b.length - a.length)
 
 const FAIL_CONNECTORS = [
@@ -713,6 +719,7 @@ const FAIL_CONNECTORS = [
   '整改', '整改工作', '修复', '修复工作', '收口', 'remediation', 'remediations',
   '審計', '審核', '復核', '評審', '結果', '意見',
   'audit', 'was', 'were', 'has', 'have', 'had', 'been', 'did', 'does', 'do',
+  'remains', 'remain', 'remained', 'still', 'continues', 'continue', '继续', '繼續', '仍然',
   'is', 'are', 'to', 'the', 'a', 'an', '经', '后', '仍', '为', '為', '是', '的',
 ].sort((a, b) => b.length - a.length)
 
@@ -788,7 +795,7 @@ const FAIL_NEGATIONS = [
 ].sort((a, b) => b.length - a.length)
 const FAIL_FILLERS = [
   'be able to', 'able to', '得到', '获得', '予以', '能够', '达到', '经过',
-  '获', '獲', '能', '准予', '被', 'be', 'to', 'the', 'a', 'yet', 'been',
+  '获', '獲', '能', '准予', '被', 'be', 'to', 'the', 'a', 'yet', 'been', '达', '達',
 ].sort((a, b) => b.length - a.length)
 const FAIL_PASS_STEMS = [
   '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
@@ -797,6 +804,9 @@ const FAIL_PASS_STEMS = [
   'approving', 'granted', 'granting', 'acceptable', '采纳', '採納',
   // 完成度本身也是可被否定的谓词：整改尚未完成 / remediation is not complete（S1 第二十三轮 P1-2）。
   '完成', 'complete', 'completed', 'completion',
+  // 放行/放行条件/clear/fit 同义收口语（S1 第二十四轮 P0）。
+  '放行', 'release', 'released', 'releases', 'clear', 'clears', 'cleared', 'fit', 'advance',
+  '晋级', '晉級', '就绪', '就緒', '满足', '滿足', '符合', '完整', 'ready', 'eligible', 'qualified', 'satisfactory', 'sufficient', 'adequate', 'green',
   // “不获认同”这类谓词不在旧表里（S2 第二十八轮 P0-1）。
   '认同', '認同', '赞同', '贊同', '首肯', '受理', '接收', '接受',
   // 推荐/建议/采信/支持/背书同样是可被否定的肯定谓词（S2 第二十九轮 P0）。
@@ -813,6 +823,8 @@ const FAIL_OBJECTS = ['最终验收', '最终驗收', '专家评审', '專家評
   // 否决的宾语也可以是报告本身或本次审计（S2 第二十七轮 P0-1）。
   '本次独立审计', '本次审计', '本轮审计', '本审计', '审计组', '审计小组', '本报告', '该报告', '此报告', '报告本身', '报告',
   '本次審計', '本輪審計', '本審計', '審計組', '審計小組', '本報告', '該報告', '此報告', '報告本身', '報告',
+  '条件', '條件', '要求', '门槛', '門檻', '准入', '基线', '基準', '资格', '資格',
+  '放行', 'release', 'clear', '晋级', '晉級',
   '驗收', '標準', '審批', '評審', '審核', '許可', '認可']
   .sort((a, b) => b.length - a.length)
 
