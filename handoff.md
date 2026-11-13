@@ -385,6 +385,17 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 
 **逐条对照表**：`docs/audits/S2-round3-response.md`（R3-01…R3-12 逐条：主张 / 改法文件:行 / 证据 / 用例 / 状态；另含审计第 7 节六条未闭合项的真实状态，以及对「verify_remaining_ns 是死列」这处误判的更正）。该表是实现者自证，不作放行依据。
 
-**未闭合、移交 S3 的**（5 条）：F-06（桥 spill 未接生产路径）；applyReport 签名仍收 policy 参数（信任面已闭合：请求体带不进 policy，runtime.ts 由 `catalog.policyFor(run.workflow_version, node_id)` 取；签名收口牵动 15 处调用点 + fault-inject 取证语义，留 S3）；四条新路由在规格 §6.1 无落点；DECISION_REQUIRED 与 BRIDGE_ACK_LAG 进规格 §17.1；verify_remaining_ns 的 remaining 重挂语义。
+**未闭合、移交 S3 的**（8 条）：F-06（桥 spill 未接生产路径）；applyReport 签名仍收 policy 参数（信任面已闭合：请求体带不进 policy，runtime.ts 由 `catalog.policyFor(run.workflow_version, node_id)` 取；签名收口牵动 15 处调用点 + fault-inject 取证语义，留 S3）；四条新路由在规格 §6.1 无落点；DECISION_REQUIRED 与 BRIDGE_ACK_LAG 进规格 §17.1；verify_remaining_ns 的 remaining 重挂语义；**工具白名单交集**（`run-node.ts` 执行 `p.tools` 前不与 `toolPolicy.allow/deny` 求交集）；**单写者锁与 epoch 没接启动路径**（`createOrchestra` 未调 `acquireDbLock` / `bumpEpoch`）；**续租路由与执行期自动续租缺失**（租约 30 秒 < 动作超时 120 秒）。
 
 **下一步**：第四轮独立审计已派独立子代理（`a749d93d-e165-403e-a87e-0ddf09d4d94c`，不自测）；审计判 pass 之前不开 S3 九节点与状态机。
+
+### 11.11 外部静态评审（2026-11-13）要点与处置
+
+外部评审方按 GitHub 公开仓库做静态审阅（看到的是约 29 spec / 227 用例的旧状态，未本地跑测试）。逐条核实与处置写在 `docs/reviews/2026-11-13-external-architecture-review.md`。要点：
+
+- **成立且要改的三条**（新增，进 S3 开场前的加固）：工具白名单交集（`run-node.ts` 执行 `p.tools` 前不与 `toolPolicy.allow/deny` 求交集，`tests/runtime.spec.ts` 里 allow 为空仍执行 `ro.echo`）；单写者的进程级隔离没接启动路径（`createOrchestra` 未取文件锁、未递增 epoch）；租约生命周期缺口（无续租路由、执行期不续租、`runNode` 复用同一个 `p.now`，而租约 30 秒 < 动作超时 120 秒）。
+- **本轮已闭合的**：强证据伪造（系统级证据门 + 痕迹绑定门 + 服务端落库痕迹）、`requiredHashes` 未接入判定流程。
+- **已过时的**：维护扫描没自动跑（`serveOrchestra` 里 2 秒一轮，早就有）。
+- **本来就登记在册的**：桥未接生产路径（F-06，留 S3）；工作流定义未持久化、只按 `workflow_version` 索引且允许覆盖（留 S4 做 `workflow_versions` 表）。
+- **工程细节四条**：WriteQueue 只是 pending 计数、HTTP 入参只做 `requireFields`、`resolveInside` 不查符号链接、配置装配未统一入口 —— 都在 S6 硬化范围；另建议加 GitHub Actions CI（仓库目前没有 `.github/workflows`），把门检查变成合并硬门槛。
+- 这三条新缺口已同时交给第四轮独立审计子代理独立核实（不自证），审计结论里会一并给判定。
