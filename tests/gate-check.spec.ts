@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { auditBindingOf, auditConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, verifyGateRecord } from '../scripts/gate-check.ts'
+import { auditBindingOf, auditConclusionOf, bodyConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, verifyGateRecord } from '../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
@@ -289,6 +289,58 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('## 结论\n\n通过')).toBe('pass')
     expect(auditConclusionOf('建议：不通过')).toBeNull()
     expect(auditConclusionOf('# 没有结论行')).toBeNull()
+  })
+
+  it('可见正文追加常见否定式不能保留 pass（S2 第二十五轮 P0-1/P0-2/P2-1）', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '本次审计无法通过。', '本次审计不予通过。', '本报告未获批准。', '本次审计未达标。',
+      '本次审计被否决。', '本次审计没能通过。', '本次审计被驳回。', '本次审计遭否决。',
+      '本次审计无法予以通过。', '本次审计不获批准。', '本次审计不予批准。',
+      '本次审计未通过验收。', '本次审计不通过验收。', '本次审计未达到通过标准。', '本报告未通过验收。',
+      '本次审计 fаil。', '本次审计 fаіl。',
+      'This review cannot pass.', 'The audit was unable to pass.',
+      'The audit was not approved.', 'The auditor did not approve.',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line)).toBeNull()
+    // 清零统计与历史叙述不能被当成否定结论。
+    expect(auditConclusionOf(base + '本次审计不通过项为 0。')).toBe('pass')
+    expect(auditConclusionOf(base + '本次审计未通过验收项为 0。')).toBe('pass')
+    expect(auditConclusionOf(base + '上一轮审计判 G2 不通过，本轮已修复。')).toBe('pass')
+  })
+
+  it('门记录正文在必过项前追加否定句时不能仍读成 pass（S2 第二十五轮 P0-2）', () => {
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    expect(bodyConclusionOf(head + '本次审计无法通过。')).toBe('fail')
+    expect(bodyConclusionOf(head + '本报告未获批准。')).toBe('fail')
+    expect(bodyConclusionOf(head + '本次审计未通过验收。')).toBe('fail')
+    expect(bodyConclusionOf(head + '本報告未通過驗收。')).toBe('fail')
+    expect(bodyConclusionOf(head + "The audit doesn't pass.")).toBe('fail')
+    expect(bodyConclusionOf(head + '本次审计不通过项为 0。')).toBe('pass')
+    expect(bodyConclusionOf(head + '上一轮审计未通过，本轮已整改。')).toBe('pass')
+  })
+
+  it('S1 第二十一轮 P0/P1：宾语、缩写、繁體、同形字、连接词与历史叙述（S1 r21）', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '本报告未通过验收。', '本次审计未通过评审。', '本報告未通過驗收。',
+      "The audit doesn't pass.", "The audit won't pass.", "The audit hasn't passed.",
+      'The audit was not approved.', 'The audit is not passing.',
+      '本报告未获批准。', '本报告被驳回。', '本报告被否决。', '本报告没有获得通过。',
+      '本报告 fаil。', '本报告未通о过。',
+      '本报告的的的的的的的的的不通过。',
+      'The audit was was was was was was was was was not pass.',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).not.toBe('pass')
+    const safe = [
+      '历史记录：上一轮审计未通过，本轮已整改。',
+      'round20 审计结论为 fail，本轮已整改。',
+      'The previous audit did not pass; this round is clean.',
+      '本轮检查未通过项为零，所有必过项均已通过。',
+    ]
+    for (const line of safe) expect(auditConclusionOf(base + line), line).toBe('pass')
+    // 历史句后面再跟本轮否定，不能被同一段豁免吞掉。
+    expect(auditConclusionOf(base + '上一轮审计未通过，本轮已整改。本报告不通过。')).not.toBe('pass')
   })
 
   it('pass 后带重大/阻断/未收口等 caveat 不能读成 pass（S1 第六轮 P1-1）', () => {
@@ -598,7 +650,6 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     const safe = [
       '本报告不通过项已全部修复',
       '本次审计不通过原因如下',
-      '本报告未通过验收',
       '本报告不合格品率为 0',
       '本报告不通过项统计见附表',
       '本次审计不通过项为 0',
@@ -625,7 +676,7 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
       '本报告不通过/不合格',
     ]
     for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
-    const safe = ['本报告不通过项已全部修复', '本次审计不通过原因如下', '本报告未通过验收', '本报告不合格品率为 0', '本报告不通过项统计见附表', '本次审计不通过项为 0']
+    const safe = ['本报告不通过项已全部修复', '本次审计不通过原因如下', '本报告不合格品率为 0', '本报告不通过项统计见附表', '本次审计不通过项为 0']
     for (const line of safe) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBe('pass')
   })
 

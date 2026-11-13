@@ -16,9 +16,11 @@ export type EvidenceEvaluation = {
 export const ALLOWED_EVIDENCE_FIELDS = ['exitCode', 'stdoutHash', 'stderrHash', 'hashes', 'producedAt'] as const
 
 export type EvidenceGateOptions = {
-  // 服务端可核验的产物哈希：report.output 的摘要，加上同 attempt 工具行的 stdout/stderr/command 哈希。
-  // requiredHashes 的值必须落在这个集合里，不能只校验 64 位十六进制形态（S2 第二十四轮 P1-1）。
-  trustedHashes: readonly string[]
+  // 产物本体：requiredHashes 的每个键都必须在 output 里有同名字段，
+  // 且证据值必须等于该字段的 sha256(canonicalJson(value))。
+  // 这样 commandHash / stdoutHash / 整个 output 的摘要都不能冒充某个具名产物，
+  // 两个 required key 也不能填同一个哈希（S2 第二十五轮 P1-1）。
+  output?: unknown
 }
 
 export function evaluateEvidence(
@@ -43,12 +45,17 @@ export function evaluateEvidence(
   // 哈希值本身也要是 sha256 形态：只给键名、值写 not-a-real-hash 不算证据（S2 第二十三轮 P0-4）
   if (requiredHashes.length > 0) {
     const provided = ev.hashes ?? {}
-    const trusted = new Set(options.trustedHashes.map((h) => h.toLowerCase()))
+    const output = options.output
+    const outputObject = output !== null && typeof output === 'object' && !Array.isArray(output)
+      ? output as Record<string, unknown>
+      : null
     const invalid = requiredHashes.filter((h) => {
       const value = provided[h]
       if (typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value)) return true
-      // 形态对的伪造值同样不算证据：必须等于服务端能重算的产物或工具痕迹哈希。
-      return !trusted.has(value.toLowerCase())
+      // 键语义必须绑定到 output 的同名字段：没有产物、或产物哈希不等于证据值，都不算。
+      if (outputObject === null || !Object.prototype.hasOwnProperty.call(outputObject, h)) return true
+      const expected = sha256Hex(canonicalJson(outputObject[h] ?? null))
+      return value.toLowerCase() !== expected.toLowerCase()
     })
     if (invalid.length > 0) {
       return { ok: false, reason: 'verification_too_weak', strength, digest, normalized }

@@ -5,10 +5,13 @@ import { appendNodeRunEvent } from '../src/infra/db/ledger.ts'
 import { acquireLease } from '../src/service/commands/lease.ts'
 import { applyReport } from '../src/service/commands/apply-report.ts'
 import type { Report } from '../src/core/report.ts'
+import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const CATALOG = catalogFor(['n_ar', 'n_other'])
 const CMD = 'c'.repeat(64)
+const ARTIFACT = { file: 'build/app.tar', size: 3 }
+const ARTIFACT_HASH = sha256Hex(canonicalJson(ARTIFACT))
 
 function setup(opts: { ttl?: number; now?: string; trace?: boolean } = {}) {
   const { db } = freshLedger(); seed(db); bindRunVersion(db, CATALOG)
@@ -375,15 +378,52 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
     expect(nodeRow(db).status).toBe('verifying')
   })
 
-  it('required_hashes 的值为真实工具痕迹哈希 → 正常收口（S2 第二十四轮 P1-1 阳性对照）', () => {
+  it('required_hashes 的值等于 output 同名产物的哈希 → 正常收口（S2 第二十五轮 P1-1 阳性对照）', () => {
     const db = setup()
     const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact'] })
     bindRunVersion(db, catalog)
     const out = apply(db, {
-      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: CMD }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+      output: { artifact: ARTIFACT },
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: ARTIFACT_HASH }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
     }, 'verifying', 1, NOW, catalog)
     expect(out.accepted).toBe(true)
     expect(nodeRow(db).status).toBe('done')
+  })
+
+  it('required_hashes 填命令哈希冒充产物 → verification_too_weak', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact'] })
+    bindRunVersion(db, catalog)
+    const out = apply(db, {
+      output: { artifact: ARTIFACT },
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: CMD }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('verification_too_weak')
+  })
+
+  it('required_hashes 的键在 output 里不存在 → verification_too_weak', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact'] })
+    bindRunVersion(db, catalog)
+    const out = apply(db, {
+      output: {},
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: ARTIFACT_HASH }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('verification_too_weak')
+  })
+
+  it('两个 required key 不能共用同一个产物哈希 → verification_too_weak', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact', 'bundle'] })
+    bindRunVersion(db, catalog)
+    const out = apply(db, {
+      output: { artifact: ARTIFACT, bundle: { file: 'build/bundle.zip' } },
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: ARTIFACT_HASH, bundle: ARTIFACT_HASH }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('verification_too_weak')
   })
 
   it('失败终态缺证据 → evidence_missing（S2 第二十三轮 P1-1）', () => {
@@ -410,6 +450,49 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
     const out = apply(db, {
       status: 'failed',
       evidence: { source: 'run_tool', exitCode: 2, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_unverifiable')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('failed 只有成功行 → tool_execution_failed（S2 第二十五轮 P1-2）', () => {
+    const db = setup()
+    const out = apply(db, {
+      status: 'failed',
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('tool_execution_failed')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('failed 同 attempt 另有失败行时，不能拿成功行收口', () => {
+    const db = setup()
+    withTx(db, (tx) => {
+      tx.run(
+        "UPDATE tool_executions SET exit_code = 2, stdout_hash = 'bad' WHERE node_run_id = 'nr_ar' AND attempt = 2 AND tool = 'ro.echo'",
+      )
+    })
+    const out = apply(db, {
+      status: 'failed',
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_unverifiable')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('timeout 同 attempt 另有失败行时，也不能拿成功行收口', () => {
+    const db = setup()
+    withTx(db, (tx) => {
+      tx.run(
+        "UPDATE tool_executions SET exit_code = 2, stdout_hash = 'bad' WHERE node_run_id = 'nr_ar' AND attempt = 2 AND tool = 'ro.echo'",
+      )
+    })
+    const out = apply(db, {
+      status: 'timeout',
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
     })
     expect(out.accepted).toBe(false)
     expect(out.reason).toBe('evidence_unverifiable')

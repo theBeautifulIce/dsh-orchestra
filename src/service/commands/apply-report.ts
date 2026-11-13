@@ -8,7 +8,6 @@ import { transitionNode } from './node-state.ts'
 import { assertLeaseValid, loadNodeRun, type NodeRunRow } from './lease.ts'
 import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
-import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
 import { canTransition } from '../../core/state-machine.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 
@@ -227,7 +226,12 @@ export function applyReport(
   // 失败/超时终态也要有可核对的服务端证据：证据必须与同 attempt 的工具痕迹与 tool_finished 对齐，
   // 不能凭一条自报的 exitCode 收口（S2 第二十三轮 P1-1、第二十四轮 P1-2）。
   if (report.status === 'failed' || report.status === 'timeout') {
-    const terminal = traceBindingGate(tx, params, report, { allowFailed: true })
+    const terminal = traceBindingGate(tx, params, report, {
+      allowFailed: true,
+      // failed 必须对一条失败行；timeout 可能是被杀死而没有失败行，但仍不许拿成功行
+      // 去盖住同 attempt 里已经出现的失败行（S2 第二十五轮 P1-2）。
+      requireFailure: report.status === 'failed',
+    })
     if (terminal.reason) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: terminal.reason, now: params.now })
     }
@@ -247,12 +251,10 @@ export function applyReport(
     if (trace.reason) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: trace.reason, now: params.now })
     }
-    // 证据强度按模板要求校验：requiredHashes 的值必须与服务端可重算的产物或痕迹哈希一致，
-    // 只写一个形态合法的伪造值不算证据（S2 第二十四轮 P1-1）。
-    const outputHash = sha256Hex(canonicalJson(report.output ?? null))
-    const evidence = evaluateEvidence(report, policy.requiredHashes ?? [], {
-      trustedHashes: [outputHash, ...trace.trustedHashes],
-    })
+    // 证据强度按模板要求校验：requiredHashes 的每个键都必须在 report.output 里有同名字段，
+    // 且证据值等于该字段的产物哈希；命令哈希、stdout 哈希、整个 output 的摘要都不能冒充
+    // 某个具名产物（S2 第二十五轮 P1-1）。
+    const evidence = evaluateEvidence(report, policy.requiredHashes ?? [], { output: report.output })
     if (!evidence.ok) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
     }
@@ -333,8 +335,6 @@ type ToolExecutionRow = {
 
 type TraceBinding = {
   reason: string | null
-  // 与证据对上的那一行工具痕迹的哈希；requiredHashes 的值必须落在这里面或 report.output 的摘要里。
-  trustedHashes: string[]
 }
 
 // 痕迹绑定门：证据要跟账本里的工具执行痕迹对得上，伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
@@ -346,23 +346,32 @@ function traceBindingGate(
   tx: Tx,
   params: ApplyReportParams,
   report: Report,
-  opts: { allowFailed?: boolean } = {},
+  opts: { allowFailed?: boolean; requireFailure?: boolean } = {},
 ): TraceBinding {
   const ev = report.evidence
-  if (!ev) return { reason: 'evidence_missing', trustedHashes: [] }
-  if (ev.source !== 'run_tool') return { reason: 'verification_too_weak', trustedHashes: [] }
-  if (typeof ev.tool !== 'string' || ev.tool.length === 0) return { reason: 'evidence_unverifiable', trustedHashes: [] }
-  if (typeof ev.commandHash !== 'string' || !/^[0-9a-f]{64}$/i.test(ev.commandHash)) return { reason: 'evidence_unverifiable', trustedHashes: [] }
-  if (typeof ev.producedAt !== 'string' || Number.isNaN(Date.parse(ev.producedAt))) return { reason: 'evidence_missing', trustedHashes: [] }
+  if (!ev) return { reason: 'evidence_missing' }
+  if (ev.source !== 'run_tool') return { reason: 'verification_too_weak' }
+  if (typeof ev.tool !== 'string' || ev.tool.length === 0) return { reason: 'evidence_unverifiable' }
+  if (typeof ev.commandHash !== 'string' || !/^[0-9a-f]{64}$/i.test(ev.commandHash)) return { reason: 'evidence_unverifiable' }
+  if (typeof ev.producedAt !== 'string' || Number.isNaN(Date.parse(ev.producedAt))) return { reason: 'evidence_missing' }
   const rows = tx.all<ToolExecutionRow>(
     'SELECT tool, exit_code, stdout_hash, stderr_hash, command_hash FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
     [params.nodeRunId, params.attempt],
   )
-  if (rows.length === 0) return { reason: 'evidence_unverifiable', trustedHashes: [] }
+  if (rows.length === 0) return { reason: 'evidence_unverifiable' }
   // 同一次尝试里出现过失败的工具，整次尝试就不许以 done 收口；失败/超时终态本身就要对失败行。
-  if (!opts.allowFailed && rows.some((r) => r.exit_code !== 0)) return { reason: 'tool_execution_failed', trustedHashes: [] }
+  const failedRows = rows.filter((r) => r.exit_code !== 0)
+  if (!opts.allowFailed && failedRows.length > 0) return { reason: 'tool_execution_failed' }
+  // 失败终态但账本里没有失败行：证据仍自称成功时是“拿成功行收口”，
+  // 证据自称失败时则根本没有可核对的失败痕迹。两者都必须拒绝，但归因分开。
+  if (opts.requireFailure && failedRows.length === 0) {
+    return { reason: ev.exitCode === 0 ? 'tool_execution_failed' : 'evidence_unverifiable' }
+  }
+  // 失败/超时终态只要同 attempt 出现过失败行，证据就必须绑定失败行；
+  // 不能拿一条成功行把异常盖过去（S2 第二十五轮 P1-2）。
+  const candidates = failedRows.length > 0 ? failedRows : rows
   const hashes = ev.hashes ?? {}
-  const matched = rows.find((r) => {
+  const matched = candidates.find((r) => {
     if (r.exit_code !== ev.exitCode) return false
     if (r.tool !== ev.tool) return false
     if ((r.stdout_hash ?? '') !== (ev.stdoutHash ?? '')) return false
@@ -372,7 +381,7 @@ function traceBindingGate(
     if (hashes.stderr !== undefined && hashes.stderr !== r.stderr_hash) return false
     return true
   })
-  if (!matched) return { reason: 'evidence_unverifiable', trustedHashes: [] }
+  if (!matched) return { reason: 'evidence_unverifiable' }
   // 事件面也要对得上：只有工具执行表有行、没有 tool_finished 留痕，仍按证据不可核
   const events = tx.all<{ payload: string }>(
     "SELECT payload FROM node_run_events WHERE node_run_id = ? AND type = 'tool_finished'",
@@ -391,8 +400,6 @@ function traceBindingGate(
       return false
     }
   })
-  if (!eventMatched) return { reason: 'evidence_unverifiable', trustedHashes: [] }
-  const trustedHashes = [matched.stdout_hash, matched.stderr_hash, matched.command_hash]
-    .filter((h): h is string => typeof h === 'string' && h.length > 0)
-  return { reason: null, trustedHashes }
+  if (!eventMatched) return { reason: 'evidence_unverifiable' }
+  return { reason: null }
 }

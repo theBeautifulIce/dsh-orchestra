@@ -4,15 +4,20 @@ import {
   type PassCondition,
 } from '../src/core/policy.ts'
 import type { Report } from '../src/core/report.ts'
+import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
+
+const ARTIFACT = { file: 'build/app.tar', digest: 'a'.repeat(64) }
+const ARTIFACT_HASH = sha256Hex(canonicalJson(ARTIFACT))
+const OUTPUT = { artifact: ARTIFACT }
 
 const report = (over: Partial<Report> = {}): Report => ({
   report_id: 'rep_1', node_run_id: 'nr1', attempt: 1, status: 'done',
-  evidence: { source: 'run_tool', exitCode: 0, hashes: { artifact: 'a'.repeat(64) } },
+  evidence: { source: 'run_tool', exitCode: 0, hashes: { artifact: ARTIFACT_HASH } },
   ...over,
 })
 
-// requiredHashes 的值必须等于服务端可重算的产物或工具痕迹哈希，不是只写个 64 位十六进制就算数。
-const trusted = { trustedHashes: ['a'.repeat(64)] }
+// requiredHashes 的键必须在 output 里有同名字段，值必须等于该字段的产物哈希。
+const trusted = { output: OUTPUT }
 
 describe('证据门', () => {
   it('没有 evidence → ok=false、reason=evidence_missing', () => {
@@ -37,8 +42,17 @@ describe('证据门', () => {
     expect(evaluateEvidence(forged, ['artifact'], trusted).reason).toBe('verification_too_weak')
   })
 
+  it('命令哈希不能冒充具名产物', () => {
+    const forged = report({ evidence: { source: 'run_tool', exitCode: 0, hashes: { artifact: 'c'.repeat(64) } } })
+    expect(evaluateEvidence(forged, ['artifact'], trusted).reason).toBe('verification_too_weak')
+  })
+
+  it('output 里没有同名产物 → verification_too_weak', () => {
+    expect(evaluateEvidence(report(), ['bundle'], trusted).reason).toBe('verification_too_weak')
+  })
+
   it('弱证据不做不可逆凭据', () => {
-    const weak = report({ evidence: { source: 'tool_result', hashes: { artifact: 'a'.repeat(64) } } })
+    const weak = report({ evidence: { source: 'tool_result', hashes: { artifact: ARTIFACT_HASH } } })
     expect(evaluateEvidence(weak, ['artifact'], trusted).reason).toBe('verification_too_weak')
   })
 })

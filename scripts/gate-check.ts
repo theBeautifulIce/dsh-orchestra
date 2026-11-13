@@ -646,6 +646,7 @@ const FAIL_SUBJECTS = [
   '審計結論', '審核結論', '復核結論', '評審結論', '審計結果', '審核結果', '復核結果', '評審結果',
   '最終結論', '最終判定',
   '审计', '审核', '复核', '评审', '结论', '判定', '審計', '審核', '復核', '評審', 'audit', 'review',
+  'auditor', 'reviewer', '審計師',
 ].sort((a, b) => b.length - a.length)
 
 const FAIL_VERDICTS = [
@@ -660,6 +661,18 @@ const FAIL_VERDICTS = [
   'didnt pass', 'didnt succeed', 'wasnt pass', 'isnt pass',
   'unsuccessful', 'failure', 'failed', 'fails', 'fail',
   'rejected', 'reject', 'denied', 'deny', 'no pass',
+  'refused', 'refusal',
+  // 无法/不予/未获批准/未达标/被否决/被驳回等常见否定式（S2 第二十五轮 P0-1/P2-1）。
+  '无法予以通过', '无法通过', '不予通过', '不获通过', '未获批准', '不获批准', '不予批准',
+  '未达到通过标准', '未达标', '不达标', '未通过验收', '不通过验收', '未获审批', '不获审批',
+  '被否决', '遭否决', '被驳回', '遭驳回', '被拒绝', '没能通过',
+  'cannot pass', 'unable to pass', 'not approved', 'not approve', 'did not approve',
+  'failed to pass', 'refused to pass', 'no approval', 'denied approval',
+  // S1 第二十一轮 P0：缩写否定、批准类否定与繁體带宾语写法。
+  'doesnt pass', 'doesnt approve', 'wont pass', 'wont approve', 'hasnt passed',
+  'hasnt approved', 'havent passed', 'isnt passing', 'isnt approved', 'wasnt approved',
+  'didnt approve', 'not passing', 'not approved',
+  '未通過驗收', '不通過驗收', '未通過評審', '未通過審核', '被駁回', '被否決',
 ].sort((a, b) => b.length - a.length)
 
 const FAIL_CONNECTORS = [
@@ -683,11 +696,31 @@ function sepPattern(token: string): string {
   return Array.from(token).filter((ch) => !/\s/u.test(ch)).map(regexEscape).join('\\|*')
 }
 
+const HOMOGLYPHS: Record<string, string> = {
+  // 西里尔/希腊同形字：先把“看起来是拉丁字母”的码位折回 ASCII，
+  // 否则 fаil、pаss 这类写法会绕过词表（S2 第二十五轮 P2-1）。
+  'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x',
+  'і': 'i', 'ј': 'j', 'ѕ': 's', 'ԁ': 'd', 'һ': 'h', 'ӏ': 'l',
+  'α': 'a', 'ο': 'o', 'ρ': 'p', 'ν': 'v', 'κ': 'k', 'χ': 'x', 'ι': 'i',
+  'ε': 'e', 'τ': 't', 'υ': 'u', 'γ': 'y',
+}
+
+function foldHomoglyphs(text: string): string {
+  return Array.from(text).map((ch) => HOMOGLYPHS[ch] ?? ch).join('')
+}
+
 function foldForVerdict(raw: string): string {
-  const text = raw.normalize('NFKC').toLowerCase().replace(/[\u2019\u00B4']/g, '')
+  const text = foldHomoglyphs(raw.normalize('NFKC').toLowerCase()).replace(/[\u2019\u00B4']/g, '')
   let out = ''
-  for (const ch of text) {
+  const chars = Array.from(text)
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i]!
     if (/[\p{Cf}\p{Mn}\p{Me}]/u.test(ch)) continue
+    // 汉字中间夹一个同形拉丁/西里尔/希腊字母时（未通о过），按汉字词处理：
+    // 不把它当成分隔符，否则一个字符就能把“未通过”拆开（S1 第二十一轮 P0-5）。
+    if (/[\p{Script=Latin}\p{Script=Cyrillic}\p{Script=Greek}]/u.test(ch)
+      && /[\u4e00-\u9fff]$/u.test(out)
+      && /[\u4e00-\u9fff]/u.test(chars[i + 1] ?? '')) continue
     // 修饰字母形的冒号/连接号（U+02D0、U+A789）属于 Lm，不能当普通字母留下。
     if ('\u02D0\uA789\u2236\uFE13\uFE55\uFF1A:\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D\u2043'.includes(ch)) {
       out += '|'
@@ -708,6 +741,68 @@ function foldForVerdict(raw: string): string {
 
 const FAIL_VERDICT_RE = new RegExp('^(?:' + FAIL_VERDICTS.map(sepPattern).join('|') + ')')
 const FAIL_CONNECTOR_RES = FAIL_CONNECTORS.map((token) => ({ token, re: new RegExp('^' + sepPattern(token)) }))
+
+// 结构化否定：否定词 + 可选填充词 + 通过类谓词 + 可选对象。
+// 这样“未达到通过标准”“无法予以通过”“被驳回”不必逐条入表，
+// 同时“未通过项为 0”仍因尾部不是句末而放行。
+const FAIL_NEGATIONS = [
+  'refused to', 'failed to', 'unable to', 'did not', 'didnt', 'was not', 'wasnt',
+  'is not', 'isnt', 'has not', 'hasnt', 'have not', 'havent', 'does not', 'doesnt',
+  'will not', 'wont', 'do not', 'dont', 'cannot', 'cant', 'never',
+  '无法', '没能', '没有', '未能', '未获', '未予', '不予', '不获', '不得', '不能', '不可',
+  '不是', '并非', '遭', '被', '未', '不', '没', '无', 'not', 'no',
+].sort((a, b) => b.length - a.length)
+const FAIL_FILLERS = [
+  'be able to', 'able to', '得到', '获得', '予以', '能够', '达到', '经过',
+  '获', '能', 'be', 'to', 'the', 'a',
+].sort((a, b) => b.length - a.length)
+const FAIL_PASS_STEMS = [
+  '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
+  '否决', '驳回', '拒绝', 'approval', 'approved', 'approve', 'passing', 'passed',
+  'succeed', 'succeeded', 'success', 'accepted', 'accept', 'pass', 'meet', 'met',
+  // 繁體谓词（S1 第二十一轮 P0-1）。
+  '通過', '達標', '過關', '許可', '認可', '否決', '駁回', '拒絕', '獲批', '获批',
+].sort((a, b) => b.length - a.length)
+const FAIL_OBJECTS = ['验收', '标准', '审批', '评审', '审核', '考核', '许可', '批准', '认可',
+  '驗收', '標準', '審批', '評審', '審核', '許可', '認可']
+  .sort((a, b) => b.length - a.length)
+
+function prefixRes(tokens: readonly string[]): { token: string; re: RegExp }[] {
+  return tokens.map((token) => ({ token, re: new RegExp('^' + sepPattern(token)) }))
+}
+const FAIL_NEG_RES = prefixRes(FAIL_NEGATIONS)
+const FAIL_FILLER_RES = prefixRes(FAIL_FILLERS)
+const FAIL_STEM_RES = prefixRes(FAIL_PASS_STEMS)
+const FAIL_OBJECT_RES = prefixRes(FAIL_OBJECTS)
+
+function matchPrefix(rest: string, resources: { token: string; re: RegExp }[]): string | null {
+  // 词与词之间允许任意 | 夹层：先跳过夹层再匹配，否则
+  // “is not passing”“未|通过|验收”会在第二个词前被 | 挡住（S1 第二十一轮 P0-3）。
+  const lead = /^\|*/.exec(rest)?.[0].length ?? 0
+  const body = rest.slice(lead)
+  for (const resource of resources) {
+    const match = resource.re.exec(body)
+    if (match) return rest.slice(0, lead) + match[0]
+  }
+  return null
+}
+
+function matchStructuralNegative(rest: string): string | null {
+  const neg = matchPrefix(rest, FAIL_NEG_RES)
+  if (!neg) return null
+  let pos = neg.length
+  for (let guard = 0; guard < 2; guard += 1) {
+    const filler = matchPrefix(rest.slice(pos), FAIL_FILLER_RES)
+    if (!filler) break
+    pos += filler.length
+  }
+  const pred = matchPrefix(rest.slice(pos), FAIL_STEM_RES)
+  if (!pred) return null
+  pos += pred.length
+  const obj = matchPrefix(rest.slice(pos), FAIL_OBJECT_RES)
+  if (obj) pos += obj.length
+  return rest.slice(0, pos)
+}
 const FAIL_SUBJECT_RE = new RegExp(FAIL_SUBJECTS.map(sepPattern).join('|'), 'g')
 const FAIL_SUBJECT_NO_BARE_RE = new RegExp(
   FAIL_SUBJECTS.filter((s) => s !== '结论' && s !== '判定').map(sepPattern).join('|'),
@@ -723,12 +818,18 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
   let sm: RegExpExecArray | null
   while ((sm = subjectRe.exec(folded)) !== null) {
     let pos = sm.index + sm[0].length
-    for (let guard = 0; guard < 8; guard += 1) {
+    // 连接词不限次数：只要求每次真的前进，长度有限所以必然收敛（S1 第二十一轮 P0-6）。
+    for (let guard = 0; guard <= folded.length; guard += 1) {
       while (folded[pos] === '|') pos += 1
       const rest = folded.slice(pos)
       const vm = FAIL_VERDICT_RE.exec(rest)
       if (vm) {
         const next = folded[pos + vm[0].length] ?? ''
+        if (next === '' || next === '|' || /[需应已的了]/.test(next)) return true
+      }
+      const structural = matchStructuralNegative(rest)
+      if (structural) {
+        const next = folded[pos + structural.length] ?? ''
         if (next === '' || next === '|' || /[需应已的了]/.test(next)) return true
       }
       let advanced = false
@@ -746,8 +847,20 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
   return false
 }
 
+// 历史叙述不是本轮意见：只剔除“上一轮/前一轮/roundN … 本轮已整改”这一小段，
+// 同一行里剩余的否定句仍照常扫描（S1 第二十一轮 P1）。
+const HISTORICAL_REMEDIATION_RES = [
+  /(?:历史记录\s*[：:]?\s*)?(?:上一轮|前一轮|round\s*\d{1,3})\s*(?:审计|審計|检查|复核|评审)?[^。\n]{0,120}?(?:本轮已整改|本轮已修复|本轮已收口|本轮已处理|本轮修复|已整改|已修复|已收口)/gi,
+  /(?:the\s+)?previous\s+audit[^.\n]{0,120}?(?:this\s+round\s+is\s+(?:clean|fixed)|remediated)/gi,
+]
+function stripHistoricalRemediation(text: string): string {
+  let out = text
+  for (const re of HISTORICAL_REMEDIATION_RES) out = out.replace(re, '')
+  return out
+}
+
 function visibleFailStatement(line: string, scan: FailScan = {}): boolean {
-  return scanFailStatement(foldForVerdict(line), scan)
+  return scanFailStatement(foldForVerdict(stripHistoricalRemediation(line)), scan)
 }
 
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
@@ -794,7 +907,7 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
 
 // 门记录正文顶部的结论行必须与 GateArtifact 的 conclusion 一致：
 // 防止 artifact 写 pass、人读正文却看到 fail（S1 第十七轮 P2-1）。
-function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
+export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   const visible = renderedAuditLines(text)
   if (visible === null) return null
   const found: Array<'pass' | 'fail'> = []

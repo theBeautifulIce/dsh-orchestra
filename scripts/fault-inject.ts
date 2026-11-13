@@ -66,7 +66,9 @@ function normalizeEvidence(text: string, shared?: EvidenceMaps): string {
     }
     return hit
   }
-  let out = text.replace(/evt_[0-9a-f]{20,}/g, (m) => idOf(m))
+  // 运行时刻（租约到期、工具开始、验收截止）也是环境噪声，统一写 <ts> 才谈得上重跑同字节。
+  let out = text.replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, '<ts>')
+  out = out.replace(/evt_[0-9a-f]{20,}/g, (m) => idOf(m))
   out = out.replace(/lease_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, (m) => entityOf(m))
   out = out.replace(/(tsk|run|nrun|dec)_[0-9a-f]{32}/g, (m) => entityOf(m))
   return out
