@@ -564,3 +564,26 @@ S1 第十一轮（docs/audits/S1-independent-audit-round11.md，sha256=2e43ca1a�
 提交 0297b77「Mask multiline link definitions and bind evidence into candidate scope」，3 文件 +196/−6（含 S1 第十一轮报告）。tsc --noEmit exit 0；全量 32 文件 / 310 例，299 passed / 11 failed，11 红仍全在 tests/gate-check.spec.ts 的预签态（G1 audit_report_sha256=0*64），无新增回归。
 
 下一步：S1 第十二轮（docs/audits/S1-independent-audit-round12.md）与 S2 第十五轮（docs/audits/S2-independent-audit-round15.md）独立审计已按 HEAD 0297b77 派出（S1 04fc20e1-1975-4f54-bd76-647fd2b3a1c7、S2 dd007ad7-764a-4247-bd44-cb8519a09071）；S2 第十四轮因 HEAD 已变而中断。两份都 pass 后：提交报告 → 改 G1 audit_round=12 / audit_report=S1-independent-audit-round12.md，G2 audit_round=15 / audit_report=S2-independent-audit-round15.md，审计 sha 清零 → 提交 → sign-gate G1、提交 → sign-gate G2、提交 → 双门 gate-check exit 0 且全量 310/310 → 开 S3。任何一份 fail 都回表整改，不重签、不开 S3。
+
+### 11.21 S2 第二十三轮与 S1 第十九轮整改：证据终态、服务端时钟、可见否定句（2026-11-14 01:50，HEAD 53495fc）
+
+S2 第二十三轮（`docs/audits/S2-independent-audit-round23.md`，288 行，判 fail：P0=4 / P1=1）与 S1 第十九轮（`docs/audits/S1-independent-audit-round19.md`，判 fail：P0=4）同批整改，提交 `53495fc`。
+
+S2 侧：
+- P0-1 解析器认裸「审计」、连接号/破折号、英文否定句；英文判定改跑原始行，避免压缩空白后失去词边界。
+- P0-2 `traceBindingGate` 查同一 attempt 全部工具行，任一行失败即 `tool_execution_failed`，不再用 `some` 挑一条成功行。
+- P0-3 新增 `ServerDeps.now`；`/lease`、`/renew`、`/report`、`/run`、`/cancel` 全部用服务端 `requestNow`，请求体 `now` 不再参与租约判定。
+- P0-4 `requiredHashes` 必须是 64 位 hex；证据必须带 `tool`、`commandHash`、`producedAt`，并与 `tool_executions`、`tool_finished` 同 attempt 全等。
+- P1-1 `failed`/`timeout` 终态也走 `terminalEvidenceGate`，无证据不许收口。
+
+S1 侧：
+- P0-1 `auditConclusionOf` 的邻行拼接改为最多四行的滑动窗口，堵「本报告不 / 通 / 过」。
+- P0-2 图片 alt 先用 `markdown-it` 的 `unescapeAll` 解实体，再判可见否定句。
+- P0-3 否定句尾部字符类补齐 ASCII/弯/全角/法文引号。
+- P0-4 `bodyConclusionOf` 同样做多行滑动窗口，门记录正文与审计报告同一口径。
+
+验收（实测）：`tsc --noEmit` exit 0；全量 32 文件 / 340 例，329 passed / 11 failed；11 红全部是 G1 预签态（`audit_report_sha256=0*64` 对实际 `50ba1b13cdf1b84d…`），无新增回归。`tests/gate-check.spec.ts` 71 例，60 passed / 11 failed；新增 S1 第十九轮两条回归用例只读运行 3 passed / 68 skipped。
+
+对照表：`docs/audits/S2-round23-response.md`、`docs/audits/S1-round19-response.md`。
+
+下一步：按当前 HEAD（整改提交 `53495fc`）重派 S1 第二十轮与 S2 第二十四轮独立审计；两份都 pass 后按既有顺序重签 G1/G2、双门 gate-check exit 0、全量 340/340，再开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
