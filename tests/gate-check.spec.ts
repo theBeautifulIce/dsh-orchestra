@@ -243,8 +243,26 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('结论：fail —— 致命 1 / 重大 3')).toBe('fail')
     expect(auditConclusionOf('## 结论\n\n不通过')).toBe('fail')
     expect(auditConclusionOf('## 结论\n\n通过')).toBe('pass')
-    expect(auditConclusionOf('建议：不通过')).toBe('fail')
+    expect(auditConclusionOf('建议：不通过')).toBeNull()
     expect(auditConclusionOf('# 没有结论行')).toBeNull()
+  })
+
+  it('pass 后带重大/阻断/未收口等 caveat 不能读成 pass（S1 第六轮 P1-1）', () => {
+    expect(auditConclusionOf('结论：pass — 重大 3')).toBeNull()
+    expect(auditConclusionOf('结论：pass（未收口）')).toBeNull()
+    expect(auditConclusionOf('结论：pass — 阻断')).toBeNull()
+    expect(auditConclusionOf('结论：pass（未解决）')).toBeNull()
+    expect(auditConclusionOf('结论：pass — 但还有 3 个重大问题')).toBeNull()
+    expect(auditConclusionOf('结论：pass（遗留 2 个重大缺陷）')).toBeNull()
+  })
+
+  it('建议行不再当结论；正常清零写法不误杀（S2 第十轮 P2-9）', () => {
+    expect(auditConclusionOf('建议：通过')).toBeNull()
+    expect(auditConclusionOf('结论：pass（P0 与 P1 均为 0）')).toBe('pass')
+    expect(auditConclusionOf('结论：pass（P0/P1 均无）')).toBe('pass')
+    expect(auditConclusionOf('结论：pass（P0=0，P1=0，P2=10）')).toBe('pass')
+    expect(auditConclusionOf('- 结论：通过')).toBe('pass')
+    expect(auditConclusionOf('> 结论：不通过')).toBe('fail')
   })
 
   it('结论后不许带“通过率”这类未收口的后缀（第七轮审计 P1-1）', () => {
@@ -280,5 +298,10 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('正文\n\n```md\n结论：pass\n```\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('~~~\n结论：pass\n~~~')).toBeNull()
     expect(auditConclusionOf('```\n结论：fail\n```\n\n结论：pass')).toBe('pass')
+    expect(auditConclusionOf('````md\n结论：fail\n```\n结论：pass\n````\n\n结论：fail')).toBe('fail')
+  })
+
+  it('第二行同向结论也按歧义处理（全文只能有一个结论）', () => {
+    expect(auditConclusionOf('结论：pass\n\n结论：pass')).toBeNull()
   })
 })

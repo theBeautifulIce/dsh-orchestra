@@ -497,3 +497,20 @@ S2 第九轮（docs/audits/S2-independent-audit-round9.md，27,906 字节）判 
 验收：tsc --noEmit exit 0；定向 5 例全过；全量 32 文件 / 295 例，285 passed / 10 failed，10 红全在 tests/gate-check.spec.ts，首因仍是 G1 audit_report_sha256 占位 0（待签），无新增缺陷。
 
 下一步：提交 P1 修复 + 两份审计报告 → 因 gate-check 已改，S2 第九轮 pass 只作为历史结论，重新派 S1 第六轮（docs/audits/S1-independent-audit-round6.md）与 S2 第十轮（docs/audits/S2-independent-audit-round10.md）独立审计 → 两份 pass 后按 G1 audit_round=6 / G2 audit_round=10 重签、双门 exit 0、全量 295/295，再开 S3。任何一份 fail 都回表整改，不重签、不开 S3。
+
+### 11.17 S2 第十轮 pass、S1 第六轮 fail 与解析器重写（2026-11-13 21:05）
+
+S2 第十轮（docs/audits/S2-independent-audit-round10.md，219 行）判 pass：P0=0 / P1=0 / P2=10。19 项必过与 19 份证据从 HEAD 0919589 按 LF 重算全对；ev-g2-15 两次 2434 字节、sha256 一致；临时 clone 把 G2 改到 round10 后可 sign-gate exit 0、gate-check exit 0。P2 未闭合：action_timeout 配置未接生产、lease_lost/action_timeout 缺执行期回归、跨重启仍是同库 hydrate、前序链只比字符串、remember 别名先写后查、围栏只按行首翻转、结论解析误杀/漏杀、done 后不释放租约、acquireLease 不校验 attempt、traceBindingGate 不校 tool/commandHash。
+
+S1 第六轮（docs/audits/S1-independent-audit-round6.md）判 fail：P0=0 / P1=1 / P2=6。P1-1 是 pass 结论后的破折号允许任意文本，阻塞词表缺重大/阻断/未收口/未解决；在克隆里“结论：pass — 重大 3”与“结论：pass（未收口）”都能让 sign-gate 与 gate-check exit 0（attack C artifact 373560a6bd64…，attack D artifact 929d83bfd289…）。P2：列表/引用/下一行结论、同义结论、围栏规则未入规范、G-08 缺 503/warning、审计报告未绑门与候选、正常清零写法被误杀。
+
+本轮把 auditConclusionOf 从“tail 正则 + 阻塞词表”改成“唯一结论行 + 结构化尾巴”：
+- 全文只接受一行结论；第二行无论同向反向都返回 null；行内引用不算结论；建议行不再当结论。
+- 行首可带标题/列表/引用/加粗标记；同义结论支持判定/审计意见/最终判定/最终结论/结果，通过/不通过与 pass/fail 等价。
+- 围栏按字符与长度配对，关闭围栏必须同字符且不短于开启围栏。
+- 结论 token 后只接受空尾、句末标点、一个括号或一个破折号解释；括号/解释内只允许清零计数（P0=0、无 P0/P1、0 致命、P2 遗留 N 条），其余文字按未收口返回 null。fail 只要求尾巴里没有反向 pass。
+- 规格 §11.3 补一条解析契约，写清围栏、唯一结论、建议行与清零计数规则。
+
+tests/gate-check.spec.ts 新增 3 例、更新建议行断言，当前该文件 38 例；定向“审计报告结论”10 例全过，tsc exit 0。全量 32 文件 / 298 例，288 passed / 10 failed；10 红仍全在 tests/gate-check.spec.ts，首因 G1 audit_report_sha256 占位 0，属待签状态，不是新缺陷。
+
+下一步：提交解析器、测试、规格与两份报告 → 因 gate-check 已改，S2 第十轮 pass 只算历史结论，重新派 S1 第七轮与 S2 第十一轮独立审计 → 两份 pass 后按 G1 audit_round=7 / G2 audit_round=11 重签、双门 exit 0、全量 298/298，再开 S3。任何一份 fail 都回表整改，不重签、不开 S3。

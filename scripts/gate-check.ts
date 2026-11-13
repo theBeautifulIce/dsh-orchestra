@@ -485,59 +485,95 @@ function checkPreviousChain(artifact: Record<string, unknown>, spec: GateSpec, r
   if (m[1] !== prev) throw new Error('previous_artifact_hash 与前序门记录的 artifact_hash 不符（重签链断了）')
 }
 
-// 审计报告正文里的结论：只认行首（可带标题/加粗标记）的结论行，且全文只能有一个结论
-// 「门记录结论：pass」这类行内引用不算结论；多个不同结论视为没结论，不能拿它签门（第六轮审计 P0-1）
+// 审计报告正文里的结论：只认行首（可带标题/列表/引用/加粗标记）的结论行，
+// 且全文只能有一个结论。行内引用不算结论；多个结论视为没结论（第六轮审计 P0-1）。
+// 结论 token 后只接受空尾、句末标点、一个括号补充或一个破折号解释；
+// 括号/解释里只允许清零计数（P0=0 / 无 P0/P1 / 0 致命 / P2 遗留 N 条），
+// 其余文字一律按未收口处理（S1 第六轮 P1-1 / S2 第十轮 P2-9）。
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
-  const found = new Set<'pass' | 'fail'>()
-  let inFence = false
+  let fence: { char: string; length: number } | null = null
+  let verdict: 'pass' | 'fail' | null = null
   for (const rawLine of text.split(/\r?\n/)) {
-    const trimmed = rawLine.trim()
-    // 围栏代码块里的“结论：pass”是示例，不是报告结论（第七轮审计 P1-1）
-    if (/^(```|~~~)/.test(trimmed)) {
-      inFence = !inFence
+    // 围栏代码块里的“结论：pass”是示例，不是报告结论；关闭围栏必须同字符且不短于开启围栏。
+    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(rawLine)
+    if (fenceMatch) {
+      const marker = fenceMatch[1] ?? ''
+      if (!fence) fence = { char: marker[0] ?? '', length: marker.length }
+      else if (marker[0] === fence.char && marker.length >= fence.length) fence = null
       continue
     }
-    if (inFence) continue
-    const line = trimmed.replace(/^#{1,6}\s*/, '').replace(/^\*\*/, '').trim()
-    // 结论 token 后只许：可选加粗、句末标点、括号补充、破折号解释，然后必须行尾
-    const tail = '(?:\\*\\*)?\\s*(?:[。．.！!？?；;，,、]\\s*)?(?:[（(][^）)]*[）)])?\\s*(?:[—–-].*)?$'
-    let m = new RegExp('^(?:审计)?(?:结论|判定)\\s*\\**\\s*[：:]\\s*\\**\\s*(pass|fail|通过|不通过)' + tail, 'i').exec(line)
-    // 结论候选行没解析成功时不能静默跳过：一行 pass、一行 fail 但 fail 行带了未收口后缀，
-    // 只统计解析成功的行就会读成 pass（S1 第四轮审计 P1-1）。候选一旦出现却无法严格收口，按歧义处理。
-    const looksLikeConclusion =
-      /^(?:审计)?(?:结论|判定)\s*\**\s*[：:]/i.test(line) ||
-      /^建议\s*[：:]/i.test(line) ||
-      /^(pass|fail|通过|不通过)(?=\s*$|\s*[。．.！!？?；;，,、*（(—–-])/i.test(line)
-    if (!m) m = new RegExp('^(pass|fail|通过|不通过)' + tail, 'i').exec(line)
-    if (!m) m = new RegExp('^建议\\s*[：:]\\s*\\**\\s*(不通过|通过)' + tail).exec(line)
-    if (!m) {
-      if (looksLikeConclusion) return null
+    if (fence) continue
+
+    const line = normalizeAuditLine(rawLine)
+    const strict = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论|结果)\s*[：:]/.test(line)
+    const bare = /^(?:pass|fail|通过|不通过)$/i.test(line)
+    if (!strict && !bare) continue
+    // 只允许一行结论：第二行无论同向还是反向都按歧义处理。
+    if (verdict !== null) return null
+    if (bare) {
+      verdict = rawVerdict(line)
       continue
     }
-    // 同一行同时出现 pass 与 fail 记号，说明括号或破折号里还写着相反结论，不能替读者挑一个（S2 第八轮审计 P2-8）
-    const hasPass = /\bpass\b/i.test(line) || /(?:^|[^不])通过/.test(line)
-    const hasFail = /\bfail\b/i.test(line) || /不通过/.test(line)
-    if (hasPass && hasFail) return null
+    const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论|结果)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(.*)$/i.exec(line)
+    if (!m) return null
     const raw = (m[1] ?? '').toLowerCase()
-    const verdict = raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
-    // 结论 token 后面还写着阻塞项 caveat 时不能读成 pass：例如“结论：pass — 但仍有 1 个 P0 未闭合”。
-    // 允许 P0=0 / 无 P0/P1 这种清零说明，其余把 P0/P1 当阻塞线索（S1 第五轮审计 P1）。
-    if (verdict === 'pass') {
-      const colon = line.search(/[：:]/)
-      const at = line.toLowerCase().indexOf(raw, colon >= 0 ? colon : 0)
-      const tail = at >= 0 ? line.slice(at + raw.length) : ''
-      if (/未闭合|仍未|仍有|尚有|尚存|没闭合|阻塞/i.test(tail)) return null
-      if (/致命/i.test(tail.replace(/0\s*致命|致命\s*0|无\s*致命/gi, ''))) return null
-      const stripped = tail
-        .replace(/无\s*P[01](?:\s*[\/、,，]\s*P[01])*/gi, '')
-        .replace(/P[01]\s*(?:项|个)?\s*(?:均|都|全部)?\s*(?:为|=|＝|[:：])?\s*0\s*(?:项|个)?/gi, '')
-        .replace(/0\s*个\s*P[01]/gi, '')
-      if (/P[01]/i.test(stripped)) return null
-    }
-    found.add(verdict)
+    const v = raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
+    if (!validConclusionTail(m[2] ?? '', v)) return null
+    verdict = v
   }
-  if (found.size !== 1) return null
-  return [...found][0] ?? null
+  return verdict
+}
+
+function normalizeAuditLine(raw: string): string {
+  let line = raw.trim()
+  line = line.replace(/^>\s?/, '')
+  line = line.replace(/^(?:[-*+]|\d+[.)])\s+/, '')
+  line = line.replace(/^#{1,6}\s*/, '')
+  line = line.replace(/^\*\*/, '')
+  return line.trim()
+}
+
+function rawVerdict(token: string): 'pass' | 'fail' {
+  return /^(?:pass|通过)$/i.test(token) ? 'pass' : 'fail'
+}
+
+// 结论 token 后的尾巴：只接受空、标点、一个括号、一个破折号解释。
+// fail 只要求尾巴里没有反向 pass（fail 不会放行门）；pass 还要把括号/解释里的
+// 计数清零说明全部剥掉，剩余任何文字都视为未收口的 caveat。
+function validConclusionTail(tail: string, verdict: 'pass' | 'fail'): boolean {
+  let t = tail.trim().replace(/^\*\*/, '').trim()
+  t = t.replace(/[。．.！!？?；;，,、\s]+$/, '')
+  if (t.length === 0) return true
+  let content = ''
+  if (/^[—–-]/.test(t)) {
+    content = t.replace(/^[—–\-\s]+/, '')
+  } else if (/^[（(]/.test(t)) {
+    const open = t[0]
+    const close = open === '（' ? '）' : ')'
+    if (!t.endsWith(close)) return false
+    content = t.slice(1, -1)
+  } else {
+    return false
+  }
+  const hasPass = /(?:^|[^不])通过|\bpass\b/i.test(content)
+  if (verdict === 'fail') return !hasPass
+  if (hasPass || /\bfail\b/i.test(content)) return false
+  return onlyCleanCounts(content)
+}
+
+function onlyCleanCounts(content: string): boolean {
+  let rest = content.replace(/\s+/g, '')
+  rest = rest.replace(/[。．.！!？?；;，,、：:（）()\[\]【】]/g, '')
+  rest = rest.replace(/0\s*(?:个|项|条)?\s*致命/gi, '')
+  rest = rest.replace(/致命\s*(?:为|=|＝)?\s*0\s*(?:个|项|条)?/gi, '')
+  rest = rest.replace(/无\s*(?:致命|重大|阻断|风险)(?:缺陷|问题)?/gi, '')
+  rest = rest.replace(/无\s*P[01](?:\s*[\/、,，与和]\s*P[01])*/gi, '')
+  rest = rest.replace(/P[01](?:\s*[\/、,，与和]\s*P[01])*\s*(?:均|都)?\s*(?:为|=|＝)?\s*0\s*(?:个|项|条)?/gi, '')
+  rest = rest.replace(/P[01](?:\s*[\/、,，与和]\s*P[01])*\s*(?:均|都)?\s*无/gi, '')
+  rest = rest.replace(/0\s*(?:个|项|条)?\s*P[01]/gi, '')
+  rest = rest.replace(/P2\s*(?:=|＝|为)?\s*(?:遗留|剩余|待办|未闭合)?\s*\d+\s*(?:条|项|个)?/gi, '')
+  rest = rest.replace(/[与和及均为都是项个条无均都]/g, '')
+  return rest.length === 0
 }
 
 // 本轮独立审计的锚：报告在 HEAD、路径在白名单目录、轮次对得上、字节哈希固定，结论与门记录一致
