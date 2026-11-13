@@ -27,9 +27,12 @@ export const GATE_FIELDS = [
   'previous_artifact_hash', 'audit_round', 'audit_report', 'audit_report_sha256',
 ] as const
 
+export type InvariantSpec = { statement: string; evidence_ids: string[] }
+
 export type GateSpec = {
   items: string[]
   content: Record<string, string>
+  invariants: Record<string, InvariantSpec>
   // 每道门固定一张必过项清单：少了、多了、改名都算没过（审计 M4）；正文表的内容列也按这张表核对（审计 N-09）
   evidenceMap: Record<string, string[]>
   // 证据 id 与文件路径也是固定映射：只固定 id 还能把文件换绑后重签（S1 第二轮审计）
@@ -57,6 +60,13 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G-09': '订阅者离线重放',
       'G-14': '迁移一半杀后重跑',
       'G-15': '备份截断能检出、恢复被拒、线上库不变',
+    },
+    // 不变量语句与证据也钉死在代码里：只比对 invariants_hash 的话，改写语句后重签仍能过（S1 第八轮 P1-3）
+    invariants: {
+      I1: { statement: '单写者与 epoch 栅栏：同一个库只有一条写路径，越代次写被拒', evidence_ids: ['ev-epoch'] },
+      I10: { statement: '无门记录不进阶：门检查固定必过项清单并重算证据哈希', evidence_ids: ['ev-gatecheck'] },
+      I2: { statement: '事件只追加且哈希链能检出篡改', evidence_ids: ['ev-chain'] },
+      I3: { statement: '事务失败不留半条记录，CAS 失败无副作用', evidence_ids: ['ev-g01', 'ev-g02'] },
     },
     evidenceMap: {
       'G1-01': ['ev-migrate'],
@@ -116,6 +126,19 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-13': '单写者锁与 epoch 围栏：第二写者拿不到锁，旧 epoch 写不进',
       'G2-14': '长动作靠心跳续租，扫描不误判过期',
       'G2-15': '同一工作流版本跨重启不可改写，在飞 run 的判定条件不跟着变',
+    },
+    invariants: {
+      I1: { statement: '一个 node_run 最多一个终态：所有迁移带 CAS，终态不再接受普通出口', evidence_ids: ['ev-g2-01', 'ev-g2-02', 'ev-g2-04', 'ev-g2-05'] },
+      I2: { statement: '账本只追加：已提交事件不改写，节点迁移都留事件', evidence_ids: ['ev-g2-04', 'ev-g2-g05'] },
+      I3: { statement: '所有迁移带 CAS，CAS 失败不产生副作用', evidence_ids: ['ev-g2-03', 'ev-g2-g04'] },
+      I4: { statement: '每个终态有对应证据，证据不足不入完成账', evidence_ids: ['ev-g2-05', 'ev-g2-08', 'ev-g2-10', 'ev-g2-g07'] },
+      I5: { statement: '卡住必须挂裁决卡；没有决策卡就不许阻塞', evidence_ids: ['ev-g2-06'] },
+      I6: { statement: '判定时限只认 boot_id 与单调纳秒：墙钟跳变、跨 boot、没有锚点都判不确定，不自动判超时', evidence_ids: ['ev-g2-09'] },
+      I7: { statement: '同一 report_id 的同类事件只留一条：重试不许把账本刷膨胀', evidence_ids: ['ev-g2-11'] },
+      I8: { statement: '工具授权只认 workflow 定义：请求体带来的策略不参与判定，越权与未注册在租约前被拒', evidence_ids: ['ev-g2-12'] },
+      I9: { statement: '单写者锁与 epoch 围栏：第二写者拿不到锁，旧 epoch 的连接写不进', evidence_ids: ['ev-g2-13'] },
+      I10: { statement: '长动作靠心跳续租：租约 2 秒、动作 3 秒时 2.5 秒扫描不判过期', evidence_ids: ['ev-g2-14'] },
+      I11: { statement: '工作流定义跨重启落库：同一版本改写被拒，在飞 run 的判定条件不跟着变', evidence_ids: ['ev-g2-15'] },
     },
     evidenceMap: {
       'G2-01': ['ev-g2-01'],
@@ -285,20 +308,39 @@ function checkEvidence(blocks: Block[], artifact: Record<string, unknown>, root:
   return { entries, hash }
 }
 
-function checkInvariants(blocks: Block[], artifact: Record<string, unknown>, entries: EvidenceEntry[]): { used: Set<string>; hash: string; list: InvariantEntry[] } {
+function checkInvariants(blocks: Block[], artifact: Record<string, unknown>, entries: EvidenceEntry[], spec: GateSpec): { used: Set<string>; hash: string; list: InvariantEntry[] } {
   const raw = blockOf(blocks, 'invariants').value
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('invariants 为空')
   const list: InvariantEntry[] = []
   const used = new Set<string>()
+  const seen = new Set<string>()
   for (const e of raw as InvariantEntry[]) {
     if (typeof e.id !== 'string' || typeof e.statement !== 'string' || !Array.isArray(e.evidence_ids) || e.evidence_ids.length === 0) {
       throw new Error('invariants 的项要有 id / statement / evidence_ids：' + JSON.stringify(e))
+    }
+    if (seen.has(e.id)) throw new Error('invariants 里 id 重复: ' + e.id)
+    seen.add(e.id)
+    // 语句与证据按固定口径比对：只核哈希等于让改写后的清单自己证明自己（S1 第八轮 P1-3）
+    const want = spec.invariants[e.id]
+    if (!want) throw new Error('不变量 id 不在固定口径里: ' + e.id)
+    if (e.statement !== want.statement) {
+      throw new Error('不变量 ' + e.id + ' 的语句与固定口径不一致（改写或削短都要重新审计）')
+    }
+    const wantEvidence = want.evidence_ids.slice().sort()
+    const givenEvidence = e.evidence_ids.slice().sort()
+    if (givenEvidence.length !== wantEvidence.length || givenEvidence.some((id, i) => id !== wantEvidence[i])) {
+      throw new Error('不变量 ' + e.id + ' 的证据与固定口径不一致')
     }
     for (const id of e.evidence_ids) {
       if (!entries.some((x) => x.id === id)) throw new Error('不变量引用了不存在的证据: ' + id)
       used.add(id)
     }
-    list.push({ id: e.id, statement: e.statement, evidence_ids: e.evidence_ids.slice().sort() })
+    list.push({ id: e.id, statement: e.statement, evidence_ids: givenEvidence })
+  }
+  const expectedIds = Object.keys(spec.invariants).sort()
+  const givenIds = list.map((x) => x.id).sort()
+  if (givenIds.length !== expectedIds.length || givenIds.some((id, i) => id !== expectedIds[i])) {
+    throw new Error('不变量清单与固定口径不一致：要有 ' + expectedIds.join(', '))
   }
   const sorted = list.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   const hash = sha256Hex(canonicalJson(sorted))
@@ -485,33 +527,13 @@ function checkPreviousChain(artifact: Record<string, unknown>, spec: GateSpec, r
   if (m[1] !== prev) throw new Error('previous_artifact_hash 与前序门记录的 artifact_hash 不符（重签链断了）')
 }
 
-// 审计报告正文里的结论：只认行首（可带标题/列表/引用/加粗标记）的结论行，
-// 且全文只能有一个结论。行内引用不算结论；多个结论视为没结论（第六轮审计 P0-1）。
-// 结论 token 后只接受空尾、句末标点、一个括号补充或一个破折号解释；
-// 括号/解释里只允许清零计数（P0=0 / 无 P0/P1 / 0 致命 / P2 遗留 N 条），
-// 其余文字一律按未收口处理（S1 第六轮 P1-1 / S2 第十轮 P2-9）。
+// 审计报告正文里的结论：只认顶层、未被隐藏的结论行，且全文只能有一个结论。
+// 可见性：HTML 注释、details/pre/script/style/template、围栏代码、四空格缩进、引用围栏都不参与；
+// 普通引用块里的结论仍可见（S1 第八轮 P1-4）。
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
-  let fence: { char: string; length: number } | null = null
   let verdict: 'pass' | 'fail' | null = null
-  for (const rawLine of text.split(/\r?\n/)) {
-    // 围栏代码块里的“结论：pass”是示例，不是报告结论。
-    // 关闭围栏必须同字符、不短于开启围栏，且 marker 后只能有空白；```js 这类带信息串的行
-    // 在围栏内是内容，不是关闭（S2 第十一轮 P1-1）。
-    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(rawLine)
-    if (fenceMatch) {
-      const marker = fenceMatch[1] ?? ''
-      const rest = fenceMatch[2] ?? ''
-      if (!fence) {
-        fence = { char: marker[0] ?? '', length: marker.length }
-      } else if (marker[0] === fence.char && marker.length >= fence.length && rest.trim() === '') {
-        fence = null
-      }
-      continue
-    }
-    if (fence) continue
-
-    const line = normalizeAuditLine(rawLine)
-    const strict = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论|结果)\s*[：:]/.test(line)
+  for (const line of auditTopLevelLines(text)) {
+    const strict = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(line)
     const bare = /^(?:pass|fail|通过|不通过)$/i.test(line)
     if (!strict && !bare) continue
     // 只允许一行结论：第二行无论同向还是反向都按歧义处理。
@@ -520,7 +542,7 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
       verdict = rawVerdict(line)
       continue
     }
-    const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论|结果)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(.*)$/i.exec(line)
+    const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(.*)$/i.exec(line)
     if (!m) return null
     const raw = (m[1] ?? '').toLowerCase()
     const v = raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
@@ -528,6 +550,91 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
     verdict = v
   }
   return verdict
+}
+
+// 审计报告绑定门名与候选提交：只读顶层可见行，防止拿别轮/别门的 pass 报告复用。
+// 报告必须各出现一次「门：G1」与「候选提交：<40 位 commit>」（S1 第八轮 P1-2）。
+export function auditBindingOf(text: string): { gate: string; commit: string } | null {
+  const gates: string[] = []
+  const commits: string[] = []
+  for (const line of auditTopLevelLines(text)) {
+    const gate = /^(?:门|gate)\s*[：:]\s*(G[1-5])\s*$/i.exec(line)
+    if (gate) gates.push((gate[1] ?? '').toUpperCase())
+    const commit = /^(?:候选提交|候选|candidate_commit|candidate)\s*[：:]\s*([0-9a-f]{40})\s*$/i.exec(line)
+    if (commit) commits.push((commit[1] ?? '').toLowerCase())
+  }
+  if (gates.length !== 1 || commits.length !== 1) return null
+  return { gate: gates[0] as string, commit: commits[0] as string }
+}
+
+// 只返回顶层可见行：去掉隐藏块，跳过围栏/缩进代码/引用围栏，保留普通引用与列表。
+function auditTopLevelLines(text: string): string[] {
+  const lines = stripHiddenAuditBlocks(text).split(/\r?\n/)
+  const out: string[] = []
+  let fence: { char: string; length: number } | null = null
+  let quoteFence: { char: string; length: number } | null = null
+  for (const rawLine of lines) {
+    if (/^(?: {4,}|\t)/.test(rawLine)) continue
+    const quote = /^\s*>\s?(.*)$/.exec(rawLine)
+    if (quote) {
+      const inner = quote[1] ?? ''
+      const qf = /^(\x60{3,}|~{3,})(.*)$/.exec(inner)
+      if (qf) {
+        const marker = qf[1] ?? ''
+        const rest = qf[2] ?? ''
+        if (!quoteFence) quoteFence = { char: marker[0] ?? '', length: marker.length }
+        else if (marker[0] === quoteFence.char && marker.length >= quoteFence.length && rest.trim() === '') quoteFence = null
+        continue
+      }
+      if (quoteFence) continue
+    } else if (quoteFence) {
+      quoteFence = null
+    }
+    const fm = /^( {0,3})(\x60{3,}|~{3,})(.*)$/.exec(rawLine)
+    if (fm) {
+      const marker = fm[2] ?? ''
+      const rest = fm[3] ?? ''
+      if (!fence) fence = { char: marker[0] ?? '', length: marker.length }
+      else if (marker[0] === fence.char && marker.length >= fence.length && rest.trim() === '') fence = null
+      continue
+    }
+    if (fence) continue
+    out.push(normalizeAuditLine(rawLine))
+  }
+  return out
+}
+
+function blankPreservingLines(text: string): string {
+  let n = 0
+  for (const ch of text) if (ch === '\n') n += 1
+  return '\u0000' + '\n'.repeat(n)
+}
+
+// HTML 注释与折叠块不可见，里面的结论不能参与判定；未闭合时一路隐藏到文末（fail-closed）。
+function stripHiddenAuditBlocks(text: string): string {
+  let out = ''
+  let cursor = 0
+  while (cursor < text.length) {
+    const start = text.indexOf('<!--', cursor)
+    if (start < 0) {
+      out += text.slice(cursor)
+      break
+    }
+    out += text.slice(cursor, start)
+    const end = text.indexOf('-->', start + 4)
+    if (end < 0) {
+      out += blankPreservingLines(text.slice(start))
+      break
+    }
+    out += blankPreservingLines(text.slice(start, end + 3))
+    cursor = end + 3
+  }
+  for (let guard = 0; guard < 10; guard += 1) {
+    const next = out.replace(/<(details|pre|script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => blankPreservingLines(m))
+    if (next === out) break
+    out = next
+  }
+  return out.replace(/<(details|pre|script|style|template)\b[^>]*>[\s\S]*$/gi, (m) => blankPreservingLines(m))
 }
 
 function normalizeAuditLine(raw: string): string {
@@ -572,6 +679,11 @@ function onlyCleanCounts(content: string): boolean {
   rest = rest.replace(/[。．.！!？?；;，,、：:（）()\[\]【】]/g, '')
   rest = rest.replace(/0\s*(?:个|项|条)?\s*致命/gi, '')
   rest = rest.replace(/致命\s*(?:为|=|＝)?\s*0\s*(?:个|项|条)?/gi, '')
+  rest = rest.replace(/重大\s*(?:为|=|＝)?\s*0\s*(?:个|项|条)?/gi, '')
+  rest = rest.replace(/0\s*(?:个|项|条)?\s*重大/gi, '')
+  rest = rest.replace(/(?:阻断|风险)\s*(?:为|=|＝)?\s*0\s*(?:个|项|条)?/gi, '')
+  rest = rest.replace(/0\s*(?:个|项|条)?\s*(?:阻断|风险)/gi, '')
+  rest = rest.replace(/P[01](?:已|均|都)?\s*(?:清零|清空|归零)/gi, '')
   rest = rest.replace(/无\s*(?:致命|重大|阻断|风险)(?:缺陷|问题)?/gi, '')
   rest = rest.replace(/无\s*P[01](?:\s*[\/、,，与和]\s*P[01])*/gi, '')
   rest = rest.replace(/P[01](?:\s*[\/、,，与和]\s*P[01])*\s*(?:均|都)?\s*(?:为|=|＝)?\s*0\s*(?:个|项|条)?/gi, '')
@@ -609,6 +721,27 @@ function checkAuditAnchor(artifact: Record<string, unknown>, spec: GateSpec, roo
   if (!actual) throw new Error('审计报告里找不到唯一结论行，不能拿它当门记录依据: ' + report)
   if (actual !== artifact.conclusion) {
     throw new Error('审计报告结论与门记录结论不符：报告=' + actual + '，门记录=' + String(artifact.conclusion))
+  }
+  // 报告必须自己写清门名与候选提交：只有路径和轮次时，别轮/别门的 pass 报告能直接拿来签（S1 第八轮 P1-2）
+  const binding = auditBindingOf(text)
+  if (!binding) {
+    throw new Error('审计报告缺少唯一的「门：G1」与「候选提交：<40 位 commit>」绑定行: ' + report)
+  }
+  if (binding.gate !== String(artifact.gate)) {
+    throw new Error('审计报告绑定的门与门记录不符：报告=' + binding.gate + '，记录=' + String(artifact.gate))
+  }
+  const commit = binding.commit
+  try {
+    git(root, ['cat-file', '-e', commit + '^{commit}'])
+    git(root, ['merge-base', '--is-ancestor', commit, 'HEAD'])
+  } catch {
+    throw new Error('审计报告的候选提交不是 HEAD 的祖先或不存在: ' + commit)
+  }
+  const afterArgs = ['diff', '--name-only', commit + '..HEAD', '--', '.']
+  for (const dir of spec.excludes) afterArgs.push(':(exclude)' + dir)
+  const after = git(root, afterArgs).toString('utf8').trim()
+  if (after.length > 0) {
+    throw new Error('审计报告的候选提交之后，候选文件又被改过，不能复用这份报告：' + after.split(/\r?\n/)[0])
   }
 }
 
@@ -698,7 +831,7 @@ export function verifyGateRecord(text: string, opts: { root?: string; allowDirty
   const expect = sha256Hex(canonicalJson(artifact))
   if (anchor[1] !== expect) throw new Error('artifact_hash 与正文不符：' + anchor[1] + ' != ' + expect)
   const evidence = checkEvidence(blocks, artifact, root, spec)
-  const invariants = checkInvariants(blocks, artifact, evidence.entries)
+  const invariants = checkInvariants(blocks, artifact, evidence.entries, spec)
   checkBodyEvidenceTable(text, evidence.entries)
   checkBodyExceptions(text, artifact.exceptions)
   const used = new Set<string>()

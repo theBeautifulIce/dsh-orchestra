@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { auditConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, verifyGateRecord } from '../scripts/gate-check.ts'
+import { auditBindingOf, auditConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, verifyGateRecord } from '../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
@@ -144,6 +144,23 @@ describe('门记录校验', { timeout: 30000 }, () => {
     const text = read().replace('| I3 | 事务失败不留半条记录，CAS 失败无副作用 | ev-g01,ev-g02 |', '| I3 | 随便写 | ev-g01,ev-g02 |')
     expect(text).not.toBe(read())
     expect(() => check(text)).toThrow(/不变量/)
+  })
+
+  it('不变量语句被削短后即使重算哈希也拒绝（S1 第八轮 P1-3）', () => {
+    const text = read()
+    const start = text.indexOf('```json invariants\n')
+    if (start < 0) throw new Error('G1 里没有 invariants 块')
+    const end = text.indexOf('\n```', start)
+    if (end < 0) throw new Error('G1 的 invariants 块没有闭合')
+    const list = JSON.parse(text.slice(start + '```json invariants\n'.length, end)) as { id: string; statement: string; evidence_ids: string[] }[]
+    const first = list[0]
+    if (!first) throw new Error('G1 的 invariants 块是空的')
+    first.statement = 'epoch 栅栏'
+    list.forEach((e) => { e.evidence_ids = [...e.evidence_ids].sort() })
+    list.sort((a, b) => a.id.localeCompare(b.id))
+    const next = text.slice(0, start) + '```json invariants\n' + JSON.stringify(list, null, 2) + text.slice(end)
+    const sealed = tamper(next, (a) => { a.invariants_hash = sha256Hex(canonicalJson(list)) })
+    expect(() => check(sealed)).toThrow(/固定口径/)
   })
 
   it('正文证据表删一行再复制另一行时拒绝（S1 第四轮审计 P2-1）', () => {
@@ -309,5 +326,30 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
 
   it('第二行同向结论也按歧义处理（全文只能有一个结论）', () => {
     expect(auditConclusionOf('结论：pass\n\n结论：pass')).toBeNull()
+  })
+
+  it('隐藏块、缩进代码、引用围栏里的结论不参与判定（S1 第八轮 P1-4）', () => {
+    expect(auditConclusionOf('本报告结论为不通过\n\n<!--\n结论：pass\n-->')).toBeNull()
+    expect(auditConclusionOf('<!-- 结论：pass -->\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('<details>\n结论：pass\n</details>\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('    结论：pass\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('> \x60\x60\x60\n> 结论：pass\n> \x60\x60\x60\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('> 结论：不通过')).toBe('fail')
+  })
+
+  it('正常清零写法不再误杀（S1 第八轮 P2-5）', () => {
+    expect(auditConclusionOf('结论：pass（重大 0）')).toBe('pass')
+    expect(auditConclusionOf('结论：pass（P0 已清零，P1 已清零）')).toBe('pass')
+    expect(auditConclusionOf('结论：pass（0 个阻断）')).toBe('pass')
+  })
+
+  it('审计报告必须带唯一的门与候选提交绑定（S1 第八轮 P1-2）', () => {
+    const commit = 'a'.repeat(40)
+    expect(auditBindingOf('门：G1\n候选提交：' + commit)).toEqual({ gate: 'G1', commit })
+    expect(auditBindingOf('Gate: G2\nCandidate: ' + 'b'.repeat(40))).toEqual({ gate: 'G2', commit: 'b'.repeat(40) })
+    expect(auditBindingOf('门：G1')).toBeNull()
+    expect(auditBindingOf('门：G1\n门：G2\n候选提交：' + commit)).toBeNull()
+    expect(auditBindingOf('<!-- 门：G1\n候选提交：' + commit + ' -->')).toBeNull()
+    expect(auditBindingOf('门：G1\n候选提交：abc')).toBeNull()
   })
 })
