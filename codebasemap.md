@@ -191,11 +191,11 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/index.ts` | 装配入口（`openServiceOrchestra`：acquireDbLock → bumpEpoch → openServiceDb → createOrchestra） |
 | `src/service/sweep.ts` | 围栏与过期扫描（逐行事务，回收 verifying 超时） |
 | `src/infra/sqlite/migrations/003_s2_round3.sql` | 第三轮新增迁移（账本列与索引） |
-| `scripts/fault-inject.ts` | 故障注入取证（1133 行；InjectionCase `ev-g2-01`…`ev-g2-11`，写 `docs/gates/evidence/`） |
-| `scripts/gate-check.ts` | 门检查校验链（562 行：必过项 / 证据 / 不变量 / 正文表 / 候选 / 哈希） |
-| `scripts/sign-gate.ts` | 门记录重签（78 行：回填证据 sha256 与各类哈希，自检后写回） |
+| `scripts/fault-inject.ts` | 故障注入取证（1377 行；InjectionCase `ev-g2-01`…`ev-g2-15`，写 `docs/gates/evidence/`，输出时间戳归一） |
+| `scripts/gate-check.ts` | 门检查校验链（1695 行：必过项 / 证据 / 不变量 / 正文表 / 候选 / 哈希 / 结论解析与隐藏文本防护） |
+| `scripts/sign-gate.ts` | 门记录重签（83 行：回填证据 sha256 与各类哈希，自检后写回） |
 | `docs/gates/G1.md`、`docs/gates/G2.md` | 两道门记录（必过项表、证据表、不变量表、artifact） |
-| `docs/gates/evidence/G1/`（6 份）、`docs/gates/evidence/G2/`（15 份） | 门证据原文，哈希逐份复核 |
+| `docs/gates/evidence/G1/`（13 份）、`docs/gates/evidence/G2/`（19 份） | 门证据原文，哈希逐份复核 |
 
 ---
 

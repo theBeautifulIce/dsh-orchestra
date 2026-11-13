@@ -609,3 +609,35 @@ S2 第二十四轮（`docs/audits/S2-independent-audit-round24.md`，判 fail：
 
 下一步：提交本段与两份对照表，按最终 HEAD 重派 S1 第二十一轮与 S2 第二十五轮独立审计；两份都 pass 后按既有顺序重签 G1/G2、双门 gate-check exit 0、全量 348/348，再开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
 
+
+
+### 11.23 S1 第二十一轮与 S2 第二十五轮整改、e2e 与提交 c818778（2026-11-14 02:50）
+
+S1 第二十一轮（`docs/audits/S1-independent-audit-round21.md`，绑 G1 / 6cb95b3，判 fail：P0 六类 / P1 一类 / P2 两项）与 S2 第二十五轮（`docs/audits/S2-independent-audit-round25.md`，绑 6cb95b3，判 fail：P0=2 / P1=3 / P2=1）同批整改，提交 `c818778`「Close S1 round21 and S2 round25 audit bypasses」，14 文件 +768/−52。
+
+解析器（`scripts/gate-check.ts`）：
+- `FAIL_VERDICTS` 补英文缩写否定（doesnt/wont/hasnt/havent/isnt/wasnt）、not passing、繁體未通過驗收/不通過驗收/未通過評審/未通過審核/被駁回/被否決；`FAIL_NEGATIONS` 补 does not/will not/have not 等；`FAIL_PASS_STEMS`/`FAIL_OBJECTS` 补繁體词与验收/标准/审批/评审/审核。
+- `matchPrefix` 先跳过前导 `|` 再匹配，修 `is|not|passing` 被词间夹层打断；连接词循环改为 `for (let guard = 0; guard <= folded.length; guard += 1)` 且每次必须前进，重复“的/was”不再受 8 次上限。
+- `foldForVerdict` 按字符遍历：汉字之间夹一个 Latin/Cyrillic/Greek 字母时跳过该字母（`未通о过`→`未通过`）；西里尔/希腊同形字经 `HOMOGLYPHS` 归一。
+- 新增 `HISTORICAL_REMEDIATION_RES` 与 `stripHistoricalRemediation`：只在可见文本里剔除“上一轮/前一轮/roundN … 本轮已整改/已修复/已收口”这一小段；历史句后另起本轮否定仍会被抓。`bodyConclusionOf` 与报告共用同一扫描器。
+
+证据门（`src/core/policy.ts`、`src/service/commands/apply-report.ts`）：
+- `requiredHashes` 改为按 key 绑定 output：每个 required key 必须 64-hex，且等于 `sha256Hex(canonicalJson(output[key] ?? null))`；命令哈希/stdout/整个 output 摘要不能冒充，两个 key 不得共用同一哈希。
+- failed/timeout 走 `traceBindingGate({ allowFailed: true, requireFailure: report.status === 'failed' })`：同 attempt 有失败行时成功证据不能覆盖；failed 状态必须有 exit_code≠0 的行，否则 `tool_execution_failed`。
+- `scripts/fault-inject.ts` 的 `normalizeEvidence` 把 ISO-8601 时间戳统一为 `<ts>`，ev-g2-14/15 两次重跑 sha256 稳定为 `4e0776e9…` / `7648abe9…`，G2 正文表与 JSON 锚同步。
+
+验收（实测）：
+- `tsc --noEmit` exit 0。
+- 全量 vitest 32 文件 / 359 例，348 passed / 11 failed；11 红全在 `tests/gate-check.spec.ts` 且全为 G1 预签态（`audit_report_sha256=0*64` 对 `50ba1b13cdf1b84d…`），无新增回归。
+- `tests/gate-check.spec.ts` 77 例，66 passed / 11 failed；新增 S1 r21 用例覆盖 16 条 P0 全拒、4 条历史/清零安全句全过、历史句后追加 `本报告不通过。` 仍拒；门正文补繁體与英文缩写否定。
+- 证据门定向：policy + apply-report 55 例全过；覆盖 requiredHashes 阳性、命令哈希冒充、缺键、双 key 同哈希、failed 仅成功行、failed/timeout 同 attempt 另有失败行。
+
+端到端（临时 clone `D:/aboutAI/_g1audit-c818778/clone`，HEAD c818778，门 G1 改 audit_round=21 并指向 S1 r21 报告；`node_modules` 用目录联接挂入）：
+- 24 例：18 条拒绝、6 条签过；18 条拒绝全部 `g1same=true`（门字节未变），6 条签过全部 `sign-gate exit 0` 且 `gate-check exit 0`。
+- 16 条 S1 r21 P0（含繁體、缩写、not approved、被驳回/否决、同形字插入、重复连接词）全部 `sign=1`，错误为“审计报告里找不到唯一结论行”或“门记录正文结论与 GateArtifact 不符”。
+- 3 条报告历史叙述 + 1 条清零安全句 `sign=0`；门正文历史句 `sign=0`；门正文“历史句 + 本次审计无法通过” `sign=1`。
+- 阳性对照 `sign=0`、`gate-check exit 0`（artifact_hash=`079efbc3abca…`、body_hash=`78eba2e0b19a…`，13 项必过 / 13 份证据）。
+
+对照表：`docs/audits/S1-round21-response.md`、`docs/audits/S2-round25-response.md`。S1 r21 P2-1 是 G1 未签态哈希，留待重签；P2-2 的 11 例预签态噪声本段保留并在计数单列。
+
+下一步：按 HEAD c818778 重派 S1 第二十二轮与 S2 第二十六轮独立审计；两份都 pass 后按既有顺序重签 G1/G2、双门 gate-check exit 0、全量 359/359，再开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
