@@ -695,3 +695,14 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 回归：`tests/gate-check.spec.ts` 新增「S1 第二十六轮 P0」与「S2 第三十一轮 P0」两组用例。
 - 验证（实测）：`tsc --noEmit` exit 0；全量 33 文件 / 374 例，362 passed / 12 failed；12 红 = 11 个 G1 预签态（audit_report_sha256=0*64）+ 1 个 body_hash 顺序用例被更早的报告锚点校验挡在前面，均非解析器回归。
 - 状态：G1/G2 未重签，S3 冻结。本段整改与三份报告/对照表提交后，在新候选上重派 S1 与 S2 独立审计；两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
+
+### 11.29 S1 第二十七轮与 S2 第三十二轮整改（2026-11-14 06:40，HEAD ec89aec）
+
+- S1 第二十七轮（`docs/audits/S1-independent-audit-round27.md`，绑 G1 / 98032b0，fail：P0=3 / P1=2 / P2=2）与 S2 第三十二轮（`docs/audits/S2-independent-audit-round32.md`，绑 G2 / 98032b0，fail：P0=2 / P1=1 / P2=1）合并整改，提交 `ec89aec`「Close S1 round27 and S2 round32 conclusion gaps」，6 文件 +643/−25。对照表 `docs/audits/S1-round27-response.md`、`docs/audits/S2-round32-response.md` 随提交入库。
+- 结论解析：`scripts/gate-check.ts:874-906` 补分句尾裸裁决词与计数语义（N 项中 M 项通过、只完成 80%、尚差 N 项、原则上/基本上有 N 项待补）；FAIL_FILLERS 补 全部/均/都/逐一/逐项/取得/地，FAIL_PASS_STEMS 补 收口/到位/开始/做完/闭环/整改，FAIL_OBJECTS 补 收口/检查/全部准入条件。S1 第二十七轮 18 条“通过但未完成”原文逐条进回归。
+- 门正文：`bodyConclusionOf` 的 pass 分支改走 `validConclusionTail`（`scripts/gate-check.ts:1175-1191`），B-06/B-07 门头括号内否定、S2 B1/B2 括号与逗号尾巴全部返回 fail。
+- 引用定义：`hiddenDefinitionFailure`（`:1107-1121`）改为整块扫到空行，支持五层块引用/列表嵌套、跨行标签、定义标题第 5 行以后；实体改用 markdown-it `unescapeAll`；定义块同时出现判定词与 pass/fail 直接拒绝，覆盖 `&period;`。
+- G2 历史叙述：新增 `stripHistoricalAuditSentence`（`:1055-1063`），只剥“第 N 轮 / round N … 不通过”历史句；直接探针 `bodyConclusionOf(docs/gates/G2.md) = pass`，P1-1 假阳性关闭。
+- 回归与验证（实测）：`tsc --noEmit` exit 0；全量 33 文件 / 436 例，425 passed / 11 failed；11 红全部是 G1 预签态 `audit_report_sha256=0*64 != 50ba1b13cdf1b84d…`，无新增回归。新增 62 例：S1 r27 与 S2 r32 载荷组。
+- 已派 S1 第二十八轮（`e9f5865b-b1e1-4311-9043-b7dbacc8ccf6`）与 S2 第三十三轮（`20c8fe7f-701b-49c3-afb0-a3ee96af9373`），都绑 ec89aec，只读、临时克隆内攻击、不签主仓门、不开 S3。
+- 状态：G1/G2 未重签，S3 九节点与状态机继续冻结。两份新审计都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3；任何一份 fail 都回表整改。
