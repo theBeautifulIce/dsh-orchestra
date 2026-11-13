@@ -19,7 +19,6 @@ export type RunNodeParams = {
   attempt: number
   input: unknown
   outputSchema: unknown
-  toolPolicy: ToolPolicy
   // 这一轮要跑的只读命令；每条都要落强证据
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
   now: string
@@ -29,11 +28,14 @@ export type RunNodeParams = {
   leaseRenewIntervalMs?: number
   // verifying 阶段的判定时限；不传就用 120 秒（规格 4.4 行 333）
   verifyTimeoutMs?: number
+  // 动作总时限；不传就用 120 秒（规格 execution.action_timeout_ms；第五轮审计 P2-1）
+  actionTimeoutMs?: number
 }
 
 // 租约 30 秒、心跳 10 秒：与门记录 G2.md 的本批定值一致（第四轮审计 M4）
 export const DEFAULT_LEASE_TTL_MS = 30_000
 export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 10_000
+export const DEFAULT_ACTION_TIMEOUT_MS = 120_000
 
 export type RunNodeResult = {
   node_run_id: string
@@ -52,13 +54,15 @@ export type RunNodeDeps = {
 }
 
 export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunNodeResult> {
+  // 工具策略只从服务端加载过的定义取：请求体给什么不算数（第五轮审计 P1-2）
+  const policy = policyForNodeRun(deps, p)
   // 前向路径只接只读工具；有副作用的动作走补偿或不可逆流程（规格 4.7 行 396）
-  const derived = checkToolPolicy(deps.registry, p.toolPolicy)
+  const derived = checkToolPolicy(deps.registry, policy)
   if (derived !== 'pure') {
     throw new OrchError('FORBIDDEN', '前向路径只接只读工具', { derived })
   }
-  // 授权边界：真正要跑的工具必须落在策略给的授权集合里，deny 永远优先（规格 5.2 行 444-445；第四轮审计 M2）
-  assertToolsAuthorized(deps.registry, p.toolPolicy, p.tools)
+  // 授权边界：真正要跑的工具必须落在定义给的授权集合里，deny 永远优先（规格 5.2 行 444-445；第四轮审计 M2）
+  assertToolsAuthorized(deps.registry, policy, p.tools)
   const leaseTtlMs = p.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS
   const lease = acquireNodeRun(deps.runtime, {
     nodeRunId: p.nodeRunId,
@@ -68,19 +72,46 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
   })
   // 执行期心跳：动作比租约长时把租约往后推，合法动作不许被扫描判成租约过期（规格 4.3 行 309-310；第四轮审计 M4）
   const nowAt = startElapsedClock(deps, p.now)
+  // 续租失败不再空吞：留一条 lease_lost 事件，动作结束前按租约丢失收口（第五轮审计 P2-1）
+  const leaseState: { lost: string | null } = { lost: null }
   const renewTimer = setInterval(() => {
     try {
       renewNodeLease(deps.runtime, { nodeRunId: p.nodeRunId, leaseTtlMs, now: nowAt() })
-    } catch {
-      // 续租失败不打断动作：收口时租约判定会自己把过期挡下来
+    } catch (err) {
+      const code = err instanceof OrchError ? err.code : 'SERVICE_UNAVAILABLE'
+      leaseState.lost = code
+      try {
+        withTx(deps.db, (tx) => {
+          appendNodeRunEvent(tx, deps.secret, p.nodeRunId, 'lease_lost', { attempt: p.attempt, reason: code })
+        })
+      } catch {
+        // 账本也写不进去时保留 lost 标记，收口会拦住 done
+      }
     }
   }, p.leaseRenewIntervalMs ?? DEFAULT_LEASE_RENEW_INTERVAL_MS)
   renewTimer.unref?.()
   try {
-    return await runNodeActions(deps, p, lease, nowAt)
+    return await runNodeActions(deps, p, lease, nowAt, policy, leaseState)
   } finally {
     clearInterval(renewTimer)
   }
+}
+
+// 从 node_run 反查 run 绑定的工作流版本，再取该节点定义里的工具清单
+function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
+  const row = deps.db.raw.prepare(
+    'SELECT n.node_id AS node_id, r.workflow_version AS workflow_version FROM node_runs n JOIN runs r ON r.run_id = n.run_id WHERE n.node_run_id = ?',
+  ).get(p.nodeRunId) as { node_id: string; workflow_version?: number | null } | undefined
+  if (!row) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: p.nodeRunId })
+  // 节点身份以账本为准：调用方传别的 nodeId 不许借到另一份工具授权
+  if (row.node_id !== p.nodeId) {
+    throw new OrchError('STALE_GENERATION', 'node_id 与账本不一致，不许借别的节点授权', { nodeRunId: p.nodeRunId, ledgerNodeId: row.node_id, requestedNodeId: p.nodeId })
+  }
+  if (row.workflow_version === null || row.workflow_version === undefined) {
+    throw new OrchError('VERDICT_UNSUPPORTED', '这个 run 没有绑定工作流版本', { nodeRunId: p.nodeRunId })
+  }
+  const def = deps.runtime.catalog.toolPolicyFor(row.workflow_version, row.node_id)
+  return { allow: def.allow, deny: def.deny, declaredPolicy: 'pure' }
 }
 
 // 动作主体：建执行器、跑工具、收口。拆成独立函数，心跳定时器才能在所有出口都被清掉
@@ -89,13 +120,15 @@ async function runNodeActions(
   p: RunNodeParams,
   lease: { action_generation: number },
   nowAt: () => string,
+  policy: ToolPolicy,
+  leaseState: { lost: string | null },
 ): Promise<RunNodeResult> {
   const agent = await createExecutorAgent(deps.agents, deps.registry, {
     nodeRunId: p.nodeRunId,
     attempt: p.attempt,
     input: p.input,
     outputSchema: p.outputSchema,
-    toolPolicy: p.toolPolicy,
+    toolPolicy: policy,
   })
   const generation = lease.action_generation
   // started 是状态迁移不是完成上报：没过证据门的上报不该用来推进状态
@@ -108,10 +141,22 @@ async function runNodeActions(
   })
 
   let evidence: StrongEvidence | null = null
+  const actionTimeoutMs = p.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
+  const actionStartNs = deps.runtime.clock?.sample().monotonicNs ?? null
+  const actionStartMs = Date.now()
+  const elapsedMs = (): number => actionStartNs === null
+    ? Date.now() - actionStartMs
+    : (deps.runtime.clock!.sample().monotonicNs - actionStartNs) / 1e6
   // 每个工具都留一条轨迹：第一份失败证据不能被后面的成功覆盖（审计 P0-3）
   const trace: { tool: string; exitCode: number; stdoutHash: string; stderrHash: string; commandHash: string }[] = []
   try {
     for (const tool of p.tools) {
+      // 动作总时限真的参与执行：剩余额度用光就停，并按动作超时收口（第五轮审计 P2-1）
+      const remaining = actionTimeoutMs - elapsedMs()
+      if (remaining <= 0) {
+        markBlocked(deps, p, 'action_timeout', nowAt())
+        throw new OrchError('OPERATION_TIMEOUT', '动作超过总时限，节点停在这里', { nodeRunId: p.nodeRunId, actionTimeoutMs })
+      }
       // 工具起飞前先把时刻和事件写下去：取消要能证明「工具在飞」（证据 G-05）
       withTx(deps.db, (tx) => {
         tx.run('UPDATE node_runs SET tool_start_at = ?, updated_at = ? WHERE node_run_id = ?', [nowAt(), nowAt(), p.nodeRunId])
@@ -124,7 +169,8 @@ async function runNodeActions(
         command: tool.command,
         args: tool.args,
         cwd: tool.cwd,
-        timeoutMs: tool.timeoutMs,
+        // 单条工具也不许超过动作总时限的剩余额度
+        timeoutMs: Math.min(tool.timeoutMs, Math.ceil(remaining)),
         workspaceRoot: deps.runner.root,
       })
       // 落库前必须核对命令哈希，核不上就不许当证据（规格 7.2 行 588）
@@ -171,6 +217,12 @@ async function runNodeActions(
     // 执行器抛错也要把节点落到可被人看见的位置，不许留在 verifying 死等
     markBlocked(deps, p, 'tool_execution_failed', nowAt())
     throw err
+  }
+
+  // 续租失败过：动作已经失去合法租约，不许再进 verifying 收口（第五轮审计 P2-1）
+  if (leaseState.lost) {
+    markBlocked(deps, p, 'lease_lost', nowAt())
+    throw new OrchError('LEASE_EXPIRED', '执行期续租失败，节点按租约丢失收口', { nodeRunId: p.nodeRunId, reason: leaseState.lost })
   }
 
   // 系统级判失败：任一工具 exitCode≠0 就中断后续工具，节点不许落 done（审计 R3-01）

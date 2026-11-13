@@ -195,8 +195,8 @@ export class ReadOnlyToolRunner {
       })
     }
     const cwd = resolveInside(this.workspaceRoot, params.cwd)
-    // argv 不经 shell：用注册表里的固定命令与参数数组直接 spawn
-    const args = params.args.length > 0 ? params.args : descriptor.command.args
+    // argv 不经 shell：参数只认注册表里的固定数组，请求里的 args 不许覆盖（第五轮审计 P1-2）
+    const args = descriptor.command.args
     const res = await this.host.run({
       bin: descriptor.command.bin,
       args,

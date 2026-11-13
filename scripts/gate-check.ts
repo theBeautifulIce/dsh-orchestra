@@ -78,7 +78,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     gateFile: 'docs/gates/G1.md',
   },
   G2: {
-    items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07', 'G2-08', 'G2-09', 'G2-10', 'G2-11'],
+    items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07', 'G2-08', 'G2-09', 'G2-10', 'G2-11', 'G2-12', 'G2-13', 'G2-14'],
     content: {
       'G2-01': '单节点 queued 到终态一条路径（走生产装配）',
       'G2-02': '重复上报只落一次',
@@ -95,6 +95,9 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-09': '判定时限只认 boot_id 与单调纳秒（墙钟跳变不误判）',
       'G2-10': '报告入口系统级证据门（弱证据与伪造痕迹一律拒）',
       'G2-11': '反复重投同一 report_id 不许把账本刷膨胀',
+      'G2-12': '工具授权只认 workflow 定义，请求体策略不参与',
+      'G2-13': '单写者锁与 epoch 围栏：第二写者拿不到锁，旧 epoch 写不进',
+      'G2-14': '长动作靠心跳续租，扫描不误判过期',
     },
     evidenceMap: {
       'G2-01': ['ev-g2-01'],
@@ -112,6 +115,9 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-09': ['ev-g2-09'],
       'G2-10': ['ev-g2-10'],
       'G2-11': ['ev-g2-11'],
+      'G2-12': ['ev-g2-12'],
+      'G2-13': ['ev-g2-13'],
+      'G2-14': ['ev-g2-14'],
     },
     scopeBase: '4f3ada7',
     excludes: ['docs/gates', 'docs/audits', 'docs/reviews', 'handoff.md'],
@@ -418,7 +424,15 @@ function checkPreviousChain(artifact: Record<string, unknown>, spec: GateSpec, r
   if (m[1] !== prev) throw new Error('previous_artifact_hash 与前序门记录的 artifact_hash 不符（重签链断了）')
 }
 
-// 本轮独立审计的锚：审计报告必须已在 HEAD，轮次与文件名对得上（审计 R3-08）
+// 审计报告正文里的结论：pass / fail / 通过 / 不通过，统一成 pass|fail
+export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
+  const m = /结论[^\n]{0,10}(?:[：:]\s*|\s*\n\s*)\**\s*(pass|fail|不通过|通过)/i.exec(text)
+  const raw = m?.[1] ?? /建议[：:]\s*\**\s*(不通过|通过)/.exec(text)?.[1]
+  if (!raw) return null
+  return raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
+}
+
+// 本轮独立审计的锚：报告在 HEAD、轮次对得上，而且报告结论必须与门记录结论一致（第五轮审计 P0-1）
 function checkAuditAnchor(artifact: Record<string, unknown>, root: string): void {
   const round = artifact.audit_round
   if (!Number.isInteger(round) || (round as number) < 1) throw new Error('audit_round 必须是正整数')
@@ -428,6 +442,12 @@ function checkAuditAnchor(artifact: Record<string, unknown>, root: string): void
   const m = /round(\d+)/.exec(report)
   const fileRound = m ? Number(m[1]) : 1
   if (fileRound !== round) throw new Error('audit_round 与审计报告的轮次不一致: ' + String(round) + ' != ' + String(fileRound))
+  const text = contentAt(root, 'HEAD', report)!.toString('utf8')
+  const actual = auditConclusionOf(text)
+  if (!actual) throw new Error('审计报告里找不到结论行，不能拿它当门记录依据: ' + report)
+  if (actual !== artifact.conclusion) {
+    throw new Error('审计报告结论与门记录结论不符：报告=' + actual + '，门记录=' + String(artifact.conclusion))
+  }
 }
 
 function checkCandidate(artifact: Record<string, unknown>, spec: { scopeBase: string; excludes: string[] }, root: string): void {

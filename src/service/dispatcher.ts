@@ -1,9 +1,7 @@
 // src/service/dispatcher.ts —— 主脑派发：把 run 下排队的节点交给生产执行器（审计 F-01）
-import { runNode, type RunNodeDeps } from '../executor/run-node.ts'
-import type { ToolPolicy } from '../executor/session.ts'
+import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps } from '../executor/run-node.ts'
 
 export type NodeSpec = {
-  toolPolicy: ToolPolicy
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
   input?: unknown
   outputSchema?: unknown
@@ -16,6 +14,7 @@ export type DispatchParams = {
   now: string
   ownerEpoch?: number
   leaseTtlMs?: number
+  leaseRenewIntervalMs?: number
 }
 
 export type DispatchOutcome = {
@@ -47,11 +46,11 @@ export async function dispatchRun(deps: RunNodeDeps, p: DispatchParams): Promise
         attempt: Number(row.attempt),
         input: spec.input ?? {},
         outputSchema: spec.outputSchema ?? {},
-        toolPolicy: spec.toolPolicy,
         tools: spec.tools,
         now: p.now,
         ownerEpoch: p.ownerEpoch ?? deps.db.epoch,
-        leaseTtlMs: p.leaseTtlMs ?? 600000,
+        leaseTtlMs: p.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
+        leaseRenewIntervalMs: p.leaseRenewIntervalMs,
       })
       outcomes.push({
         node_run_id: row.node_run_id,

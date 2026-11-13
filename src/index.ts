@@ -39,9 +39,14 @@ export type Orchestra = {
   close: () => void
 }
 
+// 只有走完取锁与 epoch 自增的启动链才许可建装配：单写者是启动前提，不是可选装饰（第五轮审计 P1-3）
+const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
 // 生产装配：一个进程一个写者，迁移在打开时跑完，命令统一走 runtime
-export function createOrchestra(opts: OrchestraOptions & { db?: Db }): Orchestra {
-  // 生产装配走 openServiceOrchestra：那里已经拿过文件锁并递增过 epoch（第四轮审计 M3）
+// 外部只能走 openServiceOrchestra；直接调用拿不到凭证（第五轮审计 P1-3）
+export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: symbol): Orchestra {
+  if (proof !== ORCHESTRA_LOCK_PROOF) {
+    throw new OrchError('FORBIDDEN', '建 orchestra 必须走 openServiceOrchestra：单写者锁与 epoch 是启动前提', {})
+  }
   const db = opts.db ?? openDb(opts.dbFile)
   applySteps(db, loadSteps(defaultMigrationsDir()))
   const catalog = new WorkflowCatalog(opts.phase)
@@ -70,6 +75,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }): Orchestra
         now: b.now,
         ownerEpoch: b.ownerEpoch ?? db.epoch,
         leaseTtlMs: b.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
+        leaseRenewIntervalMs: b.leaseRenewIntervalMs,
       })
     },
     runNode: async (b) => {
@@ -82,11 +88,11 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }): Orchestra
         attempt: b.attempt,
         input: b.input ?? {},
         outputSchema: b.outputSchema ?? {},
-        toolPolicy: b.toolPolicy,
         tools: b.tools,
         now: b.now,
         ownerEpoch: b.ownerEpoch ?? db.epoch,
         leaseTtlMs: b.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
+        leaseRenewIntervalMs: b.leaseRenewIntervalMs,
       })
     },
   }
@@ -110,7 +116,7 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
   try {
     const epoch = bumpEpoch(opts.dbFile)
     const db = openServiceDb(opts.dbFile, epoch)
-    orchestra = createOrchestra({ ...opts, db })
+    orchestra = createOrchestra({ ...opts, db }, ORCHESTRA_LOCK_PROOF)
     return {
       orchestra,
       release: async () => {

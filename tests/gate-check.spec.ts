@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { candidateEntries, verifyGateRecord } from '../scripts/gate-check.ts'
+import { auditConclusionOf, candidateEntries, verifyGateRecord } from '../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
@@ -193,5 +193,16 @@ describe('门记录校验', { timeout: 30000 }, () => {
     } finally {
       rmSync(scratch, { force: true })
     }
+  })
+})
+
+describe('审计报告结论必须与门记录一致（第五轮审计 P0-1）', () => {
+  it('读得出 pass、fail、不通过、通过；找不到就返回 null', () => {
+    expect(auditConclusionOf('# 报告\n\n结论：**pass**（0 致命）')).toBe('pass')
+    expect(auditConclusionOf('结论：fail —— 致命 1 / 重大 3')).toBe('fail')
+    expect(auditConclusionOf('## 结论\n\n不通过')).toBe('fail')
+    expect(auditConclusionOf('## 结论\n\n通过')).toBe('pass')
+    expect(auditConclusionOf('建议：不通过')).toBe('fail')
+    expect(auditConclusionOf('# 没有结论行')).toBeNull()
   })
 })

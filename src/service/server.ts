@@ -50,6 +50,7 @@ export type NodeCommands = {
     now: string
     ownerEpoch?: number
     leaseTtlMs?: number
+    leaseRenewIntervalMs?: number
   }) => Promise<DispatchOutcome[]>
   // 生产执行入口：路由只做形状校验，执行链在 runNode 里（审计 F-01）
   runNode: (body: {
@@ -58,11 +59,11 @@ export type NodeCommands = {
     attempt: number
     input?: unknown
     outputSchema?: unknown
-    toolPolicy: ToolPolicy
     tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
     now: string
     ownerEpoch?: number
     leaseTtlMs?: number
+    leaseRenewIntervalMs?: number
   }) => Promise<RunNodeResult>
 }
 
@@ -179,6 +180,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         now: String(body.now),
         ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
         leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
+        leaseRenewIntervalMs: body.leaseRenewIntervalMs === undefined ? undefined : Number(body.leaseRenewIntervalMs),
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
@@ -211,18 +213,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/run' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'nodeId', 'attempt', 'toolPolicy', 'tools', 'now'])
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'nodeId', 'attempt', 'tools', 'now'])
       if (!Array.isArray(body.tools)) {
         throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'tools 要是数组', { tools: body.tools })
       }
       const out = await queue.run(() => deps.commands!.runNode({
         nodeRunId: String(body.nodeRunId), nodeId: String(body.nodeId), attempt: Number(body.attempt),
         input: body.input ?? {}, outputSchema: body.outputSchema ?? {},
-        toolPolicy: body.toolPolicy as ToolPolicy,
         tools: body.tools as { command: string; args: string[]; cwd: string; timeoutMs: number }[],
         now: String(body.now),
         ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
         leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
+        leaseRenewIntervalMs: body.leaseRenewIntervalMs === undefined ? undefined : Number(body.leaseRenewIntervalMs),
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return

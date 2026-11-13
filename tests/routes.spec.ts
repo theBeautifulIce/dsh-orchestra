@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createOrchestra } from '../src/index.ts'
+import { openServiceOrchestra } from '../src/index.ts'
 import { withTx } from '../src/infra/sqlite/driver.ts'
 import { startServer } from '../src/service/server.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../src/executor/tools.ts'
@@ -26,7 +26,8 @@ async function boot(withExecutor = false) {
   const host: HostRunner = { readonlyAvailable: () => true, run: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '' }) }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_1', sessionId: 'sess_1' }) }
   const executor = withExecutor ? { registry, agents, runner: new ReadOnlyToolRunner(registry, host, dir) } : undefined
-  const orchestra = createOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S2', ...(executor ? { executor } : {}) })
+  const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S2', ...(executor ? { executor } : {}) })
+  const orchestra = service.orchestra
   withTx(orchestra.db, (tx) => {
     tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t1','路由','running',1,?,?)", [NOW, NOW])
     tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, status, revision, created_at, updated_at) VALUES ('r1','t1','wf',1,'running',1,?,?)", [NOW, NOW])
@@ -39,7 +40,7 @@ async function boot(withExecutor = false) {
     appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
     commands: orchestra.commands,
   })
-  closers.push(async () => { await svc.close(); orchestra.close() })
+  closers.push(async () => { await svc.close(); await service.release() })
   return svc.endpoint
 }
 
@@ -83,12 +84,11 @@ describe('节点命令与工作流加载路由', () => {
     const loaded = await post(base + '/v1/workflows/load', {
       workflow_version: '1',
       pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
-      nodes: [{ node_id: 'check', type: 'agent' }],
+      nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
     })
     expect(loaded.status).toBe(200)
     const run = await post(base + '/v1/node-runs/run', {
       nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
-      toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
       tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
     })
     expect(run.status).toBe(200)

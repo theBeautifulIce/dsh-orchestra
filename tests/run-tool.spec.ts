@@ -50,20 +50,20 @@ describe('runTool 只读执行与强证据', () => {
     expect(() => resolveInside(ROOT, '../outside')).toThrowError(/cwd 越出工作区/)
   })
 
-  it('正常执行：强证据字段齐、哈希与命令哈希对得上、args 是数组', async () => {
+  it('正常执行：强证据字段齐、哈希与命令哈希对得上，请求里的 args 不覆盖注册表', async () => {
     const { runner, run } = setup()
-    const res = await runner.runTool({ command: 'git', args: ['status', '--short'], cwd: 'sub', timeoutMs: 5000, workspaceRoot: ROOT })
+    const res = await runner.runTool({ command: 'git', args: ['rm', '-rf', '.'], cwd: 'sub', timeoutMs: 5000, workspaceRoot: ROOT })
     expect(res.evidence.source).toBe('run_tool')
     expect(res.evidence.exitCode).toBe(0)
     expect(res.evidence.stdoutHash).toBe(sha256Hex('ok'))
     expect(res.evidence.stderrHash).toBe(sha256Hex(''))
     expect(res.evidence.hashes.stdout).toBe(sha256Hex('ok'))
     expect(res.evidence.producedAt.length).toBeGreaterThan(0)
-    expect(res.evidence.commandHash).toBe(commandHashOf('git', ['status', '--short'], resolve(ROOT, 'sub'), ROOT))
-    expect(run).toHaveBeenCalledWith({ bin: 'git', args: ['status', '--short'], cwd: resolve(ROOT, 'sub'), timeoutMs: 5000 })
+    expect(res.evidence.commandHash).toBe(commandHashOf('git', ['status'], resolve(ROOT, 'sub'), ROOT))
+    expect(run).toHaveBeenCalledWith({ bin: 'git', args: ['status'], cwd: resolve(ROOT, 'sub'), timeoutMs: 5000 })
   })
 
-  it('args 为空时用注册表的固定参数', async () => {
+  it('args 为空时同样用注册表的固定参数', async () => {
     const { runner, run } = setup()
     await runner.runTool({ command: 'git', args: [], cwd: '.', timeoutMs: 1000, workspaceRoot: ROOT })
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ bin: 'git', args: ['status'] }))

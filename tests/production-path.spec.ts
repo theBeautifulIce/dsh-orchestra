@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createOrchestra } from '../src/index.ts'
+import { openServiceOrchestra } from '../src/index.ts'
 import { startServer } from '../src/service/server.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../src/executor/tools.ts'
 import type { HostAgentFactory } from '../src/executor/session.ts'
@@ -23,14 +23,16 @@ async function boot() {
   dirs.push(dir)
   const registry = new ToolRegistry()
   registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
+  registry.register({ name: 'ro.fail', capability: 'read_only', command: { bin: 'fail', args: [] } })
   const host: HostRunner = { readonlyAvailable: () => true, run: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '' }) }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_prod', sessionId: 'sess_prod' }) }
-  const orchestra = createOrchestra({
+  const service = await openServiceOrchestra({
     dbFile: join(dir, 'orchestra.db'),
     secret: SECRET,
     phase: 'S2',
     executor: { registry, agents, runner: new ReadOnlyToolRunner(registry, host, dir) },
   })
+  const orchestra = service.orchestra
   const svc = await startServer({
     secret: SECRET, phase: 'S2', epoch: orchestra.db.epoch,
     asOfSeq: () => 0,
@@ -38,7 +40,7 @@ async function boot() {
     appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
     commands: orchestra.commands,
   })
-  closers.push(async () => { await svc.close(); orchestra.close() })
+  closers.push(async () => { await svc.close(); await service.release() })
   return { endpoint: svc.endpoint, db: orchestra.db }
 }
 
@@ -54,7 +56,7 @@ describe('生产全链路：定义 → run → 派发 → 收口', () => {
     const loaded = await post(endpoint + '/v1/workflows/load', {
       workflow_version: '1',
       pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
-      nodes: [{ node_id: 'check', type: 'agent' }],
+      nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
     })
     expect(loaded.status).toBe(200)
 
@@ -76,7 +78,6 @@ describe('生产全链路：定义 → run → 派发 → 收口', () => {
       now: NOW,
       nodes: {
         check: {
-          toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
           tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
         },
       },
@@ -102,6 +103,35 @@ describe('生产全链路：定义 → run → 派发 → 收口', () => {
     expect(res.status).toBe(404)
     const body = await res.json() as any
     expect(body.error.code).toBe('NOT_FOUND')
+  })
+
+  it('授权只认定义：请求体没有策略可传，越权与未注册都在租约前被拒', async () => {
+    const { endpoint, db } = await boot()
+    const cases = [
+      { version: '1', tools: { allow: ['ro.echo'], deny: [] }, run: 'ro.fail', code: 'FORBIDDEN' },
+      { version: '2', tools: { allow: [], deny: [] }, run: 'ro.echo', code: 'FORBIDDEN' },
+      { version: '3', tools: { allow: ['ro.ghost'], deny: [] }, run: 'ro.echo', code: 'TOOL_NOT_REGISTERED' },
+    ]
+    for (const item of cases) {
+      await post(endpoint + '/v1/workflows/load', {
+        workflow_version: item.version,
+        pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
+        nodes: [{ node_id: 'check', type: 'agent', tools: item.tools }],
+      })
+      const created = await post(endpoint + '/v1/runs', { taskTitle: '授权边界', workflowVersion: item.version, now: NOW })
+      const createdBody = await created.json() as any
+      const res = await post(endpoint + '/v1/runs/dispatch', {
+        runId: createdBody.data.run_id,
+        now: NOW,
+        nodes: { check: { tools: [{ command: item.run, args: [], cwd: '.', timeoutMs: 5000 }] } },
+      })
+      expect(res.status).toBe(200)
+      const body = await res.json() as any
+      expect(body.data[0].status).toBe('failed')
+      expect(body.data[0].error_code).toBe(item.code)
+      const node = db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get(createdBody.data.nodes[0].node_run_id) as any
+      expect(node.status).toBe('queued')
+    }
   })
 
   it('节点缺工具配置 → 这一轮跳过，不动节点状态', async () => {

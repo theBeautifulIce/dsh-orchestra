@@ -18,7 +18,10 @@ import { applyCancel } from '../src/service/commands/cancel.ts'
 import { MonotonicClock, deadlineFromRow, ScriptedClock } from '../src/core/clock.ts'
 import { rearmDeadline, transitionNode } from '../src/service/commands/node-state.ts'
 import { sweep } from '../src/service/sweep.ts'
-import { createOrchestra } from '../src/index.ts'
+import { openServiceOrchestra } from '../src/index.ts'
+import { acquireDbLock } from '../src/infra/lock.ts'
+import { bumpEpoch } from '../src/infra/db/open.ts'
+import { sweepNow, type RuntimeDeps } from '../src/service/commands/runtime.ts'
 import { startServer } from '../src/service/server.ts'
 import { ToolRegistry, ReadOnlyToolRunner, type HostRunner } from '../src/executor/tools.ts'
 import { runNode } from '../src/executor/run-node.ts'
@@ -27,7 +30,7 @@ import type { Db } from '../src/infra/sqlite/driver.ts'
 
 export type InjectionCase = 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-07' | 'G-08' | 'G-09' | 'G-14' | 'G-15'
   | 'ev-g2-01' | 'ev-g2-02' | 'ev-g2-03' | 'ev-g2-04' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
-  | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11'
+  | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11' | 'ev-g2-12' | 'ev-g2-13' | 'ev-g2-14'
 
 export type InjectionResult = {
   case: InjectionCase
@@ -38,16 +41,19 @@ export type InjectionResult = {
 }
 
 // 证据要能重跑出同样的字节（审计 F-03）：临时路径统一写 <tmp>/文件名，事件 id 按首次出现归一成 evt_1、evt_2…
-function normalizeEvidence(text: string): string {
-  const ids = new Map<string, string>()
+type EvidenceMaps = { ids: Map<string, string>; entity: Map<string, string>; entityCount: Map<string, number> }
+
+// 同一份证据的四个区块必须共用一套映射：否则各自从 1 开始编号，会把 nrun_1/nrun_2 对调（第五轮审计 P2-3）
+function normalizeEvidence(text: string, shared?: EvidenceMaps): string {
+  const ids = shared?.ids ?? new Map<string, string>()
   const idOf = (raw: string): string => {
     let hit = ids.get(raw)
     if (!hit) { hit = 'evt_' + String(ids.size + 1); ids.set(raw, hit) }
     return hit
   }
   // 实体 id（tsk_/run_/nrun_/dec_/lease_）也是随机串，按首次出现归一成前缀_序号
-  const entity = new Map<string, string>()
-  const entityCount = new Map<string, number>()
+  const entity = shared?.entity ?? new Map<string, string>()
+  const entityCount = shared?.entityCount ?? new Map<string, number>()
   const entityOf = (raw: string): string => {
     let hit = entity.get(raw)
     if (!hit) {
@@ -67,12 +73,14 @@ function normalizeEvidence(text: string): string {
 
 export function writeEvidence(dir: string, result: InjectionResult): void {
   mkdirSync(dir, { recursive: true })
-  const params = normalizeEvidence(JSON.stringify(result.params, (key, value) => (key === 'db' ? '<tmp>/orchestra.db' : value)))
+  const shared: EvidenceMaps = { ids: new Map(), entity: new Map(), entityCount: new Map() }
+  const norm = (value: string): string => normalizeEvidence(value, shared)
+  const params = norm(JSON.stringify(result.params, (key, value) => (key === 'db' ? '<tmp>/orchestra.db' : value)))
   writeFileSync(join(dir, result.case + '.md'),
     '# ' + result.case + '\n\n- 参数：' + params + '\n'
-    + '\n## 注入前账本片段\n\n```\n' + normalizeEvidence(result.before) + '\n```\n'
-    + '\n## 恢复后账本片段\n\n```\n' + normalizeEvidence(result.after) + '\n```\n'
-    + '\n## 对账查询\n\n```\n' + normalizeEvidence(result.reconcile) + '\n```\n', 'utf8')
+    + '\n## 注入前账本片段\n\n```\n' + norm(result.before) + '\n```\n'
+    + '\n## 恢复后账本片段\n\n```\n' + norm(result.after) + '\n```\n'
+    + '\n## 对账查询\n\n```\n' + norm(result.reconcile) + '\n```\n', 'utf8')
 }
 
 const DRIVER_URL = pathToFileURL(join(import.meta.dirname, '../src/infra/sqlite/driver.ts')).href
@@ -414,7 +422,8 @@ async function caseG05(): Promise<InjectionResult> {
   }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_g05', sessionId: 'sess_g05' }) }
   const runner = new ReadOnlyToolRunner(registry, host, dir)
-  const orchestra = createOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, runner } })
+  const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, runner } })
+  const orchestra = service.orchestra
   withTx(orchestra.db, (tx) => {
     tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t_g05','取消注入','running',1,?,?)", [NOW, NOW])
     tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, status, revision, created_at, updated_at) VALUES ('r_g05','t_g05','wf',7,'running',1,?,?)", [NOW, NOW])
@@ -423,14 +432,13 @@ async function caseG05(): Promise<InjectionResult> {
   orchestra.catalog.load({
     workflow_version: '7',
     pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
-    nodes: [{ node_id: 'check', type: 'agent' }],
+    nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
   })
   const before = dumpState(file)
   const runPromise = runNode(
     { runtime: orchestra.runtime, db: orchestra.db, secret, registry, agents, runner },
     {
       nodeRunId: 'nrun_g05', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
-      toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
       tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
       now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
     },
@@ -467,7 +475,7 @@ async function caseG05(): Promise<InjectionResult> {
   const armed = (orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nrun_g05' AND type = 'fence_armed'").get() as { n: number }).n
   const toolEvents = (orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nrun_g05' AND type = 'tool_started'").get() as { n: number }).n
   const row = orchestra.db.raw.prepare("SELECT status, fence_state, cancel_result, tool_start_at FROM node_runs WHERE node_run_id = 'nrun_g05'").get()
-  orchestra.close()
+  await service.release()
   const after = dumpState(file)
   rmSync(dir, { recursive: true, force: true })
   return {
@@ -528,10 +536,10 @@ async function caseG07(): Promise<InjectionResult> {
 
 // —— S2 门证据：四个走真实 HTTP 入口的用例（审计 N-10）——
 
-type HttpBoot = { endpoint: string; file: string; db: Db; close: () => Promise<void> }
+type HttpBoot = { endpoint: string; file: string; db: Db; runtime: RuntimeDeps; close: () => Promise<void> }
 
 // 起真服务：真库、真路由、真执行器；工具固定回 ok，重跑字节一致
-async function bootHttp(secret: string, opts?: { failingTool?: boolean }): Promise<HttpBoot> {
+async function bootHttp(secret: string, opts?: { failingTool?: boolean; delayMs?: number }): Promise<HttpBoot> {
   const dir = mkdtempSync(join(tmpdir(), 'orch-ev-'))
   const file = join(dir, 'orchestra.db')
   const registry = new ToolRegistry()
@@ -540,11 +548,15 @@ async function bootHttp(secret: string, opts?: { failingTool?: boolean }): Promi
   if (opts?.failingTool) registry.register({ name: 'ro.fail', capability: 'read_only', command: { bin: 'ro-fail-bin', args: ['boom'] } })
   const host: HostRunner = {
     readonlyAvailable: () => true,
-    run: async (input) => (input.bin === 'ro-fail-bin' ? { exitCode: 1, stdout: '', stderr: 'boom: 工具故意失败' } : { exitCode: 0, stdout: 'ok\n', stderr: '' }),
+    run: async (input) => {
+      if (opts?.delayMs) await new Promise((resolve) => setTimeout(resolve, opts.delayMs))
+      return input.bin === 'ro-fail-bin' ? { exitCode: 1, stdout: '', stderr: 'boom: 工具故意失败' } : { exitCode: 0, stdout: 'ok\n', stderr: '' }
+    },
   }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_ev', sessionId: 'sess_ev' }) }
   const runner = new ReadOnlyToolRunner(registry, host, dir)
-  const orchestra = createOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, runner } })
+  const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, runner } })
+  const orchestra = service.orchestra
   const server = await startServer({
     secret, phase: 'S2', epoch: orchestra.db.epoch,
     asOfSeq: () => Number((orchestra.db.raw.prepare('SELECT MAX(seq) AS s FROM events').get() as { s: number | null }).s ?? 0),
@@ -554,8 +566,8 @@ async function bootHttp(secret: string, opts?: { failingTool?: boolean }): Promi
     commands: orchestra.commands,
   })
   return {
-    endpoint: server.endpoint, file, db: orchestra.db,
-    close: async () => { await server.close(); orchestra.close() },
+    endpoint: server.endpoint, file, db: orchestra.db, runtime: orchestra.runtime,
+    close: async () => { await server.close(); await service.release() },
   }
 }
 
@@ -599,7 +611,7 @@ const EV_NOW = '2026-11-13T03:00:00.000Z'
 const EV_DEF = {
   workflow_version: '1',
   pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
-  nodes: [{ node_id: 'check', type: 'agent' }],
+  nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
 }
 
 // ev-g2-01：生产全链路——加载定义 → 建 run → 派发 → 收口（审计 F-01）
@@ -612,7 +624,7 @@ async function caseEvG201(): Promise<InjectionResult> {
   const createdData = created.body?.data ?? {}
   const dispatched = await postJson(boot.endpoint, '/v1/runs/dispatch', {
     runId: createdData.run_id,
-    nodes: { check: { toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    nodes: { check: { tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
     now: EV_NOW,
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, action_generation, tool_start_at, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()
@@ -751,13 +763,13 @@ async function caseEvG208(): Promise<InjectionResult> {
   const boot = await bootHttp(secret, { failingTool: true })
   const before = dumpProduction(boot.file)
   // 判定条件故意留空：失败必须由系统判，不许外包给模板条件
-  const def = { workflow_version: '8', pass_conditions: [], nodes: [{ node_id: 'check', type: 'agent' }] }
+  const def = { workflow_version: '8', pass_conditions: [], nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.fail'], deny: [] } }] }
   const loaded = await postJson(boot.endpoint, '/v1/workflows/load', def, secret)
   const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '工具失败不许落完成', workflowVersion: '8', now: EV_NOW }, secret)
   const createdData = created.body?.data ?? {}
   const dispatched = await postJson(boot.endpoint, '/v1/runs/dispatch', {
     runId: createdData.run_id,
-    nodes: { check: { toolPolicy: { allow: ['ro.fail'], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.fail', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    nodes: { check: { tools: [{ command: 'ro.fail', args: [], cwd: '.', timeoutMs: 5000 }] } },
     now: EV_NOW,
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, action_generation, tool_start_at, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()
@@ -908,7 +920,7 @@ async function caseEvG210(): Promise<InjectionResult> {
   const control = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '真派发对照', workflowVersion: '1', now: EV_NOW }, secret)
   const controlDispatch = await postJson(boot.endpoint, '/v1/runs/dispatch', {
     runId: control.body?.data?.run_id,
-    nodes: { check: { toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' }, tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    nodes: { check: { tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
     now: EV_NOW,
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, node_id, status, attempt, revision, verify_deadline_at FROM node_runs ORDER BY node_run_id ASC').all()
@@ -1096,6 +1108,126 @@ async function caseEvG211(): Promise<InjectionResult> {
   }
 }
 
+// ev-g2-12：授权只认 worker 定义——请求体里的 toolPolicy 不算数，越权与未注册在租约前就被拒（第五轮审计 P1-2）
+async function caseEvG212(): Promise<InjectionResult> {
+  const secret = 'ev-g2-12-secret'
+  const boot = await bootHttp(secret, { failingTool: true })
+  const before = dumpProduction(boot.file)
+  const cases = [
+    { version: '12', allow: ['ro.echo'], run: 'ro.fail', code: 'FORBIDDEN' },
+    { version: '13', allow: [], run: 'ro.echo', code: 'FORBIDDEN' },
+    { version: '14', allow: ['ro.ghost'], run: 'ro.echo', code: 'TOOL_NOT_REGISTERED' },
+  ]
+  const outcomes: unknown[] = []
+  for (const item of cases) {
+    await postJson(boot.endpoint, '/v1/workflows/load', {
+      workflow_version: item.version, pass_conditions: [],
+      nodes: [{ node_id: 'check', type: 'agent', tools: { allow: item.allow, deny: [] } }],
+    }, secret)
+    const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '授权只认定义 ' + item.version, workflowVersion: item.version, now: EV_NOW }, secret)
+    const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+    // 请求体故意塞一份更宽的策略：服务端必须忽略它
+    const dispatched = await postJson(boot.endpoint, '/v1/runs/dispatch', {
+      runId: created.body?.data?.run_id, now: EV_NOW,
+      toolPolicy: { allow: ['ro.echo', 'ro.fail'], deny: [], declaredPolicy: 'pure' },
+      nodes: { check: { tools: [{ command: item.run, args: [], cwd: '.', timeoutMs: 5000 }] } },
+    }, secret)
+    const node = boot.db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get(nodeRunId)
+    outcomes.push({ version: item.version, http: dispatched.status, outcome: dispatched.body?.data?.[0], node })
+  }
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision FROM node_runs ORDER BY node_run_id ASC').all()
+  const leases = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'lease_acquired'").get() as { n: number }
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-12',
+    params: { db: boot.file, 入口: 'POST /v1/workflows/load → /v1/runs → /v1/runs/dispatch', 请求体策略: '故意带 toolPolicy allow=[ro.echo,ro.fail]' },
+    before, after,
+    reconcile: '三种定义下的派发结果=' + JSON.stringify(outcomes)
+      + '；lease_acquired 条数=' + String(leases.n)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
+// ev-g2-13：单写者与围栏——第二把锁拿不到，老 epoch 的连接写不进（第五轮审计 P1-3）
+async function caseEvG213(): Promise<InjectionResult> {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-g213-'))
+  const file = join(dir, 'orchestra.db')
+  const service = await openServiceOrchestra({ dbFile: file, secret: 'ev-g2-13-secret', phase: 'S2' })
+  const firstEpoch = service.orchestra.db.epoch
+  let secondLock = 'acquired'
+  let releaseSecond: (() => Promise<void>) | null = null
+  try {
+    releaseSecond = await acquireDbLock(file)
+  } catch (err) {
+    secondLock = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
+  }
+  if (releaseSecond) await releaseSecond()
+  const nextEpoch = bumpEpoch(file)
+  let staleWrite = 'accepted'
+  try {
+    withTx(service.orchestra.db, (tx) => {
+      tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t_old','老进程想写','running',1,?,?)", [EV_NOW, EV_NOW])
+    })
+  } catch (err) {
+    staleWrite = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
+  }
+  await service.release()
+  const after = dumpState(file)
+  rmSync(dir, { recursive: true, force: true })
+  return {
+    case: 'ev-g2-13',
+    params: { db: file, 入口: 'openServiceOrchestra（取锁 + epoch 自增）→ 再取锁 → bumpEpoch → 老连接写' },
+    before: '(空账本，未建任何业务行)',
+    after,
+    reconcile: '首个写者 epoch=' + String(firstEpoch)
+      + '；第二把锁=' + secondLock
+      + '；外部 epoch 递增到=' + String(nextEpoch)
+      + '；老连接写结果=' + staleWrite
+      + '；释放后账本=' + after,
+  }
+}
+
+// ev-g2-14：长动作心跳——动作 3 秒、租约 2 秒、500 毫秒续租，2.5 秒扫描不判过期（第五轮审计 P2-1）
+async function caseEvG214(): Promise<InjectionResult> {
+  const secret = 'ev-g2-14-secret'
+  const boot = await bootHttp(secret, { delayMs: 3000 })
+  const before = dumpProduction(boot.file)
+  await postJson(boot.endpoint, '/v1/workflows/load', {
+    workflow_version: '15', pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
+    nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
+  }, secret)
+  const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '长动作心跳', workflowVersion: '15', now: EV_NOW }, secret)
+  const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  const pending = postJson(boot.endpoint, '/v1/runs/dispatch', {
+    runId: created.body?.data?.run_id, now: EV_NOW,
+    leaseTtlMs: 2000, leaseRenewIntervalMs: 500,
+    nodes: { check: { tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
+  }, secret)
+  await new Promise((resolve) => setTimeout(resolve, 2500))
+  const swept = sweepNow(boot.runtime, new Date(Date.parse(EV_NOW) + 2500).toISOString())
+  const midNode = boot.db.raw.prepare('SELECT status, lease_expires_at, tool_start_at FROM node_runs WHERE node_run_id = ?').get(nodeRunId)
+  const dispatched = await pending
+  const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision, lease_expires_at FROM node_runs ORDER BY node_run_id ASC').all()
+  const expired = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'lease_expired'").get() as { n: number }
+  const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
+  await boot.close()
+  const after = dumpProduction(boot.file)
+  return {
+    case: 'ev-g2-14',
+    params: { db: boot.file, 入口: 'POST /v1/runs/dispatch（3 秒动作 / 2 秒租约 / 500 毫秒续租）', 扫描时刻: '第 2500 毫秒' },
+    before, after,
+    reconcile: '派发 HTTP=' + String(dispatched.status) + ' 返回=' + JSON.stringify(dispatched.body?.data ?? dispatched.body)
+      + '；2.5 秒扫描=' + JSON.stringify(swept)
+      + '；扫描时节点=' + JSON.stringify(midNode)
+      + '；lease_expired 条数=' + String(expired.n)
+      + '；节点行=' + JSON.stringify(nodeRows)
+      + '；节点事件=' + JSON.stringify(events),
+  }
+}
+
 export async function runCase(name: InjectionCase): Promise<InjectionResult> {
   switch (name) {
     case 'G-01': return caseG01()
@@ -1119,6 +1251,9 @@ export async function runCase(name: InjectionCase): Promise<InjectionResult> {
     case 'ev-g2-03': return caseEvG203()
     case 'ev-g2-04': return caseEvG204()
     case 'ev-g2-11': return caseEvG211()
+    case 'ev-g2-12': return caseEvG212()
+    case 'ev-g2-13': return caseEvG213()
+    case 'ev-g2-14': return caseEvG214()
   }
 }
 
@@ -1126,7 +1261,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const idx = process.argv.indexOf('--case')
   const name = (idx >= 0 ? process.argv[idx + 1] : 'G-01') as InjectionCase
   const out = await runCase(name)
-  const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11'].includes(name) ? 'G2' : 'G1'
+  const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11', 'ev-g2-12', 'ev-g2-13', 'ev-g2-14'].includes(name) ? 'G2' : 'G1'
   writeEvidence(join(process.cwd(), 'docs/gates/evidence/' + gate), out)
   console.log(JSON.stringify(out, null, 2))
 }
