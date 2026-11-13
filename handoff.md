@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-13 18:09。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-13 19:20。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -27,7 +27,7 @@
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
 | 参考项目 `references/` | 三份已克隆并建图谱 |
-| **源码** | S1 账本地基 + S2 单节点闭环已完成（`4f3ada7` → `ca8cea3`，37 文件 +3145/−16）：`src/core/`（errors/config/canonical/ids/hash-chain/state-machine/report/policy/clock/workflow-def）、`src/infra/`（sqlite、db、lock、logger、backup、service-state、迁移 001/002）、`src/service/`（server、envelope、write-queue、queries、commands/{lease,node-state,apply-report,cancel}、sweep）、`src/executor/`（bridge、tools、session）、`scripts/`（fault-inject、gate-check、sign-gate）、`tests/`（27 spec、211 用例）；G1、G2 门记录均已通过机器复核；第四轮整改 M1–M4 已提交 `ed5c8b8`，两道门因候选哈希漂移待重签（§11.12） |
+| **源码** | S1 账本地基 + S2 单节点闭环已完成（`4f3ada7` → `ca8cea3`，37 文件 +3145/−16）：`src/core/`（errors/config/canonical/ids/hash-chain/state-machine/report/policy/clock/workflow-def）、`src/infra/`（sqlite、db、lock、logger、backup、service-state、迁移 001/002）、`src/service/`（server、envelope、write-queue、queries、commands/{lease,node-state,apply-report,cancel}、sweep）、`src/executor/`（bridge、tools、session）、`scripts/`（fault-inject、gate-check、sign-gate）、`tests/`（31 spec、272 用例）；G1、G2 门记录均已通过机器复核；第四轮整改 M1–M5 与 N1/N2/N4/N5 已提交 `a7b03cb`，G1/G2 已重签（`8881b9b` / `e3f1fc7`）双门 exit 0，等第五轮独立审计（§11.13） |
 | 面板原型 `docs/prototype/panel-v2.html` | v20 单文件浅色原型（核心指挥台：主脑卡 + 支线卡；有事的支线展开、健康支线默认收起；数字等于列表长度；任务卡、抽屉、支线卡状态句同源；任务流内含「执行注意事项」页）；任务看板、任务流程三栏、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；无彩色左侧色条、无可见优先级标签，全部可见字号 ≥12.5px（导航 13px），四档宽度无页面溢出；任务页可按状态与时间段筛选，归档箱只收起不改历史、可随时取回；流程库是一行可搜下拉（按名称 / 说明 / 负责人 / 触发方式 / 版本 / 发布状态查），不再横排铺标签 |
 | 图谱 | `pi-harnessmm` 124/294、`dsh-superagent-prototype` 2012/8492、`DS-Bot` 10539/33229、`dsh-orchestra-docs` 97/96 |
 
@@ -402,6 +402,8 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 
 ### 11.12 第四轮独立审计（fail）与整改暂停点（2026-11-13 18:09）
 
+> 本节是暂停点的历史记录，表内「未改」是当时状态；整改已完成，最新状态见 §11.13。
+
 **审计结论**：第四轮独立审计（子代理 `a749d93d-e165-403e-a87e-0ddf09d4d94c`，不自测）判定 **G2 不通过：致命 0 / 重大 5 / 不阻断 5**。报告 `docs/audits/S2-independent-audit-round4.md`，提交 `71db20c`。
 
 | 编号 | 主张（审计要点） | 现状 |
@@ -424,16 +426,20 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 - `D:\NodeJs\node.exe node_modules/vitest/vitest.mjs run` → 31 文件 / 271 用例，**270 passed / 1 failed**；失败即 N4 的 flaky 超时（单跑 `tests/gate-check.spec.ts` 22 例全过）。
 - 干净 clone（HEAD）上两道门都 **exit 1**，原因是 candidate_hash 漂移：G1 `15fd9c509e81…` != `d6ae7bceb9ba…`；G2 `da60a01647ea…` != `325d3d7f73b8…`。这是 M1 的直接后果，**重签后才会回到 0**。
 
-**下一步（回来照顺序做，不用重新判断）**：
-1. 补 M5：`src/service/commands/apply-report.ts:90-95` 收掉 `policy` 参数，改由服务按 `node_run_id` 取 run 的 `workflow_version` 再载入模板策略；同步改 15 处调用点（`tests/apply-report.spec.ts:37,71,125,138`、`tests/sweep.spec.ts:104,119`、`tests/integration/g2.spec.ts:60,76,77,89,116,124,138,156,184,195`、`scripts/fault-inject.ts:355,380,450`）。
-2. 补 e5：把规格 §4.4:330/341/342 的「按 remaining 重挂 + 跨 boot remaining 公式」与 `verify_remaining_ns` 死列的处置写进 `docs/superpowers/plans/2026-11-12-dsh-orchestra-s3-nodes-state.md`，当必做项。
-3. 修 N1–N5（清单见上表，都是小改）。
-4. 写 `docs/audits/S2-round4-response.md`：M1…M5 + N1…N5 逐条（主张 / 改法文件:行 / 证据 / 用例 / 状态）。
-5. 重签：先把 `docs/gates/G2.md` 的 `audit_round` 改 4、`audit_report` 改 `docs/audits/S2-independent-audit-round4.md`（该文件已在 HEAD），正文结论段补一句 docs/reviews 排除理由；然后 `node scripts/sign-gate.ts docs/gates/G1.md` → 提交 → `node scripts/sign-gate.ts docs/gates/G2.md` → 提交（sign-gate 要求工作树干净、证据只认 HEAD 字节）。
-6. `node scripts/gate-check.ts docs/gates/G1.md` 与 `G2.md` 都要 exit 0。
-7. 派第五轮独立审计子代理（不自测）；**审计判 pass 之前不开 S3 九节点与状态机**。
-8. 同步 handoff / codebasemap / 票 #9（deck 插件 `deck_issue_patch({key:'9', comment})`）。
-
-**还悬着、要主人拍板的**：要不要建「每周五自动检查项目架构与关键回归风险」的定时任务（主人问过，还没落 schedule）。
+**当时列的续跑步骤（已全部完成，见 §11.13）**：补 M5 → e5 进 S3 计划 → 修 N1–N5 → 写 `docs/audits/S2-round4-response.md` → 重签 G1/G2 → 双门 exit 0 → 派第五轮独立审计。
 
 **环境速查**：node=`D:\NodeJs\node.exe`（v26.13.1）；pnpm 在本机不可用（`cmd.exe /c pnpm.cmd` 报「命令语法不正确」），一律用上面两条 node 命令；GitHub 走 `http://127.0.0.1:7078` 代理；`gh` 没凭据，票走 deck 插件。
+
+### 11.13 第四轮整改收口（2026-11-13 19:20）
+
+**已完成**：M1–M5、N1/N2/N4/N5、e5 全部落点；M5 把判定条件收进 `applyReport` 内部（按 run 的 `workflow_version` 取 `catalog.policyFor`），命令层只传 catalog，19 处调用点全部改完；e5 写进 S3 计划 Task 5 第 5 步（冻结/重挂/跨 boot 公式 + 三例验收）；N1 把 `commandHashOf` 的 cwd 按工作区根归一成相对路径；N2 补「批内新增又删除」用例；N4 门记录用例组 timeout 放宽 30 秒；N5 复现命令改 node 直跑。N3（门记录无密码学签名）按审计要求未修，残余风险留在 `docs/audits/S2-round4-response.md`。
+
+**验收（实测）**：
+- `tsc --noEmit` exit 0；`vitest run` 31 文件 / 272 例全绿（14.64s）。
+- `gate-check.ts docs/gates/G1.md` exit 0：13 项必过、13 份证据，artifact_hash=`18088365050c…`、body_hash=`d99ba65f3744…`。
+- `gate-check.ts docs/gates/G2.md` exit 0：15 项必过、15 份证据，artifact_hash=`2b90f0fde3ca…`、body_hash=`3bed7c14d24b…`。
+- ev-g2-08 连跑两次 sha256 一致：`54e4b0e8…`。
+
+**提交链**：`a7b03cb` 整改 → `8881b9b` G1 重签 → `e3f1fc7` G2 重签。对照表 `docs/audits/S2-round4-response.md`。
+
+**当前关口**：第五轮独立审计子代理 `ff0066da-1d07-4ae9-afc3-27044fc04734` 已派（不自测），结论回来前不开 S3 九节点与状态机。审计若判 pass，下一步按 `docs/superpowers/plans/2026-11-12-dsh-orchestra-s3-nodes-state.md` 开 S3；若再出重大项，回到 §11.12 表逐条整改。
