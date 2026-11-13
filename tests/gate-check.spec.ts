@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { auditConclusionOf, candidateEntries, verifyGateRecord } from '../scripts/gate-check.ts'
+import { auditConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, verifyGateRecord } from '../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
@@ -146,6 +146,25 @@ describe('门记录校验', { timeout: 30000 }, () => {
     expect(() => check(text)).toThrow(/不变量/)
   })
 
+  it('正文证据表删一行再复制另一行时拒绝（S1 第四轮审计 P2-1）', () => {
+    const sha = 'a'.repeat(64)
+    const entries = [
+      { id: 'ev-a', file: 'a.md', sha256: sha },
+      { id: 'ev-b', file: 'b.md', sha256: sha },
+    ]
+    const text = '## 证据文件与哈希\n\n| 证据 | 文件 | sha256 |\n| --- | --- | --- |\n| ev-a | a.md | ' + sha + ' |\n| ev-a | a.md | ' + sha + ' |\n'
+    expect(() => checkBodyEvidenceTable(text, entries)).toThrow(/正文证据表里证据重复: ev-a/)
+  })
+
+  it('正文不变量表删一行再复制另一行时拒绝（S1 第四轮审计 P2-1）', () => {
+    const list = [
+      { id: 'I1', statement: '一', evidence_ids: ['ev-a'] },
+      { id: 'I2', statement: '二', evidence_ids: ['ev-b'] },
+    ]
+    const text = '## 不变量\n\n| 不变量 | 内容 | 证据 |\n| --- | --- | --- |\n| I1 | 一 | ev-a |\n| I1 | 一 | ev-a |\n'
+    expect(() => checkBodyInvariants(text, list)).toThrow(/正文不变量表里不变量重复: I1/)
+  })
+
   it('前序门哈希链断了时拒绝（审计 R3-08）', () => {
     const text = tamper(readG2(), (a) => { a.previous_artifact_hash = 'b'.repeat(64) })
     expect(() => check(text)).toThrow(/重签链断了/)
@@ -234,6 +253,17 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('结论：pass 的把握不到一半')).toBeNull()
     expect(auditConclusionOf('结论：pass。')).toBe('pass')
     expect(auditConclusionOf('结论：**fail**。')).toBe('fail')
+  })
+
+  it('未收口的结论候选行不能被静默跳过（S1 第四轮审计 P1-1）', () => {
+    expect(auditConclusionOf('结论：pass\n\n结论：fail，仍有 1 个 P0 未闭合')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n结论：fail 但仍有风险未排除')).toBeNull()
+  })
+
+  it('同一行里的相反结论按歧义处理；大小写归一（S2 第八轮审计 P2-6/P2-8）', () => {
+    expect(auditConclusionOf('结论：PASS（0 致命）')).toBe('pass')
+    expect(auditConclusionOf('结论：FAIL（致命 1）')).toBe('fail')
+    expect(auditConclusionOf('结论：pass（上一轮 fail）')).toBeNull()
   })
 
   it('围栏代码块里的示例结论不参与判定（第七轮审计 P1-1）', () => {

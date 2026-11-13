@@ -363,7 +363,7 @@ function tableRows(text: string, heading: string): string[][] {
 }
 
 // 正文的「证据文件与哈希」表必须与 evidence-index 同源：改了 sha256 列或改了文件都会被点名（审计 R3-06）
-function checkBodyEvidenceTable(text: string, entries: EvidenceEntry[]): void {
+export function checkBodyEvidenceTable(text: string, entries: EvidenceEntry[]): void {
   const rows = tableRows(text, '## 证据文件与哈希')
   if (rows.length === 0) {
     if (entries.length !== 0) throw new Error('正文「证据文件与哈希」表是空的，但 artifact 列了 ' + String(entries.length) + ' 份证据')
@@ -371,14 +371,21 @@ function checkBodyEvidenceTable(text: string, entries: EvidenceEntry[]): void {
   }
   if (rows.length !== entries.length) throw new Error('正文证据表有 ' + String(rows.length) + ' 行，artifact 列了 ' + String(entries.length) + ' 份证据')
   const map = new Map(entries.map((e) => [e.id, e]))
+  const seen = new Set<string>()
   for (const row of rows) {
     const id = row[0] ?? ''
     const file = row[1] ?? ''
     const sha = row[2] ?? ''
+    if (seen.has(id)) throw new Error('正文证据表里证据重复: ' + id)
+    seen.add(id)
     const e = map.get(id)
     if (!e) throw new Error('正文证据表里有 artifact 没有的证据: ' + id)
     if (e.file !== file) throw new Error('正文证据表里 ' + id + ' 的文件与 artifact 不一致: ' + file + ' != ' + e.file)
     if (e.sha256 !== sha) throw new Error('正文证据表里 ' + id + ' 的 sha256 与 artifact 不一致（证据被改过或表没跟着改）')
+  }
+  // 只查行数和“表里每行都能在 artifact 找到”还不够：删一行再复制另一行，行数不变但证据被换掉（S1 第四轮审计 P2-1）
+  for (const e of entries) {
+    if (!seen.has(e.id)) throw new Error('正文证据表缺 artifact 里的证据: ' + e.id)
   }
 }
 
@@ -402,7 +409,7 @@ function checkBodyExceptions(text: string, exceptions: unknown): void {
 }
 
 // 正文的「不变量」表必须与 invariants 块同源：说明改了字也会被抓（审计 R3-06）
-function checkBodyInvariants(text: string, list: InvariantEntry[]): void {
+export function checkBodyInvariants(text: string, list: InvariantEntry[]): void {
   const rows = tableRows(text, '## 不变量')
   if (rows.length === 0) {
     if (list.length !== 0) throw new Error('正文「不变量」表是空的，但 artifact 列了 ' + String(list.length) + ' 条')
@@ -410,14 +417,21 @@ function checkBodyInvariants(text: string, list: InvariantEntry[]): void {
   }
   if (rows.length !== list.length) throw new Error('正文不变量表有 ' + String(rows.length) + ' 行，artifact 列了 ' + String(list.length) + ' 条')
   const map = new Map(list.map((i) => [i.id, i]))
+  const seen = new Set<string>()
   for (const row of rows) {
     const id = row[0] ?? ''
+    if (seen.has(id)) throw new Error('正文不变量表里不变量重复: ' + id)
+    seen.add(id)
     const item = map.get(id)
     if (!item) throw new Error('正文不变量表里有 artifact 没有的不变量: ' + id)
     if ((row[1] ?? '') !== item.statement) throw new Error('正文不变量表里 ' + id + ' 的说明与 artifact 不一致')
     const got = (row[2] ?? '').split(/[,，\s]+/).filter((s) => s.length > 0 && s !== '无').slice().sort().join(',')
     const want = item.evidence_ids.slice().sort().join(',')
     if (got !== want) throw new Error('正文不变量表里 ' + id + ' 的证据与 artifact 不一致: ' + got + ' != ' + want)
+  }
+  // 同上：删一行再复制另一行会骗过行数核对（S1 第四轮审计 P2-1）
+  for (const item of list) {
+    if (!seen.has(item.id)) throw new Error('正文不变量表缺 artifact 里的不变量: ' + item.id)
   }
 }
 
@@ -488,10 +502,23 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
     // 结论 token 后只许：可选加粗、句末标点、括号补充、破折号解释，然后必须行尾
     const tail = '(?:\\*\\*)?\\s*(?:[。．.！!？?；;，,、]\\s*)?(?:[（(][^）)]*[）)])?\\s*(?:[—–-].*)?$'
     let m = new RegExp('^(?:审计)?(?:结论|判定)\\s*\\**\\s*[：:]\\s*\\**\\s*(pass|fail|通过|不通过)' + tail, 'i').exec(line)
+    // 结论候选行没解析成功时不能静默跳过：一行 pass、一行 fail 但 fail 行带了未收口后缀，
+    // 只统计解析成功的行就会读成 pass（S1 第四轮审计 P1-1）。候选一旦出现却无法严格收口，按歧义处理。
+    const looksLikeConclusion =
+      /^(?:审计)?(?:结论|判定)\s*\**\s*[：:]/i.test(line) ||
+      /^建议\s*[：:]/i.test(line) ||
+      /^(pass|fail|通过|不通过)(?=\s*$|\s*[。．.！!？?；;，,、*（(—–-])/i.test(line)
     if (!m) m = new RegExp('^(pass|fail|通过|不通过)' + tail, 'i').exec(line)
     if (!m) m = new RegExp('^建议\\s*[：:]\\s*\\**\\s*(不通过|通过)' + tail).exec(line)
-    if (!m) continue
-    const raw = m[1] ?? ''
+    if (!m) {
+      if (looksLikeConclusion) return null
+      continue
+    }
+    // 同一行同时出现 pass 与 fail 记号，说明括号或破折号里还写着相反结论，不能替读者挑一个（S2 第八轮审计 P2-8）
+    const hasPass = /\bpass\b/i.test(line) || /(?:^|[^不])通过/.test(line)
+    const hasFail = /\bfail\b/i.test(line) || /不通过/.test(line)
+    if (hasPass && hasFail) return null
+    const raw = (m[1] ?? '').toLowerCase()
     found.add(raw === 'pass' || raw === '通过' ? 'pass' : 'fail')
   }
   if (found.size !== 1) return null
