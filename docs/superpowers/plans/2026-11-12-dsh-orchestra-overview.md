@@ -12,7 +12,7 @@
 
 ## 1. 规格来源与硬约束
 
-- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.3，1493 行 / 106173 bytes / SHA256 `D78E4E2B7F3C569D20F8FEC27564B031240B4E1B947F34E47EF493CE9976F82E`，commit `待回填`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
+- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.3，1493 行 / 106173 bytes / SHA256 `D78E4E2B7F3C569D20F8FEC27564B031240B4E1B947F34E47EF493CE9976F82E`，commit `26fc1af`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
 - 设计稿论证与用例：`docs/orchestra-design-draft.md` v44。
 - 不得写的事（规格 1.2 / 10.3）：内嵌编排脚本、与原生 workflowEngine 半兼容、让模型做最终裁决、接受口头副作用等级、节点层跨节点业务判断、自动兜底放行、v1 记忆删除与跨运行补偿、把执行器全量 transcript 给大脑。
 - 账本只追加；已提交事件不改写；事件序号单调（不变量 I2）。
