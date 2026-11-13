@@ -626,25 +626,31 @@ function renderedAuditLines(text: string): string[] | null {
 }
 
 // 可见正文里的“本报告不通过 / 本次审计结论为 fail”这类判断句。
-// 只认被句读或表格单元格隔开的完整陈述，避免把「本报告不通过项已全部修复」误判（S2 第二十轮补）。
+// 先把空白与冒号压掉再匹配，避免被拆字绕过；verdict 后仍要求句读/括号/结尾，
+// 所以「本报告不通过项已全部修复」这类叙述不会误杀（S1 第十八轮补）。
+// window 只给门正文用：限制结论出现在行首附近且整行不长，避免把 G2 历史段落里
+// 引用的“门记录拿结论为 fail”误当成本次正文结论。
 const FAIL_SUBJECT = '(?:本报告|本次审计|本轮审计|本次复核|本次评审|该报告|此报告|本审计)'
-const FAIL_VERDICT = '(?:fail(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的])|不通过(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的])|未通过(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的])|不合格(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的]))'
+const FAIL_VERDICT = '(?:fail(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-（(【\\[「『…/]|[需应已了的])|不通过(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-（(【\\[「『…/]|[需应已了的])|未通过(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-（(【\\[「『…/]|[需应已了的])|不合格(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-（(【\\[「『…/]|[需应已了的]))'
 
-function visibleFailStatement(line: string): boolean {
-  const boundary = '(?:^|[|。；;！!？?：:，,、]\\s*)'
+function visibleFailStatement(line: string, window: { maxStart?: number; maxLength?: number } = {}): boolean {
+  // 可见文字里的空白与冒号都可能被用来拆词（「结 论：fail」「结论∷fail」）；
+  // 判定前压成无空白、无冒号形态，只对语义判定负责，不改原始行（S1 第十八轮 P1）。
+  const compact = Array.from(line).filter((ch) => ch.trim() !== '' && !'\uFE13\uFE55\u2236\uFF1A:：'.includes(ch)).join('')
   const re = new RegExp(
-    boundary + '(?:' +
-      FAIL_SUBJECT + '(?:的)?(?:经|经过)?(?:审计|复核|评审)?(?:后)?(?:最终|仍|依然|还是)?(?:结论|判定|审计意见|最终判定|最终结论|结果)?\\s*(?:为|是|：|:)?\\s*' + FAIL_VERDICT +
-      '|(?:审计|复核|评审)(?:结论|结果)\\s*(?:为|是|：|:)\\s*' + FAIL_VERDICT +
-      '|(?:最终)?(?:结论|判定)\\s*(?:为|是|：|:)\\s*' + FAIL_VERDICT +
+    '(?:' +
+      FAIL_SUBJECT + '(?:的)?(?:经|经过)?(?:审计|复核|评审)?(?:后)?(?:最终|仍|依然|还是)?(?:结论|判定|审计意见|最终判定|最终结论|结果)?(?:为|是)?' + FAIL_VERDICT +
+      '|(?:审计|复核|评审)(?:结论|结果)(?:为|是)?' + FAIL_VERDICT +
+      '|(?:最终)?(?:结论|判定)(?:为|是)?' + FAIL_VERDICT +
       ')',
     'i',
   )
-  if (re.test(line)) return true
+  if (window.maxLength !== undefined && line.length > window.maxLength) return false
+  const m = re.exec(compact)
+  if (m && (window.maxStart === undefined || m.index <= window.maxStart)) return true
   // 表格单元格只有结论 token 时同样算可见 fail（表头/格式行不会命中）。
-  for (const cell of line.split('|')) {
-    const t = cell.trim().replace(/[。．.！!？?；;，,、\s]+$/, '')
-    if (new RegExp('^' + FAIL_VERDICT + '$', 'i').test(t)) return true
+  for (const cell of compact.split('|')) {
+    if (new RegExp('^' + FAIL_VERDICT + '$', 'i').test(cell)) return true
   }
   return false
 }
@@ -710,6 +716,7 @@ function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
     const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
     if (m) found.push(rawVerdict(m[1] ?? ''))
   }
+  if (visible.some((line) => visibleFailStatement(line, { maxStart: 24, maxLength: 160 }))) return 'fail'
   return found.length === 1 ? found[0]! : null
 }
 

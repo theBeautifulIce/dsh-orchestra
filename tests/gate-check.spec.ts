@@ -610,6 +610,51 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     for (const line of safe) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBe('pass')
   })
 
+  it('S1 第十八轮 P0：可见中文否定句必须拒绝（S1 第十八轮 P0）', () => {
+    const payloads = [
+      '本报告不通过（P0 1 条）',
+      '本报告不通过(P0 1)',
+      '本报告不通过……',
+      '复核意见 本报告不通过',
+      '本人认为本报告不通过',
+      '结论为不通过（P0 1 条）',
+      '结论为 fail（P0 1 条）',
+      '审计结果：不通过（P0 1 条）',
+      '最终判定为不通过（P0 1 条）',
+      '本报告不通过【P0 1】',
+      '本报告不通过/不合格',
+    ]
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+    const safe = ['本报告不通过项已全部修复', '本次审计不通过原因如下', '本报告未通过验收', '本报告不合格品率为 0', '本报告不通过项统计见附表', '本次审计不通过项为 0']
+    for (const line of safe) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBe('pass')
+  })
+
+  it('S1 第十八轮 P1：空白、实体、U+2236 与词内 FE55 拆字都要拒绝（S1 第十八轮 P1）', () => {
+    const payloads = [
+      '结 论：fail',
+      '结  论：fail',
+      '结\u00A0论：fail',
+      '结\u3000论：fail',
+      '结\t论：fail',
+      '结&#13;论：fail',
+      '结&#9;论：fail',
+      '结&#160;论：fail',
+      '结&#8194;论：fail',
+      '结&#8239;论：fail',
+      '结\u2028论：fail',
+      '结\u2029论：fail',
+      '结论\u2236fail',
+      '结\uFE55论：fail',
+    ]
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+  })
+
+  it('门记录正文里的可见否定句也要拒绝（S1 第十八轮 P2-1）', () => {
+    const text = read().replace('\n## 必过项与证据', '\n本报告不通过（P0 1 条）\n\n## 必过项与证据')
+    expect(text).not.toBe(read())
+    expect(() => check(text)).toThrow(/正文结论与 GateArtifact 不符/)
+  })
+
   it('门记录正文顶部的结论必须与 GateArtifact 一致（S1 第十七轮 P2-1）', () => {
     const text = read().replace('- 结论：**pass**', '- 结论：**fail**')
     expect(() => check(text)).toThrow(/正文结论与 GateArtifact 不符/)
