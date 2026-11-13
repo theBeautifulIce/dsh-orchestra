@@ -651,3 +651,15 @@ S2 第二十六轮（`docs/audits/S2-independent-audit-round26.md`，绑 G2 / ca
 - P2-1/P2-2：`src/core/policy.ts:52-72` 拒绝 null/undefined 产物；每个 required key 的产物摘要必须唯一，共用同一份内容返回 verification_too_weak。回归在 `tests/apply-report.spec.ts`。
 - 验证：`tsc --noEmit` exit 0；定向 135 例 124 passed / 11 failed；全量 32 文件 / 362 例 351 passed / 11 failed；11 红全部是 G1 预签态（`audit_report_sha256=0*64`），无新增回归。
 - 状态：未提交、未重签、未派新审计；S1 第二十二轮仍在跑。两份 pass 后重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
+
+
+### 11.25 S1 第二十二轮整改与提交 4f63116（2026-11-14 03:32）
+
+S1 第二十二轮（`docs/audits/S1-independent-audit-round22.md`，绑 G1 / ca2b196，判 fail：P0=4 / P1=1 / P2=2；报告 LF sha256=`3bf8f7f1e643e778da6d64228085aadcd13a7ec0b5b44a67bff0a640bcda282b`）整改完成并提交 `4f63116`「Close S1 round22 historical swallow and approval negations」，4 文件 +645/−5。
+
+- P0-1/P0-2：`scripts/gate-check.ts:865-890` 的 `stripHistoricalRemediation` 改为只截掉历史否定本身（`HISTORICAL_NEG_RE` 命中位置之后全部保留），不再整段删除；`:940-958` 的 `bodyConclusionOf` 对含正式 `结论：/結論：/判定：` 的行补一次 `visibleFailStatement`。19 条载荷中 7 条报告正文与 2 条门正文全部拒绝。
+- P0-3/P0-4/P1：`:637-652` 补裸主语 `本轮/本輪`；`:654-687` 补 `not approving`、`approval was not granted`、`未获批/没获批/未被批准/未准予通过/不准予通过`、`未整改/未完成整改/未修复/未收口`；`FAIL_CONNECTORS` 补 `approval`，填充词补 `准予/被`，谓词补 `approving/granted/granting/采纳`。
+- 回归：`tests/gate-check.spec.ts:346-374` 覆盖报告 17 条与门正文 2 条；历史安全句 `历史记录：上一轮审计未通过，本轮已整改。`、`round20 审计结论为 fail，本轮已整改。` 仍为 pass。
+- 验收（实测）：定向用例 1 passed / 78 skipped；`tests/gate-check.spec.ts` 79 例 68 passed / 11 failed（11 红全为 G1 预签态）；`tsc --noEmit` exit 0；全量 32 文件 / 363 例，352 passed / 11 failed。
+- 对照表：`docs/audits/S1-round22-response.md`。P2-1 预签基线、P2-2 11 例预签噪声均留到重签时收口；本报告固定审计 ca2b196，不覆盖 4f63116 与工作区修复。
+- 状态：S2 第二十七轮仍在 e7a3fa4 上运行；未重签、未开 S3。下一步收 S2 r27 报告，与 S1 r22 一并判读后重派 S1 r23 / S2 r28；两份 pass 后重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
