@@ -428,6 +428,14 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf(`本报告结论为不通过\n\n\`\n\n[a](https://example.com "\`"\n结论：pass\n")`)).toBeNull()
   })
 
+  it('跨行内联代码不能藏掉块边界后的结论行（S1 第十五轮补）', () => {
+    // 反引号跨过 ATX 标题时，渲染器会把它折成两段；若解析器仍按一个代码段处理，
+    // 可见的 fail 会被藏掉，只剩另一段 pass。跨行代码段里出现结论行一律毒化。
+    expect(auditConclusionOf('可见正文：本报告不通过。\n\n`开头\n# 标题\n结论：fail\n`\n结论：pass')).toBeNull()
+    // 跨行代码段里没有结论行时，仍按代码隐藏，可见 pass 正常生效。
+    expect(auditConclusionOf('`开头\n# 标题\n`\n结论：pass')).toBe('pass')
+  })
+
   it('poison 在 HTML 掩码之后追加，合法 CDATA 不误毒化（S1 第十四轮 P1-3/P2-1）', () => {
     for (const tail of ['<!-- 未闭合', '<?php 未闭合', '<!DOCTYPE html']) {
       expect(auditConclusionOf(`结论：不通过 [x](https://example.com)\n\n结论：pass\n\n${tail}`)).toBeNull()

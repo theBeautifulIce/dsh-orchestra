@@ -662,8 +662,9 @@ function maskIndentedAuditCode(text: string): string {
 }
 
 // 行内代码会把标签转义成字面文本；先整段抹掉，避免假的闭合标签提前收掉隐藏块。
-function maskInlineCodeInParagraph(text: string): string {
+function maskInlineCodeInParagraph(text: string): { masked: string; poisoned: boolean } {
   let out = ''
+  let poisoned = false
   let i = 0
   while (i < text.length) {
     if (text.charAt(i) !== '\x60') {
@@ -694,21 +695,37 @@ function maskInlineCodeInParagraph(text: string): string {
       i = j
       continue
     }
-    out += blankPreservingLines(text.slice(i, close))
+    // 反引号跨行时，CommonMark 仍可能因块边界把两端拆开；一旦这段被判成代码，
+    // 里面的结论行就会被藏掉。跨行代码段里只要出现结论行就毒化，宁可不可判定，
+    // 也不让被藏起来的 fail 输给另一段可见的 pass（S1 第十五轮补）。
+    const raw = text.slice(i, close)
+    if (raw.includes('\n')) {
+      for (const line of raw.split('\n')) {
+        const normalized = normalizeAuditLine(line)
+        if (/(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(normalized) || /^(?:pass|fail|通过|不通过)$/i.test(normalized)) {
+          poisoned = true
+          break
+        }
+      }
+    }
+    out += blankPreservingLines(raw)
     i = close
   }
-  return out
+  return { masked: out, poisoned }
 }
 
 // 行内代码不能跨空行；先按 CommonMark 段落切开，再在段内配对反引号。
 // 否则前段一个孤立反引号会和后段链接 title 里的反引号配对，把真实的 '[' 一起抹掉（S1 第十四轮 P1-2）。
-function maskInlineAuditCode(text: string): string {
+function maskInlineAuditCode(text: string): { masked: string; poisoned: boolean } {
   const lines = text.split('\n')
   const out: string[] = []
   let paragraph: string[] = []
+  let poisoned = false
   const flush = (): void => {
     if (paragraph.length === 0) return
-    out.push(...maskInlineCodeInParagraph(paragraph.join('\n')).split('\n'))
+    const part = maskInlineCodeInParagraph(paragraph.join('\n'))
+    out.push(...part.masked.split('\n'))
+    poisoned = poisoned || part.poisoned
     paragraph = []
   }
   for (const line of lines) {
@@ -720,7 +737,7 @@ function maskInlineAuditCode(text: string): string {
     }
   }
   flush()
-  return out.join('\n')
+  return { masked: out.join('\n'), poisoned }
 }
 
 // 合法 CDATA 段不参与渲染；检查隐藏段里的结论字样时先剔掉这些段，
@@ -907,7 +924,8 @@ function stripHiddenAuditBlocks(text: string): string {
   let masked = text.replace(/\r\n/g, '\n')
   masked = maskFencedAuditCode(masked)
   masked = maskIndentedAuditCode(masked)
-  masked = maskInlineAuditCode(masked)
+  const inline = maskInlineAuditCode(masked)
+  masked = inline.masked
   // 链接先于 HTML 掩码：链接 title 里的 '<!--' 等字样不能被当成真的 HTML 结构吞掉后文。
   // 链接段里的合法 CDATA 在毒化检查时剔除，避免误毒（S1 第十四轮 P2-1）。
   const links = maskAuditLinkDestinations(masked)
@@ -917,7 +935,7 @@ function stripHiddenAuditBlocks(text: string): string {
   masked = maskHtmlCdata(masked)
   masked = maskHtmlDoctype(masked)
   // poison 必须在所有 HTML 掩码之后追加，否则会被未闭合结构吞掉（S1 第十四轮 P1-3）。
-  if (links.poisoned) masked += '\n结论：'
+  if (links.poisoned || inline.poisoned) masked += '\n结论：'
   // 代码与链接目标已抹掉；剩下的任何标签、注释、处理指令都视为未支持的原始 HTML。
   if (/<(?=[A-Za-z/!?])/.test(masked)) return '\u0000'
   return masked
