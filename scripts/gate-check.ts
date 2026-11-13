@@ -74,7 +74,8 @@ function checkEvidence(blocks: Block[], artifact: Record<string, unknown>, root:
     }
     if (seen.has(e.id)) throw new Error('evidence-index 里 id 重复: ' + e.id)
     seen.add(e.id)
-    const actual = sha256Hex(readFileSync(join(root, e.file)))
+    // 证据按 LF 归一的字节算哈希：仓库 checkout 的换行风格不同也得到同一个值
+    const actual = sha256Hex(readFileSync(join(root, e.file), 'utf8').replace(/\r\n/g, '\n'))
     if (actual !== e.sha256) throw new Error('证据文件 sha256 不符: ' + e.id + '（记录 ' + e.sha256.slice(0, 16) + '… 实际 ' + actual.slice(0, 16) + '…）')
     entries.push({ id: e.id, file: e.file, sha256: actual })
   }
