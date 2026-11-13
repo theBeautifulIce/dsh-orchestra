@@ -613,8 +613,97 @@ function blankPreservingLines(text: string): string {
   return '\u0000' + '\n'.repeat(n)
 }
 
-// HTML 注释与折叠块不可见，里面的结论不能参与判定；未闭合时一路隐藏到文末（fail-closed）。
-function stripHiddenAuditBlocks(text: string): string {
+// 围栏代码整段不可见：里面的字面标签不能参与 HTML 配对（S1 第十轮 P1-1）。
+function maskFencedAuditCode(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let fence: { char: string; length: number; quoted: boolean } | null = null
+  for (const line of lines) {
+    const quote = /^\s*>\s?/.exec(line)
+    const quoted = quote !== null
+    const body = quote ? line.slice(quote[0].length) : line
+    if (fence) {
+      if (fence.quoted && !quoted) {
+        fence = null
+      } else {
+        out.push(blankPreservingLines(line))
+        const marker = /^( {0,3})(\x60{3,}|~{3,})(.*)$/.exec(body)
+        if (marker && quoted === fence.quoted) {
+          const m = marker[2] ?? ''
+          if (m.charAt(0) === fence.char && m.length >= fence.length && (marker[3] ?? '').trim() === '') fence = null
+        }
+        continue
+      }
+    }
+    const marker = /^( {0,3})(\x60{3,}|~{3,})(.*)$/.exec(body)
+    if (marker) {
+      const m = marker[2] ?? ''
+      fence = { char: m.charAt(0), length: m.length, quoted }
+      out.push(blankPreservingLines(line))
+      continue
+    }
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
+// 缩进代码里的标签同样只是字面文本。
+function maskIndentedAuditCode(text: string): string {
+  return text.split('\n').map((line) => {
+    const quote = /^\s*>\s?/.exec(line)
+    const body = quote ? line.slice(quote[0].length) : line
+    return /^(?: {0,3}\t| {4,})/.test(body) ? blankPreservingLines(line) : line
+  }).join('\n')
+}
+
+// 行内代码会把标签转义成字面文本；先整段抹掉，避免假的闭合标签提前收掉隐藏块。
+function maskInlineAuditCode(text: string): string {
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    if (text.charAt(i) !== '\x60') {
+      out += text.charAt(i)
+      i += 1
+      continue
+    }
+    let j = i
+    while (text.charAt(j) === '\x60') j += 1
+    const width = j - i
+    let k = j
+    let close = -1
+    while (k < text.length) {
+      if (text.charAt(k) === '\x60') {
+        let q = k
+        while (text.charAt(q) === '\x60') q += 1
+        if (q - k === width) {
+          close = q
+          break
+        }
+        k = q
+      } else {
+        k += 1
+      }
+    }
+    if (close < 0) {
+      out += text.slice(i, j)
+      i = j
+      continue
+    }
+    out += blankPreservingLines(text.slice(i, close))
+    i = close
+  }
+  return out
+}
+
+// 链接目标与引用定义不参与正文渲染，里面写标签也不能生效。
+function maskAuditLinkDestinations(text: string): string {
+  // 目标与 title 的括号可以嵌套、可以带引号，逐字符配平不可靠；整行剩余部分一起隐藏（fail-closed）。
+  return text
+    .replace(/\]\([^\n]*/g, (m) => blankPreservingLines(m))
+    .replace(/^( {0,3}\[[^\]\n]+\]:[^\n]*)$/gm, (m) => blankPreservingLines(m))
+}
+
+function maskHtmlComments(text: string): string {
   let out = ''
   let cursor = 0
   while (cursor < text.length) {
@@ -632,34 +721,106 @@ function stripHiddenAuditBlocks(text: string): string {
     out += blankPreservingLines(text.slice(start, end + 3))
     cursor = end + 3
   }
-  // 按标签配对扫描，而不是非贪婪正则：嵌套 <details> 时正则先撞到内层闭合，
-  // 会把内层之后的内容（含伪造结论）露在顶层（S1 第九轮 P1-1）。
-  const tag = /<\/?(?:details|pre|script|style|template)\b[^>]*>/gi
-  let depth = 0
-  let blockStart = 0
-  let visible = ''
-  let last = 0
-  let m: RegExpExecArray | null
-  while ((m = tag.exec(out)) !== null) {
-    const closing = m[0].startsWith('</')
-    if (!closing) {
-      if (depth === 0) blockStart = m.index
-      depth += 1
-    } else if (depth > 0) {
-      depth -= 1
-      if (depth === 0) {
-        visible += out.slice(last, blockStart) + blankPreservingLines(out.slice(blockStart, tag.lastIndex))
-        last = tag.lastIndex
+  return out
+}
+
+// 处理指令、文档类型、CDATA 在 HTML 里都不渲染；未闭合一律隐藏到文末（fail-closed）。
+function maskHtmlProcessingInstructions(text: string): string {
+  let out = ''
+  let cursor = 0
+  while (cursor < text.length) {
+    const start = text.indexOf('<?', cursor)
+    if (start < 0) {
+      out += text.slice(cursor)
+      break
+    }
+    out += text.slice(cursor, start)
+    const end = text.indexOf('?>', start + 2)
+    if (end < 0) {
+      out += blankPreservingLines(text.slice(start))
+      break
+    }
+    out += blankPreservingLines(text.slice(start, end + 2))
+    cursor = end + 2
+  }
+  return out
+}
+
+function maskHtmlCdata(text: string): string {
+  let out = ''
+  let cursor = 0
+  while (cursor < text.length) {
+    const start = text.toLowerCase().indexOf('<![cdata[', cursor)
+    if (start < 0) {
+      out += text.slice(cursor)
+      break
+    }
+    out += text.slice(cursor, start)
+    const end = text.indexOf(']]>', start + 9)
+    if (end < 0) {
+      out += blankPreservingLines(text.slice(start))
+      break
+    }
+    out += blankPreservingLines(text.slice(start, end + 3))
+    cursor = end + 3
+  }
+  return out
+}
+
+// doctype 允许带内部子集，找到配对的 > 再收；找不到就隐藏到文末。
+function maskHtmlDoctype(text: string): string {
+  let out = ''
+  let cursor = 0
+  while (cursor < text.length) {
+    const start = text.toLowerCase().indexOf('<!doctype', cursor)
+    if (start < 0) {
+      out += text.slice(cursor)
+      break
+    }
+    out += text.slice(cursor, start)
+    let quote = ''
+    let brackets = 0
+    let end = -1
+    for (let i = start + 9; i < text.length; i += 1) {
+      const ch = text.charAt(i)
+      if (quote) {
+        if (ch === quote) quote = ''
+      } else if (ch === '"' || ch === "'") {
+        quote = ch
+      } else if (ch === '[') {
+        brackets += 1
+      } else if (ch === ']') {
+        brackets = Math.max(0, brackets - 1)
+      } else if (ch === '>' && brackets === 0) {
+        end = i
+        break
       }
     }
+    if (end < 0) {
+      out += blankPreservingLines(text.slice(start))
+      break
+    }
+    out += blankPreservingLines(text.slice(start, end + 1))
+    cursor = end + 1
   }
-  if (depth > 0) {
-    // 未闭合：从最外层开标签一路隐藏到文末（fail-closed）。
-    visible += out.slice(last, blockStart) + blankPreservingLines(out.slice(blockStart))
-  } else {
-    visible += out.slice(last)
-  }
-  return visible
+  return out
+}
+
+// 审计报告只接受纯 Markdown。原始 HTML 的可见性取决于标签、属性、内联样式与宿主 CSS，
+// 无法在门检查里可靠重算；一律拒绝整份报告（fail-closed），而不是猜哪些内容可见。
+function stripHiddenAuditBlocks(text: string): string {
+  let masked = text.replace(/\r\n/g, '\n')
+  masked = maskFencedAuditCode(masked)
+  masked = maskIndentedAuditCode(masked)
+  masked = maskInlineAuditCode(masked)
+  masked = maskAuditLinkDestinations(masked)
+  masked = maskHtmlComments(masked)
+  masked = maskHtmlProcessingInstructions(masked)
+  masked = maskHtmlCdata(masked)
+  masked = maskHtmlDoctype(masked)
+  // 代码与链接目标已抹掉；剩下的任何标签、注释、处理指令都视为未支持的原始 HTML。
+  if (/<(?=[A-Za-z/!?])/.test(masked)) return '\u0000'
+  return masked
 }
 
 function normalizeAuditLine(raw: string): string {

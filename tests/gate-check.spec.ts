@@ -331,19 +331,35 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('结论：pass\n\n结论：pass')).toBeNull()
   })
 
-  it('隐藏块、缩进代码、引用围栏里的结论不参与判定（S1 第八轮 P1-4）', () => {
+  it('代码、缩进、引用围栏里的内容不参与判定（S1 第八轮 P1-4）', () => {
     expect(auditConclusionOf('本报告结论为不通过\n\n<!--\n结论：pass\n-->')).toBeNull()
     expect(auditConclusionOf('<!-- 结论：pass -->\n\n结论：fail')).toBe('fail')
-    expect(auditConclusionOf('<details>\n结论：pass\n</details>\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('\x60\x60\x60html\n<details>\n结论：pass\n</details>\n\x60\x60\x60\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('    结论：pass\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('> \x60\x60\x60\n> 结论：pass\n> \x60\x60\x60\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('> 结论：不通过')).toBe('fail')
-    // 嵌套 details 要整体隐藏，不能只藏到内层闭合（S1 第九轮 P1-1）。
-    expect(auditConclusionOf('本报告结论为不通过\n\n<details>\n<details>\n</details>\n结论：pass\n</details>')).toBeNull()
     // 引用块内的四空格缩进是代码块，不是顶层结论。
     expect(auditConclusionOf('本报告结论为不通过\n\n>    结论：pass')).toBeNull()
     // 一个空格加一个 Tab 也是缩进代码。
     expect(auditConclusionOf('本报告结论为不通过\n\n \t结论：pass')).toBeNull()
+  })
+
+  it('原始 HTML 一律拒绝，避免 details/summary/div hidden 的可见性绕过（S1 第十轮、S2 第十三轮 P1-1）', () => {
+    expect(auditConclusionOf('<details>\n结论：pass\n</details>\n\n结论：fail')).toBeNull()
+    expect(auditConclusionOf('<details open>\n结论：fail\n</details>\n\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('<details>\n<summary>结论：fail</summary>\n</details>\n<div hidden>结论：pass</div>')).toBeNull()
+    expect(auditConclusionOf('<div hidden>\n结论：pass\n</div>')).toBeNull()
+    expect(auditConclusionOf('<div style="display:none">\n结论：pass\n</div>')).toBeNull()
+    expect(auditConclusionOf('<span style="visibility:hidden">\n结论：pass\n</span>')).toBeNull()
+    // 纯 Markdown 报告里出现标签占位符也按原始 HTML 拒绝；占位符应写成反引号。
+    expect(auditConclusionOf('<ID>占位符在正文里，报告同样拒绝')).toBeNull()
+  })
+
+  it('HTML 特殊块里的结论不参与判定（S1 第十轮 P1-2）', () => {
+    expect(auditConclusionOf('<?php\n结论：pass\n?>\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('<!DOCTYPE html>\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('<![CDATA[\n结论：pass\n]]>\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('<?php\n\n结论：pass')).toBeNull()
   })
 
   it('正常清零写法不再误杀（S1 第八轮 P2-5）', () => {
