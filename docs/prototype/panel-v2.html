@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsh-orchestra · 神经中枢原型 v16</title>
+<title>dsh-orchestra · 神经中枢原型 v18</title>
 <style>
 :root{
   --bg:#f3f4f7;
@@ -3612,6 +3612,22 @@ body.v5 .note-title{margin-top:8px;font-size:13.5px;font-weight:650;color:#11131
 body.v5 .note-body{margin:5px 0 0;font-size:13px;line-height:1.72;color:#3c4147}
 body.v5 .note-foot{margin-top:8px;font-size:12px;color:#8b9099}
 body.v5 .notes-empty{padding:14px 15px;font-size:12.5px;line-height:1.72;color:#6b7079}
+/* ---- v18：状态诚实、一处一概念、默认安静、文案收短 ---- */
+body.v5 .q{position:relative;display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;margin-left:6px;border:1px solid #d7d9de;border-radius:50%;font-size:10.5px;line-height:1;color:#8b9099;cursor:help;vertical-align:1px}
+body.v5 .q::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%) translateY(2px);width:max-content;max-width:260px;padding:8px 10px;background:#fff;border:1px solid #e2e4e8;border-radius:8px;box-shadow:0 6px 20px rgba(20,22,26,.08);font-size:12.5px;line-height:1.6;color:#3c4147;letter-spacing:0;text-align:left;white-space:normal;opacity:0;visibility:hidden;transition:opacity .12s ease,transform .12s ease;z-index:30;pointer-events:none}
+body.v5 .q:hover::after,body.v5 .q:focus::after{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0)}
+body.v5 .stat{appearance:none;font:inherit;text-align:left;border:0;background:none;padding:0;cursor:pointer;border-radius:8px;transition:background .12s}
+body.v5 .stat:hover{background:#f6f6f7}
+body.v5 .stat:focus-visible{outline:2px solid #111316;outline-offset:3px}
+body.v5 .branch-calm{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:10px 14px;border:1px dashed #e0e2e6;border-radius:10px;background:#fbfbfc;font-size:12.5px;color:#6b7079}
+body.v5 .branch-calm .link-btn{margin-left:auto}
+body.v5 .neural-node{cursor:pointer}
+body.v5 .tc-stage{gap:0}
+body.v5 .tc-stage b,body.v5 .tc-result b,body.v5 .tc-next b,body.v5 .now-line b{display:inline-block;margin-right:7px;font-size:11.5px;font-weight:600;letter-spacing:.4px;color:#8b9099}
+body.v5 .now-line{display:flex;align-items:baseline;margin:0 0 10px;padding:9px 11px;background:#fafafb;border-radius:8px;font-size:13px;line-height:1.6;color:#2b2f34}
+body.v5 .lens-bar{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding:9px 12px;border:1px solid #e6e7ea;border-radius:8px;background:#fbfbfc;font-size:12.5px;color:#6b7079}
+body.v5 .lens-bar b{color:#111316;font-weight:650}
+body.v5 .lens-bar .link-btn{margin-left:auto}
 </style>
 </head>
 <body class="v3 v5">
@@ -4280,6 +4296,8 @@ const state = {
   screen: 'command',
   taskView: 'board',
   taskFilter: 'all',
+  taskLens: 'all',
+  branchesExpanded: false,
   search: '',
   historyOpen: {},
   expandedTask: 'tsk_design',
@@ -4320,8 +4338,11 @@ const typeMeta = t => TYPE[t] || TYPE.manual;
 const taskByIdSafe = id => TASKS.find(t => t.id === id) || null;
 const wfOfTask = t => (t && t.workflowId) ? WORKFLOWS[t.workflowId] : null;
 const runOfTask = t => (t && t.latestRun) ? RUNS[t.latestRun] : null;
-const openDecisions = () => DECISIONS.filter(d => d.status === 'open');
-const openEffects = () => EFFECTS.filter(e => e.status === 'open');
+const pendingDecisions = () => DECISIONS.filter(d => d.status !== 'resolved' && !state.reviewChoices[d.id]);
+const pendingEffects = () => EFFECTS.filter(e => e.status === 'open');
+const runningTasks = () => TASKS.filter(t => t.status === 'running');
+const openDecisions = pendingDecisions;
+const openEffects = pendingEffects;
 
 const tidy = v => String(v == null ? '' : v)
   .replace(/§3\.4o/g, '新版')
@@ -4353,11 +4374,12 @@ const tidy = v => String(v == null ? '' : v)
   .replace(/\bseq\b/gi, '序号');
 
 const typeWord = t => ({ scheduled: '定时', continuous: '持续', event: '事件', manual: '人工' }[t] || '任务');
-const statusWord = s => ({
+const STATE_WORD = {
   scheduled: '已排期', queued: '还没开始', running: '正在做', blocked: '等你决定',
-  paused: '已暂停', done: '已完成', done_unverified: '做完，等系统确认',
+  paused: '已暂停', done: '已完成', done_unverified: '待确认', waiting: '等上游',
   succeeded: '成功', failed: '失败'
-}[s] || '进行中');
+};
+const statusWord = s => STATE_WORD[s] || '状态未知';
 const statusTone = s => (s === 'failed' ? 'bad' : s === 'blocked' || s === 'done_unverified' ? 'wait' : s === 'running' ? 'run' : 'ok');
 const person = p => p === '啸春' ? '你' : p;
 
@@ -4368,6 +4390,10 @@ function pageHead(kicker, title, lede, actions) {
     '<div class="mast-top"><h1>' + flatTitle + '</h1><div class="mast-actions">' + (actions || '') + '</div></div>' +
     '<p class="mast-lede">' + lede + '</p>' +
   '</header>';
+}
+
+function infoTip(text) {
+  return '<span class="q" tabindex="0" role="note" aria-label="说明：' + esc(text) + '" data-tip="' + esc(text) + '">?</span>';
 }
 
 function iconBtn(name, act, label, extra) {
@@ -4392,6 +4418,10 @@ function stageOf(t) {
   if (t.status === 'scheduled') return '已排期，到点自动开始';
   if (t.type === 'manual') return '等你或负责人开始';
   return '还没开始';
+}
+
+function runStatus(t) {
+  return { key: t.status, word: statusWord(t.status), sentence: stageOf(t), tone: statusTone(t.status) };
 }
 
 function resultOf(t) {
@@ -4433,6 +4463,9 @@ function filteredTasks() {
   const q = (state.taskQuery || '').trim().toLowerCase();
   return TASKS.filter(t => {
     if (state.taskFilter !== 'all' && t.type !== state.taskFilter) return false;
+    if (state.taskLens === 'running' && t.status !== 'running') return false;
+    if (state.taskLens === 'blocked' && t.status !== 'blocked') return false;
+    if (state.taskLens === 'unverified' && t.status !== 'done_unverified') return false;
     if (!q) return true;
     const wf = wfOfTask(t);
     const hay = [t.title, t.desc, t.tags.join(' '), wf ? wf.name : ''].join(' ').toLowerCase();
@@ -4446,7 +4479,7 @@ function filteredTasks() {
 function agentLine(id) {
   const a = AGENTS[id];
   const running = a.status === 'running';
-  const word = a.status === 'done' ? '已完成' : a.status === 'running' ? '进行中' : a.status === 'waiting' ? '等上游' : '排队';
+  const word = a.status === 'done' ? '已完成' : a.status === 'running' ? '正在做' : a.status === 'waiting' ? '等上游' : '排队';
   const cls = a.status === 'done' ? 'done' : a.status === 'running' ? 'run' : '';
   return '<div class="agent">' +
     '<div class="agent-top"><span class="agent-name">' + esc(a.name) + '</span><span class="agent-state ' + cls + '">' + word + '</span></div>' +
@@ -4524,14 +4557,15 @@ function historyPop(t) {
 function taskCard(t) {
   const histOpen = state.historyOpen[t.id];
   const needs = t.status === 'blocked' || !!t.attention;
-  const progress = (t.progress != null && t.status === 'running') ? '<div class="tc-progress">' + miniBar(t.progress) + '<em>' + t.progress + '%</em></div>' : '';
+  const st = runStatus(t);
+  const progress = (t.progress != null && t.status === 'running') ? '<div class="tc-progress">' + miniBar(t.progress) + '</div>' : '';
   const histBtn = t.runCount > 1 ? '<button class="hist-btn" data-act="toggle-history" data-task="' + t.id + '" data-stop="1">历史 ' + t.runCount + ' 次</button>' : '';
   return '<article class="task-card' + (needs ? ' needs' : '') + '" data-task="' + t.id + '" tabindex="0" role="button" aria-label="打开任务 ' + esc(tidy(t.title)) + '">' +
     '<div class="tc-head"><span class="tc-type t-' + t.type + '">' + typeWord(t.type) + '</span><span class="tc-when">' + esc(whenOf(t)) + '</span></div>' +
     '<h3 class="tc-title">' + esc(tidy(t.title)) + '</h3>' +
-    '<div class="tc-stage"><span class="dot" style="background:' + (t.status === 'blocked' ? '#a63f2b' : t.status === 'running' ? '#b8862f' : '#8b8579') + '"></span><span>' + esc(stageOf(t)) + '</span></div>' +
-    (t.latestRun || t.status === 'running' ? '<div class="tc-result"><b>' + (t.status === 'running' ? '进展' : '上次') + '</b> · ' + esc(resultOf(t)) + '</div>' : '') +
-    (needs || t.status === 'running' || t.status === 'done_unverified' ? '<div class="tc-next"><b>下一步</b> · ' + esc(nextOf(t)) + '</div>' : '') +
+    '<div class="tc-stage ' + st.tone + '"><b>做到</b><span>' + esc(st.sentence) + '</span></div>' +
+    (t.latestRun || t.status === 'running' ? '<div class="tc-result"><b>' + (t.status === 'running' ? '现在' : '结果') + '</b>' + esc(resultOf(t)) + '</div>' : '') +
+    (needs || t.status === 'running' || t.status === 'done_unverified' ? '<div class="tc-next"><b>' + (needs ? '需要你' : '下一步') + '</b>' + esc(nextOf(t)) + '</div>' : '') +
     (t.attention ? '<div class="tc-call">有 ' + esc(t.attention) + ' 件等你定</div>' : '') +
     progress +
     '<div class="tc-foot"><span>' + esc(person(t.owner)) + '</span><span>·</span><span>' + esc(t.type === 'scheduled' ? '定时唤醒' : wfOfTask(t) ? wfOfTask(t).name : '手工推进') + '</span>' + histBtn + '</div>' +
@@ -4542,7 +4576,7 @@ function taskCard(t) {
 function renderTasksBoard(list) {
   const cols = [
     { key: 'scheduled', title: '接下来' },
-    { key: 'running', title: '进行中' },
+    { key: 'running', title: '正在做' },
     { key: 'attention', title: '需要你' },
     { key: 'done', title: '最近完成' }
   ];
@@ -4570,7 +4604,7 @@ const STEP_STORY = {
     n_start: { actor: '总控', process: '读取「第三段设计改到第二轮通过」的目标与验收条件，确认本轮只改设计稿，不动实现。', result: '目标与 3 条验收条件已绑定到这次运行。', evidence: 'goal_7c1 · 3 条验收', dur: '0.2s', input: '任务目标 + 验收条件', output: '本次目标与验收条件', attempt: '第 1 次尝试' },
     n_plan: { actor: '总控', process: '把目标拆成侦察、修订、审计三条支线，写清每条支线的产出和停下等你的地方。', result: '4 个子目标进入队列，依赖关系写入本次运行。', evidence: 'plan_7c1 · 4 个子目标', dur: '2m', input: '本次目标', output: '4 条子任务与依赖', attempt: '第 1 次尝试' },
     n_research: { actor: '子代理 · 侦察', process: '只读扫描设计稿与台账，找出 10 处旧标题引用和 2 处当前清单指向。', result: '返回 3 条可回查引用；没有改任何文件。', evidence: 'ev_7f3a_01 · 3 处引用', dur: '18m', input: '设计稿 v24 + 台账', output: '3 处可回查的引用', attempt: '第 2 次尝试' },
-    n_draft: { actor: '子代理 · 修订', process: '按生效清单重写唯一键段落，并补两条验收用例；当前改到 64%。', result: '已写回 2 个段落，剩余 1 个段落待一致性核对。', evidence: 'diff_7f3a_02 · 2 段', dur: '64%', input: '3 处可回查的引用', output: 'v25 草稿（进行中）', attempt: '第 3 次尝试' },
+    n_draft: { actor: '子代理 · 修订', process: '按生效清单重写唯一键段落，并补两条验收用例；当前改到 64%。', result: '已写回 2 个段落，剩余 1 个段落待一致性核对。', evidence: 'diff_7f3a_02 · 2 段', dur: '64%', input: '3 处可回查的引用', output: 'v25 草稿（未定稿）', attempt: '第 3 次尝试' },
     n_audit: { actor: '子代理 · 审计', process: '等 v25 草稿完整后逐条对照原文，只写结论，不改稿。', result: '还没轮到这一步：上游草稿还没收尾。', evidence: '—', dur: '—', input: 'v25 草稿', output: '审计结果', attempt: '尚未开始' },
     n_gate: { actor: '规则 · 证据核对', process: '检查每条结论是否带原文位置与系统确认；没有证据不放行。', result: '停在「唯一键按哪版收尾」，已生成一项最急决定。', evidence: 'dec_7f31 · 2 条冲突', dur: '—', input: '侦察 + 修订 + 审计结果', output: '1 项需要你决定的事', attempt: '等待输入' },
     n_close: { actor: '收尾', process: '把通过项写回设计稿、台账和 L5，并留下可回查的收尾记录。', result: '还没轮到这一步：等关口放行。', evidence: '—', dur: '—', input: '关口结论', output: '设计稿 + 台账 + L5', attempt: '尚未开始' }
@@ -4617,7 +4651,7 @@ const CHAIN_STORY = {
   '生成摘要': { actor: '收尾', process: '把当日变化压成一条可追溯摘要。', result: '摘要已写入当日笔记。', evidence: 'note_4d21 · 1 条', dur: '2s', input: '索引表', output: '当日笔记', attempt: '第 1 次尝试' }
 };
 
-const STEP_STATE_WORD = { done: '已完成', run: '执行中', wait: '等上游', blocked: '等你决定', fail: '失败', unverified: '等系统确认', scheduled: '已排期' };
+const STEP_STATE_WORD = { done: '已完成', run: '正在做', wait: '等上游', blocked: '等你决定', fail: '失败', unverified: '等系统确认', scheduled: '已排期' };
 
 function stepStateWord(st){ return STEP_STATE_WORD[st] || '等上游'; }
 
@@ -4727,6 +4761,11 @@ function renderTasksList(list) {
 
 function renderTasks() {
   const list = filteredTasks();
+  const lens = state.taskLens || 'all';
+  const lensName = { running: '正在做', blocked: '等你决定', unverified: '待确认' }[lens];
+  const narrowed = lens !== 'all' || state.taskFilter !== 'all' || !!(state.taskQuery || '').trim();
+  const headCount = narrowed ? ('显示 ' + list.length + ' / 共 ' + TASKS.length + ' 件') : ('共 ' + TASKS.length + ' 件');
+  const lensBar = lens === 'all' ? '' : '<div class="lens-bar"><span>只看：' + lensName + '</span><b>' + list.length + ' 件</b><button class="link-btn" data-act="task-lens" data-lens="all">看全部</button></div>';
   const counts = { all: TASKS.length };
   Object.keys(TYPE).forEach(k => counts[k] = TASKS.filter(t => t.type === k).length);
   const filters = [['all', '全部'], ['scheduled', '定时'], ['continuous', '持续'], ['event', '事件'], ['manual', '人工']].map(c => '<button class="filter ' + (state.taskFilter === c[0] ? 'on' : '') + '" data-act="task-filter" data-filter="' + c[0] + '">' + c[1] + ' <span class="n">' + counts[c[0]] + '</span></button>').join('');
@@ -4734,7 +4773,7 @@ function renderTasks() {
   const body = state.taskView === 'board' ? renderTasksBoard(list) : state.taskView === 'workflow' ? renderTasksWorkflow(list) : renderTasksList(list);
   const empty = list.length ? '' : '<div class="empty">当前筛选下没有任务。<button class="link-btn" data-act="task-filter" data-filter="all">清除筛选</button></div>';
   return '<section class="page">' +
-    '<div class="task-top"><div class="task-top-main"><div class="task-kicker">工作 · 共 ' + TASKS.length + ' 件</div><h1>任务</h1><p>点一条任务看它做到哪一步；点任意一步，过程和结果就在右边。</p></div><div class="task-top-actions"><button class="btn ghost" data-act="toast" data-msg="当前视图已保存。">保存视图</button><button class="btn primary" data-act="new-task">新建任务</button></div></div>' +
+    '<div class="task-top"><div class="task-top-main"><div class="task-kicker">工作 · ' + headCount + '</div><h1>任务</h1><p>点一条任务看它做到哪一步；点任意一步，过程和结果就在右边。</p></div><div class="task-top-actions"><button class="btn ghost" data-act="toast" data-msg="当前视图已保存。">保存视图</button><button class="btn primary" data-act="new-task">新建任务</button></div></div>' + lensBar +
     '<div class="task-toolbar"><div class="filters">' + filters + '</div><div class="task-tools"><label class="mini-search">' + icon('search') + '<input id="taskSearch" data-task-search placeholder="找任务…" value="' + esc(state.taskQuery) + '" autocomplete="off"></label><div class="view-switch">' + views + '</div></div></div>' +
     empty + body +
   '</section>';
@@ -4756,7 +4795,7 @@ function wfSideItem(wf){
 }
 
 function nodeWord(n){
-  return n.status === 'done' ? '已完成' : n.status === 'run' ? '进行中' : n.status === 'blocked' ? '等你决定' : '等上游';
+  return n.status === 'done' ? '已完成' : n.status === 'run' ? '正在做' : n.status === 'blocked' ? '等你决定' : '等上游';
 }
 
 function wfSelectedNode(wf){
@@ -5009,7 +5048,7 @@ function wfGateBanner(wf){
   if(wf.status !== 'draft') return '<div class="wf-gate ok">已发布 · ' + esc(wf.version) + ' · 当前版本有 ' + g.passed + ' 次试运行通过</div>';
   if(!g.runs) return '<div class="wf-gate wait">还没有试跑过。先跑一次，看到完整结果后才能发布。</div>';
   if(!g.passed) return '<div class="wf-gate wait">还没有一次跑通的试运行。最近一次停在「' + esc(statusWord(g.last ? g.last.status : 'blocked')) + '」，处理后再跑。</div>';
-  if(g.openP0) return '<div class="wf-gate wait">试运行已通过，但还有 ' + g.openP0 + ' 件高优先级事项等你处理；处理完才能发布。</div>';
+  if(g.openP0) return '<div class="wf-gate wait">试运行已通过，但还有 ' + g.openP0 + ' 件要紧的事等你处理；处理完才能发布。</div>';
   return '<div class="wf-gate ok">试运行已通过 · ' + esc((g.last && g.last.time) || '刚刚') + ' · ' + g.passed + ' 次通过 · 可以发布</div>';
 }
 
@@ -5066,7 +5105,7 @@ function renderInbox(){
   const selected = Array.from(state.selectedDecisions).filter(id => open.some(d => d.id === id));
   return '<section class="page">' +
     pageHead('等你决定 · ' + open.length + ' 件', '待你决定',
-      '只放需要你承担后果的选择；每件都写清发生了什么、能怎么选。',
+      '只放需要你承担后果的选择。' + infoTip('数字等于下面还没处理的条数；其中「必须现在处理」是 P0 的部分。'),
       '<button class="btn" data-act="refresh-inbox">刷新</button>') +
     '<div class="summary-line">' +
       '<div class="summary-cell hot"><b>' + p0 + '</b><span>必须现在处理</span></div>' +
@@ -5094,10 +5133,10 @@ function renderEffects(){
   const filter = state.effectFilter || 'all';
   const list = EFFECTS.filter(e => filter === 'all' ? true : filter === 'open' ? e.status === 'open' : filter === 'signed' ? e.status === 'signed' : e.level === filter);
   return '<section class="page">' +
-    pageHead('待核实 · ' + openEffects().length + ' 笔', '待核实',
-      '已经发生但没有系统确认的操作；签字只代表你接手后续核验。',
+    pageHead('待核实 · ' + list.length + ' 笔', '待核实',
+      '已经发生、还没有系统确认的操作。' + infoTip('签字只代表你接手后续核验，风险不会因此消失。'),
       '<button class="btn" data-act="export-effects">导出清单</button>') +
-    '<div class="callout warn">这里不是待办清单，是风险账。签了字不等于风险消失，只代表你知道它、愿意接手后续核验。</div>' +
+    '<div class="callout warn">这是风险账，不是待办。签字表示你接手核验，不等于风险消失。</div>' +
     '<div class="chips">' + [['all', '全部'], ['open', '等你接手'], ['signed', '已接手'], ['irreversible', '不可逆'], ['external', '已经发出去']].map(f => '<button class="chip ' + (filter === f[0] ? 'on' : '') + '" data-act="effect-filter" data-filter="' + f[0] + '">' + f[1] + '</button>').join('') + '</div>' +
     '<div class="effect-list">' + (list.length ? list.map(effectCard).join('') : '<div class="empty">这个筛选下没有。</div>') + '</div>' +
   '</section>';
@@ -5134,14 +5173,14 @@ function renderEvents(){
   const filter = state.eventType || 'all';
   const list = EVENTS.filter(e => filter === 'all' ? true : filter === 'side_effect' ? e.type.indexOf('effect') >= 0 : e.type.indexOf(filter) >= 0);
   return '<section class="page">' +
-    pageHead('记录 · ' + EVENTS.length + ' 条', '记录',
-      '按时间倒序；点一行看完整载荷、前序指纹与链上位置。',
+    pageHead('记录 · ' + list.length + ' 条', '记录',
+      '按时间倒序。' + infoTip('点一行看完整记录、前后能不能接上，以及当时带的细节。'),
       '<button class="btn" data-act="verify-chain">核对记录</button><button class="btn" data-act="export-events">导出</button>') +
-    '<div class="hash-banner"><div><b>记录是连着的</b> · 最近核对 ' + nowLabel + '，' + EVENTS.length + ' 条没有断点。</div><div class="right">最新指纹 ' + esc(EVENTS[0].hash.slice(0, 10)) + '…</div></div>' +
+    '<div class="hash-banner"><div><b>记录是连着的</b> · 最近核对 ' + nowLabel + '，' + EVENTS.length + ' 条没有断点。</div><div class="right">最新一条的校验码 ' + esc(EVENTS[0].hash.slice(0, 10)) + '…</div></div>' +
     '<div class="chips">' + [['all', '全部'], ['task', '任务'], ['run', '运行'], ['decision', '决定'], ['side_effect', '操作'], ['agent', '子代理']].map(f => '<button class="chip ' + (filter === f[0] ? 'on' : '') + '" data-act="event-filter" data-filter="' + f[0] + '">' + f[1] + '</button>').join('') + '</div>' +
     '<div class="table-wrap"><table class="tbl event-table"><thead><tr><th style="width:88px">时间</th><th>发生了什么</th><th style="width:150px">对象</th><th style="width:112px">谁做的</th><th style="width:86px">结果</th></tr></thead><tbody>' +
       list.map(e => { const r = eventResult(e); return '<tr data-act="open-event" data-event="' + e.seq + '"><td class="mono">' + esc(e.time) + '</td><td>' + esc(tidy(e.summary)) + '</td><td>' + esc(tidy(eventObject(e))) + '</td><td>' + esc(actorName(e.actor)) + '</td><td><span class="estate ' + r[1] + '">' + r[0] + '</span></td></tr>'; }).join('') +
-    '</tbody></table></div><p class="path-note">点一行看完整记录，包括指纹和当时带的数据。</p>' +
+    '</tbody></table></div><p class="path-note">点一行看完整记录，包括校验码和当时的细节。</p>' +
   '</section>';
 }
 
@@ -5164,7 +5203,8 @@ function taskOverview(t){
   const runs = taskRuns(t);
   const latest = runs[0] || null;
   const wf = wfOfTask(t);
-  let html = '<div class="section"><div class="section-h"><h3>目标与验收</h3></div><div class="card-box"><div style="font-size:12.5px;line-height:1.65;color:var(--ink2)">' + esc(tidy(t.desc)) + '</div><div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)"><div class="dec-label">验收条件</div><div style="font-size:12.5px;color:var(--ink2);line-height:1.55">' + esc(tidy(t.acceptance)) + '</div></div></div></div>';
+  const st = runStatus(t);
+  let html = '<div class="section"><div class="section-h"><h3>目标与验收</h3></div><div class="card-box"><div class="now-line ' + st.tone + '"><b>做到</b><span>' + esc(st.sentence) + '</span></div><div style="font-size:12.5px;line-height:1.65;color:var(--ink2)">' + esc(tidy(t.desc)) + '</div><div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)"><div class="dec-label">验收条件</div><div style="font-size:12.5px;color:var(--ink2);line-height:1.55">' + esc(tidy(t.acceptance)) + '</div></div></div></div>';
   if(t.type === 'scheduled'){
     html += '<div class="section"><div class="section-h"><h3>排期与历史运行</h3><div class="right"><span class="tag gray" style="height:17px;font-size:12px">一条任务 · 多次运行</span></div></div>' +
       '<div class="card-box tint" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px"><div><div class="policy-k">排期</div><div class="policy-v">' + esc(t.schedule) + '</div></div><div><div class="policy-k">下一次</div><div class="policy-v">' + esc(t.next) + '</div><div class="policy-k" style="margin-top:3px">' + (t.status === 'paused' ? '已暂停，不产生新的唤醒任务' : '到点唤醒入队，不新增任务卡片') + '</div></div></div>' +
@@ -5280,7 +5320,7 @@ function drawerRun(){
         (effects.length ? effects.map(e => '<div class="evidence-item" data-act="open-effect" data-eff="' + e.id + '" style="cursor:pointer">' + icon('effect') + '<div><div class="en">' + esc(tidy(e.title)) + '</div><div class="ed">' + esc(tidy(e.verified)) + ' · ' + (e.status === 'signed' ? '已签字接手' : '等你接手') + '</div></div></div>').join('') : '<div class="callout info" style="margin-top:8px">' + icon('info') + '<div>这次运行没有留下需要接手的操作。</div></div>') +
         '<div class="canvas-hint">证据缺失时，运行只能停在「做完，等系统确认」，不能改成成功。</div></div>'
       : '<div class="section"><div class="run-hero"><div><div class="big">' + esc(run.duration) + '</div><div class="meta">' + esc(run.time) + ' · ' + esc(run.trigger) + '</div></div><div class="right">' + statusTag(run.status) + '<div style="margin-top:4px">' + (wf ? esc(tidy(wf.name)) + ' ' + esc(wf.version) : '人工执行') + (testOnly ? ' · 只读演练' : '') + '</div></div></div></div>' +
-        '<div class="section"><div class="section-h"><h3>节点步骤</h3><div class="right">' + steps.length + ' 个</div></div><div class="run-steps">' + steps.map(s => '<div class="run-step"><span class="step-mark ' + stepMark(s.state) + '">' + stepGlyph(s.state) + '</span><div><div class="st">' + esc(s.label) + '</div><div class="sd">' + (s.state === 'done' ? '已完成，产物已落盘' : s.state === 'run' ? '执行中，尚未产出终态' : s.state === 'fail' ? '失败，已回滚或停在安全态' : s.state === 'blocked' ? '停下来，等你决定' : s.state === 'done_unverified' ? '做完了，还有操作没拿到系统确认' : '等待上游') + '</div></div><span class="sdur">' + esc(s.dur) + '</span></div>').join('') + '</div></div>' +
+        '<div class="section"><div class="section-h"><h3>节点步骤</h3><div class="right">' + steps.length + ' 个</div></div><div class="run-steps">' + steps.map(s => '<div class="run-step"><span class="step-mark ' + stepMark(s.state) + '">' + stepGlyph(s.state) + '</span><div><div class="st">' + esc(s.label) + '</div><div class="sd">' + (s.state === 'done' ? '已完成，产物已落盘' : s.state === 'run' ? '正在做，还没有最终结果' : s.state === 'fail' ? '失败，已回滚或停在安全态' : s.state === 'blocked' ? '停下来，等你决定' : s.state === 'done_unverified' ? '做完了，还有操作没拿到系统确认' : '等待上游') + '</div></div><span class="sdur">' + esc(s.dur) + '</span></div>').join('') + '</div></div>' +
         (decisions.length ? '<div class="section"><div class="callout danger">' + icon('alert') + '<div><b>这次运行留下 ' + decisions.length + ' 件需要你定的事。</b>运行不会自己继续，先处理这些事。 <button class="link-btn" data-act="open-decision" data-dec="' + decisions[0].id + '">去处理</button></div></div></div>' : '') +
         '<div class="section"><div class="section-h"><h3>同任务其它运行</h3></div>' + (task ? runHistoryRows(taskRuns(task), run.id) : '') + '</div>'),
     foot: '<span class="muted" style="font-size:12px">运行记录不可改写</span><span class="right"><button class="btn ghost sm" data-act="close-drawer">关闭</button>' + (task ? '<button class="btn sm" data-act="open-task" data-task="' + task.id + '">回到任务</button>' : '') + '</span>'
@@ -5433,7 +5473,7 @@ function resolveModal(d){
   const opts = d.allowed.map(a => '<label class="opt-card" data-opt="' + a + '"><input type="radio" name="decChoice" value="' + a + '"><div class="opt-main"><div class="opt-title">' + esc(d.allowedLabels[a] || a) + '</div><div class="opt-desc">' + esc(d.allowedDesc[a] || '') + '</div></div></label>').join('');
   const impactText = d.allowed.map(a => (d.allowedLabels[a] || a) + '：' + (d.allowedDesc[a] || '')).join('；');
   const p0 = d.priority === 'P0' ? '<div class="callout warn" style="margin-top:8px">' + icon('alert') + '<div><b>两条路的结果不一样。</b>' + esc(tidy(impactText)) + '</div></div><div class="check-row" style="margin-top:8px"><input type="checkbox" id="decAck"><div class="cm"><div class="cn">我知道提交后不能撤回</div><div class="cd">我看清了两条路各自的后果，也接受其中一条会带来的返工。</div></div></div>' : '';
-  return modalShell('需要你决定', esc(tidy(d.title)), '<div class="modal-summary"><div><dt>优先级</dt><dd>' + urgencyWord(d.priority) + ' · ' + decisionKind(d.kind) + '</dd></div><div><dt>超时会怎样</dt><dd>' + esc(d.expiryLabel) + '</dd></div><div><dt>关联任务</dt><dd>' + esc(task ? tidy(task.title) : '这个任务') + '</dd></div></div><div class="callout info">' + icon('info') + '<div><b>你在决定什么：</b>' + esc(tidy(d.why)) + '</div></div><div class="field"><label>你可以怎么选 <span class="req">必选</span></label><div class="option-list">' + opts + '</div></div><div class="field"><label>补充说明</label><textarea id="decNote" placeholder="写清楚为什么这样选，以及之后要核对什么…"></textarea></div>' + p0, '<span class="muted" style="font-size:12px">提交后会写进记录，不能改选</span><span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-decision" data-dec="' + d.id + '">确认这个选择</button></span>');
+  return modalShell('需要你决定', esc(tidy(d.title)), '<div class="modal-summary"><div><dt>要紧程度</dt><dd>' + urgencyWord(d.priority) + ' · ' + decisionKind(d.kind) + '</dd></div><div><dt>超时会怎样</dt><dd>' + esc(d.expiryLabel) + '</dd></div><div><dt>关联任务</dt><dd>' + esc(task ? tidy(task.title) : '这个任务') + '</dd></div></div><div class="callout info">' + icon('info') + '<div><b>你在决定什么：</b>' + esc(tidy(d.why)) + '</div></div><div class="field"><label>你可以怎么选 <span class="req">必选</span></label><div class="option-list">' + opts + '</div></div><div class="field"><label>补充说明</label><textarea id="decNote" placeholder="写清楚为什么这样选，以及之后要核对什么…"></textarea></div>' + p0, '<span class="muted" style="font-size:12px">提交后会写进记录，不能改选</span><span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-decision" data-dec="' + d.id + '">确认这个选择</button></span>');
 }
 
 function signModal(e){
@@ -5454,7 +5494,7 @@ function taskTypeFields(type){
   return '<div class="field"><label>什么时候跑</label><input id="ntSchedule" placeholder="例如：每天 09:00"></div><div class="field"><label>时区</label><select id="ntTz"><option>Asia/Shanghai</option><option>UTC</option></select></div><div class="field"><label>错过一次怎么办</label><select id="ntMiss"><option>补跑一次</option><option>跳过，等下次</option><option>先问我</option></select></div>';
 }
 function newTaskModal(){
-  return modalShell('新建任务', '新建任务', '<div class="field"><label>任务标题 <span class="req">必填</span></label><input id="ntTitle" placeholder="例如：每周一清理没有系统确认的操作"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>任务类型</label><select id="ntType"><option value="scheduled">定时唤醒</option><option value="continuous">持续目标</option><option value="event">事件触发</option><option value="manual">人工任务</option></select></div><div class="field"><label>优先级</label><select id="ntPriority"><option value="P1">尽快</option><option value="P0">最急</option><option value="P2" selected>常规</option><option value="P3">有空再做</option></select></div></div><div class="field"><label>工作流</label><select id="ntWorkflow"><option value="">不绑定工作流（人工执行）</option>' + Object.keys(WORKFLOWS).map(k => '<option value="' + k + '">' + esc(WORKFLOWS[k].name) + ' · ' + esc(WORKFLOWS[k].version) + '</option>').join('') + '</select></div><div id="ntTypeFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + taskTypeFields('scheduled') + '</div><div class="callout info">' + icon('info') + '<div>定时任务只创建一条任务；每次唤醒生成一次运行，历史在任务内查看，不会在板上堆出一排任务卡。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-task">创建任务</button></span>');
+  return modalShell('新建任务', '新建任务', '<div class="field"><label>任务标题 <span class="req">必填</span></label><input id="ntTitle" placeholder="例如：每周一清理没有系统确认的操作"></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="field"><label>任务类型</label><select id="ntType"><option value="scheduled">定时唤醒</option><option value="continuous">持续目标</option><option value="event">事件触发</option><option value="manual">人工任务</option></select></div><div class="field"><label>要多赶</label><select id="ntPriority"><option value="P1">尽快</option><option value="P0">最急</option><option value="P2" selected>常规</option><option value="P3">有空再做</option></select></div></div><div class="field"><label>工作流</label><select id="ntWorkflow"><option value="">不绑定工作流（人工执行）</option>' + Object.keys(WORKFLOWS).map(k => '<option value="' + k + '">' + esc(WORKFLOWS[k].name) + ' · ' + esc(WORKFLOWS[k].version) + '</option>').join('') + '</select></div><div id="ntTypeFields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' + taskTypeFields('scheduled') + '</div><div class="callout info">' + icon('info') + '<div>定时任务只创建一条任务；每次唤醒生成一次运行，历史在任务内查看，不会在板上堆出一排任务卡。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-task">创建任务</button></span>');
 }
 
 function newWorkflowModal(){
@@ -5493,10 +5533,10 @@ function publishModal(wf){
   const g = wfGateInfo(wf);
   const last = g.last;
   if(!g.ready){
-    const why = !wf.nodes.length ? '画布还是空的，没有可发布的步骤。' : !g.runs ? '还没有试跑过。先完整跑一次，看到结果再发布。' : !g.passed ? '最近一次试跑没有跑通：' + (last ? tidy(last.trigger) + ' · ' + statusWord(last.status) : '结果为空') + '。' : '还有 ' + g.openP0 + ' 件高优先级事项等你处理。';
+    const why = !wf.nodes.length ? '画布还是空的，没有可发布的步骤。' : !g.runs ? '还没有试跑过。先完整跑一次，看到结果再发布。' : !g.passed ? '最近一次试跑没有跑通：' + (last ? tidy(last.trigger) + ' · ' + statusWord(last.status) : '结果为空') + '。' : '还有 ' + g.openP0 + ' 件要紧的事等你处理。';
     return modalShell('发布检查', '还不能发布 ' + esc(tidy(wf.name)), '<div class="callout warn">' + icon('alert') + '<div><b>差一步。</b>' + esc(why) + '</div></div><div class="modal-summary" style="margin-top:10px"><div><dt>试跑</dt><dd>' + g.runs + ' 次，' + g.passed + ' 次通过</dd></div><div><dt>待你处理</dt><dd>' + g.openP0 + ' 件</dd></div><div><dt>步骤</dt><dd>' + wf.nodes.length + ' 个</dd></div></div>', '<span class="right"><button class="btn primary sm" data-act="close-modal">知道了</button></span>');
   }
-  return modalShell('发布', '发布 ' + esc(tidy(wf.name)), '<div class="modal-summary"><div><dt>版本</dt><dd>' + esc(wf.version) + '</dd></div><div><dt>步骤与连线</dt><dd>' + wf.nodes.length + ' 个步骤 · ' + wf.edges.length + ' 条连线</dd></div><div><dt>还没处理的高优先级事项</dt><dd>' + g.openP0 + ' 件</dd></div><div><dt>试运行</dt><dd>已通过 · ' + esc(last ? last.time : '刚刚') + '</dd></div></div><div class="check-row"><input type="checkbox" id="pubAck"><div class="cm"><div class="cn">我确认这次发布后，这条流程就按当前版本固定下来</div><div class="cd">之后再改要发新版本；正在跑的任务仍然按旧版本走完。</div></div></div><div class="callout warn" style="margin-top:9px">' + icon('alert') + '<div>发布会写进记录，并通知所有用到这条流程的任务。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-publish" data-wf="' + wf.id + '">确认发布</button></span>');
+  return modalShell('发布', '发布 ' + esc(tidy(wf.name)), '<div class="modal-summary"><div><dt>版本</dt><dd>' + esc(wf.version) + '</dd></div><div><dt>步骤与连线</dt><dd>' + wf.nodes.length + ' 个步骤 · ' + wf.edges.length + ' 条连线</dd></div><div><dt>还没处理的要紧的事</dt><dd>' + g.openP0 + ' 件</dd></div><div><dt>试运行</dt><dd>已通过 · ' + esc(last ? last.time : '刚刚') + '</dd></div></div><div class="check-row"><input type="checkbox" id="pubAck"><div class="cm"><div class="cn">我确认这次发布后，这条流程就按当前版本固定下来</div><div class="cd">之后再改要发新版本；正在跑的任务仍然按旧版本走完。</div></div></div><div class="callout warn" style="margin-top:9px">' + icon('alert') + '<div>发布会写进记录，并通知所有用到这条流程的任务。</div></div>', '<span class="right"><button class="btn ghost sm" data-act="close-modal">取消</button><button class="btn primary sm" data-act="submit-publish" data-wf="' + wf.id + '">确认发布</button></span>');
 }
 
 function wfApiDefinition(wf){
@@ -5596,7 +5636,7 @@ function render(){
   const tr = $('#toastRoot'); if(tr) tr.innerHTML = '';
   const map = { command: renderCommand, tasks: renderTasks, workflows: renderWorkflows, inbox: renderInbox, effects: renderEffects, events: renderEvents };
   $('#screen').innerHTML = (map[screen] || renderCommand)();
-  const navCounts = { navTasks: TASKS.length, navWorkflows: Object.keys(WORKFLOWS).length, navInbox: openDecisions().length, navEffects: openEffects().length };
+  const navCounts = { navTasks: TASKS.length, navWorkflows: Object.keys(WORKFLOWS).length, navInbox: pendingDecisions().length, navEffects: pendingEffects().length };
   Object.keys(navCounts).forEach(function(id){ const el = document.getElementById(id); if(el) el.textContent = String(navCounts[id]); });
   $$('.nav-item').forEach(n => n.classList.toggle('on', n.dataset.screen === screen));
   const meta = SCREEN_META[screen];
@@ -5774,7 +5814,14 @@ document.addEventListener('click', function(ev){
   if(!ev.target.closest('.searchbox')){ const sp = $('#searchPop'); if(sp) sp.hidden = true; }
 
   const nav = ev.target.closest('[data-screen]');
-  if(nav){ state.screen = nav.dataset.screen; closeDrawer(); render(); return; }
+  if(nav){
+    const to = nav.dataset.screen;
+    state.screen = to;
+    if(to === 'tasks'){ state.taskFilter = 'all'; state.taskQuery = ''; state.taskLens = nav.dataset.lens || 'all'; }
+    if(to === 'events') state.eventType = 'all';
+    if(to === 'effects') state.effectFilter = nav.dataset.filter || 'open';
+    closeDrawer(); render(); return;
+  }
 
   const actEl = ev.target.closest('[data-act]');
   if(actEl){
@@ -5784,6 +5831,7 @@ document.addEventListener('click', function(ev){
     if(act === 'close-drawer'){ state.drawer = null; renderDrawer(); return; }
     if(act === 'task-view'){ state.taskView = actEl.dataset.view; render(); return; }
     if(act === 'task-filter'){ state.taskFilter = actEl.dataset.filter; render(); return; }
+    if(act === 'task-lens'){ state.taskLens = actEl.dataset.lens; render(); return; }
     if(act === 'toggle-history'){ ev.stopPropagation(); state.historyOpen[actEl.dataset.task] = !state.historyOpen[actEl.dataset.task]; render(); return; }
     if(act === 'toggle-expand'){ ev.stopPropagation(); state.expandedTask = state.expandedTask === actEl.dataset.task ? 'none' : actEl.dataset.task; render(); return; }
     if(act === 'open-task'){ const sp = $('#searchPop'); if(sp) sp.hidden = true; openTask(actEl.dataset.task); return; }
@@ -5849,7 +5897,7 @@ document.addEventListener('click', function(ev){
     if(act === 'submit-publish'){
       const wf = wfById(actEl.dataset.wf);
       const g = wfGateInfo(wf);
-      if(!g.ready){ closeModal(); toast('还不能发布：' + (!wf.nodes.length ? '画布是空的。' : !g.runs ? '还没有试跑过。' : !g.passed ? '还没有一次跑通。' : '还有 ' + g.openP0 + ' 件高优先级事项没处理。'), true); return; }
+      if(!g.ready){ closeModal(); toast('还不能发布：' + (!wf.nodes.length ? '画布是空的。' : !g.runs ? '还没有试跑过。' : !g.passed ? '还没有一次跑通。' : '还有 ' + g.openP0 + ' 件要紧的事没处理。'), true); return; }
       if(!$('#pubAck') || !$('#pubAck').checked){ toast('先勾选发布确认。', true); return; }
       wf.status = 'published'; wf.version = wf.version.replace('-draft', ''); wf.updated = '刚刚'; state.wfDirty = false;
       wf.versions.forEach(v => { v.current = false; }); wf.versions.unshift({ v: wf.version, at: '刚刚', by: '啸春', current: true, note: '首次发布；执行契约冻结。' });
@@ -5937,7 +5985,7 @@ document.addEventListener('click', function(ev){
     if(act === 'copy-event'){ const e = EVENTS.find(x => String(x.seq) === String(actEl.dataset.event)); if(e){ const txt = JSON.stringify(e, null, 2); if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(function(){ toast('事件 JSON 已复制。'); }).catch(function(){ toast('剪贴板不可用；JSON 已在抽屉里展开，可手动选择复制。', true); }); } else { toast('剪贴板不可用；JSON 已在抽屉里展开，可手动选择复制。', true); } } return; }
     if(act === 'toast'){ toast(actEl.dataset.msg || '已记录。'); return; }
     if(act === 'refresh-inbox'){ render(); toast('收件箱已刷新。'); return; }
-    if(act === 'verify-chain'){ toast('哈希链校验通过：' + EVENTS.length + ' 条事件连续，无断点。'); return; }
+    if(act === 'verify-chain'){ toast('核对完成：' + EVENTS.length + ' 条记录前后对得上，没有断点。'); return; }
     if(act === 'export-effects' || act === 'export-events'){ toast('导出任务已创建，文件会落在 workspace 的 exports 目录。'); return; }
     if(act === 'toggle-review' || act === 'batch'){ toast('已记录。'); return; }
   }
@@ -6185,32 +6233,43 @@ state.neuralMode = state.neuralMode || 'all';
 state.neuralSelected = state.neuralSelected || 'drafter';
 state.neuralChatOpen = false;
 state.neuralMessages = state.neuralMessages || [
-  { role: 'assistant', text: '我在。四条主支线正在按证据门推进，修订执行当前 64%。你可以直接问我进度、冲突、子代理状态，或让我解释一条流程。' }
+  { role: 'assistant', text: '我在。五条支线按依赖推进：侦察已完成，修订执行 64%，其余在等上游。需要你的事我会先摘出来。' }
 ];
 
-function neuralStatusWord(status){
-  return ({ done: '已交付', running: '执行中', waiting: '等上游', queued: '排队中', blocked: '待决定' })[status] || '待命';
-}
-
 function neuralNextStep(a){
-  if(a.status === 'done') return '已交付，等主脑收进台账';
-  if(a.status === 'running') return '正在推进：' + tidy(a.log[0] ? a.log[0][1] : a.task);
+  if(a.status === 'done') return '已完成，等主脑收进台账';
+  if(a.status === 'running') return tidy(a.log[0] ? a.log[0][1] : a.task);
   if(a.status === 'waiting') return '等上游把结果交回来';
   if(a.status === 'blocked') return '要你先做一次决定';
-  return '等前面的支线先交付';
+  return '等前面的支线先完成';
 }
 
-function neuralNodeCard(id){
-  const a = AGENTS[id];
-  const selected = state.neuralSelected === id;
-  return '<button class="neural-node n-' + id + (selected ? ' selected' : '') + '" data-act="neural-select" data-node="' + id + '" aria-label="查看' + esc(a.name) + '当前任务" aria-pressed="' + (selected ? 'true' : 'false') + '">' +
-    '<span class="neural-node-top"><span class="neural-node-ico">' + icon(NEURAL_NODE_ICONS[id]) + '</span><span class="neural-node-name">' + esc(a.name) + '</span><span class="neural-node-state ' + a.status + '"><i></i>' + neuralStatusWord(a.status) + '</span></span>' +
+const nodeCard = a => {
+  return '<button class="neural-node n-' + a.id + '" data-act="neural-open-agent" data-node="' + a.id + '" aria-label="查看' + esc(a.name) + '详情">' +
+    '<span class="neural-node-top"><span class="neural-node-ico">' + icon(NEURAL_NODE_ICONS[a.id]) + '</span><span class="neural-node-name">' + esc(a.name) + '</span><span class="neural-node-state ' + a.status + '"><i></i>' + statusWord(a.status) + '</span></span>' +
     '<span class="neural-node-role">' + esc(a.role) + '</span>' +
-    '<span class="neural-node-task"><b>现在</b>' + esc(tidy(a.task)) + '</span>' +
+    '<span class="neural-node-task"><b>做到</b>' + esc(tidy(a.task)) + '</span>' +
     '<span class="neural-node-out"><b>结果</b>' + esc(tidy(a.outputs[0])) + '</span>' +
-    '<span class="neural-node-need"><b>还需要</b>' + esc(tidy(neuralNextStep(a))) + '</span>' +
-    '<span class="neural-node-foot"><span class="neural-node-progress"><i style="width:' + Math.max(2, a.progress) + '%"></i></span><span class="neural-node-pct">' + String(a.progress).padStart(2, '0') + '%</span></span>' +
+    '<span class="neural-node-need"><b>' + (a.status === 'running' ? '进展' : '下一步') + '</b>' + esc(tidy(neuralNextStep(a))) + '</span>' +
+    (a.status === 'running' ? '<span class="neural-node-foot"><span class="neural-node-progress"><i style="width:' + Math.max(2, a.progress) + '%"></i></span></span>' : '') +
   '</button>';
+};
+
+function branchGridHtml(){
+  const agents = NEURAL_NODE_IDS.map(id => Object.assign({}, AGENTS[id], { id: id }));
+  const busy = agents.filter(a => a.status === 'running' || a.status === 'blocked');
+  const calm = agents.filter(a => a.status !== 'running' && a.status !== 'blocked');
+  const c = st => calm.filter(a => a.status === st).length;
+  const more = state.branchesExpanded;
+  const calmLine = calm.length ? '<div class="branch-calm"><span>' + (more ? '其余 ' + calm.length + ' 条正常支线' : '其余 ' + calm.length + ' 条正常 · 已完成 ' + c('done') + ' · 等上游 ' + c('waiting') + ' · 还没开始 ' + c('queued')) + '</span><button class="link-btn" data-act="neural-branches-' + (more ? 'less' : 'more') + '">' + (more ? '收起' : '展开') + '</button></div>' : '';
+  return busy.map(nodeCard).join('') + (more ? calm.map(nodeCard).join('') : '') + calmLine;
+}
+
+
+function coreStateLine(paused){
+  const agents = NEURAL_NODE_IDS.map(id => AGENTS[id]);
+  const c = st => agents.filter(a => a.status === st).length;
+  return paused ? '已暂停 · 现场留着' : '在做 ' + c('running') + ' 条 · 等上游 ' + c('waiting') + ' 条';
 }
 
 function neuralCorePanel(paused, openCount){
@@ -6222,14 +6281,14 @@ function neuralCorePanel(paused, openCount){
       '<span class="core-badge">主脑</span>' +
       '<h3 class="core-title">' + esc(o.name) + '</h3>' +
       '<p class="core-role">总控 · Superagent</p>' +
-      '<div class="core-state"><i></i>' + (paused ? '已暂停 · 现场留着' : '在统筹 ' + agents.length + ' 条支线 · 整体 ' + o.progress + '%') + '</div>' +
+      '<div class="core-state"><i></i>' + coreStateLine(paused) + '</div>' +
       '<button class="core-talk" data-act="neural-chat">' + icon('spark') + '与主脑对话</button>' +
     '</div>' +
     '<div class="core-body">' +
       '<p class="core-mission">' + esc(tidy(o.mission)) + '</p>' +
       '<div class="core-do-grid">' +
-        '<div class="core-do"><span class="core-do-k">支线</span><span class="core-do-v">' + agents.length + ' 条 · 已交付 ' + count('done') + ' · 在跑 ' + count('running') + ' · 等上游 ' + count('waiting') + ' · 排队 ' + count('queued') + '</span></div>' +
-        '<div class="core-do"><span class="core-do-k">验收硬门</span><span class="core-do-v">0 致命 / 0 重大</span></div>' +
+        '<div class="core-do"><span class="core-do-k">支线' + infoTip('五条支线各自的状态；点下方卡片看单条详情。') + '</span><span class="core-do-v">' + agents.length + ' 条 · 已完成 ' + count('done') + ' · 在做 ' + count('running') + ' · 等上游 ' + count('waiting') + ' · 还没开始 ' + count('queued') + '</span></div>' +
+        '<div class="core-do"><span class="core-do-k">验收硬门' + infoTip('证据门：致命与重大都为 0，才允许收尾。') + '</span><span class="core-do-v">0 致命 / 0 重大</span></div>' +
         '<div class="core-do"><span class="core-do-k">主脑产出</span><span class="core-do-v">' + esc(tidy(o.outputs[0])) + ' · ' + esc(tidy(o.outputs[1])) + '</span></div>' +
         '<div class="core-do"><span class="core-do-k">等你决定</span><span class="core-do-v">' + openCount + ' 件事</span></div>' +
       '</div>' +
@@ -6250,40 +6309,40 @@ function neuralInspector(){
 }
 
 renderCommand = function(){
-  const open = openDecisions();
+  const open = pendingDecisions();
   const paused = !!state.orchPaused;
+  const running = runningTasks();
   const recent = EVENTS.slice().sort((a, b) => b.seq - a.seq).slice(0, 5);
   const flows = Object.values(WORKFLOWS).slice(0, 4);
-  const modes = [['all','全貌'],['focus','专注']];
+  const stat = (n, unit, label, screen, lens) => '<button class="stat" data-screen="' + screen + '"' + (lens ? ' data-lens="' + lens + '"' : '') + ' aria-label="' + label + '"><div class="stat-num">' + n + '<em>' + unit + '</em></div><div class="stat-label">' + label + '</div></button>';
   return '<section class="page command-page">' +
-    pageHead('NEURAL COMMAND · 11 月 12 日', '早上好，啸春',
-      '主脑七七在统筹这批任务。下面能一眼看到每条支线做到哪一步、出了什么结果、还差什么。',
+    pageHead('指挥台 · 11 月 12 日', '早上好，啸春',
+      '七七在总控这批任务；有事的支线展开，没事的收起。',
       '<button class="btn" data-act="open-notes">评审说明</button><button class="btn primary" data-act="new-task">' + icon('plus') + '新建任务</button>') +
     '<div class="overview-grid">' +
       '<section class="ops neural-ops' + (paused ? ' paused' : '') + '">' +
-        '<div class="ops-head"><div><p class="ops-kicker">DSH SUPERAGENT · NEURAL ORCHESTRATION</p><h2 class="ops-title"><span class="dot"></span>七七 · 神经中枢</h2><p class="ops-goal">当前目标：把第三段设计改到第二轮通过，拆成四条并行支线，守住「0 致命 / 0 重大」的证据门。</p></div>' +
-        '<div class="ops-ctrl"><div class="neural-view-switch">' + modes.map(m => '<button class="' + (state.neuralMode === m[0] ? 'on' : '') + '" data-act="neural-mode" data-mode="' + m[0] + '">' + m[1] + '</button>').join('') + '</div>' +
-        '<button data-act="toggle-orch-full">' + icon('external') + '<span>沉浸全屏</span></button><button data-act="toggle-orch-pause">' + icon(paused ? 'play' : 'pause') + '<span>' + (paused ? '继续' : '暂停') + '</span></button></div></div>' +
-        '<div class="ops-body"><div class="neural-stage" id="neuralStage" data-mode="' + state.neuralMode + '">' +
+        '<div class="ops-head"><div><p class="ops-kicker">主脑 · 正在总控</p><h2 class="ops-title"><span class="dot"></span>七七 · 神经中枢</h2><p class="ops-goal">把第三段设计改到第二轮通过：五条支线并行，守住「0 致命 / 0 重大」。</p></div>' +
+        '<div class="ops-ctrl"><button data-act="toggle-orch-full">' + icon('external') + '<span>沉浸全屏</span></button><button data-act="toggle-orch-pause">' + icon(paused ? 'play' : 'pause') + '<span>' + (paused ? '继续' : '暂停') + '</span></button></div></div>' +
+        '<div class="ops-body"><div class="neural-stage" id="neuralStage">' +
           '<div class="neural-stage-label"><i></i>指挥台 · 主脑统筹 ' + NEURAL_NODE_IDS.length + ' 条支线</div>' +
           neuralCorePanel(paused, open.length) +
-          '<div class="branch-grid">' + NEURAL_NODE_IDS.map(neuralNodeCard).join('') + '</div>' +
-        '</div>' + neuralInspector() + '</div>' +
+          '<div class="branch-grid" id="branchGrid">' + branchGridHtml() + '</div>' +
+        '</div></div>' +
       '</section>' +
-      '<aside class="asks"><div class="rail-head"><h2>需要你决定</h2><span>' + open.length + '</span></div><p class="rail-lede">只有承担后果的决定，才会打断你。</p>' +
+      '<aside class="asks"><div class="rail-head"><h2>需要你决定</h2><span>' + open.length + '</span></div><p class="rail-lede">只有承担后果的决定才打断你。' + infoTip('数字等于下面列出的条数；完整列表在「等你决定」屏。') + '</p>' +
         open.slice(0, 3).map(d => '<button class="ask" data-dec="' + d.id + '"><div class="ask-meta"><span class="ask-pri ' + (d.priority === 'P0' ? 'p0' : '') + '">' + esc(urgencyWord(d.priority)) + '</span><span>' + esc(d.created) + '</span></div><div class="ask-title">' + esc(tidy(d.title)) + '</div><div class="ask-why">' + esc(tidy(d.why)) + '</div><div class="ask-go">处理 →</div></button>').join('') +
-        '<a class="rail-more" data-screen="inbox">查看全部 ' + open.length + ' 条 →</a>' +
+        '<a class="rail-more" data-screen="inbox">全部 ' + open.length + ' 条 →</a>' +
       '</aside>' +
     '</div>' +
     '<div class="stats-strip">' +
-      '<div class="stat"><div class="stat-num">' + TASKS.filter(t => t.status === 'running').length + '<em>条</em></div><div class="stat-label">正在运行</div></div>' +
-      '<div class="stat"><div class="stat-num">' + open.length + '<em>件</em></div><div class="stat-label">等你决定</div></div>' +
-      '<div class="stat"><div class="stat-num">' + openEffects().length + '<em>笔</em></div><div class="stat-label">待核实</div></div>' +
-      '<div class="stat"><div class="stat-num">' + EVENTS.length + '<em>条</em></div><div class="stat-label">今天记录</div></div>' +
+      stat(running.length, '条', '正在做', 'tasks', 'running') +
+      stat(open.length, '件', '等你决定', 'inbox') +
+      stat(pendingEffects().length, '笔', '待核实', 'effects') +
+      stat(EVENTS.length, '条', '今天记录', 'events') +
     '</div>' +
-    '<div class="lower"><section><div class="block-head"><h2>最近发生</h2><a data-screen="events">全部记录 →</a></div>' +
+    '<div class="lower"><section><div class="block-head"><h2>最近发生' + infoTip('只显示最近五条，完整记录在「记录」屏。') + '</h2><a data-screen="events">全部记录 →</a></div>' +
       recent.map(e => '<div class="event-line"><div class="event-time">' + esc(e.time) + '</div><div class="event-text">' + esc(tidy(e.summary)) + '</div><div class="event-out ' + (e.type === 'node.failed' ? 'bad' : e.type === 'decision.created' || e.type === 'effect.recorded' ? 'wait' : 'ok') + '">' + (e.type === 'node.failed' ? '没通过' : e.type === 'decision.created' ? '等你决定' : e.type === 'effect.recorded' ? '等你接手' : '完成') + '</div></div>').join('') + '</section>' +
-      '<section><div class="block-head"><h2>流程状态</h2><a data-screen="workflows">打开流程 →</a></div>' + flows.map(w => '<div class="flow-line"><div class="flow-name">' + esc(tidy(w.name)) + '<small>' + esc(w.version) + '</small></div><div class="flow-bar"><i style="width:' + Math.min(100, w.success || 0) + '%"></i></div><div class="flow-pct">' + (w.success == null ? '草稿' : w.success + '%') + '</div></div>').join('') + '</section>' +
+      '<section><div class="block-head"><h2>流程状态' + infoTip('只列最近用到的四条；点流程名进入流程设计。') + '</h2><a data-screen="workflows">打开流程 →</a></div>' + flows.map(w => '<div class="flow-line"><div class="flow-name">' + esc(tidy(w.name)) + '<small>' + esc(w.version) + '</small></div><div class="flow-bar"><i style="width:' + Math.min(100, w.success || 0) + '%"></i></div><div class="flow-pct">' + (w.success == null ? '草稿' : w.success + '%') + '</div></div>').join('') + '</section>' +
     '</div>' +
   '</section>';
 };
@@ -7007,16 +7066,11 @@ function neuralStart(){
 }
 
 function neuralRefresh(){
-  const stage = $('#neuralStage');
-  if(stage) stage.dataset.mode = state.neuralMode;
   $$('[data-act="neural-mode"]').forEach(btn => btn.classList.toggle('on', btn.dataset.mode === state.neuralMode));
-  $$('.neural-node').forEach(node => {
-    const on = node.dataset.node === state.neuralSelected;
-    node.classList.toggle('selected', on); node.setAttribute('aria-pressed', on ? 'true' : 'false');
-  });
-  const inspector = $('.neural-inspector');
-  if(inspector) inspector.outerHTML = neuralInspector();
+  const grid = $('#branchGrid');
+  if(grid) grid.innerHTML = branchGridHtml();
 }
+
 
 function neuralChatMessagesHtml(){
   const messages = state.neuralMessages.map(m => '<div class="chat-message ' + (m.role === 'user' ? 'user' : '') + '"><span class="chat-avatar">' + (m.role === 'user' ? '春' : '七') + '</span><div class="chat-bubble">' + esc(m.text) + '</div></div>').join('');
@@ -7027,7 +7081,7 @@ function neuralChatMessagesHtml(){
 function neuralChatHtml(){
   return '<div class="neural-chat-layer" data-act="neural-chat-close"><section class="neural-chat" data-stop="1" role="dialog" aria-modal="true" aria-label="与主脑七七对话">' +
     '<header class="neural-chat-head"><span class="chat-orb">' + icon('command') + '</span><div><div class="chat-title">与七七对话</div><div class="chat-sub"><i></i>主脑在线 · 已接入当前编排现场</div></div><button class="chat-close" data-act="neural-chat-close" aria-label="关闭对话">' + icon('close') + '</button></header>' +
-    '<div class="chat-context"><span>当前目标 · 第三段设计第二轮通过</span><span>4 条并行支线</span><span>证据门已开启</span></div>' +
+    '<div class="chat-context"><span>当前目标 · 第三段设计第二轮通过</span><span>5 条支线并行</span><span>证据门已开启</span></div>' +
     '<div class="chat-messages" id="neuralChatMessages">' + neuralChatMessagesHtml() + '</div>' +
     '<div class="chat-suggestions"><button data-act="neural-prompt" data-prompt="现在整体进度怎么样？">整体进度</button><button data-act="neural-prompt" data-prompt="哪个子代理最需要关注？">关注哪个节点</button><button data-act="neural-prompt" data-prompt="当前有什么冲突需要我决定？">待决定冲突</button></div>' +
     '<div class="chat-composer"><textarea id="neuralChatInput" rows="1" placeholder="问主脑任何问题…  Enter 发送，Shift + Enter 换行"></textarea><button class="chat-send" data-act="neural-send" aria-label="发送">' + icon('send') + '</button></div>' +
@@ -7052,7 +7106,7 @@ function closeNeuralChat(){
 }
 function neuralReply(question){
   const q = question.toLowerCase();
-  if(/进度|怎么样|状态|汇报/.test(q)) return '目前总控进度 78%。证据侦察已交付；修订执行正在重写「生效清单」与「历史清单」的边界句，进度 64%；交叉审计和证据核验在等上游输入。当前有 ' + openDecisions().length + ' 件决定需要你处理。';
+  if(/进度|怎么样|状态|汇报/.test(q)) return '目前总控进度 78%。证据侦察已完成；修订执行正在重写「生效清单」与「历史清单」的边界句，进度 64%；交叉审计和证据核验在等上游输入。当前有 ' + openDecisions().length + ' 件决定需要你处理。';
   if(/冲突|决定|风险|处理/.test(q)) {
     const d = openDecisions()[0];
     return d ? '最需要先处理的是「' + tidy(d.title) + '」。' + tidy(d.why) + '我没有替你自动选择，你可以从右侧「需要你决定」进入并查看两条路径的后果。' : '当前没有等待你决定的冲突，证据门正常。';
@@ -7121,7 +7175,7 @@ function wfDelete(wfId){
 document.addEventListener('click', function(ev){
   const el = ev.target.closest('[data-act]'); if(!el) return;
   const act = el.dataset.act;
-  const known = ['neural-select','neural-mode','neural-focus','neural-open-agent','neural-chat','neural-chat-close','neural-send','neural-prompt','wf-manage','wf-duplicate','wf-delete-confirm','wf-delete'];
+  const known = ['neural-select','neural-mode','neural-focus','neural-open-agent','neural-chat','neural-chat-close','neural-send','neural-prompt','neural-branches-more','neural-branches-less','wf-manage','wf-duplicate','wf-delete-confirm','wf-delete'];
   if(act === 'toggle-orch-pause' && el.closest('.neural-ops')) known.push(act);
   if(known.indexOf(act) < 0) return;
   if(act === 'neural-chat-close' && el.classList.contains('neural-chat-layer') && ev.target !== el) return;
@@ -7131,6 +7185,11 @@ document.addEventListener('click', function(ev){
   }
   if(act === 'neural-mode'){
     state.neuralMode = el.dataset.mode; neuralRefresh(); return;
+  }
+  if(act === 'neural-branches-more' || act === 'neural-branches-less'){
+    state.branchesExpanded = act === 'neural-branches-more';
+    const grid = $('#branchGrid'); if(grid) grid.innerHTML = branchGridHtml();
+    return;
   }
   if(act === 'neural-focus'){
     state.neuralMode = state.neuralMode === 'focus' ? 'all' : 'focus'; neuralRefresh(); return;
@@ -7145,8 +7204,8 @@ document.addEventListener('click', function(ev){
     state.orchPaused = !state.orchPaused;
     const ops = el.closest('.neural-ops'); if(ops) ops.classList.toggle('paused', state.orchPaused);
     el.innerHTML = icon(state.orchPaused ? 'play' : 'pause') + '<span>' + (state.orchPaused ? '继续' : '暂停') + '</span>';
-    const coreState = $('.neural-core .core-state span'); if(coreState) coreState.textContent = state.orchPaused ? '已暂停 · 保留现场' : '神经活跃 · 78%';
-    toast(state.orchPaused ? '神经活动已暂停，所有节点保留当前现场。' : '神经活动已恢复，电子脉冲继续流动。'); return;
+    $('.core-state').forEach(x => x.innerHTML = '<i></i>' + coreStateLine(state.orchPaused));
+    toast(state.orchPaused ? '已暂停，现场保留。' : '已继续。'); return;
   }
   if(act === 'neural-chat'){ openNeuralChat(); return; }
   if(act === 'neural-chat-close'){ closeNeuralChat(); return; }
