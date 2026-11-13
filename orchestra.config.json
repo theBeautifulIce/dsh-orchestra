@@ -1,0 +1,8 @@
+{
+  "phase": "S1",
+  "service": { "db_path": "storages/dsh-orchestra/orchestra.db", "busy_timeout_ms": 5000 },
+  "execution": { "concurrency": 3, "human_slots": 1, "startup_timeout_ms": 60000, "unknown_watchdog_ms": 120000, "verify_timeout_ms": 120000 },
+  "bridge": { "buffer_high_water_bytes": 4194304, "buffer_limit_bytes": 8388608 },
+  "retention": { "receipt_days": 7, "in_flight_timeout_minutes": 10 },
+  "memory": { "bridge_id": "memory-audit-v1", "eval_timeout_ms": 120000, "judge_content_limit": 4000, "approval_ttl_hours": 24 }
+}
