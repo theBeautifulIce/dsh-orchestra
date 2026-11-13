@@ -706,3 +706,14 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 回归与验证（实测）：`tsc --noEmit` exit 0；全量 33 文件 / 436 例，425 passed / 11 failed；11 红全部是 G1 预签态 `audit_report_sha256=0*64 != 50ba1b13cdf1b84d…`，无新增回归。新增 62 例：S1 r27 与 S2 r32 载荷组。
 - 已派 S1 第二十八轮（`e9f5865b-b1e1-4311-9043-b7dbacc8ccf6`）与 S2 第三十三轮（`20c8fe7f-701b-49c3-afb0-a3ee96af9373`），都绑 ec89aec，只读、临时克隆内攻击、不签主仓门、不开 S3。
 - 状态：G1/G2 未重签，S3 九节点与状态机继续冻结。两份新审计都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3；任何一份 fail 都回表整改。
+
+### 11.30 S1 第二十八轮与 S2 第三十三轮整改（2026-11-14 07:15，候选 4f87642）
+
+- S1 第二十八轮（`docs/audits/S1-independent-audit-round28.md`，绑 G1 / 4f87642，fail：P0=4 / P1=2 / P2=2）与 S2 第三十三轮（`docs/audits/S2-independent-audit-round33.md`，绑 G2 / 4f87642，fail：P0=5 / P1=0 / P2=2）合并整改。
+- 结论解析：`scripts/gate-check.ts` 的 FAIL_FILLERS 补 顺利/正式/全面/整体/一次性/本次/当次，FAIL_OBJECTS 补 本次验收/当次复核检查，FAIL_PASS_STEMS 补 解决/关闭/清零/处理/消除/验收/复核/覆盖/核实/完善/落实/销项；countingFailure 补 N/M 比例、分项通过、未通过 N 项、完成一半、百分之八十、通过率不足，并让 N 项中 M 项通过支持 必过/均/全部/里；BARE_TAIL 与待办分支补 待办/待改进。
+- 隐藏定义：`stripDefinitionContainers` 去掉固定 5 层上限，六层引用/列表定义同样进入 hiddenDefinitionFailure。
+- 历史叙述：`HISTORICAL_AUDIT_SENTENCE_RE` 只在同句带明确整改说明时剥离，无整改说明的“第 N 轮……不通过”不再当历史；报告侧与门正文共用该剥离。
+- 回归：`tests/gate-check.spec.ts` 新增 S1 第二十八轮 54 条与 S2 第三十三轮 52 条正式用例，共 2 个 `it`，载荷逐条断言 null/fail，合法 P2 遗留与清零正控保持 pass。
+- 验证（实测）：`tsc --noEmit` exit 0；`tests/gate-check.spec.ts` 151 例，137 passed / 14 failed；全量 33 文件 / 438 例，424 passed / 14 failed；14 红全部是 G1 预签态 `audit_report_sha256=0*64 != 50ba1b13cdf1b84d…`，不是解析器回归。
+- 仍留 P2：required_hashes 空清单放行、报告与门/证据只有词法校验、“第 33 轮”带空格的历史叙述误判；均记 S3 前置项，不阻断本轮。
+- 状态：G1/G2 未重签，S3 九节点与状态机继续冻结。本段整改与两份报告/对照表提交后，在新候选上重派 S1 与 S2 独立审计；两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。

@@ -673,7 +673,7 @@ const FAIL_VERDICTS = [
   'refused', 'refusal', 'rejects', 'denies', 'refuses', 'declines', 'vetoes',
   // 无法/不予/未获批准/未达标/被否决/被驳回等常见否定式（S2 第二十五轮 P0-1/P2-1）。
   '无法予以通过', '无法通过', '不予通过', '不获通过', '未获批准', '不获批准', '不予批准',
-  '未达到通过标准', '未达标', '不达标', '未通过验收', '不通过验收', '未获审批', '不获审批',
+  '未达到通过标准', '未达标', '不达标', '未达标准', '未達標準', '未达要求', '未達要求', '未通过验收', '不通过验收', '未获审批', '不获审批',
   '被否决', '遭否决', '被驳回', '遭驳回', '被拒绝', '没能通过',
   // 裸裁决词：结论为否决/驳回/拒绝/反对，或未采纳/拒收/不接收（S2 第二十六轮 P0-1）。
   '未采纳', '未採納', '反对通过', '反對通過', '拒收', '不接收',
@@ -710,6 +710,8 @@ const FAIL_VERDICTS = [
   '不予放行', '不放行', '不予晋级', '不晋级', '未就绪', '不具备', '不充分', '未达成', '未满足', '不满足', '未符合', '不符合', '不完整', '待补', '退回', '打回', '悬而未决',
   '不予准入', '不准入', '未准入', '不予準入', '不準入', '未準入',
   '不足', '不够', '不夠', '未完成', '未收口',
+  // 留有余地的结论同样不是 clean pass（S1 第二十八轮 P0-1）。
+  '不齐全', '不齊全', '结论保留', '結論保留', '保留意见', '保留意見', '待观察', '待觀察',
   '不予采信并退回', '不予採信並退回', '不予采信并退回本报告', '不予採信並退回本報告',
 ].sort((a, b) => b.length - a.length)
 
@@ -822,9 +824,17 @@ const FAIL_FILLERS = [
   '完全', '完全地', '彻底', '徹底', '根本', '真正',
   // 量词与副词作填充：尚未全部完成 / 未逐一通过 / 没有取得全部认可（S1 第二十七轮 P0-1、S2 第三十二轮 P0-1）。
   '全部', '全都', '均', '都', '逐一', '逐项', '逐項', '取得', '地',
+  // 判定系动词与范围词：不能视为通过 / 不能认定通过 / 并非所有必过项都通过（S1 第二十八轮 P0-1）。
+  '视为', '視為', '认定', '認定', '视作', '視作', '算作',
+  '所有', '每项', '每項', '各项', '各項', '必过项', '必過項',
+  // 按规范执行：未按规范执行（S1 第二十八轮 P0-1）。
+  '按', '按照', '依照', '依', '根据', '根據', '规范', '規範',
+  // 程度/方式副词与限定语：未能顺利通过 / 未正式收口 / 未一次性通过 / 未获全面通过（S2 第三十三轮 P0-1）。
+  '顺利', '順利', '正式', '全面', '整体', '整體', '一次性', '本次', '当次', '當次',
 ].sort((a, b) => b.length - a.length)
 const FAIL_PASS_STEMS = [
-  '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
+  // 标准/標准必须排在达标/達標前：未达标准不能被截成“未达标”后留下“准”。
+  '标准', '標準', '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
   '否决', '驳回', '拒绝', 'approval', 'approved', 'approve', 'passing', 'passed',
   'succeed', 'succeeded', 'success', 'accepted', 'accept', 'pass', 'meet', 'met',
   'approving', 'granted', 'granting', 'acceptable', '采纳', '採納',
@@ -832,6 +842,16 @@ const FAIL_PASS_STEMS = [
   '完成', 'complete', 'completed', 'completion',
   // 收口/到位/开始/做完/闭环/整改同样是可被否定的完成度谓词（S1 第二十七轮 P0-1）。
   '收口', '到位', '开始', '開始', '做完', '闭环', '閉環', '整改',
+  // 问题状态谓词：问题未解决 / 缺陷未关闭 / P0 未清零 / 整改未结束（S1 第二十八轮 P0-1）。
+  '解决', '解決', '关闭', '關閉', '清零', '处理', '處理', '消除', '结束', '結束',
+  // 修复/修復是完成度谓词：未修复完毕（S1 第二十八轮 P0-1）。
+  '修复', '修復',
+  // 验证与覆盖谓词：证据未核实 / 部分项未验证 / 范围未覆盖（S1 第二十八轮 P0-1）。
+  '验收', '驗收', '复核', '復核', '覆盖', '覆蓋', '核实', '核實', '验证', '驗證', '核验', '核驗',
+  // 整改动作谓词：未落实 / 未完善 / 未开展 / 未销项（S1 第二十八轮 P0-1）。
+  '完善', '落实', '落實', '开展', '開展', '销项', '銷項', '执行', '執行',
+  // “未达要求/未达标准”里的对象本身就是被否定的准入谓词（S1 第二十八轮 P0-1）。
+  '要求', '标准', '標準',
   // 放行/放行条件/clear/fit 同义收口语（S1 第二十四轮 P0）。
   '放行', 'release', 'released', 'releases', 'clear', 'clears', 'cleared', 'fit', 'advance',
   '晋级', '晉級', '就绪', '就緒', '满足', '滿足', '符合', '完整', 'ready', 'eligible', 'qualified', 'satisfactory', 'sufficient', 'adequate', 'green',
@@ -856,6 +876,12 @@ const FAIL_OBJECTS = ['最终验收', '最终驗收', '专家评审', '專家評
   '本次審計', '本輪審計', '本審計', '審計組', '審計小組', '本報告', '該報告', '此報告', '報告本身', '報告',
   '全部准入条件', '全部準入條件', '条件', '條件', '准入条件', '准入條件', '放行条件', '放行條件', '要求', '门槛', '門檻', '准入', '準入', '基线', '基準', '资格', '資格',
   '依据', '依據', '整改', '整改工作', '修复', '修复工作', '收口', '检查', '檢查',
+  // 谓词后接范围宾语：未覆盖全部节点 / 未核验全部必过项（S1 第二十八轮 P0-1）。
+  '全部', '节点', '節點', '必过项', '必過項',
+  // 谓词后接完成补语：未复核完毕 / 未整改完成（S1 第二十八轮 P0-1）。
+  '完毕', '完畢', '完成',
+  // 带限定的验收宾语：未通过本次验收 / 未通过当次复核检查（S2 第三十三轮 P0-1）。
+  '本次验收', '本次驗收', '当次复核检查', '當次複核檢查', '本次复核', '本次覆核', '本次检查', '本次檢查',
   'the audit report', 'this report', 'the report', 'audit report', 'the gate', 'this gate',
   '放行', 'release', 'clear', '晋级', '晉級',
   '驗收', '標準', '審批', '評審', '審核', '許可', '認可']
@@ -875,27 +901,72 @@ const BARE_TAIL_VERDICTS = [
   '待补', '待補', '待整改', '待修复', '待修復', '未整改', '未修复', '未修復',
   '未收口', '未完成', '部分通过', '部分通過', '有条件通过', '有條件通過', '附条件通过', '附條件通過',
   '不予采信', '不予採信', '不予受理', '不予准入', '不予準入', '未获准入', '未獲准入',
+  // 待确认/待观察：既不 clean pass 也不显式否定，按句尾未收口处理（S1 第二十八轮 P0-1）。
+  '待确认', '待確認', '尚待确认', '待观察', '待觀察', '待完善', '待复核', '待覆核', '待落实', '待落實',
+  // 待办/待改进同样是未收口事实（S2 第三十三轮 P0-3）。
+  '待办', '待辦', '待改进', '待改進',
 ].sort((a, b) => b.length - a.length)
 const BARE_TAIL_RE = new RegExp('^(?:' + BARE_TAIL_VERDICTS.map(sepPattern).join('|') + ')')
 
 // 计数/比例不足同样是失败：13 项中 12 项通过 / 只完成 80% / 尚差 2 项（S1 第二十七轮 P0-1）。
+function positiveCount(token: string): boolean {
+  if (/^\d+$/.test(token)) return Number(token) > 0
+  return token !== '零' && token !== '〇'
+}
+
 function countingFailure(raw: string): boolean {
   const text = raw.normalize('NFKC').toLowerCase().replace(/[\s*_]+/g, '')
-  for (const m of text.matchAll(/(\d{1,3})\s*(?:项|個|个|條|条)中(\d{1,3})\s*(?:项|個|个|條|条)?(?:通过|通過|达标|達標|合格)/g)) {
+  // 计数不足：13 项中有 12 项通过 / 13 项中只有 12 项 pass / 13 项里 12 项通过。
+  for (const m of text.matchAll(/(\d{1,3})\s*(?:项|個|个|條|条)(?:必过|必過|通过项|通過項)?\s*(?:中|裡|里|当中|當中)(?:有|只有|仅有|僅有|其中|还有|還有)?\s*(\d{1,3})\s*(?:项|個|个|條|条)?\s*(?:均|都|全部|全|已|为|為)?\s*(?:通过|通過|达标|達標|合格|pass(?:ed|ing)?|成功|完成|收口)/g)) {
     if (Number(m[2]) < Number(m[1])) return true
   }
+  // 比例式：通过 18/19 项 / 只完成 18/19 项必过（S2 第三十三轮 P0-2）。
+  for (const m of text.matchAll(/(\d{1,3})\s*\/\s*(\d{1,3})\s*(?:项|個|个|條|条)(?!\s*(?:必过|必過)?(?:全过|全過|全部通过|全部通過|均通过|均通過))/g)) {
+    if (Number(m[1]) < Number(m[2])) return true
+  }
+  // 分项式：通过 18 项，1 项未过 / 未通过 1 项（S2 第三十三轮 P0-2）。
+  for (const m of text.matchAll(/(\d{1,3})\s*(?:项|個|个|條|条)[^。\n]{0,8}?(?:通过|通過|达标|達標|合格)[^。\n]{0,8}?(\d{1,3})\s*(?:项|個|个|條|条)[^。\n]{0,6}?(?:未过|未過|未通过|未通過|没过|沒過)/g)) {
+    if (Number(m[2]) > 0) return true
+  }
+  for (const m of text.matchAll(/(?:未通过|未通過|未过|未過)\s*(\d{1,3})\s*(?:项|個|个|條|条)/g)) {
+    if (Number(m[1]) > 0) return true
+  }
+  // 完成一半 / 只完成了百分之八十（S2 第三十三轮 P0-2）。
+  if (/完成(?:了)?(?:一半|半数|半數)/.test(text)) return true
+  if (/百分之[一二三四五六七八九十]/.test(text)) return true
+  // 通过率不足 100%（S2 第三十三轮 P0-2）。
+  for (const m of text.matchAll(/通过率(?:为|為)?\s*(\d{1,3}(?:\.\d+)?)\s*%/g)) {
+    if (Number(m[1]) < 100) return true
+  }
+  // 完成度只有 80%：名词形式不跟“只完成”。
+  const level = /(?:完成度|完成率|进度|進度)(?:只|仅|僅)?(?:有|为|為)?\s*(\d{1,3}(?:\.\d+)?)%/.exec(text)
+  if (level && Number(level[1]) < 100) return true
   const ratio = /(?:只|仅|僅|仅仅|僅僅)(?:完成|完成了|通過|通过|整改|收口|达标|達標)[^。\n]{0,24}?(?:(\d{1,3}(?:\.\d+)?)%|一半|半数|半數)/.exec(text)
   if (ratio) {
     if (ratio[1] === undefined) return true
     if (Number(ratio[1]) < 100) return true
   }
-  const short = /(?:尚差|还差|還差|仍差|尚缺|仍缺|还缺|還缺|仍欠|尚欠|欠缺)(\d{1,3})\s*(?:项|個|个|條|条)/.exec(text)
-  if (short && Number(short[1]) > 0) return true
-  const remain = /(?:仍有|还有|還有|尚有|尚余|尚餘|遗留|遺留)(\d{1,3})\s*(?:项|個|个|條|条)[^。\n]{0,12}?(?:致命|重大|问题|問題|缺陷|风险|風險|待补|待補|待整改|未)/.exec(text)
-  if (remain && Number(remain[1]) > 0) return true
-  // 无主语的“原则上有 3 项待补”：没有否定词，只能按“还有未完成项”判（S2 第三十二轮 P0-2）。
-  const pending = /(?:原则上|原則上|基本上|大致上|大体上|大體上)?有(\d{1,3})\s*(?:项|個|个|條|条)[^。\n]{0,16}?(?:待补|待補|待整改|待修复|待修復|未完成|未收口|未整改|未修复|未修復)/.exec(text)
-  if (pending && Number(pending[1]) > 0) return true
+  // 剩余量本身即未完成：尚有 2 项 / 遗留 2 项 / 缺少 2 项证据。
+  for (const m of text.matchAll(/(?:仍有|还有|還有|尚有|尚余|尚餘|遗留|遺留|尚差|还差|還差|仍差|尚缺|仍缺|还缺|還缺|仍欠|尚欠|欠缺|缺少|缺)(\d{1,3})\s*(?:项|個|个|條|条)/g)) {
+    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 8)
+    // “仍有 19 项通过”是清零正句，不按剩余项判。
+    if (/^(?:通过|通過|pass|合格|达标|達標)/.test(after)) continue
+    // P2/P3 与“不阻断”是允许的遗留项，不影响 pass 结论（既有正控）。
+    if (/(?:p2|p3|不阻断|不阻斷)/i.test(text.slice(Math.max(0, m.index - 8), m.index))) continue
+    if (Number(m[1]) > 0) return true
+  }
+  // 待办量词族：原则上有 3 项待完善 / 尚有 2 项待复核 / 有一项必过项未核验 / 复核发现 2 项未覆盖。
+  const pending = /([一二三四五六七八九十百两兩几幾\d]{1,3})\s*(?:项|個|个|條|条)[^。\n]{0,18}?(?:待补|待補|待整改|待修复|待修復|待复核|待覆核|待完善|待落实|待落實|待确认|待確認|待观察|待觀察|待办|待辦|待改进|待改進|未完成|未收口|未整改|未修复|未修復|未解决|未解決|未关闭|未關閉|未清零|未处理|未處理|未消除|未验收|未驗收|未复核|未復核|未覆盖|未覆蓋|未核实|未核實|未验证|未驗證|未核验|未核驗|未落实|未落實|未开展|未開展|未结束|未結束|未销项|未銷項|未达标|未達標|未达要求|未达标准|未达標準)/.exec(text)
+  if (pending && positiveCount(pending[1]!)) {
+    // P2/P3 遗留可以不计入，但“P2 待办”仍是未收口（S2 第三十三轮 P0-3）。
+    const before = text.slice(Math.max(0, pending.index - 8), pending.index)
+    const allowedRemainder = /(?:p2|p3|不阻断|不阻斷)/i.test(before)
+      && !/(?:待办|待辦|待改进|待改進)/.test(pending[0])
+    if (!allowedRemainder) return true
+  }
+  // 没有数字的部分项：部分必过项未验证。
+  if (/部分[^。\n]{0,12}?(?:未验证|未驗證|未核验|未核驗|未覆盖|未覆蓋|未核实|未核實|未解决|未解決|未完成)/.test(text)) return true
+  // 无主语的“原则上有 3 项待补”与“原则上 3 项待完善”都已在 pending 覆盖。
   // 存在未完成项：否定项本身是名词，不能靠谓词否定表；前字为 不/无/没/未 时是清零正句。
   for (const m of text.matchAll(/(?:存在|仍有|还有|還有|尚有|发现|發現)(?:未完成项|未完成項|未收口项|未收口項|待整改项|待整改項)/g)) {
     const before = text.slice(Math.max(0, m.index - 1), m.index)
@@ -961,7 +1032,11 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
     if (clause.length === 0) continue
     for (let i = 0; i < clause.length; i += 1) {
       const tailVerdict = BARE_TAIL_RE.exec(clause.slice(i))
-      if (tailVerdict && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailVerdict.length))) return true
+      if (tailVerdict && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailVerdict[0].length))) return true
+      // 无主语的句尾裁决词：证据不充分 / 方案不合格（S1 第二十八轮 P0-1）。
+      // 但“算没过 / 视为未通过”是归类规则，不是本轮判定（G1.md:205 误伤）。
+      const tailFailure = FAIL_VERDICT_RE.exec(clause.slice(i))
+      if (tailFailure && !/^(?:pass|fail)$/i.test(tailFailure[0]) && !/(?:算|视为|视為|视作|視作|认定|認定|算作|记作|記作|记为|記為|属于|屬於|归为|歸為)$/.test(clause.slice(0, i)) && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailFailure[0].length))) return true
     }
   }
   const subjectRe = scan.bareConclusion === 'never' ? FAIL_SUBJECT_NO_BARE_RE : FAIL_SUBJECT_RE
@@ -1022,7 +1097,11 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
       if (neg && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + neg.length))) return true
       // 固有否定词单独收口：仍有 3 项致命待补 / 原则上有 2 项待补（S1 第二十七轮 P0-1）。
       const tailVerdict = BARE_TAIL_RE.exec(clause.slice(i))
-      if (tailVerdict && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailVerdict.length))) return true
+      if (tailVerdict && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailVerdict[0].length))) return true
+      // 无主语的句尾裁决词：证据不充分 / 方案不合格（S1 第二十八轮 P0-1）。
+      // 但“算没过 / 视为未通过”是归类规则，不是本轮判定（G1.md:205 误伤）。
+      const tailFailure = FAIL_VERDICT_RE.exec(clause.slice(i))
+      if (tailFailure && !/^(?:pass|fail)$/i.test(tailFailure[0]) && !/(?:算|视为|视為|视作|視作|认定|認定|算作|记作|記作|记为|記為|属于|屬於|归为|歸為)$/.test(clause.slice(0, i)) && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailFailure[0].length))) return true
     }
   }
   return false
@@ -1052,7 +1131,9 @@ const HISTORICAL_NEG_RE = new RegExp(
 const HISTORICAL_POSITIVE_RE = /通过|通過|passing|passed|approved?/i
 // 门正文里的历史段落：以“第N轮独立审计/round N audit”开头、含当轮否决的整句，
 // 是在记录过去，不是本门当前结论（S1 第二十七轮 P1-1）。只剥整句，句后的本轮说明照常扫描。
-const HISTORICAL_AUDIT_SENTENCE_RE = /^(?:[ \t]*[-*+][ \t]+)?(?:第[一二三四五六七八九十百\d]{1,4}轮|round\s*\d{1,3}(?:\s+audit)?)[^。\n]*?(?:不通过|未通过|fail)[^。\n]*。?/i
+// 只有带本轮整改说明的历史句才是叙述；裸写“第 N 轮判不通过”仍按本轮否决算
+// （S1 第二十八轮 P0-4：历史剥离不能吞掉本轮 fail）。
+const HISTORICAL_AUDIT_SENTENCE_RE = /^(?:[ \t]*[-*+][ \t]+)?(?:第[一二三四五六七八九十百\d]{1,4}轮|round\s*\d{1,3}(?:\s+audit)?)[^。\n]*?(?:不通过|未通过|fail)[^。\n]*?(?:这版|這一版|本轮已|本輪已|已整改|已修复|已修復|已收口|逐条整改|逐條整改|按[^。\n]{0,40}整改)[^。\n]*。?/i
 function stripHistoricalAuditSentence(line: string): string {
   return line.replace(HISTORICAL_AUDIT_SENTENCE_RE, '')
 }
@@ -1094,7 +1175,8 @@ function lineFailure(line: string): boolean {
 const DEFINITION_DEST = '<[^>]*>|(?:https?://|/|\\.{1,2}/)[^\\s]*|[\\w.-]+\\.[a-z]{2,4}\\b[^\\s]*'
 function stripDefinitionContainers(line: string): string {
   let out = line
-  for (let i = 0; i < 5; i += 1) {
+  // 容器层数不设固定上限：每一轮至少吃掉一个标记，长度有限所以必然收敛。
+  for (;;) {
     const next = out.replace(/^[ \t]*(?:>[ \t]*|[-*+][ \t]+|\d+[.)][ \t]+)/, '')
     if (next === out) break
     out = next
@@ -1127,8 +1209,10 @@ function hiddenDefinitionFailure(text: string): boolean {
 
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   if (hiddenDefinitionFailure(text)) return null
-  const visible = renderedAuditLines(text)
-  if (visible === null) return null
+  const rendered = renderedAuditLines(text)
+  if (rendered === null) return null
+  // 报告侧同样只剥“历史轮次 + 本轮已整改”的叙述，保持与门正文同口径（S1 第二十八轮 P1-2）。
+  const visible = rendered.map(stripHistoricalAuditSentence)
   let verdict: 'pass' | 'fail' | null = null
   let inlineFail = false
   // 英文审计报告同样用 Conclusion/Verdict/Outcome 开结论行（S2 第二十七轮 P0-2）。
