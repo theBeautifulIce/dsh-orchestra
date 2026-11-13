@@ -806,7 +806,7 @@ const FAIL_NEGATIONS = [
   'refused to', 'failed to', 'unable to', 'did not', 'didnt', 'was not', 'wasnt',
   'is not', 'isnt', 'has not', 'hasnt', 'have not', 'havent', 'does not', 'doesnt',
   'will not', 'wont', 'do not', 'dont', 'cannot', 'cant', 'never',
-  '无法', '没能', '没有', '未能', '未获', '未予', '不予', '不获', '不得', '不能', '不可',
+  '无法', '没能', '没有', '未能', '未获', '未獲得', '未获得', '没有获得', '沒有獲得', '未取得', '未予', '不予', '不获', '不得', '不能', '不可',
   '尚未', '还没有', '還沒有', '还没', '還沒', '暂未', '暫未', '仍未', '从未', '從未', '并未', '並未',
   '不是', '并非', '並非', '遭', '被', '未', '不', '没', '沒', '无', '無', 'not', 'no',
 ].sort((a, b) => b.length - a.length)
@@ -820,6 +820,8 @@ const FAIL_FILLERS = [
   '作为', '作為',
   // 程度副词不改变否定方向：未完全完成 / 未彻底整改（S2 第三十一轮 P0）。
   '完全', '完全地', '彻底', '徹底', '根本', '真正',
+  // 量词与副词作填充：尚未全部完成 / 未逐一通过 / 没有取得全部认可（S1 第二十七轮 P0-1、S2 第三十二轮 P0-1）。
+  '全部', '全都', '均', '都', '逐一', '逐项', '逐項', '取得', '地',
 ].sort((a, b) => b.length - a.length)
 const FAIL_PASS_STEMS = [
   '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
@@ -828,6 +830,8 @@ const FAIL_PASS_STEMS = [
   'approving', 'granted', 'granting', 'acceptable', '采纳', '採納',
   // 完成度本身也是可被否定的谓词：整改尚未完成 / remediation is not complete（S1 第二十三轮 P1-2）。
   '完成', 'complete', 'completed', 'completion',
+  // 收口/到位/开始/做完/闭环/整改同样是可被否定的完成度谓词（S1 第二十七轮 P0-1）。
+  '收口', '到位', '开始', '開始', '做完', '闭环', '閉環', '整改',
   // 放行/放行条件/clear/fit 同义收口语（S1 第二十四轮 P0）。
   '放行', 'release', 'released', 'releases', 'clear', 'clears', 'cleared', 'fit', 'advance',
   '晋级', '晉級', '就绪', '就緒', '满足', '滿足', '符合', '完整', 'ready', 'eligible', 'qualified', 'satisfactory', 'sufficient', 'adequate', 'green',
@@ -850,8 +854,8 @@ const FAIL_OBJECTS = ['最终验收', '最终驗收', '专家评审', '專家評
   // 否决的宾语也可以是报告本身或本次审计（S2 第二十七轮 P0-1）。
   '本次独立审计', '本次审计', '本轮审计', '本审计', '审计组', '审计小组', '本报告', '该报告', '此报告', '报告本身', '报告',
   '本次審計', '本輪審計', '本審計', '審計組', '審計小組', '本報告', '該報告', '此報告', '報告本身', '報告',
-  '条件', '條件', '准入条件', '准入條件', '放行条件', '放行條件', '要求', '门槛', '門檻', '准入', '準入', '基线', '基準', '资格', '資格',
-  '依据', '依據', '整改', '整改工作', '修复', '修复工作',
+  '全部准入条件', '全部準入條件', '条件', '條件', '准入条件', '准入條件', '放行条件', '放行條件', '要求', '门槛', '門檻', '准入', '準入', '基线', '基準', '资格', '資格',
+  '依据', '依據', '整改', '整改工作', '修复', '修复工作', '收口', '检查', '檢查',
   'the audit report', 'this report', 'the report', 'audit report', 'the gate', 'this gate',
   '放行', 'release', 'clear', '晋级', '晉級',
   '驗收', '標準', '審批', '評審', '審核', '許可', '認可']
@@ -864,6 +868,41 @@ const FAIL_NEG_RES = prefixRes(FAIL_NEGATIONS)
 const FAIL_FILLER_RES = prefixRes(FAIL_FILLERS)
 const FAIL_STEM_RES = prefixRes(FAIL_PASS_STEMS)
 const FAIL_OBJECT_RES = prefixRes(FAIL_OBJECTS)
+
+// 分句末尾的固有否定词：不带主语也能独立收口（S1 第二十七轮 P0-1）。
+// 不放裸 fail："攻击结果：fail" 是攻击载荷描述，不是审计结论（既有正控）。
+const BARE_TAIL_VERDICTS = [
+  '待补', '待補', '待整改', '待修复', '待修復', '未整改', '未修复', '未修復',
+  '未收口', '未完成', '部分通过', '部分通過', '有条件通过', '有條件通過', '附条件通过', '附條件通過',
+  '不予采信', '不予採信', '不予受理', '不予准入', '不予準入', '未获准入', '未獲准入',
+].sort((a, b) => b.length - a.length)
+const BARE_TAIL_RE = new RegExp('^(?:' + BARE_TAIL_VERDICTS.map(sepPattern).join('|') + ')')
+
+// 计数/比例不足同样是失败：13 项中 12 项通过 / 只完成 80% / 尚差 2 项（S1 第二十七轮 P0-1）。
+function countingFailure(raw: string): boolean {
+  const text = raw.normalize('NFKC').toLowerCase().replace(/[\s*_]+/g, '')
+  for (const m of text.matchAll(/(\d{1,3})\s*(?:项|個|个|條|条)中(\d{1,3})\s*(?:项|個|个|條|条)?(?:通过|通過|达标|達標|合格)/g)) {
+    if (Number(m[2]) < Number(m[1])) return true
+  }
+  const ratio = /(?:只|仅|僅|仅仅|僅僅)(?:完成|完成了|通過|通过|整改|收口|达标|達標)[^。\n]{0,24}?(?:(\d{1,3}(?:\.\d+)?)%|一半|半数|半數)/.exec(text)
+  if (ratio) {
+    if (ratio[1] === undefined) return true
+    if (Number(ratio[1]) < 100) return true
+  }
+  const short = /(?:尚差|还差|還差|仍差|尚缺|仍缺|还缺|還缺|仍欠|尚欠|欠缺)(\d{1,3})\s*(?:项|個|个|條|条)/.exec(text)
+  if (short && Number(short[1]) > 0) return true
+  const remain = /(?:仍有|还有|還有|尚有|尚余|尚餘|遗留|遺留)(\d{1,3})\s*(?:项|個|个|條|条)[^。\n]{0,12}?(?:致命|重大|问题|問題|缺陷|风险|風險|待补|待補|待整改|未)/.exec(text)
+  if (remain && Number(remain[1]) > 0) return true
+  // 无主语的“原则上有 3 项待补”：没有否定词，只能按“还有未完成项”判（S2 第三十二轮 P0-2）。
+  const pending = /(?:原则上|原則上|基本上|大致上|大体上|大體上)?有(\d{1,3})\s*(?:项|個|个|條|条)[^。\n]{0,16}?(?:待补|待補|待整改|待修复|待修復|未完成|未收口|未整改|未修复|未修復)/.exec(text)
+  if (pending && Number(pending[1]) > 0) return true
+  // 存在未完成项：否定项本身是名词，不能靠谓词否定表；前字为 不/无/没/未 时是清零正句。
+  for (const m of text.matchAll(/(?:存在|仍有|还有|還有|尚有|发现|發現)(?:未完成项|未完成項|未收口项|未收口項|待整改项|待整改項)/g)) {
+    const before = text.slice(Math.max(0, m.index - 1), m.index)
+    if (!/[不无沒没未]/.test(before)) return true
+  }
+  return false
+}
 
 function matchPrefix(rest: string, resources: { token: string; re: RegExp }[]): string | null {
   // 词与词之间允许任意 | 夹层：先跳过夹层再匹配，否则
@@ -917,6 +956,14 @@ type FailScan = { bareConclusion?: 'any' | 'never' }
 
 function scanFailStatement(folded: string, scan: FailScan): boolean {
   if (folded.length === 0) return false
+  // 无主语的句尾固有否定也要收口：原则上有 3 项待补（S1 第二十七轮 R-16）。
+  for (const clause of folded.split('|')) {
+    if (clause.length === 0) continue
+    for (let i = 0; i < clause.length; i += 1) {
+      const tailVerdict = BARE_TAIL_RE.exec(clause.slice(i))
+      if (tailVerdict && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailVerdict.length))) return true
+    }
+  }
   const subjectRe = scan.bareConclusion === 'never' ? FAIL_SUBJECT_NO_BARE_RE : FAIL_SUBJECT_RE
   subjectRe.lastIndex = 0
   let sm: RegExpExecArray | null
@@ -972,7 +1019,10 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
     if (clause.length === 0) continue
     for (let i = 0; i < clause.length; i += 1) {
       const neg = matchStructuralNegative(clause.slice(i))
-      if (neg && i + neg.length === clause.length) return true
+      if (neg && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + neg.length))) return true
+      // 固有否定词单独收口：仍有 3 项致命待补 / 原则上有 2 项待补（S1 第二十七轮 P0-1）。
+      const tailVerdict = BARE_TAIL_RE.exec(clause.slice(i))
+      if (tailVerdict && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailVerdict.length))) return true
     }
   }
   return false
@@ -1000,6 +1050,12 @@ const HISTORICAL_NEG_RE = new RegExp(
 // 历史锚本身是“通过”时，匹配段里的第一个否定属于当前轮，不能当历史否定截掉
 // （S1 第二十三轮 P0-1：上一轮已通过，本报告未通过验收）。
 const HISTORICAL_POSITIVE_RE = /通过|通過|passing|passed|approved?/i
+// 门正文里的历史段落：以“第N轮独立审计/round N audit”开头、含当轮否决的整句，
+// 是在记录过去，不是本门当前结论（S1 第二十七轮 P1-1）。只剥整句，句后的本轮说明照常扫描。
+const HISTORICAL_AUDIT_SENTENCE_RE = /^(?:[ \t]*[-*+][ \t]+)?(?:第[一二三四五六七八九十百\d]{1,4}轮|round\s*\d{1,3}(?:\s+audit)?)[^。\n]*?(?:不通过|未通过|fail)[^。\n]*。?/i
+function stripHistoricalAuditSentence(line: string): string {
+  return line.replace(HISTORICAL_AUDIT_SENTENCE_RE, '')
+}
 function stripHistoricalRemediation(text: string): string {
   let out = text
   for (const re of HISTORICAL_REMEDIATION_RES) {
@@ -1019,7 +1075,10 @@ function stripHistoricalRemediation(text: string): string {
 }
 
 function visibleFailStatement(line: string, scan: FailScan = {}): boolean {
-  return scanFailStatement(foldForVerdict(stripHistoricalRemediation(line)), scan)
+  const text = stripHistoricalRemediation(line)
+  // 计数不足与“存在未完成项”不是一个谓词否定，先在原文上判一次（S1 第二十七轮 P0-1、S2 第三十二轮 P0-1）。
+  if (countingFailure(text)) return true
+  return scanFailStatement(foldForVerdict(text), scan)
 }
 
 // 单行内的否定：先只认句首裸否定；结论词开头的行再按完整主语扫一遍。
@@ -1032,19 +1091,36 @@ function lineFailure(line: string): boolean {
 
 // 引用定义（[1]: …）不参与渲染，但里面藏着的否决不能因此消失：
 // 定义块里出现正式的“结论：fail/不通过”等按歧义拒绝（S2 第三十轮 P2）。
+const DEFINITION_DEST = '<[^>]*>|(?:https?://|/|\\.{1,2}/)[^\\s]*|[\\w.-]+\\.[a-z]{2,4}\\b[^\\s]*'
+function stripDefinitionContainers(line: string): string {
+  let out = line
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(/^[ \t]*(?:>[ \t]*|[-*+][ \t]+|\d+[.)][ \t]+)/, '')
+    if (next === out) break
+    out = next
+  }
+  return out.trim()
+}
+function stripDefinitionDestination(line: string): string {
+  return line.replace(new RegExp('^(\\[[^\\]]*\\]\\s*:\\s*)(?:' + DEFINITION_DEST + ')', 'i'), '$1')
+}
 function hiddenDefinitionFailure(text: string): boolean {
-  let remaining = 0
-  for (const line of text.split(/\r?\n/)) {
-    const startsDefinition = /^[ \t]*(?:>[ \t]*)*\[[^\]]+\]:/.test(line)
-    if (startsDefinition) remaining = 3
-    if (startsDefinition || (remaining > 0 && line.trim() !== '')) {
-      // 实体编码也要按渲染结果解码：&#102;ail 在原始行里没有字面 fail（S2 第三十一轮 P0）。
-      const decoded = decodeHtmlEntitiesForInspection(line)
-      if (lineFailure(decoded) || visibleFailStatement(decoded, { bareConclusion: 'any' })) return true
-      if (!startsDefinition) remaining -= 1
-      continue
+  const lines = text.split(/\r?\n/)
+  let inBlock = false
+  for (const raw of lines) {
+    const line = stripDefinitionContainers(raw)
+    if (line === '') { inBlock = false; continue }
+    if (!inBlock) {
+      if (/^\[[^\]]+\]:/.test(line) || /^\[[^\]]+$/.test(line)) inBlock = true
+      else continue
     }
-    if (line.trim() === '') remaining = 0
+    const body = /^\[[^\]]+\]:/.test(line) ? stripDefinitionDestination(line) : line
+    const decoded = decodeHtmlEntitiesForInspection(body)
+    // 引用定义本身不可见：定义块里只要同时出现判定词与 pass/fail，无论中间是冒号、
+    // 句点还是别的分隔，都按隐藏结论拒绝（S1 第二十七轮 P2-2、R-H4）。
+    if (/(?:结论|結論|判定|审计意见|最終結論|最终结论|conclusions?|verdict|outcomes?|results?)/i.test(decoded)
+      && /(?:\b(?:pass|fail(?:ed|ure|s)?|reject(?:ed|s)?|den(?:y|ied|ies))\b|不通过|未通过|通过|否决|驳回)/i.test(decoded)) return true
+    if (lineFailure(decoded) || visibleFailStatement(decoded, { bareConclusion: 'any' })) return true
   }
   return false
 }
@@ -1102,13 +1178,17 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
 // 防止 artifact 写 pass、人读正文却看到 fail（S1 第十七轮 P2-1）。
 export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   if (hiddenDefinitionFailure(text)) return 'fail'
-  const visible = renderedAuditLines(text)
-  if (visible === null) return null
+  const rendered = renderedAuditLines(text)
+  if (rendered === null) return null
+  // 历史审计叙述不是本门当前结论：整句剥掉后再扫（S1 第二十七轮 P1-1）。
+  const visible = rendered.map(stripHistoricalAuditSentence)
   const found: Array<'pass' | 'fail'> = []
   for (const line of visible) {
-    const m = /^(?:审计|audit\s+)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
+    const m = /^(?:审计|audit\s+)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)([\s\S]*)$/i.exec(line)
     if (m) {
       const v = rawVerdict(m[1] ?? '')
+      // 门正文结论行的尾巴必须与报告侧同源校验：pass 后面再挂 caveat 不能签过（S1 第二十七轮 P0-2、S2 第三十二轮 P1-1）。
+      if (!validConclusionTail(m[2] ?? '', v)) return 'fail'
       // 正文结论写 pass、同一行尾巴再写 fail/否决的，按 fail 收口（S2 第二十七轮 P0-2 同族）。
       if (v === 'pass' && /\b(?:fail|failed|failure)\b|不通过|未通过|未过|否决|驳回|拒绝|拒收|不予|未获|未予/i.test(line)) return 'fail'
       found.push(v)
@@ -1148,12 +1228,8 @@ export function auditBindingOf(text: string): { gate: string; commit: string } |
 // Markdown 会把 HTML 实体渲染成字符；判定前先按渲染结果解码，否则
 // '&#32467;&#35770;&#65306;fail' 这种可见结论会被漏掉（S1 第十五轮补）。
 function decodeHtmlEntitiesForInspection(line: string): string {
-  return line
-    .replace(/&#(x?)([0-9a-f]+);/gi, (m, hex: string, digits: string) => {
-      const code = Number.parseInt(digits, hex ? 16 : 10)
-      if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return m
-      return String.fromCodePoint(code)
-    })
+  // markdown-it 的 unescapeAll 覆盖全部命名实体与数字实体（S2 第三十二轮 P0-2）。
+  return AUDIT_MARKDOWN.utils.unescapeAll(line)
     .replace(/&(amp|lt|gt|quot|apos|nbsp|colon|newline|tab);/gi, (m, name: string) => {
       const map: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00A0', colon: ':', newline: '\n', tab: '\t' }
       return map[name.toLowerCase()] ?? m
@@ -1693,6 +1769,10 @@ function validConclusionTail(tail: string, verdict: 'pass' | 'fail'): boolean {
 
 function onlyCleanCounts(content: string): boolean {
   let rest = content.replace(/\s+/g, '')
+  // 标准结论尾巴“N 项必过全过，失败项为空，无 run”是清零说明，不是 caveat（S2 第三十二轮 P1-1）。
+  rest = rest.replace(/\d+(?:\.\d+)?(?:\/\d+(?:\.\d+)?)?(?:项|項)?必过(?:项|項)?(?:全过|全過|全部通过|全部通過|均通过|均通過|通过|通過)/g, '')
+  rest = rest.replace(/(?:失败项|失敗項)(?:为|為|是)?(?:空|0|零)/g, '')
+  rest = rest.replace(/无run/g, '')
   rest = rest.replace(/[。．.！!？?；;，,、：:（）()\[\]【】]/g, '')
   rest = rest.replace(/0\s*(?:个|项|条)?\s*致命/gi, '')
   rest = rest.replace(/致命\s*(?:为|=|＝)?\s*0\s*(?:个|项|条)?/gi, '')
