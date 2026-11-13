@@ -613,6 +613,11 @@ function blankPreservingLines(text: string): string {
   return '\u0000' + '\n'.repeat(n)
 }
 
+// CommonMark 的空行只认空格与 Tab；U+00A0、U+2003、U+3000、BOM 等都不是空行。
+function isMarkdownBlankLine(line: string): boolean {
+  return /^[ \t]*$/.test(line)
+}
+
 // 围栏代码整段不可见：里面的字面标签不能参与 HTML 配对（S1 第十轮 P1-1）。
 function maskFencedAuditCode(text: string): string {
   const lines = text.split('\n')
@@ -657,7 +662,7 @@ function maskIndentedAuditCode(text: string): string {
 }
 
 // 行内代码会把标签转义成字面文本；先整段抹掉，避免假的闭合标签提前收掉隐藏块。
-function maskInlineAuditCode(text: string): string {
+function maskInlineCodeInParagraph(text: string): string {
   let out = ''
   let i = 0
   while (i < text.length) {
@@ -695,15 +700,66 @@ function maskInlineAuditCode(text: string): string {
   return out
 }
 
+// 行内代码不能跨空行；先按 CommonMark 段落切开，再在段内配对反引号。
+// 否则前段一个孤立反引号会和后段链接 title 里的反引号配对，把真实的 '[' 一起抹掉（S1 第十四轮 P1-2）。
+function maskInlineAuditCode(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let paragraph: string[] = []
+  const flush = (): void => {
+    if (paragraph.length === 0) return
+    out.push(...maskInlineCodeInParagraph(paragraph.join('\n')).split('\n'))
+    paragraph = []
+  }
+  for (const line of lines) {
+    if (isMarkdownBlankLine(line)) {
+      flush()
+      out.push(line)
+    } else {
+      paragraph.push(line)
+    }
+  }
+  flush()
+  return out.join('\n')
+}
+
+// 合法 CDATA 段不参与渲染；检查隐藏段里的结论字样时先剔掉这些段，
+// 否则 CDATA 里的 pass 会被误判为毒化（S1 第十四轮 P2-1）。
+function stripCdataSpansForInspection(lines: string[]): string[] {
+  const text = lines.join('\n')
+  const lower = text.toLowerCase()
+  let out = ''
+  let cursor = 0
+  while (cursor < text.length) {
+    const start = lower.indexOf('<![cdata[', cursor)
+    if (start < 0) {
+      out += text.slice(cursor)
+      break
+    }
+    const end = lower.indexOf(']]>', start + 9)
+    // 未闭合的 CDATA 不剔除：保留原文，让毒化逻辑兜底，避免隐藏段里的 fail 被静默放过。
+    if (end < 0) {
+      out += text.slice(cursor)
+      break
+    }
+    out += text.slice(cursor, start)
+    const hidden = text.slice(start, end + 3)
+    out += '\n'.repeat((hidden.match(/\n/g) ?? []).length)
+    cursor = end + 3
+  }
+  return out.split('\n')
+}
+
 // 链接目标、title、图片 alt 与引用定义都不参与正文渲染，里面写标签也不能生效。
 // 这些结构都只能在同一个段落内跨行（CommonMark 不允许空行），所以按段落整体隐藏：
 // 宁可把同段的可见文字也藏掉，也不把渲染器隐藏的结论放进来（fail-closed）。
-function maskAuditLinkDestinations(text: string): string {
+function maskAuditLinkDestinations(text: string): { masked: string; poisoned: boolean } {
   const lines = text.split('\n')
+  const inspectionLines = stripCdataSpansForInspection(lines)
   let start = 0
   let poisoned = false
   for (let i = 0; i <= lines.length; i += 1) {
-    if (i < lines.length && lines[i]!.trim().length > 0) continue
+    if (i < lines.length && !isMarkdownBlankLine(lines[i]!)) continue
     if (i > start) {
       let hide = false
       for (let k = start; k < i; k += 1) {
@@ -717,15 +773,16 @@ function maskAuditLinkDestinations(text: string): string {
       if (hide) {
         for (let k = start; k < i; k += 1) {
           const line = lines[k]!
+          const inspected = inspectionLines[k]!
           lines[k] = blankPreservingLines(line)
           // 整段隐藏会把同一段里任何结论行一起藏掉，包括可见的 fail 与写坏的结论行。
           // 只要藏掉的是结论行（不论 pass/fail/无法解析），就补一行无取值结论，
           // 让 auditConclusionOf 判为不可判定，避免另一段的 pass 把可见 fail 洗掉（fail-closed）。
-          const normalized = normalizeAuditLine(line)
+          const normalized = normalizeAuditLine(inspected)
           // 被藏掉的结论行必须自己也是干净的 pass 才能放行；fail、写坏的尾巴、
           // 无法解析的结论都毒掉，避免另一段 pass 把可见 fail 或歧义洗掉（fail-closed）。
           const cleanPass = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:pass|通过)(.*)$/i.exec(normalized)
-          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/i.test(line)
+          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/i.test(inspected)
           if (hasConclusionText) {
             if (cleanPass === null || !validConclusionTail(cleanPass[1] ?? '', 'pass')) poisoned = true
           } else if (/^(?:fail|不通过)$/i.test(normalized)) {
@@ -736,9 +793,9 @@ function maskAuditLinkDestinations(text: string): string {
     }
     start = i + 1
   }
-  // 追加一行没有取值的结论：让 auditConclusionOf 读到后判为不可判定。
-  if (poisoned) return lines.join('\n') + '\n结论：'
-  return lines.join('\n')
+  // poison 行由 stripHiddenAuditBlocks 在 HTML 掩码之后统一追加，
+  // 避免未闭合的注释/处理指令/doctype 把 poison 一起吞掉（S1 第十四轮 P1-3）。
+  return { masked: lines.join('\n'), poisoned }
 }
 
 function maskHtmlComments(text: string): string {
@@ -851,11 +908,16 @@ function stripHiddenAuditBlocks(text: string): string {
   masked = maskFencedAuditCode(masked)
   masked = maskIndentedAuditCode(masked)
   masked = maskInlineAuditCode(masked)
-  masked = maskAuditLinkDestinations(masked)
+  // 链接先于 HTML 掩码：链接 title 里的 '<!--' 等字样不能被当成真的 HTML 结构吞掉后文。
+  // 链接段里的合法 CDATA 在毒化检查时剔除，避免误毒（S1 第十四轮 P2-1）。
+  const links = maskAuditLinkDestinations(masked)
+  masked = links.masked
   masked = maskHtmlComments(masked)
   masked = maskHtmlProcessingInstructions(masked)
   masked = maskHtmlCdata(masked)
   masked = maskHtmlDoctype(masked)
+  // poison 必须在所有 HTML 掩码之后追加，否则会被未闭合结构吞掉（S1 第十四轮 P1-3）。
+  if (links.poisoned) masked += '\n结论：'
   // 代码与链接目标已抹掉；剩下的任何标签、注释、处理指令都视为未支持的原始 HTML。
   if (/<(?=[A-Za-z/!?])/.test(masked)) return '\u0000'
   return masked

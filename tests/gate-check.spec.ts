@@ -421,6 +421,25 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('[x](https://example.com)\n结论：不通过\n\n结论：pass')).toBeNull()
   })
 
+  it('段落边界按 CommonMark 口径，Unicode 空白不切断段落（S1 第十四轮 P1-1/P1-2）', () => {
+    for (const ch of ['\u00A0', '\u2003', '\u3000', '\u000C', '\u000B', '\uFEFF', '\u2028']) {
+      expect(auditConclusionOf(`本报告结论为不通过\n\n[a](https://example.com "title\n${ch}\n结论：pass\n")`)).toBeNull()
+    }
+    expect(auditConclusionOf(`本报告结论为不通过\n\n\`\n\n[a](https://example.com "\`"\n结论：pass\n")`)).toBeNull()
+  })
+
+  it('poison 在 HTML 掩码之后追加，合法 CDATA 不误毒化（S1 第十四轮 P1-3/P2-1）', () => {
+    for (const tail of ['<!-- 未闭合', '<?php 未闭合', '<!DOCTYPE html']) {
+      expect(auditConclusionOf(`结论：不通过 [x](https://example.com)\n\n结论：pass\n\n${tail}`)).toBeNull()
+    }
+    expect(auditConclusionOf('结论：不通过\n\n<![CDATA[结论：pass]]>')).toBe('fail')
+    expect(auditConclusionOf('结论：不通过\n\n<![CDATA[\n结论：pass\n]]>')).toBe('fail')
+    // 链接 title 里的 '<!--' 不是真的 HTML 注释，不能吞掉后面的可见 fail 再让前面的 pass 过门。
+    expect(auditConclusionOf('结论：pass\n\n[x](https://example.com "title <!--")\n结论：不通过')).toBeNull()
+    // 未闭合的 CDATA 不当作可剔除的隐藏段，隐藏链接段里的 fail 仍要毒化。
+    expect(auditConclusionOf('结论：pass\n\n[x](https://example.com "<![CDATA[")\n结论：不通过')).toBeNull()
+  })
+
   it('原始 HTML 一律拒绝，避免 details/summary/div hidden 的可见性绕过（S1 第十轮、S2 第十三轮 P1-1）', () => {
     expect(auditConclusionOf('<details>\n结论：pass\n</details>\n\n结论：fail')).toBeNull()
     expect(auditConclusionOf('<details open>\n结论：fail\n</details>\n\n结论：pass')).toBeNull()
