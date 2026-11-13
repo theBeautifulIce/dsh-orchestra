@@ -549,7 +549,7 @@ function renderedAuditLines(text: string): string[] | null {
     }
     // 链接所在段落里出现“结论：”时，可见正文可能只剩前缀而方括号已被解析掉；
     // 这类段落按歧义处理，不能让另一段干净 pass 过门（S1 第十三轮 P1）。
-    if (paragraphHasLink && /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(buffer)) ambiguous = true
+    if (paragraphHasLink && /(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))\s*[：:—–-]/i.test(buffer)) ambiguous = true
     for (const line of buffer.split('\n')) lines.push(normalizeAuditLine(line))
     buffer = ''
     paragraphHasLink = false
@@ -647,8 +647,10 @@ const FAIL_SUBJECTS = [
   '最終結論', '最終判定',
   '审计', '审核', '复核', '评审', '结论', '結論', '判定', '審計', '審核', '復核', '評審', 'audit', 'review',
   'auditor', 'reviewer', '審計師',
+  // 英文报告本身也能作否定句主语（S2 第二十七轮 P0-2）。
+  'the report', 'this report', 'the audit report', 'audit report', 'report', 'reports',
   // 本轮未整改/未完成整改这类“完成度”否定没有“审计”二字，仍要能挂在裸主语上（S1 第二十二轮 P1）。
-  '本轮', '本輪',
+  '本轮', '本輪', '审计组', '审计小组', '審計組', '審計小組', '报告', '報告', 'approval', 'gate',
 ].sort((a, b) => b.length - a.length)
 
 const FAIL_VERDICTS = [
@@ -661,9 +663,9 @@ const FAIL_VERDICTS = [
   '未過關', '沒過', '失敗',
   'not successful', 'not succeeded', 'not succeed', 'not passed', 'not pass',
   'didnt pass', 'didnt succeed', 'wasnt pass', 'isnt pass',
-  'unsuccessful', 'failure', 'failed', 'fails', 'fail',
+  'unsuccessful', 'failure', 'failed', 'fails', 'failing', 'fail',
   'rejected', 'reject', 'denied', 'deny', 'no pass',
-  'refused', 'refusal',
+  'refused', 'refusal', 'rejects', 'denies', 'refuses', 'declines', 'vetoes',
   // 无法/不予/未获批准/未达标/被否决/被驳回等常见否定式（S2 第二十五轮 P0-1/P2-1）。
   '无法予以通过', '无法通过', '不予通过', '不获通过', '未获批准', '不获批准', '不予批准',
   '未达到通过标准', '未达标', '不达标', '未通过验收', '不通过验收', '未获审批', '不获审批',
@@ -684,6 +686,16 @@ const FAIL_VERDICTS = [
   '未获批', '没获批', '未被批准', '未准予通过', '不准予通过', '未获批通过',
   // 整改完成度否定：本轮未整改 / 本报告未完成整改（S1 第二十二轮 P1）。
   '未完成整改', '整改未完成', '未完成修复', '未整改', '未修复', '未收口',
+  // S2 第二十八轮 P0-1/P0-2：同义否定与无点 i、收口宾语。
+  '未通过收口', '未通過收口', 'unapproved', 'disapproved', 'unaccepted', 'nonapproved',
+  '未过', '未過', '否',
+  // 同义结论族：部分通过、有条件通过、待整改/暂缓都不是 clean pass（S2 第二十八轮 P0-1 扩展）。
+  '部分通过', '部分通過', '有条件通过', '有條件通過', '附条件通过', '附條件通過',
+  '未受理', '不予受理', '未接收', '不接受', '不予接受', '未接受',
+  '待整改', '需整改', '仍需整改', '尚未整改', '有待整改', '待修复', '需修复',
+  '暂缓', '暫緩', '搁置', '擱置', '待定', '悬置', '懸置', '否定', '负面', '負面',
+  'negative', 'unfavorable', 'unfavourable', 'declined', 'vetoed', 'turned down',
+  'unacceptable', 'noncompliant',
 ].sort((a, b) => b.length - a.length)
 
 const FAIL_CONNECTORS = [
@@ -691,7 +703,7 @@ const FAIL_CONNECTORS = [
   '审计结论', '审核结论', '复核结论', '评审结论',
   '审计结果', '审核结果', '复核结果', '评审结果',
   '最终结论', '最终判定', 'conclusions', 'conclusion', 'outcome',
-  '结果', '结论', '結論', '判定', '意见', '经过', '审计', '审核', '复核', '评审',
+  '结果', '结论', '結論', '判定', '意见', '经过', '审计', '审核', '复核', '评审', 'verdict', 'verdicts',
   '报告', '報告', '最终', '最終', '依然', '还是', '总的', 'results', 'result', 'report', 'review', 'approval',
   '審計', '審核', '復核', '評審', '結果', '意見',
   'audit', 'was', 'were', 'has', 'have', 'had', 'been', 'did', 'does', 'do',
@@ -712,6 +724,8 @@ const HOMOGLYPHS: Record<string, string> = {
   // 否则 fаil、pаss 这类写法会绕过词表（S2 第二十五轮 P2-1）。
   'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x',
   'і': 'i', 'ј': 'j', 'ѕ': 's', 'ԁ': 'd', 'һ': 'h', 'ӏ': 'l',
+  // 无点 i 不是同形折叠能覆盖的：NFKC 保留 ı，词表匹配不到 fail（S2 第二十八轮 P0-1）。
+  'ı': 'i',
   'α': 'a', 'ο': 'o', 'ρ': 'p', 'ν': 'v', 'κ': 'k', 'χ': 'x', 'ι': 'i',
   'ε': 'e', 'τ': 't', 'υ': 'u', 'γ': 'y',
 }
@@ -771,12 +785,17 @@ const FAIL_PASS_STEMS = [
   '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
   '否决', '驳回', '拒绝', 'approval', 'approved', 'approve', 'passing', 'passed',
   'succeed', 'succeeded', 'success', 'accepted', 'accept', 'pass', 'meet', 'met',
-  'approving', 'granted', 'granting', '采纳', '採納',
+  'approving', 'granted', 'granting', 'acceptable', '采纳', '採納',
+  // “不获认同”这类谓词不在旧表里（S2 第二十八轮 P0-1）。
+  '认同', '認同', '赞同', '贊同', '首肯', '受理', '接收', '接受',
   // 繁體谓词（S1 第二十一轮 P0-1）。
   '通過', '達標', '過關', '許可', '認可', '否決', '駁回', '拒絕', '獲批', '获批',
 ].sort((a, b) => b.length - a.length)
 const FAIL_OBJECTS = ['验收', '标准', '审批', '评审', '审核', '考核', '许可', '批准', '认可',
   '通过', '通過',
+  // 否决的宾语也可以是报告本身或本次审计（S2 第二十七轮 P0-1）。
+  '本次独立审计', '本次审计', '本轮审计', '本审计', '审计组', '审计小组', '本报告', '该报告', '此报告', '报告本身', '报告',
+  '本次審計', '本輪審計', '本審計', '審計組', '審計小組', '本報告', '該報告', '此報告', '報告本身', '報告',
   '驗收', '標準', '審批', '評審', '審核', '許可', '認可']
   .sort((a, b) => b.length - a.length)
 
@@ -800,21 +819,31 @@ function matchPrefix(rest: string, resources: { token: string; re: RegExp }[]): 
   return null
 }
 
+function matchStructuralObject(rest: string): number {
+  const obj = matchPrefix(rest, FAIL_OBJECT_RES)
+  return obj ? obj.length : 0
+}
+
 function matchStructuralNegative(rest: string): string | null {
   const neg = matchPrefix(rest, FAIL_NEG_RES)
   if (!neg) return null
   let pos = neg.length
-  for (let guard = 0; guard < 2; guard += 1) {
+  // 每吃一个填充词前都先试谓词：not acceptable 里的 a 不能被当成填充词吃掉，
+  // 否则 not able to pass 这类写法仍然要能匹配（S2 第二十七轮 P0-2 同族）。
+  for (let depth = 0; depth <= 2; depth += 1) {
+    const pred = matchPrefix(rest.slice(pos), FAIL_STEM_RES)
+    if (pred) {
+      pos += pred.length
+      const obj = matchPrefix(rest.slice(pos), FAIL_OBJECT_RES)
+      if (obj) pos += obj.length
+      return rest.slice(0, pos)
+    }
+    if (depth === 2) break
     const filler = matchPrefix(rest.slice(pos), FAIL_FILLER_RES)
     if (!filler) break
     pos += filler.length
   }
-  const pred = matchPrefix(rest.slice(pos), FAIL_STEM_RES)
-  if (!pred) return null
-  pos += pred.length
-  const obj = matchPrefix(rest.slice(pos), FAIL_OBJECT_RES)
-  if (obj) pos += obj.length
-  return rest.slice(0, pos)
+  return null
 }
 const FAIL_SUBJECT_RE = new RegExp(FAIL_SUBJECTS.map(sepPattern).join('|'), 'g')
 const FAIL_SUBJECT_NO_BARE_RE = new RegExp(
@@ -837,7 +866,10 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
       const rest = folded.slice(pos)
       const vm = FAIL_VERDICT_RE.exec(rest)
       if (vm) {
-        const next = folded[pos + vm[0].length] ?? ''
+        // 裁决词本身可以带宾语（拒收本报告 / rejects the report），宾语属于同一句否定，
+        // 不能因为紧跟名词就当作叙述放行（S2 第二十七轮 P0-1）。
+        const object = matchStructuralObject(rest.slice(vm[0].length))
+        const next = folded[pos + vm[0].length + object] ?? ''
         if (next === '' || next === '|' || /[需应已的了]/.test(next)) return true
       }
       const structural = matchStructuralNegative(rest)
@@ -872,7 +904,10 @@ const HISTORICAL_REMEDIATION_RES = [
 const HISTORICAL_NEG_RE = new RegExp(
   ['failed to pass', 'did not pass', 'did not approve', 'not approved', 'not pass',
     '未获批准', '未能通过', '未获通过', '没有通过', '未获批', '未达标',
-    '被否决', '被驳回', '未通过', '不通过', '没通过', 'fail']
+    '未通过收口', '未受理', '不予受理', '未接收', '不接受', '不予接受', '未接受',
+    '部分通过', '有条件通过', '附条件通过', '待整改', '需整改', '仍需整改',
+    '尚未整改', '有待整改', '待修复', '需修复', '暂缓', '搁置', '待定',
+    '被否决', '被驳回', '未通过', '不通过', '没通过', '未过', 'fail']
     .sort((a, b) => b.length - a.length).map(regexEscape).join('|'),
   'i',
 )
@@ -898,13 +933,17 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   if (visible === null) return null
   let verdict: 'pass' | 'fail' | null = null
   let inlineFail = false
-  const conclusionText = /(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]/
-  const conclusionWord = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)$/i
+  // 英文审计报告同样用 Conclusion/Verdict/Outcome 开结论行（S2 第二十七轮 P0-2）。
+  const conclusionText = /(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))\s*[：:—–-]/i
+  const conclusionWord = /^(?:审计|audit\s+)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|conclusions?|verdict|outcomes?|results?)$/i
   // 先把所有可见行按行边界拼起来做一次全文扫描：跨越任意多行的拆词都能命中。
   if (visibleFailStatement(visible.join('|'))) inlineFail = true
   for (let visibleIndex = 0; visibleIndex < visible.length; visibleIndex += 1) {
     const line = visible[visibleIndex]!
-    const strict = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]/.test(line)
+    // 中文结论行即使值不合法也要按歧义拒绝；英文只在紧跟 pass/fail 时才当正式结论，
+    // 避免把正文里的 “Conclusion: the design is sound” 误判成结论行。
+    const strict = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:—–-]/.test(line)
+      || /^(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:pass|fail)\b/i.test(line)
     const bare = /^(?:pass|fail|通过|不通过)$/i.test(line)
     if (!strict && !bare) {
       // 全文扫描已经在循环外完成；这里只保留链接定义与“结论”/“：fail”拆行的歧义判定。
@@ -924,7 +963,7 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
       verdict = rawVerdict(line)
       continue
     }
-    const m = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(.*)$/i.exec(line)
+    const m = /^(?:审计|audit\s+)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(.*)$/i.exec(line)
     if (!m) return null
     const raw = (m[1] ?? '').toLowerCase()
     const v = raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
@@ -942,8 +981,13 @@ export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   if (visible === null) return null
   const found: Array<'pass' | 'fail'> = []
   for (const line of visible) {
-    const m = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
-    if (m) found.push(rawVerdict(m[1] ?? ''))
+    const m = /^(?:审计|audit\s+)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
+    if (m) {
+      const v = rawVerdict(m[1] ?? '')
+      // 正文结论写 pass、同一行尾巴再写 fail/否决的，按 fail 收口（S2 第二十七轮 P0-2 同族）。
+      if (v === 'pass' && /\b(?:fail|failed|failure)\b|不通过|未通过|未过|否决|驳回|拒绝|拒收|不予|未获|未予/i.test(line)) return 'fail'
+      found.push(v)
+    }
   }
   // 正文不再按 160 字/24 字偏移截窗：长行和靠后的否定句同样能签过（S1 第二十轮 P0-4）。
   // 历史段落里“门记录拿结论为 fail”这类叙述用裸“结论”会误杀，所以全文扫描排除
@@ -1329,7 +1373,7 @@ function maskAuditLinkDestinations(text: string): { masked: string; poisoned: bo
         for (const line of visible.split('\n')) {
           const normalized = normalizeAuditLine(line)
           const cleanPass = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:pass|通过)(.*)$/i.exec(normalized)
-          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/i.test(normalized)
+          const hasConclusionText = /(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))\s*[：:—–-]/i.test(normalized)
           if (hasConclusionText) {
             if (cleanPass === null || !validConclusionTail(cleanPass[1] ?? '', 'pass')) poisoned = true
           } else if (/^(?:fail|不通过)$/i.test(normalized)) {

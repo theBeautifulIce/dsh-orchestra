@@ -228,9 +228,9 @@ export function applyReport(
   if (report.status === 'failed' || report.status === 'timeout') {
     const terminal = traceBindingGate(tx, params, report, {
       allowFailed: true,
-      // failed 必须对一条失败行；timeout 可能是被杀死而没有失败行，但仍不许拿成功行
-      // 去盖住同 attempt 里已经出现的失败行（S2 第二十五轮 P1-2）。
-      requireFailure: report.status === 'failed',
+      // 失败与超时都必须对一条失败行：超时也要在账本里留下失败/被杀的工具痕迹，
+      // 只拿一条成功行收口会把超时盖过去（S2 第二十五轮 P1-2、第二十八轮 P2-1）。
+      requireFailure: true,
     })
     if (terminal.reason) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: terminal.reason, now: params.now })

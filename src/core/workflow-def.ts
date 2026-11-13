@@ -37,9 +37,23 @@ export function isKnownNodeType(type: string): type is NodeType {
   return Object.prototype.hasOwnProperty.call(NODE_CAPABILITY, type)
 }
 
+// 必留哈希是逐个键核对的：同一层里写重复键名会让要求数量看起来比实际多，
+// 以前由 Set 静默折叠（S2 第二十八轮 P2-2）。模板层与节点层各自不许重复，跨层取并集不变。
+function assertNoDuplicateRequiredHashes(owner: string, keys: readonly string[] | undefined): void {
+  const seen = new Set<string>()
+  for (const key of keys ?? []) {
+    if (seen.has(key)) {
+      throw new OrchError('WORKFLOW_VALIDATION_FAILED', '必留哈希键名重复，要求会被静默折叠', { owner, key })
+    }
+    seen.add(key)
+  }
+}
+
 // 加载期按 min_phase 拒越阶段能力：S2 加载 parallel 节点必须被拒（规格 2.4 行 122）
 export function assertDefinitionAllowed(def: WorkflowDefinition, phase: Phase): void {
+  assertNoDuplicateRequiredHashes('template', def.required_hashes)
   for (const node of def.nodes) {
+    assertNoDuplicateRequiredHashes(node.node_id, node.required_hashes)
     if (!isKnownNodeType(node.type)) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '未知节点类型', { node_id: node.node_id, type: node.type })
     }

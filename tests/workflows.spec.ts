@@ -54,6 +54,14 @@ describe('工作流版本不可变（第五轮审计 P1-1）', () => {
     expect(second.definitionHash('1')).toBe(first.definitionHash('1'))
   })
 
+  it('同一层重复必留哈希键名在加载期就拒（S2 第二十八轮 P2-2）', () => {
+    const catalog = new WorkflowCatalog('S2')
+    expect(() => catalog.load({ ...def, required_hashes: ['artifact', 'artifact'] }))
+      .toThrowError(/必留哈希键名重复/)
+    expect(() => catalog.load({ ...def, nodes: [{ ...def.nodes[0]!, required_hashes: ['artifact', 'artifact'] }] }))
+      .toThrowError(/必留哈希键名重复/)
+  })
+
   it('节点不在版本里 → SCHEMA_VERSION_UNSUPPORTED', () => {
     const catalog = new WorkflowCatalog('S2')
     catalog.load(def)

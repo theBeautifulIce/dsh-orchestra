@@ -373,6 +373,51 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(bodyConclusionOf(head + '上一轮审计未通过，结论：fail，本轮已整改。')).toBe('fail')
   })
 
+  it('S2 第二十八轮 P0-1/P0-2：结论行写 pass 时同义否定仍要拒绝', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '本次审计结论为未过。', '本次审计结论为否。', '本次审计结论为 faıl。',
+      '本次审计结论为未通过收口。', '本次审计结论为不获认同。', '本次审计结论为 unapproved。',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).toBeNull()
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    for (const line of negatives) expect(bodyConclusionOf(head + line), line).toBe('fail')
+    expect(auditConclusionOf(base + '本次审计结论为未过项为零，全部通过。')).toBe('pass')
+    const more = [
+      '本次审计结论为部分通过。', '本次审计结论为有条件通过。', '本次审计结论为待整改。',
+      '本次审计结论为暂缓。', '本次审计结论为未受理。', '本次审计结论为不接受。',
+      'The audit conclusion was negative.', 'The audit conclusion was unapproved.',
+    ]
+    for (const line of more) expect(auditConclusionOf(base + line), line).not.toBe('pass')
+    expect(auditConclusionOf(base + '历史记录：上一轮审计结论为未过，本轮已整改。')).toBe('pass')
+  })
+
+  it('S2 第二十七轮 P0-1/P0-2：报告宾语与英文否决/结论行都要拒绝', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '本次审计结论为拒收本报告。', '本报告未通过本次审计。', 'This audit rejects the report.',
+      'This audit denies the report.', 'The review declines the report.',
+      'The report was rejected.', 'The report did not pass.', 'This report was not approved.',
+      '审计组未予认可。', '报告未通过审核。', 'The review found the gate failing.',
+      'This report is not acceptable.', 'Approval was refused.', 'Audit verdict: rejected.',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).toBeNull()
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    for (const line of negatives) expect(bodyConclusionOf(head + line), line).toBe('fail')
+    // 英文结论行：值必须明确；正文里不带裁决的 Conclusion 叙述不能当正式结论。
+    expect(auditConclusionOf('CONCLUSION: FAIL')).toBe('fail')
+    expect(auditConclusionOf('Conclusion: fail')).toBe('fail')
+    expect(auditConclusionOf('Verdict: pass')).toBe('pass')
+    expect(auditConclusionOf('Outcome: PASS')).toBe('pass')
+    expect(auditConclusionOf('CONCLUSION — FAIL')).toBe('fail')
+    expect(auditConclusionOf('Audit Conclusion: PASS')).toBe('pass')
+    expect(auditConclusionOf('Result: fail')).toBe('fail')
+    expect(auditConclusionOf(base + 'Conclusion: the design is sound')).toBe('pass')
+    // 正文英文结论写 pass、同行尾巴再放 fail 时按 fail 收口。
+    expect(bodyConclusionOf('## 必过项与证据\n\nCONCLUSION: PASS (fail)')).toBe('fail')
+    expect(bodyConclusionOf('## 必过项与证据\n\nCONCLUSION: PASS')).toBe('pass')
+  })
+
   it('S2 第二十六轮 P0-1/P0-2：裸裁决词与繁體結論不能保留 pass', () => {
     const base = '结论：pass\n\n'
     const negatives = [
