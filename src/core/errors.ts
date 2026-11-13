@@ -89,26 +89,44 @@ export const ERROR_STATUS = {
 
 export type OrchErrorCode = keyof typeof ERROR_STATUS
 
+/** S2 提案码：尚未进规格 17.1，统一从 proposedError 出，details 带 proposed=true。 */
+export const PROPOSED_ERROR_CODES = {
+  LEASE_EXPIRED: 409,
+  BRIDGE_ACK_LAG: 409,
+} as const
+
+export type ProposedErrorCode = keyof typeof PROPOSED_ERROR_CODES
+
+export type AnyOrchErrorCode = OrchErrorCode | ProposedErrorCode
+
 const RETRYABLE: ReadonlySet<OrchErrorCode> = new Set([
   'QUERY_TIMEOUT', 'SERVICE_UNAVAILABLE', 'OPERATION_TIMEOUT', 'COMMAND_BUSY',
 ])
 
 export class OrchError extends Error {
-  readonly code: OrchErrorCode
+  readonly code: AnyOrchErrorCode
   readonly retryable: boolean
   readonly details: Record<string, unknown>
 
-  constructor(code: OrchErrorCode, message: string, details: Record<string, unknown> = {}) {
+  constructor(code: AnyOrchErrorCode, message: string, details: Record<string, unknown> = {}) {
     super(message)
     this.name = 'OrchError'
     this.code = code
-    this.retryable = RETRYABLE.has(code)
+    this.retryable = RETRYABLE.has(code as OrchErrorCode)
     this.details = details
   }
 
   get httpStatus(): number {
-    return ERROR_STATUS[this.code]
+    const known = ERROR_STATUS as Record<string, number>
+    if (this.code in known) return known[this.code]!
+    const proposed = PROPOSED_ERROR_CODES as Record<string, number>
+    return proposed[this.code] ?? 500
   }
+}
+
+/** 提案码统一从这里出，details 里一定带 proposed = true。 */
+export function proposedError(code: ProposedErrorCode, message: string, details: Record<string, unknown> = {}): OrchError {
+  return new OrchError(code, message, { ...details, proposed: true })
 }
 
 /** 非 OrchError 的异常统一折成 SERVICE_UNAVAILABLE，只留 message，不外泄堆栈。 */
@@ -130,7 +148,7 @@ export type FailEnvelope = {
   ok: false
   schema_version: 1
   as_of_seq: number
-  error: { code: OrchErrorCode; message: string; retryable: boolean; details: Record<string, unknown> }
+  error: { code: AnyOrchErrorCode; message: string; retryable: boolean; details: Record<string, unknown> }
 }
 
 export function okEnvelope(asOfSeq: number, data: unknown, now = new Date()): ReadEnvelope {

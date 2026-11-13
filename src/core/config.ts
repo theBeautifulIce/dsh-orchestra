@@ -34,10 +34,16 @@ export const configSchema = z.object({
     startup_timeout_ms: positiveInt(0),
     unknown_watchdog_ms: positiveInt(0),
     verify_timeout_ms: positiveInt(0),
+    // S2 追加：租约时长、心跳间隔、动作超时、取消宽限
+    lease_ttl_ms: positiveInt(1000),
+    lease_renew_interval_ms: positiveInt(500),
+    action_timeout_ms: positiveInt(1000),
+    cancel_grace_ms: positiveInt(1000),
   }).strict(),
   bridge: z.object({
     buffer_high_water_bytes: positiveInt(1024),
     buffer_limit_bytes: positiveInt(1024),
+    spill_dir: z.string().min(1),
   }).strict(),
   retention: z.object({
     receipt_days: positiveInt(1),
@@ -52,6 +58,9 @@ export const configSchema = z.object({
 }).strict().superRefine((cfg, ctx) => {
   if (cfg.bridge.buffer_high_water_bytes >= cfg.bridge.buffer_limit_bytes) {
     ctx.addIssue({ code: 'custom', path: ['bridge', 'buffer_high_water_bytes'], message: '必须小于 buffer_limit_bytes' })
+  }
+  if (cfg.execution.lease_renew_interval_ms >= cfg.execution.lease_ttl_ms) {
+    ctx.addIssue({ code: 'custom', path: ['execution', 'lease_renew_interval_ms'], message: '心跳间隔必须小于租约时长' })
   }
 })
 
