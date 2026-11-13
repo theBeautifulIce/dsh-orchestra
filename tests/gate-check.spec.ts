@@ -400,6 +400,8 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
       'The report was rejected.', 'The report did not pass.', 'This report was not approved.',
       '审计组未予认可。', '报告未通过审核。', 'The review found the gate failing.',
       'This report is not acceptable.', 'Approval was refused.', 'Audit verdict: rejected.',
+      '本次审计不推荐通过本报告。', '不予采信本报告。', '不建议通过本报告。',
+      '结论为：不予推荐。', 'This audit does not recommend the report.', '未予推荐本报告。',
     ]
     for (const line of negatives) expect(auditConclusionOf(base + line), line).toBeNull()
     const head = '结论：pass\n\n## 必过项与证据\n\n'
