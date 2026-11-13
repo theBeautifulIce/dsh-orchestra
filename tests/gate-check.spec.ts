@@ -227,4 +227,18 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('建议：不通过')).toBe('fail')
     expect(auditConclusionOf('# 没有结论行')).toBeNull()
   })
+
+  it('结论后不许带“通过率”这类未收口的后缀（第七轮审计 P1-1）', () => {
+    expect(auditConclusionOf('结论：通过率 60%，未达门槛')).toBeNull()
+    expect(auditConclusionOf('结论：fail 但仍有风险未排除')).toBeNull()
+    expect(auditConclusionOf('结论：pass 的把握不到一半')).toBeNull()
+    expect(auditConclusionOf('结论：pass。')).toBe('pass')
+    expect(auditConclusionOf('结论：**fail**。')).toBe('fail')
+  })
+
+  it('围栏代码块里的示例结论不参与判定（第七轮审计 P1-1）', () => {
+    expect(auditConclusionOf('正文\n\n```md\n结论：pass\n```\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('~~~\n结论：pass\n~~~')).toBeNull()
+    expect(auditConclusionOf('```\n结论：fail\n```\n\n结论：pass')).toBe('pass')
+  })
 })

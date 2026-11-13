@@ -175,7 +175,8 @@ async function runNodeActions(
       })
       // 落库前必须核对命令哈希，核不上就不许当证据（规格 7.2 行 588）
       const descriptor = deps.registry.require(tool.command)
-      const args = tool.args.length > 0 ? tool.args : descriptor.command.args
+      // 期望哈希必须与 runner 实际执行的 argv 同源：请求里的 args 不覆盖注册表参数，也不能拿来算哈希
+      const args = descriptor.command.args
       // 期望哈希用执行器实际解析过的绝对 cwd，和 runner 落证据时同一口径
       assertCommandHash(out.evidence, commandHashOf(descriptor.command.bin, args, resolveInside(deps.runner.root, tool.cwd), deps.runner.root))
       evidence = out.evidence

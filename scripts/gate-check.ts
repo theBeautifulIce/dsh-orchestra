@@ -475,11 +475,21 @@ function checkPreviousChain(artifact: Record<string, unknown>, spec: GateSpec, r
 // 「门记录结论：pass」这类行内引用不算结论；多个不同结论视为没结论，不能拿它签门（第六轮审计 P0-1）
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   const found = new Set<'pass' | 'fail'>()
+  let inFence = false
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim().replace(/^#{1,6}\s*/, '').replace(/^\*\*/, '').trim()
-    let m = /^(?:审计)?(?:结论|判定)\s*\**\s*[：:]\s*\**\s*(pass|fail|通过|不通过)(?![a-zA-Z])/i.exec(line)
-    if (!m) m = /^(pass|fail|通过|不通过)$/i.exec(line)
-    if (!m) m = /^建议\s*[：:]\s*\**\s*(不通过|通过)$/.exec(line)
+    const trimmed = rawLine.trim()
+    // 围栏代码块里的“结论：pass”是示例，不是报告结论（第七轮审计 P1-1）
+    if (/^(```|~~~)/.test(trimmed)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    const line = trimmed.replace(/^#{1,6}\s*/, '').replace(/^\*\*/, '').trim()
+    // 结论 token 后只许：可选加粗、句末标点、括号补充、破折号解释，然后必须行尾
+    const tail = '(?:\\*\\*)?\\s*(?:[。．.！!？?；;，,、]\\s*)?(?:[（(][^）)]*[）)])?\\s*(?:[—–-].*)?$'
+    let m = new RegExp('^(?:审计)?(?:结论|判定)\\s*\\**\\s*[：:]\\s*\\**\\s*(pass|fail|通过|不通过)' + tail, 'i').exec(line)
+    if (!m) m = new RegExp('^(pass|fail|通过|不通过)' + tail, 'i').exec(line)
+    if (!m) m = new RegExp('^建议\\s*[：:]\\s*\\**\\s*(不通过|通过)' + tail).exec(line)
     if (!m) continue
     const raw = m[1] ?? ''
     found.add(raw === 'pass' || raw === '通过' ? 'pass' : 'fail')

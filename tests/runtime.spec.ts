@@ -52,7 +52,8 @@ describe('生产路径跑通单节点', () => {
       { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
-        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        // 请求里的 args 只是形状字段，执行与哈希都必须以注册表定义为准（第七轮审计 P2）
+        tools: [{ command: 'ro.echo', args: ['ignored'], cwd: '.', timeoutMs: 5000 }],
         now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
       },
     )
