@@ -351,6 +351,8 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('结论：pass\n\n结**论**：fail')).toBeNull()
     expect(auditConclusionOf('结论：pass\n\n[结论](https://example.com)：fail')).toBeNull()
     expect(auditConclusionOf('结论：pass\n\n[结论][r]：fail\n\n[r]: https://example.com')).toBeNull()
+    // 普通含链接的说明段里出现“结论”二字，不应被误毒化。
+    expect(auditConclusionOf('结论：pass\n\n见[证据](https://example.com)，这里讨论结论。')).toBe('pass')
   })
 
   it('HTML 实体渲染后的可见结论也要参与判定（S1 第十五轮补）', () => {

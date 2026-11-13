@@ -806,6 +806,25 @@ function stripCdataSpansForInspection(lines: string[]): string[] {
 // 链接目标、title、图片 alt 与引用定义都不参与正文渲染，里面写标签也不能生效。
 // 这些结构都只能在同一个段落内跨行（CommonMark 不允许空行），所以按段落整体隐藏：
 // 宁可把同段的可见文字也藏掉，也不把渲染器隐藏的结论放进来（fail-closed）。
+function visibleTextOfLinkParagraph(text: string): string {
+  const kept: string[] = []
+  let inDefinition = false
+  for (const line of text.split('\n')) {
+    if (/^[ \t]*(?:>[ \t]*)*\[[^\]]+\]:/.test(line)) {
+      inDefinition = true
+      continue
+    }
+    if (inDefinition && /^[ \t]+/.test(line)) continue
+    inDefinition = false
+    kept.push(line)
+  }
+  return kept.join('\n')
+    .replace(/!\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+    .replace(/\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+    .replace(/\[([^\]]*)\]\[[^\]]*\]/g, '$1')
+    .replace(/\[([^\]]*)\]/g, '$1')
+}
+
 function maskAuditLinkDestinations(text: string): { masked: string; poisoned: boolean } {
   const lines = text.split('\n')
   const inspectionLines = stripCdataSpansForInspection(lines)
@@ -824,20 +843,15 @@ function maskAuditLinkDestinations(text: string): { masked: string; poisoned: bo
         }
       }
       if (hide) {
-        for (let k = start; k < i; k += 1) {
-          const line = lines[k]!
-          const inspected = inspectionLines[k]!
-          lines[k] = blankPreservingLines(line)
-          // 整段隐藏会把同一段里任何结论行一起藏掉，包括可见的 fail 与写坏的结论行。
-          // 只要藏掉的是结论行（不论 pass/fail/无法解析），就补一行无取值结论，
-          // 让 auditConclusionOf 判为不可判定，避免另一段的 pass 把可见 fail 洗掉（fail-closed）。
-          const normalized = normalizeAuditLine(inspected)
-          // 被藏掉的结论行必须自己也是干净的 pass 才能放行；fail、写坏的尾巴、
-          // 无法解析的结论都毒掉，避免另一段 pass 把可见 fail 或歧义洗掉（fail-closed）。
+        // 先按渲染后的可见文字重建这一段：链接只保留 label，目标/title 丢弃。
+        // 这样 `[结论](url)：fail` 会还原成 `结论：fail`，而普通含链接的说明段
+        // 不会因为出现“结论”二字就被误毒化。
+        const visible = visibleTextOfLinkParagraph(inspectionLines.slice(start, i).join('\n'))
+        for (let k = start; k < i; k += 1) lines[k] = blankPreservingLines(lines[k]!)
+        for (const line of visible.split('\n')) {
+          const normalized = normalizeAuditLine(line)
           const cleanPass = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:pass|通过)(.*)$/i.exec(normalized)
-          // 链接掩码会把整段藏掉；只要段里出现结论词，就不许另一段 pass 过门。
-          // 不能要求“结论”后紧跟冒号：`[结论](url)：fail` 的冒号在链接语法之后。
-          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)/i.test(inspected)
+          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/i.test(normalized)
           if (hasConclusionText) {
             if (cleanPass === null || !validConclusionTail(cleanPass[1] ?? '', 'pass')) poisoned = true
           } else if (/^(?:fail|不通过)$/i.test(normalized)) {
