@@ -524,3 +524,24 @@ S2 第十一轮（docs/audits/S2-independent-audit-round11.md，354 行）判 fa
 验收：解析器定向 11 例全过；tsc --noEmit exit 0；全量 32 文件 / 299 例，289 passed / 10 failed，10 红仍全在 tests/gate-check.spec.ts，首因 G1 audit_report_sha256=0，属待签。S1 第七轮因 HEAD 即将更新已中断，未出报告；它的审计对象 153353a 已过期。
 
 下一步：提交围栏修复、测试与 S2 第十一轮报告 → 重新派 S1 第八轮（docs/audits/S1-independent-audit-round8.md）与 S2 第十二轮（docs/audits/S2-independent-audit-round12.md）独立审计 → 两份 pass 后按 G1 audit_round=8 / G2 audit_round=12 重签、双门 exit 0、全量 299/299，再开 S3。任何一份 fail 都回表整改，不重签、不开 S3。
+
+
+### 11.19 S1 第九/十轮、S2 第十二/十三轮与“原始 HTML 一律拒绝”（2026-11-13 22:40，HEAD 9598462）
+
+S1 第九轮（docs/audits/S1-independent-audit-round9.md）fail：P0=0 / P1=1 / P2=5。P1-1 是隐藏文本仍三种绕过：嵌套 details、引用块内四空格、空格+Tab 缩进；克隆里 sign-gate 与 gate-check 均可 exit 0。P2-1..P2-5 已复核：G-08 缺 503/warning 原文、写者锁无直接测试、events 表无 append-only 触发器、迁移缺号无测试、签后测试两例（CLI 围栏查找与 audit_round 自指）。
+
+该轮 P2 全部闭合：scripts/fault-inject.ts 的 caseG08 增加 HTTP 队列满探针（第二笔 503 SERVICE_UNAVAILABLE + warn 原文）；tests/db-open.spec.ts 增加第二把写者锁 ELOCKED；新增 src/infra/sqlite/migrations/005_append_only_events.sql（events BEFORE UPDATE/DELETE RAISE(ABORT)），默认迁移变 [1,2,3,4,5]；src/infra/db/migrate.ts loadSteps 增加编号连续性校验（001+003 负例入 tests/migrate.spec.ts）；tests/gate-check.spec.ts 修 CRLF 与 audit_round+1 自指。提交 9a44739「Close hidden audit conclusions and migration gaps」，12 文件 +275/−29。
+
+S1 第十轮（docs/audits/S1-independent-audit-round10.md）fail：P0=0 / P1=2 / P2=0。P1-1 行内代码/链接/缩进代码里的字面闭合标签让 details 提前闭合（scripts/gate-check.ts:637/:643-654）；P1-2 stripHiddenAuditBlocks 没清 <?...?>、<!DOCTYPE>、<![CDATA[[]]>，jsdom 下不可见但解析器仍把其中 pass 当顶层结论。第九轮三种基础绕过已闭合，绑定/祖先/candidate..HEAD diff/不变量固定口径均未被破坏。
+
+S2 第十二轮（docs/audits/S2-independent-audit-round12.md）pass：P0=0 / P1=0 / P2=9。19 项/19 证据/58 候选；ev-g2-12..15 复跑字节与 sha256 全一致；模拟重签后 G2 gate-check exit 0。报告 19216 字节，sha256=23c569301794fbb76ec3fbef35146c4611790d9a8bc3e3798cba57465f5a05b2。
+
+S2 第十三轮（docs/audits/S2-independent-audit-round13.md）fail：P0=0 / P1=1 / P2=9+新增 P2-10。P1-1 是 stripHiddenAuditBlocks 无条件剥掉整个 details/pre/script/style/template，不看 details open、不保留 summary；div hidden / style=display:none 也不识别。克隆中 details open 可见 fail + 块外可见 pass 仍被解析成 pass，sign-gate 与 gate-check 均 exit 0。P2-10：签后往 evidence 追加一行可绕过（docs/gates 在 spec.excludes 内，候选 diff 不覆盖证据）。
+
+本轮定案：审计报告只接受纯 Markdown，不再猜 HTML 可见性。stripHiddenAuditBlocks 先掩码围栏代码、缩进代码、行内代码、链接目标与 title、HTML 注释、处理指令、CDATA、DOCTYPE；之后仍出现原始 HTML 起始标记就返回哨兵，结论解析为 null，sign-gate 在写盘前拒绝整份报告（fail-closed）。占位符应写反引号或 HTML 实体。
+
+端到端攻击（临时 clone，已删除）：攻击报告可见正文写“本报告结论为不通过”，details open 内藏“结论：pass”，G1 指向它。sign-gate exit 1，错误原文“Error: 审计报告里找不到唯一结论行，不能拿它当门记录依据: docs/audits/S1-independent-audit-round11-attack.md”，G1 前后字节不变。阳性对照：同一 clone 换纯 Markdown pass 报告，sign-gate exit 0（artifact_hash=2eddede1c798…，body_hash=f742b9d513f9…，90 个候选文件），提交签后 G1 后 gate-check exit 0（13 项必过、13 份证据）。证明 fail-closed 不是把正常报告也一刀切。
+
+验收（主仓库）：tsc --noEmit exit 0；全量 32 文件 / 308 例，297 passed / 11 failed；11 红全在 tests/gate-check.spec.ts，首因 G1 门记录 audit_report_sha256 仍为 64 个 0（预签态），无解析器回归。提交 9598462「Reject raw HTML in audit report conclusions」，4 文件 +597/−31，含 S1-round10 与 S2-round13 两份报告。
+
+下一步：S1 第十一轮（docs/audits/S1-independent-audit-round11.md）与 S2 第十四轮（docs/audits/S2-independent-audit-round14.md）独立审计已派出（S1 7fd39d7a-ac2d-4987-ae37-4e2e449e565d、S2 713ecf5c-5e33-407a-ad68-8f16b6d328ad）。两份都 pass 后：提交两份报告 → 改 G1 audit_round=11 / audit_report=S1-independent-audit-round11.md，改 G2 audit_round=14 / audit_report=S2-independent-audit-round14.md，审计 sha 清零 → 提交 → sign-gate G1、提交 → sign-gate G2、提交 → 双门 gate-check exit 0 且全量 308/308 → 开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
