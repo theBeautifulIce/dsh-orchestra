@@ -43,7 +43,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test && pnpm build",
-    "gate": "tsx scripts/gate-check.ts"
+    "gate": "node --no-warnings scripts/gate-check.ts"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",

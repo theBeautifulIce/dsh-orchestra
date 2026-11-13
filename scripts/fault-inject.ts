@@ -1,7 +1,7 @@
 // G1 故障注入：每条都留下注入参数、前后账本片段、恢复后对账查询（规格 12.3 行 1077）
 // 用法：node scripts/fault-inject.ts --case G-01   （Node 26 直接跑 TS）
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -24,7 +24,7 @@ export type InjectionResult = {
 
 export function writeEvidence(dir: string, result: InjectionResult): void {
   mkdirSync(dir, { recursive: true })
-  appendFileSync(join(dir, result.case + '.md'),
+  writeFileSync(join(dir, result.case + '.md'),
     '# ' + result.case + '\n\n- 参数：' + JSON.stringify(result.params) + '\n'
     + '\n## 注入前账本片段\n\n```\n' + result.before + '\n```\n'
     + '\n## 恢复后账本片段\n\n```\n' + result.after + '\n```\n'

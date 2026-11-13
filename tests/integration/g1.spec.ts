@@ -1,14 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { join } from 'node:path'
-import { runCase, writeEvidence, type InjectionCase } from '../../scripts/fault-inject.ts'
+import { runCase, type InjectionCase } from '../../scripts/fault-inject.ts'
 
-const EVIDENCE = join(process.cwd(), 'docs/gates/evidence/G1')
 const TIMEOUT = 60000
 
 async function run(name: InjectionCase) {
-  const out = await runCase(name)
-  writeEvidence(EVIDENCE, out)
-  return out
+  return runCase(name)
 }
 
 describe('G1 故障注入', () => {
