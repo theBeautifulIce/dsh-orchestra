@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-13 12:05。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-13 13:22。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -27,7 +27,7 @@
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
 | 参考项目 `references/` | 三份已克隆并建图谱 |
-| **源码** | **没有。还没开始写。** |
+| **源码** | S1 账本地基 + S2 单节点闭环已完成（`4f3ada7` → `ca8cea3`，37 文件 +3145/−16）：`src/core/`（errors/config/canonical/ids/hash-chain/state-machine/report/policy/clock/workflow-def）、`src/infra/`（sqlite、db、lock、logger、backup、service-state、迁移 001/002）、`src/service/`（server、envelope、write-queue、queries、commands/{lease,node-state,apply-report,cancel}、sweep）、`src/executor/`（bridge、tools、session）、`scripts/`（fault-inject、gate-check、sign-gate）、`tests/`（27 spec、211 用例）；G1、G2 门记录均已通过机器复核 |
 | 面板原型 `docs/prototype/panel-v2.html` | v20 单文件浅色原型（核心指挥台：主脑卡 + 支线卡；有事的支线展开、健康支线默认收起；数字等于列表长度；任务卡、抽屉、支线卡状态句同源；任务流内含「执行注意事项」页）；任务看板、任务流程三栏、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；无彩色左侧色条、无可见优先级标签，全部可见字号 ≥12.5px（导航 13px），四档宽度无页面溢出；任务页可按状态与时间段筛选，归档箱只收起不改历史、可随时取回；流程库是一行可搜下拉（按名称 / 说明 / 负责人 / 触发方式 / 版本 / 发布状态查），不再横排铺标签 |
 | 图谱 | `pi-harnessmm` 124/294、`dsh-superagent-prototype` 2012/8492、`DS-Bot` 10539/33229、`dsh-orchestra-docs` 97/96 |
 
@@ -289,4 +289,21 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 **轻微项**：handoff 的 13 spec → 14；G-01 证据里的临时目录统一写成 `<tmp>`；/v1/events 单页上限 500 → 200，与 `EVENTS_LIMIT_MAX` 一致；游标接进 /v1/events（`cursor` 参数与 `next_cursor`），并对「签发时间在未来」的游标报 `CURSOR_EXPIRED`。
 
 **复验**：`pnpm check` 全绿（14 spec / 100 用例），`pnpm gate` 通过；G1 重签为 `0dff4bf33d94…`。
+
+### 11.7 S2 单节点闭环已完成（2026-11-13 13:21，提交 `ca8cea3` 收口）
+
+**提交链**（`4f3ada7` 之后）：`a48d4de` 账本扩展迁移 002 → `a2f6491` 桥 RPC 七方法 → `05d5eb5` 桥事件缓冲与断号重取 → `e23079c` 工具注册表与前向能力推导 → `130fc40` runTool 强证据 → `a27d148` 租约获取/续期/过期扫描 → `840290b` agent 执行器与输出三件套 → `302d222` 节点状态机（20 键、Ga/Gr 分离）→ `7131316` applyReport 六步 → `11f94b2` 证据门与判定规则 → `6143f7d` 取消四值与超时围栏 → `c9399ac` 单调时钟与维护扫描 → `a1a75bb` S2 阶段开关 → `ca8cea3` G2 用例与四条故障注入 → `d844a0e` G2 门记录与十一条证据。
+
+**落地面**：`src/executor/bridge.ts`（事件缓冲、spill、gap 整页重取、`toolStartAnchor`）、`src/executor/tools.ts`（ToolRegistry、`deriveEffectiveCapability`、`resolveDeclaredPolicy`、`ReadOnlyToolRunner.runTool`、`commandHashOf`、`assertCommandHash`）、`src/executor/session.ts`（工具白名单/黑名单、64 KiB 载荷上限、800 字摘要、`inheritHistory:false`）、`src/service/commands/lease.ts`、`node-state.ts`、`apply-report.ts`、`cancel.ts`、`src/service/sweep.ts`、`src/core/state-machine.ts`、`report.ts`、`policy.ts`、`clock.ts`、`workflow-def.ts`。
+
+**验收（全 exit 0）**：`pnpm check` 全绿（typecheck 0 错 / 27 spec / 211 用例 passed；build `lib/index.js` 0.10 kB、`lib/index.d.ts` 0.10 kB、`lib/client.js` 0.29 kB）；`node scripts/gate-check.ts docs/gates/G2.md` 输出「gate G2 通过（11 项必过、11 份证据哈希复核，artifact_hash=825c6727e55f…）」；G1 因候选范围变化联动重签，`artifact_hash=bf64eba9e608…`，同样复核通过。
+
+**G2 门记录**：`docs/gates/G2.md`，11 项必过为 G2-01..G2-07（单节点 queued→done 三步、重复上报只落一次、租约过期迟到被拒、取消不产生新 attempt、终态必带证据、无裸 blocked、S2 加载 parallel 被拒）与 G-03/G-04/G-05/G-07 四条 S2 故障注入；四条不变量 I1 终态唯一 / I2 账本只追加 / I3 CAS 无副作用 / I4 终态必有证据；证据 11 份在 `docs/gates/evidence/G2/`，硬编码口径写在本批定值表（租约 30 秒、续期 10 秒、动作超时 120 秒、取消宽限 30 秒、桥缓冲 8 MiB / 高水位 4 MiB、`run_tool` 强证据 / `tool_result` 弱证据、`report_seq` 每个 node_run 从 1 起、写队列 1000、回执保留 7 天）。
+
+**计划偏离三处**：① 先写 `src/core/policy.ts` 再写 `apply-report.ts`（六步里要调证据门）；② 计划里的 `rejectReport` 漏了 `now` 参数，导致 `report_registry.created_at` NOT NULL 失败，六个调用点已补；③ Task 14 的 g2 用例把「无裸 blocked」限定 `node_run_id LIKE 'nrun_%'`，因为 S1 seed 的 `nr1` 是遗留 running 夹具，不在 20 键枚举内。
+
+**S2 未覆盖、留给 S3 的**：九节点类型与 `parallel`/`subworkflow` 的调度、决定节点与 inbox、自治档位、面板接真实账本。**S2 禁止项全程未碰**：没有发布流程定义、没有记忆裁判桥、没有面板写入。
+
+**下一步**：按主人要求交独立子代理做 S2 审计（不自测），审计报告落 `docs/audits/S2-independent-audit.md`，结论写进票 #9；审计过再开 S3。
+
 
