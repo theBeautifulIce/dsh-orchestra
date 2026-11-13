@@ -709,6 +709,8 @@ const FAIL_CONNECTORS = [
   '最终结论', '最终判定', 'conclusions', 'conclusion', 'outcome',
   '结果', '结论', '結論', '判定', '意见', '经过', '审计', '审核', '复核', '评审', 'verdict', 'verdicts', '建议', '建議', '推荐', '推薦',
   '报告', '報告', '最终', '最終', '依然', '还是', '总的', 'results', 'result', 'report', 'review', 'approval',
+  // 整改/修复/收口是完成度陈述的中间词：本报告整改尚未完成（S1 第二十三轮 P1-2）。
+  '整改', '整改工作', '修复', '修复工作', '收口', 'remediation', 'remediations',
   '審計', '審核', '復核', '評審', '結果', '意見',
   'audit', 'was', 'were', 'has', 'have', 'had', 'been', 'did', 'does', 'do',
   'is', 'are', 'to', 'the', 'a', 'an', '经', '后', '仍', '为', '為', '是', '的',
@@ -730,6 +732,8 @@ const HOMOGLYPHS: Record<string, string> = {
   'і': 'i', 'ј': 'j', 'ѕ': 's', 'ԁ': 'd', 'һ': 'h', 'ӏ': 'l',
   // 无点 i 不是同形折叠能覆盖的：NFKC 保留 ı，词表匹配不到 fail（S2 第二十八轮 P0-1）。
   'ı': 'i',
+  // ß 不是 NFKC 折叠能覆盖的同形字：paß 会绕过 pass 词表（S1 第二十三轮 P2-2）。
+  'ß': 'ss',
   'α': 'a', 'ο': 'o', 'ρ': 'p', 'ν': 'v', 'κ': 'k', 'χ': 'x', 'ι': 'i',
   'ε': 'e', 'τ': 't', 'υ': 'u', 'γ': 'y',
 }
@@ -779,17 +783,20 @@ const FAIL_NEGATIONS = [
   'is not', 'isnt', 'has not', 'hasnt', 'have not', 'havent', 'does not', 'doesnt',
   'will not', 'wont', 'do not', 'dont', 'cannot', 'cant', 'never',
   '无法', '没能', '没有', '未能', '未获', '未予', '不予', '不获', '不得', '不能', '不可',
-  '不是', '并非', '遭', '被', '未', '不', '没', '无', 'not', 'no',
+  '尚未', '还没', '還沒', '暂未', '暫未', '仍未', '从未', '從未', '并未', '並未',
+  '不是', '并非', '並非', '遭', '被', '未', '不', '没', '沒', '无', '無', 'not', 'no',
 ].sort((a, b) => b.length - a.length)
 const FAIL_FILLERS = [
   'be able to', 'able to', '得到', '获得', '予以', '能够', '达到', '经过',
-  '获', '能', '准予', '被', 'be', 'to', 'the', 'a',
+  '获', '獲', '能', '准予', '被', 'be', 'to', 'the', 'a', 'yet', 'been',
 ].sort((a, b) => b.length - a.length)
 const FAIL_PASS_STEMS = [
   '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
   '否决', '驳回', '拒绝', 'approval', 'approved', 'approve', 'passing', 'passed',
   'succeed', 'succeeded', 'success', 'accepted', 'accept', 'pass', 'meet', 'met',
   'approving', 'granted', 'granting', 'acceptable', '采纳', '採納',
+  // 完成度本身也是可被否定的谓词：整改尚未完成 / remediation is not complete（S1 第二十三轮 P1-2）。
+  '完成', 'complete', 'completed', 'completion',
   // “不获认同”这类谓词不在旧表里（S2 第二十八轮 P0-1）。
   '认同', '認同', '赞同', '贊同', '首肯', '受理', '接收', '接受',
   // 推荐/建议/采信/支持/背书同样是可被否定的肯定谓词（S2 第二十九轮 P0）。
@@ -799,7 +806,9 @@ const FAIL_PASS_STEMS = [
   // 繁體谓词（S1 第二十一轮 P0-1）。
   '通過', '達標', '過關', '許可', '認可', '否決', '駁回', '拒絕', '獲批', '获批',
 ].sort((a, b) => b.length - a.length)
-const FAIL_OBJECTS = ['验收', '标准', '审批', '评审', '审核', '考核', '许可', '批准', '认可',
+const FAIL_OBJECTS = ['最终验收', '最终驗收', '专家评审', '專家評審', '专家复核', '專家復核',
+  '验收', '标准', '审批', '评审', '审核', '复核', '复查', '复审', '审查', '核查', '确认', '考核', '许可', '批准', '认可',
+  '驗收', '標準', '審批', '評審', '審核', '復核', '復查', '復審', '審查', '核查', '確認', '許可', '認可',
   '通过', '通過',
   // 否决的宾语也可以是报告本身或本次审计（S2 第二十七轮 P0-1）。
   '本次独立审计', '本次审计', '本轮审计', '本审计', '审计组', '审计小组', '本报告', '该报告', '此报告', '报告本身', '报告',
@@ -938,12 +947,20 @@ const HISTORICAL_NEG_RE = new RegExp(
     .sort((a, b) => b.length - a.length).map(regexEscape).join('|'),
   'i',
 )
+// 历史锚本身是“通过”时，匹配段里的第一个否定属于当前轮，不能当历史否定截掉
+// （S1 第二十三轮 P0-1：上一轮已通过，本报告未通过验收）。
+const HISTORICAL_POSITIVE_RE = /通过|通過|passing|passed|approved?/i
 function stripHistoricalRemediation(text: string): string {
   let out = text
   for (const re of HISTORICAL_REMEDIATION_RES) {
     out = out.replace(re, (match) => {
       const negative = HISTORICAL_NEG_RE.exec(match)
-      if (negative) return match.slice(negative.index + negative[0].length)
+      if (negative) {
+        const before = match.slice(0, negative.index)
+        // 历史锚已经是通过态：否定只能算当前轮，整段保留给统一扫描器。
+        if (HISTORICAL_POSITIVE_RE.test(before)) return match
+        return match.slice(negative.index + negative[0].length)
+      }
       // 没识别出历史否定时不整段删除，避免豁免范围失控。
       return match
     })

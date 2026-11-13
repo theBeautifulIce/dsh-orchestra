@@ -392,6 +392,33 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf(base + '历史记录：上一轮审计结论为未过，本轮已整改。')).toBe('pass')
   })
 
+  it('S1 第二十三轮 P0/P1：历史通过锚、裁决宾语、副词前缀与完成度都要拒绝', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '上一轮审计已通过，本报告未通过验收，本轮已整改。',
+      '上一轮审计结论为通过，本次审计未通过复核，本轮已修复。',
+      '上一轮审计已通过，本报告被驳回，本轮已整改。',
+      '上一轮审计已通过，结论：fail，本轮已整改。',
+      'The previous audit was recorded as passing; this audit does not pass; this round is fixed.',
+      '本报告未通过复核。', '本报告未通过最终验收。', '本次审计未通过专家评审。',
+      '本报告尚未通过。', '本报告还没通过。', '本报告暂未通过。', '本报告尚未获批。',
+      '本报告整改尚未完成。', '本轮整改仍未完成。',
+      'This audit remediation is not complete.', 'The audit remediation is not complete.',
+      'This audit has not yet passed.', 'This audit has not yet been approved.',
+      '本报告未通過复核。', 'This audit does not paß.',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).toBeNull()
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    for (const line of negatives) expect(bodyConclusionOf(head + line), line).toBe('fail')
+    for (const safe of [
+      '历史记录：上一轮审计未通过，本轮已整改。',
+      '上一轮审计未通过，本轮已整改。',
+      'round20 审计结论为 fail，本轮已整改。',
+      '本次审计结论为未过项为零，全部通过。',
+      '未通过项为 0，结论：pass。',
+    ]) expect(auditConclusionOf(base + safe), safe).toBe('pass')
+  })
+
   it('S2 第二十七轮 P0-1/P0-2：报告宾语与英文否决/结论行都要拒绝', () => {
     const base = '结论：pass\n\n'
     const negatives = [
