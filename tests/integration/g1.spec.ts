@@ -39,6 +39,7 @@ describe('G1 故障注入', () => {
   it('G-15 备份被截断能检出、恢复被拒、线上库不变', async () => {
     const out = await run('G-15')
     expect(out.reconcile).toContain('截断')
-    expect(out.reconcile).toContain('线上库')
+    expect(out.reconcile).toContain('恢复被拒：true')
+    expect(out.reconcile).toContain('线上库未变：true')
   }, TIMEOUT)
 })

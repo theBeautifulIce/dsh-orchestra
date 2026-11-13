@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { OrchError, failEnvelope, okEnvelope, toOrchError } from '../core/errors.ts'
 import { sha256Hex } from '../core/canonical.ts'
 import { type Logger, nullLogger } from '../infra/logger.ts'
+import { WriteQueue } from './write-queue.ts'
+import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 
 export type ServerDeps = {
   secret: string
@@ -13,6 +15,7 @@ export type ServerDeps = {
   listEvents: (fromSeq: number, limit: number) => unknown[]
   appendLedgerEvent: (body: unknown, actor: string) => { seq: number; event_id: string }
   log?: Logger
+  queue?: WriteQueue
 }
 
 const MAX_BODY_BYTES = 1024 * 1024
@@ -60,7 +63,7 @@ const intParam = (url: URL, name: string, fallback: number): number => {
   return n
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDeps): Promise<void> {
+async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDeps, queue: WriteQueue): Promise<void> {
   const log = deps.log ?? nullLogger
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
   try {
@@ -76,14 +79,22 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/events') {
-      const fromSeq = intParam(url, 'from_seq', 0)
-      const limit = Math.min(intParam(url, 'limit', 100), 500)
-      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: deps.listEvents(fromSeq, limit) }))
+      // 游标与 from_seq 二选一；游标按 kind=events、无过滤条件绑定（规格 8.3 行 638）
+      const rawCursor = url.searchParams.get('cursor')
+      const fromSeq = rawCursor === null
+        ? intParam(url, 'from_seq', 0)
+        : Number(decodeCursor(rawCursor, 'events', {}).last_key)
+      if (!Number.isInteger(fromSeq) || fromSeq < 0) throw new OrchError('CURSOR_EXPIRED', '游标里的位置不合法', { cursor: rawCursor })
+      const limit = Math.min(intParam(url, 'limit', 100), 200)
+      const rows = deps.listEvents(fromSeq, limit)
+      const last = rows.length === 0 ? null : (rows[rows.length - 1] as { seq?: number }).seq
+      const nextCursor = typeof last === 'number' ? encodeCursor(makeCursor('events', {}, String(last), '', deps.asOfSeq())) : null
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: rows, next_cursor: nextCursor }))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/ledger/events') {
       const body = await readJsonBody(req)
-      const out = deps.appendLedgerEvent(body, actor)
+      const out = await queue.run(() => deps.appendLedgerEvent(body, actor))
       sendJson(res, 200, okEnvelope(out.seq, { seq: out.seq, event_id: out.event_id, actor }))
       return
     }
@@ -96,7 +107,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
 }
 
 export function startServer(deps: ServerDeps): Promise<{ endpoint: string; close: () => Promise<void>; server: Server }> {
-  const server = createServer((req, res) => { void handle(req, res, deps) })
+  const queue = deps.queue ?? new WriteQueue(1000, deps.log ?? nullLogger)
+  const server = createServer((req, res) => { void handle(req, res, deps, queue) })
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {

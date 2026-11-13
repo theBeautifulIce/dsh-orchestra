@@ -34,6 +34,9 @@ export function decodeCursor(raw: string, kind: string, filter: unknown, now = D
   if (sha256Hex(canonicalJson(filter)) !== c.filter_hash) {
     throw new OrchError('CURSOR_FILTER_MISMATCH', '过滤条件变了，游标要重来', { kind })
   }
+  if (c.issued_at > now + 60_000) {
+    throw new OrchError('CURSOR_EXPIRED', '游标签发时间在未来，不认', { kind })
+  }
   if (now - c.issued_at > CURSOR_TTL_MS) {
     throw new OrchError('CURSOR_EXPIRED', '游标过期了', { kind })
   }

@@ -24,8 +24,11 @@ export type InjectionResult = {
 
 export function writeEvidence(dir: string, result: InjectionResult): void {
   mkdirSync(dir, { recursive: true })
+  // 临时目录每次跑都不一样：证据里统一写成 <tmp>，别让失效路径进账
+  const escapedTmp = JSON.stringify(tmpdir()).slice(1, -1)
+  const params = JSON.stringify(result.params).split(escapedTmp).join('<tmp>')
   writeFileSync(join(dir, result.case + '.md'),
-    '# ' + result.case + '\n\n- 参数：' + JSON.stringify(result.params) + '\n'
+    '# ' + result.case + '\n\n- 参数：' + params + '\n'
     + '\n## 注入前账本片段\n\n```\n' + result.before + '\n```\n'
     + '\n## 恢复后账本片段\n\n```\n' + result.after + '\n```\n'
     + '\n## 对账查询\n\n```\n' + result.reconcile + '\n```\n', 'utf8')
@@ -228,8 +231,9 @@ async function caseG15(): Promise<InjectionResult> {
   const { dir, file, db } = freshLedger()
   seed(db)
   const before = dumpEvents(file)
-  const online = { size: statSync(file).size, sha: sha256File(file) }
   db.raw.close()
+  // 先关连接再取快照：否则 WAL 还没 checkpoint，前后快照被打开动作本身扰动，测不出「线上库不变」
+  const online = { size: statSync(file).size, sha: sha256File(file) }
   const dest = join(dir, 'backup-g15')
   const manifest = backup(file, dest)
   const copy = join(dest, 'orchestra.db')
@@ -256,7 +260,10 @@ async function caseG15(): Promise<InjectionResult> {
     params: { db: file, backup: dest, tamper: 'truncate 到一半' },
     before,
     after: dumpEvents(file),
-    reconcile: '损坏检出：' + (detected || '(没检出！)') + '；恢复被拒：' + (restoreErr || '(没有拒绝)') + '；线上库 ' + JSON.stringify(online) + '→' + JSON.stringify(onlineAfter) + '；线上事件数 ' + String(count),
+    reconcile: '损坏检出：' + (detected || '(没检出！)')
+      + '；恢复被拒：' + String(restoreErr.length > 0)
+      + '；线上库未变：' + String(online.size === onlineAfter.size && online.sha === onlineAfter.sha)
+      + '；线上库 sha ' + online.sha.slice(0, 12) + '；线上事件数 ' + String(count),
   }
 }
 
