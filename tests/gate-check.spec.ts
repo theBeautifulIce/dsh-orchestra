@@ -649,6 +649,31 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
   })
 
+  it('S1 第十八轮 P1-1：包裹型与收尾标点否定行必须拒绝', () => {
+    const payloads = [
+      '【结论：fail】',
+      '「结论：fail」',
+      '“结论：fail”',
+      '《结论：fail》',
+      '（结论：fail）',
+      '［结论：fail］',
+      '<结论：fail>',
+      '**「结论：fail」**',
+      '本报告不通过」',
+      '本报告不通过……',
+      '本报告不通过》',
+      '本报告不通过>',
+      '本报告不通过』',
+      '本报告不通过〕',
+    ]
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+  })
+
+  it('S1 第十八轮 P2-3：其余形似冒号也要拒绝', () => {
+    const payloads = ['结论∶fail', '结论ːfail', '结论꞉fail', '结﹕论：fail']
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+  })
+
   it('门记录正文里的可见否定句也要拒绝（S1 第十八轮 P2-1）', () => {
     const text = read().replace('\n## 必过项与证据', '\n本报告不通过（P0 1 条）\n\n## 必过项与证据')
     expect(text).not.toBe(read())
