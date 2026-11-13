@@ -587,3 +587,25 @@ S1 侧：
 对照表：`docs/audits/S2-round23-response.md`、`docs/audits/S1-round19-response.md`。
 
 下一步：按当前 HEAD（整改提交 `53495fc`）重派 S1 第二十轮与 S2 第二十四轮独立审计；两份都 pass 后按既有顺序重签 G1/G2、双门 gate-check exit 0、全量 340/340，再开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
+
+### 11.22 S2 第二十四轮与 S1 第二十轮整改：折叠判定器、正文全扫描、证据绑定（2026-11-14 02:20，代码提交 24ffd47）
+
+S2 第二十四轮（`docs/audits/S2-independent-audit-round24.md`，判 fail：P0=1 / P1=2）与 S1 第二十轮（`docs/audits/S1-independent-audit-round20.md`，判 fail：P0=4 / P1=2 / P2=1）同批整改，代码提交 `24ffd47`「Reject hidden audit negatives and bind evidence hashes」，8 文件 +804/−99。
+
+解析器（`scripts/gate-check.ts:637-751`）：
+- 删除旧 `FAIL_SUBJECT/FAIL_VERDICT` 与窗口扫描，改为 `foldForVerdict` 全文折叠：NFKC、小写、删撇号、丢弃 Cf/Mn/Me、空白与标点统一映射 `|`；主语/连接词/结论词之间允许任意 `|`，五行拆词、零宽、组合符、引号夹层、U+2011/U+2010/U+2012/U+2043 都能连回。
+- `FAIL_SUBJECTS` 增补繁體与「审计报告/审计意见/最终结论」等；`FAIL_VERDICTS` 增补「失败/未成功/未过关/不批准」及英文 fail/failed/failure/not pass/didnt pass 等。
+- 图片 alt 先剥标签、`unescapeAll`、`normalizeAuditLine` 再进同一扫描器；`auditConclusionOf` 与 `bodyConclusionOf` 改为全文扫一次，正文不再有 24 字偏移/160 字长度窗口。
+- 安全句 `本报告不通过项已全部修复` 等仍 pass；正文裸「结论」不作为默认主语，`门记录拿结论为 fail` 不误杀。
+
+证据门：
+- `src/core/policy.ts:16-58`：`evaluateEvidence` 增 `EvidenceGateOptions.trustedHashes`，requiredHashes 的值必须 64-hex 且落在服务端可重算集合内，否则 `verification_too_weak`。
+- `src/service/commands/apply-report.ts:245-275`：trusted 集合 = `sha256Hex(canonicalJson(report.output ?? null))` + 匹配工具行的 stdout/stderr/command 哈希。
+- `apply-report.ts:345-397`：删除 `terminalEvidenceGate`；`traceBindingGate` 增 `{ allowFailed }`。done 时同 attempt 任一失败行即 `tool_execution_failed`；failed/timeout 允许失败行，但证据必须与某一行及 `tool_finished` 全等。
+
+实测：`tsc --noEmit` exit 0；`tests/policy.spec.ts` + `tests/apply-report.spec.ts` 47 例全过；`tests/gate-check.spec.ts` 74 例 63 passed / 11 failed；全量 32 文件 / 348 例，337 passed / 11 failed。11 红全部是 G1 预签态（`audit_report_sha256=0*64` 对 `50ba1b13cdf1b84d…`），无新增回归。S1 r20 的 21 个载荷、S2 r24 的 36 个载荷在落盘代码上全部 REJECT。
+
+对照表：`docs/audits/S2-round24-response.md`、`docs/audits/S1-round20-response.md`。
+
+下一步：提交本段与两份对照表，按最终 HEAD 重派 S1 第二十一轮与 S2 第二十五轮独立审计；两份都 pass 后按既有顺序重签 G1/G2、双门 gate-check exit 0、全量 348/348，再开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
+
