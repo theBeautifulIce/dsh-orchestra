@@ -462,6 +462,12 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('    普通缩进示例\n\n结论：pass')).toBe('pass')
   })
 
+  it('行内代码不能先吃掉链接方括号，让 title 里的结论漏成顶层（S2 第十八轮 P0）', () => {
+    const bt = '\x60'
+    expect(auditConclusionOf(`本报告可见正文的结论为不通过。\n\n${bt}\n- [a](https://example.com "title${bt}\n结论：pass\n")\n`)).toBeNull()
+    expect(auditConclusionOf(`本报告可见正文的结论为不通过。\n\n${bt}\n> [a](https://example.com "title${bt}\n> 结论：pass\n> ")\n`)).toBeNull()
+  })
+
   it('poison 在 HTML 掩码之后追加，合法 CDATA 不误毒化（S1 第十四轮 P1-3/P2-1）', () => {
     for (const tail of ['<!-- 未闭合', '<?php 未闭合', '<!DOCTYPE html']) {
       expect(auditConclusionOf(`结论：不通过 [x](https://example.com)\n\n结论：pass\n\n${tail}`)).toBeNull()

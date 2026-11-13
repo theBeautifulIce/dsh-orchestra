@@ -977,12 +977,13 @@ function stripHiddenAuditBlocks(text: string): string {
   masked = maskFencedAuditCode(masked)
   const indented = maskIndentedAuditCode(masked)
   masked = indented.masked
-  const inline = maskInlineAuditCode(masked)
-  masked = inline.masked
-  // 链接先于 HTML 掩码：链接 title 里的 '<!--' 等字样不能被当成真的 HTML 结构吞掉后文。
-  // 链接段里的合法 CDATA 在毒化检查时剔除，避免误毒（S1 第十四轮 P2-1）。
+  // 链接必须先于行内代码：行内代码若先吃掉链接的方括号，链接掩码就看不到这段，
+  // title 里的结论行会漏成顶层（S2 第十八轮 P0）。链接段里的合法 CDATA 在毒化
+  // 检查时剔除，避免误毒（S1 第十四轮 P2-1）。
   const links = maskAuditLinkDestinations(masked)
   masked = links.masked
+  const inline = maskInlineAuditCode(masked)
+  masked = inline.masked
   masked = maskHtmlComments(masked)
   masked = maskHtmlProcessingInstructions(masked)
   masked = maskHtmlCdata(masked)
