@@ -2849,3 +2849,48 @@ git commit -m "test(gate): 加 G2 集成用例与门记录"
 14. `docs/gates/G2.md` 写全：逐项必过项都有证据 ID、失败项为空、`conclusion=pass`、`artifact_hash` 锚点与 `sha256Hex(canonicalJson(artifact))` 一致；`pnpm tsx scripts/gate-check.ts docs/gates/G2.md` 打印通过。
 15. 两个新增错误码在 §未决参数 里登记为提案，代码里经 `proposedError()` 抛出并带 `details.proposed=true`。
 16. `pnpm check` 全绿；本批提交信息一律中文 Conventional Commits，一个 Task 一次提交。
+
+
+---
+
+## 口径补充（第二轮审计后，2026-11-13）
+
+> 本节是对上面正文的补充，不改上面的历史正文。对应第二轮独立审计 `docs/audits/S2-independent-audit-round2.md` 的 N-11 与第七节「规格一致性」四条；逐条对应表见 `docs/audits/S2-round2-response.md`。
+
+### 1. `DECISION_REQUIRED` 提案码（HTTP 422）
+
+上面 §0 提案了两个错误码；本批实际用到第三个，一并登记，等规格 17.1 修订后才算既成事实：
+
+- `DECISION_REQUIRED`（HTTP 422）—— 阻塞迁移必须挂凭据，没凭据就不许卡住。理由：S2 没有 `decisions` 表，「挂裁决卡」这件事在服务侧的落点是 `verify_human` 请求（理由 + 缺什么）；两条路径都缺凭据时，节点既不该停在 `verifying` 死等，也不该被裸写成 `blocked_post`，所以点名一个可区分的码，与 `LEASE_EXPIRED`（租约过期）语义不重叠。
+- 落点：`src/service/commands/node-state.ts` 的 `transitionNode`（阻塞迁移既无 `decision_id` 又无 `verify_human` 时抛此码，带 `details.proposed=true`）；`src/service/commands/apply-report.ts` 的阻塞上报无凭据时按 `reason='decision_required'` 拒收——这是拒绝理由，不是错误码，节点状态不动。
+- 阻塞凭据的两种形态（任一成立即算有凭据）：`decision_id` 非空字符串；`verify_human.reason` 非空字符串（`missing` 可空）。`report.output.request.reason` 或 `report.error_code` 都可以充当 `verify_human.reason` 的来源。
+- G2 例外表登记三个提案码：`LEASE_EXPIRED`(409)、`BRIDGE_ACK_LAG`(409)、`DECISION_REQUIRED`(422)。
+
+### 2. 服务侧 HTTP 入口口径（补规格未定义的路由）
+
+规格 §6.1 定义的是 `workflow.create/open_draft/update/publish` 四个命令，属 S3 及以后，不在本批范围；S2 为了让单节点闭环有真实入口，另起一组服务侧路由。门证据从这些入口跑出来才算数：
+
+| 路由 | 作用 | 必填字段 |
+| --- | --- | --- |
+| `POST /v1/workflows/load` | 加载工作流定义，按阶段闸校验（S2 拒 parallel / subworkflow） | 请求体即定义 |
+| `POST /v1/runs` | 建 task / run / node_run（节点状态 queued） | `taskTitle`、`workflowVersion`、`now` |
+| `POST /v1/runs/dispatch` | 派发器拾取 queued 节点并调 `runNode` | `runId`、`nodes`（按 node_id 归类的对象）、`now` |
+| `POST /v1/node-runs/lease` | 取租约（queued → leased → dispatched） | `nodeRunId`、`ownerEpoch`、`leaseTtlMs`、`now` |
+| `POST /v1/node-runs/report` | 上报收口（`applyReport` 六步） | `nodeRunId`、`attempt`、`report`、`expectedStatus`、`generation`、`now` |
+| `POST /v1/node-runs/run` | 执行器主链（`runNode`） | `nodeRunId`、`nodeId`、`attempt`、`toolPolicy`、`tools`、`now` |
+| `POST /v1/node-runs/cancel` | 取消与围栏（`cancelResult` 只许四个枚举值，非法值 400） | `nodeRunId`、`attempt`、`revision`、`cancelResult`、`now`、`graceMs` |
+| `GET /health`、`GET /v1/tasks`、`GET /v1/events`、`POST /v1/ledger/events` | 健康、只读列表与账本追加 | — |
+
+这组路由是 S2 服务装配的入口，不实现也不声称实现规格 §6.1 的 workflow 命令语义。
+
+### 3. 报告信封的 attempt 一致性
+
+`report.attempt` 必须等于请求的 `attempt`，不等按 `reason='attempt_mismatch'` 拒收；registry 落库统一用 `report.attempt`。跨节点重放（registry 里同一 `report_id` 已属别的 `node_run_id`）按结构错拒。
+
+### 4. 多工具节点的证据口径
+
+每个工具落一条轨迹（`tool` / `exitCode` / `stdoutHash` / `stderrHash` / `commandHash`），全部写进 `report.output.evidence_trace`；`report.evidence` 记决定判定的那一条（最后一个执行的工具）。任一工具 `exitCode ≠ 0` 即中断后续工具，节点不得落 `done`，转 `blocked_post` 并记一条 `verify_human`。
+
+### 5. 判定时限与扫描
+
+`verify_timeout_ms` 缺省 120000（规格 4.4 行 333）；进 `verifying` 时写 `verify_deadline_at`，离开半态时清钟；`sweep` 扫到点未收口的 `verifying`，转 `blocked_post` 并记 `verify_human(reason='verify_timeout')`。扫描逐行事务：单行失败跳过这一行，不让一行拖垮整批。
