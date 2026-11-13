@@ -8,8 +8,8 @@ import { PHASE_CAPABILITIES, loadConfig, parseConfig, phaseIndex, requireCapabil
 const SAMPLE = {
   phase: 'S1',
   service: { db_path: 'storages/dsh-orchestra/orchestra.db', busy_timeout_ms: 5000 },
-  execution: { concurrency: 3, human_slots: 1, startup_timeout_ms: 60000, unknown_watchdog_ms: 120000, verify_timeout_ms: 120000 },
-  bridge: { buffer_high_water_bytes: 4194304, buffer_limit_bytes: 8388608 },
+  execution: { concurrency: 3, human_slots: 1, startup_timeout_ms: 60000, unknown_watchdog_ms: 120000, verify_timeout_ms: 120000, lease_ttl_ms: 30000, lease_renew_interval_ms: 10000, action_timeout_ms: 120000, cancel_grace_ms: 30000 },
+  bridge: { buffer_high_water_bytes: 4194304, buffer_limit_bytes: 8388608, spill_dir: 'storages/dsh-orchestra/bridge-spill' },
   retention: { receipt_days: 7, in_flight_timeout_minutes: 10 },
   memory: { bridge_id: 'memory-audit-v1', eval_timeout_ms: 120000, judge_content_limit: 4000, approval_ttl_hours: 24 },
 }
@@ -28,10 +28,10 @@ const expectCode = (fn: () => unknown, code: string) => {
 }
 
 describe('配置 schema', () => {
-  it('仓库里的 orchestra.config.json 能加载，phase 为 S1', () => {
+  it('仓库里的 orchestra.config.json 能加载，phase 为 S2', () => {
     const cfg = loadConfig(join(process.cwd(), 'orchestra.config.json'))
-    expect(cfg.phase).toBe('S1')
-    expect(phaseIndex(cfg.phase)).toBe(0)
+    expect(cfg.phase).toBe('S2')
+    expect(phaseIndex(cfg.phase)).toBe(1)
   })
 
   it('规格样例形状能解析', () => {

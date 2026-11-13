@@ -13,7 +13,12 @@ const blocks = [...text.matchAll(/```json[ \t]*([^\r\n]*)\r?\n([\s\S]*?)\r?\n```
 const artifactMatch = blocks.find((m) => { try { return JSON.parse(m[2] ?? '')?.gate === 'G1' } catch { return false } })
 if (!artifactMatch) throw new Error('找不到 GateArtifact')
 const artifact = JSON.parse(artifactMatch[2] ?? '') as Record<string, any>
-const evidenceBlock = blocks.find((m) => (m[1] ?? '').trim() === 'evidence-index')
+const evidenceBlock = blocks.find((m) => {
+  try {
+    const v = JSON.parse(m[2] ?? '')
+    return Array.isArray(v) && v.length > 0 && v.every((e: any) => e && typeof e.id === 'string' && typeof e.file === 'string' && typeof e.sha256 === 'string')
+  } catch { return false }
+})
 const invariantBlock = blocks.find((m) => (m[1] ?? '').trim() === 'invariants')
 if (!evidenceBlock || !invariantBlock) throw new Error('缺少 evidence-index 或 invariants 块')
 
@@ -28,6 +33,8 @@ for (const e of sortedEvidence) {
   text = text.replace(row, '$1' + e.sha256 + '$2')
 }
 artifact.evidence_index_hash = evidenceHash
+// 证据索引 json 块也换成新哈希：门检查读的是这个块，不是人读的表
+text = text.slice(0, evidenceBlock.index) + '```json evidence-index\n' + JSON.stringify(sortedEvidence, null, 2) + '\n```' + text.slice(evidenceBlock.index! + evidenceBlock[0].length)
 
 const invariants = (JSON.parse(invariantBlock[2] ?? '') as InvariantEntry[]).map((i) => ({ id: i.id, statement: i.statement, evidence_ids: i.evidence_ids.slice().sort() })).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 artifact.invariants_hash = sha256Hex(canonicalJson(invariants))
