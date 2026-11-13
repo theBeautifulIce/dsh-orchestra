@@ -676,12 +676,22 @@ function maskFencedAuditCode(text: string): string {
 // 就不能静默藏掉（否则可见的 fail 会被另一段 pass 洗掉），一律毒化（S1 第十五轮补）。
 function maskIndentedAuditCode(text: string): { masked: string; poisoned: boolean } {
   let poisoned = false
+  let previousBlank = true
   const masked = text.split('\n').map((line) => {
     const quote = /^\s*>\s?/.exec(line)
     const body = quote ? line.slice(quote[0].length) : line
-    if (!/^(?: {0,3}\t| {4,})/.test(body)) return line
-    const normalized = normalizeAuditLine(body)
-    if (/(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(normalized) || /^(?:pass|fail|通过|不通过)$/i.test(normalized)) poisoned = true
+    const blank = isMarkdownBlankLine(line)
+    if (!/^(?: {0,3}\t| {4,})/.test(body)) {
+      previousBlank = blank
+      return line
+    }
+    // 只有空行（或文首）之后的缩进才是确定的缩进代码；紧跟在列表项/段落后面
+    // 的四空格是续行，渲染器仍可见。这种情况出现结论行就毒化（S1 第十五轮补）。
+    if (!previousBlank) {
+      const normalized = normalizeAuditLine(body)
+      if (/(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(normalized) || /^(?:pass|fail|通过|不通过)$/i.test(normalized)) poisoned = true
+    }
+    previousBlank = blank
     return blankPreservingLines(line)
   }).join('\n')
   return { masked, poisoned }
