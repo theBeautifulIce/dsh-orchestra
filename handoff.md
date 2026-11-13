@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-13 13:56。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-13 14:57。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -331,4 +331,33 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 **下一步**：把这一版交第二轮独立审计（同样不许自测）；若过，S2 收口，开 S3 九节点与状态机。
 
 **未做的**：`workflow_versions` 表与发布流程留给 S4；inbox/裁决卡界面留给 S5；24 小时浸泡留给 S6。
+
+### 11.9 第二轮独立审计整改与重签（2026-11-13 14:57，提交 `e845dfa` + `aa24312` + `f1111aa`）
+
+**审计结论**：第二轮独立审计（`docs/audits/S2-independent-audit-round2.md`，313 行）判 G2 不通过。旧七条里 F-01 未修（生产路径根本不存在），F-04 / F-05 只修了一半路径；新列十一条 N-01…N-11，其中致命四条：N-01 裸卡住绕过 I5、N-02 判定失败永久停在 verifying、N-03 多工具只留最后一个工具的证据、N-04 围栏 + 迟到 unknown 让 sweep 永久 STALE_GENERATION。
+
+**四条 P0 的改法**：
+
+| 编号 | 审计说的 | 改法 |
+| --- | --- | --- |
+| N-01 | applyReport 能裸写 blocked_post，decisionEvents=0 | 第六步改走 transitionNode；blocking 时 `request.reason` 或 `error_code` 必须有一个非空，否则按 `decision_required` 拒收、节点状态不动；补齐后挂 verify_human 事件 |
+| N-02 | runNode 判定失败后永久 verifying，sweep 扫不到 | 进 verifying 写 `verify_deadline_at`（缺省 120000ms），离开清钟；sweep 到点转 blocked_post + verify_human(reason=verify_timeout)；runNode 收口被拒即 markBlocked |
+| N-03 | 多工具节点只留最后一个证据，首个工具 exitCode=3 仍报 done | 每工具写 tool_start_at 与 tool_started 事件；报告带 output.evidence_trace；任一工具非零退出即 break，判定用失败证据，不得 done |
+| N-04 | 围栏 armed 时 cancel 改状态、sweep 的 revokeFence CAS 落空 | 围栏立着时取消只记结果不改状态（reason fence_pending）；queued/leased 取消转 superseded（不产生新 attempt）；sweep 逐行事务，单行失败不拖垮整批 |
+
+**七条 P1 的改法**：跨节点 report_id 重放抛 SCHEMA_VERSION_UNSUPPORTED（N-05）；同 report_id 的 report_replayed 只追加第一条（N-06）；report.attempt 与节点不符按 attempt_mismatch 拒收（N-07）；server 校验 cancelResult 枚举、非法值 400（N-08）；门候选含删除文件、证据只认 HEAD 字节、工作树必须干净、正文表第 2 列与 exceptions 同源（N-09）；四份手写证据改成脚本从真实入口跑出来（N-10）；例外表补 BRIDGE_ACK_LAG(409)、DECISION_REQUIRED 依据写进 S2 计划末尾「口径补充（第二轮审计后）」（N-11）。
+
+**生产装配补齐（F-01）**：新增 `src/service/runs.ts`（createRun：建 task/run/node_runs）与 `src/service/dispatcher.ts`（dispatchRun：拾 queued 节点走 runNode）；server 挂 `POST /v1/runs` 与 `POST /v1/runs/dispatch`；`tests/production-path.spec.ts` 三条全链路 HTTP 用例。
+
+**提交链**：`e845dfa` 源码与测试 → `aa24312` 证据重写 + 计划口径补充 + 两份审计文档 → `f1111aa` 重签 G1 / G2 门记录。
+
+**重签结果**：G1 candidate=`21587626d731…`、artifact_hash=`1a3d7eb0aa58…`；G2 candidate=`e535a85d7360…`、artifact_hash=`41a299fe330a…`。`node scripts/gate-check.ts docs/gates/G1.md` 与 G2 均通过（13 项 / 11 项必过，证据 13 份 / 11 份哈希复核）。
+
+**验收（全 exit 0）**：`pnpm check` typecheck 0 错、vitest 31 个文件 / 254 用例全绿（8.94s）、build 通过；四份 ev-g2-* 注入证据连跑两次 sha256 一致（3f1e9a5b… / 74c0a947… / cef5cf3d… / 607471ff…）。
+
+**逐条对照表**：`docs/audits/S2-round2-response.md`（旧七条 / N-01…N-11 / 规格一致性五条 / 门记录有效性 / 移交 S3 四条 / 验证命令）。该表是实现者自证，不作放行依据。
+
+**未闭合、移交 S3 的**：F-06（桥 spill 未接生产路径，bridge.ts 仍只在单元层复现）、§七.5（applyReport 仍接受 policy 参数）、四条新路由在规格 §6.1 的落点、DECISION_REQUIRED 与 BRIDGE_ACK_LAG 进规格 17.1。
+
+**下一步**：派第三轮独立审计（独立子代理，不自测）；审计过才开 S3 九节点与状态机。
 

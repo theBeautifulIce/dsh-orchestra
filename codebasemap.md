@@ -168,6 +168,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `docs/orchestra-audit-ledger.md` | 84 行 / 18KB | 逐轮审计台账：§一 逐轮记录（1–20 轮）、§二 几件能算出来的事、§三 收敛判据、§四 统计口径、§五 当前进度与续跑指引 |
 | `docs/requirements.md` | 约 330 行 / 19KB | 原始需求（R1–R23 主人原话表）、需求分解 F1–F13 / N1–N7、拍板口径 §3.1–§3.7、验收标准 |
 | `docs/design-notes.md` | 约 300 行 / 28KB | 设计思路：16 条决策（问题→决策→理由→被否方案→代价）、五个坑族、参考项目学了什么、风险清单 |
+| `docs/audits/` | 每轮一份报告 + 一份整改对照表 | 独立审计报告（S1 / S2 第一轮 / 第二轮）与整改对照表（S2-round2-response.md）：放行依据是审计报告本身，对照表只是实现者自证 |
 
 **查法**：
 - 「某条规则写在哪一行」 → 直接读设计稿（`orchestra-design-draft.md`），行号见下方 §四。
