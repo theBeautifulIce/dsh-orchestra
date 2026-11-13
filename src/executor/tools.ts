@@ -1,4 +1,6 @@
 // src/executor/tools.ts —— 工具注册表与 capability 推导（规格 4.7 行 371-399）
+import { resolve, sep } from 'node:path'
+import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 
 export type ToolCapability = 'read_only' | 'mutating' | 'compensating'
@@ -80,4 +82,118 @@ export function resolveDeclaredPolicy(declared: SideEffectPolicy, derived: SideE
   }
   // 声明 irreversible 而推导更宽：接受并按 irreversible 算（规格 4.7 行 399）
   return declared === 'irreversible' ? 'irreversible' : derived
+}
+
+// —— 只读执行器与强证据（规格 7.2 行 588、4.7 行 380-384）——
+
+// 宿主执行接口：只读身份由宿主保证，本批只负责不越权
+export type HostRunner = {
+  readonlyAvailable(): boolean
+  run(input: { bin: string; args: string[]; cwd: string; timeoutMs: number }): Promise<{
+    exitCode: number
+    stdout: string
+    stderr: string
+  }>
+}
+
+// cwd 必须在工作区内，越界即拒（规格 7.2 行 588）
+export function resolveInside(root: string, target: string): string {
+  const rootAbs = resolve(root)
+  const targetAbs = resolve(rootAbs, target)
+  if (targetAbs !== rootAbs && !targetAbs.startsWith(rootAbs + sep)) {
+    throw new OrchError('FORBIDDEN', 'cwd 越出工作区', { root: rootAbs, target: targetAbs })
+  }
+  return targetAbs
+}
+
+export type StrongEvidence = {
+  // 来源标记：run_tool 是强证据，模型侧 tool_result 是弱证据（规格 4.7 行 380-383）
+  source: 'run_tool'
+  exitCode: number
+  stdoutHash: string
+  stderrHash: string
+  hashes: Record<string, string>
+  producedAt: string
+  // 命令哈希：落库前要核对，核对不上就不许写（规格 7.2 行 589）
+  commandHash: string
+}
+
+export type RunToolParams = {
+  command: string
+  args: string[]
+  cwd: string
+  timeoutMs: number
+  workspaceRoot: string
+}
+
+export type RunToolResult = {
+  evidence: StrongEvidence
+  stdout: string
+  stderr: string
+}
+
+// 命令哈希：把命令与参数固定成一段可核对的串
+export function commandHashOf(command: string, args: string[], cwd: string): string {
+  return sha256Hex(JSON.stringify({ command, args, cwd }))
+}
+
+export class ReadOnlyToolRunner {
+  private readonly registry: ToolRegistry
+  private readonly host: HostRunner
+  private readonly workspaceRoot: string
+
+  constructor(registry: ToolRegistry, host: HostRunner, workspaceRoot: string) {
+    this.registry = registry
+    this.host = host
+    this.workspaceRoot = workspaceRoot
+  }
+
+  async runTool(params: RunToolParams): Promise<RunToolResult> {
+    // 命令必须命中注册表，且 capability 必须是 read_only
+    const descriptor = this.registry.lookup(params.command)
+    if (!descriptor) {
+      throw new OrchError('RUN_TOOL_NOT_READ_ONLY', '命令没注册，不许按只读执行', { command: params.command })
+    }
+    if (descriptor.capability !== 'read_only') {
+      throw new OrchError('RUN_TOOL_NOT_READ_ONLY', '命令不是只读命令', {
+        command: params.command,
+        capability: descriptor.capability,
+      })
+    }
+    // 宿主没有只读挂载就报，不降级（规格 4.7 行 381）
+    if (!this.host.readonlyAvailable()) {
+      throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '宿主没有只读挂载，强证据不可得', {
+        command: params.command,
+      })
+    }
+    const cwd = resolveInside(this.workspaceRoot, params.cwd)
+    // argv 不经 shell：用注册表里的固定命令与参数数组直接 spawn
+    const args = params.args.length > 0 ? params.args : descriptor.command.args
+    const res = await this.host.run({
+      bin: descriptor.command.bin,
+      args,
+      cwd,
+      timeoutMs: params.timeoutMs,
+    })
+    const evidence: StrongEvidence = {
+      source: 'run_tool',
+      exitCode: res.exitCode,
+      stdoutHash: sha256Hex(res.stdout),
+      stderrHash: sha256Hex(res.stderr),
+      hashes: { stdout: sha256Hex(res.stdout), stderr: sha256Hex(res.stderr) },
+      producedAt: new Date().toISOString(),
+      commandHash: commandHashOf(descriptor.command.bin, args, cwd),
+    }
+    return { evidence, stdout: res.stdout, stderr: res.stderr }
+  }
+}
+
+// 落库前核对命令哈希：对不上就当证据不足（规格 7.2 行 588、4.7 行 379）
+export function assertCommandHash(evidence: StrongEvidence, expected: string): void {
+  if (evidence.commandHash !== expected) {
+    throw new OrchError('VERIFICATION_TOO_WEAK', '命令哈希对不上，证据不作数', {
+      got: evidence.commandHash,
+      expect: expected,
+    })
+  }
 }
