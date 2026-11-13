@@ -436,6 +436,13 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('`开头\n# 标题\n`\n结论：pass')).toBe('pass')
   })
 
+  it('缩进代码不能藏掉列表续行里的结论（S1 第十五轮补）', () => {
+    // 四空格缩进在列表项里只是续行，不是代码；藏掉可见 fail 会让 pass 过门。
+    expect(auditConclusionOf('结论：pass\n\n- 列表项\n    结论：fail')).toBeNull()
+    // 真正的缩进代码里没有结论时，仍按代码隐藏，不影响可见 pass。
+    expect(auditConclusionOf('    普通缩进示例\n\n结论：pass')).toBe('pass')
+  })
+
   it('poison 在 HTML 掩码之后追加，合法 CDATA 不误毒化（S1 第十四轮 P1-3/P2-1）', () => {
     for (const tail of ['<!-- 未闭合', '<?php 未闭合', '<!DOCTYPE html']) {
       expect(auditConclusionOf(`结论：不通过 [x](https://example.com)\n\n结论：pass\n\n${tail}`)).toBeNull()

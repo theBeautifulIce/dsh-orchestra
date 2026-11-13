@@ -653,12 +653,19 @@ function maskFencedAuditCode(text: string): string {
 }
 
 // 缩进代码里的标签同样只是字面文本。
-function maskIndentedAuditCode(text: string): string {
-  return text.split('\n').map((line) => {
+// 但四空格缩进在列表项里只是续行，渲染器仍显示；一旦这段里出现结论行，
+// 就不能静默藏掉（否则可见的 fail 会被另一段 pass 洗掉），一律毒化（S1 第十五轮补）。
+function maskIndentedAuditCode(text: string): { masked: string; poisoned: boolean } {
+  let poisoned = false
+  const masked = text.split('\n').map((line) => {
     const quote = /^\s*>\s?/.exec(line)
     const body = quote ? line.slice(quote[0].length) : line
-    return /^(?: {0,3}\t| {4,})/.test(body) ? blankPreservingLines(line) : line
+    if (!/^(?: {0,3}\t| {4,})/.test(body)) return line
+    const normalized = normalizeAuditLine(body)
+    if (/(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(normalized) || /^(?:pass|fail|通过|不通过)$/i.test(normalized)) poisoned = true
+    return blankPreservingLines(line)
   }).join('\n')
+  return { masked, poisoned }
 }
 
 // 行内代码会把标签转义成字面文本；先整段抹掉，避免假的闭合标签提前收掉隐藏块。
@@ -923,7 +930,8 @@ function maskHtmlDoctype(text: string): string {
 function stripHiddenAuditBlocks(text: string): string {
   let masked = text.replace(/\r\n/g, '\n')
   masked = maskFencedAuditCode(masked)
-  masked = maskIndentedAuditCode(masked)
+  const indented = maskIndentedAuditCode(masked)
+  masked = indented.masked
   const inline = maskInlineAuditCode(masked)
   masked = inline.masked
   // 链接先于 HTML 掩码：链接 title 里的 '<!--' 等字样不能被当成真的 HTML 结构吞掉后文。
@@ -935,7 +943,7 @@ function stripHiddenAuditBlocks(text: string): string {
   masked = maskHtmlCdata(masked)
   masked = maskHtmlDoctype(masked)
   // poison 必须在所有 HTML 掩码之后追加，否则会被未闭合结构吞掉（S1 第十四轮 P1-3）。
-  if (links.poisoned || inline.poisoned) masked += '\n结论：'
+  if (links.poisoned || inline.poisoned || indented.poisoned) masked += '\n结论：'
   // 代码与链接目标已抹掉；剩下的任何标签、注释、处理指令都视为未支持的原始 HTML。
   if (/<(?=[A-Za-z/!?])/.test(masked)) return '\u0000'
   return masked
