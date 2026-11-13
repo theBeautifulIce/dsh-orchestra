@@ -663,3 +663,17 @@ S1 第二十二轮（`docs/audits/S1-independent-audit-round22.md`，绑 G1 / ca
 - 验收（实测）：定向用例 1 passed / 78 skipped；`tests/gate-check.spec.ts` 79 例 68 passed / 11 failed（11 红全为 G1 预签态）；`tsc --noEmit` exit 0；全量 32 文件 / 363 例，352 passed / 11 failed。
 - 对照表：`docs/audits/S1-round22-response.md`。P2-1 预签基线、P2-2 11 例预签噪声均留到重签时收口；本报告固定审计 ca2b196，不覆盖 4f63116 与工作区修复。
 - 状态：S2 第二十七轮仍在 e7a3fa4 上运行；未重签、未开 S3。下一步收 S2 r27 报告，与 S1 r22 一并判读后重派 S1 r23 / S2 r28；两份 pass 后重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
+
+### 11.26 S2 第二十七、二十八轮整改与提交 b92e849（2026-11-14 03:56）
+
+S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7a3fa4，fail：P0=2 / P1=0 / P2=3）与第二十八轮（`docs/audits/S2-independent-audit-round28.md`，绑 G2 / d1dfe12，fail：P0=2 / P1=0 / P2=2）合并整改，提交 `b92e849`「Close S2 round27 and round28 verdict parsing gaps」，10 文件 +761/−25。对照表 `docs/audits/S2-round27-response.md`、`docs/audits/S2-round28-response.md`（均随提交入库）。
+
+- 结论解析：`scripts/gate-check.ts` 的裁决词表补 `未通过收口/未过/否/unapproved/disapproved/unaccepted/nonapproved/failing/rejects/denies/refuses/declines/vetoes` 与部分通过、待整改、暂缓、否定等同义族；谓词补 `认同/赞同/受理/接收/接受/acceptable`；宾语补 `本报告/本次审计/审计组/报告`；主语补 `审计组/报告/approval/gate/report`；HOMOGLYPHS 补无点 `ı`。
+- 结构：裁决词命中后先消费可选宾语再判句尾；结构否定每层先试谓词再吃填充词，`not acceptable` 不再被 `a` 挡掉。
+- 英文结论行：`Conclusion/Verdict/Outcome/Result` 加冒号或破折号后紧跟 pass/fail 才算正式结论；正文里的普通 Conclusion 叙述仍忽略；正文结论写 pass、同行尾巴再写 fail 的一律按 fail 收口。
+- 证据门：`src/service/commands/apply-report.ts:233` 失败与超时统一 `requireFailure: true`；`src/core/workflow-def.ts:42-60` 新增 `assertNoDuplicateRequiredHashes`，模板层与节点层重复必留哈希键在加载期抛 `WORKFLOW_VALIDATION_FAILED`。
+- 回归：`tests/gate-check.spec.ts:376-415` 覆盖 r27/r28 全部载荷与同族 9 条；`tests/apply-report.spec.ts:511/:522`；`tests/workflows.spec.ts:57`。
+- 验证（实测）：`tsc --noEmit` exit 0；`tests/gate-check.spec.ts` 81 例 70 passed / 11 failed；全量 32 文件 / 367 例，356 passed / 11 failed；11 红全部是 G1 预签态（`audit_report_sha256=0*64`），无新增回归。
+- 已派 S1 第二十四轮（`a5a88da0-5e4f-4bd4-9d9b-bfa0ea2260fe`）与 S2 第二十九轮（`7c43a174-289b-49bc-b70d-f34a092d639e`），都绑 b92e849，只读、临时克隆内攻击、不签门不提交。
+- 状态：G1/G2 未重签，S3 九节点与状态机继续冻结。旧 S1 第二十三轮仍在跑，只作参考；以 S1 r24 与 S2 r29 为准，两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
+
