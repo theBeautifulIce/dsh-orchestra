@@ -42,9 +42,9 @@ const config = (over: Record<string, unknown> = {}) => ({
 })
 
 describe('S2 迁移与定值', () => {
-  it('空库跑到 003：node_runs 补齐 S2 列，默认 0', () => {
+  it('空库跑到 004：node_runs 补齐 S2 列，默认 0', () => {
     const db = openDb(dbFile())
-    expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([1, 2, 3])
+    expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([1, 2, 3, 4])
     const cols = columns(db.raw, 'node_runs')
     for (const need of ['action_generation', 'rearm_generation', 'fence_state', 'fence_grace_until', 'deadline_boot_id', 'deadline_monotonic_ns', 'tool_start_at', 'verify_remaining_ns', 'side_effect_verified_none', 'stop_evidence']) {
       expect(cols).toContain(need)
@@ -82,8 +82,8 @@ describe('S2 迁移与定值', () => {
     const steps = loadSteps(defaultMigrationsDir())
     applySteps(db, steps)
     expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([])
-    expect(applied(db.raw)).toEqual([1, 2, 3])
-    expect(steps.length).toBe(3)
+    expect(applied(db.raw)).toEqual([1, 2, 3, 4])
+    expect(steps.length).toBe(4)
     db.raw.close()
   })
 

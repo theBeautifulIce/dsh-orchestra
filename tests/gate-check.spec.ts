@@ -151,6 +151,22 @@ describe('门记录校验', { timeout: 30000 }, () => {
     expect(() => check(text)).toThrow(/重签链断了/)
   })
 
+  it('证据文件与固定文件映射不一致时拒绝（S1 第二轮审计）', () => {
+    const text = read().replace(/("id": "ev-g15",\s*"file": ")[^"]+/, '$1docs/gates/evidence/G1/G-01.md')
+    expect(text).not.toBe(read())
+    expect(() => check(text)).toThrow(/文件与固定映射不一致/)
+  })
+
+  it('审计报告字节哈希被改时拒绝（S1 第二轮审计）', () => {
+    const text = tamper(read(), (a) => { a.audit_report_sha256 = 'd'.repeat(64) })
+    expect(() => check(text)).toThrow(/审计报告 sha256 与记录不符/)
+  })
+
+  it('审计报告不在 docs/audits 下时拒绝（S1 第二轮审计）', () => {
+    const text = tamper(read(), (a) => { a.audit_report = 'docs/gates/G1.md' })
+    expect(() => check(text)).toThrow(/docs\/audits/)
+  })
+
   it('审计轮次与审计报告对不上时拒绝（审计 R3-08）', () => {
     const text = tamper(read(), (a) => { a.audit_round = 9 })
     expect(() => check(text)).toThrow(/audit_round/)
@@ -196,7 +212,13 @@ describe('门记录校验', { timeout: 30000 }, () => {
   })
 })
 
-describe('审计报告结论必须与门记录一致（第五轮审计 P0-1）', () => {
+describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / 第六轮 P0-1）', () => {
+  it('只认行首唯一结论：行内引用不算，多个不同结论视为没有结论', () => {
+    expect(auditConclusionOf('# 报告\n\n门记录结论：pass\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('结论：pass\n\n结论：fail')).toBeNull()
+    expect(auditConclusionOf('本文引用“结论：pass”作为例子')).toBeNull()
+  })
+
   it('读得出 pass、fail、不通过、通过；找不到就返回 null', () => {
     expect(auditConclusionOf('# 报告\n\n结论：**pass**（0 致命）')).toBe('pass')
     expect(auditConclusionOf('结论：fail —— 致命 1 / 重大 3')).toBe('fail')

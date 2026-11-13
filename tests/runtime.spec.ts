@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openServiceOrchestra } from '../src/index.ts'
+import { definitionHashOf } from '../src/service/workflows.ts'
 import { withTx } from '../src/infra/sqlite/driver.ts'
 import { ToolRegistry } from '../src/executor/tools.ts'
 import { ReadOnlyToolRunner, type HostRunner } from '../src/executor/tools.ts'
@@ -27,6 +28,7 @@ async function setup() {
     pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
     nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo', 'ro.fail', 'ro.ok'], deny: [] } }],
   })
+  withTx(orchestra.db, (tx) => tx.run('UPDATE runs SET workflow_definition_hash = ? WHERE run_id = ?', [definitionHashOf(orchestra.catalog.get('7')), 'r1']))
   const registry = new ToolRegistry()
   registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
   registry.register({ name: 'ro.fail', capability: 'read_only', command: { bin: 'fail', args: [] } })

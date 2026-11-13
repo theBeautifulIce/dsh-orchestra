@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
-import { WorkflowCatalog } from '../../src/service/workflows.ts'
+import { definitionHashOf, WorkflowCatalog } from '../../src/service/workflows.ts'
 import type { PassCondition } from '../../src/core/policy.ts'
 
 export const TEST_SECRET = 'test-secret-for-g1'
@@ -27,9 +27,10 @@ export function catalogFor(
   return catalog
 }
 
-// 让 run 绑上工作流版本：没有版本就没有判定条件，done 报告会被 VERDICT_UNSUPPORTED 拒
-export function bindRunVersion(db: Db, version: number | string = 1, runId = 'r1'): void {
-  withTx(db, (tx) => tx.run('UPDATE runs SET workflow_version = ? WHERE run_id = ?', [version, runId]))
+// 让 run 绑上工作流版本与定义哈希：没有版本/哈希就没有判定条件，done 报告会被 VERDICT_UNSUPPORTED 拒
+export function bindRunVersion(db: Db, catalog: WorkflowCatalog, version: number | string = 1, runId = 'r1'): void {
+  const hash = definitionHashOf(catalog.get(version))
+  withTx(db, (tx) => tx.run('UPDATE runs SET workflow_version = ?, workflow_definition_hash = ? WHERE run_id = ?', [version, hash, runId]))
 }
 
 export function freshLedger(dir?: string): { dir: string; file: string; db: Db } {

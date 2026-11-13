@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { WorkflowCatalog } from '../src/service/workflows.ts'
 import type { WorkflowDefinition } from '../src/core/workflow-def.ts'
+import { freshLedger } from './fixtures/ledger.ts'
 
 const def: WorkflowDefinition = {
   workflow_version: '1',
@@ -39,6 +40,18 @@ describe('工作流版本不可变（第五轮审计 P1-1）', () => {
     const policy = catalog.toolPolicyFor('1', 'check')
     policy.allow.push('ro.rm')
     expect(catalog.toolPolicyFor('1', 'check').allow).toEqual(['ro.echo'])
+  })
+
+  it('跨重启：定义落库后，新目录能装回旧定义，同版本改写被拒', () => {
+    const { db } = freshLedger()
+    const first = new WorkflowCatalog('S2', db)
+    first.load(def)
+    const second = new WorkflowCatalog('S2', db)
+    expect(second.hydrate()).toBe(1)
+    expect(second.get('1').workflow_version).toBe('1')
+    expect(() => second.load({ ...def, nodes: [{ node_id: 'check', type: 'agent' as const }] }))
+      .toThrowError(/同一工作流版本不许改写定义/)
+    expect(second.definitionHash('1')).toBe(first.definitionHash('1'))
   })
 
   it('节点不在版本里 → SCHEMA_VERSION_UNSUPPORTED', () => {

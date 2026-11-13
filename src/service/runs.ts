@@ -4,7 +4,7 @@ import { nodeRunId as newNodeRunId, runId as newRunId, taskId as newTaskId } fro
 import type { Db } from '../infra/sqlite/driver.ts'
 import { withTx } from '../infra/sqlite/driver.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
-import type { WorkflowCatalog } from './workflows.ts'
+import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
 
 export type CreateRunParams = {
   taskTitle: string
@@ -49,6 +49,7 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
   const taskIdValue = newTaskId()
   const runIdValue = newRunId()
   const version = String(def.workflow_version)
+  const definitionHash = definitionHashOf(def)
   const nodes: CreatedNodeRun[] = []
   withTx(db, (tx) => {
     tx.run(
@@ -56,8 +57,8 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
       [taskIdValue, p.taskTitle, version, 'running', p.now, p.now],
     )
     tx.run(
-      'INSERT INTO runs (run_id, task_id, workflow_version, status, revision, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)',
-      [runIdValue, taskIdValue, version, 'running', p.now, p.now, p.now],
+      'INSERT INTO runs (run_id, task_id, workflow_version, workflow_definition_hash, status, revision, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)',
+      [runIdValue, taskIdValue, version, definitionHash, 'running', p.now, p.now, p.now],
     )
     picked.forEach((n, idx) => {
       const id = newNodeRunId()
@@ -70,7 +71,7 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
       nodes.push({ node_run_id: id, node_id: n.node_id, seq, node_type: n.type, status: 'queued' })
     })
     appendEvent(tx, { type: 'task.created', runId: runIdValue, payload: { task_id: taskIdValue, workflow_version: version, node_count: nodes.length } })
-    appendEvent(tx, { type: 'run.created', runId: runIdValue, payload: { run_id: runIdValue, workflow_version: version } })
+    appendEvent(tx, { type: 'run.created', runId: runIdValue, payload: { run_id: runIdValue, workflow_version: version, workflow_definition_hash: definitionHash } })
   })
   return { task_id: taskIdValue, run_id: runIdValue, workflow_version: version, nodes }
 }

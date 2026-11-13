@@ -8,6 +8,7 @@ import { withTx } from '../src/infra/sqlite/driver.ts'
 import { startServer } from '../src/service/server.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../src/executor/tools.ts'
 import type { HostAgentFactory } from '../src/executor/session.ts'
+import { bindRunVersion } from './fixtures/ledger.ts'
 
 const SECRET = 'routes-secret'
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -41,7 +42,7 @@ async function boot(withExecutor = false) {
     commands: orchestra.commands,
   })
   closers.push(async () => { await svc.close(); await service.release() })
-  return svc.endpoint
+  return { endpoint: svc.endpoint, orchestra }
 }
 
 const post = (url: string, body: unknown) => fetch(url, {
@@ -52,7 +53,7 @@ const post = (url: string, body: unknown) => fetch(url, {
 
 describe('节点命令与工作流加载路由', () => {
   it('加载工作流 → 拿租约 → 上报 → 三条路都进服务层', async () => {
-    const base = await boot()
+    const { endpoint: base } = await boot()
     const loaded = await post(base + '/v1/workflows/load', {
       workflow_version: '1',
       pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
@@ -80,13 +81,14 @@ describe('节点命令与工作流加载路由', () => {
   })
 
   it('生产执行路由：/v1/node-runs/run 一路跑到 done', async () => {
-    const base = await boot(true)
+    const { endpoint: base, orchestra } = await boot(true)
     const loaded = await post(base + '/v1/workflows/load', {
       workflow_version: '1',
       pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
       nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
     })
     expect(loaded.status).toBe(200)
+    bindRunVersion(orchestra.db, orchestra.catalog, 1, 'r1')
     const run = await post(base + '/v1/node-runs/run', {
       nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
       tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
@@ -98,7 +100,7 @@ describe('节点命令与工作流加载路由', () => {
   })
 
   it('加载 parallel 定义 → HTTP 403 FORBIDDEN', async () => {
-    const base = await boot()
+    const { endpoint: base } = await boot()
     const res = await post(base + '/v1/workflows/load', {
       workflow_version: '1',
       nodes: [{ node_id: 'n1', type: 'parallel' }],
@@ -109,7 +111,7 @@ describe('节点命令与工作流加载路由', () => {
   })
 
   it('缺字段 → 400 PAYLOAD_SCHEMA_INVALID', async () => {
-    const base = await boot()
+    const { endpoint: base } = await boot()
     const res = await post(base + '/v1/node-runs/lease', { nodeRunId: 'nrun_1' })
     // 结构错按 422 回（PAYLOAD_SCHEMA_INVALID 的既有口径）
     expect(res.status).toBe(422)

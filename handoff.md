@@ -443,3 +443,26 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 **提交链**：`a7b03cb` 整改 → `ecbd247` G1 重签 → `df7d23a` G2 重签（`8154e18` / `53d36cc` 为收口文档与 codebasemap 同步）。对照表 `docs/audits/S2-round4-response.md`。
 
 **当前关口**：第五轮独立审计子代理 `ff0066da-1d07-4ae9-afc3-27044fc04734` 已派（不自测），结论回来前不开 S3 九节点与状态机。审计若判 pass，下一步按 `docs/superpowers/plans/2026-11-12-dsh-orchestra-s3-nodes-state.md` 开 S3；若再出重大项，回到 §11.12 表逐条整改。
+
+### 11.14 第五轮独立审计整改（2026-11-13 19:35，提交 \`f68e836\`）
+
+**审计结论**：第五轮独立审计（\`docs/audits/S2-independent-audit-round5.md\`）判 G2 fail：致命 1 / 重大 3 / 不阻断 4。致命是门记录拿结论为 fail 的第四轮报告签 pass（P0-1）；重大是同一工作流版本可 reload 改写（P1-1）、工具授权仍由请求体自带（P1-2）、\`createOrchestra\` 能绕过锁与 epoch（P1-3）；不阻断四条是 M4 长动作与续租收口、门检查证据可换绑、ev-g2-10 实体对调、服务端时间基准。
+
+**本轮改法**：
+
+| 项 | 落点 |
+| --- | --- |
+| P0-1 | \`scripts/gate-check.ts:428\` 的 \`auditConclusionOf\` 读报告结论；\`:436\` 的 \`checkAuditAnchor\` 在结论不一致时拒绝；\`tests/gate-check.spec.ts\` 补六种输入回归 |
+| P1-1 | \`src/service/workflows.ts:19\` 的 \`load\` 同版本内容不同抛 \`WORKFLOW_VERSION_IMMUTABLE\`；新增 \`tests/workflows.spec.ts\` 五例 |
+| P1-2 | \`runNode\` 不再收 \`toolPolicy\`，由 \`policyForNodeRun\` 按 \`node_run → runs.workflow_version\` 取 \`node.tools\`；请求体策略字段删除；请求 \`args\` 不再覆盖注册表；\`tests/production-path.spec.ts\` 补 deny / 空 allow / 未注册三例，\`tests/runtime.spec.ts\` 补借 \`nodeId\` 越权一例 |
+| P1-3 | \`src/index.ts:43\` 模块私有 \`ORCHESTRA_LOCK_PROOF\`；\`createOrchestra\` 无凭证抛 \`FORBIDDEN\`；测试与 \`scripts/fault-inject.ts\` 全部改走 \`openServiceOrchestra\` |
+| P2-1 | \`run-node.ts\` 读 \`actionTimeoutMs\`；续租失败写 \`lease_lost\` 事件并按租约丢失收口；长动作用例 3 秒动作 / 2 秒租约 / 500 毫秒续租 |
+| P2-3 | \`scripts/fault-inject.ts\` 的 \`normalizeEvidence\` 改为全篇共用一套实体映射，重生成 \`ev-g2-10\` |
+
+**门与证据**：G2 加 G2-12/13/14 三项必过项与 \`ev-g2-12/13/14\` 三份证据，不变量补 I8/I9/I10；G2 表内证据哈希已更新（12 \`5c2d543f…\`、13 \`a5260693…\`、14 \`865fd0b7…\`、10 新 \`76b458ed…\`）。审计锚仍是 round4 fail 报告，等第六轮 pass 报告后改为 \`audit_round=6\` / \`audit_report=docs/audits/S2-independent-audit-round6.md\` 再重签。
+
+**验收（实测）**：\`tsc --noEmit\` exit 0；全量 32 文件 / 281 用例，272 passed / 9 failed，9 个全在 \`tests/gate-check.spec.ts\`，首因全是「审计报告结论与门记录结论不符：报告=fail，门记录=pass」，属 P0-1 生效后的预期，待新报告与重签。
+
+**提交**：\`f68e836\`（21 文件，+743/−103）；工作树干净。对照表 \`docs/audits/S2-round5-response.md\`。
+
+**下一步**：第六轮独立审计与 S1/G1 第二轮独立审计已并行派出（S2 \`83e3bd88-06b0-42e4-8162-a80ceb7e8f7e\`、S1 \`366bec2f-c6e7-4799-ad76-cfd2d21939ad\`），不自测；两份报告都 pass 后改审计锚、重签 G1/G2、双门 exit 0，再开 S3。

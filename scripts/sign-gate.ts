@@ -61,6 +61,12 @@ if (spec.prevGate) {
   artifact.previous_artifact_hash = '0'.repeat(64)
 }
 
+// 审计报告按 HEAD 字节固定：只记路径的话，签完再改报告正文门检查发现不了（S1 第二轮审计）
+const auditReport = String(artifact.audit_report ?? '')
+if (!auditReport) throw new Error('artifact 里没有 audit_report')
+const auditBytes = git(['show', 'HEAD:' + auditReport])
+artifact.audit_report_sha256 = sha256Hex(Buffer.from(auditBytes.toString('utf8').replace(/\r\n/g, '\n')))
+
 const newArtifactJson = JSON.stringify(artifact, null, 2)
 text = text.slice(0, artifactMatch.index) + '```json\n' + newArtifactJson + '\n```' + text.slice(artifactMatch.index! + artifactMatch[0].length)
 const artifactHash = sha256Hex(canonicalJson(artifact))

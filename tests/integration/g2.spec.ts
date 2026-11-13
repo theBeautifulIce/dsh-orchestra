@@ -47,7 +47,7 @@ function goodReport(nodeRunId: string, reportId: string, status: string) {
 const CATALOG = catalogFor(['node_a'])
 
 // M5：判定条件从 run 绑定的工作流版本取，每个用例先把 run 绑上版本
-function seedV(db: Db): void { seed(db); bindRunVersion(db) }
+function seedV(db: Db): void { seed(db); bindRunVersion(db, CATALOG) }
 
 describe('G2 门必过项', () => {
   it('单节点 queued 到终态一条路径', () => {

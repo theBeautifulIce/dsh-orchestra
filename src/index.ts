@@ -49,7 +49,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   }
   const db = opts.db ?? openDb(opts.dbFile)
   applySteps(db, loadSteps(defaultMigrationsDir()))
-  const catalog = new WorkflowCatalog(opts.phase)
+  const catalog = new WorkflowCatalog(opts.phase, db)
+  // 定义落库是跨重启的事实来源：不先把已签发的版本装回内存，重启后同版本会被当成新定义（第六轮审计 P1-1）
+  catalog.hydrate()
   // 生产时钟：墙钟与单调钟同时取样，漂移超过 2 秒就判不确定（规格 3.4 行 171）
   const clock = new SystemClock(randomUUID())
   const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }

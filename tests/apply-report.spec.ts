@@ -9,7 +9,7 @@ const NOW = '2026-11-13T03:00:00.000Z'
 const CATALOG = catalogFor(['n_ar', 'n_other'])
 
 function setup(opts: { ttl?: number; now?: string; trace?: boolean } = {}) {
-  const { db } = freshLedger(); seed(db); bindRunVersion(db)
+  const { db } = freshLedger(); seed(db); bindRunVersion(db, CATALOG)
   withTx(db, (tx) => {
     tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_ar', 'r1', 'n_ar', 5, 'agent', 2, 'queued', 10, ?, ?)", [NOW, NOW])
   })
@@ -102,7 +102,9 @@ describe('applyReport 六步收口', () => {
 
   it('证据不足（不可逆节点只给 exitCode）→ rejected 且 reason 含 verification_too_weak', () => {
     const db = setup()
-    const out = apply(db, {}, 'verifying', 1, NOW, catalogFor(['n_ar'], { requiredHashes: ['artifact'] }))
+    const custom = catalogFor(['n_ar'], { requiredHashes: ['artifact'] })
+    bindRunVersion(db, custom)
+    const out = apply(db, {}, 'verifying', 1, NOW, custom)
     expect(out.registry_state).toBe('rejected')
     expect(out.reason).toContain('verification_too_weak')
     expect(events(db, 'report_applied')).toBe(0)
@@ -266,6 +268,22 @@ describe('同一 report_id 的同类事件只留一条（审计 R3-04）', () =>
     const rows = db.raw.prepare("SELECT COUNT(*) AS n FROM report_registry WHERE report_id='rep_1'").get() as { n: number }
     expect(rows.n).toBe(1)
     expect(Number(registry(db).report_seq)).toBe(1)
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+})
+
+describe('跨重启定义绑定（第六轮审计 P1-1）', () => {
+  it('run 绑定的定义哈希与当前目录不一致时拒绝收口', () => {
+    const db = setup()
+    withTx(db, (tx) => tx.run("UPDATE runs SET workflow_definition_hash = ? WHERE run_id = 'r1'", ['f'.repeat(64)]))
+    expect(() => apply(db)).toThrowError(/工作流定义与当前版本不一致/)
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('run 没有绑定定义哈希时不许收口', () => {
+    const db = setup()
+    withTx(db, (tx) => tx.run("UPDATE runs SET workflow_definition_hash = NULL WHERE run_id = 'r1'"))
+    expect(() => apply(db)).toThrowError(/没有绑定工作流定义哈希/)
     expect(nodeRow(db).status).toBe('verifying')
   })
 })

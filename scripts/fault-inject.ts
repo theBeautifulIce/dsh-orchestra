@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { openDb, withTx } from '../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../src/infra/db/migrate.ts'
@@ -30,7 +30,7 @@ import type { Db } from '../src/infra/sqlite/driver.ts'
 
 export type InjectionCase = 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-07' | 'G-08' | 'G-09' | 'G-14' | 'G-15'
   | 'ev-g2-01' | 'ev-g2-02' | 'ev-g2-03' | 'ev-g2-04' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
-  | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11' | 'ev-g2-12' | 'ev-g2-13' | 'ev-g2-14'
+  | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11' | 'ev-g2-12' | 'ev-g2-13' | 'ev-g2-14' | 'ev-g2-15'
 
 export type InjectionResult = {
   case: InjectionCase
@@ -356,10 +356,10 @@ const strongReport = (nodeRunId: string, reportId: string, status: string) => ({
 const NODE_ROW = (db: Db, id: string) => db.raw.prepare('SELECT status, action_generation, attempt, fence_state, cancel_result, lease_expires_at FROM node_runs WHERE node_run_id = ?').get(id)
 
 async function caseG03(): Promise<InjectionResult> {
-  const { file, db } = freshLedger(); seed(db); bindRunVersion(db)
+  const catalog = catalogFor(['n1'])
+  const { file, db } = freshLedger(); seed(db); bindRunVersion(db, catalog)
   const before = dumpState(file)
   injectQueued(db, 'nrun_g03')
-  const catalog = catalogFor(['n1'])
   const run = () => inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
     nodeRunId: 'nrun_g03', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: '2026-11-13T03:00:00.000Z',
     report: strongReport('nrun_g03', 'rpt_g03_1', 'started'),
@@ -379,7 +379,8 @@ async function caseG03(): Promise<InjectionResult> {
 }
 
 async function caseG04(): Promise<InjectionResult> {
-  const { file, db } = freshLedger(); seed(db); bindRunVersion(db)
+  const catalog = catalogFor(['n1'])
+  const { file, db } = freshLedger(); seed(db); bindRunVersion(db, catalog)
   const before = dumpState(file)
   injectQueued(db, 'nrun_g04')
   db.raw.prepare("UPDATE node_runs SET lease_expires_at = '2026-11-11T00:00:00.000Z' WHERE node_run_id = 'nrun_g04'").run()
@@ -388,7 +389,7 @@ async function caseG04(): Promise<InjectionResult> {
     inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nrun_g04', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: '2026-11-13T03:00:00.000Z',
       report: strongReport('nrun_g04', 'rpt_g04_1', 'started'),
-    }, catalogFor(['n1'])))
+    }, catalog))
   } catch (err) {
     code = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
   }
@@ -539,9 +540,11 @@ async function caseG07(): Promise<InjectionResult> {
 type HttpBoot = { endpoint: string; file: string; db: Db; runtime: RuntimeDeps; close: () => Promise<void> }
 
 // 起真服务：真库、真路由、真执行器；工具固定回 ok，重跑字节一致
-async function bootHttp(secret: string, opts?: { failingTool?: boolean; delayMs?: number }): Promise<HttpBoot> {
-  const dir = mkdtempSync(join(tmpdir(), 'orch-ev-'))
-  const file = join(dir, 'orchestra.db')
+async function bootHttp(secret: string, opts?: { failingTool?: boolean; delayMs?: number; dbFile?: string }): Promise<HttpBoot> {
+  // 指定 dbFile 就重启同一个库：跨重启用例靠它验定义持久化（ev-g2-15）
+  const file = opts?.dbFile ?? join(mkdtempSync(join(tmpdir(), 'orch-ev-')), 'orchestra.db')
+  const dir = dirname(file)
+  mkdirSync(dir, { recursive: true })
   const registry = new ToolRegistry()
   registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
   // 故意失败的工具：宿主直接回非零退出码，用来验「工具失败不许落完成」
@@ -1228,6 +1231,62 @@ async function caseEvG214(): Promise<InjectionResult> {
   }
 }
 
+// ev-g2-15：定义必须跨重启落库——重启后同名版本不许改写，在飞 run 的判定条件不跟着变
+// 先起服务把定义跑进 verifying，关掉，再用同一个库重启：hydrate 装回旧定义，改写被 409 拒
+async function caseEvG215(): Promise<InjectionResult> {
+  const secret = 'ev-g2-15-secret'
+  const base = mkdtempSync(join(tmpdir(), 'orch-ev15-'))
+  const file = join(base, 'orchestra.db')
+  const first = await bootHttp(secret, { dbFile: file })
+  const before = dumpProduction(file)
+  const loaded = await postJson(first.endpoint, '/v1/workflows/load', EV_DEF, secret)
+  const created = await postJson(first.endpoint, '/v1/runs', { taskTitle: '跨重启定义绑定', workflowVersion: '1', now: EV_NOW }, secret)
+  const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
+  const leased = await postJson(first.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const gen = Number(leased.body?.data?.action_generation ?? 0)
+  await postJson(first.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev15_started', node_run_id: nodeRunId, attempt: 1, status: 'started' },
+  }, secret)
+  const verifying = await postJson(first.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'started', generation: gen, now: EV_NOW,
+    report: { report_id: 'rpt_ev15_verifying', node_run_id: nodeRunId, attempt: 1, status: 'verifying' },
+  }, secret)
+  const boundBefore = first.db.raw.prepare('SELECT workflow_version, workflow_definition_hash FROM runs ORDER BY run_id ASC').get()
+  await first.close()
+
+  // 重启同一个库：定义只应从账本装回来，不许从空目录重新放行
+  const second = await bootHttp(secret, { dbFile: file })
+  const versions = second.db.raw.prepare('SELECT version, content_hash FROM workflow_versions ORDER BY version ASC').all()
+  const altered = { ...EV_DEF, pass_conditions: [] }
+  const reload = await postJson(second.endpoint, '/v1/workflows/load', altered, secret)
+  const boundAfter = second.db.raw.prepare('SELECT workflow_version, workflow_definition_hash FROM runs ORDER BY run_id ASC').get()
+  const nodeAfter = second.db.raw.prepare('SELECT status, attempt, revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId)
+  // 弱证据（不是 run_tool 签发）来收口：判定条件若被改写就会放行，这里必须仍被拒
+  const doneWeak = await postJson(second.endpoint, '/v1/node-runs/report', {
+    nodeRunId, attempt: 1, expectedStatus: 'verifying', generation: gen, now: '2026-11-13T03:00:01.000Z',
+    report: {
+      report_id: 'rpt_ev15_done_weak', node_run_id: nodeRunId, attempt: 1, status: 'done',
+      evidence: { source: 'tool_result', exitCode: 0, stdoutHash: 'h_ev15', hashes: {} },
+    },
+  }, secret)
+  await second.close()
+  const after = dumpProduction(file)
+  return {
+    case: 'ev-g2-15',
+    params: { db: file, 入口: 'POST /v1/workflows/load × 2（同一库重启）', 节点: nodeRunId, 改写: 'workflow_version=1 但 pass_conditions=[]' },
+    before, after,
+    reconcile: '首次加载 HTTP=' + String(loaded.status)
+      + '；验收到 verifying HTTP=' + String(verifying.status)
+      + '；重启前绑定=' + JSON.stringify(boundBefore)
+      + '；重启后定义表=' + JSON.stringify(versions)
+      + '；改写同版本 HTTP=' + String(reload.status) + ' 错误=' + JSON.stringify(reload.body?.error ?? reload.body)
+      + '；重启后绑定=' + JSON.stringify(boundAfter)
+      + '；节点行=' + JSON.stringify(nodeAfter)
+      + '；弱证据收口 HTTP=' + String(doneWeak.status) + ' 返回=' + JSON.stringify(doneWeak.body?.data ?? doneWeak.body?.error),
+  }
+}
+
 export async function runCase(name: InjectionCase): Promise<InjectionResult> {
   switch (name) {
     case 'G-01': return caseG01()
@@ -1254,6 +1313,7 @@ export async function runCase(name: InjectionCase): Promise<InjectionResult> {
     case 'ev-g2-12': return caseEvG212()
     case 'ev-g2-13': return caseEvG213()
     case 'ev-g2-14': return caseEvG214()
+    case 'ev-g2-15': return caseEvG215()
   }
 }
 
@@ -1261,7 +1321,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const idx = process.argv.indexOf('--case')
   const name = (idx >= 0 ? process.argv[idx + 1] : 'G-01') as InjectionCase
   const out = await runCase(name)
-  const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11', 'ev-g2-12', 'ev-g2-13', 'ev-g2-14'].includes(name) ? 'G2' : 'G1'
+  const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11', 'ev-g2-12', 'ev-g2-13', 'ev-g2-14', 'ev-g2-15'].includes(name) ? 'G2' : 'G1'
   writeEvidence(join(process.cwd(), 'docs/gates/evidence/' + gate), out)
   console.log(JSON.stringify(out, null, 2))
 }

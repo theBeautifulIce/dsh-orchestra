@@ -61,6 +61,6 @@
 ## 五、验收
 
 - 类型检查：`D:/NodeJs/node.exe node_modules/typescript/bin/tsc --noEmit` exit 0。
-- 全量用例：待跑；`tests/gate-check.spec.ts` 在换 pass 报告与重签前会红，这是 P0-1 生效后的预期。
+- 全量用例：32 文件 / 281 例，272 通过 / 9 失败；9 例全在 `tests/gate-check.spec.ts`，首因是「审计报告结论与门记录结论不符：报告=fail，门记录=pass」，属 P0-1 生效后的预期，待换 pass 报告与重签。
 - 证据：`ev-g2-12/13/14` 已生成，各连跑两次 sha256 一致；`ev-g2-10` 已按统一映射重生成。
 - 门记录：G2 已加 G2-12/13/14 三项、三份证据、I8/I9/I10 三条不变量；G1/G2 的审计锚与哈希待第六轮独立审计给出 pass 报告后重签。

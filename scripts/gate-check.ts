@@ -24,7 +24,7 @@ export const GATE_FIELDS = [
   'gate', 'schema_version', 'gate_run_id', 'candidate_hash', 'change_scope_hash',
   'evidence_index_hash', 'invariants_hash', 'must_pass_items', 'failed_items', 'conclusion',
   'run_terminal', 'exceptions', 'rollback', 'approver', 'approved_at', 'producer',
-  'previous_artifact_hash', 'audit_round', 'audit_report',
+  'previous_artifact_hash', 'audit_round', 'audit_report', 'audit_report_sha256',
 ] as const
 
 export type GateSpec = {
@@ -32,6 +32,8 @@ export type GateSpec = {
   content: Record<string, string>
   // 每道门固定一张必过项清单：少了、多了、改名都算没过（审计 M4）；正文表的内容列也按这张表核对（审计 N-09）
   evidenceMap: Record<string, string[]>
+  // 证据 id 与文件路径也是固定映射：只固定 id 还能把文件换绑后重签（S1 第二轮审计）
+  evidenceFiles: Record<string, string>
   scopeBase: string
   excludes: string[]
   prevGate: string | null
@@ -71,6 +73,21 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G-14': ['ev-g14'],
       'G-15': ['ev-g15'],
     },
+    evidenceFiles: {
+      'ev-auth': 'tests/auth.spec.ts',
+      'ev-backup': 'tests/backup.spec.ts',
+      'ev-chain': 'tests/hash-chain.spec.ts',
+      'ev-epoch': 'tests/db-open.spec.ts',
+      'ev-g01': 'docs/gates/evidence/G1/G-01.md',
+      'ev-g02': 'docs/gates/evidence/G1/G-02.md',
+      'ev-g08': 'docs/gates/evidence/G1/G-08.md',
+      'ev-g09': 'docs/gates/evidence/G1/G-09.md',
+      'ev-g14': 'docs/gates/evidence/G1/G-14.md',
+      'ev-g15': 'docs/gates/evidence/G1/G-15.md',
+      'ev-gatecheck': 'tests/gate-check.spec.ts',
+      'ev-migrate': 'tests/migrate.spec.ts',
+      'ev-phase': 'tests/config.spec.ts',
+    },
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
     // handoff 是活文档，每次收尾都会改；它进候选范围会让门哈希随一次文档更新失效（审计 F-02）
     excludes: ['docs/gates', 'docs/audits', 'docs/reviews', 'handoff.md'],
@@ -78,7 +95,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     gateFile: 'docs/gates/G1.md',
   },
   G2: {
-    items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07', 'G2-08', 'G2-09', 'G2-10', 'G2-11', 'G2-12', 'G2-13', 'G2-14'],
+    items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07', 'G2-08', 'G2-09', 'G2-10', 'G2-11', 'G2-12', 'G2-13', 'G2-14', 'G2-15'],
     content: {
       'G2-01': '单节点 queued 到终态一条路径（走生产装配）',
       'G2-02': '重复上报只落一次',
@@ -98,6 +115,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-12': '工具授权只认 workflow 定义，请求体策略不参与',
       'G2-13': '单写者锁与 epoch 围栏：第二写者拿不到锁，旧 epoch 写不进',
       'G2-14': '长动作靠心跳续租，扫描不误判过期',
+      'G2-15': '同一工作流版本跨重启不可改写，在飞 run 的判定条件不跟着变',
     },
     evidenceMap: {
       'G2-01': ['ev-g2-01'],
@@ -118,6 +136,28 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-12': ['ev-g2-12'],
       'G2-13': ['ev-g2-13'],
       'G2-14': ['ev-g2-14'],
+      'G2-15': ['ev-g2-15'],
+    },
+    evidenceFiles: {
+      'ev-g2-01': 'docs/gates/evidence/G2/ev-g2-01.md',
+      'ev-g2-02': 'docs/gates/evidence/G2/ev-g2-02.md',
+      'ev-g2-03': 'docs/gates/evidence/G2/ev-g2-03.md',
+      'ev-g2-04': 'docs/gates/evidence/G2/ev-g2-04.md',
+      'ev-g2-05': 'docs/gates/evidence/G2/ev-g2-05.md',
+      'ev-g2-06': 'docs/gates/evidence/G2/ev-g2-06.md',
+      'ev-g2-07': 'docs/gates/evidence/G2/ev-g2-07.md',
+      'ev-g2-g03': 'docs/gates/evidence/G2/G-03.md',
+      'ev-g2-g04': 'docs/gates/evidence/G2/G-04.md',
+      'ev-g2-g05': 'docs/gates/evidence/G2/G-05.md',
+      'ev-g2-g07': 'docs/gates/evidence/G2/G-07.md',
+      'ev-g2-08': 'docs/gates/evidence/G2/ev-g2-08.md',
+      'ev-g2-09': 'docs/gates/evidence/G2/ev-g2-09.md',
+      'ev-g2-10': 'docs/gates/evidence/G2/ev-g2-10.md',
+      'ev-g2-11': 'docs/gates/evidence/G2/ev-g2-11.md',
+      'ev-g2-12': 'docs/gates/evidence/G2/ev-g2-12.md',
+      'ev-g2-13': 'docs/gates/evidence/G2/ev-g2-13.md',
+      'ev-g2-14': 'docs/gates/evidence/G2/ev-g2-14.md',
+      'ev-g2-15': 'docs/gates/evidence/G2/ev-g2-15.md',
     },
     scopeBase: '4f3ada7',
     excludes: ['docs/gates', 'docs/audits', 'docs/reviews', 'handoff.md'],
@@ -211,7 +251,7 @@ export function candidateEntries(root: string, spec: { scopeBase: string; exclud
   return { paths, files }
 }
 
-function checkEvidence(blocks: Block[], artifact: Record<string, unknown>, root: string): { entries: EvidenceEntry[]; hash: string } {
+function checkEvidence(blocks: Block[], artifact: Record<string, unknown>, root: string, spec: GateSpec): { entries: EvidenceEntry[]; hash: string } {
   const raw = blockOf(blocks, 'evidence-index').value
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('evidence-index 为空')
   const entries: EvidenceEntry[] = []
@@ -222,6 +262,10 @@ function checkEvidence(blocks: Block[], artifact: Record<string, unknown>, root:
     }
     if (seen.has(e.id)) throw new Error('evidence-index 里 id 重复: ' + e.id)
     seen.add(e.id)
+    // id 的文件路径固定：只固定 id 的话，换一份同名文件再重签仍能过（S1 第二轮审计）
+    const expectedFile = spec.evidenceFiles[e.id]
+    if (!expectedFile) throw new Error('证据 id 不在固定映射里: ' + e.id)
+    if (e.file !== expectedFile) throw new Error('证据 ' + e.id + ' 的文件与固定映射不一致（换绑证据不许重签）：' + e.file + ' != ' + expectedFile)
     // 证据也读 HEAD：工作树里改证据但没提交，不能拿来签门（审计 N-09）
     const head = contentAt(root, 'HEAD', e.file)
     if (!head) throw new Error('证据文件不在 HEAD 里，先提交证据再签门: ' + e.id)
@@ -229,6 +273,9 @@ function checkEvidence(blocks: Block[], artifact: Record<string, unknown>, root:
     const actual = sha256Hex(head.toString('utf8').replace(/\r\n/g, '\n'))
     if (actual !== e.sha256) throw new Error('证据文件 sha256 不符: ' + e.id + '（记录 ' + e.sha256.slice(0, 16) + '… 实际 ' + actual.slice(0, 16) + '…）')
     entries.push({ id: e.id, file: e.file, sha256: actual })
+  }
+  for (const id of Object.keys(spec.evidenceFiles).sort()) {
+    if (!seen.has(id)) throw new Error('固定证据映射里的 ' + id + ' 没有出现在 evidence-index')
   }
   const sorted = entries.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   const hash = sha256Hex(canonicalJson(sorted))
@@ -424,27 +471,48 @@ function checkPreviousChain(artifact: Record<string, unknown>, spec: GateSpec, r
   if (m[1] !== prev) throw new Error('previous_artifact_hash 与前序门记录的 artifact_hash 不符（重签链断了）')
 }
 
-// 审计报告正文里的结论：pass / fail / 通过 / 不通过，统一成 pass|fail
+// 审计报告正文里的结论：只认行首（可带标题/加粗标记）的结论行，且全文只能有一个结论
+// 「门记录结论：pass」这类行内引用不算结论；多个不同结论视为没结论，不能拿它签门（第六轮审计 P0-1）
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
-  const m = /结论[^\n]{0,10}(?:[：:]\s*|\s*\n\s*)\**\s*(pass|fail|不通过|通过)/i.exec(text)
-  const raw = m?.[1] ?? /建议[：:]\s*\**\s*(不通过|通过)/.exec(text)?.[1]
-  if (!raw) return null
-  return raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
+  const found = new Set<'pass' | 'fail'>()
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^#{1,6}\s*/, '').replace(/^\*\*/, '').trim()
+    let m = /^(?:审计)?(?:结论|判定)\s*\**\s*[：:]\s*\**\s*(pass|fail|通过|不通过)(?![a-zA-Z])/i.exec(line)
+    if (!m) m = /^(pass|fail|通过|不通过)$/i.exec(line)
+    if (!m) m = /^建议\s*[：:]\s*\**\s*(不通过|通过)$/.exec(line)
+    if (!m) continue
+    const raw = m[1] ?? ''
+    found.add(raw === 'pass' || raw === '通过' ? 'pass' : 'fail')
+  }
+  if (found.size !== 1) return null
+  return [...found][0] ?? null
 }
 
-// 本轮独立审计的锚：报告在 HEAD、轮次对得上，而且报告结论必须与门记录结论一致（第五轮审计 P0-1）
-function checkAuditAnchor(artifact: Record<string, unknown>, root: string): void {
+// 本轮独立审计的锚：报告在 HEAD、路径在白名单目录、轮次对得上、字节哈希固定，结论与门记录一致
+// 只绑结论不绑字节，签后改报告正文不会被发现；门记录自身也不能当审计报告自指通过（S1 第二轮审计）
+function checkAuditAnchor(artifact: Record<string, unknown>, spec: GateSpec, root: string): void {
   const round = artifact.audit_round
   if (!Number.isInteger(round) || (round as number) < 1) throw new Error('audit_round 必须是正整数')
   const report = String(artifact.audit_report ?? '')
   if (report.length === 0) throw new Error('audit_report 不能空')
-  if (!contentAt(root, 'HEAD', report)) throw new Error('审计报告不在 HEAD 里，先提交审计报告: ' + report)
+  if (!/^docs\/audits\/[^/]+\.md$/.test(report) || report.includes('..')) {
+    throw new Error('audit_report 必须是 docs/audits/ 下的 Markdown 报告: ' + report)
+  }
+  if (report === spec.gateFile) throw new Error('audit_report 不能指向门记录自身')
+  const head = contentAt(root, 'HEAD', report)
+  if (!head) throw new Error('审计报告不在 HEAD 里，先提交审计报告: ' + report)
   const m = /round(\d+)/.exec(report)
   const fileRound = m ? Number(m[1]) : 1
   if (fileRound !== round) throw new Error('audit_round 与审计报告的轮次不一致: ' + String(round) + ' != ' + String(fileRound))
-  const text = contentAt(root, 'HEAD', report)!.toString('utf8')
+  const expectedHash = String(artifact.audit_report_sha256 ?? '')
+  if (!/^[0-9a-f]{64}$/.test(expectedHash)) throw new Error('audit_report_sha256 必须是 64 位 sha256')
+  const actualHash = sha256Hex(head.toString('utf8').replace(/\r\n/g, '\n'))
+  if (actualHash !== expectedHash) {
+    throw new Error('审计报告 sha256 与记录不符（报告改过就重新审计再签）：' + expectedHash.slice(0, 16) + '… != ' + actualHash.slice(0, 16) + '…')
+  }
+  const text = head.toString('utf8')
   const actual = auditConclusionOf(text)
-  if (!actual) throw new Error('审计报告里找不到结论行，不能拿它当门记录依据: ' + report)
+  if (!actual) throw new Error('审计报告里找不到唯一结论行，不能拿它当门记录依据: ' + report)
   if (actual !== artifact.conclusion) {
     throw new Error('审计报告结论与门记录结论不符：报告=' + actual + '，门记录=' + String(artifact.conclusion))
   }
@@ -529,13 +597,13 @@ export function verifyGateRecord(text: string, opts: { root?: string; allowDirty
   }
   checkGovernance(artifact)
   checkPreviousChain(artifact, spec, root)
-  checkAuditAnchor(artifact, root)
+  checkAuditAnchor(artifact, spec, root)
 
   const anchor = /artifact_hash=([0-9a-f]{64})/.exec(text)
   if (!anchor) throw new Error('门记录里找不到 artifact_hash 锚点')
   const expect = sha256Hex(canonicalJson(artifact))
   if (anchor[1] !== expect) throw new Error('artifact_hash 与正文不符：' + anchor[1] + ' != ' + expect)
-  const evidence = checkEvidence(blocks, artifact, root)
+  const evidence = checkEvidence(blocks, artifact, root, spec)
   const invariants = checkInvariants(blocks, artifact, evidence.entries)
   checkBodyEvidenceTable(text, evidence.entries)
   checkBodyExceptions(text, artifact.exceptions)

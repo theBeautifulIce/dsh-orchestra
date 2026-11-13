@@ -16,7 +16,7 @@ const CATALOG = catalogFor(['n_sw'])
 function setup(nodeRunId = 'nr_sw') {
   const { db } = freshLedger()
   seed(db)
-  bindRunVersion(db)
+  bindRunVersion(db, CATALOG)
   withTx(db, (tx) => {
     tx.run(
       "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES (?, 'r1', 'n_sw', 5, 'agent', 2, 'queued', 10, ?, ?)",
