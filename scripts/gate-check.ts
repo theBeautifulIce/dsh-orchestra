@@ -581,24 +581,20 @@ function auditTopLevelLines(text: string): string[] {
       const inner = quote[2] ?? ''
       // 引用块内的缩进代码同样不可见；引用标记后已吃掉一个空格，剩 3 个空格也算代码。
       if (/^(?: {0,3}\t| {3,})/.test(inner)) continue
-      const qf = /^(\x60{3,}|~{3,})(.*)$/.exec(inner)
+      const qf = fenceMarkerOf(inner)
       if (qf) {
-        const marker = qf[1] ?? ''
-        const rest = qf[2] ?? ''
-        if (!quoteFence) quoteFence = { char: marker[0] ?? '', length: marker.length }
-        else if (marker[0] === quoteFence.char && marker.length >= quoteFence.length && rest.trim() === '') quoteFence = null
+        if (!quoteFence) quoteFence = { char: qf.char, length: qf.length }
+        else if (qf.char === quoteFence.char && qf.length >= quoteFence.length && qf.rest.trim() === '') quoteFence = null
         continue
       }
       if (quoteFence) continue
     } else if (quoteFence) {
       quoteFence = null
     }
-    const fm = /^( {0,3})(\x60{3,}|~{3,})(.*)$/.exec(rawLine)
+    const fm = fenceMarkerOf(rawLine)
     if (fm) {
-      const marker = fm[2] ?? ''
-      const rest = fm[3] ?? ''
-      if (!fence) fence = { char: marker[0] ?? '', length: marker.length }
-      else if (marker[0] === fence.char && marker.length >= fence.length && rest.trim() === '') fence = null
+      if (!fence) fence = { char: fm.char, length: fm.length }
+      else if (fm.char === fence.char && fm.length >= fence.length && fm.rest.trim() === '') fence = null
       continue
     }
     if (fence) continue
@@ -618,6 +614,16 @@ function isMarkdownBlankLine(line: string): boolean {
   return /^[ \t]*$/.test(line)
 }
 
+// 反引号围栏的 info string 里不能出现反引号；这种行在 CommonMark 里不是围栏。
+function fenceMarkerOf(body: string): { char: string; length: number; rest: string } | null {
+  const m = /^( {0,3})(\x60{3,}|~{3,})(.*)$/.exec(body)
+  if (!m) return null
+  const marker = m[2] ?? ''
+  const rest = m[3] ?? ''
+  if (marker.charAt(0) === '\x60' && rest.includes('\x60')) return null
+  return { char: marker.charAt(0), length: marker.length, rest }
+}
+
 // 围栏代码整段不可见：里面的字面标签不能参与 HTML 配对（S1 第十轮 P1-1）。
 function maskFencedAuditCode(text: string): string {
   const lines = text.split('\n')
@@ -632,18 +638,16 @@ function maskFencedAuditCode(text: string): string {
         fence = null
       } else {
         out.push(blankPreservingLines(line))
-        const marker = /^( {0,3})(\x60{3,}|~{3,})(.*)$/.exec(body)
+        const marker = fenceMarkerOf(body)
         if (marker && quoted === fence.quoted) {
-          const m = marker[2] ?? ''
-          if (m.charAt(0) === fence.char && m.length >= fence.length && (marker[3] ?? '').trim() === '') fence = null
+          if (marker.char === fence.char && marker.length >= fence.length && marker.rest.trim() === '') fence = null
         }
         continue
       }
     }
-    const marker = /^( {0,3})(\x60{3,}|~{3,})(.*)$/.exec(body)
+    const marker = fenceMarkerOf(body)
     if (marker) {
-      const m = marker[2] ?? ''
-      fence = { char: m.charAt(0), length: m.length, quoted }
+      fence = { char: marker.char, length: marker.length, quoted }
       out.push(blankPreservingLines(line))
       continue
     }
