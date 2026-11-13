@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsh-orchestra · 神经中枢原型 v19</title>
+<title>dsh-orchestra · 神经中枢原型 v20</title>
 <style>
 :root{
   --bg:#f3f4f7;
@@ -2182,16 +2182,6 @@ body.v5 .tw-ev .ic{width:11px;height:11px;margin-top:2px;color:#0f766e;flex:none
 body.v5 .tw-empty{padding:22px;border:1px dashed #e6e7ea;border-radius:8px;color:#5b6b82;font-size:13px;text-align:center}
 
 /* workflows page */
-body.v5 .wf-switch{display:flex;align-items:center;gap:3px;margin:0 0 10px;padding:3px;border:1px solid var(--line);border-radius:7px;background:#ffffff;overflow-x:auto}
-body.v5 .wf-pill{
-  height:29px;padding:0 11px;border:1px solid transparent;border-radius:5px;background:none;
-  color:#5b6b82;font-size:13.5px;white-space:nowrap;display:flex;align-items:center;gap:6px;
-}
-body.v5 .wf-pill:hover{background:#ffffff;color:#0f172a}
-body.v5 .wf-pill.on{background:#ffffff;border-color:#111316;color:#111316;font-weight:600}
-body.v5 .wf-pill .ver{font-family:var(--mono);font-size:12px;color:#5b6b82}
-body.v5 .wf-pill.on .ver{color:#0f766e}
-body.v5 .wf-pill .live{width:4px;height:4px;border-radius:50%;background:#15803d}
 body.v5 .wf-hero{border:1px solid var(--line);border-radius:9px;background:#ffffff;margin-bottom:10px}
 body.v5 .wf-hero-top{display:flex;align-items:flex-start;gap:16px;padding:14px 15px 12px;border-bottom:1px solid #e6e7ea}
 body.v5 .wf-hero-main{flex:1;min-width:0}
@@ -2269,9 +2259,6 @@ body.v5 .wf-title{margin:4px 0 4px;font-size:17px;line-height:1.35;font-weight:6
 body.v5 .wf-desc{margin:0;max-width:1000px;font-size:13.5px;line-height:1.6;color:#5b6b82}
 body.v5 .wf-meta{margin-top:5px;font-family:var(--mono);font-size:12.5px;color:#5b6b82;display:flex;flex-wrap:wrap;gap:5px}
 body.v5 .wf-actions{display:flex;gap:6px;flex:none;padding-top:1px}
-body.v5 .wf-pill em{font-style:normal;font-family:var(--mono);font-size:12px;color:#5b6b82}
-body.v5 .wf-pill.on em{color:#0f766e}
-body.v5 .wf-pill .dot{width:5px;height:5px;border-radius:50%;flex:none}
 body.v5 .wf-panel-head{display:flex;align-items:center;gap:8px;padding:10px 13px;border-bottom:1px solid #e6e7ea;background:#f8fafc}
 body.v5 .wf-panel-head b{font-size:13px;font-weight:600;color:#0f172a}
 body.v5 .wf-panel-head span{font-size:12.5px;color:#5b6b82}
@@ -2852,8 +2839,6 @@ body.v5 .tw-inspect-empty{font-size:14px;padding:20px 14px}
 body.v5 .tw-empty-note{font-size:14px}
 
 /* 流程页 */
-body.v5 .wf-pill{height:32px;padding:0 12px;font-size:14px}
-body.v5 .wf-pill .ver,body.v5 .wf-pill em{font-size:13px}
 body.v5 .wf-hero-top{padding:16px 18px 14px}
 body.v5 .wf-hero-kicker{font-size:13.5px;letter-spacing:.08em}
 body.v5 .wf-hero-title{font-size:19px;line-height:1.4}
@@ -3422,10 +3407,6 @@ body.v5 .chat-footnote{padding:0 18px 12px;text-align:center;color:#a3a8b0;font-
 body.v5 .wf-top{padding:18px 20px;margin:0 0 14px;border:1px solid #e6e7ea;border-radius:10px;background:#ffffff;box-shadow:none}
 body.v5 .wf-top-kicker{color:#636970!important;font-weight:600}
 body.v5 .wf-top-actions{gap:6px;flex-wrap:wrap;justify-content:flex-end}
-body.v5 .wf-switch{padding:3px;gap:3px;border-radius:7px;background:#f5f5f6;border:1px solid #e6e7ea;box-shadow:none}
-body.v5 .wf-pill{border-radius:5px;color:#4a4f57;border:1px solid transparent}
-body.v5 .wf-pill.on{border-color:#ffffff;background:#ffffff;color:#111316;box-shadow:0 0 0 1px #e0e1e5}
-body.v5 .wf-pill.on em{color:#5e646d}
 body.v5 .wf-gate{border-radius:0;border:0;background:transparent;padding:4px 2px;margin:0 0 10px;font-size:13px;color:#636970}
 body.v5 .wf-tabs{margin-top:12px;border:1px solid #e6e7ea;border-radius:8px 8px 0 0;background:#ffffff}
 body.v5 .wf-tab.on{border-bottom-color:#111316;color:#111316}
@@ -3662,6 +3643,50 @@ body.v5 .arch-desc{margin-top:8px;padding-top:9px;border-top:1px solid #e6e7ea;f
 body.v5 .arch-ack{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:13px;line-height:1.65;color:#3c4147;cursor:pointer}
 body.v5 .arch-ack input{margin-top:3px}
 @media (max-width:900px){body.v5 .archive-row{grid-template-columns:1fr auto}body.v5 .ar-result,body.v5 .ar-date{grid-column:1/-1}}
+/* ---- v20：流程库（可搜下拉，替代横向标签条） ---- */
+body.v5 .wf-bar{position:relative;margin:0 0 12px}
+body.v5 .wf-cur{display:flex;align-items:center;gap:9px;width:100%;min-height:42px;padding:0 13px;background:#fff;border:1px solid var(--line);border-radius:9px;text-align:left;color:#111316;cursor:pointer;transition:border-color .14s, box-shadow .14s}
+body.v5 .wf-cur:hover{border-color:#c9ced6}
+body.v5 .wf-cur[aria-expanded="true"]{border-color:#aab1bb;box-shadow:0 1px 2px rgba(16,24,40,.05)}
+body.v5 .wf-cur-dot{width:7px;height:7px;border-radius:50%;flex:none;background:#249b72}
+body.v5 .wf-cur-dot.draft{background:#d29a38}
+body.v5 .wf-cur-name{font-size:14.5px;font-weight:650;letter-spacing:-.01em}
+body.v5 .wf-cur-ver{font-family:var(--mono);font-size:12px;color:#5b6b82}
+body.v5 .wf-cur-sep{width:1px;height:14px;background:#e4e6ea;margin:0 3px}
+body.v5 .wf-cur-hint{font-size:12.5px;color:#7a828e}
+body.v5 .wf-cur-caret{width:16px;height:16px;margin-left:auto;color:#8b919c;transition:transform .16s}
+body.v5 .wf-cur[aria-expanded="true"] .wf-cur-caret{transform:rotate(180deg)}
+body.v5 .wf-pick{position:absolute;left:0;right:auto;top:calc(100% + 6px);width:min(700px,100%);z-index:45;background:#fff;border:1px solid #e2e4e8;border-radius:11px;box-shadow:0 24px 48px -24px rgba(15,23,42,.28),0 2px 8px rgba(15,23,42,.06);padding:9px}
+body.v5 .wf-pick-search{display:flex;align-items:center;gap:8px;height:38px;padding:0 10px;border:1px solid #e2e4e8;border-radius:8px;background:#fafbfc}
+body.v5 .wf-pick-search .ic{width:15px;height:15px;color:#8b919c;flex:none}
+body.v5 .wf-pick-search input{flex:1;min-width:0;border:0;background:none;font-size:13.5px;color:#111316;outline:none}
+body.v5 .wf-pick-search input::placeholder{color:#9aa1ac}
+body.v5 .wf-pick-clear{display:flex;align-items:center;justify-content:center;width:22px;height:22px;border:0;border-radius:5px;background:none;color:#8b919c;cursor:pointer}
+body.v5 .wf-pick-clear:hover{background:#f0f1f3;color:#111316}
+body.v5 .wf-pick-clear .ic{width:13px;height:13px}
+body.v5 .wf-pick-head{display:flex;align-items:center;justify-content:space-between;padding:10px 5px 6px;font-size:12.5px;color:#8b919c}
+body.v5 .wf-pick-list{display:flex;flex-direction:column;gap:1px;max-height:396px;overflow:auto}
+body.v5 .wf-pick-row{display:flex;align-items:flex-start;gap:12px;width:100%;padding:11px 10px;border:1px solid transparent;border-radius:8px;background:none;text-align:left;cursor:pointer}
+body.v5 .wf-pick-row:hover{background:#f7f8fa}
+body.v5 .wf-pick-row.on{background:#f4f6f8;border-color:#e7e9ec}
+body.v5 .wf-pick-main{min-width:0;flex:1}
+body.v5 .wf-pick-name{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:650;color:#111316;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.v5 .wf-pick-name em{font-style:normal;font-family:var(--mono);font-size:11.5px;font-weight:400;color:#77808c}
+body.v5 .wf-pick-now{flex:none;font-size:11px;font-weight:600;color:#0f6b60;background:#eaf6f2;border-radius:4px;padding:1px 5px}
+body.v5 .wf-pick-desc{display:block;margin-top:3px;font-size:12.5px;line-height:1.5;color:#5b6b82;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.v5 .wf-pick-meta{display:block;margin-top:4px;font-size:12px;color:#8b919c}
+body.v5 .wf-pick-side{flex:none;padding-top:1px}
+body.v5 .wf-state{display:inline-block;font-size:11.5px;padding:2px 7px;border-radius:999px;border:1px solid #e4e6ea;color:#5b6b82;background:#fff}
+body.v5 .wf-state.live{color:#0f6b60;border-color:#d3e9e4;background:#f5faf8}
+body.v5 .wf-state.draft{color:#87621f;border-color:#eee1c8;background:#fdf9f2}
+body.v5 .wf-pick-empty{padding:22px 12px 18px;text-align:center;font-size:13px;color:#5b6b82}
+body.v5 .wf-pick-empty .link-btn{margin-left:2px}
+body.v5 .wf-pick-foot{padding:8px 5px 2px;margin-top:6px;border-top:1px solid #f1f2f4;font-size:12px;color:#8b919c}
+@media(max-width:760px){
+  body.v5 .wf-cur-hint,body.v5 .wf-cur-sep{display:none}
+  body.v5 .wf-pick{width:100%}
+  body.v5 .wf-pick-desc{display:none}
+}
 </style>
 </head>
 <body class="v3 v5">
@@ -4372,6 +4397,8 @@ const state = {
   historyOpen: {},
   expandedTask: 'tsk_design',
   selectedWorkflow: 'wf_design',
+  wfPickOpen: false,
+  wfQuery: '',
   wfTab: 'canvas',
   stepSel: null,
   wfNode: null,
@@ -5190,6 +5217,47 @@ function wfGateBanner(wf){
   return '<div class="wf-gate ok">试运行已通过 · ' + esc((g.last && g.last.time) || '刚刚') + ' · ' + g.passed + ' 次通过 · 可以发布</div>';
 }
 
+function wfPickRow(w, cur){
+  const on = w.id === cur.id;
+  return '<button class="wf-pick-row' + (on ? ' on' : '') + '" data-act="open-wf" data-wf="' + w.id + '" role="option" aria-selected="' + (on ? 'true' : 'false') + '">' +
+    '<span class="wf-pick-main">' +
+      '<span class="wf-pick-name">' + esc(tidy(w.name)) + '<em>' + esc(w.version) + '</em>' + (on ? '<span class="wf-pick-now">当前</span>' : '') + '</span>' +
+      '<span class="wf-pick-desc">' + esc(tidy(w.desc)) + '</span>' +
+      '<span class="wf-pick-meta">' + esc(w.triggerLabel) + ' · 负责人 ' + esc(w.owner) + ' · ' + w.nodes.length + ' 步 · ' + fmtNum(w.runs) + ' 次运行 · 最近更新 ' + esc(w.updated) + '</span>' +
+    '</span>' +
+    '<span class="wf-pick-side"><span class="wf-state ' + (w.status === 'draft' ? 'draft' : 'live') + '">' + (w.status === 'draft' ? '草稿' : '已发布') + '</span></span>' +
+  '</button>';
+}
+
+function wfPicker(wf){
+  const all = Object.keys(WORKFLOWS).map(k => WORKFLOWS[k]);
+  const q = (state.wfQuery || '').trim().toLowerCase();
+  const hit = all.filter(w => !q || [w.name, w.desc, w.owner, w.triggerLabel, w.version, (w.status === 'draft' ? '草稿' : '已发布')].join(' ').toLowerCase().indexOf(q) >= 0);
+  const cur = all.filter(w => w.id === (wf && wf.id))[0] || all[0];
+  return '<div class="wf-bar">' +
+    '<button class="wf-cur" data-act="wf-pick-toggle" aria-haspopup="listbox" aria-expanded="' + (state.wfPickOpen ? 'true' : 'false') + '">' +
+      '<span class="wf-cur-dot ' + (cur.status === 'draft' ? 'draft' : 'live') + '"></span>' +
+      '<span class="wf-cur-name">' + esc(tidy(cur.name)) + '</span>' +
+      '<span class="wf-cur-ver">' + esc(cur.version) + '</span>' +
+      '<span class="wf-cur-sep"></span>' +
+      '<span class="wf-cur-hint">共 ' + all.length + ' 个流程</span>' +
+      icon('chevron-down', 'wf-cur-caret') +
+    '</button>' +
+    (state.wfPickOpen ?
+      '<div class="wf-pick" role="listbox" aria-label="流程列表">' +
+        '<div class="wf-pick-search">' + icon('search') +
+          '<input id="wfPickSearch" type="text" autocomplete="off" placeholder="搜流程名、说明或负责人" value="' + esc(state.wfQuery) + '" aria-label="搜索流程">' +
+          (state.wfQuery ? '<button class="wf-pick-clear" data-act="wf-pick-clear" aria-label="清空搜索">' + icon('close') + '</button>' : '') +
+        '</div>' +
+        '<div class="wf-pick-head"><span>选一个流程</span><span>' + (q ? '找到 ' + hit.length + ' 个' : '全部 ' + all.length + ' 个') + '</span></div>' +
+        (hit.length ?
+          '<div class="wf-pick-list">' + hit.map(w => wfPickRow(w, cur)).join('') + '</div>' :
+          '<div class="wf-pick-empty">没有含「' + esc(state.wfQuery) + '」的流程。<button class="link-btn" data-act="wf-pick-clear">清空条件</button></div>') +
+        '<div class="wf-pick-foot">点一条就切过去；Esc 或点空白处收起。</div>' +
+      '</div>' : '') +
+  '</div>';
+}
+
 function renderWorkflows(){
   const wf = wfByIdSafe(state.selectedWorkflow);
   const tab = state.wfTab || 'canvas';
@@ -5210,10 +5278,7 @@ function renderWorkflows(){
       (wf.status === 'draft' ? (canPublish ? '<button class="btn" data-act="publish-wf" data-wf="' + wf.id + '">发布 ' + esc(wf.version) + '</button>' : '<button class="btn ghost" data-act="publish-wf" data-wf="' + wf.id + '">检查发布条件</button>') : '<button class="btn" data-act="new-version" data-wf="' + wf.id + '">新版本</button>') +
       '<button class="btn primary" data-act="wf-test" data-wf="' + wf.id + '">试跑一次</button>' +
     '</div></div>' +
-    '<div class="wf-switch">' + Object.keys(WORKFLOWS).map(k => {
-      const w = WORKFLOWS[k];
-      return '<button class="wf-pill ' + (wf.id === w.id ? 'on' : '') + '" data-act="open-wf" data-wf="' + w.id + '"><span class="dot" style="background:' + (w.status === 'draft' ? '#fbbf24' : '#4ade80') + '"></span>' + esc(tidy(w.name)) + '<em>' + esc(w.version) + '</em></button>';
-    }).join('') + '</div>' + wfGateBanner(wf) +
+    wfPicker(wf) + wfGateBanner(wf) +
     '<div class="wf-tabs">' + tabs.map(t => '<button class="wf-tab ' + (tab === t[0] ? 'on' : '') + '" data-act="wf-tab" data-tab="' + t[0] + '">' + t[1] + (t[2] ? '<span class="n">' + t[2] + '</span>' : '') + '</button>').join('') + '</div>' +
     '<div class="wf-body"><div class="wf-stage-panel"><div class="wf-panel-head"><b>' + panelHead[0] + '</b><span>' + panelHead[1] + '</span></div>' + content + '</div><aside class="wf-aside">' + wfInspector(wf) + '</aside></div>' +
   '</section>';
@@ -5958,6 +6023,7 @@ document.addEventListener('click', function(ev){
   if(back && ev.target.closest('[data-act]') === back) return;
   if(ev.target.closest('[data-stop]') && !ev.target.closest('[data-act]')) return;
   if(!ev.target.closest('.searchbox')){ const sp = $('#searchPop'); if(sp) sp.hidden = true; }
+  if(state.wfPickOpen && !ev.target.closest('.wf-bar')){ state.wfPickOpen = false; state.wfQuery = ''; render(); }
 
   const nav = ev.target.closest('[data-screen]');
   if(nav){
@@ -5995,7 +6061,9 @@ document.addEventListener('click', function(ev){
     if(act === 'open-task-runs'){ openTask(actEl.dataset.task, 'runs'); return; }
     if(act === 'open-run' || act === 'open-wf-run'){ openRun(actEl.dataset.run); return; }
     if(act === 'open-agent'){ openDrawer({ kind: 'agent', id: actEl.dataset.agent }); return; }
-    if(act === 'open-wf'){ state.selectedWorkflow = actEl.dataset.wf; state.wfNode = null; state.wfEdge = null; state.wfEditNode = null; state.wfPendingPos = null; state.wfPendingType = null; state.wfPendingLink = null; state.wfDirty = false; state.screen = 'workflows'; state.drawer = null; render(); return; }
+    if(act === 'wf-pick-toggle'){ state.wfPickOpen = !state.wfPickOpen; if(!state.wfPickOpen) state.wfQuery = ''; render(); if(state.wfPickOpen){ setTimeout(function(){ const el = $('#wfPickSearch'); if(el){ el.focus(); try{ el.setSelectionRange(el.value.length, el.value.length); }catch(e){} } }, 0); } return; }
+    if(act === 'wf-pick-clear'){ state.wfQuery = ''; render(); setTimeout(function(){ const el = $('#wfPickSearch'); if(el) el.focus(); }, 0); return; }
+    if(act === 'open-wf'){ state.wfPickOpen = false; state.wfQuery = ''; state.selectedWorkflow = actEl.dataset.wf; state.wfNode = null; state.wfEdge = null; state.wfEditNode = null; state.wfPendingPos = null; state.wfPendingType = null; state.wfPendingLink = null; state.wfDirty = false; state.screen = 'workflows'; state.drawer = null; render(); return; }
     if(act === 'wf-tab'){ state.wfTab = actEl.dataset.tab; render(); return; }
     if(act === 'task-pick'){ state.taskPick = actEl.dataset.task; state.stepSel = null; render(); return; }
     if(act === 'task-step'){ state.stepSel = { task: actEl.dataset.task, index: Number(actEl.dataset.index) }; render(); if(window.innerWidth < 1180){ setTimeout(function(){ const ins = document.querySelector('.tw-inspect'); if(ins) ins.scrollIntoView({block:'nearest', behavior:'smooth'}); }, 30); } return; }
@@ -6355,6 +6423,13 @@ document.addEventListener('input', function(ev){
     updateSearchPop();
     return;
   }
+  if(ev.target.id === 'wfPickSearch'){
+    state.wfQuery = ev.target.value;
+    const pos = ev.target.selectionStart;
+    render();
+    const el = $('#wfPickSearch'); if(el){ el.focus(); try{ el.setSelectionRange(pos, pos); }catch(e){} }
+    return;
+  }
   if(ev.target.id === 'taskSearch'){
     state.taskQuery = ev.target.value;
     const pos = ev.target.selectionStart;
@@ -6364,6 +6439,15 @@ document.addEventListener('input', function(ev){
 });
 
 document.addEventListener('keydown', function(ev){
+  if(ev.target && ev.target.id === 'wfPickSearch'){
+    if(ev.key === 'Escape'){ ev.stopPropagation(); state.wfPickOpen = false; state.wfQuery = ''; render(); return; }
+    if(ev.key === 'Enter'){
+      ev.preventDefault();
+      const first = document.querySelector('.wf-pick-row');
+      if(first){ first.click(); } else { toast('没有匹配的流程，换个词试试。', true); }
+      return;
+    }
+  }
   if(ev.target.id === 'globalSearch' && ev.key === 'Enter'){
     const q = ev.target.value.trim();
     state.search = q;
