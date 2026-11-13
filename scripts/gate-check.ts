@@ -18,6 +18,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import MarkdownIt from 'markdown-it'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
 
 export const GATE_FIELDS = [
@@ -530,12 +531,122 @@ function checkPreviousChain(artifact: Record<string, unknown>, spec: GateSpec, r
 // 审计报告正文里的结论：只认顶层、未被隐藏的结论行，且全文只能有一个结论。
 // 可见性：HTML 注释、details/pre/script/style/template、围栏代码、四空格缩进、引用围栏都不参与；
 // 普通引用块里的结论仍可见（S1 第八轮 P1-4）。
+// 用真实 Markdown 解析器取“渲染后可见的正文行”：链接目标/title、围栏代码、
+// 缩进代码、引用定义、原始 HTML 都不进正文；实体与 Unicode 由解析器归一。
+// 之前靠正则模拟 CommonMark，S2 第二十轮 13 条 P0 全是渲染差异；这里直接对齐渲染器。
+const AUDIT_MARKDOWN = new MarkdownIt({ html: true, linkify: false, typographer: false })
+
+function renderedAuditLines(text: string): string[] | null {
+  const lines: string[] = []
+  let buffer = ''
+  let ambiguous = false
+  let paragraphHasLink = false
+  const flush = (): void => {
+    if (buffer.trim() === '') {
+      buffer = ''
+      paragraphHasLink = false
+      return
+    }
+    // 链接所在段落里出现“结论：”时，可见正文可能只剩前缀而方括号已被解析掉；
+    // 这类段落按歧义处理，不能让另一段干净 pass 过门（S1 第十三轮 P1）。
+    if (paragraphHasLink && /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(buffer)) ambiguous = true
+    for (const line of buffer.split('\n')) lines.push(normalizeAuditLine(line))
+    buffer = ''
+    paragraphHasLink = false
+  }
+  const invisibleHtml = (html: string): boolean | null => {
+    const body = html.trimStart()
+    if (body.startsWith('<!--')) {
+      const end = body.indexOf('-->')
+      // 注释后面同一块里若还有正文，渲染器会显示，不能整块当隐藏。
+      return end < 0 ? null : body.slice(end + 3).trim() === '' ? true : null
+    }
+    if (body.startsWith('<?')) {
+      const end = body.indexOf('?>')
+      return end < 0 ? null : body.slice(end + 2).trim() === '' ? true : null
+    }
+    if (body.startsWith('<![CDATA[')) {
+      const end = body.indexOf(']]>')
+      return end < 0 ? null : body.slice(end + 3).trim() === '' ? true : null
+    }
+    if (/^<!DOCTYPE\b/i.test(body)) return /^<!DOCTYPE[^>]*>\s*$/i.test(body.trim()) ? true : null
+    return false
+  }
+  // 单独一两个反引号是未闭合的行内代码，渲染器会把它当字面量，
+  // 但跨块的结论行不能被它“证明可见”；按歧义拒绝（S1 第十四轮补）。
+  if (/(?:^|\n)[ \t]*`{1,2}[ \t]*(?=\n[ \t]*\n)/.test(text)) return null
+  // markdown-it 把 `>    结论：pass` 当引用段落，但 CommonMark 的引用块内四空格
+  // 是缩进代码；门口径按代码隐藏（S1 第八轮 P1-4）。带链接方括号的行仍保留，
+  // 由可见链接段规则毒化，不能一并抹掉（S2 第十九轮 P0）。
+  const source = text.replace(/\r\n/g, '\n').split('\n').map((line) => {
+    const quote = /^(\s*>\s?)([\s\S]*)$/.exec(line)
+    if (quote && !/[\[\]]/.test(quote[2] ?? '') && /^(?: {0,3}\t| {3,})/.test(quote[2] ?? '')) return ''
+    return line
+  }).join('\n')
+  const tokens = AUDIT_MARKDOWN.parse(source, {})
+  for (const token of tokens) {
+    if (token.type === 'html_block') {
+      const hidden = invisibleHtml(token.content)
+      if (hidden === true) continue
+      return null
+    }
+    if (token.type === 'fence' || token.type === 'code_block') {
+      flush()
+      continue
+    }
+    if (token.type !== 'inline') {
+      if (token.type.endsWith('_open') || token.type.endsWith('_close') || token.type === 'hr') flush()
+      continue
+    }
+    for (const child of token.children ?? []) {
+      if (child.type === 'html_inline') {
+        const hidden = invisibleHtml(child.content)
+        if (hidden === true) continue
+        return null
+      }
+      if (child.type === 'link_open' || child.type === 'link_close' || child.type === 'image') {
+        paragraphHasLink = true
+      } else if (child.type === 'text' || child.type === 'text_special') {
+        buffer += child.content
+      } else if (child.type === 'softbreak') {
+        // 门记录按“源码行”核对结论与绑定；软换行保留为行边界，和既有报告格式一致。
+        flush()
+      } else if (child.type === 'hardbreak') {
+        flush()
+      }
+      // code_inline / image / link_open / link_close / 强调标记都不产生可见正文。
+    }
+  }
+  flush()
+  return ambiguous ? null : lines
+}
+
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
+  const visible = renderedAuditLines(text)
+  if (visible === null) return null
   let verdict: 'pass' | 'fail' | null = null
-  for (const line of auditTopLevelLines(text)) {
+  let inlineFail = false
+  const conclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/
+  const conclusionWord = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)$/i
+  const inlineFailConclusion = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:fail|不通过)(?=$|[\s。．.！!？?；;，,、*（(—–-])/i
+  for (let visibleIndex = 0; visibleIndex < visible.length; visibleIndex += 1) {
+    const line = visible[visibleIndex]!
     const strict = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(line)
     const bare = /^(?:pass|fail|通过|不通过)$/i.test(line)
-    if (!strict && !bare) continue
+    if (!strict && !bare) {
+      // 可见正文里另有一句 fail 结论（即使前面还有干净 pass）也不能放行；
+      // 反过来，正文里引用 pass 不影响紧跟的正式 fail 结论（S2 第二十轮 zwsp-colon）。
+      if (inlineFailConclusion.test(line)) inlineFail = true
+      // 链接/引用定义段落里的可见“结论：”不能靠另一段干净 pass 洗掉（S2 第二十轮 def-*）；
+      // 普通正文里提到“结论：”只是行内引用，不影响后面的正式结论行。
+      if (line.includes('[') && conclusionText.test(line)) return null
+      // 结论词被换行拆成“结论” + “：fail”时，下一行以冒号开头，按歧义处理。
+      if (conclusionWord.test(line.trim())) {
+        const next = visible[visibleIndex + 1] ?? ''
+        if (/^\s*[：:]/.test(next)) return null
+      }
+      continue
+    }
     // 只允许一行结论：第二行无论同向还是反向都按歧义处理。
     if (verdict !== null) return null
     if (bare) {
@@ -549,15 +660,18 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
     if (!validConclusionTail(m[2] ?? '', v)) return null
     verdict = v
   }
+  if (verdict === 'pass' && inlineFail) return null
   return verdict
 }
 
 // 审计报告绑定门名与候选提交：只读顶层可见行，防止拿别轮/别门的 pass 报告复用。
 // 报告必须各出现一次「门：G1」与「候选提交：<40 位 commit>」（S1 第八轮 P1-2）。
 export function auditBindingOf(text: string): { gate: string; commit: string } | null {
+  const visible = renderedAuditLines(text)
+  if (visible === null) return null
   const gates: string[] = []
   const commits: string[] = []
-  for (const line of auditTopLevelLines(text)) {
+  for (const line of visible) {
     const gate = /^(?:门|gate)\s*[：:]\s*(G[1-5])\s*$/i.exec(line)
     if (gate) gates.push((gate[1] ?? '').toUpperCase())
     const commit = /^(?:候选提交|候选|candidate_commit|candidate)\s*[：:]\s*([0-9a-f]{40})\s*$/i.exec(line)
@@ -639,31 +753,75 @@ function fenceMarkerOf(body: string): { char: string; length: number; rest: stri
   return { char: marker.charAt(0), length: marker.length, rest }
 }
 
+// 围栏可以开在列表项或引用块里：`- ~~~`、`1. \x60\x60\x60`、`> - ~~~` 的首行
+// 去掉容器前缀后才是围栏标记。只对“开栏”去掉列表标记；关栏时不能去，
+// 否则围栏内容里的 `- ~~~` 会被误当成关栏，后面的隐藏段落就会漏出来（S1 第十六轮 P1-1）。
+function stripQuoteContainer(line: string): string | null {
+  const q = /^ {0,3}> ?/.exec(line)
+  return q ? line.slice(q[0].length) : null
+}
+
+function stripListContainer(body: string): string | null {
+  const l = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(body)
+  return l ? body.slice(l[0].length) : null
+}
+
+function openingFenceInContainer(line: string): { char: string; length: number; quoted: boolean } | null {
+  let body = line
+  let quoted = false
+  const quotedBody = stripQuoteContainer(body)
+  if (quotedBody !== null) {
+    quoted = true
+    body = quotedBody
+  }
+  for (let depth = 0; depth < 8; depth += 1) {
+    const inner = stripListContainer(body)
+    if (inner === null) break
+    body = inner
+  }
+  const marker = fenceMarkerOf(body)
+  return marker ? { char: marker.char, length: marker.length, quoted } : null
+}
+
+function closesFenceInContainer(
+  line: string,
+  fence: { char: string; length: number; quoted: boolean },
+): boolean {
+  let body = line
+  if (fence.quoted) {
+    const quotedBody = stripQuoteContainer(body)
+    if (quotedBody === null) return false
+    body = quotedBody
+  } else if (stripQuoteContainer(body) !== null) {
+    // 未加引用的围栏内容里，以 `>` 开头的行仍是内容，不是关栏。
+    return false
+  }
+  const marker = fenceMarkerOf(body)
+  // 关闭围栏的后缀只允许空格或 Tab；NBSP、U+3000、U+FEFF 都不是 CommonMark 空白。
+  return marker !== null
+    && marker.char === fence.char
+    && marker.length >= fence.length
+    && /^[ \t]*$/.test(marker.rest)
+}
+
 // 围栏代码整段不可见：里面的字面标签不能参与 HTML 配对（S1 第十轮 P1-1）。
 function maskFencedAuditCode(text: string): string {
   const lines = text.split('\n')
   const out: string[] = []
   let fence: { char: string; length: number; quoted: boolean } | null = null
   for (const line of lines) {
-    const quote = /^\s*>\s?/.exec(line)
-    const quoted = quote !== null
-    const body = quote ? line.slice(quote[0].length) : line
     if (fence) {
-      if (fence.quoted && !quoted) {
+      if (fence.quoted && stripQuoteContainer(line) === null) {
         fence = null
       } else {
         out.push(blankPreservingLines(line))
-        const marker = fenceMarkerOf(body)
-        if (marker && quoted === fence.quoted) {
-          // 关闭围栏的后缀只允许空格或 Tab；NBSP、U+3000、U+FEFF 都不是 CommonMark 空白。
-          if (marker.char === fence.char && marker.length >= fence.length && /^[ \t]*$/.test(marker.rest)) fence = null
-        }
+        if (closesFenceInContainer(line, fence)) fence = null
         continue
       }
     }
-    const marker = fenceMarkerOf(body)
-    if (marker) {
-      fence = { char: marker.char, length: marker.length, quoted }
+    const opening = openingFenceInContainer(line)
+    if (opening) {
+      fence = opening
       out.push(blankPreservingLines(line))
       continue
     }
@@ -1023,7 +1181,9 @@ function stripHiddenAuditBlocks(text: string): string {
 }
 
 function normalizeAuditLine(raw: string): string {
-  let line = raw.trim()
+  // Unicode 格式控制符（ZWSP、BOM、方向标记等）渲染不可见，但不能让它们卡在
+  // “结论”和冒号之间；先剥掉再做判定（S2 第二十轮 zwsp-colon）。
+  let line = raw.replace(/\p{Cf}/gu, '').trim()
   line = line.replace(/^>\s?/, '')
   line = line.replace(/^(?:[-*+]|\d+[.)])\s+/, '')
   line = line.replace(/^#{1,6}\s*/, '')

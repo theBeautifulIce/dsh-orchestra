@@ -522,6 +522,29 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('结论：pass（0 个阻断）')).toBe('pass')
   })
 
+  it('S2 第二十轮 13 条载荷都不能把可见 fail 藏进 pass（S2 第二十轮 P0）', () => {
+    const payloads: Array<[string, string]> = [
+      ['def-trailing', '结论：pass\n\n[x]: https://example.com "t" 结论：fail'],
+      ['def-invalid-dest', '结论：pass\n\n[x]: not a url "结论：fail"'],
+      ['def-then-indent', '结论：pass\n\n[x]: https://example.com\n 结论：fail'],
+      ['fake-link-spaces', '结论：pass\n\n[a](not a url "结论：fail")'],
+      ['fake-link-bare-title', '结论：pass\n\n[a](https://e.com 结论：fail)'],
+      ['fake-ref-undefined', '结论：pass\n\n[a][结论：fail]'],
+      ['image-fake-dest', '结论：pass\n\n![a](not a url "结论：fail")'],
+      ['entity-link-para', '结论：pass\n\n见[证据](https://e.com)，结论&#65306;fail'],
+      ['entity-heading-after-link', '结论：pass\n\n[x](https://e.com)\n# 结论&#65306;fail'],
+      ['entity-list-after-link', '结论：pass\n\n[x](https://e.com)\n- 结论&#65306;fail'],
+      ['entity-indented-list', '结论：pass\n\n- 列表项\n    结论&#65306;fail'],
+      ['setext-entity', '结论：pass\n\n[x](https://e.com)\n结论&#65306;fail\n---'],
+      ['zwsp-colon', '结论：pass\n\n见下段：结论\u200B：fail'],
+    ]
+    for (const [name, payload] of payloads) {
+      expect(auditConclusionOf(payload), name).toBeNull()
+    }
+    expect(auditConclusionOf('门：G2\n候选提交：' + 'a'.repeat(40) + '\n\n结论：pass')).toBe('pass')
+    expect(auditConclusionOf('门：G2\n候选提交：' + 'a'.repeat(40) + '\n\n结论：fail')).toBe('fail')
+  })
+
   it('审计报告必须带唯一的门与候选提交绑定（S1 第八轮 P1-2）', () => {
     const commit = 'a'.repeat(40)
     expect(auditBindingOf('门：G1\n候选提交：' + commit)).toEqual({ gate: 'G1', commit })
