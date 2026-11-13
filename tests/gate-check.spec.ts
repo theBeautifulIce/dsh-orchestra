@@ -266,6 +266,16 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('结论：pass（上一轮 fail）')).toBeNull()
   })
 
+  it('pass 结论后的阻塞项 caveat 不能读成 pass（S1 第五轮审计 P1）', () => {
+    expect(auditConclusionOf('结论：pass — 但仍有 1 个 P0 未闭合')).toBeNull()
+    expect(auditConclusionOf('结论：pass（但仍有 1 个 P0 未闭合）')).toBeNull()
+    expect(auditConclusionOf('结论：pass（P0 未闭合）')).toBeNull()
+    expect(auditConclusionOf('结论：pass，致命 1')).toBeNull()
+    expect(auditConclusionOf('结论：pass（P0=0，P1=0）')).toBe('pass')
+    expect(auditConclusionOf('结论：pass（无 P0/P1）')).toBe('pass')
+    expect(auditConclusionOf('结论：pass — P2 遗留 3 条')).toBe('pass')
+  })
+
   it('围栏代码块里的示例结论不参与判定（第七轮审计 P1-1）', () => {
     expect(auditConclusionOf('正文\n\n```md\n结论：pass\n```\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('~~~\n结论：pass\n~~~')).toBeNull()

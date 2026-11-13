@@ -519,7 +519,22 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
     const hasFail = /\bfail\b/i.test(line) || /不通过/.test(line)
     if (hasPass && hasFail) return null
     const raw = (m[1] ?? '').toLowerCase()
-    found.add(raw === 'pass' || raw === '通过' ? 'pass' : 'fail')
+    const verdict = raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
+    // 结论 token 后面还写着阻塞项 caveat 时不能读成 pass：例如“结论：pass — 但仍有 1 个 P0 未闭合”。
+    // 允许 P0=0 / 无 P0/P1 这种清零说明，其余把 P0/P1 当阻塞线索（S1 第五轮审计 P1）。
+    if (verdict === 'pass') {
+      const colon = line.search(/[：:]/)
+      const at = line.toLowerCase().indexOf(raw, colon >= 0 ? colon : 0)
+      const tail = at >= 0 ? line.slice(at + raw.length) : ''
+      if (/未闭合|仍未|仍有|尚有|尚存|没闭合|阻塞/i.test(tail)) return null
+      if (/致命/i.test(tail.replace(/0\s*致命|致命\s*0|无\s*致命/gi, ''))) return null
+      const stripped = tail
+        .replace(/无\s*P[01](?:\s*[\/、,，]\s*P[01])*/gi, '')
+        .replace(/P[01]\s*(?:项|个)?\s*(?:均|都|全部)?\s*(?:为|=|＝|[:：])?\s*0\s*(?:项|个)?/gi, '')
+        .replace(/0\s*个\s*P[01]/gi, '')
+      if (/P[01]/i.test(stripped)) return null
+    }
+    found.add(verdict)
   }
   if (found.size !== 1) return null
   return [...found][0] ?? null

@@ -466,3 +466,34 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 **提交**：\`f68e836\`（21 文件，+743/−103）；工作树干净。对照表 \`docs/audits/S2-round5-response.md\`。
 
 **下一步**：第六轮独立审计与 S1/G1 第二轮独立审计已并行派出（S2 \`83e3bd88-06b0-42e4-8162-a80ceb7e8f7e\`、S1 \`366bec2f-c6e7-4799-ad76-cfd2d21939ad\`），不自测；两份报告都 pass 后改审计锚、重签 G1/G2、双门 exit 0，再开 S3。
+
+### 11.15 第六至第八轮审计、S1 第四轮与门检查加固（2026-11-13 20:30，HEAD f7ebe69）
+
+S2 第六轮判 fail：审计结论解析取全文第一个“结论”、不锚行首；G2 未按 18 项重签；工作流定义只在内存。第七轮再判 fail（审计报告归档与门锚细节），第八轮判 pass：docs/audits/S2-independent-audit-round8.md，P0=0 / P1=0 / P2=8，19 项必过与 19 份证据从 HEAD 重算全对，ev-g2-15 重跑字节一致。
+
+S1 第四轮判 fail：docs/audits/S1-independent-audit-round4.md。P1-1 是 auditConclusionOf 对“结论/判定开头但未收口”的行直接 continue，报告同写 pass 与 fail 时返回 pass；P2-1 是正文证据表/不变量表只查行数与子集，删一行复制另一行仍能签过。另有 P2-2 G-08 缺 503/warning、P2-3 G-15 含绝对临时路径、P2-4 审计报告未绑定门与候选 HEAD。
+
+f7ebe69 改法：
+- auditConclusionOf：结论候选行未严格解析时返回 null（歧义），不再跳过；同行同时出现 pass/fail 返回 null；大小写归一。修 P1-1、S2 P2-6/P2-8。
+- 正文证据表与不变量表：拒绝重复 id，并要求与 artifact 列表完全覆盖；两个 checker 导出给单测直接调用。修 P2-1。
+- docs/gates/evidence/G1/G-15.md 的备份路径改为 <tmp>/backup-g15，消除绝对临时路径（P2-3）。
+- docs/gates/G2.md 把“动作总时限读 execution.action_timeout_ms”改为“默认 120 秒，配置接线留 S3”，与代码实际一致（S2 第八轮 P2-1）。
+- tests/gate-check.spec.ts 补 4 例：未收口结论候选、大小写/同行相反结论、两表重复行。
+
+验收（实测）：tsc --noEmit exit 0；全量 32 文件 / 294 例，284 passed / 10 failed，10 红全在 tests/gate-check.spec.ts，首因均为 G1 audit_report_sha256 仍是占位 0（待签状态），不是新缺陷。新增 4 例定向运行全过。
+
+当前门状态：G1 仍是 13 项、audit_round=1、audit_report=docs/audits/S1-independent-audit.md（旧 fail 报告）、审计 sha 全 0；G2 是 19 项、audit_round=4、audit_report=docs/audits/S2-independent-audit-round4.md（fail 报告）、审计 sha 全 0。两门都未重签。
+
+下一步（按序）：S1 第五轮（docs/audits/S1-independent-audit-round5.md）与 S2 第九轮（docs/audits/S2-independent-audit-round9.md）独立审计已派出（S1 458ae59f-9bc9-414e-a41e-adf05acc0f8d、S2 f55ae8ed-95d1-4c3b-a532-02d456b0d013）。两份都 pass 后：提交两份报告 → 改 G1 audit_round=5 / audit_report=S1-independent-audit-round5.md，改 G2 audit_round=9 / audit_report=S2-independent-audit-round9.md，审计 sha 清零 → 提交 → sign-gate G1、提交 → sign-gate G2、提交 → 双门 gate-check exit 0 且全量 294/294 → 开 S3 九节点与状态机。任何一份判 fail 都回到对应表逐条整改，不重签、不开 S3。
+
+### 11.16 S1 第五轮 fail 与 S2 第九轮 pass（2026-11-13 20:50，HEAD f7ebe69 + 未提交 P1 修复）
+
+S1 第五轮（docs/audits/S1-independent-audit-round5.md，492 行 / 33,493 字节）判 fail：P0=0 / P1=1 / P2=5。阻断项是 auditConclusionOf 对同一 canonical 结论行的阻塞 caveat 仍读成 pass，例如 `结论：pass — 但仍有 1 个 P0 未闭合`；克隆端到端 sign-gate 与 gate-check 都能 exit 0。P2：列表项/引用块里的“结论：fail”被忽略、同义写法不识别、围栏内 fail 被跳过、G-08 缺 503/warning、审计报告未绑定门与候选 HEAD（旧 round3 pass 报告可重签）。
+
+S2 第九轮（docs/audits/S2-independent-audit-round9.md，27,906 字节）判 pass：P0=0 / P1=0 / P2=9。19 项必过与 19 份证据从 HEAD 按 LF 重算全对，ev-g2-15 重跑 2434 字节、sha256 一致；核心链路无阻断项。P2 未闭合：G2 定值表仍写配置键、lease_lost/action_timeout 缺执行期回归、跨重启未 close/reopen、前序链只比字符串、remember 别名顺序、围栏不配对、结论解析 fail-closed 过宽。
+
+本轮 P1 修复（scripts/gate-check.ts）：verdict=pass 时检查结论 token 后的 tail；tail 出现未闭合/仍未/仍有/尚有/尚存/没闭合/阻塞即返回 null；去掉“0 致命/致命 0/无致命”后仍含致命返回 null；去掉“无 P0/P1”和 P0/P1 接 0 的写法后仍含 P0/P1 返回 null。tests/gate-check.spec.ts 补 7 条断言，覆盖破折号、括号、P0 未闭合、致命 1、P0=0/P1=0、无 P0/P1、仅 P2 遗留。
+
+验收：tsc --noEmit exit 0；定向 5 例全过；全量 32 文件 / 295 例，285 passed / 10 failed，10 红全在 tests/gate-check.spec.ts，首因仍是 G1 audit_report_sha256 占位 0（待签），无新增缺陷。
+
+下一步：提交 P1 修复 + 两份审计报告 → 因 gate-check 已改，S2 第九轮 pass 只作为历史结论，重新派 S1 第六轮（docs/audits/S1-independent-audit-round6.md）与 S2 第十轮（docs/audits/S2-independent-audit-round10.md）独立审计 → 两份 pass 后按 G1 audit_round=6 / G2 audit_round=10 重签、双门 exit 0、全量 295/295，再开 S3。任何一份 fail 都回表整改，不重签、不开 S3。
