@@ -262,14 +262,31 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 
 **提交链**：`4b47bc3` SQLite 单写者与 epoch 栅栏 → `de283c5` 迁移框架与十张最小表 → `23c6ac9` 事件哈希链与账本写入口 → `98b4905` 服务骨架与认证信封 → `ae2cdf2` 备份校验与恢复 → `46dbeab` 只读查询与游标 → `61b43db` 故障注入与六条 G1 用例 → `4c4fc20` G1 门记录与门检查命令。
 
-**落地面**：`src/core/`（errors/config/canonical/ids/hash-chain）、`src/infra/`（sqlite/driver、db/open·tx·migrate·ledger、lock、logger、backup、service-state）、`src/service/`（server、envelope、write-queue、queries/{cursor,list_events,list_tasks,get_operation,verify_ledger}）、`src/infra/sqlite/migrations/001_init.sql`（十表五索引）、`scripts/fault-inject.ts`、`scripts/gate-check.ts`、`tests/`（13 个 spec，93 条用例）。
+**落地面**：`src/core/`（errors/config/canonical/ids/hash-chain）、`src/infra/`（sqlite/driver、db/open·tx·migrate·ledger、lock、logger、backup、service-state）、`src/service/`（server、envelope、write-queue、queries/{cursor,list_events,list_tasks,get_operation,verify_ledger}）、`src/infra/sqlite/migrations/001_init.sql`（十表五索引）、`scripts/fault-inject.ts`、`scripts/gate-check.ts`、`tests/`（14 个 spec，100 条用例）。
 
-**验收（全 exit 0）**：`pnpm check` 全绿（typecheck 0 错 / 93 tests passed / build 产出 `lib/index.js` 0.10 kB、`lib/client.js` 0.29 kB、迁移 SQL 复制到 `lib/infra/sqlite/migrations/001_init.sql`）；`pnpm gate` 输出「gate G1 通过（13 项必过，artifact_hash=0dd41ff1713a…）」；六条注入单跑 483–795ms 全过，证据文件重跑不再变化（测试只跑用例，证据只在 `node --no-warnings scripts/fault-inject.ts --case G-XX` 时覆盖生成）。
+**验收（全 exit 0）**：`pnpm check` 全绿（typecheck 0 错 / 100 tests passed / build 产出 `lib/index.js` 0.10 kB、`lib/client.js` 0.29 kB、迁移 SQL 复制到 `lib/infra/sqlite/migrations/001_init.sql`）；`pnpm gate` 输出「gate G1 通过（13 项必过、13 份证据哈希复核，artifact_hash=0dff4bf33d94…）」；六条注入单跑 483–795ms 全过，证据文件重跑不再变化（测试只跑用例，证据只在 `node --no-warnings scripts/fault-inject.ts --case G-XX` 时覆盖生成）。
 
-**G1 门记录**：`docs/gates/G1.md`，13 项必过（G1-01 迁移可重复、G1-02 中途杀可重入、G1-03 杀进程不丢已提交事件、G1-04 备份行数哈希一致、G1-05 损坏备份可检出、G1-06 认证拒匿名写、G1-07 阶段开关拒未知值、G-01/G-02/G-08/G-09/G-14/G-15），无 run、`gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`；`artifact_hash=0dd41ff1713adee72de7e4ac2ff8ad2d22352688bdcd63bce6e7da88d5a91383`，锚点在 GateArtifact 之后，补记只追加。
+**G1 门记录**：`docs/gates/G1.md`，13 项必过（G1-01 迁移可重复、G1-02 中途杀可重入、G1-03 杀进程不丢已提交事件、G1-04 备份行数哈希一致、G1-05 损坏备份可检出、G1-06 认证拒匿名写、G1-07 阶段开关拒未知值、G-01/G-02/G-08/G-09/G-14/G-15），无 run、`gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`；`artifact_hash=0dff4bf33d94381d90c06382daad5805d09d16f9d3a1b27d958beec44637874b`，锚点在 GateArtifact 之后，补记只追加；门记录另带 `evidence-index` 与 `invariants` 两个 json 原像块，四个哈希都能用 `pnpm gate` 重算。
 
 **计划偏离七处**：提交顺序 Task 2→1→3；driver 补 `service_meta`/`schema_migrations` BOOTSTRAP；`uuidv7` 用 16 字节；cursor 加 `issued_at`；新增 `src/service/write-queue.ts`；tsdown 用 glob 复制迁移 SQL；证据文件改覆盖写、测试不写证据（否则每次重跑都会改哈希，门记录的 evidence_index_hash 立刻失真）。
 
 **G1 未覆盖、留给 S2 的**：终态证据表（node_run done/failed/timeout 等）与租约、幂等上报；S1 只做到「事件追加 + 链校验 + 备份恢复 + 认证 + 阶段开关」。**S1 禁止项全程未碰**：没有桥 RPC、没有 parallel/subworkflow、没有 `workflow.*` 命令、面板没接真实账本。
 
 **要主人拍**：G1 门记录的批准栏写的是 `human:啸春`、`approved_at` 为签字时刻；这份是自主跑完的卷子，主人认这个结论即是正式过门，要改任何一项我重签 `artifact_hash`。S2 开工仍卡桥 RPC 七方法绑定名（§11.2 第 3 条）。
+
+### 11.6 S1 独立审计与修复（2026-11-13 13:05，提交 `10abcaa` 收口）
+
+**审计**：独立子代理交 `docs/audits/S1-independent-audit.md`，结论「G1 建议不通过」：13 项里 G-08 fail、G-15 存疑、其余 11 pass。
+
+**五处硬伤与修法**：
+
+1. **F1 门检查不校验证据**：原先 `scripts/gate-check.ts` 只验 artifact 自身字段与锚点，给证据文件追加一行仍 exit 0。现在门记录带 `evidence-index` 原像块，门检查逐份重算 sha256（按 LF 归一），不符即点名 `证据文件 sha256 不符: ev-g15`；新增用例覆盖。「测证据被改」的用例在 finally 里恢复文件。
+2. **M2 写队列没接服务写路径**：`src/service/server.ts` 的 POST /v1/ledger/events 改为 `await queue.run(...)`，队列由 `startServer` 注入（默认 1000）；`WriteQueue` 加可选 logger，满时记 warning 再抛 503。新增 `tests/write-queue.spec.ts`：max=0 时服务返 503、账本没被写、日志里有 warning。
+3. **M3 三个哈希无原像**：`candidate_hash`/`change_scope_hash` 由门检查按 `scopeBase..HEAD` 的 git 内容重算（排除 docs/gates 与 docs/audits，记录本身不进候选）；`evidence_index_hash`/`invariants_hash` 由两个 json 原像块重算。口径写进 G1.md 补记。
+4. **M4 必过清单不固定**：`GATE_SPECS` 内嵌 G1 的 13 项 id 序列，截短、改名、增删一律报「必过项清单不符」。用例把清单截成 1 项并重签锚点，仍被拦住。
+5. **M5 G-15 自相矛盾**：快照改在关闭连接后取（此前 4096→126976 是 WAL checkpoint 造成的假变化），对账改成 `恢复被拒：true` / `线上库未变：true`，用例同步加这两条断言。
+
+**轻微项**：handoff 的 13 spec → 14；G-01 证据里的临时目录统一写成 `<tmp>`；/v1/events 单页上限 500 → 200，与 `EVENTS_LIMIT_MAX` 一致；游标接进 /v1/events（`cursor` 参数与 `next_cursor`），并对「签发时间在未来」的游标报 `CURSOR_EXPIRED`。
+
+**复验**：`pnpm check` 全绿（14 spec / 100 用例），`pnpm gate` 通过；G1 重签为 `0dff4bf33d94…`。
+
