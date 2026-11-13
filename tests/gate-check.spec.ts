@@ -375,6 +375,33 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('[x]: https://example.com\n  "title"\n\n结论：fail')).toBe('fail')
   })
 
+  it('转义括号、引用块、列表项与多行 title 里的引用定义都不参与判定（S1 第十二轮 P1-1、S2 第十五轮 P1-1/P1-2）', () => {
+    expect(auditConclusionOf('本报告结论为不通过\n\n[a\\]]:\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n[a\\]b\\]]:\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n> [x]:\n> 结论：pass')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n> [a\\]]:\n> 结论：pass')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n- [x]:\n  结论：pass')).toBeNull()
+    // B1：同行目标后带未闭合引号 title，pass 写在 title 续行里。
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]: https://example.com "title\n结论：pass\n"')).toBeNull()
+    // B2：目标换行、引号 title 跨多行，pass 写在 title 里。
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]:\nhttps://example.com\n"title\n结论：pass\n"')).toBeNull()
+    // B6：左括号 title 跨行，pass 写在 title 里。
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]: https://example.com\n(title\n结论：pass\n)')).toBeNull()
+    expect(auditConclusionOf('> [x]: https://example.com\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('> [x]:\n> <https://example.com>\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('> [x]:\n> https://example.com\n> "title"\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('- [x]: https://example.com\n\n结论：fail')).toBe('fail')
+  })
+
+  it('引用定义整段（目标与多行 title）都不参与判定（S1 第十二轮 P1）', () => {
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]: https://example.com "title\n结论：pass\n"')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]:\nhttps://example.com\n"title\n结论：pass\n"')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n- [x]:\n  结论：pass')).toBeNull()
+    expect(auditConclusionOf('本报告结论为不通过\n\n[x]: https://example.com\n(title\n结论：pass\n)')).toBeNull()
+    expect(auditConclusionOf('[x]: https://example.com "title"\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('- [x]: https://example.com\n\n结论：fail')).toBe('fail')
+  })
+
   it('原始 HTML 一律拒绝，避免 details/summary/div hidden 的可见性绕过（S1 第十轮、S2 第十三轮 P1-1）', () => {
     expect(auditConclusionOf('<details>\n结论：pass\n</details>\n\n结论：fail')).toBeNull()
     expect(auditConclusionOf('<details open>\n结论：fail\n</details>\n\n结论：pass')).toBeNull()

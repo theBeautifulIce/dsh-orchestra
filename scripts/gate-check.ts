@@ -700,29 +700,35 @@ function maskAuditLinkDestinations(text: string): string {
   // 目标与 title 的括号可以嵌套、可以带引号，逐字符配平不可靠；整行剩余部分一起隐藏（fail-closed）。
   const masked = text.replace(/\]\([^\n]*/g, (m) => blankPreservingLines(m))
   const lines = masked.split('\n')
-  for (let i = 0; i < lines.length; i += 1) {
-    // CommonMark 允许引用定义的目标与 title 换行：只抹定义行会把下一行可见内容漏进结论解析。
-    const m = /^( {0,3}\[[^\]\n]+\]):(.*)$/.exec(lines[i]!)
-    if (!m) continue
-    const rest = m[2] ?? ''
-    lines[i] = blankPreservingLines(lines[i]!)
-    if (rest.trim().length === 0) {
-      // 目标可以在下一行；再下一行若是引号/括号 title 也一起隐藏。
-      const next = lines[i + 1]
-      if (next !== undefined && next.trim().length > 0) {
-        lines[i + 1] = blankPreservingLines(next)
-        const afterTitle = lines[i + 2]
-        if (afterTitle !== undefined && /^[ \t]*(?:"|'|\()/.test(afterTitle)) {
-          lines[i + 2] = blankPreservingLines(afterTitle)
-        }
+  // 引用块、列表项与缩进不改变引用定义的语义：先剥掉容器前缀再匹配（S1 第十二轮 P1-1）。
+  const stripContainers = (line: string): string => {
+    let rest = line
+    for (;;) {
+      const next = rest.replace(/^[ \t]*/, '')
+      if (next.startsWith('>')) {
+        rest = next.slice(1)
+        continue
       }
-    } else {
-      // 目标同行、title 换行。
-      const next = lines[i + 1]
-      if (next !== undefined && /^[ \t]*(?:"|'|\()/.test(next)) {
-        lines[i + 1] = blankPreservingLines(next)
+      const list = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(next)
+      if (list) {
+        rest = next.slice(list[0].length)
+        continue
       }
+      return next
     }
+  }
+  for (let i = 0; i < lines.length; i += 1) {
+    // 标签里的右方括号可以反斜杠转义，匹配时要成对吃掉转义字符。
+    if (!/^\[((?:[^\]\n\\]|\\.)+)\]:/.test(stripContainers(lines[i]!))) continue
+    // 引用定义的目标与 title 都可以跨行，title 还允许跨多行；定义内不会出现空行。
+    // 从定义行一直隐藏到本段结束，宁可多藏，也不把渲染器隐藏的 pass 结论放进来。
+    lines[i] = blankPreservingLines(lines[i]!)
+    let j = i + 1
+    while (j < lines.length && stripContainers(lines[j]!).trim().length > 0) {
+      lines[j] = blankPreservingLines(lines[j]!)
+      j += 1
+    }
+    i = j
   }
   return lines.join('\n')
 }
