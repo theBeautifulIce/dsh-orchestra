@@ -110,6 +110,38 @@ describe('applyReport 六步收口', () => {
   })
 })
 
+describe('报告身份与跨节点（审计 N-05 / N-06 / N-07）', () => {
+  it('report.attempt 与请求不一致 → attempt_mismatch，节点不动', () => {
+    const db = setup()
+    const out = withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 2, report: rep({ attempt: 999 }), expectedStatus: 'verifying', generation: 1, now: NOW }, POLICY))
+    expect(out.registry_state).toBe('rejected')
+    expect(out.reason).toBe('attempt_mismatch')
+    expect(nodeRow(db).status).toBe('verifying')
+    expect(events(db, 'report_applied')).toBe(0)
+  })
+
+  it('report_id 已属于别的节点 → 跨节点重放按结构错拒', () => {
+    const db = setup()
+    apply(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_other', 'r1', 'n_other', 6, 'agent', 2, 'verifying', 3, ?, ?)", [NOW, NOW])
+    })
+    expect(() => withTx(db, (tx) => applyReport(tx, TEST_SECRET, { nodeRunId: 'nr_other', attempt: 2, report: rep({ node_run_id: 'nr_other' }), expectedStatus: 'verifying', generation: 1, now: NOW }, POLICY))).toThrowError(/别的节点/)
+    const other = db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id='nr_other'").get() as { status: string }
+    expect(other.status).toBe('verifying')
+  })
+
+  it('同一条已 applied 报告反复重发：report_replayed 只留一条', () => {
+    const db = setup()
+    apply(db)
+    const afterFirst = Number(nodeRow(db).revision)
+    apply(db)
+    apply(db)
+    expect(events(db, 'report_replayed')).toBe(1)
+    expect(Number(nodeRow(db).revision)).toBe(afterFirst)
+  })
+})
+
 describe('围栏与重放（审计 F-04 / F-05）', () => {
   const rejected = (db: any, id: string) => {
     db.raw.prepare("INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, 'nr_ar', 2, (SELECT COALESCE(MAX(report_seq),0)+1 FROM report_registry), 'rejected', ?, ?)").run(id, NOW, NOW)
@@ -164,5 +196,36 @@ describe('围栏与重放（审计 F-04 / F-05）', () => {
     const n = events(db, 'report_rejected')
     apply(db, {}, 'started')
     expect(events(db, 'report_rejected')).toBe(n)
+  })
+})
+
+describe('阻塞凭据：卡住必须挂 verify_human（审计 N-01）', () => {
+  it('blocked_post 带请求理由 → 落 blocked_post 并留 verify_human 事件', () => {
+    const db = setup()
+    const out = apply(db, { status: 'blocked_post', output: { request: { reason: '证据不足', missing: ['artifact'] } } })
+    expect(out.accepted).toBe(true)
+    expect(out.next_status).toBe('blocked_post')
+    expect(nodeRow(db).status).toBe('blocked_post')
+    expect(events(db, 'verify_human')).toBe(1)
+  })
+
+  it('blocked_post 什么理由都没有 → rejected + decision_required，节点留在 verifying', () => {
+    const db = setup()
+    const out = apply(db, { status: 'blocked_post' })
+    expect(out.accepted).toBe(false)
+    expect(out.registry_state).toBe('rejected')
+    expect(out.reason).toBe('decision_required')
+    expect(nodeRow(db).status).toBe('verifying')
+    expect(events(db, 'verify_human')).toBe(0)
+  })
+
+  it('blocked_post 只带 error_code → 凭据成立，卡住时留 verify_human', () => {
+    const db = setup()
+    const out = apply(db, { status: 'blocked_post', error_code: 'TOOL_FAILED' })
+    expect(out.accepted).toBe(true)
+    expect(nodeRow(db).status).toBe('blocked_post')
+    expect(events(db, 'verify_human')).toBe(1)
+    const ev = db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nr_ar' AND type='verify_human'").get() as { payload: string }
+    expect(JSON.parse(ev.payload).reason).toBe('TOOL_FAILED')
   })
 })

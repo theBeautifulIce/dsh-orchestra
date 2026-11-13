@@ -36,6 +36,21 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   if (isTerminal(row.status)) {
     return { cancel_result: 'already_stopped', next_status: row.status, fence_state: null, reason: 'terminal_no_out_edge' }
   }
+  // 还没派发就取消：直接作废，不进围栏、不产生新 attempt（审计 N-08）
+  if (row.status === 'queued' || row.status === 'leased') {
+    runCas(
+      tx,
+      "UPDATE node_runs SET status = 'superseded', cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN ('queued', 'leased')",
+      [params.now, params.cancelResult, params.now, params.nodeRunId, params.attempt, params.revision],
+      { rows: 1, what: 'cancel-before-dispatch' },
+    )
+    appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_before_dispatch', {
+      cancel_result: params.cancelResult,
+      from: row.status,
+      to: 'superseded',
+    })
+    return { cancel_result: params.cancelResult, next_status: 'superseded', fence_state: null, reason: 'cancelled_before_dispatch' }
+  }
   if (params.cancelResult === 'interrupted') {
     // 围栏已经立着：第二次取消不许再立一次（G-05 要求一次取消只arm一次）
     if (row.fence_state === 'armed') {
@@ -58,6 +73,17 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   if (params.cancelResult === 'not_interruptible') {
     // 动作停不下来：延长动作截止时间并进 stopping（规格 4.5 行 345）
     const deadline = new Date(Date.parse(params.now) + (params.extendDeadlineMs ?? 0)).toISOString()
+    if (row.fence_state === 'armed') {
+      // 围栏立着时改状态会留下“stopping 但仍 armed”的双主人：只记取消结果，等宽限到点由 sweep 撤围栏（审计 P0-4）
+      runCas(
+        tx,
+        "UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND fence_state = 'armed'",
+        [params.now, 'not_interruptible', deadline, params.now, params.nodeRunId, params.attempt, params.revision],
+        { rows: 1, what: 'cancel-not-interruptible-fenced' },
+      )
+      appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline, fence_pending: true })
+      return { cancel_result: 'not_interruptible', next_status: row.status, fence_state: 'armed', reason: 'fence_pending' }
+    }
     runCas(
       tx,
       'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
@@ -69,6 +95,16 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   }
   if (params.cancelResult === 'already_stopped') {
     // 已经停了：按已停事实判定，状态不改，只记取消事实（规格 4.5 行 346）
+    if (row.fence_state === 'armed') {
+      runCas(
+        tx,
+        "UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND fence_state = 'armed'",
+        [params.now, 'already_stopped', params.now, params.nodeRunId, params.attempt, params.revision],
+        { rows: 1, what: 'cancel-already-stopped-fenced' },
+      )
+      appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_already_stopped', { status: row.status, fence_pending: true })
+      return { cancel_result: 'already_stopped', next_status: row.status, fence_state: 'armed', reason: 'fence_pending' }
+    }
     runCas(
       tx,
       'UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
@@ -79,6 +115,17 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     return { cancel_result: 'already_stopped', next_status: row.status, fence_state: null, reason: 'already_stopped' }
   }
   // unknown：进 stopping 再查执行器状态（规格 4.5 行 347）
+  if (row.fence_state === 'armed') {
+    // 围栏立着时不许在这里改状态；宽限到点撤围栏时统一回 stopping（审计 P0-4）
+    runCas(
+      tx,
+      "UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND fence_state = 'armed'",
+      [params.now, 'unknown', params.now, params.nodeRunId, params.attempt, params.revision],
+      { rows: 1, what: 'cancel-unknown-fenced' },
+    )
+    appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_unknown', { fence_pending: true })
+    return { cancel_result: 'unknown', next_status: row.status, fence_state: 'armed', reason: 'fence_pending' }
+  }
   runCas(
     tx,
     'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
@@ -105,12 +152,12 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
   // 宽限没到点不许撤销：任何调用方都不能提前把围栏撤了（规格 4.5 行 346）
   if (!params.row.fence_grace_until) return false
   if (Date.parse(params.row.fence_grace_until) > Date.parse(params.now)) return false
-  runCas(
-    tx,
+  // 撤销失败只说明这行已被别人改过：返回 false 让 sweep 继续下一条，不许整批回滚（审计 P0-4）
+  const res = tx.run(
     'UPDATE node_runs SET status = ?, fence_state = ?, fence_grace_until = NULL, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND status = ? AND attempt = ? AND revision = ?',
     ['stopping', 'revoked', params.now, params.row.node_run_id, 'timing_out', params.row.attempt, params.row.revision],
-    { rows: 1, what: 'revokeFence' },
   )
+  if (res.changes !== 1) return false
   appendNodeRunEvent(tx, secret, params.row.node_run_id, 'fence_revoked', { reason: 'grace_expired' })
   return true
 }

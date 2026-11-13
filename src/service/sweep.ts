@@ -3,10 +3,13 @@ import type { Db } from '../infra/sqlite/driver.ts'
 import { inTx } from '../infra/db/tx.ts'
 import { sweepExpiredLeases } from './commands/lease.ts'
 import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts'
+import { transitionNode } from './commands/node-state.ts'
 
 export type SweepResult = {
   lease_expired: string[]
   fence_revoked: string[]
+  // 判定时限到点、超时转阻塞的节点（规格 4.4 行 333）
+  verify_timed_out: string[]
   // 围栏撤销后该重放的队头；S3 接上决定重放后由决策循环消费
   replay_heads: { node_run_id: string; report_id: string; report_seq: number }[]
   scanned_at: string
@@ -29,6 +32,30 @@ export function sweep(db: Db, secret: string, params: { now: string }): SweepRes
       const head = pickReplayHead(tx, row.node_run_id, row.attempt)
       if (head) heads.push({ node_run_id: row.node_run_id, report_id: head.report_id, report_seq: head.report_seq })
     }
-    return { lease_expired: leaseExpired, fence_revoked: revoked, replay_heads: heads, scanned_at: params.now }
+    // 判定时限到点：verifying 超时转 blocked_post，并留一条 verify_human（规格 4.4 行 333）
+    const timedOut: string[] = []
+    const verifying = tx.all<{ node_run_id: string; attempt: number; revision: number; verify_deadline_at: string }>(
+      'SELECT node_run_id, attempt, revision, verify_deadline_at FROM node_runs WHERE status = ? AND verify_deadline_at IS NOT NULL',
+      ['verifying'],
+    )
+    for (const row of verifying) {
+      if (Date.parse(row.verify_deadline_at) > Date.parse(params.now)) continue
+      try {
+        transitionNode(tx, secret, {
+          nodeRunId: row.node_run_id,
+          from: 'verifying',
+          to: 'blocked_post',
+          attempt: row.attempt,
+          revision: row.revision,
+          now: params.now,
+          reason: 'verify_timeout',
+          verifyHuman: { reason: 'verify_timeout', missing: [] },
+        })
+        timedOut.push(row.node_run_id)
+      } catch {
+        // 别的流程刚改过这一行：跳过这一行，不让单行失败拖垮整批扫描（审计 N-04）
+      }
+    }
+    return { lease_expired: leaseExpired, fence_revoked: revoked, verify_timed_out: timedOut, replay_heads: heads, scanned_at: params.now }
   })
 }

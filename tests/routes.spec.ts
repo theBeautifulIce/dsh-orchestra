@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { createOrchestra } from '../src/index.ts'
 import { withTx } from '../src/infra/sqlite/driver.ts'
 import { startServer } from '../src/service/server.ts'
+import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../src/executor/tools.ts'
+import type { HostAgentFactory } from '../src/executor/session.ts'
 
 const SECRET = 'routes-secret'
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -16,10 +18,15 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) { try { rmSync(dir, { recursive: true, force: true }) } catch { /* 句柄晚释放 */ } }
 })
 
-async function boot() {
+async function boot(withExecutor = false) {
   const dir = mkdtempSync(join(tmpdir(), 'orch-routes-'))
   dirs.push(dir)
-  const orchestra = createOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S2' })
+  const registry = new ToolRegistry()
+  registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
+  const host: HostRunner = { readonlyAvailable: () => true, run: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '' }) }
+  const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_1', sessionId: 'sess_1' }) }
+  const executor = withExecutor ? { registry, agents, runner: new ReadOnlyToolRunner(registry, host, dir) } : undefined
+  const orchestra = createOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S2', ...(executor ? { executor } : {}) })
   withTx(orchestra.db, (tx) => {
     tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t1','路由','running',1,?,?)", [NOW, NOW])
     tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, status, revision, created_at, updated_at) VALUES ('r1','t1','wf',1,'running',1,?,?)", [NOW, NOW])
@@ -69,6 +76,36 @@ describe('节点命令与工作流加载路由', () => {
     expect(reportBody.data.accepted).toBe(false)
     // dispatched 不能直跳 done：路由到了服务层，状态机也守住了
     expect(reportBody.data.reason).toBe('illegal_transition')
+  })
+
+  it('生产执行路由：/v1/node-runs/run 一路跑到 done', async () => {
+    const base = await boot(true)
+    const loaded = await post(base + '/v1/workflows/load', {
+      workflow_version: '1',
+      pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
+      nodes: [{ node_id: 'check', type: 'agent' }],
+    })
+    expect(loaded.status).toBe(200)
+    const run = await post(base + '/v1/node-runs/run', {
+      nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+      tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+    })
+    expect(run.status).toBe(200)
+    const body = await run.json() as any
+    expect(body.data.final_status).toBe('done')
+    expect(body.data.evidence.source).toBe('run_tool')
+  })
+
+  it('加载 parallel 定义 → HTTP 403 FORBIDDEN', async () => {
+    const base = await boot()
+    const res = await post(base + '/v1/workflows/load', {
+      workflow_version: '1',
+      nodes: [{ node_id: 'n1', type: 'parallel' }],
+    })
+    expect(res.status).toBe(403)
+    const body = await res.json() as any
+    expect(body.error.code).toBe('FORBIDDEN')
   })
 
   it('缺字段 → 400 PAYLOAD_SCHEMA_INVALID', async () => {

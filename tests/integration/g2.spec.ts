@@ -103,24 +103,65 @@ describe('G2 门必过项', () => {
     expect(countOf(db, 'SELECT COUNT(*) AS n FROM node_runs WHERE node_run_id = ? AND attempt > ?', ['nrun_g2_04', 1])).toBe(0)
   })
 
-  it('终态必带证据', () => {
+  it('终态必带证据：走到 verifying 再报 done，没证据就拒在证据门', () => {
     const { db } = freshLedger(); seed(db)
     seedQueued(db, 'nrun_g2_05'); lease(db, 'nrun_g2_05')
+    // 先从 dispatched 走到 verifying：只有站在 verifying 上，done 才真的走到证据门
+    let expected = 'dispatched'
+    for (const target of ['started', 'verifying']) {
+      const step = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
+        nodeRunId: 'nrun_g2_05', attempt: 1, expectedStatus: expected, generation: 1, now: NOW,
+        report: goodReport('nrun_g2_05', 'rpt_g2_05_' + target, target),
+      }, PASS))
+      expect(step.registry_state).toBe('applied')
+      expected = target
+    }
+    expect(rowOf(db, 'nrun_g2_05').status).toBe('verifying')
     const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
-      nodeRunId: 'nrun_g2_05', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: NOW,
-      report: { report_id: 'rpt_g2_05', node_run_id: 'nrun_g2_05', attempt: 1, status: 'done' },
+      nodeRunId: 'nrun_g2_05', attempt: 1, expectedStatus: 'verifying', generation: 1, now: NOW,
+      report: { report_id: 'rpt_g2_05_done', node_run_id: 'nrun_g2_05', attempt: 1, status: 'done' },
     }, PASS))
     expect(res.accepted).toBe(false)
     expect(res.registry_state).toBe('rejected')
-    expect(rowOf(db, 'nrun_g2_05').status).toBe('dispatched')
+    expect(res.reason).toBe('evidence_missing')
+    expect(rowOf(db, 'nrun_g2_05').status).toBe('verifying')
   })
 
-  it('无裸 blocked', () => {
+  it('无裸 blocked：没凭据的阻塞上报被拒，节点状态不动', () => {
     const { db } = freshLedger(); seed(db)
-    seedQueued(db, 'nrun_g2_06')
+    seedQueued(db, 'nrun_g2_06'); lease(db, 'nrun_g2_06')
+    inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_06', from: 'dispatched', to: 'started', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_06').revision), now: NOW, reason: 'executor_started' }))
+    const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
+      nodeRunId: 'nrun_g2_06', attempt: 1, expectedStatus: 'started', generation: 1, now: NOW,
+      report: { report_id: 'rpt_g2_06', node_run_id: 'nrun_g2_06', attempt: 1, status: 'blocked_post' },
+    }, PASS))
+    expect(res.accepted).toBe(false)
+    expect(res.registry_state).toBe('rejected')
+    expect(res.reason).toBe('decision_required')
+    expect(rowOf(db, 'nrun_g2_06').status).toBe('started')
+    expect(countOf(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = 'verify_human'", ['nrun_g2_06'])).toBe(0)
     expect(countOf(db, 'SELECT COUNT(*) AS n FROM node_runs WHERE status = ?', ['blocked'])).toBe(0)
     const unknown = countOf(db, "SELECT COUNT(*) AS n FROM node_runs WHERE node_run_id LIKE 'nrun_%' AND status NOT IN ('queued','leased','dispatched','started','waiting','verifying','timing_out','stopping','startup_unknown','paused_bridge_missing','blocked_pre','blocked_post','indeterminate_side_effect','done','failed','timeout','abandoned_unverified','failed_with_unverified','orphaned','superseded')", [])
     expect(unknown).toBe(0)
+  })
+
+  it('带凭据的阻塞才算数：blocked_post 必须挂 verify_human 事件', () => {
+    const { db } = freshLedger(); seed(db)
+    seedQueued(db, 'nrun_g2_06b'); lease(db, 'nrun_g2_06b')
+    inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_06b', from: 'dispatched', to: 'started', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_06b').revision), now: NOW, reason: 'executor_started' }))
+    const res = inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
+      nodeRunId: 'nrun_g2_06b', attempt: 1, expectedStatus: 'started', generation: 1, now: NOW,
+      report: { report_id: 'rpt_g2_06b', node_run_id: 'nrun_g2_06b', attempt: 1, status: 'blocked_post', output: { request: { reason: '证据不足', missing: ['artifact'] } } },
+    }, PASS))
+    expect(res.accepted).toBe(true)
+    expect(rowOf(db, 'nrun_g2_06b').status).toBe('blocked_post')
+    expect(countOf(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = 'verify_human'", ['nrun_g2_06b'])).toBe(1)
+    // 不变量：账本里每个 blocked_post 节点都挂着 verify_human 凭据
+    const blocked = db.raw.prepare("SELECT node_run_id FROM node_runs WHERE status = 'blocked_post'").all() as { node_run_id: string }[]
+    expect(blocked.length).toBeGreaterThan(0)
+    for (const row of blocked) {
+      expect(countOf(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = 'verify_human'", [row.node_run_id])).toBe(1)
+    }
   })
 
   it('S2 加载 parallel 被拒', () => {

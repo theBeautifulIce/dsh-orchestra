@@ -3,8 +3,8 @@ import { OrchError } from '../../core/errors.ts'
 import { isReportRegistryState, type ApplyResult, type Report } from '../../core/report.ts'
 import type { PassCondition } from '../../core/policy.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
-import { runCas } from '../../infra/db/tx.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { transitionNode } from './node-state.ts'
 import { assertLeaseValid, loadNodeRun, type NodeRunRow } from './lease.ts'
 import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
@@ -91,6 +91,14 @@ export function applyReport(
     if (!isReportRegistryState(existing.state)) {
       throw new OrchError('STALE_GENERATION', 'registry 状态不在枚举里', { state: existing.state })
     }
+    // 同一个 report_id 只能属于一个 node_run：跨节点重放按结构错拒（审计 N-05）
+    if (existing.node_run_id !== params.nodeRunId) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'report_id 已经属于别的节点，不能跨节点重放', {
+        report_id: report.report_id,
+        registered: existing.node_run_id,
+        requested: params.nodeRunId,
+      })
+    }
     if (existing.state === 'applied') {
       // 已经落过账：不许再落一次，只把状态记成 replayed
       tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['replayed', params.now, report.report_id])
@@ -102,11 +110,18 @@ export function applyReport(
       return { accepted: false, reason: 'already_applied', registry_state: 'replayed' }
     }
     if (existing.state === 'replayed') {
-      appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
-        report_id: report.report_id,
-        report_seq: existing.report_seq,
-        reason: 'already_replayed',
-      })
+      // 同一条报告反复重发：事件只留一条，账本不许被重试刷膨胀（审计 N-06）
+      const dup = tx.get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = ? AND payload LIKE ?",
+        [params.nodeRunId, 'report_replayed', '%"report_id":"' + report.report_id + '"%'],
+      )
+      if ((dup?.n ?? 0) === 0) {
+        appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
+          report_id: report.report_id,
+          report_seq: existing.report_seq,
+          reason: 'already_replayed',
+        })
+      }
       return { accepted: false, reason: 'already_replayed', registry_state: 'replayed' }
     }
     // 已 rejected 的走重放路径：先验哈希链，再确认是当前 attempt 的队头（规格 4.2 行 304）
@@ -143,6 +158,10 @@ export function applyReport(
   const reportSeq = existing ? existing.report_seq : nextReportSeq(tx, params.nodeRunId)
   // 第三步：status + attempt + generation 三样 CAS（含租约校验）
   const row: NodeRunRow = loadNodeRun(tx, params.nodeRunId)
+  // 报告自己写的 attempt 必须和请求一致：执行器报 999、请求报 1 不许被当成同一笔（审计 N-07）
+  if (report.attempt !== params.attempt) {
+    return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'attempt_mismatch', now: params.now })
+  }
   if (row.attempt !== params.attempt) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'attempt_mismatch', now: params.now })
   }
@@ -166,23 +185,50 @@ export function applyReport(
   if (!canTransition(row.status, report.status)) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'illegal_transition', now: params.now })
   }
-  // 第四步：证据评估
-  const evidence = evaluateEvidence(report, policy.requiredHashes ?? [])
-  if (!evidence.ok) {
-    return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
+  // 第四、五步只对“完成”上报做证据与判定：失败、阻塞的回报不该被要求带通过证据
+  let evidenceDigest: string | null = null
+  if (report.status === 'done') {
+    const evidence = evaluateEvidence(report, policy.requiredHashes ?? [])
+    if (!evidence.ok) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
+    }
+    const verdict = evaluatePassConditions(policy.passConditions, evidence.normalized)
+    if (!verdict.pass) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: verdict.reason ?? 'verdict_unmet', now: params.now })
+    }
+    evidenceDigest = evidence.digest
   }
-  // 第五步：按模板判定规则求值
-  const verdict = evaluatePassConditions(policy.passConditions, evidence.normalized)
-  if (!verdict.pass) {
-    return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: verdict.reason ?? 'verdict_unmet', now: params.now })
+  // 第六步：节点迁移也必须走状态机（审计 P0-2：这里曾经直接 UPDATE，绕过 blocked 的裁决卡检查）
+  // S2 没有 decisions 表：阻塞凭据就是一条 verify_human 请求（理由 + 缺什么），error_code 只作兜底
+  // 两样都没有就是「裸卡住」：按 decision_required 拒掉，节点留在原状态等人来看（审计 N-01）
+  const request = (report.output as { request?: { reason?: unknown; missing?: unknown } } | undefined)?.request
+  const requestReason = typeof request?.reason === 'string' && request.reason.trim() !== '' ? request.reason.trim() : null
+  const codeReason = typeof report.error_code === 'string' && report.error_code.trim() !== '' ? report.error_code.trim() : null
+  const blocking = report.status === 'blocked_post' || report.status === 'blocked_pre'
+  const reason = requestReason ?? codeReason
+  let verifyHuman: { reason: string; missing: string[] } | undefined
+  if (blocking) {
+    if (reason === null) {
+      return rejectReport(tx, secret, {
+        nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq,
+        reason: 'decision_required', now: params.now,
+      })
+    }
+    verifyHuman = {
+      reason,
+      missing: Array.isArray(request?.missing) ? request.missing.map(String) : [],
+    }
   }
-  // 第六步：节点 CAS + registry 标 applied + 哈希链留痕
-  runCas(
-    tx,
-    'UPDATE node_runs SET status = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND status = ? AND attempt = ? AND action_generation = ?',
-    [report.status, params.now, params.nodeRunId, params.expectedStatus, params.attempt, params.generation],
-    { rows: 1, what: 'applyReport-node' },
-  )
+  transitionNode(tx, secret, {
+    nodeRunId: params.nodeRunId,
+    from: row.status,
+    to: report.status,
+    attempt: params.attempt,
+    revision: row.revision,
+    now: params.now,
+    reason: 'report_applied',
+    verifyHuman,
+  })
   if (existing) {
     tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['applied', params.now, report.report_id])
   } else {
@@ -195,7 +241,7 @@ export function applyReport(
     report_id: report.report_id,
     report_seq: reportSeq,
     next_status: report.status,
-    evidence_digest: evidence.digest,
+    evidence_digest: evidenceDigest,
   })
   return { accepted: true, next_status: report.status, registry_state: 'applied' }
 }

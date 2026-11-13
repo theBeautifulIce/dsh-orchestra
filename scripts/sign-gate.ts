@@ -4,10 +4,12 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { GATE_SPECS, type EvidenceEntry, type InvariantEntry } from './gate-check.ts'
+import { assertClean, candidateEntries, GATE_SPECS, verifyGateRecord, type EvidenceEntry, type InvariantEntry } from './gate-check.ts'
 
 const path = process.argv[2] ?? 'docs/gates/G1.md'
 const root = resolve(process.cwd())
+// 先确认候选范围干净：脏文件不进 candidate_hash，签出来的门等于没覆盖它（审计 N-09）
+assertClean(root)
 let text = readFileSync(path, 'utf8')
 const blocks = [...text.matchAll(/```json[ \t]*([^\r\n]*)\r?\n([\s\S]*?)\r?\n```/g)]
 const artifactMatch = blocks.find((m) => { try { return typeof JSON.parse(m[2] ?? '')?.gate === 'string' } catch { return false } })
@@ -23,7 +25,9 @@ const invariantBlock = blocks.find((m) => (m[1] ?? '').trim() === 'invariants')
 if (!evidenceBlock || !invariantBlock) throw new Error('缺少 evidence-index 或 invariants 块')
 
 const entries = (JSON.parse(evidenceBlock[2] ?? '') as EvidenceEntry[]).map((e) => {
-  const sha = sha256Hex(readFileSync(join(root, e.file), 'utf8').replace(/\r\n/g, '\n'))
+  // 证据以 HEAD 为准：工作树里改了没提交的证据不能拿来签
+  const bytes = execFileSync('git', ['show', 'HEAD:' + e.file], { cwd: root, maxBuffer: 64 * 1024 * 1024 })
+  const sha = sha256Hex(bytes.toString('utf8').replace(/\r\n/g, '\n'))
   return { ...e, sha256: sha }
 })
 const sortedEvidence = entries.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -43,10 +47,7 @@ const gate = String(artifact.gate)
 const spec = GATE_SPECS[gate]
 if (!spec) throw new Error('没有这道门的校验规格: ' + gate)
 const git = (args: string[]) => execFileSync('git', args, { cwd: root, maxBuffer: 64 * 1024 * 1024 })
-const args = ['diff', '--name-only', '--diff-filter=ACMR', spec.scopeBase + '..HEAD', '--', '.']
-for (const dir of spec.excludes) args.push(':(exclude)' + dir)
-const paths = git(args).toString('utf8').split(/\r?\n/).filter(Boolean).sort()
-const files = paths.map((p) => ({ path: p, sha256: sha256Hex(git(['show', 'HEAD:' + p])) }))
+const { paths, files } = candidateEntries(root, spec)
 artifact.candidate_hash = sha256Hex(canonicalJson(files))
 artifact.change_scope_hash = sha256Hex(canonicalJson(paths))
 
@@ -54,5 +55,7 @@ const newArtifactJson = JSON.stringify(artifact, null, 2)
 text = text.slice(0, artifactMatch.index) + '```json\n' + newArtifactJson + '\n```' + text.slice(artifactMatch.index! + artifactMatch[0].length)
 const artifactHash = sha256Hex(canonicalJson(artifact))
 text = text.replace(/artifact_hash=[0-9a-f]{64}/, 'artifact_hash=' + artifactHash)
+// 写回之前先按门检查跑一遍：签出来的记录必须是能过的
+verifyGateRecord(text, { root })
 writeFileSync(path, text)
 console.log('重签完成：证据 ' + String(entries.length) + ' 份，candidate=' + artifact.candidate_hash.slice(0, 12) + '…，artifact_hash=' + artifactHash.slice(0, 12) + '…，改动文件 ' + String(paths.length) + ' 个')

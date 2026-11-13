@@ -76,6 +76,37 @@ describe('取消四值与围栏', () => {
   })
 })
 
+describe('取消边界（审计 N-08 / P0-4）', () => {
+  it('queued 取消直接变 superseded，不进围栏', () => {
+    const { db } = freshLedger(); seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_c', 'r1', 'n_c', 5, 'agent', 2, 'queued', 10, ?, ?)", [NOW, NOW])
+    })
+    const out = withTx(db, (tx) => applyCancel(tx, TEST_SECRET, { nodeRunId: 'nr_c', attempt: 2, revision: 10, cancelResult: 'unknown', now: NOW, graceMs: 30000 }))
+    expect(out.next_status).toBe('superseded')
+    expect(out.reason).toBe('cancelled_before_dispatch')
+    expect(nodeRow(db).status).toBe('superseded')
+    expect(nodeRow(db).fence_state).toBeNull()
+    expect(events(db, 'cancel_before_dispatch')).toBe(1)
+  })
+
+  it('围栏立着时收到 unknown：不改状态，宽限到点撤围栏回 stopping', () => {
+    const db = setup()
+    cancel(db, 'interrupted')
+    const out = cancel(db, 'unknown')
+    expect(out.next_status).toBe('timing_out')
+    expect(out.fence_state).toBe('armed')
+    expect(out.reason).toBe('fence_pending')
+    expect(nodeRow(db).status).toBe('timing_out')
+    expect(nodeRow(db).cancel_result).toBe('unknown')
+    const row = nodeRow(db)
+    const changed = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row, now: '2026-11-13T03:01:00.000Z' }))
+    expect(changed).toBe(true)
+    expect(nodeRow(db).status).toBe('stopping')
+    expect(nodeRow(db).fence_state).toBe('revoked')
+  })
+})
+
 describe('围栏撤销与排队重放', () => {
   it('armed 且 timing_out → 回 stopping、fence revoked', () => {
     const db = setup()

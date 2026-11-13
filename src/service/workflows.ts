@@ -19,6 +19,10 @@ export class WorkflowCatalog {
   load(def: WorkflowDefinition): LoadWorkflowResult {
     assertDefinitionAllowed(def, this.phase)
     this.defs.set(String(def.workflow_version), def)
+    // 账本里 workflow_version 是整数列：'01' 这类版本号存进去会变成 1，别名兜住它
+    if (/^\d+$/.test(String(def.workflow_version))) {
+      this.defs.set(String(Number(def.workflow_version)), def)
+    }
     return {
       workflow_version: String(def.workflow_version),
       nodes: def.nodes.map((n) => ({

@@ -8,6 +8,10 @@ import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
 import type { LoadWorkflowResult } from './workflows.ts'
+import type { CreateRunResult } from './runs.ts'
+import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
+import type { RunNodeResult } from '../executor/run-node.ts'
+import type { ToolPolicy } from '../executor/session.ts'
 
 export type ServerDeps = {
   secret: string
@@ -35,7 +39,32 @@ export type NodeCommands = {
     graceMs: number; extendDeadlineMs?: number
   }) => CancelOutcome
   loadWorkflow: (body: unknown) => LoadWorkflowResult
+  // 建 run 与节点：定义加载后由服务层建行，不许靠手写 INSERT 起节点（审计 F-01）
+  createRun: (body: { taskTitle: string; workflowVersion: string; nodeIds?: string[]; now: string }) => CreateRunResult
+  // 派发：把 run 下排队中的节点交给生产执行器跑
+  dispatch: (body: {
+    runId: string
+    nodes: Record<string, NodeSpec>
+    now: string
+    ownerEpoch?: number
+    leaseTtlMs?: number
+  }) => Promise<DispatchOutcome[]>
+  // 生产执行入口：路由只做形状校验，执行链在 runNode 里（审计 F-01）
+  runNode: (body: {
+    nodeRunId: string
+    nodeId: string
+    attempt: number
+    input?: unknown
+    outputSchema?: unknown
+    toolPolicy: ToolPolicy
+    tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
+    now: string
+    ownerEpoch?: number
+    leaseTtlMs?: number
+  }) => Promise<RunNodeResult>
 }
+
+const CANCEL_RESULTS = ['interrupted', 'not_interruptible', 'already_stopped', 'unknown'] as const
 
 // 请求体必填字段：缺一个就按结构错拒，别把 undefined 写进账本
 function requireFields(body: unknown, fields: string[]): Record<string, unknown> {
@@ -126,6 +155,32 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
+    if (req.method === 'POST' && url.pathname === '/v1/runs' && deps.commands) {
+      const body = requireFields(await readJsonBody(req), ['taskTitle', 'workflowVersion', 'now'])
+      const out = await queue.run(() => deps.commands!.createRun({
+        taskTitle: String(body.taskTitle),
+        workflowVersion: String(body.workflowVersion),
+        nodeIds: Array.isArray(body.nodeIds) ? body.nodeIds.map(String) : undefined,
+        now: String(body.now),
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/runs/dispatch' && deps.commands) {
+      const body = requireFields(await readJsonBody(req), ['runId', 'nodes', 'now'])
+      if (typeof body.nodes !== 'object' || body.nodes === null || Array.isArray(body.nodes)) {
+        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'nodes 要是按 node_id 归类的对象', { nodes: body.nodes })
+      }
+      const out = await queue.run(() => deps.commands!.dispatch({
+        runId: String(body.runId),
+        nodes: body.nodes as Record<string, NodeSpec>,
+        now: String(body.now),
+        ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
+        leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/lease' && deps.commands) {
       const body = requireFields(await readJsonBody(req), ['nodeRunId', 'ownerEpoch', 'leaseTtlMs', 'now'])
       const out = await queue.run(() => deps.commands!.acquireLease({
@@ -145,8 +200,28 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
+    if (req.method === 'POST' && url.pathname === '/v1/node-runs/run' && deps.commands) {
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'nodeId', 'attempt', 'toolPolicy', 'tools', 'now'])
+      if (!Array.isArray(body.tools)) {
+        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'tools 要是数组', { tools: body.tools })
+      }
+      const out = await queue.run(() => deps.commands!.runNode({
+        nodeRunId: String(body.nodeRunId), nodeId: String(body.nodeId), attempt: Number(body.attempt),
+        input: body.input ?? {}, outputSchema: body.outputSchema ?? {},
+        toolPolicy: body.toolPolicy as ToolPolicy,
+        tools: body.tools as { command: string; args: string[]; cwd: string; timeoutMs: number }[],
+        now: String(body.now),
+        ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
+        leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/cancel' && deps.commands) {
       const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'revision', 'cancelResult', 'now', 'graceMs'])
+      if (!(CANCEL_RESULTS as readonly string[]).includes(String(body.cancelResult))) {
+        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'cancelResult 不在枚举里', { cancelResult: body.cancelResult })
+      }
       const out = await queue.run(() => deps.commands!.cancel({
         nodeRunId: String(body.nodeRunId), attempt: Number(body.attempt), revision: Number(body.revision),
         cancelResult: String(body.cancelResult), now: String(body.now), graceMs: Number(body.graceMs),

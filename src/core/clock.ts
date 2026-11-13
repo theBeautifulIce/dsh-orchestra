@@ -62,6 +62,23 @@ export class MonotonicClock {
   }
 }
 
+// 节点行上的截止锚点 → 判定用的 Deadline
+// 墙钟只作展示用；判定只看 boot_id 与单调纳秒（规格 3.4 行 171）
+export type DeadlineRow = {
+  deadline_boot_id: string | null
+  deadline_monotonic_ns: number | null
+  deadline_at: string | null
+}
+
+export function deadlineFromRow(row: DeadlineRow): Deadline | null {
+  if (!row.deadline_boot_id || row.deadline_monotonic_ns === null || !row.deadline_at) return null
+  return {
+    bootId: row.deadline_boot_id,
+    monotonicNs: Number(row.deadline_monotonic_ns),
+    wallClockMs: Date.parse(row.deadline_at),
+  }
+}
+
 // 跨 boot 剩余预算
 export type PreviousClock = {
   bootId: BootId
