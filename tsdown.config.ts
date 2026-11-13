@@ -23,6 +23,8 @@ export default defineConfig([
     target: 'es2024',
     dts: true,
     clean: true,
+    // 迁移 SQL 要跟着进 lib，defaultMigrationsDir 在打包后指向 lib/infra/sqlite/migrations
+    copy: [{ from: 'src/infra/sqlite/migrations/*.sql', to: 'lib/infra/sqlite/migrations' }],
     deps: { neverBundle: [/^@deepseek-ai\//, 'zod', 'proper-lockfile'] },
   },
   {

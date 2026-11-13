@@ -1,5 +1,5 @@
 // 迁移执行器：枚举 migrations/NNN-name.sql、校验、按序执行、记账（总纲 4.1.1）
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { sha256Hex } from '../../core/canonical.ts'
@@ -8,8 +8,17 @@ import { execSchema, type Db } from '../sqlite/driver.ts'
 
 export type SchemaStep = { version: number; name: string; checksum: string; statements: string[] }
 
+// 源码里是 src/infra/sqlite/migrations，打包后被并进 lib/index.js，所以从模块位置往上找几种可能
 export function defaultMigrationsDir(): string {
-  return fileURLToPath(new URL('../sqlite/migrations/', import.meta.url))
+  const here = fileURLToPath(new URL('.', import.meta.url))
+  const candidates = [
+    join(here, 'infra/sqlite/migrations'),
+    join(here, '../sqlite/migrations'),
+    join(here, 'sqlite/migrations'),
+    join(here, '../infra/sqlite/migrations'),
+  ]
+  for (const dir of candidates) if (existsSync(dir)) return dir
+  return candidates[0]!
 }
 
 export function loadSteps(dir: string): SchemaStep[] {
