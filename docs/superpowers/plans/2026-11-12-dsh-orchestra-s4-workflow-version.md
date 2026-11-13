@@ -19,7 +19,7 @@
 
 ## Tech Stack
 
-总纲 §4.1 的那套，不新增依赖：TypeScript 6.0.3（ESM、NodeNext，导入写 `.ts` 后缀）、Node `^22.19.0 || >=24.0.0`、pnpm 11.7.0、vitest 4.1.8、tsdown 0.22.14、zod 4.4.3、SQLite（`node:sqlite`）。脚本：`pnpm typecheck`、`pnpm test`、`pnpm build`、`pnpm check`、`pnpm gate`。
+总纲 §4.1 的那套，不新增依赖：TypeScript 6.0.3（ESM、NodeNext，导入写 `.ts` 后缀）、Node `^22.19.0 || >=24.0.0`、pnpm 12.3.4、vitest 4.1.8、tsdown 0.22.14、zod 4.4.3、SQLite（`node:sqlite`）。脚本：`pnpm typecheck`、`pnpm test`、`pnpm build`、`pnpm check`、`pnpm gate`。
 
 ## 本批能做什么
 

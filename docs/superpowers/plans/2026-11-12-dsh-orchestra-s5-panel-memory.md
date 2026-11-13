@@ -6,7 +6,7 @@
 
 **Architecture:** 面板是只读客户端，账本是唯一事实源：面板只经 src/client/api 的读模型客户端与 SSE 取数，六条命令走控制面信封，由 src/service/commands 落到账本，命令结果按 operation_id 查回执，不做乐观更新。读模型层把账本表投影成规格 8.2 的七种视图（TaskSummary / RunSummary / WorkflowView / NodeRunView / DecisionView / EventView / UnverifiedEffectView），展示状态由服务端给全，声明只做展示不改原文；未观测到的东西有自己的名字，不许折叠进「正常」档。记忆是一条独立于任务运行的支线：memory_start_run 以 (source_run_id, request_key) 幂等开批，固定图 mem_trigger→mem_prepare→mem_check→mem_route→mem_confirm→mem_apply→mem_report 把「提议—评估—审批—写入—回执」串成一条链，唯一写入口是 memory.apply_governed，批准快照一旦落定就只读。
 
-**Tech Stack:** TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 11.7.0 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · react 18.3.28 · react-dom 18.3.28 · jsdom 29.1.1 · node:sqlite（内置 DatabaseSync）· DSH bundle 插件
+**Tech Stack:** TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 12.3.4 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · react 18.3.1 · react-dom 18.3.1 · jsdom 29.1.1 · node:sqlite（内置 DatabaseSync）· DSH bundle 插件
 
 ---
 

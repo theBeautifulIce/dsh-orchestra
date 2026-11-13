@@ -6,7 +6,7 @@
 
 **Architecture:** 账本侧仍由 S1 的单写者 SQLite 服务承担，本批只加列与两个语义列，不改写入拓扑：所有状态迁移写回 `node_runs`，所有迁移带 CAS（`UPDATE` 语句的 `WHERE` 条件里含 revision / attempt / action_generation 之一，受影响行数必须恰为 1），所有终态、拒绝与扫描决策写 `node_run_events` 哈希链。执行侧新增「执行桥客户端 + executor 子智能体」：编排服务通过桥把节点派给一个不继承主会话历史的子智能体，子智能体只拿节点输入、工具策略与输出 schema；它做不做得由编排服务说了算——完成状态只能由 `applyReport` 收口，agent 不能自报完成。证据分强弱两档：`runTool` 以宿主只读身份跑注册表里的固定命令产出强证据，模型侧 `tool_result` 只是弱证据，不可逆节点只认产物哈希。代际分两支：`Ga` 跟动作走，`rearm_generation` 跟续期走，两者不许合并成一个数。门是 G2：单节点一条路径、重复上报只落一次、租约过期迟到上报被拒、取消后不产生新 attempt、终态必带证据、无裸 blocked、S2 加载 parallel 被拒，外加 G-03 / G-04 / G-05 / G-07 四条故障注入。
 
-**Tech Stack:** 同 S1：TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 11.7.0 · vitest 4.1.8 · zod 4.4.3 · node:sqlite（内置 DatabaseSync）· 桥与 executor 走宿主侧插件接口，测试用替身
+**Tech Stack:** 同 S1：TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 12.3.4 · vitest 4.1.8 · zod 4.4.3 · node:sqlite（内置 DatabaseSync）· 桥与 executor 走宿主侧插件接口，测试用替身
 
 ---
 

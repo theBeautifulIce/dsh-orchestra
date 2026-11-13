@@ -6,7 +6,7 @@
 
 **Architecture:** 引擎层 orchestra-service 是独立 Node 进程，只做确定性的记账与查询，不碰节点正文、不调模型、不调工具。存储层是单个 SQLite 库（node:sqlite 内置驱动），账本唯一写者是服务，所有写事务走 BEGIN IMMEDIATE 并在事务内校验 instance_epoch，任何其他进程只能通过服务 API 写。事件既是事实来源也是对外流：`events` 表全局单调 seq 只追加，`node_run_events` 每个 node_run 一条 HMAC 哈希链。接入层这一批只留一个只读 HTTP 端口与共享密钥，写通道留到 S2 起。
 
-**Tech Stack:** TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 11.7.0 · vitest 4.1.8 · zod 4.4.3 · proper-lockfile 4.1.2 · node:sqlite（内置 DatabaseSync）
+**Tech Stack:** TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 12.3.4 · vitest 4.1.8 · zod 4.4.3 · proper-lockfile 4.1.2 · node:sqlite（内置 DatabaseSync）
 
 ---
 

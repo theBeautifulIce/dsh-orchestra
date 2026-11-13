@@ -6,7 +6,7 @@
 
 **Architecture:** 硬化层放在编排服务这一侧，不改账本语义：故障注入走 `scripts/fault-inject.ts` 的统一入口，每条注入都产出注入脚本与参数、前后账本片段、恢复后对账查询三样东西，对账查询是"过没过"的唯一判据。性能与浸泡用同一套读路径测量，不另开旁路。门流程 `wf_release_v1` 是一条普通的工作流定义（trigger → agent → parallel 六组检查 → wait → policy → approval → 收口器 → branch），policy 节点确定性判定必过项与阈值、不读 agent 摘要，GateArtifact 由 run 外的收口器写。升级与回滚只动构建与路由，账本只追加不回退。
 
-**Tech Stack:** TypeScript 6.0.3（ESM，NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 11.7.0 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · React 18.3.28 · jsdom 29.1.1 · node:sqlite（内置，只经 `src/infra/sqlite/driver.ts`）· DSH bundle 插件。
+**Tech Stack:** TypeScript 6.0.3（ESM，NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 12.3.4 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · React 18.3.1 · jsdom 29.1.1 · node:sqlite（内置，只经 `src/infra/sqlite/driver.ts`）· DSH bundle 插件。
 
 ---
 
@@ -1144,7 +1144,7 @@ git commit -m "docs(release): 交出三圈试用与升圈规则"
 artifact_hash=SHA256(canonical_json(artifact))
 ```
 
-4. 定发布包。按总纲 §4.1 的 `files` 清单：`lib`、`cordis.patch.yml`、`orchestra.config.json`、`README.md`；安装说明写清 DSH 版本要求（`dsh ^0.2.1-alpha.2`）、Node 版本（`^22.19.0 || >=24.0.0`）、安装步骤、配置文件位置与阶段切换方式。
+4. 定发布包。按总纲 §4.1 的 `files` 清单：`lib`、`cordis.patch.yml`、`orchestra.config.json`、`README.md`；安装说明写清 DSH 版本要求（`dsh >=0.2.2-0 <0.2.3-0`）、Node 版本（`^22.19.0 || >=24.0.0`）、安装步骤、配置文件位置与阶段切换方式。
 
 5. 定门禁的硬约束。门记录缺失、批准人缺失、证据缺失任一不得进下一阶段（规格 13.5 行 1143）；没有门记录与批准人不得进下一阶段，例外不覆盖 I1 到 I9（规格 12.1 行 1037）。
 

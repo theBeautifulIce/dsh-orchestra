@@ -6,7 +6,7 @@
 
 **Architecture:** 四层。引擎层 `orchestra-service` 是独立 Node 进程，只做确定性状态机、记账、事务、租约、扫描、事件与查询，不碰节点正文、不调模型、不调工具；存储层是 SQLite 单库，账本唯一写者是服务；执行层在 DSH 宿主内，一任务一具名会话，节点作业由 executor 子智能体执行；接入层（工具面、面板、记忆审计、外部订阅）只与服务的读模型和命令信封说话。
 
-**Tech Stack:** TypeScript 6.0.3 (ESM, NodeNext) · Node `^22.19.0 || >=24.0.0` · pnpm 11.7.0 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · proper-lockfile 4.1.2 · @deepseek-ai/cordis 4.0.5-alpha.1 · dsh-* peer `^0.2.1-alpha.2` · SQLite（node:sqlite 内置）· DSH bundle 插件（cordis.patch.yml + client 注入）
+**Tech Stack:** TypeScript 6.0.3 (ESM, NodeNext) · Node `^22.19.0 || >=24.0.0`（本机 26.13.1）· pnpm 12.3.4 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · proper-lockfile 4.1.2 · @deepseek-ai/cordis `^4.1.0` · @deepseek-ai/dsh-* peer `>=0.2.2-0 <0.2.3-0`（宿主 0.2.2-rc.1）· react 18.3.1（宿主冻结，只作 external）· SQLite（node:sqlite 内置）· DSH bundle 插件（cordis.patch.yml + client 注入）
 
 ---
 
@@ -122,12 +122,13 @@ dsh-orchestra/
 
 - `package.json`：`type=module`、`main: lib/index.js`、`types: lib/index.d.ts`、`exports` 含 `.` 与 `./client`、`files: [lib, cordis.patch.yml, README.md]`、`dsh.bundle.patch=./cordis.patch.yml`、`dsh.client.platform=web`、`dsh.client.inject` 六个 dsh-client-ui-* 包、`dsh.manifestVersion=1`。
 - scripts：`build=tsdown`、`typecheck=tsc --noEmit`、`test=vitest run`、`check=pnpm typecheck && pnpm test && pnpm build`、`gate=tsx scripts/gate-check.ts`。
-- engines：`node: ^22.19.0 || >=24.0.0`、`dsh: ^0.2.1-alpha.2`；packageManager `pnpm@11.7.0`。
-- 依赖：`proper-lockfile@4.1.2`、`zod@4.4.3`；peerDeps 为 cordis 与 dsh-* 系列 `^0.2.1-alpha.2`、`@deepseek-ai/schemastery@3.18.5-alpha.1`。
-- devDeps：同版本 peer + `typescript@6.0.3`、`vitest@4.1.8`、`tsdown@0.22.14`、`@types/node@22.20.0`、`react@18.3.28`、`react-dom@18.3.28`、`jsdom@29.1.1`。
+- engines：`node: ^22.19.0 || >=24.0.0`、`dsh: >=0.2.2-0 <0.2.3-0`；packageManager `pnpm@12.3.4`。宿主实测版本 0.2.2-rc.1：旧的 `dsh ^0.2.1-alpha.2` 不满足该区间，插件会被宿主拒装，必须改区间写法。
+- 依赖：`proper-lockfile@4.1.2`、`zod@4.4.3`；peerDeps 一律带 `@deepseek-ai/` 前缀——无 scope 的 `dsh-*` 在 npm 上多半 404 或指向无关包（`dsh-persistence` 的真名是 `@deepseek-ai/dsh-session-persistence`，`dsh-client-ui-locale` 的真名是 `@deepseek-ai/dsh-client-locale`）；版本区间 cordis `^4.1.0`、`@deepseek-ai/schemastery@^3.19.0`、dsh-* 系列 `>=0.2.2-0 <0.2.3-0`。
+- devDeps：`typescript@6.0.3`、`vitest@4.1.8`、`tsdown@0.22.14`、`@types/node@22.20.5`、`@types/react@18.3.31`、`@types/react-dom@18.3.7`、`react@18.3.1`、`react-dom@18.3.1`、`jsdom@29.1.1`。react 18.3.28 不存在；宿主把 react/react-dom 冻结在 18.3.1，插件侧只作 external，bundle 不自带。
+- `dsh.client.inject` 只列宿主已提供的客户端包（`@deepseek-ai/dsh-client-locale` / `-ui-settings` / `-ui-renderer` / `-ui-layout` / `-ui-sidebar` / `-ui-workspace` 已在宿主 app.asar 中核实存在），且必须与客户端代码实际 import 的包一一对齐：S5 若引入 `@deepseek-ai/dsh-client-ui-primitives`，随即可补进 inject；多列无害，漏列会在浏览器端 `require` 失败。
 - tsconfig：`target ES2024`、`module NodeNext`、`moduleResolution NodeNext`、`strict`、`noUncheckedIndexedAccess`、`verbatimModuleSyntax`、`rewriteRelativeImportExtensions`、`jsx react-jsx`、include `src/**/*.ts(x)` 与 `tests/**/*.ts(x)`。
 - vitest.config.ts：`resolve.dedupe=['react','react-dom']`、`test.include=['tests/**/*.spec.{ts,tsx}']`。
-- tsdown.config.ts：照抄参考项目 `references/dsh-superagent-prototype/tsdown.config.ts` 的形状——两段配置（node 端 + client 端），外加一个 `raw` 插件负责 `?raw` 引入 css；client 端用 `outputOptions.banner` 把 `module.exports` 包进 `window.__ModuleLoader__.load(...)`。
+- tsdown.config.ts：照抄参考项目 `references/dsh-superagent-prototype/tsdown.config.ts` 的形状（references/ 目录被 .gitignore 忽略、不随仓库分发，配置已在本节代码块内全量给出，直接照抄代码块）——两段配置（node 端 + client 端），外加一个 `raw` 插件负责 `?raw` 引入 css；client 端用 `outputOptions.banner` 把 `module.exports` 包进 `window.__ModuleLoader__.load(...)`。两段的 `neverBundle` 都要含 `/^@deepseek-ai\//`：node 端的 dsh-*、cordis、schemastery 由宿主注入，client 端的 dsh-client-* 同样由宿主注入，打包进来会出现两份实例。
 
 ```ts
 import { readFileSync } from 'node:fs'
@@ -141,7 +142,7 @@ const raw = { name: 'raw',
 export default defineConfig([
   { entry: { index: 'src/index.ts' }, outDir: 'lib', format: 'esm', fixedExtension: false, platform: 'node', target: 'es2024', dts: true, clean: true, deps: { neverBundle: [/^@deepseek-ai\//, 'zod', 'proper-lockfile'] } },
   { entry: { client: 'src/client/index.tsx' }, outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, clean: false, plugins: [raw],
-    deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'] },
+    deps: { neverBundle: [/^@deepseek-ai\//, 'react', 'react/jsx-runtime', 'react-dom'] },
     outputOptions: { entryFileNames: 'client.js', banner: 'window.__ModuleLoader__.load({ id: "dsh-orchestra", factory: (require) => {', footer: 'return module.exports; } });', intro: 'var module = { exports: {} }; var exports = module.exports;' } },
 ])
 ```
@@ -200,16 +201,15 @@ package.json 侧对应：`main: lib/index.js`、`types: lib/index.d.ts`、`expor
 
 骨架任务没有可写的业务单测，验证用类型检查与构建冒烟；这是 writing-plans 格式的唯一例外，已在计划里写明。
 
-- Step 1：确认环境不满足则先装 Node。
+- Step 1：确认工具链（本机已就绪，不必再装）。
 
 ```powershell
-node -v    # 期望 v22.19.0+ 或 v24.x；本机当前 v22.14.0 不满足 engines
-winget install OpenJS.NodeJS.LTS   # 装 24 LTS
-node -v    # 期望 v24.x
-corepack enable
-corepack prepare pnpm@11.7.0 --activate
-pnpm -v    # 期望 11.7.0
+node -v    # 期望 v22.19.0+ 或 >=24.0.0；本机当前 v26.13.1，满足 engines
+pnpm -v    # 期望 12.3.4；Node 26 不再随包分发 corepack，不要再跑 corepack enable
+npm -v     # 期望 11.x
 ```
+
+若 pnpm 缺失：`npm i -g pnpm@12.3.4`（本机 registry 需走代理时加 `--proxy http://127.0.0.1:7078`）。旧写法里的 `corepack enable` + `corepack prepare pnpm@11.7.0` 在 Node 26 上必然失败，已作废。
 
 - Step 2：写骨架文件。
 
@@ -253,34 +253,30 @@ pnpm -v    # 期望 11.7.0
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "gate": "tsx scripts/gate-check.ts"
   },
-  "engines": { "node": "^22.19.0 || >=24.0.0", "dsh": "^0.2.1-alpha.2" },
-  "packageManager": "pnpm@11.7.0",
+  "engines": { "node": "^22.19.0 || >=24.0.0", "dsh": ">=0.2.2-0 <0.2.3-0" },
+  "packageManager": "pnpm@12.3.4",
   "dependencies": { "proper-lockfile": "4.1.2", "zod": "4.4.3" },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.5-alpha.1",
-    "@deepseek-ai/schemastery": "3.18.5-alpha.1",
-    "dsh-agent": "^0.2.1-alpha.2",
-    "dsh-api-session-controller": "^0.2.1-alpha.2",
-    "dsh-client-ui-layout": "^0.2.1-alpha.2",
-    "dsh-client-ui-locale": "^0.2.1-alpha.2",
-    "dsh-client-ui-renderer": "^0.2.1-alpha.2",
-    "dsh-client-ui-settings": "^0.2.1-alpha.2",
-    "dsh-client-ui-sidebar": "^0.2.1-alpha.2",
-    "dsh-client-ui-workspace": "^0.2.1-alpha.2",
-    "dsh-host-webserver": "^0.2.1-alpha.2",
-    "dsh-permission-presets": "^0.2.1-alpha.2",
-    "dsh-persistence": "^0.2.1-alpha.2",
-    "dsh-scope": "^0.2.1-alpha.2",
-    "dsh-session": "^0.2.1-alpha.2",
-    "dsh-skill": "^0.2.1-alpha.2",
-    "dsh-subprocess": "^0.2.1-alpha.2",
-    "dsh-tools": "^0.2.1-alpha.2"
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "@deepseek-ai/dsh-agent": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-api-session-controller": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-permission-presets": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-scope": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-session": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-session-persistence": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-skill": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-subprocess": ">=0.2.2-0 <0.2.3-0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-0 <0.2.3-0"
   },
   "devDependencies": {
-    "@types/node": "22.20.0",
+    "@types/node": "22.20.5",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
     "jsdom": "29.1.1",
-    "react": "18.3.28",
-    "react-dom": "18.3.28",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
     "tsdown": "0.22.14",
     "typescript": "6.0.3",
     "vitest": "4.1.8"
@@ -401,11 +397,12 @@ describe('smoke', () => {
 - Step 3：安装依赖并跑验证。
 
 ```powershell
+$env:HTTPS_PROXY='http://127.0.0.1:7078'   # 本机 registry 走本地代理；直连可用的机器可省
 pnpm install
 pnpm check
 ```
 
-期望输出：typecheck 无错误；vitest 报 `1 passed`；tsdown 产出 `lib/index.js`、`lib/index.d.ts`、`lib/client.js`。
+期望输出：typecheck 无错误；vitest 报 `1 passed`；tsdown 产出 `lib/index.js`、`lib/index.d.ts`、`lib/client.js`，且 `lib/client.js` 里的 `require("react")` 与 `require("@deepseek-ai/...")` 未被打进产物。
 
 - Step 4：提交。
 
