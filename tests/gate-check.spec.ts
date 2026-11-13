@@ -345,6 +345,11 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('````md\n结论：fail\n```\n结论：pass\n````\n\n结论：fail')).toBe('fail')
   })
 
+  it('HTML 实体渲染后的可见结论也要参与判定（S1 第十五轮补）', () => {
+    expect(auditConclusionOf('结论：pass\n\n&#32467;&#35770;&#65306;fail')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n&#32467;&#35770;&colon;fail')).toBeNull()
+  })
+
   it('反引号围栏的 info string 带反引号时不算围栏（S1 第十五轮补）', () => {
     expect(auditConclusionOf('结论：pass\n\n' + '\x60'.repeat(3) + 'foo\x60bar\n结论：fail\n' + '\x60'.repeat(3))).toBeNull()
   })

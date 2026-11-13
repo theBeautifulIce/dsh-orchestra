@@ -567,6 +567,21 @@ export function auditBindingOf(text: string): { gate: string; commit: string } |
   return { gate: gates[0] as string, commit: commits[0] as string }
 }
 
+// Markdown 会把 HTML 实体渲染成字符；判定前先按渲染结果解码，否则
+// '&#32467;&#35770;&#65306;fail' 这种可见结论会被漏掉（S1 第十五轮补）。
+function decodeHtmlEntitiesForInspection(line: string): string {
+  return line
+    .replace(/&#(x?)([0-9a-f]+);/gi, (m, hex: string, digits: string) => {
+      const code = Number.parseInt(digits, hex ? 16 : 10)
+      if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return m
+      return String.fromCodePoint(code)
+    })
+    .replace(/&(amp|lt|gt|quot|apos|nbsp|colon|newline|tab);/gi, (m, name: string) => {
+      const map: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00A0', colon: ':', newline: '\n', tab: '\t' }
+      return map[name.toLowerCase()] ?? m
+    })
+}
+
 // 只返回顶层可见行：去掉隐藏块，跳过围栏/缩进代码/引用围栏，保留普通引用与列表。
 function auditTopLevelLines(text: string): string[] {
   const lines = stripHiddenAuditBlocks(text).split(/\r?\n/)
@@ -598,7 +613,7 @@ function auditTopLevelLines(text: string): string[] {
       continue
     }
     if (fence) continue
-    out.push(normalizeAuditLine(rawLine))
+    for (const decoded of decodeHtmlEntitiesForInspection(rawLine).split('\n')) out.push(normalizeAuditLine(decoded))
   }
   return out
 }
