@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-13 11:50。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-13 12:05。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -194,7 +194,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 - 仓库已初始化：`D:\aboutAI\dsh-orchestra\.git`，分支 `main`，首个提交 `fc92495`
   （docs: dsh-orchestra 项目落地（设计稿/台账/需求/设计思路/handoff/图谱索引）），共 7 个文件、1787 行。
 - `.gitignore` 忽略 `references/`（三份参考项目各自带 `.git`，不并入本仓库）、`.codebase-memory/`、`tmp/`、`.tmp/`、`*.log`、`*.bak`；`docs/prototype/` 只提交 `panel-v2.html`，截图与一次性脚本不入库。
-- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮、`8bfdc30` v39 第六段送第 39 轮、`3d4f59d` 原型 v11 字号层、`a1afa13` v41 第六段主体、`fd0df0b` G1 无 run 例外、`b747419` 记录重送与 G1、`0f950e6` v42 修第 42 轮 12 条并送第 43 轮、`6777ea4` v43 修第 43 轮 10 条 + 原型 v12、`63adb98` 原型 v13 去掉优先级标签并统一人话文案、`fb7d1f1` v44 修第 44 轮 9 条、`408df76` 记录 v44 送第 45 轮、`b068ca4` 记录第 45 轮 pass 并同步 handoff、`ee17d03` 落 v44 实施规格、`89d8836` 同步 v44 实施规格落盘与待审状态、`aea1b24` 共享面提案留档、`eeb7558` 原型 v15 纯白平面系统、`f3b7e94` 原型 v16 核心指挥台、`65b69c5` 原型 v17 执行注意事项落进任务流并重排数字字号、`b8352db` 落齐 S1–S6 六份批次计划、`f094760` 规格升 v1.2 裁定九处不一致并重校六份计划的规格行号、`26fc1af` 规格升 v1.3 补第十八章主脑与自治档位并为 S3/S5 各加一任务。、`a540e1e` 原型 v18 状态诚实、一处一概念、默认安静、文案收短（数字等于列表长度、状态句三处同源、健康支线默认收起）、`8aa9cef` 原型 v19 任务查询按状态与时间段、归档箱只收起不改历史、`1091673` 原型 v20 流程库改成一行可搜下拉、`c08fa3a` 校正七份计划的依赖与版本事实并清仓库补 GLOSSARY 与 ADR 0001（此提交同时是首次推到远端，`origin/main` 与本地同步）。
+- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮、`8bfdc30` v39 第六段送第 39 轮、`3d4f59d` 原型 v11 字号层、`a1afa13` v41 第六段主体、`fd0df0b` G1 无 run 例外、`b747419` 记录重送与 G1、`0f950e6` v42 修第 42 轮 12 条并送第 43 轮、`6777ea4` v43 修第 43 轮 10 条 + 原型 v12、`63adb98` 原型 v13 去掉优先级标签并统一人话文案、`fb7d1f1` v44 修第 44 轮 9 条、`408df76` 记录 v44 送第 45 轮、`b068ca4` 记录第 45 轮 pass 并同步 handoff、`ee17d03` 落 v44 实施规格、`89d8836` 同步 v44 实施规格落盘与待审状态、`aea1b24` 共享面提案留档、`eeb7558` 原型 v15 纯白平面系统、`f3b7e94` 原型 v16 核心指挥台、`65b69c5` 原型 v17 执行注意事项落进任务流并重排数字字号、`b8352db` 落齐 S1–S6 六份批次计划、`f094760` 规格升 v1.2 裁定九处不一致并重校六份计划的规格行号、`26fc1af` 规格升 v1.3 补第十八章主脑与自治档位并为 S3/S5 各加一任务。、`a540e1e` 原型 v18 状态诚实、一处一概念、默认安静、文案收短（数字等于列表长度、状态句三处同源、健康支线默认收起）、`8aa9cef` 原型 v19 任务查询按状态与时间段、归档箱只收起不改历史、`1091673` 原型 v20 流程库改成一行可搜下拉、`c08fa3a` 校正七份计划的依赖与版本事实并清仓库补 GLOSSARY 与 ADR 0001（此提交同时是首次推到远端，`origin/main` 与本地同步）、`80442ac` 记录计划校正与路线、`5f8ad5f` Task 0 插件仓库骨架与工具链（`origin/main` 已同步）。
 - 每次改设计稿后要提交（主人硬约束：改代码/文档后同步更新版本号并留痕）。
 
 ---
@@ -240,7 +240,7 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 ```
 
 - **每批只做三件事**：把对应计划里的 Task 逐条做掉 → 跑该批验收测试 → 写 `docs/gates/G<n>.md` 与 GateArtifact；门没过不往后走。
-- **Task 0 的验收线**：`pnpm check` 全绿（typecheck 无错、vitest 1 passed、产出 `lib/index.js` + `lib/index.d.ts` + `lib/client.js`），且 `lib/client.js` 里的 `require("react")` 与 `require("@deepseek-ai/...")` 未被打进产物。
+- **Task 0 已完成**（`5f8ad5f`，验收线全过，见 §11.4）；下一批是 S1 账本与状态机。
 - **要主人先拍的三件事**：规格 16.3 六项开放参数、`report_registry` 是否加 `queued_for_replay` 字段、桥 RPC 七方法落到宿主插件 API 的确切绑定名（最后一项卡在 S2 开工前）。
 
 ### 11.3 环境现值
@@ -248,3 +248,12 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 - Node `v26.13.1`（`D:\NodeJs\node.exe`）、npm 11.19.1、pnpm 12.3.4；`node:sqlite` 免旗标可用。
 - 宿主 DSH `0.2.2-rc.1`；`gh` CLI 未登录，deck 插件后端可用（GitHub）。
 - npm registry 与 GitHub 都走本地代理 `http://127.0.0.1:7078`。
+
+### 11.4 Task 0 已完成（2026-11-13 12:00，提交 `5f8ad5f`）
+
+- 落地 11 个文件：`package.json`、`tsconfig.json`、`vitest.config.ts`、`tsdown.config.ts`、`cordis.patch.yml`、`orchestra.config.json`、`src/index.ts`、`src/client/index.tsx`、`tests/smoke.spec.ts`、`.npmrc`、`pnpm-lock.yaml`。
+- `.npmrc` 写 `auto-install-peers=false` 与 `strict-peer-dependencies=false`：`@deepseek-ai/*` 与 react 由宿主注入，安装期不该自动拉取。
+- 实测（全部 exit 0）：`pnpm install` 9.4s，peer 解析到 `@deepseek-ai/dsh-*` 0.2.2-rc.2（满足 `>=0.2.2-0 <0.2.3-0`）；`pnpm typecheck` 无错；`pnpm test` 1 passed；`pnpm build` 产出 `lib/index.js` 0.10 kB + `lib/index.d.ts` 0.10 kB（ESM）与 `lib/client.js` 0.29 kB（CJS）。
+- 产物核读：`lib/client.js` 是 `window.__ModuleLoader__.load({ id: "dsh-orchestra", factory: (require) => { … } });`，内部只有 `exports.clientId = "dsh-orchestra"`，没有任何 `require("react")` 或 `require("@deepseek-ai/…")`。
+- 两处与计划原文的偏差：① 总纲 §5 内联的 tsdown 代码块 `neverBundle: [/^@deepseek-ai//, ...]` 是无效正则（斜杠未转义），client 端还漏了 `react/jsx-runtime`，已按 §4.1 权威块执行；② `.gitignore` 在 `c08fa3a` 已补齐 `node_modules/`、`lib/`、`storages/`，本任务无需再改。
+- GitHub 票 #8（Task 0）已更新到 100% 并入办上报；S1 不受 §16.3 六项开放参数阻塞，可以开工；S2 起受桥 RPC 绑定名未定影响。
