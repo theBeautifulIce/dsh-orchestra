@@ -545,3 +545,22 @@ S2 第十三轮（docs/audits/S2-independent-audit-round13.md）fail：P0=0 / P1
 验收（主仓库）：tsc --noEmit exit 0；全量 32 文件 / 308 例，297 passed / 11 failed；11 红全在 tests/gate-check.spec.ts，首因 G1 门记录 audit_report_sha256 仍为 64 个 0（预签态），无解析器回归。提交 9598462「Reject raw HTML in audit report conclusions」，4 文件 +597/−31，含 S1-round10 与 S2-round13 两份报告。
 
 下一步：S1 第十一轮（docs/audits/S1-independent-audit-round11.md）与 S2 第十四轮（docs/audits/S2-independent-audit-round14.md）独立审计已派出（S1 7fd39d7a-ac2d-4987-ae37-4e2e449e565d、S2 713ecf5c-5e33-407a-ad68-8f16b6d328ad）。两份都 pass 后：提交两份报告 → 改 G1 audit_round=11 / audit_report=S1-independent-audit-round11.md，改 G2 audit_round=14 / audit_report=S2-independent-audit-round14.md，审计 sha 清零 → 提交 → sign-gate G1、提交 → sign-gate G2、提交 → 双门 gate-check exit 0 且全量 308/308 → 开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
+
+
+### 11.20 S1 第十一轮 fail：链接引用定义续行；证据纳入候选范围（2026-11-13 22:46，HEAD 0297b77）
+
+S1 第十一轮（docs/audits/S1-independent-audit-round11.md，sha256=2e43ca1a…）fail：P0=0 / P1=1 / P2=1。P1 是链接引用定义续行：CommonMark 允许 `[x]:` 的目标写在下一行，旧 maskAuditLinkDestinations 只抹定义行，下一行的“结论：pass”被 markdown-it / python-markdown 整体隐藏，但解析器仍读成唯一结论。克隆里 sign-gate 与 gate-check 均 exit 0（artifact_hash=825e642d…）。P2 是证据文件签后追加一行再重签仍能过（与 S2 第十三轮 P2-10 同根因）。同轮复核：12 种原始 HTML/可见性绕过全部 exit 1；阳性对照 pass；绑定与不变量固定口径有效。
+
+修复（scripts/gate-check.ts）：
+- maskAuditLinkDestinations 改为逐行处理引用定义；定义行冒号后为空时，连带掩码下一行目标，再下一行若是引号/括号 title 一并掩码；目标同行但 title 换行的也掩码 title 行。
+- GATE_SPECS 的 excludes 从 `docs/gates` 改为只排除 `docs/gates/G1.md` 与 `docs/gates/G2.md`；docs/gates/evidence/** 进入候选范围。证据签后改动会使 diff 非空，checkAuditAnchor 以“候选提交之后，候选文件又被改过”拒绝复用旧报告。
+- tests/gate-check.spec.ts 新增 2 例：引用定义续行隐藏 pass 必须为 null；临时 git 仓库中证据文件进入候选、门记录自身不进入。gate-check.spec 现 47 例。
+
+端到端验证（临时 clone，已删除）：
+- 攻击报告 `[x]:` 换行藏“结论：pass”，G1 指向它：sign-gate exit 1，错误“审计报告里找不到唯一结论行”，G1 前后字节不变。
+- 阳性对照：纯 Markdown pass 报告签过，artifact_hash=a01fcb5138d9…、body_hash=1642c2c9e449…、候选 115 个文件，提交签后 G1 后 gate-check exit 0。
+- 签后往 docs/gates/evidence/G1/G-01.md 追加一行并提交，再 sign-gate：exit 1，错误“审计报告的候选提交之后，候选文件又被改过，不能复用这份报告：docs/gates/evidence/G1/G-01.md”。
+
+提交 0297b77「Mask multiline link definitions and bind evidence into candidate scope」，3 文件 +196/−6（含 S1 第十一轮报告）。tsc --noEmit exit 0；全量 32 文件 / 310 例，299 passed / 11 failed，11 红仍全在 tests/gate-check.spec.ts 的预签态（G1 audit_report_sha256=0*64），无新增回归。
+
+下一步：S1 第十二轮（docs/audits/S1-independent-audit-round12.md）与 S2 第十五轮（docs/audits/S2-independent-audit-round15.md）独立审计已按 HEAD 0297b77 派出（S1 04fc20e1-1975-4f54-bd76-647fd2b3a1c7、S2 dd007ad7-764a-4247-bd44-cb8519a09071）；S2 第十四轮因 HEAD 已变而中断。两份都 pass 后：提交报告 → 改 G1 audit_round=12 / audit_report=S1-independent-audit-round12.md，G2 audit_round=15 / audit_report=S2-independent-audit-round15.md，审计 sha 清零 → 提交 → sign-gate G1、提交 → sign-gate G2、提交 → 双门 gate-check exit 0 且全量 310/310 → 开 S3。任何一份 fail 都回表整改，不重签、不开 S3。
