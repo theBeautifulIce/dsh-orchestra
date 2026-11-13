@@ -701,6 +701,7 @@ function maskInlineAuditCode(text: string): string {
 function maskAuditLinkDestinations(text: string): string {
   const lines = text.split('\n')
   let start = 0
+  let poisoned = false
   for (let i = 0; i <= lines.length; i += 1) {
     if (i < lines.length && lines[i]!.trim().length > 0) continue
     if (i > start) {
@@ -714,11 +715,23 @@ function maskAuditLinkDestinations(text: string): string {
         }
       }
       if (hide) {
-        for (let k = start; k < i; k += 1) lines[k] = blankPreservingLines(lines[k]!)
+        for (let k = start; k < i; k += 1) {
+          const line = lines[k]!
+          lines[k] = blankPreservingLines(line)
+          // 整段隐藏会把同一段里可见的 fail 结论一起藏掉。只要藏掉的是 fail，
+          // 就在文末补一行无取值的结论，让 auditConclusionOf 判为不可判定（fail-closed）。
+          const normalized = normalizeAuditLine(line)
+          if (/^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:fail|不通过)/i.test(normalized)
+            || /^(?:fail|不通过)$/i.test(normalized)) {
+            poisoned = true
+          }
+        }
       }
     }
     start = i + 1
   }
+  // 追加一行没有取值的结论：让 auditConclusionOf 读到后判为不可判定。
+  if (poisoned) return lines.join('\n') + '\n结论：'
   return lines.join('\n')
 }
 
