@@ -575,14 +575,10 @@ function renderedAuditLines(text: string): string[] | null {
   // 单独一两个反引号是未闭合的行内代码，渲染器会把它当字面量，
   // 但跨块的结论行不能被它“证明可见”；按歧义拒绝（S1 第十四轮补）。
   if (/(?:^|\n)[ \t]*`{1,2}[ \t]*(?=\n[ \t]*\n)/.test(text)) return null
-  // markdown-it 把 `>    结论：pass` 当引用段落，但 CommonMark 的引用块内四空格
-  // 是缩进代码；门口径按代码隐藏（S1 第八轮 P1-4）。带链接方括号的行仍保留，
-  // 由可见链接段规则毒化，不能一并抹掉（S2 第十九轮 P0）。
-  const source = text.replace(/\r\n/g, '\n').split('\n').map((line) => {
-    const quote = /^(\s*>\s?)([\s\S]*)$/.exec(line)
-    if (quote && !/[\[\]]/.test(quote[2] ?? '') && /^(?: {0,3}\t| {3,})/.test(quote[2] ?? '')) return ''
-    return line
-  }).join('\n')
+  // 引用块里的缩进是否可见由 markdown-it 自己判：引用标记吃掉一个空格后，
+  // 剩 3 个空格仍是引用段落（可见），剩 4 个才是缩进代码。手工清行会把
+  // `> 引用\n>    结论：fail` 这种续行误藏（S1 第十七轮 P1-A）。
+  const source = text.replace(/\r\n/g, '\n')
   const tokens = AUDIT_MARKDOWN.parse(source, {})
   for (const token of tokens) {
     if (token.type === 'html_block') {
@@ -604,7 +600,15 @@ function renderedAuditLines(text: string): string[] | null {
         if (hidden === true) continue
         return null
       }
-      if (child.type === 'link_open' || child.type === 'link_close' || child.type === 'image') {
+      if (child.type === 'code_inline') {
+        // 行内代码在渲染里是可见文字；把内容并回可见行，
+        // 不能让「结论\`:\`fail」「结\`论\`：fail」被拆开漏掉（S1 第十七轮 P1-B）。
+        buffer += child.content
+      } else if (child.type === 'image') {
+        // 图片加载失败时浏览器会显示 alt 文本；alt 里出现 fail 结论按歧义拒绝。
+        if (visibleFailStatement(child.content)) ambiguous = true
+        paragraphHasLink = true
+      } else if (child.type === 'link_open' || child.type === 'link_close') {
         paragraphHasLink = true
       } else if (child.type === 'text' || child.type === 'text_special') {
         buffer += child.content
@@ -619,6 +623,30 @@ function renderedAuditLines(text: string): string[] | null {
   }
   flush()
   return ambiguous ? null : lines
+}
+
+// 可见正文里的“本报告不通过 / 本次审计结论为 fail”这类判断句。
+// 只认被句读或表格单元格隔开的完整陈述，避免把「本报告不通过项已全部修复」误判（S2 第二十轮补）。
+const FAIL_SUBJECT = '(?:本报告|本次审计|本轮审计|本次复核|本次评审|该报告|此报告|本审计)'
+const FAIL_VERDICT = '(?:fail(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的])|不通过(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的])|未通过(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的])|不合格(?=$|[\\s。．.！!？?；;，,、|*）)】—–：:\\-]|[需应已了的]))'
+
+function visibleFailStatement(line: string): boolean {
+  const boundary = '(?:^|[|。；;！!？?：:，,、]\\s*)'
+  const re = new RegExp(
+    boundary + '(?:' +
+      FAIL_SUBJECT + '(?:的)?(?:经|经过)?(?:审计|复核|评审)?(?:后)?(?:最终|仍|依然|还是)?(?:结论|判定|审计意见|最终判定|最终结论|结果)?\\s*(?:为|是|：|:)?\\s*' + FAIL_VERDICT +
+      '|(?:审计|复核|评审)(?:结论|结果)\\s*(?:为|是|：|:)\\s*' + FAIL_VERDICT +
+      '|(?:最终)?(?:结论|判定)\\s*(?:为|是|：|:)\\s*' + FAIL_VERDICT +
+      ')',
+    'i',
+  )
+  if (re.test(line)) return true
+  // 表格单元格只有结论 token 时同样算可见 fail（表头/格式行不会命中）。
+  for (const cell of line.split('|')) {
+    const t = cell.trim().replace(/[。．.！!？?；;，,、\s]+$/, '')
+    if (new RegExp('^' + FAIL_VERDICT + '$', 'i').test(t)) return true
+  }
+  return false
 }
 
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
@@ -636,7 +664,15 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
     if (!strict && !bare) {
       // 可见正文里另有一句 fail 结论（即使前面还有干净 pass）也不能放行；
       // 反过来，正文里引用 pass 不影响紧跟的正式 fail 结论（S2 第二十轮 zwsp-colon）。
-      if (inlineFailConclusion.test(line)) inlineFail = true
+      if (inlineFailConclusion.test(line) || visibleFailStatement(line)) inlineFail = true
+      // 软换行/实体换行也会把可见结论拆开（结\n论：fail、本报告结论\n为不通过）；
+      // 对相邻两行做一次拼接判定，宁可多判歧义，不能让 fail 从换行缝里漏掉（S1 第十七轮 P2-4）。
+      const nextVisible = visible[visibleIndex + 1] ?? ''
+      if (
+        nextVisible &&
+        !strict &&
+        (visibleFailStatement(line + nextVisible) || visibleFailStatement(line + ' ' + nextVisible))
+      ) inlineFail = true
       // 链接/引用定义段落里的可见“结论：”不能靠另一段干净 pass 洗掉（S2 第二十轮 def-*）；
       // 普通正文里提到“结论：”只是行内引用，不影响后面的正式结论行。
       if (line.includes('[') && conclusionText.test(line)) return null
@@ -662,6 +698,19 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   }
   if (verdict === 'pass' && inlineFail) return null
   return verdict
+}
+
+// 门记录正文顶部的结论行必须与 GateArtifact 的 conclusion 一致：
+// 防止 artifact 写 pass、人读正文却看到 fail（S1 第十七轮 P2-1）。
+function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
+  const visible = renderedAuditLines(text)
+  if (visible === null) return null
+  const found: Array<'pass' | 'fail'> = []
+  for (const line of visible) {
+    const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
+    if (m) found.push(rawVerdict(m[1] ?? ''))
+  }
+  return found.length === 1 ? found[0]! : null
 }
 
 // 审计报告绑定门名与候选提交：只读顶层可见行，防止拿别轮/别门的 pass 报告复用。
@@ -1181,11 +1230,18 @@ function stripHiddenAuditBlocks(text: string): string {
 }
 
 function normalizeAuditLine(raw: string): string {
-  // Unicode 格式控制符（ZWSP、BOM、方向标记等）渲染不可见，但不能让它们卡在
-  // “结论”和冒号之间；先剥掉再做判定（S2 第二十轮 zwsp-colon）。
-  let line = raw.replace(/\p{Cf}/gu, '').trim()
+  // 渲染不可见的字符不能把“结论”拆开：格式控制符（Cf）、组合记号（Mn/Me）
+  // 以及几个无字形的 Lo 填充符都先剥掉（S1 第十七轮 P1-C）。
+  let line = raw
+    .replace(/[\p{Cf}\p{Mn}\p{Me}]/gu, '')
+    .replace(/[\u115F\u1160\u17B4\u17B5\u180E\u2800\u3164\uFFA0]/g, '')
+    .trim()
+  // U+FE55 小冒号、U+FE13 竖排冒号在视觉上就是冒号，归一后再判定（S1 第十七轮 P2-3）。
+  line = line.replace(/[\uFE13\uFE55]/g, ':')
   line = line.replace(/^>\s?/, '')
   line = line.replace(/^(?:[-*+]|\d+[.)])\s+/, '')
+  // 任务列表的复选框不产生可见文字，判定前剥掉，避免「本报告不通过」被前缀挡住。
+  line = line.replace(/^\[[ xX]\]\s+/, '')
   line = line.replace(/^#{1,6}\s*/, '')
   // 强调标记不改变可见文字；判定前一律剥掉，避免 `**结论**：fail` 被漏掉。
   line = line.replace(/(?:\*\*?|__?|~~)/g, '')
@@ -1361,6 +1417,11 @@ export function verifyGateRecord(text: string, opts: { root?: string; allowDirty
   const failed = artifact.failed_items as unknown[]
   if (!Array.isArray(failed) || failed.length !== 0) throw new Error('failed_items 不为空')
   if (artifact.conclusion !== 'pass') throw new Error('conclusion 不是 pass')
+  const bodyVerdict = bodyConclusionOf(text)
+  if (bodyVerdict === null) throw new Error('门记录正文结论行缺失或不唯一')
+  if (bodyVerdict !== artifact.conclusion) {
+    throw new Error('门记录正文结论与 GateArtifact 不符：正文=' + bodyVerdict + '，artifact=' + String(artifact.conclusion))
+  }
   const hasRun = artifact.gate_run_id !== null
   if (hasRun && artifact.run_terminal !== 'succeeded') {
     throw new Error('有 run 的门 run_terminal 必须是 succeeded，实际 ' + String(artifact.run_terminal))

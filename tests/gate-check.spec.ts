@@ -381,7 +381,11 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('    结论：pass\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('> \x60\x60\x60\n> 结论：pass\n> \x60\x60\x60\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('> 结论：不通过')).toBe('fail')
-    // 引用块内的四空格缩进是代码块，不是顶层结论。
+    // 引用标记只吃掉一个空格；`>    结论` 剩 3 个空格，仍是可见引用段落，
+    // 基准 pass 后面出现可见 fail 必须拒绝（S1 第十七轮 P1-A / S2 第二十一轮 P0-1）。
+    expect(auditConclusionOf('结论：pass\n\n>    结论：fail')).toBeNull()
+    expect(auditConclusionOf('>    结论：pass')).toBe('pass')
+    // 可见的“本报告结论为不通过”本身就足够拒绝。
     expect(auditConclusionOf('本报告结论为不通过\n\n>    结论：pass')).toBeNull()
     // 一个空格加一个 Tab 也是缩进代码。
     expect(auditConclusionOf('本报告结论为不通过\n\n \t结论：pass')).toBeNull()
@@ -543,6 +547,72 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     }
     expect(auditConclusionOf('门：G2\n候选提交：' + 'a'.repeat(40) + '\n\n结论：pass')).toBe('pass')
     expect(auditConclusionOf('门：G2\n候选提交：' + 'a'.repeat(40) + '\n\n结论：fail')).toBe('fail')
+  })
+
+  it('S1 第十七轮载荷：可见 fail 不能藏在引用续行、行内代码、不可见字符和换行里（S1 第十七轮 P1）', () => {
+    const payloads: Array<[string, string]> = [
+      ['bq-4sp', '结论：pass\n\n> 引用\n>    结论：fail'],
+      ['bq-5sp', '结论：pass\n\n> 引用\n>     结论：fail'],
+      ['li-4sp', '结论：pass\n\n> - 项\n>    结论：fail'],
+      ['li-5sp', '结论：pass\n\n> - 项\n>     结论：fail'],
+      ['li-6sp', '结论：pass\n\n> - 项\n>      结论：fail'],
+      ['code-colon', '结论：pass\n\n结论`:`fail'],
+      ['code-fullcolon', '结论：pass\n\n结论`：`fail'],
+      ['code-split-word', '结论：pass\n\n结`论`：fail'],
+      ['cgj-word', '结论：pass\n\n结\u034F论：fail'],
+      ['cgj-entity', '结论：pass\n\n结&#847;论：fail'],
+      ['cgj-before-colon', '结论：pass\n\n结论\u034F：fail'],
+      ['vs16', '结论：pass\n\n结\uFE0F论：fail'],
+      ['hangul-filler', '结论：pass\n\n结\u3164论：fail'],
+      ['choseong-filler', '结论：pass\n\n结\u115F论：fail'],
+      ['halfwidth-filler', '结论：pass\n\n结\uFFA0论：fail'],
+      ['small-colon', '结论：pass\n\n结论\uFE55fail'],
+      ['softbreak-split', '结论：pass\n\n结\n论：fail'],
+      ['entity-newline-split', '结论：pass\n\n结&#10;论：fail'],
+      ['image-alt', '结论：pass\n\n![结论：fail](https://example.invalid/i.png)'],
+      ['prose-fail', '结论：pass\n\n本报告不通过'],
+      ['prose-fail-2', '结论：pass\n\n本报告结论为 fail'],
+      ['prose-fail-3', '结论：pass\n\n结论为不通过'],
+      ['prose-fail-4', '结论：pass\n\n最终判定为不通过'],
+      ['prose-fail-5', '结论：pass\n\n审计结果：不通过'],
+      ['prose-fail-6', '结论：pass\n\n复核结论为 fail'],
+      ['task-list', '结论：pass\n\n- [ ] 本报告不通过'],
+      ['heading', '结论：pass\n\n## 本报告不通过'],
+      ['emphasis', '结论：pass\n\n**本报告不通过**'],
+      ['link', '结论：pass\n\n[本报告不通过](https://example.invalid)'],
+      ['inline-code', '结论：pass\n\n本报告结论为 `fail`'],
+      ['crossline-1', '结论：pass\n\n本报告结论\n为不通过'],
+      ['crossline-2', '结论：pass\n\n本次审计\n结论：不通过'],
+      ['crossline-3', '结论：pass\n\n本报告结论为\nfail'],
+      ['table-cell', '结论：pass\n\n| 项 | 结果 |\n| --- | --- |\n| 审计 | 不通过 |'],
+    ]
+    for (const [name, payload] of payloads) {
+      expect(auditConclusionOf(payload), name).toBeNull()
+    }
+    // 单边的可见 fail 结论要被采信，而不是丢掉后返回 null（P1-B-5）。
+    expect(auditConclusionOf('结论`:`fail')).toBe('fail')
+    // 反向控制：可见 pass 也不能被藏起来（P2-2）。
+    expect(auditConclusionOf('结论：fail\n\n>    结论：pass')).toBeNull()
+    expect(auditConclusionOf('结论：fail\n\n结论`:`pass')).toBeNull()
+    // 普通叙述里出现“不通过”但不是结论时不能误杀。
+    const safe = [
+      '本报告不通过项已全部修复',
+      '本次审计不通过原因如下',
+      '本报告未通过验收',
+      '本报告不合格品率为 0',
+      '本报告不通过项统计见附表',
+      '本次审计不通过项为 0',
+      '本报告通过',
+      '本报告结论为 pass',
+      '攻击结果：fail',
+      '本次审计结论：pass',
+    ]
+    for (const line of safe) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBe('pass')
+  })
+
+  it('门记录正文顶部的结论必须与 GateArtifact 一致（S1 第十七轮 P2-1）', () => {
+    const text = read().replace('- 结论：**pass**', '- 结论：**fail**')
+    expect(() => check(text)).toThrow(/正文结论与 GateArtifact 不符/)
   })
 
   it('审计报告必须带唯一的门与候选提交绑定（S1 第八轮 P1-2）', () => {
