@@ -685,3 +685,13 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - S2 第三十轮（`docs/audits/S2-independent-audit-round30.md`，绑 G2 / 998c89b，fail：P0=8 / P1=0 / P2=1）整改中：`scripts/gate-check.ts` 的 FAIL_CONNECTORS 补语气副词与并列连接，FAIL_SUBJECTS 补整改/修复，FAIL_VERDICTS 补不予准入/不予采信并退回，FAIL_PASS_STEMS 补准入，FAIL_OBJECTS 补准入条件与报告，FAIL_FILLERS 补 consider/deem/regard/report，填充循环上限由 2 提到 6；入口新增 hiddenDefinitionFailure，引用定义里的隐藏否决按歧义拒绝。对照表 `docs/audits/S2-round30-response.md`。
 - 验证（实测）：`tsc --noEmit` exit 0；`tests/gate-check.spec.ts` 84 例 73 passed / 11 failed；全量 32 文件 / 370 例 359 passed / 11 failed；11 红全部是 G1 预签态（audit_report_sha256=0*64）。新增「S2 第三十轮 P0/P2」用例单独运行 1 passed / 83 skipped。
 - 状态：S1 第二十五轮（a78007f4）仍在 998c89b 上运行，只作参考；S2 第三十轮已结束。本对照表提交后在新候选上重派 S1 与 S2 独立审计；两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。当前未签门、未开 S3。
+
+### 11.28 S1 第二十五、二十六轮与 S2 第三十一轮整改（2026-11-14 05:20，候选 e717293）
+
+- S2 第三十轮整改提交 `e717293`「Close S2 round30 modality and hidden definition gaps」，5 文件 +410/−3，含对照表 `docs/audits/S2-round30-response.md`。
+- S1 第二十五轮（`docs/audits/S1-independent-audit-round25.md`，绑 G1 / 998c89b，fail：P0=3 / P1=2 / P2=2）十条可见否定整改：FAIL_CONNECTORS 补验收/复核/评审/审核、被、目前、尚、完成度、进度、in；FAIL_VERDICTS 补不足/未完成/未收口；FAIL_OBJECTS 补放行条件。对照表 `docs/audits/S1-round25-response.md`。
+- S1 第二十六轮（`docs/audits/S1-independent-audit-round26.md`，绑 G1 / e717293，fail：P0=8 / P1=2 / P2=2）整改：新增分句尾部否定（`scripts/gate-check.ts:969`），按标点拆句，只要分句以“否定词 + 填充词 + 谓词 + 宾语”收口即判否决，不再依赖主语后连接词穷举；FAIL_FILLERS 补作为/完全/彻底，FAIL_PASS_STEMS 补具备，FAIL_OBJECTS 补依据/整改/the gate，FAIL_CONNECTORS 补 generally speaking 系列英文插入语。对照表 `docs/audits/S1-round26-response.md`。
+- S2 第三十一轮（`docs/audits/S2-independent-audit-round31.md`，绑 G2 / e717293，fail：P0=4 组 / P1=1 / P2=2）整改：post-pass 尾巴与门正文“失败项为空，准入条件尚未满足”由同一分句扫描收口；程度否定补完全/彻底/还没有；`hiddenDefinitionFailure`（`scripts/gate-check.ts:1035`）改为定义起始行后三行内非空内容全部扫描，支持无缩进 dest/title、块引用续行与 HTML 实体解码；门正文引用定义入口同步返回 fail。对照表 `docs/audits/S2-round31-response.md`。
+- 回归：`tests/gate-check.spec.ts` 新增「S1 第二十六轮 P0」与「S2 第三十一轮 P0」两组用例。
+- 验证（实测）：`tsc --noEmit` exit 0；全量 33 文件 / 374 例，362 passed / 12 failed；12 红 = 11 个 G1 预签态（audit_report_sha256=0*64）+ 1 个 body_hash 顺序用例被更早的报告锚点校验挡在前面，均非解析器回归。
+- 状态：G1/G2 未重签，S3 冻结。本段整改与三份报告/对照表提交后，在新候选上重派 S1 与 S2 独立审计；两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。

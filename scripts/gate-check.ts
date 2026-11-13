@@ -709,6 +709,7 @@ const FAIL_VERDICTS = [
   'unready', 'not ready', 'no-go', 'nogo', 'on hold', 'red',
   '不予放行', '不放行', '不予晋级', '不晋级', '未就绪', '不具备', '不充分', '未达成', '未满足', '不满足', '未符合', '不符合', '不完整', '待补', '退回', '打回', '悬而未决',
   '不予准入', '不准入', '未准入', '不予準入', '不準入', '未準入',
+  '不足', '不够', '不夠', '未完成', '未收口',
   '不予采信并退回', '不予採信並退回', '不予采信并退回本报告', '不予採信並退回本報告',
 ].sort((a, b) => b.length - a.length)
 
@@ -729,8 +730,14 @@ const FAIL_CONNECTORS = [
   '原则上', '原則上', '总体上', '總體上', '总体', '總體', '基本上', '大体上', '大體上',
   '整体上', '整體上', '总的来说', '總的來說', '一般而言', '一般而論',
   'on the whole', 'in general', 'overall', 'generally', 'basically',
+  // 英文插入语不是主语的一部分：This audit, generally speaking, does not clear the gate（S2 第三十一轮 P0）。
+  'generally speaking', 'strictly speaking', 'broadly speaking', 'practically speaking',
+  'speaking', 'in practice', 'as a whole', 'on balance', 'all things considered',
   // 并列否定：不予采信并退回本报告（S2 第三十轮 P0-3）。
   '并且', '並且', '并', '並', '且', '又', '同时', '同時', 'and', 'then',
+  // 主语与谓词之间的对象名词、副词、被动标记与状态介词（S1 第二十五轮 P0）。
+  '验收', '驗收', '复核', '復核', '评审', '評審', '审核', '審核',
+  '被', '目前', '當前', '当前', '暂时', '暫時', '尚', '尚且', '完成度', '完成率', '进度', '進度', 'in',
 ].sort((a, b) => b.length - a.length)
 
 function regexEscape(ch: string): string {
@@ -800,7 +807,7 @@ const FAIL_NEGATIONS = [
   'is not', 'isnt', 'has not', 'hasnt', 'have not', 'havent', 'does not', 'doesnt',
   'will not', 'wont', 'do not', 'dont', 'cannot', 'cant', 'never',
   '无法', '没能', '没有', '未能', '未获', '未予', '不予', '不获', '不得', '不能', '不可',
-  '尚未', '还没', '還沒', '暂未', '暫未', '仍未', '从未', '從未', '并未', '並未',
+  '尚未', '还没有', '還沒有', '还没', '還沒', '暂未', '暫未', '仍未', '从未', '從未', '并未', '並未',
   '不是', '并非', '並非', '遭', '被', '未', '不', '没', '沒', '无', '無', 'not', 'no',
 ].sort((a, b) => b.length - a.length)
 const FAIL_FILLERS = [
@@ -809,6 +816,10 @@ const FAIL_FILLERS = [
   // does not consider the report ready：consider / report 是评价动词与评价对象（S2 第三十轮 P0-6）。
   'consider', 'considers', 'considered', 'deem', 'deems', 'deemed', 'regard', 'regards', 'regarded',
   'think', 'thinks', 'find', 'finds', 'report', 'reports',
+  // 作为准入依据 / 作为放行条件（S1 第二十六轮 P0）。
+  '作为', '作為',
+  // 程度副词不改变否定方向：未完全完成 / 未彻底整改（S2 第三十一轮 P0）。
+  '完全', '完全地', '彻底', '徹底', '根本', '真正',
 ].sort((a, b) => b.length - a.length)
 const FAIL_PASS_STEMS = [
   '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
@@ -821,6 +832,8 @@ const FAIL_PASS_STEMS = [
   '放行', 'release', 'released', 'releases', 'clear', 'clears', 'cleared', 'fit', 'advance',
   '晋级', '晉級', '就绪', '就緒', '满足', '滿足', '符合', '完整', 'ready', 'eligible', 'qualified', 'satisfactory', 'sufficient', 'adequate', 'green',
   '准入', '準入',
+  // 具备/具備同样是可被否定的准入谓词（S1 第二十六轮 P0）。
+  '具备', '具備',
   // “不获认同”这类谓词不在旧表里（S2 第二十八轮 P0-1）。
   '认同', '認同', '赞同', '贊同', '首肯', '受理', '接收', '接受',
   // 推荐/建议/采信/支持/背书同样是可被否定的肯定谓词（S2 第二十九轮 P0）。
@@ -837,8 +850,9 @@ const FAIL_OBJECTS = ['最终验收', '最终驗收', '专家评审', '專家評
   // 否决的宾语也可以是报告本身或本次审计（S2 第二十七轮 P0-1）。
   '本次独立审计', '本次审计', '本轮审计', '本审计', '审计组', '审计小组', '本报告', '该报告', '此报告', '报告本身', '报告',
   '本次審計', '本輪審計', '本審計', '審計組', '審計小組', '本報告', '該報告', '此報告', '報告本身', '報告',
-  '条件', '條件', '准入条件', '准入條件', '要求', '门槛', '門檻', '准入', '準入', '基线', '基準', '资格', '資格',
-  'the audit report', 'this report', 'the report', 'audit report',
+  '条件', '條件', '准入条件', '准入條件', '放行条件', '放行條件', '要求', '门槛', '門檻', '准入', '準入', '基线', '基準', '资格', '資格',
+  '依据', '依據', '整改', '整改工作', '修复', '修复工作',
+  'the audit report', 'this report', 'the report', 'audit report', 'the gate', 'this gate',
   '放行', 'release', 'clear', '晋级', '晉級',
   '驗收', '標準', '審批', '評審', '審核', '許可', '認可']
   .sort((a, b) => b.length - a.length)
@@ -952,6 +966,15 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
     const next = folded[lead + bareVerdict[0].length + object] ?? ''
     if (next === '' || next === '|' || /[需应已的了]/.test(next)) return true
   }
+  // 分句尾部否定：无论主语和语气副词怎么堆，只要某个分句以否定谓词收口就是否决。
+  // 这样不必为每一个新副词/对象补连接词（S1 第二十六轮八条 P0 的共同机制）。
+  for (const clause of folded.split('|')) {
+    if (clause.length === 0) continue
+    for (let i = 0; i < clause.length; i += 1) {
+      const neg = matchStructuralNegative(clause.slice(i))
+      if (neg && i + neg.length === clause.length) return true
+    }
+  }
   return false
 }
 
@@ -1010,15 +1033,18 @@ function lineFailure(line: string): boolean {
 // 引用定义（[1]: …）不参与渲染，但里面藏着的否决不能因此消失：
 // 定义块里出现正式的“结论：fail/不通过”等按歧义拒绝（S2 第三十轮 P2）。
 function hiddenDefinitionFailure(text: string): boolean {
-  let inDefinition = false
+  let remaining = 0
   for (const line of text.split(/\r?\n/)) {
     const startsDefinition = /^[ \t]*(?:>[ \t]*)*\[[^\]]+\]:/.test(line)
-    const continuation = inDefinition && /^[ \t]+/.test(line)
-    if (startsDefinition) inDefinition = true
-    else if (!continuation) inDefinition = false
-    if (startsDefinition || continuation) {
-      if (lineFailure(line) || visibleFailStatement(line, { bareConclusion: 'any' })) return true
+    if (startsDefinition) remaining = 3
+    if (startsDefinition || (remaining > 0 && line.trim() !== '')) {
+      // 实体编码也要按渲染结果解码：&#102;ail 在原始行里没有字面 fail（S2 第三十一轮 P0）。
+      const decoded = decodeHtmlEntitiesForInspection(line)
+      if (lineFailure(decoded) || visibleFailStatement(decoded, { bareConclusion: 'any' })) return true
+      if (!startsDefinition) remaining -= 1
+      continue
     }
+    if (line.trim() === '') remaining = 0
   }
   return false
 }
