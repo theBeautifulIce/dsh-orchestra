@@ -655,7 +655,8 @@ function maskFencedAuditCode(text: string): string {
         out.push(blankPreservingLines(line))
         const marker = fenceMarkerOf(body)
         if (marker && quoted === fence.quoted) {
-          if (marker.char === fence.char && marker.length >= fence.length && marker.rest.trim() === '') fence = null
+          // 关闭围栏的后缀只允许空格或 Tab；NBSP、U+3000、U+FEFF 都不是 CommonMark 空白。
+          if (marker.char === fence.char && marker.length >= fence.length && /^[ \t]*$/.test(marker.rest)) fence = null
         }
         continue
       }
@@ -672,29 +673,51 @@ function maskFencedAuditCode(text: string): string {
 }
 
 // 缩进代码里的标签同样只是字面文本。
-// 但四空格缩进在列表项里只是续行，渲染器仍显示；一旦这段里出现结论行，
-// 就不能静默藏掉（否则可见的 fail 会被另一段 pass 洗掉），一律毒化（S1 第十五轮补）。
+// 但四空格缩进在列表项里只是续行，渲染器仍显示；段落中间的四空格也不是代码。
+// 只有“空行之后、且不在列表里”的缩进块才是确定的代码块；其余缩进块里出现结论行
+// 就不能静默藏掉，否则可见的 fail 会被另一段 pass 洗掉（S1 第十五轮 P1-C）。
 function maskIndentedAuditCode(text: string): { masked: string; poisoned: boolean } {
+  const lines = text.split('\n')
+  const out: string[] = []
   let poisoned = false
+  let inList = false
   let previousBlank = true
-  const masked = text.split('\n').map((line) => {
+  let pending: string[] = []
+  let pendingPoisonable = false
+  const flush = (): void => {
+    if (pending.length === 0) return
+    if (pendingPoisonable) {
+      const joined = pending.join('\n')
+      if (/(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(joined) || pending.some((l) => /^(?:pass|fail|通过|不通过)$/i.test(l))) poisoned = true
+    }
+    pending = []
+  }
+  for (const line of lines) {
     const quote = /^\s*>\s?/.exec(line)
     const body = quote ? line.slice(quote[0].length) : line
     const blank = isMarkdownBlankLine(line)
-    if (!/^(?: {0,3}\t| {4,})/.test(body)) {
+    const indented = /^(?: {0,3}\t| {4,})/.test(body)
+    if (!indented) {
+      flush()
+      if (!blank) {
+        if (/^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(body)) {
+          inList = true
+        } else if (previousBlank && /^[^ \t]/.test(body)) {
+          // 空行后回到顶格的普通段落/标题，列表已经结束。
+          inList = false
+        }
+      }
       previousBlank = blank
-      return line
+      out.push(line)
+      continue
     }
-    // 只有空行（或文首）之后的缩进才是确定的缩进代码；紧跟在列表项/段落后面
-    // 的四空格是续行，渲染器仍可见。这种情况出现结论行就毒化（S1 第十五轮补）。
-    if (!previousBlank) {
-      const normalized = normalizeAuditLine(body)
-      if (/(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(normalized) || /^(?:pass|fail|通过|不通过)$/i.test(normalized)) poisoned = true
-    }
-    previousBlank = blank
-    return blankPreservingLines(line)
-  }).join('\n')
-  return { masked, poisoned }
+    if (pending.length === 0) pendingPoisonable = inList || !previousBlank
+    pending.push(normalizeAuditLine(body))
+    previousBlank = false
+    out.push(blankPreservingLines(line))
+  }
+  flush()
+  return { masked: out.join('\n'), poisoned }
 }
 
 // 行内代码会把标签转义成字面文本；先整段抹掉，避免假的闭合标签提前收掉隐藏块。
@@ -809,13 +832,17 @@ function stripCdataSpansForInspection(lines: string[]): string[] {
 function visibleTextOfLinkParagraph(text: string): string {
   const kept: string[] = []
   let inDefinition = false
+  let atParagraphStart = true
   for (const line of text.split('\n')) {
-    if (/^[ \t]*(?:>[ \t]*)*\[[^\]]+\]:/.test(line)) {
+    // CommonMark 只把段落开头的方括号定义当引用定义；段落中间同形状的行是可见正文，
+    // 不能整行删掉，否则 title 里写结论的可见 fail 会被静默洗掉（S2 第十九轮 P0）。
+    if (atParagraphStart && /^[ \t]*(?:>[ \t]*)*\[[^\]]+\]:/.test(line)) {
       inDefinition = true
       continue
     }
     if (inDefinition && /^[ \t]+/.test(line)) continue
     inDefinition = false
+    if (line.trim() !== '') atParagraphStart = false
     kept.push(line)
   }
   return kept.join('\n')

@@ -468,6 +468,24 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf(`本报告可见正文的结论为不通过。\n\n${bt}\n> [a](https://example.com "title${bt}\n> 结论：pass\n> ")\n`)).toBeNull()
   })
 
+  it('围栏关闭与缩进续行按 CommonMark 判定（S1 第十五轮 P1-B/P1-C/P2）', () => {
+    const f = '\x60'.repeat(3)
+    const nb = '\u00A0'
+    // NBSP 不是合法关闭后缀：围栏一直开到文末，围栏内的 fail 不可见，只剩可见 pass。
+    expect(auditConclusionOf(`结论：pass\n\n${f}\n结论：pass\n${f}${nb}\n结论：fail`)).toBe('pass')
+    // 列表项四空格续行是可见正文，跨行拼出的结论也要毒化。
+    expect(auditConclusionOf('结论：pass\n\n- 列表项\n    结论\n    ：fail')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n- 列表项\n\n    结论：fail')).toBeNull()
+    // 真正的多行缩进代码块不因第二行出现结论而误毒化。
+    expect(auditConclusionOf('    其他\n    结论：pass\n\n结论：pass')).toBe('pass')
+  })
+
+  it('段落中间的定义样式是可见正文，不能整行删除（S2 第十九轮 P0）', () => {
+    expect(auditConclusionOf('结论：pass\n\n正文\n   [x]: https://example.com "title 结论：fail"')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n- 列表项\n   [x]: https://example.com "title 结论：fail"')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n> 引用\n>    [x]: https://example.com "title 结论：fail"')).toBeNull()
+  })
+
   it('poison 在 HTML 掩码之后追加，合法 CDATA 不误毒化（S1 第十四轮 P1-3/P2-1）', () => {
     for (const tail of ['<!-- 未闭合', '<?php 未闭合', '<!DOCTYPE html']) {
       expect(auditConclusionOf(`结论：不通过 [x](https://example.com)\n\n结论：pass\n\n${tail}`)).toBeNull()
