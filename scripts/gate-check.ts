@@ -825,7 +825,9 @@ function maskAuditLinkDestinations(text: string): { masked: string; poisoned: bo
           // 被藏掉的结论行必须自己也是干净的 pass 才能放行；fail、写坏的尾巴、
           // 无法解析的结论都毒掉，避免另一段 pass 把可见 fail 或歧义洗掉（fail-closed）。
           const cleanPass = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:pass|通过)(.*)$/i.exec(normalized)
-          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/i.test(inspected)
+          // 链接掩码会把整段藏掉；只要段里出现结论词，就不许另一段 pass 过门。
+          // 不能要求“结论”后紧跟冒号：`[结论](url)：fail` 的冒号在链接语法之后。
+          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)/i.test(inspected)
           if (hasConclusionText) {
             if (cleanPass === null || !validConclusionTail(cleanPass[1] ?? '', 'pass')) poisoned = true
           } else if (/^(?:fail|不通过)$/i.test(normalized)) {
@@ -973,7 +975,8 @@ function normalizeAuditLine(raw: string): string {
   line = line.replace(/^>\s?/, '')
   line = line.replace(/^(?:[-*+]|\d+[.)])\s+/, '')
   line = line.replace(/^#{1,6}\s*/, '')
-  line = line.replace(/^\*\*/, '')
+  // 强调标记不改变可见文字；判定前一律剥掉，避免 `**结论**：fail` 被漏掉。
+  line = line.replace(/(?:\*\*?|__?|~~)/g, '')
   return line.trim()
 }
 

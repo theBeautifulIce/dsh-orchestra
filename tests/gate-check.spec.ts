@@ -345,6 +345,14 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('````md\n结论：fail\n```\n结论：pass\n````\n\n结论：fail')).toBe('fail')
   })
 
+  it('强调标记与链接文字都不能藏掉可见结论（S1 第十五轮补）', () => {
+    expect(auditConclusionOf('结论：pass\n\n**结论**：fail')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n*结论*：fail')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n结**论**：fail')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n[结论](https://example.com)：fail')).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n[结论][r]：fail\n\n[r]: https://example.com')).toBeNull()
+  })
+
   it('HTML 实体渲染后的可见结论也要参与判定（S1 第十五轮补）', () => {
     expect(auditConclusionOf('结论：pass\n\n&#32467;&#35770;&#65306;fail')).toBeNull()
     expect(auditConclusionOf('结论：pass\n\n&#32467;&#35770;&colon;fail')).toBeNull()
