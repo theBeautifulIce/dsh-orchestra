@@ -301,6 +301,12 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('````md\n结论：fail\n```\n结论：pass\n````\n\n结论：fail')).toBe('fail')
   })
 
+  it('关闭围栏必须 marker 后只有空白（S2 第十一轮 P1-1）', () => {
+    expect(auditConclusionOf('正文\n\n```md\n示例：\n```js\n结论：pass\n```\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('```\n结论：fail\n```js\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('```\n结论：fail\n```   \n\n结论：pass')).toBe('pass')
+  })
+
   it('第二行同向结论也按歧义处理（全文只能有一个结论）', () => {
     expect(auditConclusionOf('结论：pass\n\n结论：pass')).toBeNull()
   })

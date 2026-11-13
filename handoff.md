@@ -514,3 +514,13 @@ S1 第六轮（docs/audits/S1-independent-audit-round6.md）判 fail：P0=0 / P1
 tests/gate-check.spec.ts 新增 3 例、更新建议行断言，当前该文件 38 例；定向“审计报告结论”10 例全过，tsc exit 0。全量 32 文件 / 298 例，288 passed / 10 failed；10 红仍全在 tests/gate-check.spec.ts，首因 G1 audit_report_sha256 占位 0，属待签状态，不是新缺陷。
 
 下一步：提交解析器、测试、规格与两份报告 → 因 gate-check 已改，S2 第十轮 pass 只算历史结论，重新派 S1 第七轮与 S2 第十一轮独立审计 → 两份 pass 后按 G1 audit_round=7 / G2 audit_round=11 重签、双门 exit 0、全量 298/298，再开 S3。任何一份 fail 都回表整改，不重签、不开 S3。
+
+### 11.18 S2 第十一轮 fail：关闭围栏带信息串（2026-11-13 21:27）
+
+S2 第十一轮（docs/audits/S2-independent-audit-round11.md，354 行）判 fail：P0=0 / P1=1 / P2=10。P1-1 在 scripts/gate-check.ts:498-503：关闭围栏只要求同字符且长度不短于开启，没要求 marker 后只能有空白；围栏内的 ```js 会被误当关闭围栏，真实结论 fail 的报告可被解析成 pass，临时 clone 里 sign-gate 与 G2 gate-check 都能 exit 0。19 项必过/19 证据/11 不变量、八个哈希、ev-g2-12..15 复跑均一致；测试 10 红仍只来自 G1 待签。
+
+修复：fenceMatch 改为 /^\s*(`{3,}|~{3,})(.*)$/，只有同字符、长度不短于开启围栏、且 marker 后 rest.trim() 为空才关闭；带信息串的行在围栏内按内容跳过。tests/gate-check.spec.ts 新增“关闭围栏必须 marker 后只有空白”一例，覆盖 ` ``js 不关闭、正常关闭带尾随空格、围栏内 pass 不参与判定。
+
+验收：解析器定向 11 例全过；tsc --noEmit exit 0；全量 32 文件 / 299 例，289 passed / 10 failed，10 红仍全在 tests/gate-check.spec.ts，首因 G1 audit_report_sha256=0，属待签。S1 第七轮因 HEAD 即将更新已中断，未出报告；它的审计对象 153353a 已过期。
+
+下一步：提交围栏修复、测试与 S2 第十一轮报告 → 重新派 S1 第八轮（docs/audits/S1-independent-audit-round8.md）与 S2 第十二轮（docs/audits/S2-independent-audit-round12.md）独立审计 → 两份 pass 后按 G1 audit_round=8 / G2 audit_round=12 重签、双门 exit 0、全量 299/299，再开 S3。任何一份 fail 都回表整改，不重签、不开 S3。

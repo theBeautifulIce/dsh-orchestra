@@ -494,12 +494,18 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   let fence: { char: string; length: number } | null = null
   let verdict: 'pass' | 'fail' | null = null
   for (const rawLine of text.split(/\r?\n/)) {
-    // 围栏代码块里的“结论：pass”是示例，不是报告结论；关闭围栏必须同字符且不短于开启围栏。
-    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(rawLine)
+    // 围栏代码块里的“结论：pass”是示例，不是报告结论。
+    // 关闭围栏必须同字符、不短于开启围栏，且 marker 后只能有空白；```js 这类带信息串的行
+    // 在围栏内是内容，不是关闭（S2 第十一轮 P1-1）。
+    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(rawLine)
     if (fenceMatch) {
       const marker = fenceMatch[1] ?? ''
-      if (!fence) fence = { char: marker[0] ?? '', length: marker.length }
-      else if (marker[0] === fence.char && marker.length >= fence.length) fence = null
+      const rest = fenceMatch[2] ?? ''
+      if (!fence) {
+        fence = { char: marker[0] ?? '', length: marker.length }
+      } else if (marker[0] === fence.char && marker.length >= fence.length && rest.trim() === '') {
+        fence = null
+      }
       continue
     }
     if (fence) continue
