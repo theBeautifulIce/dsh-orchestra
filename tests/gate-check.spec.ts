@@ -343,6 +343,36 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf(base + '上一轮审计未通过，本轮已整改。本报告不通过。')).not.toBe('pass')
   })
 
+  it('S1 第二十二轮 19 条绕过：历史豁免只抹历史否定，本轮结论与完成度否定都要拒绝', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      // P0-1 历史整改剥离跨度（报告正文 7 例）
+      '上一轮审计未通过，本轮审计未通过验收，本轮已整改。',
+      '上一轮审计未通过，\n本轮审计未通过验收，\n本轮已整改。',
+      'The previous audit failed to pass, the current audit did not approve, this round is fixed.',
+      '上一轮审计未通过，本轮未整改，本轮已整改。',
+      '上一轮审计未通过，本轮审计未通过验收\n\n本轮已整改。',
+      '上一轮审计未通过，结论：fail，本轮已整改。',
+      '上一轮审计未通过，结论：\nfail，本轮已整改。',
+      // P0-3 英文进行时/名词化（3 例）
+      'This audit is not approving.', "This audit isn't approving.",
+      'The audit approval was not granted.',
+      // P0-4 中文批准类（4 例）
+      '本报告未获批。', '本报告没获批。', '本报告未准予通过。', '本报告未被批准。',
+      // P1 整改完成度陈述（3 例）
+      '本轮未整改。', '本报告未完成整改。',
+      '上一轮审计未通过，本轮已整改，但实际上本轮未整改。',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).not.toBe('pass')
+    // 历史豁免本身仍要保护真正的历史叙述。
+    expect(auditConclusionOf(base + '历史记录：上一轮审计未通过，本轮已整改。')).toBe('pass')
+    expect(auditConclusionOf(base + 'round20 审计结论为 fail，本轮已整改。')).toBe('pass')
+    // P0-2 同一剥离跨度覆盖门正文（2 例）
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    expect(bodyConclusionOf(head + '上一轮审计未通过，本轮审计未通过验收，本轮已整改。')).toBe('fail')
+    expect(bodyConclusionOf(head + '上一轮审计未通过，结论：fail，本轮已整改。')).toBe('fail')
+  })
+
   it('S2 第二十六轮 P0-1/P0-2：裸裁决词与繁體結論不能保留 pass', () => {
     const base = '结论：pass\n\n'
     const negatives = [

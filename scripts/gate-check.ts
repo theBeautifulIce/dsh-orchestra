@@ -647,6 +647,8 @@ const FAIL_SUBJECTS = [
   '最終結論', '最終判定',
   '审计', '审核', '复核', '评审', '结论', '結論', '判定', '審計', '審核', '復核', '評審', 'audit', 'review',
   'auditor', 'reviewer', '審計師',
+  // 本轮未整改/未完成整改这类“完成度”否定没有“审计”二字，仍要能挂在裸主语上（S1 第二十二轮 P1）。
+  '本轮', '本輪',
 ].sort((a, b) => b.length - a.length)
 
 const FAIL_VERDICTS = [
@@ -676,6 +678,12 @@ const FAIL_VERDICTS = [
   'hasnt approved', 'havent passed', 'isnt passing', 'isnt approved', 'wasnt approved',
   'didnt approve', 'not passing', 'not approved',
   '未通過驗收', '不通過驗收', '未通過評審', '未通過審核', '被駁回', '被否決',
+  // S1 第二十二轮：英文进行时否定、批准被动否定与中文缩写否定。
+  'approval was not granted', 'approval is not granted', 'approval has not been granted',
+  'approval not granted', 'approval not given', 'not approving', 'isnt approving', 'not granted', 'not given',
+  '未获批', '没获批', '未被批准', '未准予通过', '不准予通过', '未获批通过',
+  // 整改完成度否定：本轮未整改 / 本报告未完成整改（S1 第二十二轮 P1）。
+  '未完成整改', '整改未完成', '未完成修复', '未整改', '未修复', '未收口',
 ].sort((a, b) => b.length - a.length)
 
 const FAIL_CONNECTORS = [
@@ -684,7 +692,7 @@ const FAIL_CONNECTORS = [
   '审计结果', '审核结果', '复核结果', '评审结果',
   '最终结论', '最终判定', 'conclusions', 'conclusion', 'outcome',
   '结果', '结论', '結論', '判定', '意见', '经过', '审计', '审核', '复核', '评审',
-  '报告', '報告', '最终', '最終', '依然', '还是', '总的', 'results', 'result', 'report', 'review',
+  '报告', '報告', '最终', '最終', '依然', '还是', '总的', 'results', 'result', 'report', 'review', 'approval',
   '審計', '審核', '復核', '評審', '結果', '意見',
   'audit', 'was', 'were', 'has', 'have', 'had', 'been', 'did', 'does', 'do',
   'is', 'are', 'to', 'the', 'a', 'an', '经', '后', '仍', '为', '為', '是', '的',
@@ -757,16 +765,18 @@ const FAIL_NEGATIONS = [
 ].sort((a, b) => b.length - a.length)
 const FAIL_FILLERS = [
   'be able to', 'able to', '得到', '获得', '予以', '能够', '达到', '经过',
-  '获', '能', 'be', 'to', 'the', 'a',
+  '获', '能', '准予', '被', 'be', 'to', 'the', 'a',
 ].sort((a, b) => b.length - a.length)
 const FAIL_PASS_STEMS = [
   '通过', '批准', '达标', '合格', '成功', '过关', '许可', '认可', '同意',
   '否决', '驳回', '拒绝', 'approval', 'approved', 'approve', 'passing', 'passed',
   'succeed', 'succeeded', 'success', 'accepted', 'accept', 'pass', 'meet', 'met',
+  'approving', 'granted', 'granting', '采纳', '採納',
   // 繁體谓词（S1 第二十一轮 P0-1）。
   '通過', '達標', '過關', '許可', '認可', '否決', '駁回', '拒絕', '獲批', '获批',
 ].sort((a, b) => b.length - a.length)
 const FAIL_OBJECTS = ['验收', '标准', '审批', '评审', '审核', '考核', '许可', '批准', '认可',
+  '通过', '通過',
   '驗收', '標準', '審批', '評審', '審核', '許可', '認可']
   .sort((a, b) => b.length - a.length)
 
@@ -856,9 +866,26 @@ const HISTORICAL_REMEDIATION_RES = [
   /(?:历史记录\s*[：:]?\s*)?(?:上一轮|前一轮|round\s*\d{1,3})\s*(?:审计|審計|检查|复核|评审)?[^。\n]{0,120}?(?:本轮已整改|本轮已修复|本轮已收口|本轮已处理|本轮修复|已整改|已修复|已收口)/gi,
   /(?:the\s+)?previous\s+audit[^.\n]{0,120}?(?:this\s+round\s+is\s+(?:clean|fixed)|remediated)/gi,
 ]
+// 历史句子只抹掉“上一轮……未通过”本身，保留它后面的全部文字。
+// 这样“上一轮未通过，本轮审计未通过验收，本轮已整改”只能消掉前半句，
+// 本轮否定与“结论：fail”仍会进入统一扫描器（S1 第二十二轮 P0-1/P0-2）。
+const HISTORICAL_NEG_RE = new RegExp(
+  ['failed to pass', 'did not pass', 'did not approve', 'not approved', 'not pass',
+    '未获批准', '未能通过', '未获通过', '没有通过', '未获批', '未达标',
+    '被否决', '被驳回', '未通过', '不通过', '没通过', 'fail']
+    .sort((a, b) => b.length - a.length).map(regexEscape).join('|'),
+  'i',
+)
 function stripHistoricalRemediation(text: string): string {
   let out = text
-  for (const re of HISTORICAL_REMEDIATION_RES) out = out.replace(re, '')
+  for (const re of HISTORICAL_REMEDIATION_RES) {
+    out = out.replace(re, (match) => {
+      const negative = HISTORICAL_NEG_RE.exec(match)
+      if (negative) return match.slice(negative.index + negative[0].length)
+      // 没识别出历史否定时不整段删除，避免豁免范围失控。
+      return match
+    })
+  }
   return out
 }
 
@@ -920,10 +947,12 @@ export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   }
   // 正文不再按 160 字/24 字偏移截窗：长行和靠后的否定句同样能签过（S1 第二十轮 P0-4）。
   // 历史段落里“门记录拿结论为 fail”这类叙述用裸“结论”会误杀，所以全文扫描排除
-  // 裸结论主语，只对以“结论/判定”开头的行补一次精确判定。
+  // 裸结论主语；历史前缀截掉后，正文里出现正式“结论：fail”的行再补一次精确判定。
   if (visibleFailStatement(visible.join('|'), { bareConclusion: 'never' })) return 'fail'
   for (const line of visible) {
-    if (/^(?:结论|結論|判定)/.test(line) && visibleFailStatement(line)) return 'fail'
+    // 历史前缀已经在 strip 阶段截掉；剩余正文里出现正式的“结论：fail”
+    // 就是本轮否决，即使它前面还有别的文字（S1 第二十二轮 P0-2）。
+    if (/(?:结论|結論|判定)\s*[：:]/.test(line) && visibleFailStatement(line)) return 'fail'
   }
   return found.length === 1 ? found[0]! : null
 }
