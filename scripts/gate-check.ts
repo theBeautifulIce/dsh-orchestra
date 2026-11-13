@@ -695,40 +695,29 @@ function maskInlineAuditCode(text: string): string {
   return out
 }
 
-// 链接目标与引用定义不参与正文渲染，里面写标签也不能生效。
+// 链接目标、title、图片 alt 与引用定义都不参与正文渲染，里面写标签也不能生效。
+// 这些结构都只能在同一个段落内跨行（CommonMark 不允许空行），所以按段落整体隐藏：
+// 宁可把同段的可见文字也藏掉，也不把渲染器隐藏的结论放进来（fail-closed）。
 function maskAuditLinkDestinations(text: string): string {
-  // 目标与 title 的括号可以嵌套、可以带引号，逐字符配平不可靠；整行剩余部分一起隐藏（fail-closed）。
-  const masked = text.replace(/\]\([^\n]*/g, (m) => blankPreservingLines(m))
-  const lines = masked.split('\n')
-  // 引用块、列表项与缩进不改变引用定义的语义：先剥掉容器前缀再匹配（S1 第十二轮 P1-1）。
-  const stripContainers = (line: string): string => {
-    let rest = line
-    for (;;) {
-      const next = rest.replace(/^[ \t]*/, '')
-      if (next.startsWith('>')) {
-        rest = next.slice(1)
-        continue
+  const lines = text.split('\n')
+  let start = 0
+  for (let i = 0; i <= lines.length; i += 1) {
+    if (i < lines.length && lines[i]!.trim().length > 0) continue
+    if (i > start) {
+      let hide = false
+      for (let k = start; k < i; k += 1) {
+        // 所有链接、图片与引用定义都必须出现 ASCII 的 '['；带 '[' 的段落整体隐藏。
+        // 这样跨行 label/title/alt、全引用 [text][ref]、空格分隔的引用标签也一并覆盖。
+        if (lines[k]!.includes('[')) {
+          hide = true
+          break
+        }
       }
-      const list = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/.exec(next)
-      if (list) {
-        rest = next.slice(list[0].length)
-        continue
+      if (hide) {
+        for (let k = start; k < i; k += 1) lines[k] = blankPreservingLines(lines[k]!)
       }
-      return next
     }
-  }
-  for (let i = 0; i < lines.length; i += 1) {
-    // 标签里的右方括号可以反斜杠转义，匹配时要成对吃掉转义字符。
-    if (!/^\[((?:[^\]\n\\]|\\.)+)\]:/.test(stripContainers(lines[i]!))) continue
-    // 引用定义的目标与 title 都可以跨行，title 还允许跨多行；定义内不会出现空行。
-    // 从定义行一直隐藏到本段结束，宁可多藏，也不把渲染器隐藏的 pass 结论放进来。
-    lines[i] = blankPreservingLines(lines[i]!)
-    let j = i + 1
-    while (j < lines.length && stripContainers(lines[j]!).trim().length > 0) {
-      lines[j] = blankPreservingLines(lines[j]!)
-      j += 1
-    }
-    i = j
+    start = i + 1
   }
   return lines.join('\n')
 }

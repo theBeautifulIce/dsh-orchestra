@@ -402,6 +402,17 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('- [x]: https://example.com\n\n结论：fail')).toBe('fail')
   })
 
+  it('跨行引用标签、行内链接 title 与图片 alt 都不参与判定（S1 第十三轮 P1、S2 第十六轮 P0）', () => {
+    expect(auditConclusionOf('本报告可见正文的结论为不通过。\n\n[x\ny]: https://example.com\n"title\n结论：pass\n"')).toBeNull()
+    expect(auditConclusionOf('本报告可见正文的结论为不通过。\n\n[a](https://example.com "title\n结论：pass\n")')).toBeNull()
+    expect(auditConclusionOf('本报告可见正文的结论为不通过。\n\n![alt\n结论：pass\n](https://example.com/i.png)')).toBeNull()
+    expect(auditConclusionOf('本报告可见正文的结论为不通过。\n\n![alt](https://example.com/i.png "title\n结论：pass\n")')).toBeNull()
+    expect(auditConclusionOf('[a](https://example.com "t")\n\n结论：pass')).toBe('pass')
+    expect(auditConclusionOf('![alt](https://example.com/i.png)\n\n结论：fail')).toBe('fail')
+    expect(auditConclusionOf('本报告可见正文的结论为不通过。\n\n[text] [结论：pass]\n\n[结论：pass]: https://example.com')).toBeNull()
+    expect(auditConclusionOf('[text] [ref]\n\n[ref]: https://example.com\n\n结论：fail')).toBe('fail')
+  })
+
   it('原始 HTML 一律拒绝，避免 details/summary/div hidden 的可见性绕过（S1 第十轮、S2 第十三轮 P1-1）', () => {
     expect(auditConclusionOf('<details>\n结论：pass\n</details>\n\n结论：fail')).toBeNull()
     expect(auditConclusionOf('<details open>\n结论：fail\n</details>\n\n结论：pass')).toBeNull()
