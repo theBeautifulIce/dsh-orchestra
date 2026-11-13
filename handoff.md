@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-13 16:40。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-13 18:09。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -27,7 +27,7 @@
 | 设计思路 `docs/design-notes.md` | 已写（16 条决策 + 五个坑族 + 风险清单） |
 | 代码图谱索引 `codebasemap.md`（根） | 已写（三份参考图谱 + 本项目文档图谱） |
 | 参考项目 `references/` | 三份已克隆并建图谱 |
-| **源码** | S1 账本地基 + S2 单节点闭环已完成（`4f3ada7` → `ca8cea3`，37 文件 +3145/−16）：`src/core/`（errors/config/canonical/ids/hash-chain/state-machine/report/policy/clock/workflow-def）、`src/infra/`（sqlite、db、lock、logger、backup、service-state、迁移 001/002）、`src/service/`（server、envelope、write-queue、queries、commands/{lease,node-state,apply-report,cancel}、sweep）、`src/executor/`（bridge、tools、session）、`scripts/`（fault-inject、gate-check、sign-gate）、`tests/`（27 spec、211 用例）；G1、G2 门记录均已通过机器复核 |
+| **源码** | S1 账本地基 + S2 单节点闭环已完成（`4f3ada7` → `ca8cea3`，37 文件 +3145/−16）：`src/core/`（errors/config/canonical/ids/hash-chain/state-machine/report/policy/clock/workflow-def）、`src/infra/`（sqlite、db、lock、logger、backup、service-state、迁移 001/002）、`src/service/`（server、envelope、write-queue、queries、commands/{lease,node-state,apply-report,cancel}、sweep）、`src/executor/`（bridge、tools、session）、`scripts/`（fault-inject、gate-check、sign-gate）、`tests/`（27 spec、211 用例）；G1、G2 门记录均已通过机器复核；第四轮整改 M1–M4 已提交 `ed5c8b8`，两道门因候选哈希漂移待重签（§11.12） |
 | 面板原型 `docs/prototype/panel-v2.html` | v20 单文件浅色原型（核心指挥台：主脑卡 + 支线卡；有事的支线展开、健康支线默认收起；数字等于列表长度；任务卡、抽屉、支线卡状态句同源；任务流内含「执行注意事项」页）；任务看板、任务流程三栏、流程页画布与真实发布门禁、全局搜索、决定弹窗与签字接手；无彩色左侧色条、无可见优先级标签，全部可见字号 ≥12.5px（导航 13px），四档宽度无页面溢出；任务页可按状态与时间段筛选，归档箱只收起不改历史、可随时取回；流程库是一行可搜下拉（按名称 / 说明 / 负责人 / 触发方式 / 版本 / 发布状态查），不再横排铺标签 |
 | 图谱 | `pi-harnessmm` 124/294、`dsh-superagent-prototype` 2012/8492、`DS-Bot` 10539/33229、`dsh-orchestra-docs` 97/96 |
 
@@ -114,7 +114,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 4. 原型 v20 已提交（`1091673`）并交主人评审：流程页顶部横排标签条换成一行可搜下拉，按名称 / 说明 / 负责人 / 触发方式 / 版本 / 发布状态过滤，当前流程标「当前」，Esc 或点空白收起、Enter 切第一条；任务页可按状态与时间段查，归档箱只收起不改历史、可搜索可取回；状态数字与列表同源、状态句三处同源、健康支线默认收起、卡面只留「做到 / 结果 / 需要你」。
 5. 实施计划已写完（总纲 + S1–S6，提交 `f094760`，含规格行号重校准；`26fc1af` 再补 S3 Task 15 起运行命令与自治档位、S5 Task 17 自治档位与审计留痕的显示，总纲 §5 批次表同步为 S3 15 个 Task / S5 17 个 Task）：等主人过目后按 `executing-plans` 或 `subagent-driven-development` 从 S1 起步，先跑 G1 门再进 S2。
 6. 每次改稿后同步版本号、SHA256、行数与台账，改完提交 git。
-7. **实施进度（2026-11-13 16:40）**：S1 账本地基与 S2 单节点闭环已实现；第三轮独立审计整改已收口并重签两道门（提交 `c13814e` / `a5d0707` / `98dee52`），vitest 31 文件 / 271 用例全绿。第四轮独立审计子代理已派（`a749d93d-e165-403e-a87e-0ddf09d4d94c`）；**审计判 pass 之前不开 S3**。
+7. **实施进度（2026-11-13 18:09，任务已暂停）**：S1 账本地基与 S2 单节点闭环已实现；第三轮整改已重签两道门（`c13814e` / `a5d0707` / `98dee52`）。**第四轮独立审计已回：G2 判 fail（致命 0 / 重大 5 / 不阻断 5）**，报告 `docs/audits/S2-independent-audit-round4.md`（`71db20c`）；其中 M1–M4 已整改并提交 `ed5c8b8`，M5 与 N1–N5 未做，两道门待重签。**审计判 pass 之前不开 S3**。续跑步骤见 §11.12。
 
 > ⚠️ 第三段内改稿时**不要**新增顶层 `##` 标题（会打乱「三段」的叙事结构）；从第四段起按六段路线新增 `## 第四段 …`，不要改动前三段标题。不要删 §3.4b–§3.4m 的历史清单（它们是审计轨迹），不要在别的章节另写一份终态枚举（**终态集合只在 §8 写一份**）。
 
@@ -195,7 +195,7 @@ v33 在第 34 轮 pass 后只清四条收口项：`workflow.open_draft` 的三�
 - 仓库已初始化：`D:\aboutAI\dsh-orchestra\.git`，分支 `main`，首个提交 `fc92495`
   （docs: dsh-orchestra 项目落地（设计稿/台账/需求/设计思路/handoff/图谱索引）），共 7 个文件、1787 行。
 - `.gitignore` 忽略 `references/`（三份参考项目各自带 `.git`，不并入本仓库）、`.codebase-memory/`、`tmp/`、`.tmp/`、`*.log`、`*.bak`；`docs/prototype/` 只提交 `panel-v2.html`，截图与一次性脚本不入库。
-- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮、`8bfdc30` v39 第六段送第 39 轮、`3d4f59d` 原型 v11 字号层、`a1afa13` v41 第六段主体、`fd0df0b` G1 无 run 例外、`b747419` 记录重送与 G1、`0f950e6` v42 修第 42 轮 12 条并送第 43 轮、`6777ea4` v43 修第 43 轮 10 条 + 原型 v12、`63adb98` 原型 v13 去掉优先级标签并统一人话文案、`fb7d1f1` v44 修第 44 轮 9 条、`408df76` 记录 v44 送第 45 轮、`b068ca4` 记录第 45 轮 pass 并同步 handoff、`ee17d03` 落 v44 实施规格、`89d8836` 同步 v44 实施规格落盘与待审状态、`aea1b24` 共享面提案留档、`eeb7558` 原型 v15 纯白平面系统、`f3b7e94` 原型 v16 核心指挥台、`65b69c5` 原型 v17 执行注意事项落进任务流并重排数字字号、`b8352db` 落齐 S1–S6 六份批次计划、`f094760` 规格升 v1.2 裁定九处不一致并重校六份计划的规格行号、`26fc1af` 规格升 v1.3 补第十八章主脑与自治档位并为 S3/S5 各加一任务。、`a540e1e` 原型 v18 状态诚实、一处一概念、默认安静、文案收短（数字等于列表长度、状态句三处同源、健康支线默认收起）、`8aa9cef` 原型 v19 任务查询按状态与时间段、归档箱只收起不改历史、`1091673` 原型 v20 流程库改成一行可搜下拉、`c08fa3a` 校正七份计划的依赖与版本事实并清仓库补 GLOSSARY 与 ADR 0001（此提交同时是首次推到远端，`origin/main` 与本地同步）、`80442ac` 记录计划校正与路线、`5f8ad5f` Task 0 插件仓库骨架与工具链（`origin/main` 已同步）。、`c13814e` S2 第三轮整改（四条新故障注入证据 + 幂等单测 + 门检查表头修复 + 21 份证据重生成）、`a5d0707` 重签 G1、`98dee52` 重签 G2（新增 G2-11 必过项）。
+- 关键提交：`f7da467` agent skills 配置、`750c89f` v20 送审、`8b68b44` v21 收口、`d9a0c1e` v22 收口、`bdf9c17` v23 收口（第三段送审版）、`3e7ccc8` v27 送第 29 轮 + 原型 v7、`bb64f0b` 原型 v8 去掉彩色左条、`f7dde5e` v29 送第 31 轮 + 原型 v9、`99ca50e` v32 送第 34 轮、`462bfa9` 原型 v10 字号收口 + 设计 v31、`2136866` 原型 v10 绘图细节、`5f759e7` v33 第四段收口、`ce36151` v35 第五段修第 35 轮 13 条、`5c391b1` v36 第五段修第 36 轮 7 条并送第 37 轮、`33b093e` v37 第五段修第 37 轮 10 条并送第 38 轮、`8bfdc30` v39 第六段送第 39 轮、`3d4f59d` 原型 v11 字号层、`a1afa13` v41 第六段主体、`fd0df0b` G1 无 run 例外、`b747419` 记录重送与 G1、`0f950e6` v42 修第 42 轮 12 条并送第 43 轮、`6777ea4` v43 修第 43 轮 10 条 + 原型 v12、`63adb98` 原型 v13 去掉优先级标签并统一人话文案、`fb7d1f1` v44 修第 44 轮 9 条、`408df76` 记录 v44 送第 45 轮、`b068ca4` 记录第 45 轮 pass 并同步 handoff、`ee17d03` 落 v44 实施规格、`89d8836` 同步 v44 实施规格落盘与待审状态、`aea1b24` 共享面提案留档、`eeb7558` 原型 v15 纯白平面系统、`f3b7e94` 原型 v16 核心指挥台、`65b69c5` 原型 v17 执行注意事项落进任务流并重排数字字号、`b8352db` 落齐 S1–S6 六份批次计划、`f094760` 规格升 v1.2 裁定九处不一致并重校六份计划的规格行号、`26fc1af` 规格升 v1.3 补第十八章主脑与自治档位并为 S3/S5 各加一任务。、`a540e1e` 原型 v18 状态诚实、一处一概念、默认安静、文案收短（数字等于列表长度、状态句三处同源、健康支线默认收起）、`8aa9cef` 原型 v19 任务查询按状态与时间段、归档箱只收起不改历史、`1091673` 原型 v20 流程库改成一行可搜下拉、`c08fa3a` 校正七份计划的依赖与版本事实并清仓库补 GLOSSARY 与 ADR 0001（此提交同时是首次推到远端，`origin/main` 与本地同步）、`80442ac` 记录计划校正与路线、`5f8ad5f` Task 0 插件仓库骨架与工具链（`origin/main` 已同步）。、`c13814e` S2 第三轮整改（四条新故障注入证据 + 幂等单测 + 门检查表头修复 + 21 份证据重生成）、`a5d0707` 重签 G1、`98dee52` 重签 G2（新增 G2-11 必过项）、`71db20c` 落 S2 第四轮独立审计报告（G2 判 fail）、`ed5c8b8` S2 第四轮整改 M1–M4（门候选排除 docs/reviews、工具授权求交、单写者锁与 epoch 接启动路径、执行期租约心跳与续租路由）。
 - 每次改设计稿后要提交（主人硬约束：改代码/文档后同步更新版本号并留痕）。
 
 ---
@@ -399,3 +399,41 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 - **本来就登记在册的**：桥未接生产路径（F-06，留 S3）；工作流定义未持久化、只按 `workflow_version` 索引且允许覆盖（留 S4 做 `workflow_versions` 表）。
 - **工程细节四条**：WriteQueue 只是 pending 计数、HTTP 入参只做 `requireFields`、`resolveInside` 不查符号链接、配置装配未统一入口 —— 都在 S6 硬化范围；另建议加 GitHub Actions CI（仓库目前没有 `.github/workflows`），把门检查变成合并硬门槛。
 - 这三条新缺口已同时交给第四轮独立审计子代理独立核实（不自证），审计结论里会一并给判定。
+
+### 11.12 第四轮独立审计（fail）与整改暂停点（2026-11-13 18:09）
+
+**审计结论**：第四轮独立审计（子代理 `a749d93d-e165-403e-a87e-0ddf09d4d94c`，不自测）判定 **G2 不通过：致命 0 / 重大 5 / 不阻断 5**。报告 `docs/audits/S2-independent-audit-round4.md`，提交 `71db20c`。
+
+| 编号 | 主张（审计要点） | 现状 |
+| --- | --- | --- |
+| M1 | 门记录与 HEAD 漂移：`docs/reviews/` 进了 G1/G2 候选范围却不在 excludes，两道门在 HEAD 上跑 `node scripts/gate-check.ts` 均 exit 1 | 已改：`scripts/gate-check.ts` 的 G1 excludes（:76）、G2 excludes（:117）、DIRTY_IGNORES（:175）加 `docs/reviews`；**待重签** |
+| M2 | 工具白名单在生产路径不生效：`runNode` 执行 `p.tools` 前不与 `toolPolicy.allow/deny` 求交，`tests/runtime.spec.ts` 里 allow 为空仍执行 `ro.echo` | 已改：`src/executor/tools.ts:41-62` 新增 `assertToolsAuthorized`（deny 优先 → FORBIDDEN；未注册 → TOOL_NOT_REGISTERED；不在 allow → FORBIDDEN），`src/executor/run-node.ts:61` 调用 |
+| M3 | 单写者锁与 epoch 没接启动路径：`createOrchestra` 未 `acquireDbLock`、未 `bumpEpoch` | 已改：`src/index.ts:104-126` 新增 `openServiceOrchestra`（acquireDbLock → bumpEpoch → openServiceDb → createOrchestra，返回 release），`serveOrchestra` 改走它 |
+| M4 | 租约生命周期缺口：无续租路由、执行期不续租，租约 30s < 动作超时 120s | 已改：`src/executor/run-node.ts:35-36` 定 `DEFAULT_LEASE_TTL_MS=30000` / `DEFAULT_LEASE_RENEW_INTERVAL_MS=10000`，`:69-83` setInterval 心跳续租；`src/service/server.ts:195-202` 新增 `POST /v1/node-runs/renew`，`src/index.ts:52` 接 `commands.renewLease`；遗留：`src/service/dispatcher.ts:54` 的 `leaseTtlMs ?? 600000` 还没统一 |
+| M5 | `applyReport` 仍收 `policy` 参数，与规格 §4.2:293「policy 不在参数里」冲突（信任面已闭：请求体带不进 policy，runtime 由模板反查） | **未改**，本轮暂停。改签名牵动 15 处调用点；另一条路是改规格并在门记录登记偏差，二选一 |
+| N1 | `ev-g2-08` 的 `command_hash` 含临时目录路径，不是字节可复现 | 未改：把 `commandHashOf` 的 cwd 归一为工作区相对路径后重跑证据 |
+| N2 | `ADDED_THEN_DELETED` 分支无单测 | 未改 |
+| N3 | 门记录无密码学签名；`scripts/gate-check.ts` / `scripts/sign-gate.ts` 自身在候选范围内却无独立锚点 | 未改 |
+| N4 | `tests/gate-check.spec.ts:31`「G1 门记录通过」并行满负载超 5000ms 超时（flaky） | 未改：给该用例加 timeout 即可 |
+| N5 | `docs/gates/G2.md:80` 复现命令写 `pnpm`，本机不可用 | 未改：换 `node node_modules/typescript/bin/tsc --noEmit` 与 `node node_modules/vitest/vitest.mjs run` |
+
+**本轮已提交**：`ed5c8b8`（M1–M4，8 文件 +162/−43），工作树干净；`handoff.md` 不进候选（DIRTY_IGNORES），改它不挡签门。
+
+**验收（实测）**：
+- `D:\NodeJs\node.exe node_modules/typescript/bin/tsc --noEmit` → exit 0。
+- `D:\NodeJs\node.exe node_modules/vitest/vitest.mjs run` → 31 文件 / 271 用例，**270 passed / 1 failed**；失败即 N4 的 flaky 超时（单跑 `tests/gate-check.spec.ts` 22 例全过）。
+- 干净 clone（HEAD）上两道门都 **exit 1**，原因是 candidate_hash 漂移：G1 `15fd9c509e81…` != `d6ae7bceb9ba…`；G2 `da60a01647ea…` != `325d3d7f73b8…`。这是 M1 的直接后果，**重签后才会回到 0**。
+
+**下一步（回来照顺序做，不用重新判断）**：
+1. 补 M5：`src/service/commands/apply-report.ts:90-95` 收掉 `policy` 参数，改由服务按 `node_run_id` 取 run 的 `workflow_version` 再载入模板策略；同步改 15 处调用点（`tests/apply-report.spec.ts:37,71,125,138`、`tests/sweep.spec.ts:104,119`、`tests/integration/g2.spec.ts:60,76,77,89,116,124,138,156,184,195`、`scripts/fault-inject.ts:355,380,450`）。
+2. 补 e5：把规格 §4.4:330/341/342 的「按 remaining 重挂 + 跨 boot remaining 公式」与 `verify_remaining_ns` 死列的处置写进 `docs/superpowers/plans/2026-11-12-dsh-orchestra-s3-nodes-state.md`，当必做项。
+3. 修 N1–N5（清单见上表，都是小改）。
+4. 写 `docs/audits/S2-round4-response.md`：M1…M5 + N1…N5 逐条（主张 / 改法文件:行 / 证据 / 用例 / 状态）。
+5. 重签：先把 `docs/gates/G2.md` 的 `audit_round` 改 4、`audit_report` 改 `docs/audits/S2-independent-audit-round4.md`（该文件已在 HEAD），正文结论段补一句 docs/reviews 排除理由；然后 `node scripts/sign-gate.ts docs/gates/G1.md` → 提交 → `node scripts/sign-gate.ts docs/gates/G2.md` → 提交（sign-gate 要求工作树干净、证据只认 HEAD 字节）。
+6. `node scripts/gate-check.ts docs/gates/G1.md` 与 `G2.md` 都要 exit 0。
+7. 派第五轮独立审计子代理（不自测）；**审计判 pass 之前不开 S3 九节点与状态机**。
+8. 同步 handoff / codebasemap / 票 #9（deck 插件 `deck_issue_patch({key:'9', comment})`）。
+
+**还悬着、要主人拍板的**：要不要建「每周五自动检查项目架构与关键回归风险」的定时任务（主人问过，还没落 schedule）。
+
+**环境速查**：node=`D:\NodeJs\node.exe`（v26.13.1）；pnpm 在本机不可用（`cmd.exe /c pnpm.cmd` 报「命令语法不正确」），一律用上面两条 node 命令；GitHub 走 `http://127.0.0.1:7078` 代理；`gh` 没凭据，票走 deck 插件。
