@@ -574,10 +574,13 @@ function auditTopLevelLines(text: string): string[] {
   let fence: { char: string; length: number } | null = null
   let quoteFence: { char: string; length: number } | null = null
   for (const rawLine of lines) {
-    if (/^(?: {4,}|\t)/.test(rawLine)) continue
-    const quote = /^\s*>\s?(.*)$/.exec(rawLine)
+    // Markdown 缩进代码：最多 3 个空格后接 Tab，或 4 个以上空格（空格+Tab 也算）。
+    if (/^(?: {0,3}\t| {4,})/.test(rawLine)) continue
+    const quote = /^\s*>( ?)([\s\S]*)$/.exec(rawLine)
     if (quote) {
-      const inner = quote[1] ?? ''
+      const inner = quote[2] ?? ''
+      // 引用块内的缩进代码同样不可见；引用标记后已吃掉一个空格，剩 3 个空格也算代码。
+      if (/^(?: {0,3}\t| {3,})/.test(inner)) continue
       const qf = /^(\x60{3,}|~{3,})(.*)$/.exec(inner)
       if (qf) {
         const marker = qf[1] ?? ''
@@ -629,12 +632,34 @@ function stripHiddenAuditBlocks(text: string): string {
     out += blankPreservingLines(text.slice(start, end + 3))
     cursor = end + 3
   }
-  for (let guard = 0; guard < 10; guard += 1) {
-    const next = out.replace(/<(details|pre|script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, (m) => blankPreservingLines(m))
-    if (next === out) break
-    out = next
+  // 按标签配对扫描，而不是非贪婪正则：嵌套 <details> 时正则先撞到内层闭合，
+  // 会把内层之后的内容（含伪造结论）露在顶层（S1 第九轮 P1-1）。
+  const tag = /<\/?(?:details|pre|script|style|template)\b[^>]*>/gi
+  let depth = 0
+  let blockStart = 0
+  let visible = ''
+  let last = 0
+  let m: RegExpExecArray | null
+  while ((m = tag.exec(out)) !== null) {
+    const closing = m[0].startsWith('</')
+    if (!closing) {
+      if (depth === 0) blockStart = m.index
+      depth += 1
+    } else if (depth > 0) {
+      depth -= 1
+      if (depth === 0) {
+        visible += out.slice(last, blockStart) + blankPreservingLines(out.slice(blockStart, tag.lastIndex))
+        last = tag.lastIndex
+      }
+    }
   }
-  return out.replace(/<(details|pre|script|style|template)\b[^>]*>[\s\S]*$/gi, (m) => blankPreservingLines(m))
+  if (depth > 0) {
+    // 未闭合：从最外层开标签一路隐藏到文末（fail-closed）。
+    visible += out.slice(last, blockStart) + blankPreservingLines(out.slice(blockStart))
+  } else {
+    visible += out.slice(last)
+  }
+  return visible
 }
 
 function normalizeAuditLine(raw: string): string {

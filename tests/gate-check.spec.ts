@@ -148,11 +148,14 @@ describe('门记录校验', { timeout: 30000 }, () => {
 
   it('不变量语句被削短后即使重算哈希也拒绝（S1 第八轮 P1-3）', () => {
     const text = read()
-    const start = text.indexOf('```json invariants\n')
+    const marker = '```json invariants'
+    const start = text.indexOf(marker)
     if (start < 0) throw new Error('G1 里没有 invariants 块')
-    const end = text.indexOf('\n```', start)
+    const bodyStart = text.indexOf('\n', start)
+    if (bodyStart < 0) throw new Error('G1 的 invariants 块头没有换行')
+    const end = text.indexOf('\n```', bodyStart)
     if (end < 0) throw new Error('G1 的 invariants 块没有闭合')
-    const list = JSON.parse(text.slice(start + '```json invariants\n'.length, end)) as { id: string; statement: string; evidence_ids: string[] }[]
+    const list = JSON.parse(text.slice(bodyStart + 1, end)) as { id: string; statement: string; evidence_ids: string[] }[]
     const first = list[0]
     if (!first) throw new Error('G1 的 invariants 块是空的')
     first.statement = 'epoch 栅栏'
@@ -204,7 +207,7 @@ describe('门记录校验', { timeout: 30000 }, () => {
   })
 
   it('审计轮次与审计报告对不上时拒绝（审计 R3-08）', () => {
-    const text = tamper(read(), (a) => { a.audit_round = 9 })
+    const text = tamper(read(), (a) => { a.audit_round = (a.audit_round as number) + 1 })
     expect(() => check(text)).toThrow(/audit_round/)
   })
 
@@ -335,6 +338,12 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('    结论：pass\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('> \x60\x60\x60\n> 结论：pass\n> \x60\x60\x60\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('> 结论：不通过')).toBe('fail')
+    // 嵌套 details 要整体隐藏，不能只藏到内层闭合（S1 第九轮 P1-1）。
+    expect(auditConclusionOf('本报告结论为不通过\n\n<details>\n<details>\n</details>\n结论：pass\n</details>')).toBeNull()
+    // 引用块内的四空格缩进是代码块，不是顶层结论。
+    expect(auditConclusionOf('本报告结论为不通过\n\n>    结论：pass')).toBeNull()
+    // 一个空格加一个 Tab 也是缩进代码。
+    expect(auditConclusionOf('本报告结论为不通过\n\n \t结论：pass')).toBeNull()
   })
 
   it('正常清零写法不再误杀（S1 第八轮 P2-5）', () => {

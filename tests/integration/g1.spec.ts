@@ -33,7 +33,7 @@ describe('G1 故障注入', () => {
   it('G-14 迁移一半被杀后重跑：已提交步骤不重复执行', async () => {
     const out = await run('G-14')
     expect(out.reconcile).toContain('重跑只补了 [902]')
-    expect(out.reconcile).toContain('schema_migrations=[1,2,3,4,901,902]')
+    expect(out.reconcile).toContain('schema_migrations=[1,2,3,4,5,901,902]')
   }, TIMEOUT)
 
   it('G-15 备份被截断能检出、恢复被拒、线上库不变', async () => {

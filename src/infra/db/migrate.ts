@@ -35,6 +35,13 @@ export function loadSteps(dir: string): SchemaStep[] {
     if (seen.has(step.version)) throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '迁移编号重复', { version: step.version })
     seen.add(step.version)
   }
+  const versions = [...seen].sort((a, b) => a - b)
+  for (let i = 0; i < versions.length; i += 1) {
+    const got = versions[i]!
+    if (got !== i + 1) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '迁移编号不连续，中间缺号', { expected: i + 1, got })
+    }
+  }
   return steps
 }
 

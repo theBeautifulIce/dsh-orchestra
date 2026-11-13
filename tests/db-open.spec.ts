@@ -6,6 +6,7 @@ import { OrchError } from '../src/core/errors.ts'
 import { openDb, withTx } from '../src/infra/sqlite/driver.ts'
 import { bumpEpoch, openServiceDb } from '../src/infra/db/open.ts'
 import { runCas } from '../src/infra/db/tx.ts'
+import { acquireDbLock } from '../src/infra/lock.ts'
 
 const dirs: string[] = []
 function dbFile(): string {
@@ -73,6 +74,17 @@ describe('epoch 栅栏', () => {
     expect(fresh.raw.prepare("SELECT value FROM service_meta WHERE key = 'alive'").get()).toBeTruthy()
     stale.raw.close()
     fresh.raw.close()
+  })
+})
+
+describe('写者锁', () => {
+  it('第二把锁拿不到，释放后能再拿（S1 第九轮 P2-2）', async () => {
+    const file = dbFile()
+    const release = await acquireDbLock(file)
+    await expect(acquireDbLock(file)).rejects.toMatchObject({ code: 'ELOCKED' })
+    await release()
+    const again = await acquireDbLock(file)
+    await again()
   })
 })
 

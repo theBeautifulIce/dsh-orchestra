@@ -9,6 +9,7 @@ import { openDb, withTx } from '../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../src/infra/db/migrate.ts'
 import { listEvents } from '../src/service/queries/list_events.ts'
 import { WriteQueue } from '../src/service/write-queue.ts'
+import { createLogger } from '../src/infra/logger.ts'
 import { backup, restore, sha256File, verifyBackup } from '../src/infra/backup.ts'
 import { bindRunVersion, catalogFor, eventSeqs, freshLedger, seed, TEST_SECRET } from '../tests/fixtures/ledger.ts'
 import { inTx } from '../src/infra/db/tx.ts'
@@ -234,12 +235,38 @@ async function caseG08(): Promise<InjectionResult> {
     reader.raw.close()
     db.raw.close()
   }
+  // HTTP 入口也验一遍：第一笔挂住占满队列，第二笔必须 503，且 warn 原文落在日志里（S1 第九轮 P2-1）
+  const httpSecret = 'g08-http-secret'
+  const logLines: string[] = []
+  let enteredResolve!: () => void
+  const entered = new Promise<void>((r) => { enteredResolve = r })
+  let releaseResolve!: () => void
+  const release = new Promise<void>((r) => { releaseResolve = r })
+  const boot = await bootHttp(httpSecret, {
+    queueMax: 1,
+    holdAppend: { entered: () => { enteredResolve() }, until: release },
+    logSink: logLines,
+  })
+  const first = postJson(boot.endpoint, '/v1/ledger/events', { type: 'inject.g08.http' }, httpSecret)
+  await entered
+  const second = await postJson(boot.endpoint, '/v1/ledger/events', { type: 'inject.g08.http2' }, httpSecret)
+  releaseResolve()
+  await first
+  await boot.close()
+  const parsedLogs = logLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+  const warnRow = parsedLogs.find((row) => row.msg === '写队列满了，拒掉这一笔写')
+  const warnText = warnRow
+    ? String(warnRow.level) + ' ' + String(warnRow.msg) + ' ' + JSON.stringify({ pending: warnRow.pending, max: warnRow.max })
+    : '(日志里没记到 warning)'
   return {
     case: 'G-08',
-    params: { db: file, busyTimeoutMs: 30, queueMax: 2 },
+    params: { db: file, busyTimeoutMs: 30, queueMax: 2, httpQueueMax: 1 },
     before,
     after: dumpEvents(file),
-    reconcile: '长事务期间读路径返回 ' + String(readOk) + ' 条（不为 0 即没被拖死）；第二个写者报 busy：' + String(busy.length > 0) + '；队列溢出码：' + queueErr,
+    reconcile: '长事务期间读路径返回 ' + String(readOk) + ' 条（不为 0 即没被拖死）；第二个写者报 busy：' + String(busy.length > 0)
+      + '；队列溢出码：' + queueErr
+      + '；HTTP 队列满第二笔 HTTP=' + String(second.status) + ' 错误码=' + String(second.body?.error?.code ?? '')
+      + '；warning 原文=' + warnText,
   }
 }
 
@@ -539,8 +566,18 @@ async function caseG07(): Promise<InjectionResult> {
 
 type HttpBoot = { endpoint: string; file: string; db: Db; runtime: RuntimeDeps; close: () => Promise<void> }
 
+type HttpBootOpts = {
+  failingTool?: boolean
+  delayMs?: number
+  dbFile?: string
+  // 写队列上限与挂起入口：G-08 用它把队列灌满，验 HTTP 503 与 warning 原文（S1 第九轮 P2-1）
+  queueMax?: number
+  holdAppend?: { entered: () => void; until: Promise<void> }
+  logSink?: string[]
+}
+
 // 起真服务：真库、真路由、真执行器；工具固定回 ok，重跑字节一致
-async function bootHttp(secret: string, opts?: { failingTool?: boolean; delayMs?: number; dbFile?: string }): Promise<HttpBoot> {
+async function bootHttp(secret: string, opts?: HttpBootOpts): Promise<HttpBoot> {
   // 指定 dbFile 就重启同一个库：跨重启用例靠它验定义持久化（ev-g2-15）
   const file = opts?.dbFile ?? join(mkdtempSync(join(tmpdir(), 'orch-ev-')), 'orchestra.db')
   const dir = dirname(file)
@@ -560,12 +597,22 @@ async function bootHttp(secret: string, opts?: { failingTool?: boolean; delayMs?
   const runner = new ReadOnlyToolRunner(registry, host, dir)
   const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, runner } })
   const orchestra = service.orchestra
+  const log = createLogger({ write: (line) => { opts?.logSink?.push(line) } })
+  const append = opts?.holdAppend
+    ? (async () => {
+      opts.holdAppend!.entered()
+      await opts.holdAppend!.until
+      return { seq: 0, event_id: 'evt_service' }
+    })
+    : (() => ({ seq: 0, event_id: 'evt_service' }))
   const server = await startServer({
     secret, phase: 'S2', epoch: orchestra.db.epoch,
     asOfSeq: () => Number((orchestra.db.raw.prepare('SELECT MAX(seq) AS s FROM events').get() as { s: number | null }).s ?? 0),
     listTasks: () => [],
     listEvents: () => [],
-    appendLedgerEvent: () => ({ seq: 0, event_id: 'evt_service' }),
+    appendLedgerEvent: append as unknown as (body: unknown, actor: string) => { seq: number; event_id: string },
+    log,
+    queue: opts?.queueMax === undefined ? undefined : new WriteQueue(opts.queueMax, log),
     commands: orchestra.commands,
   })
   return {

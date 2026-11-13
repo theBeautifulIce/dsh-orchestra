@@ -35,13 +35,13 @@ const codeOf = (fn: () => unknown): string => {
 }
 
 describe('迁移框架', () => {
-  it('空库跑一次：十一张表齐、迁移记四行', () => {
+  it('空库跑一次：十一张表齐、迁移记五行', () => {
     const db = openDb(dbFile())
-    expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([1, 2, 3, 4])
+    expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([1, 2, 3, 4, 5])
     const names = tables(db.raw)
     for (const name of ELEVEN_TABLES) expect(names).toContain(name)
     const rows = appliedRows(db.raw) as { version: number }[]
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4])
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5])
     db.raw.close()
   })
 
@@ -50,7 +50,7 @@ describe('迁移框架', () => {
     const steps = loadSteps(defaultMigrationsDir())
     applySteps(db, steps)
     expect(applySteps(db, loadSteps(defaultMigrationsDir()))).toEqual([])
-    expect(appliedRows(db.raw).length).toBe(4)
+    expect(appliedRows(db.raw).length).toBe(5)
     db.raw.close()
   })
 
@@ -90,5 +90,23 @@ describe('迁移框架', () => {
     writeFileSync(join(dir, '001_a.sql'), 'CREATE TABLE x (id INTEGER PRIMARY KEY);')
     writeFileSync(join(dir, '001_b.sql'), 'CREATE TABLE y (id INTEGER PRIMARY KEY);')
     expect(codeOf(() => loadSteps(dir))).toBe('SCHEMA_VERSION_UNSUPPORTED')
+  })
+
+  it('编号缺号 → 抛错（S1 第九轮 P2-4）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orch-migfiles-'))
+    dirs.push(dir)
+    writeFileSync(join(dir, '001_a.sql'), 'CREATE TABLE x (id INTEGER PRIMARY KEY);')
+    writeFileSync(join(dir, '003_c.sql'), 'CREATE TABLE z (id INTEGER PRIMARY KEY);')
+    expect(codeOf(() => loadSteps(dir))).toBe('SCHEMA_VERSION_UNSUPPORTED')
+  })
+
+  it('events 表只追加：UPDATE 与 DELETE 都被数据库拒绝（S1 第九轮 P2-3）', () => {
+    const db = openDb(dbFile())
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    db.raw.prepare("INSERT INTO events (event_id, type, occurred_at, created_at) VALUES ('evt_1','test','now','now')").run()
+    expect(() => db.raw.prepare("UPDATE events SET type = 'changed' WHERE event_id = 'evt_1'").run()).toThrow(/events 只追加/)
+    expect(() => db.raw.prepare("DELETE FROM events WHERE event_id = 'evt_1'").run()).toThrow(/events 只追加/)
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n).toBe(1)
+    db.raw.close()
   })
 })
