@@ -38,6 +38,29 @@ export class ToolRegistry {
   }
 }
 
+// 执行前的授权核对：真正要跑的工具必须已注册、落在 allow 集合里、且不在 deny 集合里
+// deny 永远优先（规格 5.2 行 444-445；第四轮审计 M2：策略与执行集此前没有交集）
+export function assertToolsAuthorized(
+  registry: ToolRegistry,
+  policy: { allow?: string[]; deny?: string[] },
+  tools: { command: string }[],
+): void {
+  const allow = new Set(policy.allow ?? [])
+  const deny = new Set(policy.deny ?? [])
+  for (const tool of tools) {
+    if (deny.has(tool.command)) {
+      throw new OrchError('FORBIDDEN', '工具在禁用清单里，不许执行', { tool: tool.command })
+    }
+    registry.require(tool.command)
+    if (!allow.has(tool.command)) {
+      throw new OrchError('FORBIDDEN', '工具不在授权清单里，不许执行', {
+        tool: tool.command,
+        allow: Array.from(allow),
+      })
+    }
+  }
+}
+
 // 补偿描述符可执行 = 有补偿工具名、有参数、有验证命令
 export function hasExecutableCompensation(tool: ToolDescriptor): boolean {
   if (!tool.compensation) return false

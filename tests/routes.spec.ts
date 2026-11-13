@@ -88,7 +88,7 @@ describe('节点命令与工作流加载路由', () => {
     expect(loaded.status).toBe(200)
     const run = await post(base + '/v1/node-runs/run', {
       nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
-      toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+      toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
       tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
     })
     expect(run.status).toBe(200)

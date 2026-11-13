@@ -45,7 +45,7 @@ describe('生产路径跑通单节点', () => {
     const out = await runNode(
       { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
       {
-        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
         now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
       },
@@ -70,7 +70,7 @@ describe('生产路径跑通单节点', () => {
     await expect(runNode(
       { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner: badRunner },
       {
-        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
         now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
       },
@@ -88,7 +88,7 @@ describe('生产路径跑通单节点', () => {
     await runNode(
       { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
       {
-        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
         now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
       },
@@ -107,7 +107,7 @@ describe('生产路径跑通单节点', () => {
     await runNode(
       { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
       {
-        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
         now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
       },
@@ -134,7 +134,7 @@ describe('生产路径跑通单节点', () => {
     await expect(runNode(
       { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
       {
-        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: ['ro.fail', 'ro.ok'], deny: [], declaredPolicy: 'pure' },
         tools: [
           { command: 'ro.fail', args: [], cwd: '.', timeoutMs: 5000 },
           { command: 'ro.ok', args: [], cwd: '.', timeoutMs: 5000 },

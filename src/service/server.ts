@@ -31,6 +31,8 @@ export type NodeCommands = {
   acquireLease: (body: { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }) => {
     lease_id: string; expires_at: string; action_generation: number
   }
+  // 续租：动作比租约长时把租约往后推；判定留在服务端，路由层只搬字段（规格 4.3 行 309-310）
+  renewLease: (body: { nodeRunId: string; leaseTtlMs: number; now: string }) => { expires_at: string }
   report: (body: {
     nodeRunId: string; attempt: number; report: unknown; expectedStatus: string; generation: number; now: string
   }) => ApplyResult
@@ -186,6 +188,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const out = await queue.run(() => deps.commands!.acquireLease({
         nodeRunId: String(body.nodeRunId), ownerEpoch: Number(body.ownerEpoch),
         leaseTtlMs: Number(body.leaseTtlMs), now: String(body.now),
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/node-runs/renew' && deps.commands) {
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'leaseTtlMs', 'now'])
+      const out = await queue.run(() => deps.commands!.renewLease({
+        nodeRunId: String(body.nodeRunId), leaseTtlMs: Number(body.leaseTtlMs), now: String(body.now),
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return

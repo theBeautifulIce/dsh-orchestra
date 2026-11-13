@@ -73,7 +73,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
     // handoff 是活文档，每次收尾都会改；它进候选范围会让门哈希随一次文档更新失效（审计 F-02）
-    excludes: ['docs/gates', 'docs/audits', 'handoff.md'],
+    excludes: ['docs/gates', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: null,
     gateFile: 'docs/gates/G1.md',
   },
@@ -114,7 +114,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-11': ['ev-g2-11'],
     },
     scopeBase: '4f3ada7',
-    excludes: ['docs/gates', 'docs/audits', 'handoff.md'],
+    excludes: ['docs/gates', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: 'G1',
     gateFile: 'docs/gates/G2.md',
   },
@@ -172,7 +172,7 @@ function changedFiles(root: string, spec: { scopeBase: string; excludes: string[
 
 // 门记录只能对着干净的 HEAD 签：脏文件不进 candidate_hash，却可能被当成本次候选（审计 N-09、R3-07）
 // docs/gates 不在忽略清单里：门记录自己脏了就是没签完，不许继续往下走
-const DIRTY_IGNORES = ['docs/audits', 'handoff.md']
+const DIRTY_IGNORES = ['docs/audits', 'docs/reviews', 'handoff.md']
 
 export function assertClean(root: string): void {
   const args = ['status', '--porcelain', '--', '.']

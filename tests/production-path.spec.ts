@@ -76,7 +76,7 @@ describe('生产全链路：定义 → run → 派发 → 收口', () => {
       now: NOW,
       nodes: {
         check: {
-          toolPolicy: { allow: [], deny: [], declaredPolicy: 'pure' },
+          toolPolicy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
           tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
         },
       },
