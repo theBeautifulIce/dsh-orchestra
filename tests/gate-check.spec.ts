@@ -439,6 +439,41 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(bodyConclusionOf(head + '未发现新的阻断项。')).toBe('pass')
   })
 
+  it('S2 第三十轮 P0/P2：语气副词、连续谓词、准入宾语与引用定义里的隐藏否决都要拒绝', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '本次审计原则上不推荐通过本报告。',
+      'This audit, on the whole, does not endorse the report.',
+      '本次审计不予采信并退回本报告。',
+      '本次审计结论为：不予准入。',
+      '整改工作尚未完成。',
+      'This audit does not consider the report ready.',
+      '门正文：本门记录不具备准入条件。',
+      '门正文：本门记录未达到准入条件。',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).toBeNull()
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    for (const line of negatives) expect(bodyConclusionOf(head + line), line).toBe('fail')
+    // 安全的同族正句不能被误伤。
+    for (const safe of [
+      '本次审计推荐通过本报告，本门记录具备准入条件，整改工作已完成。',
+      'This audit recommends approval; the report is ready.',
+      '本门记录具备准入条件。',
+      '整改工作已完成。',
+    ]) expect(bodyConclusionOf(head + safe), safe).toBe('pass')
+    // 引用定义不渲染，但里面藏的否决不能靠另一段干净 pass 洗掉。
+    for (const hidden of [
+      '[1]: "本次审计结论：fail"\n\n结论：pass',
+      '[1]: "结论：不通过"\n\n结论：pass',
+      '[1]: "审计未通过"\n\n结论：pass',
+    ]) {
+      expect(auditConclusionOf(hidden), hidden).toBeNull()
+      expect(bodyConclusionOf(hidden), hidden).toBe('fail')
+    }
+    expect(auditConclusionOf('[1]: https://example.com\n\n结论：pass')).toBe('pass')
+    expect(bodyConclusionOf('[1]: https://example.com\n\n结论：pass')).toBe('pass')
+  })
+
   it('S2 第二十七轮 P0-1/P0-2：报告宾语与英文否决/结论行都要拒绝', () => {
     const base = '结论：pass\n\n'
     const negatives = [

@@ -677,3 +677,11 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 已派 S1 第二十四轮（`a5a88da0-5e4f-4bd4-9d9b-bfa0ea2260fe`）与 S2 第二十九轮（`7c43a174-289b-49bc-b70d-f34a092d639e`），都绑 b92e849，只读、临时克隆内攻击、不签门不提交。
 - 状态：G1/G2 未重签，S3 九节点与状态机继续冻结。旧 S1 第二十三轮仍在跑，只作参考；以 S1 r24 与 S2 r29 为准，两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
 
+### 11.27 S2 第二十九、三十轮与 S1 第二十三、二十四轮整改（2026-11-14 04:50，HEAD 998c89b）
+
+- S2 第二十九轮（推荐/采信否定族）提交 `a0b5597`「Close S2 round29 recommendation negations」，对照表 `docs/audits/S2-round29-response.md`。
+- S1 第二十三轮（历史通过锚、裁决宾语、副词前缀）提交 `a725238`「Close S1 round23 history-anchor and object gaps」，对照表 `docs/audits/S1-round23-response.md`。
+- S1 第二十四轮（放行/clear/fit/release 同义否定）提交 `998c89b`「Close S1 round24 release and gate-body negations」，对照表 `docs/audits/S1-round24-response.md`。
+- S2 第三十轮（`docs/audits/S2-independent-audit-round30.md`，绑 G2 / 998c89b，fail：P0=8 / P1=0 / P2=1）整改中：`scripts/gate-check.ts` 的 FAIL_CONNECTORS 补语气副词与并列连接，FAIL_SUBJECTS 补整改/修复，FAIL_VERDICTS 补不予准入/不予采信并退回，FAIL_PASS_STEMS 补准入，FAIL_OBJECTS 补准入条件与报告，FAIL_FILLERS 补 consider/deem/regard/report，填充循环上限由 2 提到 6；入口新增 hiddenDefinitionFailure，引用定义里的隐藏否决按歧义拒绝。对照表 `docs/audits/S2-round30-response.md`。
+- 验证（实测）：`tsc --noEmit` exit 0；`tests/gate-check.spec.ts` 84 例 73 passed / 11 failed；全量 32 文件 / 370 例 359 passed / 11 failed；11 红全部是 G1 预签态（audit_report_sha256=0*64）。新增「S2 第三十轮 P0/P2」用例单独运行 1 passed / 83 skipped。
+- 状态：S1 第二十五轮（a78007f4）仍在 998c89b 上运行，只作参考；S2 第三十轮已结束。本对照表提交后在新候选上重派 S1 与 S2 独立审计；两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。当前未签门、未开 S3。
