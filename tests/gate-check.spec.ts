@@ -674,6 +674,53 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
   })
 
+  it('S2 第二十三轮 P0-1：裸审计主语、连接号与英文否定句都要拒绝', () => {
+    const payloads = [
+      '审计未通过',
+      '结论 - fail',
+      '结论—fail',
+      'The audit failed.',
+      'The review did not pass.',
+    ]
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+    // 叙述性“未通过项”仍然不误杀。
+    expect(auditConclusionOf('结论：pass\n\n审计未通过项为 0')).toBe('pass')
+  })
+
+  it('S1 第十九轮 P0-1/P0-2/P0-3：三行拆词、引号包裹与图片 alt 的否定句都要拒绝', () => {
+    const payloads = [
+      '本报告不\n通\n过',
+      '"本报告不通过"',
+      "'本报告不通过'",
+      '‘本报告不通过’',
+      '＂本报告不通过＂',
+      '«本报告不通过»',
+      '"结论：fail"',
+      '![本报告不通过&#xFF08;P0 1 条&#xFF09;](x.png)',
+      '![本报告不&nbsp;通过](x.png)',
+      '![结论&colon;fail](x.png)',
+      '![&#26412;&#25253;&#21578;&#19981;&#36890;&#36807;](x.png)',
+      '!["本报告不通过"](x.png)',
+      "!['本报告不通过'](x.png)",
+      '![‘本报告不通过’](x.png)',
+      '![&quot;本报告不通过&quot;](x.png)',
+    ]
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+  })
+
+  it('门记录正文的三行拆词、引号包裹与图片 alt 否定句也要拒绝（S1 第十九轮 P0-4）', () => {
+    const payloads = [
+      '本报告不\n通\n过',
+      '"本报告不通过"',
+      '![本报告不通过&#xFF08;P0 1 条&#xFF09;](x.png)',
+    ]
+    for (const line of payloads) {
+      const text = read().replace('\n## 必过项与证据', '\n' + line + '\n\n## 必过项与证据')
+      expect(text, line).not.toBe(read())
+      expect(() => check(text), line).toThrow(/正文结论/)
+    }
+  })
+
   it('门记录正文里的可见否定句也要拒绝（S1 第十八轮 P2-1）', () => {
     const text = read().replace('\n## 必过项与证据', '\n本报告不通过（P0 1 条）\n\n## 必过项与证据')
     expect(text).not.toBe(read())

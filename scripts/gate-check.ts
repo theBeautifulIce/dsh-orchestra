@@ -606,7 +606,7 @@ function renderedAuditLines(text: string): string[] | null {
         buffer += child.content
       } else if (child.type === 'image') {
         // 图片加载失败时浏览器会显示 alt 文本；alt 里出现 fail 结论按歧义拒绝。
-        if (visibleFailStatement(child.content)) ambiguous = true
+        if (visibleFailStatement(AUDIT_MARKDOWN.utils.unescapeAll(child.content))) ambiguous = true
         paragraphHasLink = true
       } else if (child.type === 'link_open' || child.type === 'link_close') {
         paragraphHasLink = true
@@ -630,13 +630,13 @@ function renderedAuditLines(text: string): string[] | null {
 // 所以「本报告不通过项已全部修复」这类叙述不会误杀（S1 第十八轮补）。
 // window 只给门正文用：限制结论出现在行首附近且整行不长，避免把 G2 历史段落里
 // 引用的“门记录拿结论为 fail”误当成本次正文结论。
-const FAIL_SUBJECT = '(?:本报告|本次审计|本轮审计|本次复核|本次评审|该报告|此报告|本审计)'
-const FAIL_VERDICT = '(?:fail(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/]|[需应已了的])|不通过(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/]|[需应已了的])|未通过(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/]|[需应已了的])|不合格(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/]|[需应已了的]))'
+const FAIL_SUBJECT = '(?:本报告|本次审计|本轮审计|本次复核|本次评审|该报告|此报告|本审计|审计)'
+const FAIL_VERDICT = '(?:fail(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的])|不通过(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的])|未通过(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的])|不合格(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的]))'
 
 function visibleFailStatement(line: string, window: { maxStart?: number; maxLength?: number } = {}): boolean {
   // 可见文字里的空白与冒号都可能被用来拆词（「结 论：fail」「结论∷fail」）；
   // 判定前压成无空白、无冒号形态，只对语义判定负责，不改原始行（S1 第十八轮 P1）。
-  const compact = Array.from(line).filter((ch) => ch.trim() !== '' && !'\uFE13\uFE55\u2236\u02D0\uA789\uFF1A:：'.includes(ch)).join('')
+  const compact = Array.from(line).filter((ch) => ch.trim() !== '' && !'\uFE13\uFE55\u2236\u02D0\uA789\uFF1A:：-—–―−'.includes(ch)).join('')
   const re = new RegExp(
     '(?:' +
       FAIL_SUBJECT + '(?:的)?(?:经|经过)?(?:审计|复核|评审)?(?:后)?(?:最终|仍|依然|还是)?(?:结论|判定|审计意见|最终判定|最终结论|结果)?(?:为|是)?' + FAIL_VERDICT +
@@ -646,6 +646,8 @@ function visibleFailStatement(line: string, window: { maxStart?: number; maxLeng
     'i',
   )
   if (window.maxLength !== undefined && line.length > window.maxLength) return false
+  // 英文报告同样可能把否定写在可见正文里（S2 第二十三轮 P0-1）
+  if (/\b(?:the\s+)?(?:audit|review)\b[^.\n]{0,30}\b(?:failed|not\s+passed|did\s+not\s+pass)\b/i.test(line)) return true
   const m = re.exec(compact)
   if (m && (window.maxStart === undefined || m.index <= window.maxStart)) return true
   // 表格单元格只有结论 token 时同样算可见 fail（表头/格式行不会命中）。
@@ -672,13 +674,13 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
       // 反过来，正文里引用 pass 不影响紧跟的正式 fail 结论（S2 第二十轮 zwsp-colon）。
       if (inlineFailConclusion.test(line) || visibleFailStatement(line)) inlineFail = true
       // 软换行/实体换行也会把可见结论拆开（结\n论：fail、本报告结论\n为不通过）；
-      // 对相邻两行做一次拼接判定，宁可多判歧义，不能让 fail 从换行缝里漏掉（S1 第十七轮 P2-4）。
-      const nextVisible = visible[visibleIndex + 1] ?? ''
-      if (
-        nextVisible &&
-        !strict &&
-        (visibleFailStatement(line + nextVisible) || visibleFailStatement(line + ' ' + nextVisible))
-      ) inlineFail = true
+      // 一段否定句可能被拆成三行以上，只拼下一行会漏；对最多四行做滑动拼接，
+      // 宁可多判歧义，不能让 fail 从换行缝里漏掉（S1 第十七轮 P2-4、第十九轮 P0-1）。
+      for (let span = 2; span <= 4; span += 1) {
+        const parts = visible.slice(visibleIndex, visibleIndex + span)
+        if (parts.length < span) break
+        if (visibleFailStatement(parts.join('')) || visibleFailStatement(parts.join(' '))) inlineFail = true
+      }
       // 链接/引用定义段落里的可见“结论：”不能靠另一段干净 pass 洗掉（S2 第二十轮 def-*）；
       // 普通正文里提到“结论：”只是行内引用，不影响后面的正式结论行。
       if (line.includes('[') && conclusionText.test(line)) return null
@@ -716,7 +718,20 @@ function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
     const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
     if (m) found.push(rawVerdict(m[1] ?? ''))
   }
-  if (visible.some((line) => visibleFailStatement(line, { maxStart: 24, maxLength: 160 }))) return 'fail'
+  const bodyWindow = { maxStart: 24, maxLength: 160 }
+  for (let i = 0; i < visible.length; i += 1) {
+    const line = visible[i]!
+    if (visibleFailStatement(line, bodyWindow)) return 'fail'
+    // 门记录正文也可能把否定句拆成多行；与审计报告同一口径做滑动拼接（S1 第十九轮 P0-4）。
+    for (let span = 2; span <= 4; span += 1) {
+      const parts = visible.slice(i, i + span)
+      if (parts.length < span) break
+      if (
+        visibleFailStatement(parts.join(''), bodyWindow) ||
+        visibleFailStatement(parts.join(' '), bodyWindow)
+      ) return 'fail'
+    }
+  }
   return found.length === 1 ? found[0]! : null
 }
 

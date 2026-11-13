@@ -19,7 +19,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) { try { rmSync(dir, { recursive: true, force: true }) } catch { /* 句柄晚释放 */ } }
 })
 
-async function boot(withExecutor = false) {
+async function boot(withExecutor = false, nowProvider?: () => string) {
   const dir = mkdtempSync(join(tmpdir(), 'orch-routes-'))
   dirs.push(dir)
   const registry = new ToolRegistry()
@@ -39,6 +39,7 @@ async function boot(withExecutor = false) {
     asOfSeq: () => 0,
     listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
+    now: nowProvider ?? (() => NOW),
     commands: orchestra.commands,
   })
   closers.push(async () => { await svc.close(); await service.release() })
@@ -108,6 +109,27 @@ describe('节点命令与工作流加载路由', () => {
     expect(res.status).toBe(403)
     const body = await res.json() as any
     expect(body.error.code).toBe('FORBIDDEN')
+  })
+
+  it('上报时间以服务端时钟为准，body.now 不能回拨租约', async () => {
+    let current = NOW
+    const { endpoint: base } = await boot(false, () => current)
+    const loaded = await post(base + '/v1/workflows/load', {
+      workflow_version: '1',
+      pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
+      nodes: [{ node_id: 'check', type: 'agent' }],
+    })
+    expect(loaded.status).toBe(200)
+    const lease = await post(base + '/v1/node-runs/lease', { nodeRunId: 'nrun_1', ownerEpoch: 1, leaseTtlMs: 1000 })
+    expect(lease.status).toBe(200)
+    current = '2026-11-13T03:00:02.000Z'
+    const report = await post(base + '/v1/node-runs/report', {
+      nodeRunId: 'nrun_1', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: NOW,
+      report: { report_id: 'rep_clock', node_run_id: 'nrun_1', attempt: 1, status: 'started', evidence: { source: 'run_tool', exitCode: 0 } },
+    })
+    expect(report.status).not.toBe(200)
+    const body = await report.json() as any
+    expect(body.error.code).toBe('LEASE_EXPIRED')
   })
 
   it('缺字段 → 400 PAYLOAD_SCHEMA_INVALID', async () => {

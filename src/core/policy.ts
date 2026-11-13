@@ -30,10 +30,14 @@ export function evaluateEvidence(report: Report, requiredHashes: string[]): Evid
   }
   const digest = sha256Hex(canonicalJson(normalized))
   // 不可逆节点的通过凭据必须是产物哈希，只有 exitCode 不够（规格 4.7 行 380）
+  // 哈希值本身也要是 sha256 形态：只给键名、值写 not-a-real-hash 不算证据（S2 第二十三轮 P0-4）
   if (requiredHashes.length > 0) {
-    const provided = new Set(Object.keys(ev.hashes ?? {}))
-    const missing = requiredHashes.filter((h) => !provided.has(h))
-    if (missing.length > 0) {
+    const provided = ev.hashes ?? {}
+    const invalid = requiredHashes.filter((h) => {
+      const value = provided[h]
+      return typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value)
+    })
+    if (invalid.length > 0) {
       return { ok: false, reason: 'verification_too_weak', strength, digest, normalized }
     }
     if (strength === 'weak') {

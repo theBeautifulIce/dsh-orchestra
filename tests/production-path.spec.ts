@@ -38,6 +38,7 @@ async function boot() {
     asOfSeq: () => 0,
     listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
+    now: () => NOW,
     commands: orchestra.commands,
   })
   closers.push(async () => { await svc.close(); await service.release() })

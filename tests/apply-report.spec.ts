@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { bindRunVersion, catalogFor, freshLedger, seed, TEST_SECRET } from './fixtures/ledger.ts'
 import { withTx } from '../src/infra/sqlite/driver.ts'
+import { appendNodeRunEvent } from '../src/infra/db/ledger.ts'
 import { acquireLease } from '../src/service/commands/lease.ts'
 import { applyReport } from '../src/service/commands/apply-report.ts'
 import type { Report } from '../src/core/report.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const CATALOG = catalogFor(['n_ar', 'n_other'])
+const CMD = 'c'.repeat(64)
 
 function setup(opts: { ttl?: number; now?: string; trace?: boolean } = {}) {
   const { db } = freshLedger(); seed(db); bindRunVersion(db, CATALOG)
@@ -19,9 +21,12 @@ function setup(opts: { ttl?: number; now?: string; trace?: boolean } = {}) {
   if (opts.trace !== false) {
     withTx(db, (tx) => {
       tx.run(
-        "INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nr_ar', 2, 'ro.echo', 0, 'h', NULL, 'cmdhash', ?, ?)",
-        [NOW, NOW],
+        "INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nr_ar', 2, 'ro.echo', 0, 'h', NULL, ?, ?, ?)",
+        [CMD, NOW, NOW],
       )
+      appendNodeRunEvent(tx, TEST_SECRET, 'nr_ar', 'tool_finished', {
+        tool: 'ro.echo', attempt: 2, exit_code: 0, stdout_hash: 'h', stderr_hash: null, command_hash: CMD,
+      })
     })
   }
   return db
@@ -29,7 +34,7 @@ function setup(opts: { ttl?: number; now?: string; trace?: boolean } = {}) {
 
 const rep = (over: Partial<Report> = {}): Report => ({
   report_id: 'rep_1', node_run_id: 'nr_ar', attempt: 2, status: 'done',
-  evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {} },
+  evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
   ...over,
 })
 
@@ -316,9 +321,63 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
 
   it('痕迹里的 stdout_hash 对不上 → evidence_unverifiable', () => {
     const db = setup()
-    const out = apply(db, { evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'other', hashes: {} } })
+    const out = apply(db, { evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'other', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD } })
     expect(out.accepted).toBe(false)
     expect(out.reason).toBe('evidence_unverifiable')
     expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('同一 attempt 已有失败工具行 → 整次尝试不许 done（S2 第二十三轮 P0-2）', () => {
+    const db = setup()
+    withTx(db, (tx) => {
+      tx.run(
+        "INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nr_ar', 2, 'ro.fail', 2, 'bad', NULL, ?, ?, ?)",
+        [CMD, NOW, NOW],
+      )
+    })
+    const out = apply(db)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('tool_execution_failed')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('证据的 commandHash 与痕迹行对不上 → evidence_unverifiable（S2 第二十三轮 P0-4）', () => {
+    const db = setup()
+    const out = apply(db, {
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: 'f'.repeat(64) },
+    })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_unverifiable')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('required_hashes 只给键名、值不是 sha256 → verification_too_weak（S2 第二十三轮 P0-4）', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact'] })
+    bindRunVersion(db, catalog)
+    const out = apply(db, {
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: 'not-a-real-hash' }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('verification_too_weak')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('失败终态缺证据 → evidence_missing（S2 第二十三轮 P1-1）', () => {
+    const db = setup()
+    const out = apply(db, { status: 'failed', evidence: undefined })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_missing')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('失败终态带执行器证据 → 正常收口（S2 第二十三轮 P1-1 阳性对照）', () => {
+    const db = setup()
+    const out = apply(db, {
+      status: 'failed',
+      evidence: { source: 'run_tool', exitCode: 2, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    })
+    expect(out.accepted).toBe(true)
+    expect(nodeRow(db).status).toBe('failed')
   })
 })

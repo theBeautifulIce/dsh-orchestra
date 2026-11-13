@@ -7,6 +7,9 @@ export type ReportEvidence = {
   stderrHash?: string
   hashes?: Record<string, string>
   producedAt?: string
+  // 执行器落库时同时写入的命令名与命令哈希；收口时拿它们和 tool_executions 行对齐
+  tool?: string
+  commandHash?: string
 }
 
 export type Report = {

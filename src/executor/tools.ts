@@ -137,7 +137,8 @@ export type StrongEvidence = {
   stderrHash: string
   hashes: Record<string, string>
   producedAt: string
-  // 命令哈希：落库前要核对，核对不上就不许写（规格 7.2 行 589）
+  // 命令名与命令哈希：收口时和 tool_executions 的 tool/command_hash 对齐
+  tool: string
   commandHash: string
 }
 
@@ -210,6 +211,7 @@ export class ReadOnlyToolRunner {
       stderrHash: sha256Hex(res.stderr),
       hashes: { stdout: sha256Hex(res.stdout), stderr: sha256Hex(res.stderr) },
       producedAt: new Date().toISOString(),
+      tool: params.command,
       commandHash: commandHashOf(descriptor.command.bin, args, cwd, this.workspaceRoot),
     }
     return { evidence, stdout: res.stdout, stderr: res.stderr }

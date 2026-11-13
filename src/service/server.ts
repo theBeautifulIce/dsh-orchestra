@@ -23,6 +23,9 @@ export type ServerDeps = {
   appendLedgerEvent: (body: unknown, actor: string) => { seq: number; event_id: string }
   log?: Logger
   queue?: WriteQueue
+  // 服务端时钟：租约与上报的时刻只由服务端决定，请求体里的 now 不参与判定。
+  // 测试可注入固定时刻；生产缺省读系统墙钟。
+  now?: () => string
   // 生产路径的节点命令；缺省时这几条路由一律 404，老测试不受影响
   commands?: NodeCommands
 }
@@ -68,6 +71,9 @@ export type NodeCommands = {
 }
 
 const CANCEL_RESULTS = ['interrupted', 'not_interruptible', 'already_stopped', 'unknown'] as const
+
+// 服务端时刻只从这里取：客户端发来的 now 仅作形状兼容，不进入租约/上报判定（S2 第二十三轮 P0-3）
+const serverNow = (deps: ServerDeps): string => deps.now ? deps.now() : new Date().toISOString()
 
 // 请求体必填字段：缺一个就按结构错拒，别把 undefined 写进账本
 function requireFields(body: unknown, fields: string[]): Record<string, unknown> {
@@ -126,6 +132,8 @@ const intParam = (url: URL, name: string, fallback: number): number => {
 async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDeps, queue: WriteQueue): Promise<void> {
   const log = deps.log ?? nullLogger
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+  // 每个请求只取一次服务端时刻：同一请求内的租约与上报用同一基准
+  const requestNow = serverNow(deps)
   try {
     if (req.method === 'GET' && url.pathname === '/health') {
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), { ok: true, phase: deps.phase, epoch: deps.epoch }))
@@ -159,25 +167,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['taskTitle', 'workflowVersion', 'now'])
+      const body = requireFields(await readJsonBody(req), ['taskTitle', 'workflowVersion'])
       const out = await queue.run(() => deps.commands!.createRun({
         taskTitle: String(body.taskTitle),
         workflowVersion: String(body.workflowVersion),
         nodeIds: Array.isArray(body.nodeIds) ? body.nodeIds.map(String) : undefined,
-        now: String(body.now),
+        now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs/dispatch' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['runId', 'nodes', 'now'])
+      const body = requireFields(await readJsonBody(req), ['runId', 'nodes'])
       if (typeof body.nodes !== 'object' || body.nodes === null || Array.isArray(body.nodes)) {
         throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'nodes 要是按 node_id 归类的对象', { nodes: body.nodes })
       }
       const out = await queue.run(() => deps.commands!.dispatch({
         runId: String(body.runId),
         nodes: body.nodes as Record<string, NodeSpec>,
-        now: String(body.now),
+        now: requestNow,
         ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
         leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
         leaseRenewIntervalMs: body.leaseRenewIntervalMs === undefined ? undefined : Number(body.leaseRenewIntervalMs),
@@ -186,34 +194,34 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/lease' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'ownerEpoch', 'leaseTtlMs', 'now'])
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'ownerEpoch', 'leaseTtlMs'])
       const out = await queue.run(() => deps.commands!.acquireLease({
         nodeRunId: String(body.nodeRunId), ownerEpoch: Number(body.ownerEpoch),
-        leaseTtlMs: Number(body.leaseTtlMs), now: String(body.now),
+        leaseTtlMs: Number(body.leaseTtlMs), now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/renew' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'leaseTtlMs', 'now'])
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'leaseTtlMs'])
       const out = await queue.run(() => deps.commands!.renewLease({
-        nodeRunId: String(body.nodeRunId), leaseTtlMs: Number(body.leaseTtlMs), now: String(body.now),
+        nodeRunId: String(body.nodeRunId), leaseTtlMs: Number(body.leaseTtlMs), now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/report' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'report', 'expectedStatus', 'generation', 'now'])
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'report', 'expectedStatus', 'generation'])
       const out = await queue.run(() => deps.commands!.report({
         nodeRunId: String(body.nodeRunId), attempt: Number(body.attempt),
         report: body.report, expectedStatus: String(body.expectedStatus),
-        generation: Number(body.generation), now: String(body.now),
+        generation: Number(body.generation), now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/run' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'nodeId', 'attempt', 'tools', 'now'])
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'nodeId', 'attempt', 'tools'])
       if (!Array.isArray(body.tools)) {
         throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'tools 要是数组', { tools: body.tools })
       }
@@ -221,7 +229,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         nodeRunId: String(body.nodeRunId), nodeId: String(body.nodeId), attempt: Number(body.attempt),
         input: body.input ?? {}, outputSchema: body.outputSchema ?? {},
         tools: body.tools as { command: string; args: string[]; cwd: string; timeoutMs: number }[],
-        now: String(body.now),
+        now: requestNow,
         ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
         leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
         leaseRenewIntervalMs: body.leaseRenewIntervalMs === undefined ? undefined : Number(body.leaseRenewIntervalMs),
@@ -230,13 +238,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/cancel' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'revision', 'cancelResult', 'now', 'graceMs'])
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'revision', 'cancelResult', 'graceMs'])
       if (!(CANCEL_RESULTS as readonly string[]).includes(String(body.cancelResult))) {
         throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'cancelResult 不在枚举里', { cancelResult: body.cancelResult })
       }
       const out = await queue.run(() => deps.commands!.cancel({
         nodeRunId: String(body.nodeRunId), attempt: Number(body.attempt), revision: Number(body.revision),
-        cancelResult: String(body.cancelResult), now: String(body.now), graceMs: Number(body.graceMs),
+        cancelResult: String(body.cancelResult), now: requestNow, graceMs: Number(body.graceMs),
         extendDeadlineMs: body.extendDeadlineMs === undefined ? undefined : Number(body.extendDeadlineMs),
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))

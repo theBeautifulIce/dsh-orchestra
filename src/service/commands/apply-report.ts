@@ -223,7 +223,14 @@ export function applyReport(
   if (!canTransition(row.status, report.status)) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'illegal_transition', now: params.now })
   }
-  // 第四、五步只对“完成”上报做证据与判定：失败、阻塞的回报不该被要求带通过证据
+  // 失败/超时终态也要有可核对的服务端证据：空证据不许收口（S2 第二十三轮 P1-1）
+  if (report.status === 'failed' || report.status === 'timeout') {
+    const terminalReason = terminalEvidenceGate(report)
+    if (terminalReason) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: terminalReason, now: params.now })
+    }
+  }
+  // 第四、五步只对“完成”上报做通过证据与判定：失败、阻塞的回报不该被要求带通过证据
   let evidenceDigest: string | null = null
   if (report.status === 'done') {
     // 判定条件只从 run 绑定的工作流版本取，不在请求体、也不在函数参数里（规格 4.2 行 293）
@@ -310,15 +317,70 @@ function systemEvidenceGate(report: Report): string | null {
   return null
 }
 
+// 失败/超时终态的证据门：只要求证据存在、来自执行器且退出码可核对；
+// 退出码非 0 是失败终态的常态，不在这里按“工具失败”拒收（S2 第二十三轮 P1-1）
+function terminalEvidenceGate(report: Report): string | null {
+  const ev = report.evidence
+  if (!ev) return 'evidence_missing'
+  if (ev.source !== 'run_tool') return 'verification_too_weak'
+  if (typeof ev.exitCode !== 'number') return 'evidence_missing'
+  return null
+}
+
+type ToolExecutionRow = {
+  tool: string
+  exit_code: number
+  stdout_hash: string | null
+  stderr_hash: string | null
+  command_hash: string | null
+}
+
 // 痕迹绑定门：证据要跟账本里的工具执行痕迹对得上，伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
+// 同一 attempt 只要有一行工具失败就不许 done；证据的命令名、退出码、stdout/stderr、命令哈希
+// 都要和同一行以及对应的 tool_finished 事件对齐（S2 第二十三轮 P0-2/P0-4）
 function traceBindingGate(tx: Tx, params: ApplyReportParams, report: Report): string | null {
   const ev = report.evidence
   if (!ev) return 'evidence_missing'
-  const rows = tx.all<{ exit_code: number; stdout_hash: string | null }>(
-    'SELECT exit_code, stdout_hash FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
+  if (typeof ev.tool !== 'string' || ev.tool.length === 0) return 'evidence_unverifiable'
+  if (typeof ev.commandHash !== 'string' || !/^[0-9a-f]{64}$/i.test(ev.commandHash)) return 'evidence_unverifiable'
+  if (typeof ev.producedAt !== 'string' || Number.isNaN(Date.parse(ev.producedAt))) return 'evidence_missing'
+  const rows = tx.all<ToolExecutionRow>(
+    'SELECT tool, exit_code, stdout_hash, stderr_hash, command_hash FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
     [params.nodeRunId, params.attempt],
   )
-  const matched = rows.some((r) => r.exit_code === ev.exitCode && (r.stdout_hash ?? '') === (ev.stdoutHash ?? ''))
+  if (rows.length === 0) return 'evidence_unverifiable'
+  // 同一次尝试里出现过失败的工具，整次尝试就不许以 done 收口
+  if (rows.some((r) => r.exit_code !== 0)) return 'tool_execution_failed'
+  const hashes = ev.hashes ?? {}
+  const matched = rows.some((r) => {
+    if (r.exit_code !== ev.exitCode) return false
+    if (r.tool !== ev.tool) return false
+    if ((r.stdout_hash ?? '') !== (ev.stdoutHash ?? '')) return false
+    if ((r.stderr_hash ?? '') !== (ev.stderrHash ?? '')) return false
+    if ((r.command_hash ?? '') !== ev.commandHash) return false
+    if (hashes.stdout !== undefined && hashes.stdout !== r.stdout_hash) return false
+    if (hashes.stderr !== undefined && hashes.stderr !== r.stderr_hash) return false
+    return true
+  })
   if (!matched) return 'evidence_unverifiable'
+  // 事件面也要对得上：只有工具执行表有行、没有 tool_finished 留痕，仍按证据不可核
+  const events = tx.all<{ payload: string }>(
+    "SELECT payload FROM node_run_events WHERE node_run_id = ? AND type = 'tool_finished'",
+    [params.nodeRunId],
+  )
+  const eventMatched = events.some((event) => {
+    try {
+      const p = JSON.parse(event.payload) as Record<string, unknown>
+      return p.attempt === params.attempt
+        && p.tool === ev.tool
+        && p.exit_code === ev.exitCode
+        && (p.stdout_hash ?? '') === (ev.stdoutHash ?? '')
+        && (p.stderr_hash ?? '') === (ev.stderrHash ?? '')
+        && (p.command_hash ?? '') === ev.commandHash
+    } catch {
+      return false
+    }
+  })
+  if (!eventMatched) return 'evidence_unverifiable'
   return null
 }

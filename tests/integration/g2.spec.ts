@@ -7,11 +7,13 @@ import { MonotonicClock } from '../../src/core/clock.ts'
 import { transitionNode } from '../../src/service/commands/node-state.ts'
 import { inTx } from '../../src/infra/db/tx.ts'
 import { bindRunVersion, catalogFor, freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
+import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import type { Db } from '../../src/infra/sqlite/driver.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const HASH_A = 'a'.repeat(64)
 const HASH_B = 'b'.repeat(64)
+const CMD_HASH = 'c'.repeat(64)
 
 function seedQueued(db: Db, nodeRunId: string): void {
   inTx(db, (tx) => {
@@ -40,7 +42,7 @@ function goodReport(nodeRunId: string, reportId: string, status: string) {
     node_run_id: nodeRunId,
     attempt: 1,
     status,
-    evidence: { source: 'run_tool' as const, exitCode: 0, stdoutHash: HASH_A, stderrHash: HASH_B, hashes: {}, producedAt: NOW },
+    evidence: { source: 'run_tool' as const, exitCode: 0, stdoutHash: HASH_A, stderrHash: HASH_B, hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD_HASH },
   }
 }
 
@@ -56,7 +58,10 @@ describe('G2 门必过项', () => {
     lease(db, 'nrun_g2_01')
     // 工具执行痕迹：done 报告的证据要对得上它（审计 R3-03）
     inTx(db, (tx) => {
-      tx.run("INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nrun_g2_01', 1, 'ro.echo', 0, ?, NULL, 'cmdhash', ?, ?)", [HASH_A, NOW, NOW])
+      tx.run("INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nrun_g2_01', 1, 'ro.echo', 0, ?, ?, ?, ?, ?)", [HASH_A, HASH_B, CMD_HASH, NOW, NOW])
+      appendNodeRunEvent(tx, TEST_SECRET, 'nrun_g2_01', 'tool_finished', {
+        tool: 'ro.echo', attempt: 1, exit_code: 0, stdout_hash: HASH_A, stderr_hash: HASH_B, command_hash: CMD_HASH,
+      })
     })
     let expected = 'dispatched'
     for (const target of ['started', 'verifying', 'done']) {
