@@ -15,7 +15,17 @@ export type EvidenceEvaluation = {
 // passCondition 只许引用这几个字段（规格 4.7 行 386）
 export const ALLOWED_EVIDENCE_FIELDS = ['exitCode', 'stdoutHash', 'stderrHash', 'hashes', 'producedAt'] as const
 
-export function evaluateEvidence(report: Report, requiredHashes: string[]): EvidenceEvaluation {
+export type EvidenceGateOptions = {
+  // 服务端可核验的产物哈希：report.output 的摘要，加上同 attempt 工具行的 stdout/stderr/command 哈希。
+  // requiredHashes 的值必须落在这个集合里，不能只校验 64 位十六进制形态（S2 第二十四轮 P1-1）。
+  trustedHashes: readonly string[]
+}
+
+export function evaluateEvidence(
+  report: Report,
+  requiredHashes: string[],
+  options: EvidenceGateOptions,
+): EvidenceEvaluation {
   const ev: ReportEvidence | undefined = report.evidence
   if (!ev) {
     return { ok: false, reason: 'evidence_missing', strength: 'weak', digest: sha256Hex(canonicalJson({})), normalized: {} }
@@ -33,9 +43,12 @@ export function evaluateEvidence(report: Report, requiredHashes: string[]): Evid
   // 哈希值本身也要是 sha256 形态：只给键名、值写 not-a-real-hash 不算证据（S2 第二十三轮 P0-4）
   if (requiredHashes.length > 0) {
     const provided = ev.hashes ?? {}
+    const trusted = new Set(options.trustedHashes.map((h) => h.toLowerCase()))
     const invalid = requiredHashes.filter((h) => {
       const value = provided[h]
-      return typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value)
+      if (typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value)) return true
+      // 形态对的伪造值同样不算证据：必须等于服务端能重算的产物或工具痕迹哈希。
+      return !trusted.has(value.toLowerCase())
     })
     if (invalid.length > 0) {
       return { ok: false, reason: 'verification_too_weak', strength, digest, normalized }

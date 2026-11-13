@@ -708,6 +708,50 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
   })
 
+  it('S1 第二十轮 P0/P1：五行拆词、alt 不可见字符、收尾符号与同义否定都要拒绝', () => {
+    const payloads = [
+      '本\n报\n告不\n通\n过',
+      '本 \n报 \n告不 \n通 \n过',
+      '审计报告不通过',
+      '本报告没有通过',
+      '本报告并未通过',
+      '本报告未获通过',
+      '本报告不通過',
+      '本报告结论为ｆａｉｌ',
+      '本报告不（通过）',
+      '„本报告不通过“',
+      '〝本报告不通过〞',
+      '｢本报告不通过｣',
+      '本报告不通过🚫',
+      '![本报告不&#8203;通过](x.png)',
+      '![本报告不\u200b通过](x.png)',
+      '![本报告不\u0301通过](x.png)',
+      '![本报告不&ZeroWidthSpace;通过](x.png)',
+      '![本报告不<wbr>通过](x.png)',
+    ]
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+    const safe = ['本报告不通过项已全部修复', '本次审计不通过项为 0', '审计未通过项为 0']
+    for (const line of safe) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBe('pass')
+  })
+
+  it('S2 第二十四轮 P0-1：引号/括号/逗号/省略号/同义否定/连接号/英文变体都要拒绝', () => {
+    const payloads = [
+      '本次审计“未通过”', '本次审计结论为“不通过”', '本次审计"未通过"',
+      '![本次审计“未通过”](x.png)', '本次审计（未通过）', '本次审计，未通过。', '本次审计...未通过',
+      '审计没通过', '审计未获通过', '审计未能通过', '审计没有通过', '审核未通过', '复核未通过',
+      '总的审计意见：未通过', '本次审计‑未通过', '本次审计﹣未通过', '本次审计－未通过',
+      '本次审计‐未通过', '本次审计⁃未通过', '本次审计失败。', '本次审计未予通过。',
+      '本次审计未得到通过。', '本次审计未过关。', '本次审计没过。', '本次审计通不过。',
+      '本次审计不能通过。', '本次审计不是通过。', '审计ｆａｉｌ',
+      'Audit: fail.', 'The audit fails.', 'The audit was unsuccessful.', "The audit didn't pass.",
+      'The audit did fail.', 'Audit result: fail.', 'The audit is a failure.',
+      'The audit was not successful.', 'The audit did not succeed.',
+    ]
+    for (const line of payloads) expect(auditConclusionOf('结论：pass\n\n' + line), line).toBeNull()
+    expect(auditConclusionOf('结论：pass\n\n审计未通过项为 0')).toBe('pass')
+    expect(auditConclusionOf('结论：pass\n\n本报告不通过项已全部修复')).toBe('pass')
+  })
+
   it('门记录正文的三行拆词、引号包裹与图片 alt 否定句也要拒绝（S1 第十九轮 P0-4）', () => {
     const payloads = [
       '本报告不\n通\n过',
@@ -725,6 +769,22 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     const text = read().replace('\n## 必过项与证据', '\n本报告不通过（P0 1 条）\n\n## 必过项与证据')
     expect(text).not.toBe(read())
     expect(() => check(text)).toThrow(/正文结论与 GateArtifact 不符/)
+  })
+
+  it('门记录正文的长行与偏移否定句也要拒绝（S1 第二十轮 P0-4）', () => {
+    const payloads = [
+      '复核补充：本报告不通过，详见附录。' + '注'.repeat(160),
+      '复核补充：' + '前'.repeat(25) + '本报告不通过',
+      '本\n报\n告不\n通\n过',
+      '„本报告不通过“',
+      '本报告不通过🚫',
+      '![本报告不\u200b通过](x.png)',
+    ]
+    for (const payload of payloads) {
+      const text = read().replace('\n## 必过项与证据', '\n' + payload + '\n\n## 必过项与证据')
+      expect(text, payload).not.toBe(read())
+      expect(() => check(text), payload).toThrow(/正文结论/)
+    }
   })
 
   it('门记录正文顶部的结论必须与 GateArtifact 一致（S1 第十七轮 P2-1）', () => {

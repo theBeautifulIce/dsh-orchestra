@@ -363,6 +363,29 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
     expect(nodeRow(db).status).toBe('verifying')
   })
 
+  it('required_hashes 的 64 位伪造值不在服务端可核验集合 → verification_too_weak（S2 第二十四轮 P1-1）', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact'] })
+    bindRunVersion(db, catalog)
+    const out = apply(db, {
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: 'a'.repeat(64) }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('verification_too_weak')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('required_hashes 的值为真实工具痕迹哈希 → 正常收口（S2 第二十四轮 P1-1 阳性对照）', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact'] })
+    bindRunVersion(db, catalog)
+    const out = apply(db, {
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: CMD }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(true)
+    expect(nodeRow(db).status).toBe('done')
+  })
+
   it('失败终态缺证据 → evidence_missing（S2 第二十三轮 P1-1）', () => {
     const db = setup()
     const out = apply(db, { status: 'failed', evidence: undefined })
@@ -371,11 +394,42 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
     expect(nodeRow(db).status).toBe('verifying')
   })
 
-  it('失败终态带执行器证据 → 正常收口（S2 第二十三轮 P1-1 阳性对照）', () => {
+  it('失败终态的证据与轨迹退出码矛盾 → evidence_unverifiable（S2 第二十四轮 P1-2）', () => {
     const db = setup()
     const out = apply(db, {
       status: 'failed',
       evidence: { source: 'run_tool', exitCode: 2, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_unverifiable')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('失败终态没有工具痕迹 → evidence_unverifiable（S2 第二十四轮 P1-2）', () => {
+    const db = setup({ trace: false })
+    const out = apply(db, {
+      status: 'failed',
+      evidence: { source: 'run_tool', exitCode: 2, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('evidence_unverifiable')
+    expect(nodeRow(db).status).toBe('verifying')
+  })
+
+  it('失败终态的失败行与 tool_finished 对齐 → 正常收口（S2 第二十四轮 P1-2 阳性对照）', () => {
+    const db = setup({ trace: false })
+    withTx(db, (tx) => {
+      tx.run(
+        "INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES ('nr_ar', 2, 'ro.echo', 2, 'bad', NULL, ?, ?, ?)",
+        [CMD, NOW, NOW],
+      )
+      appendNodeRunEvent(tx, TEST_SECRET, 'nr_ar', 'tool_finished', {
+        tool: 'ro.echo', attempt: 2, exit_code: 2, stdout_hash: 'bad', stderr_hash: null, command_hash: CMD,
+      })
+    })
+    const out = apply(db, {
+      status: 'failed',
+      evidence: { source: 'run_tool', exitCode: 2, stdoutHash: 'bad', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
     })
     expect(out.accepted).toBe(true)
     expect(nodeRow(db).status).toBe('failed')

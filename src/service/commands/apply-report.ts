@@ -8,6 +8,7 @@ import { transitionNode } from './node-state.ts'
 import { assertLeaseValid, loadNodeRun, type NodeRunRow } from './lease.ts'
 import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
+import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
 import { canTransition } from '../../core/state-machine.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 
@@ -223,11 +224,12 @@ export function applyReport(
   if (!canTransition(row.status, report.status)) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'illegal_transition', now: params.now })
   }
-  // 失败/超时终态也要有可核对的服务端证据：空证据不许收口（S2 第二十三轮 P1-1）
+  // 失败/超时终态也要有可核对的服务端证据：证据必须与同 attempt 的工具痕迹与 tool_finished 对齐，
+  // 不能凭一条自报的 exitCode 收口（S2 第二十三轮 P1-1、第二十四轮 P1-2）。
   if (report.status === 'failed' || report.status === 'timeout') {
-    const terminalReason = terminalEvidenceGate(report)
-    if (terminalReason) {
-      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: terminalReason, now: params.now })
+    const terminal = traceBindingGate(tx, params, report, { allowFailed: true })
+    if (terminal.reason) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: terminal.reason, now: params.now })
     }
   }
   // 第四、五步只对“完成”上报做通过证据与判定：失败、阻塞的回报不该被要求带通过证据
@@ -235,25 +237,29 @@ export function applyReport(
   if (report.status === 'done') {
     // 判定条件只从 run 绑定的工作流版本取，不在请求体、也不在函数参数里（规格 4.2 行 293）
     const policy = policyForReport(tx, row, catalog)
-    // 证据强度先按模板要求校验：不可逆节点只给 exitCode 不许收口（规格 4.7 行 380）
-    const evidence = evaluateEvidence(report, policy.requiredHashes ?? [])
-    if (!evidence.ok) {
-      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
-    }
     // 系统级证据门：弱证据、工具失败都不许直落 done（审计 R3-03）
     const systemReason = systemEvidenceGate(report)
     if (systemReason) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: systemReason, now: params.now })
     }
+    // 证据要跟账本里的工具执行痕迹对得上：伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
+    const trace = traceBindingGate(tx, params, report)
+    if (trace.reason) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: trace.reason, now: params.now })
+    }
+    // 证据强度按模板要求校验：requiredHashes 的值必须与服务端可重算的产物或痕迹哈希一致，
+    // 只写一个形态合法的伪造值不算证据（S2 第二十四轮 P1-1）。
+    const outputHash = sha256Hex(canonicalJson(report.output ?? null))
+    const evidence = evaluateEvidence(report, policy.requiredHashes ?? [], {
+      trustedHashes: [outputHash, ...trace.trustedHashes],
+    })
+    if (!evidence.ok) {
+      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
+    }
     // 判定条件：模板条件是基线，节点只能追加更严的条件（规格 4.7 行 390）
     const verdict = evaluatePassConditions(policy.passConditions, evidence.normalized)
     if (!verdict.pass) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: verdict.reason ?? 'verdict_unmet', now: params.now })
-    }
-    // 证据要跟账本里的工具执行痕迹对得上：伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
-    const bindReason = traceBindingGate(tx, params, report)
-    if (bindReason) {
-      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: bindReason, now: params.now })
     }
     evidenceDigest = evidence.digest
   }
@@ -317,16 +323,6 @@ function systemEvidenceGate(report: Report): string | null {
   return null
 }
 
-// 失败/超时终态的证据门：只要求证据存在、来自执行器且退出码可核对；
-// 退出码非 0 是失败终态的常态，不在这里按“工具失败”拒收（S2 第二十三轮 P1-1）
-function terminalEvidenceGate(report: Report): string | null {
-  const ev = report.evidence
-  if (!ev) return 'evidence_missing'
-  if (ev.source !== 'run_tool') return 'verification_too_weak'
-  if (typeof ev.exitCode !== 'number') return 'evidence_missing'
-  return null
-}
-
 type ToolExecutionRow = {
   tool: string
   exit_code: number
@@ -335,24 +331,38 @@ type ToolExecutionRow = {
   command_hash: string | null
 }
 
+type TraceBinding = {
+  reason: string | null
+  // 与证据对上的那一行工具痕迹的哈希；requiredHashes 的值必须落在这里面或 report.output 的摘要里。
+  trustedHashes: string[]
+}
+
 // 痕迹绑定门：证据要跟账本里的工具执行痕迹对得上，伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
 // 同一 attempt 只要有一行工具失败就不许 done；证据的命令名、退出码、stdout/stderr、命令哈希
-// 都要和同一行以及对应的 tool_finished 事件对齐（S2 第二十三轮 P0-2/P0-4）
-function traceBindingGate(tx: Tx, params: ApplyReportParams, report: Report): string | null {
+// 都要和同一行以及对应的 tool_finished 事件对齐（S2 第二十三轮 P0-2/P0-4）。
+// 失败/超时终态允许同 attempt 有失败行，但仍要求证据与其中一行及 tool_finished 全等，
+// 不能拿一条自报的 exitCode 收口（S2 第二十四轮 P1-2）。
+function traceBindingGate(
+  tx: Tx,
+  params: ApplyReportParams,
+  report: Report,
+  opts: { allowFailed?: boolean } = {},
+): TraceBinding {
   const ev = report.evidence
-  if (!ev) return 'evidence_missing'
-  if (typeof ev.tool !== 'string' || ev.tool.length === 0) return 'evidence_unverifiable'
-  if (typeof ev.commandHash !== 'string' || !/^[0-9a-f]{64}$/i.test(ev.commandHash)) return 'evidence_unverifiable'
-  if (typeof ev.producedAt !== 'string' || Number.isNaN(Date.parse(ev.producedAt))) return 'evidence_missing'
+  if (!ev) return { reason: 'evidence_missing', trustedHashes: [] }
+  if (ev.source !== 'run_tool') return { reason: 'verification_too_weak', trustedHashes: [] }
+  if (typeof ev.tool !== 'string' || ev.tool.length === 0) return { reason: 'evidence_unverifiable', trustedHashes: [] }
+  if (typeof ev.commandHash !== 'string' || !/^[0-9a-f]{64}$/i.test(ev.commandHash)) return { reason: 'evidence_unverifiable', trustedHashes: [] }
+  if (typeof ev.producedAt !== 'string' || Number.isNaN(Date.parse(ev.producedAt))) return { reason: 'evidence_missing', trustedHashes: [] }
   const rows = tx.all<ToolExecutionRow>(
     'SELECT tool, exit_code, stdout_hash, stderr_hash, command_hash FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
     [params.nodeRunId, params.attempt],
   )
-  if (rows.length === 0) return 'evidence_unverifiable'
-  // 同一次尝试里出现过失败的工具，整次尝试就不许以 done 收口
-  if (rows.some((r) => r.exit_code !== 0)) return 'tool_execution_failed'
+  if (rows.length === 0) return { reason: 'evidence_unverifiable', trustedHashes: [] }
+  // 同一次尝试里出现过失败的工具，整次尝试就不许以 done 收口；失败/超时终态本身就要对失败行。
+  if (!opts.allowFailed && rows.some((r) => r.exit_code !== 0)) return { reason: 'tool_execution_failed', trustedHashes: [] }
   const hashes = ev.hashes ?? {}
-  const matched = rows.some((r) => {
+  const matched = rows.find((r) => {
     if (r.exit_code !== ev.exitCode) return false
     if (r.tool !== ev.tool) return false
     if ((r.stdout_hash ?? '') !== (ev.stdoutHash ?? '')) return false
@@ -362,7 +372,7 @@ function traceBindingGate(tx: Tx, params: ApplyReportParams, report: Report): st
     if (hashes.stderr !== undefined && hashes.stderr !== r.stderr_hash) return false
     return true
   })
-  if (!matched) return 'evidence_unverifiable'
+  if (!matched) return { reason: 'evidence_unverifiable', trustedHashes: [] }
   // 事件面也要对得上：只有工具执行表有行、没有 tool_finished 留痕，仍按证据不可核
   const events = tx.all<{ payload: string }>(
     "SELECT payload FROM node_run_events WHERE node_run_id = ? AND type = 'tool_finished'",
@@ -381,6 +391,8 @@ function traceBindingGate(tx: Tx, params: ApplyReportParams, report: Report): st
       return false
     }
   })
-  if (!eventMatched) return 'evidence_unverifiable'
-  return null
+  if (!eventMatched) return { reason: 'evidence_unverifiable', trustedHashes: [] }
+  const trustedHashes = [matched.stdout_hash, matched.stderr_hash, matched.command_hash]
+    .filter((h): h is string => typeof h === 'string' && h.length > 0)
+  return { reason: null, trustedHashes }
 }

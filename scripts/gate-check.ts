@@ -606,7 +606,11 @@ function renderedAuditLines(text: string): string[] | null {
         buffer += child.content
       } else if (child.type === 'image') {
         // 图片加载失败时浏览器会显示 alt 文本；alt 里出现 fail 结论按歧义拒绝。
-        if (visibleFailStatement(AUDIT_MARKDOWN.utils.unescapeAll(child.content))) ambiguous = true
+        // alt 里的实体要先解码，标签（如 <wbr>）和不可见字符不能把结论拆开（S1 第二十轮 P0-2）。
+        const alt = normalizeAuditLine(
+          AUDIT_MARKDOWN.utils.unescapeAll(child.content).replace(/<[^>]*>/g, ''),
+        )
+        if (visibleFailStatement(alt)) ambiguous = true
         paragraphHasLink = true
       } else if (child.type === 'link_open' || child.type === 'link_close') {
         paragraphHasLink = true
@@ -626,35 +630,124 @@ function renderedAuditLines(text: string): string[] | null {
 }
 
 // 可见正文里的“本报告不通过 / 本次审计结论为 fail”这类判断句。
-// 先把空白与冒号压掉再匹配，避免被拆字绕过；verdict 后仍要求句读/括号/结尾，
-// 所以「本报告不通过项已全部修复」这类叙述不会误杀（S1 第十八轮补）。
-// window 只给门正文用：限制结论出现在行首附近且整行不长，避免把 G2 历史段落里
-// 引用的“门记录拿结论为 fail”误当成本次正文结论。
-const FAIL_SUBJECT = '(?:本报告|本次审计|本轮审计|本次复核|本次评审|该报告|此报告|本审计|审计)'
-const FAIL_VERDICT = '(?:fail(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的])|不通过(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的])|未通过(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的])|不合格(?=$|[\\s。．.！!？?；;，,、|*）)】」』”》〕］>—–：:\\-（(【\\[「『…/"\'‘’＂«»‹›]|[需应已了的]))'
+// 先做 NFKC、去撇号、丢不可见字符，把空白与标点统一成 |，再让主语/连接词/
+// 结论词允许任意 | 夹层；这样五行拆词、零宽、全角、连接号、引号都不能绕过。
+// 结论词后只接受结尾、分隔符或「需应已的了」，所以「不通过项」「未通过验收」
+// 这类叙述仍不误杀（S1 第十八至二十轮）。
+const FAIL_SUBJECTS = [
+  '本次独立审计', '审计意见', '审核意见', '复核意见', '评审意见',
+  '审计结论', '审核结论', '复核结论', '评审结论',
+  '审计结果', '审核结果', '复核结果', '评审结果',
+  '最终结论', '最终判定', '审计报告', '审核报告', '复核报告', '评审报告',
+  '本报告', '本次审计', '本轮审计', '本次复核', '本次评审', '该报告', '此报告', '本审计',
+  // 繁體主语同样不做简繁转换（S1 第二十轮 P1-1）。
+  '本報告', '本次審計', '本輪審計', '本次復核', '本次評審', '該報告', '此報告', '本審計',
+  '審計報告', '審核報告', '復核報告', '評審報告', '審計意見', '審核意見', '復核意見', '評審意見',
+  '審計結論', '審核結論', '復核結論', '評審結論', '審計結果', '審核結果', '復核結果', '評審結果',
+  '最終結論', '最終判定',
+  '审计', '审核', '复核', '评审', '结论', '判定', '審計', '審核', '復核', '評審', 'audit', 'review',
+].sort((a, b) => b.length - a.length)
 
-function visibleFailStatement(line: string, window: { maxStart?: number; maxLength?: number } = {}): boolean {
-  // 可见文字里的空白与冒号都可能被用来拆词（「结 论：fail」「结论∷fail」）；
-  // 判定前压成无空白、无冒号形态，只对语义判定负责，不改原始行（S1 第十八轮 P1）。
-  const compact = Array.from(line).filter((ch) => ch.trim() !== '' && !'\uFE13\uFE55\u2236\u02D0\uA789\uFF1A:：-—–―−'.includes(ch)).join('')
-  const re = new RegExp(
-    '(?:' +
-      FAIL_SUBJECT + '(?:的)?(?:经|经过)?(?:审计|复核|评审)?(?:后)?(?:最终|仍|依然|还是)?(?:结论|判定|审计意见|最终判定|最终结论|结果)?(?:为|是)?' + FAIL_VERDICT +
-      '|(?:审计|复核|评审)(?:结论|结果)(?:为|是)?' + FAIL_VERDICT +
-      '|(?:最终)?(?:结论|判定)(?:为|是)?' + FAIL_VERDICT +
-      ')',
-    'i',
-  )
-  if (window.maxLength !== undefined && line.length > window.maxLength) return false
-  // 英文报告同样可能把否定写在可见正文里（S2 第二十三轮 P0-1）
-  if (/\b(?:the\s+)?(?:audit|review)\b[^.\n]{0,30}\b(?:failed|not\s+passed|did\s+not\s+pass)\b/i.test(line)) return true
-  const m = re.exec(compact)
-  if (m && (window.maxStart === undefined || m.index <= window.maxStart)) return true
-  // 表格单元格只有结论 token 时同样算可见 fail（表头/格式行不会命中）。
-  for (const cell of compact.split('|')) {
-    if (new RegExp('^' + FAIL_VERDICT + '$', 'i').test(cell)) return true
+const FAIL_VERDICTS = [
+  '未得到通过', '没有得到通过', '未能通过', '没有通过', '并未通过', '未获通过', '未予通过',
+  '不能通过', '不是通过', '通不过', '不通过', '未通过', '没通过',
+  // 繁體否定词：NFKC 不做简繁转换，必须单独列出（S1 第二十轮 P1-1）。
+  '未得到通過', '沒有得到通過', '未能通過', '沒有通過', '並未通過', '未獲通過', '未予通過',
+  '不能通過', '不是通過', '通不過', '不通過', '未通過', '沒通過',
+  '不合格', '未成功', '不成功', '未过关', '没过', '不批准', '未批准', '失败',
+  '未過關', '沒過', '失敗',
+  'not successful', 'not succeeded', 'not succeed', 'not passed', 'not pass',
+  'didnt pass', 'didnt succeed', 'wasnt pass', 'isnt pass',
+  'unsuccessful', 'failure', 'failed', 'fails', 'fail',
+  'rejected', 'reject', 'denied', 'deny', 'no pass',
+].sort((a, b) => b.length - a.length)
+
+const FAIL_CONNECTORS = [
+  '审计意见', '审核意见', '复核意见', '评审意见',
+  '审计结论', '审核结论', '复核结论', '评审结论',
+  '审计结果', '审核结果', '复核结果', '评审结果',
+  '最终结论', '最终判定', 'conclusions', 'conclusion', 'outcome',
+  '结果', '结论', '判定', '意见', '经过', '审计', '审核', '复核', '评审',
+  '报告', '報告', '最终', '最終', '依然', '还是', '总的', 'results', 'result', 'report', 'review',
+  '審計', '審核', '復核', '評審', '結果', '意見',
+  'audit', 'was', 'were', 'has', 'have', 'had', 'been', 'did', 'does', 'do',
+  'is', 'are', 'to', 'the', 'a', 'an', '经', '后', '仍', '为', '是', '的',
+].sort((a, b) => b.length - a.length)
+
+function regexEscape(ch: string): string {
+  return ch.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')
+}
+
+// 允许任意不可见/标点夹层：每个字符之间插 \|*。
+function sepPattern(token: string): string {
+  return Array.from(token).filter((ch) => !/\s/u.test(ch)).map(regexEscape).join('\\|*')
+}
+
+function foldForVerdict(raw: string): string {
+  const text = raw.normalize('NFKC').toLowerCase().replace(/[\u2019\u00B4']/g, '')
+  let out = ''
+  for (const ch of text) {
+    if (/[\p{Cf}\p{Mn}\p{Me}]/u.test(ch)) continue
+    // 修饰字母形的冒号/连接号（U+02D0、U+A789）属于 Lm，不能当普通字母留下。
+    if ('\u02D0\uA789\u2236\uFE13\uFE55\uFF1A:\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE63\uFF0D\u2043'.includes(ch)) {
+      out += '|'
+      continue
+    }
+    if (/\s/u.test(ch)) {
+      out += '|'
+      continue
+    }
+    if (/[\p{L}\p{N}]/u.test(ch)) {
+      out += ch
+      continue
+    }
+    out += '|'
+  }
+  return out.replace(/\|+/g, '|').replace(/^\|+|\|+$/g, '')
+}
+
+const FAIL_VERDICT_RE = new RegExp('^(?:' + FAIL_VERDICTS.map(sepPattern).join('|') + ')')
+const FAIL_CONNECTOR_RES = FAIL_CONNECTORS.map((token) => ({ token, re: new RegExp('^' + sepPattern(token)) }))
+const FAIL_SUBJECT_RE = new RegExp(FAIL_SUBJECTS.map(sepPattern).join('|'), 'g')
+const FAIL_SUBJECT_NO_BARE_RE = new RegExp(
+  FAIL_SUBJECTS.filter((s) => s !== '结论' && s !== '判定').map(sepPattern).join('|'),
+  'g',
+)
+
+type FailScan = { bareConclusion?: 'any' | 'never' }
+
+function scanFailStatement(folded: string, scan: FailScan): boolean {
+  if (folded.length === 0) return false
+  const subjectRe = scan.bareConclusion === 'never' ? FAIL_SUBJECT_NO_BARE_RE : FAIL_SUBJECT_RE
+  subjectRe.lastIndex = 0
+  let sm: RegExpExecArray | null
+  while ((sm = subjectRe.exec(folded)) !== null) {
+    let pos = sm.index + sm[0].length
+    for (let guard = 0; guard < 8; guard += 1) {
+      while (folded[pos] === '|') pos += 1
+      const rest = folded.slice(pos)
+      const vm = FAIL_VERDICT_RE.exec(rest)
+      if (vm) {
+        const next = folded[pos + vm[0].length] ?? ''
+        if (next === '' || next === '|' || /[需应已的了]/.test(next)) return true
+      }
+      let advanced = false
+      for (const connector of FAIL_CONNECTOR_RES) {
+        const cm = connector.re.exec(rest)
+        if (cm) {
+          pos += cm[0].length
+          advanced = true
+          break
+        }
+      }
+      if (!advanced) break
+    }
   }
   return false
+}
+
+function visibleFailStatement(line: string, scan: FailScan = {}): boolean {
+  return scanFailStatement(foldForVerdict(line), scan)
 }
 
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
@@ -664,23 +757,14 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   let inlineFail = false
   const conclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/
   const conclusionWord = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)$/i
-  const inlineFailConclusion = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:fail|不通过)(?=$|[\s。．.！!？?；;，,、*（(—–-])/i
+  // 先把所有可见行按行边界拼起来做一次全文扫描：跨越任意多行的拆词都能命中。
+  if (visibleFailStatement(visible.join('|'))) inlineFail = true
   for (let visibleIndex = 0; visibleIndex < visible.length; visibleIndex += 1) {
     const line = visible[visibleIndex]!
     const strict = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(line)
     const bare = /^(?:pass|fail|通过|不通过)$/i.test(line)
     if (!strict && !bare) {
-      // 可见正文里另有一句 fail 结论（即使前面还有干净 pass）也不能放行；
-      // 反过来，正文里引用 pass 不影响紧跟的正式 fail 结论（S2 第二十轮 zwsp-colon）。
-      if (inlineFailConclusion.test(line) || visibleFailStatement(line)) inlineFail = true
-      // 软换行/实体换行也会把可见结论拆开（结\n论：fail、本报告结论\n为不通过）；
-      // 一段否定句可能被拆成三行以上，只拼下一行会漏；对最多四行做滑动拼接，
-      // 宁可多判歧义，不能让 fail 从换行缝里漏掉（S1 第十七轮 P2-4、第十九轮 P0-1）。
-      for (let span = 2; span <= 4; span += 1) {
-        const parts = visible.slice(visibleIndex, visibleIndex + span)
-        if (parts.length < span) break
-        if (visibleFailStatement(parts.join('')) || visibleFailStatement(parts.join(' '))) inlineFail = true
-      }
+      // 全文扫描已经在循环外完成；这里只保留链接定义与“结论”/“：fail”拆行的歧义判定。
       // 链接/引用定义段落里的可见“结论：”不能靠另一段干净 pass 洗掉（S2 第二十轮 def-*）；
       // 普通正文里提到“结论：”只是行内引用，不影响后面的正式结论行。
       if (line.includes('[') && conclusionText.test(line)) return null
@@ -718,19 +802,12 @@ function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
     const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
     if (m) found.push(rawVerdict(m[1] ?? ''))
   }
-  const bodyWindow = { maxStart: 24, maxLength: 160 }
-  for (let i = 0; i < visible.length; i += 1) {
-    const line = visible[i]!
-    if (visibleFailStatement(line, bodyWindow)) return 'fail'
-    // 门记录正文也可能把否定句拆成多行；与审计报告同一口径做滑动拼接（S1 第十九轮 P0-4）。
-    for (let span = 2; span <= 4; span += 1) {
-      const parts = visible.slice(i, i + span)
-      if (parts.length < span) break
-      if (
-        visibleFailStatement(parts.join(''), bodyWindow) ||
-        visibleFailStatement(parts.join(' '), bodyWindow)
-      ) return 'fail'
-    }
+  // 正文不再按 160 字/24 字偏移截窗：长行和靠后的否定句同样能签过（S1 第二十轮 P0-4）。
+  // 历史段落里“门记录拿结论为 fail”这类叙述用裸“结论”会误杀，所以全文扫描排除
+  // 裸结论主语，只对以“结论/判定”开头的行补一次精确判定。
+  if (visibleFailStatement(visible.join('|'), { bareConclusion: 'never' })) return 'fail'
+  for (const line of visible) {
+    if (/^(?:结论|判定)/.test(line) && visibleFailStatement(line)) return 'fail'
   }
   return found.length === 1 ? found[0]! : null
 }

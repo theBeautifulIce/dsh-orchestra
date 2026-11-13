@@ -11,27 +11,35 @@ const report = (over: Partial<Report> = {}): Report => ({
   ...over,
 })
 
+// requiredHashes 的值必须等于服务端可重算的产物或工具痕迹哈希，不是只写个 64 位十六进制就算数。
+const trusted = { trustedHashes: ['a'.repeat(64)] }
+
 describe('证据门', () => {
   it('没有 evidence → ok=false、reason=evidence_missing', () => {
-    const out = evaluateEvidence(report({ evidence: undefined }), [])
+    const out = evaluateEvidence(report({ evidence: undefined }), [], trusted)
     expect(out.ok).toBe(false)
     expect(out.reason).toBe('evidence_missing')
   })
 
   it('来源决定强弱：run_tool 强、tool_result 弱', () => {
-    expect(evaluateEvidence(report(), []).strength).toBe('strong')
-    expect(evaluateEvidence(report({ evidence: { source: 'tool_result' } }), []).strength).toBe('weak')
+    expect(evaluateEvidence(report(), [], trusted).strength).toBe('strong')
+    expect(evaluateEvidence(report({ evidence: { source: 'tool_result' } }), [], trusted).strength).toBe('weak')
   })
 
   it('必留哈希缺失 → verification_too_weak；补齐强证据 → ok', () => {
     const onlyExit = report({ evidence: { source: 'run_tool', exitCode: 0 } })
-    expect(evaluateEvidence(onlyExit, ['artifact']).reason).toBe('verification_too_weak')
-    expect(evaluateEvidence(report(), ['artifact']).ok).toBe(true)
+    expect(evaluateEvidence(onlyExit, ['artifact'], trusted).reason).toBe('verification_too_weak')
+    expect(evaluateEvidence(report(), ['artifact'], trusted).ok).toBe(true)
+  })
+
+  it('形态合法的伪造哈希不算证据', () => {
+    const forged = report({ evidence: { source: 'run_tool', exitCode: 0, hashes: { artifact: 'b'.repeat(64) } } })
+    expect(evaluateEvidence(forged, ['artifact'], trusted).reason).toBe('verification_too_weak')
   })
 
   it('弱证据不做不可逆凭据', () => {
     const weak = report({ evidence: { source: 'tool_result', hashes: { artifact: 'a'.repeat(64) } } })
-    expect(evaluateEvidence(weak, ['artifact']).reason).toBe('verification_too_weak')
+    expect(evaluateEvidence(weak, ['artifact'], trusted).reason).toBe('verification_too_weak')
   })
 })
 
