@@ -90,7 +90,8 @@ describe('认证与信封', () => {
     const { base } = await boot()
     const res = await get(base + '/v1/events?from_seq=5&limit=9999', SECRET)
     expect(res.status).toBe(200)
-    expect((await res.json() as { data: unknown }).data).toEqual({ items: [{ from: 5, limit: 500 }] })
+    // 事件单页上限 200（与 src/service/queries/list_events.ts 的 EVENTS_LIMIT_MAX 一致）
+    expect((await res.json() as { data: unknown }).data).toEqual({ items: [{ from: 5, limit: 200 }], next_cursor: null })
   })
 
   it('POST /v1/ledger/events 匿名写 → 401', async () => {

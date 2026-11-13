@@ -84,12 +84,12 @@ describe('门记录校验', () => {
     expect(() => verifyGateRecord(text)).toThrow(/candidate_hash 与候选文件不符/)
   })
 
-  it('证据没人引用时指名是哪一份', () => {
+  it('必过项的证据被摘空时指名哪一项缺证据', () => {
     const text = tamper(read(), (a) => {
-      const items = a.must_pass_items as { evidence_ids: string[] }[]
-      for (const item of items) item.evidence_ids = item.evidence_ids.filter((id) => id !== 'ev-phase')
-      a.must_pass_items = items
+      const items = a.must_pass_items as { id: string; evidence_ids: string[] }[]
+      const target = items.find((i) => i.id === 'G1-07')
+      if (target) target.evidence_ids = []
     })
-    expect(() => verifyGateRecord(text)).toThrow(/证据没被任何必过项或不变量引用: ev-phase/)
+    expect(() => verifyGateRecord(text)).toThrow(/必过项缺证据: G1-07/)
   })
 })
