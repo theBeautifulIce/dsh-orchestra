@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsh-orchestra · 神经中枢原型 v18</title>
+<title>dsh-orchestra · 神经中枢原型 v19</title>
 <style>
 :root{
   --bg:#f3f4f7;
@@ -3628,6 +3628,40 @@ body.v5 .now-line{display:flex;align-items:baseline;margin:0 0 10px;padding:9px 
 body.v5 .lens-bar{display:flex;align-items:center;gap:10px;margin:0 0 12px;padding:9px 12px;border:1px solid #e6e7ea;border-radius:8px;background:#fbfbfc;font-size:12.5px;color:#6b7079}
 body.v5 .lens-bar b{color:#111316;font-weight:650}
 body.v5 .lens-bar .link-btn{margin-left:auto}
+
+/* ---- v19：任务查询条件与归档箱 ---- */
+body.v5 .query-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:9px 12px;border:1px solid #e6e7ea;border-radius:8px;background:#fff}
+body.v5 .qb-field{display:inline-flex;align-items:center;gap:7px}
+body.v5 .qb-label{font-size:12.5px;color:#6b7079}
+body.v5 .mini-select{height:28px;padding:0 6px;border:1px solid #e6e7ea;border-radius:6px;background:#fff;font:inherit;font-size:13px;color:#111316;cursor:pointer}
+body.v5 .mini-select:hover{border-color:#c9ccd2}
+body.v5 .mini-date{height:28px;padding:0 8px;border:1px solid #e6e7ea;border-radius:6px;background:#fff;font:inherit;font-size:12.5px;color:#111316}
+body.v5 .mini-select:focus,body.v5 .mini-date:focus{outline:none;border-color:#111316}
+body.v5 .date-range{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6b7079}
+body.v5 .qb-right{margin-left:auto;display:inline-flex;align-items:center;gap:12px}
+body.v5 .archive-toggle{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 10px;border:1px solid #e6e7ea;border-radius:6px;background:#fff;font:inherit;font-size:12.5px;color:#3c4147;cursor:pointer}
+body.v5 .archive-toggle .ic{width:13px;height:13px;color:#6b7079}
+body.v5 .archive-toggle b{font-family:var(--mono);font-size:12px;font-weight:600;color:#111316}
+body.v5 .archive-toggle:hover{border-color:#c9ccd2;background:#fafafb}
+body.v5 .archive-toggle.on{background:#111316;border-color:#111316;color:#fff}
+body.v5 .archive-toggle.on .ic,body.v5 .archive-toggle.on b{color:#fff}
+body.v5 .archive-note{display:flex;align-items:flex-start;gap:9px;margin:0 0 12px;padding:11px 13px;border:1px solid #e6e7ea;border-radius:8px;background:#fbfbfc;font-size:12.5px;line-height:1.7;color:#4a4f57}
+body.v5 .archive-note .ic{width:14px;height:14px;flex:none;margin-top:2px;color:#6b7079}
+body.v5 .archive-note b{font-weight:600;color:#111316}
+body.v5 .archive-list{display:flex;flex-direction:column;gap:8px}
+body.v5 .archive-row{display:grid;grid-template-columns:minmax(0,2.2fr) minmax(0,1.3fr) auto auto;gap:18px;align-items:center;padding:12px 15px;border:1px solid #e6e7ea;border-radius:9px;background:#fff}
+body.v5 .ar-title{font-size:14px;font-weight:600;color:#111316;line-height:1.45}
+body.v5 .ar-sub{margin-top:3px;font-size:12px;color:#6b7079}
+body.v5 .ar-result,body.v5 .ar-date{font-size:13px;line-height:1.55;color:#3c4147}
+body.v5 .ar-k{display:block;margin-bottom:2px;font-size:11.5px;color:#6b7079}
+body.v5 .arch-box{padding:12px 14px;border:1px solid #e6e7ea;border-radius:9px;background:#fbfbfc}
+body.v5 .arch-row{display:flex;gap:12px;align-items:baseline;padding:4px 0;font-size:13px;line-height:1.6;color:#3c4147}
+body.v5 .arch-row span{flex:none;width:76px;font-size:12px;color:#6b7079}
+body.v5 .arch-row b{font-weight:600;color:#111316}
+body.v5 .arch-desc{margin-top:8px;padding-top:9px;border-top:1px solid #e6e7ea;font-size:12.5px;line-height:1.7;color:#6b7079}
+body.v5 .arch-ack{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:13px;line-height:1.65;color:#3c4147;cursor:pointer}
+body.v5 .arch-ack input{margin-top:3px}
+@media (max-width:900px){body.v5 .archive-row{grid-template-columns:1fr auto}body.v5 .ar-result,body.v5 .ar-date{grid-column:1/-1}}
 </style>
 </head>
 <body class="v3 v5">
@@ -3913,7 +3947,9 @@ const RUNS = {
   run_1c44: { id: 'run_1c44', taskId: 'tsk_design', status: 'succeeded', time: '11-09 16:10', duration: '3h12m', trigger: '持续目标', summary: '第三段 v23 收尾，审计通过', seq: 17988, stepStates: ['done','done','done','done','done','done'] },
   run_6c02: { id: 'run_6c02', taskId: 'tsk_review', status: 'blocked', time: '今天 20:31', duration: '8m', trigger: '事件触发', summary: '审计结果分成 2 个致命问题、6 个重大问题、4 个措辞问题，等你复核', seq: 18416, stepStates: ['done','done','run','wait','wait','wait'] },
   run_b18e: { id: 'run_b18e', taskId: 'tsk_migrate', status: 'done_unverified', time: '今天 20:08', duration: '1m04s', trigger: '人工触发', summary: '迁移脚本跑完；有 2 笔写入没拿到系统确认', seq: 18408, stepStates: ['done','done','done','wait','done_unverified'] },
-  run_3e77: { id: 'run_3e77', taskId: 'tsk_release', status: 'succeeded', time: '今天 19:44', duration: '22m', trigger: '人工触发', summary: '第四段面板 v1 已交评审；设计稿提交待跟进', seq: 18390, stepStates: ['done','done','done','done','done'] }
+  run_3e77: { id: 'run_3e77', taskId: 'tsk_release', status: 'succeeded', time: '今天 19:44', duration: '22m', trigger: '人工触发', summary: '第四段面板 v1 已交评审；设计稿提交待跟进', seq: 18390, stepStates: ['done','done','done','done','done'] },
+  run_e101: { id: 'run_e101', taskId: 'tsk_audit_v22', status: 'succeeded', time: '11-06 15:20', duration: '14m', trigger: '人工触发', summary: '独立审计通过；0 个致命，3 个措辞已改', seq: 17320, stepStates: ['done','done','done'] },
+  run_f001: { id: 'run_f001', taskId: 'tsk_cleanup', status: 'succeeded', time: '09-30 18:20', duration: '42s', trigger: '定时唤醒', summary: '清掉 18 个旧临时文件；清单已存档', seq: 16840, stepStates: ['done','done'] },
 };
 
 /* ================= tasks ================= */
@@ -3922,7 +3958,7 @@ const TASKS = [
     id: 'tsk_memory', type: 'scheduled', title: '每日 09:00 项目记忆巡检',
     workflowId: 'wf_memory', status: 'scheduled', column: 'scheduled', priority: 'P2', owner: '七七',
     schedule: '每天 09:00', next: '明天 09:00', latestRun: 'run_9f31', runCount: 12,
-    attention: 0, progress: null, due: null, createdAt: '2026-10-28',
+    attention: 0, progress: null, due: null, createdAt: '2026-10-28', updatedAt: '2026-11-12',
     desc: '读取记忆与记事本候选，归并重复、标出冲突，并把当天的变化压成一条可追溯摘要。',
     acceptance: '归并结果可回退；冲突项不自动删除；日报包含每条变更的来源。',
     tags: ['记忆', '自动', '只读扫描'],
@@ -3939,7 +3975,7 @@ const TASKS = [
     id: 'tsk_design', type: 'continuous', title: '把第三段设计改到第二轮通过',
     workflowId: 'wf_design', status: 'running', column: 'running', priority: 'P0', owner: '七七',
     schedule: null, next: null, latestRun: 'run_7f3a', runCount: 3,
-    attention: 1, progress: 78, due: '今晚 23:30', createdAt: '2026-11-09',
+    attention: 1, progress: 78, due: '今晚 23:30', createdAt: '2026-11-09', updatedAt: '2026-11-12',
     desc: '围绕第三段九种节点与状态机，把审计指出的引用冲突收敛成可提交的唯一生效清单。',
     acceptance: '没有致命问题、没有重大问题；每处冲突都有处理结论；证据能回查。',
     tags: ['设计', '编排'],
@@ -3956,7 +3992,7 @@ const TASKS = [
     id: 'tsk_review', type: 'event', title: '审计结果回来了：v24 第四段',
     workflowId: 'wf_review', status: 'blocked', column: 'attention', priority: 'P1', owner: '七七',
     schedule: null, next: null, latestRun: 'run_6c02', runCount: 1,
-    attention: 1, progress: null, due: '今天 21:30', createdAt: '2026-11-11',
+    attention: 1, progress: null, due: '今天 21:30', createdAt: '2026-11-11', updatedAt: '2026-11-12',
     desc: '独立审计结果已经回来，按致命、重大、措辞分开；等你确认分级。',
     acceptance: '每条判断都能回到审计原文；最急的项进入「等你决定」。',
     tags: ['审计', '事件', 'v24'],
@@ -3974,7 +4010,7 @@ const TASKS = [
     id: 'tsk_weekly', type: 'scheduled', title: '每周一 10:00 清理没有系统确认的操作',
     workflowId: 'wf_effects', status: 'paused', column: 'attention', priority: 'P1', owner: '七七',
     schedule: '每周一 10:00', next: '已暂停', latestRun: 'run_5b18', runCount: 8,
-    attention: 1, progress: null, due: null, createdAt: '2026-10-06',
+    attention: 1, progress: null, due: null, createdAt: '2026-10-06', updatedAt: '2026-11-09',
     desc: '扫描没有拿到系统确认的操作，先尝试补证；补不到证据就停下来，交给人处理。',
     acceptance: '没有任何没有系统确认的操作被自动关掉；暂停原因与恢复条件都有记录。',
     tags: ['没有系统确认', '自动', '已暂停'],
@@ -3990,7 +4026,7 @@ const TASKS = [
     id: 'tsk_panel', type: 'manual', title: '面板 v2 信息架构定稿',
     workflowId: null, status: 'queued', column: 'scheduled', priority: 'P1', owner: '啸春',
     schedule: null, next: null, latestRun: null, runCount: 0,
-    attention: 0, progress: null, due: '今天 22:00', createdAt: '2026-11-11',
+    attention: 0, progress: null, due: '今天 22:00', createdAt: '2026-11-11', updatedAt: '2026-11-11',
     desc: '把任务类型、历史运行、工作流管理与 Superagent 编排放进一套可评审的信息架构。',
     acceptance: '评审问题有明确结论；原型可点击；改动范围可落到设计稿。',
     tags: ['面板', '评审', '人工'],
@@ -4000,7 +4036,7 @@ const TASKS = [
     id: 'tsk_migrate', type: 'manual', title: '把本地数据库升到 v18',
     workflowId: 'wf_memory', status: 'done_unverified', column: 'done', priority: 'P2', owner: '七七',
     schedule: null, next: null, latestRun: 'run_b18e', runCount: 1,
-    attention: 2, progress: 100, due: null, createdAt: '2026-11-11',
+    attention: 2, progress: 100, due: null, createdAt: '2026-11-11', updatedAt: '2026-11-12',
     desc: '把本地编排账本升到 v18，补一行迁移记录，并通知审计子代理。',
     acceptance: '迁移记录能查到；审计确认能对上；对不上时停在「做完，等系统确认」。',
     tags: ['迁移', '未验证', '数据库'],
@@ -4016,7 +4052,7 @@ const TASKS = [
     id: 'tsk_notes', type: 'scheduled', title: '每晚 23:00 归并当日记忆',
     workflowId: 'wf_memory', status: 'scheduled', column: 'scheduled', priority: 'P3', owner: '七七',
     schedule: '每天 23:00', next: '今天 23:00', latestRun: 'run_4d21', runCount: 34,
-    attention: 0, progress: null, due: null, createdAt: '2026-09-18',
+    attention: 0, progress: null, due: null, createdAt: '2026-09-18', updatedAt: '2026-11-11',
     desc: '把当日零散记忆归并成索引，压缩重复条目，并把摘要放回当日笔记。',
     acceptance: '原文不丢失；索引可检索；失败时不影响原记忆。',
     tags: ['记忆', '自动', '夜间'],
@@ -4032,7 +4068,7 @@ const TASKS = [
     id: 'tsk_release', type: 'continuous', title: '把 v25 设计稿送审，记下结果',
     workflowId: 'wf_design', status: 'done', column: 'done', priority: 'P2', owner: '七七',
     schedule: null, next: null, latestRun: 'run_3e77', runCount: 6,
-    attention: 0, progress: 100, due: null, createdAt: '2026-11-10',
+    attention: 0, progress: 100, due: null, createdAt: '2026-11-10', updatedAt: '2026-11-12',
     desc: '把第四段面板与查询的修改交给独立审计，通过后记下结果。',
     acceptance: '审计结果可追溯；台账、交接说明、L5 同步；工作树干净。',
     tags: ['设计', '送审', '收尾'],
@@ -4041,6 +4077,33 @@ const TASKS = [
       { label: '一致性自检', state: 'done', dur: '4m' },
       { label: '送独立审计', state: 'done', dur: '6m' },
       { label: '记下结果', state: 'done', dur: '3m' }
+    ]
+  },
+  {
+    id: 'tsk_audit_v22', type: 'continuous', title: '把 v22 面板送独立审计，记下结论',
+    workflowId: 'wf_design', status: 'done', column: 'done', priority: 'P2', owner: '七七',
+    schedule: null, next: null, latestRun: 'run_e101', runCount: 3,
+    attention: 0, progress: 100, due: null, createdAt: '2026-10-30', updatedAt: '2026-11-06', archivedAt: '2026-11-06',
+    desc: '第四段改完之后请独立审计看一遍，把结论记进台账。',
+    acceptance: '审计结论可追溯；台账与交接说明同步；工作树干净。',
+    tags: ['设计', '审计', '已归档'],
+    chain: [
+      { label: '整理修订', state: 'done', dur: '12m' },
+      { label: '送独立审计', state: 'done', dur: '9m' },
+      { label: '记下结论', state: 'done', dur: '4m' }
+    ]
+  },
+  {
+    id: 'tsk_cleanup', type: 'scheduled', title: '每周清理运行记录里的旧临时文件',
+    workflowId: 'wf_memory', status: 'done', column: 'done', priority: 'P3', owner: '七七',
+    schedule: '每周一 08:00', next: '已归档，不再排期', latestRun: 'run_f001', runCount: 2,
+    attention: 0, progress: 100, due: null, createdAt: '2026-09-25', updatedAt: '2026-09-30', archivedAt: '2026-10-01',
+    desc: '把运行记录里超过 30 天的临时文件清掉，删之前先对一遍清单。',
+    acceptance: '清理清单可查；没有误删仍在引用的文件。',
+    tags: ['维护', '清理', '已归档'],
+    chain: [
+      { label: '对清单', state: 'done', dur: '1m' },
+      { label: '清理文件', state: 'done', dur: '42s' }
     ]
   }
 ];
@@ -4055,7 +4118,9 @@ const taskRuns = task => {
     : task.id === 'tsk_design' ? ['run_7f3a','run_2d55','run_1c44']
     : task.id === 'tsk_review' ? ['run_6c02']
     : task.id === 'tsk_migrate' ? ['run_b18e']
-    : task.id === 'tsk_release' ? ['run_3e77'] : [];
+    : task.id === 'tsk_release' ? ['run_3e77']
+    : task.id === 'tsk_audit_v22' ? ['run_e101']
+    : task.id === 'tsk_cleanup' ? ['run_f001'] : [];
   return ids.map(id => RUNS[id]).filter(Boolean);
 };
 
@@ -4297,6 +4362,11 @@ const state = {
   taskView: 'board',
   taskFilter: 'all',
   taskLens: 'all',
+  taskStatus: 'all',
+  taskTime: 'all',
+  taskFrom: '',
+  taskTo: '',
+  taskArchive: false,
   branchesExpanded: false,
   search: '',
   historyOpen: {},
@@ -4341,6 +4411,37 @@ const runOfTask = t => (t && t.latestRun) ? RUNS[t.latestRun] : null;
 const pendingDecisions = () => DECISIONS.filter(d => d.status !== 'resolved' && !state.reviewChoices[d.id]);
 const pendingEffects = () => EFFECTS.filter(e => e.status === 'open');
 const runningTasks = () => TASKS.filter(t => t.status === 'running');
+/* 归档箱：只改它出不出现，不改历史。演示数据里的“今天”固定为 2026-11-12。 */
+const TODAY_ISO = '2026-11-12';
+const isArchived = t => !!t.archivedAt;
+const activeTasks = () => TASKS.filter(t => !isArchived(t));
+const archivedTasks = () => TASKS.filter(isArchived);
+const taskActivityDate = t => t.updatedAt || t.createdAt || '';
+const daysAgoISO = n => { const d = new Date(TODAY_ISO + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
+const fmtArchiveDate = v => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''); return m ? (Number(m[2]) + ' 月 ' + Number(m[3]) + ' 日') : (v || ''); };
+const TASK_STATUS_FILTER = { running: 'running', blocked: 'blocked', unverified: 'done_unverified', scheduled: 'scheduled', done: 'done', paused: 'paused', queued: 'queued' };
+function taskTimeBounds(){
+  const v = state.taskTime || 'all';
+  if(v === 'today') return [TODAY_ISO, TODAY_ISO];
+  if(v === '7d') return [daysAgoISO(6), TODAY_ISO];
+  if(v === '30d') return [daysAgoISO(29), TODAY_ISO];
+  if(v === 'custom') return [state.taskFrom || '', state.taskTo || ''];
+  return ['', ''];
+}
+function archiveTask(id){
+  const t = taskById(id);
+  if(!t || isArchived(t)) return false;
+  t.archivedAt = TODAY_ISO;
+  addEvent('task.archived', '啸春', '把「' + tidy(t.title) + '」收进归档箱；运行记录、事件和决定都保留', { task_id: t.id }, t.id);
+  return true;
+}
+function restoreTask(id){
+  const t = taskById(id);
+  if(!t || !isArchived(t)) return false;
+  t.archivedAt = null;
+  addEvent('task.restored', '啸春', '把「' + tidy(t.title) + '」从归档箱取回', { task_id: t.id }, t.id);
+  return true;
+}
 const openDecisions = pendingDecisions;
 const openEffects = pendingEffects;
 
@@ -4461,16 +4562,24 @@ function whenOf(t) {
 
 function filteredTasks() {
   const q = (state.taskQuery || '').trim().toLowerCase();
-  return TASKS.filter(t => {
+  const want = state.taskStatus !== 'all' ? (TASK_STATUS_FILTER[state.taskStatus] || state.taskStatus) : null;
+  const bounds = taskTimeBounds();
+  const pool = state.taskArchive ? archivedTasks() : activeTasks();
+  const out = pool.filter(t => {
     if (state.taskFilter !== 'all' && t.type !== state.taskFilter) return false;
+    if (want && t.status !== want) return false;
     if (state.taskLens === 'running' && t.status !== 'running') return false;
     if (state.taskLens === 'blocked' && t.status !== 'blocked') return false;
     if (state.taskLens === 'unverified' && t.status !== 'done_unverified') return false;
+    const d = state.taskArchive ? (t.archivedAt || taskActivityDate(t)) : taskActivityDate(t);
+    if (bounds[0] && (!d || d < bounds[0])) return false;
+    if (bounds[1] && (!d || d > bounds[1])) return false;
     if (!q) return true;
     const wf = wfOfTask(t);
     const hay = [t.title, t.desc, t.tags.join(' '), wf ? wf.name : ''].join(' ').toLowerCase();
     return hay.indexOf(q) >= 0;
   });
+  return state.taskArchive ? out.slice().sort((a, b) => String(b.archivedAt).localeCompare(String(a.archivedAt))) : out;
 }
 
 /* ============================================================
@@ -4759,22 +4868,51 @@ function renderTasksList(list) {
   return '<div class="task-list">' + list.map(t => '<div class="task-list-row" data-task="' + t.id + '"><div class="tl-main"><div class="tl-title">' + esc(tidy(t.title)) + '</div><div class="tl-sub">' + typeWord(t.type) + ' · ' + esc(person(t.owner)) + '</div></div><div class="tl-stage">' + esc(stageOf(t)) + '</div><div class="tl-result">' + esc(resultOf(t)) + '</div><div class="tl-next">' + esc(nextOf(t)) + '</div><div class="tl-when">' + esc(whenOf(t)) + '</div></div>').join('') + '</div>';
 }
 
+function renderArchiveList(list){
+  const note = '<div class="archive-note">' + icon('info') + '<span><b>归档不是删除，也不是一种状态。</b>任务只是从看板和日常列表里收起来；运行记录、事件和当时的决定全部保留，能搜索，也能随时取回。这份列表按归档时间倒序。</span></div>';
+  if(!list.length) return note + '<div class="empty">这一页还没有归档的任务。</div>';
+  return note + '<div class="archive-list">' + list.map(t => '<div class="archive-row"><div class="ar-main"><div class="ar-title">' + esc(tidy(t.title)) + '</div><div class="ar-sub">' + typeWord(t.type) + ' · ' + esc(person(t.owner)) + ' · 共 ' + (t.runCount || 0) + ' 次运行</div></div><div class="ar-result"><span class="ar-k">最后结果</span>' + esc(resultOf(t)) + '</div><div class="ar-date"><span class="ar-k">归档于</span>' + fmtArchiveDate(t.archivedAt) + '</div><button class="btn ghost sm" data-act="task-restore" data-task="' + t.id + '">取回</button></div>').join('') + '</div>';
+}
+
+function archiveModal(t){
+  return modalShell('归档 · ' + typeWord(t.type), '把「' + tidy(t.title) + '」收进归档箱？',
+    '<div class="arch-box">' +
+      '<div class="arch-row"><span>会怎样</span><b>从看板和日常列表里收起来，不再占位置</b></div>' +
+      '<div class="arch-row"><span>仍然保留</span><b>全部运行记录、事件、当时的决定和证据</b></div>' +
+      '<div class="arch-row"><span>想找回来</span><b>任务页的「归档箱」，随时取回，状态不变</b></div>' +
+      '<div class="arch-desc">归档不是删除，也不是一种任务状态。它只是让这条任务退到后面去，历史一件不少。</div>' +
+    '</div>' +
+    '<label class="arch-ack"><input type="checkbox" id="archAck"> 我知道它不会出现在日常列表里；需要时我会去归档箱取回</label>',
+    '<button class="btn ghost" data-act="close-modal">先不归档</button><button class="btn primary" data-act="confirm-archive" data-task="' + t.id + '">确认归档</button>');
+}
+
 function renderTasks() {
   const list = filteredTasks();
+  const arch = !!state.taskArchive;
   const lens = state.taskLens || 'all';
   const lensName = { running: '正在做', blocked: '等你决定', unverified: '待确认' }[lens];
-  const narrowed = lens !== 'all' || state.taskFilter !== 'all' || !!(state.taskQuery || '').trim();
-  const headCount = narrowed ? ('显示 ' + list.length + ' / 共 ' + TASKS.length + ' 件') : ('共 ' + TASKS.length + ' 件');
+  const narrowed = lens !== 'all' || state.taskFilter !== 'all' || state.taskStatus !== 'all' || state.taskTime !== 'all' || !!(state.taskQuery || '').trim();
+  const basePool = arch ? archivedTasks() : activeTasks();
+  const total = basePool.length;
+  const headCount = arch ? ('归档 ' + archivedTasks().length + ' 件') : (narrowed ? ('显示 ' + list.length + ' / 共 ' + total + ' 件') : ('共 ' + total + ' 件'));
   const lensBar = lens === 'all' ? '' : '<div class="lens-bar"><span>只看：' + lensName + '</span><b>' + list.length + ' 件</b><button class="link-btn" data-act="task-lens" data-lens="all">看全部</button></div>';
-  const counts = { all: TASKS.length };
-  Object.keys(TYPE).forEach(k => counts[k] = TASKS.filter(t => t.type === k).length);
+  const counts = { all: total };
+  Object.keys(TYPE).forEach(k => counts[k] = basePool.filter(t => t.type === k).length);
   const filters = [['all', '全部'], ['scheduled', '定时'], ['continuous', '持续'], ['event', '事件'], ['manual', '人工']].map(c => '<button class="filter ' + (state.taskFilter === c[0] ? 'on' : '') + '" data-act="task-filter" data-filter="' + c[0] + '">' + c[1] + ' <span class="n">' + counts[c[0]] + '</span></button>').join('');
   const views = [['board', '看板'], ['workflow', '流程'], ['list', '列表']].map(v => '<button class="view-btn ' + (state.taskView === v[0] ? 'on' : '') + '" data-act="task-view" data-view="' + v[0] + '">' + v[1] + '</button>').join('');
-  const body = state.taskView === 'board' ? renderTasksBoard(list) : state.taskView === 'workflow' ? renderTasksWorkflow(list) : renderTasksList(list);
-  const empty = list.length ? '' : '<div class="empty">当前筛选下没有任务。<button class="link-btn" data-act="task-filter" data-filter="all">清除筛选</button></div>';
+  const statusSel = '<label class="qb-field"><span class="qb-label">状态</span><select id="taskStatus" class="mini-select">' + [['all', '全部状态'], ['running', '正在做'], ['blocked', '卡住了'], ['unverified', '做完了待核实'], ['scheduled', '等排期'], ['paused', '已暂停'], ['done', '已完成'], ['queued', '排队中']].map(o => '<option value="' + o[0] + '"' + (state.taskStatus === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></label>';
+  const timeSel = '<label class="qb-field"><span class="qb-label">时间</span><select id="taskTime" class="mini-select">' + [['all', '全部时间'], ['today', '今天'], ['7d', '近 7 天'], ['30d', '近 30 天'], ['custom', '自选时间段']].map(o => '<option value="' + o[0] + '"' + (state.taskTime === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></label>';
+  const dateRange = state.taskTime === 'custom' ? '<span class="date-range"><input type="date" id="taskFrom" class="mini-date" value="' + esc(state.taskFrom) + '" aria-label="从哪一天"><span>到</span><input type="date" id="taskTo" class="mini-date" value="' + esc(state.taskTo) + '" aria-label="到哪一天"></span>' : '';
+  const reset = narrowed ? '<button class="link-btn" data-act="task-reset">清除条件</button>' : '';
+  const archBtn = '<button class="archive-toggle ' + (arch ? 'on' : '') + '" data-act="task-archive" data-archive="' + (arch ? '0' : '1') + '">' + icon('archive') + '<span>' + (arch ? '回到全部任务' : '归档箱') + '</span><b>' + archivedTasks().length + '</b></button>';
+  const queryBar = '<div class="query-bar">' + statusSel + timeSel + dateRange + '<span class="qb-right">' + reset + archBtn + '</span></div>';
+  const body = arch ? renderArchiveList(list) : state.taskView === 'board' ? renderTasksBoard(list) : state.taskView === 'workflow' ? renderTasksWorkflow(list) : renderTasksList(list);
+  const empty = list.length ? '' : arch
+    ? '<div class="empty">归档箱还是空的。只有已完成的任务才能收进来；收进来后，运行记录和决定都还在。' + (narrowed ? '<button class="link-btn" data-act="task-reset">清除条件</button>' : '') + '</div>'
+    : '<div class="empty">当前筛选下没有任务。<button class="link-btn" data-act="task-reset">清除条件</button></div>';
   return '<section class="page">' +
-    '<div class="task-top"><div class="task-top-main"><div class="task-kicker">工作 · ' + headCount + '</div><h1>任务</h1><p>点一条任务看它做到哪一步；点任意一步，过程和结果就在右边。</p></div><div class="task-top-actions"><button class="btn ghost" data-act="toast" data-msg="当前视图已保存。">保存视图</button><button class="btn primary" data-act="new-task">新建任务</button></div></div>' + lensBar +
-    '<div class="task-toolbar"><div class="filters">' + filters + '</div><div class="task-tools"><label class="mini-search">' + icon('search') + '<input id="taskSearch" data-task-search placeholder="找任务…" value="' + esc(state.taskQuery) + '" autocomplete="off"></label><div class="view-switch">' + views + '</div></div></div>' +
+    '<div class="task-top"><div class="task-top-main"><div class="task-kicker">工作 · ' + headCount + '</div><h1>' + (arch ? '归档箱' : '任务') + '</h1><p>' + (arch ? '归档只是收起来，不改历史；运行记录、事件和当时的决定都还在，随时可以取回。' : '点一条任务看它做到哪一步；点任意一步，过程和结果就在右边。') + '</p></div><div class="task-top-actions"><button class="btn ghost" data-act="toast" data-msg="当前视图已保存。">保存视图</button><button class="btn primary" data-act="new-task">新建任务</button></div></div>' + lensBar + queryBar +
+    '<div class="task-toolbar"><div class="filters">' + filters + '</div><div class="task-tools"><label class="mini-search">' + icon('search') + '<input id="taskSearch" data-task-search placeholder="找任务…" value="' + esc(state.taskQuery) + '" autocomplete="off"></label>' + (arch ? '' : '<div class="view-switch">' + views + '</div>') + '</div></div>' +
     empty + body +
   '</section>';
 }
@@ -5217,6 +5355,11 @@ function taskOverview(t){
   if(t.attention > 0){
     html += '<div class="section"><div class="callout danger">' + icon('alert') + '<div><b>这个任务有 ' + t.attention + ' 项需要人介入。</b>任务不会自动变成「完成」；相关证据和可选项都在「等你决定」里。 <button class="link-btn" data-act="go-inbox">去收件箱</button></div></div></div>';
   }
+  if(isArchived(t)){
+    html += '<div class="section"><div class="section-h"><h3>归档</h3></div><div class="arch-box"><div class="arch-row"><span>归档于</span><b>' + fmtArchiveDate(t.archivedAt) + '</b></div><div class="arch-row"><span>现在在哪</span><b>任务页的「归档箱」；看板和日常列表里不再出现</b></div><div class="arch-row"><span>还留着什么</span><b>全部运行记录、事件、当时的决定和证据</b></div><div class="arch-desc">归档不是删除，也不是一种状态。想让它回到日常列表，点 <button class="link-btn" data-act="task-restore" data-task="' + t.id + '">取回任务</button> 就行，状态和历史都不变。</div></div></div>';
+  } else if(t.status === 'done' && !t.attention){
+    html += '<div class="section"><div class="section-h"><h3>归档</h3></div><div class="arch-box"><div class="arch-row"><span>适合归档</span><b>已经做完、也不再需要你盯着的任务</b></div><div class="arch-desc">收进归档箱只是把它从看板和日常列表里收起来；运行记录、事件和当时的决定都保留，随时可以取回。 <button class="link-btn" data-act="task-archive-one" data-task="' + t.id + '">收进归档箱</button></div></div></div>';
+  }
   html += '<div class="section"><div class="section-h"><h3>编排与资源</h3></div><div class="card-box" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px"><div><div class="policy-k">工作流</div><div class="policy-v">' + (wf ? esc(tidy(wf.name)) : '人工执行') + '<div class="policy-k" style="margin-top:3px">' + (wf ? esc(wf.version) : '无') + '</div></div></div><div><div class="policy-k">负责人</div><div class="policy-v">' + esc(t.owner) + '</div></div><div><div class="policy-k">优先级</div><div class="policy-v">' + esc(t.priority) + '</div></div></div></div>';
   return html;
 }
@@ -5287,19 +5430,22 @@ function drawerTask(){
   if(!t) return '';
   const ui = state.drawer.tab || 'overview';
   const runs = taskRuns(t);
+  const archived = isArchived(t);
   const body = ui === 'runs' ? '<div class="section"><div class="section-h"><h3>全部运行</h3><div class="right">同一任务 · ' + runs.length + ' 次</div></div>' + (runs.length ? runHistoryRows(runs, '') : '<div class="empty">这个任务还没有运行记录。</div>') + '<div class="canvas-hint">' + icon('history') + '定时任务不会因为每次唤醒就多出一张任务卡；历史都收在这一条任务下面。</div></div>'
     : ui === 'orchestration' ? taskOrchestration(t)
     : ui === 'events' ? taskEvents(t)
     : taskOverview(t);
+  const footRight = archived
+    ? '<button class="btn ghost sm" data-act="close-drawer">关闭</button><button class="btn primary sm" data-act="task-restore" data-task="' + t.id + '">取回任务</button>'
+    : '<button class="btn ghost sm" data-act="close-drawer">关闭</button>' + (t.status === 'done' && !t.attention ? '<button class="btn ghost sm" data-act="task-archive-one" data-task="' + t.id + '">归档</button>' : '') + '<button class="btn primary sm" data-act="task-action" data-task="' + t.id + '">' + (t.attention ? '处理待办' : '继续推进') + '</button>';
   return drawerShell({
     kicker: '任务', title: esc(tidy(t.title)),
-    sub: statusTag(t.status) + typeTag(t.type) + '<span>· ' + esc(t.owner) + '</span>',
+    sub: (archived ? '<span class="tag gray">已归档</span>' : '') + statusTag(t.status) + typeTag(t.type) + '<span>· ' + esc(t.owner) + '</span>',
     tabs: [['overview','概览'],['runs','运行','' + runs.length],['orchestration','编排'],['events','事件','' + EVENTS.filter(e => e.taskId === t.id).length]],
     tab: ui, body,
-    foot: '<span class="muted" style="font-size:14px">任务做到哪一步，由运行和你的决定共同决定</span><span class="right"><button class="btn ghost sm" data-act="close-drawer">关闭</button><button class="btn primary sm" data-act="task-action" data-task="' + t.id + '">' + (t.attention ? '处理待办' : '继续推进') + '</button></span>'
+    foot: '<span class="muted" style="font-size:14px">' + (archived ? '归档不改历史；需要时随时取回' : '任务做到哪一步，由运行和你的决定共同决定') + '</span><span class="right">' + footRight + '</span>'
   });
 }
-
 function drawerRun(){
   const run = RUNS[state.drawer.id];
   if(!run) return '';
@@ -5636,7 +5782,7 @@ function render(){
   const tr = $('#toastRoot'); if(tr) tr.innerHTML = '';
   const map = { command: renderCommand, tasks: renderTasks, workflows: renderWorkflows, inbox: renderInbox, effects: renderEffects, events: renderEvents };
   $('#screen').innerHTML = (map[screen] || renderCommand)();
-  const navCounts = { navTasks: TASKS.length, navWorkflows: Object.keys(WORKFLOWS).length, navInbox: pendingDecisions().length, navEffects: pendingEffects().length };
+  const navCounts = { navTasks: activeTasks().length, navWorkflows: Object.keys(WORKFLOWS).length, navInbox: pendingDecisions().length, navEffects: pendingEffects().length };
   Object.keys(navCounts).forEach(function(id){ const el = document.getElementById(id); if(el) el.textContent = String(navCounts[id]); });
   $$('.nav-item').forEach(n => n.classList.toggle('on', n.dataset.screen === screen));
   const meta = SCREEN_META[screen];
@@ -5705,7 +5851,7 @@ function submitTask(){
     next = owner === '啸春' ? '等你来做' : '等' + owner + '来做';
   }
   const id = 'tsk_' + randHex(4);
-  TASKS.unshift(Object.assign({ id: id, type: type, title: title.trim(), workflowId: wf, status: type === 'scheduled' ? 'scheduled' : 'queued', column: 'scheduled', priority: pri, owner: owner, schedule: schedule, next: next, latestRun: null, runCount: 0, attention: 0, progress: null, due: null, createdAt: '2026-11-11', desc: type === 'manual' ? extra.how : '新建任务，等待补充验收条件。', acceptance: '待补充。', tags: [TYPE[type].label, '新建'], trigger: trigger, chain: [] }, extra));
+  TASKS.unshift(Object.assign({ id: id, type: type, title: title.trim(), workflowId: wf, status: type === 'scheduled' ? 'scheduled' : 'queued', column: 'scheduled', priority: pri, owner: owner, schedule: schedule, next: next, latestRun: null, runCount: 0, attention: 0, progress: null, due: null, createdAt: '2026-11-11', updatedAt: '2026-11-11', desc: type === 'manual' ? extra.how : '新建任务，等待补充验收条件。', acceptance: '待补充。', tags: [TYPE[type].label, '新建'], trigger: trigger, chain: [] }, extra));
   addEvent('task.created', '啸春', '新建任务 ' + id + '：' + title.trim(), { task: id, type: type, workflow: wf }, id);
   closeModal(); state.screen = 'tasks'; state.taskFilter = 'all'; state.taskView = 'board'; render();
   toast('任务已创建，放在「接下来」：' + next);
@@ -5817,7 +5963,7 @@ document.addEventListener('click', function(ev){
   if(nav){
     const to = nav.dataset.screen;
     state.screen = to;
-    if(to === 'tasks'){ state.taskFilter = 'all'; state.taskQuery = ''; state.taskLens = nav.dataset.lens || 'all'; }
+    if(to === 'tasks'){ state.taskFilter = 'all'; state.taskQuery = ''; state.taskLens = nav.dataset.lens || 'all'; state.taskStatus = 'all'; state.taskTime = 'all'; state.taskFrom = ''; state.taskTo = ''; state.taskArchive = false; }
     if(to === 'events') state.eventType = 'all';
     if(to === 'effects') state.effectFilter = nav.dataset.filter || 'open';
     closeDrawer(); render(); return;
@@ -5832,6 +5978,11 @@ document.addEventListener('click', function(ev){
     if(act === 'task-view'){ state.taskView = actEl.dataset.view; render(); return; }
     if(act === 'task-filter'){ state.taskFilter = actEl.dataset.filter; render(); return; }
     if(act === 'task-lens'){ state.taskLens = actEl.dataset.lens; render(); return; }
+    if(act === 'task-archive'){ state.taskArchive = actEl.dataset.archive === '1'; state.taskLens = 'all'; state.taskFilter = 'all'; state.taskStatus = 'all'; state.taskTime = 'all'; state.taskFrom = ''; state.taskTo = ''; state.taskQuery = ''; state.drawer = null; render(); return; }
+    if(act === 'task-reset'){ state.taskLens = 'all'; state.taskFilter = 'all'; state.taskStatus = 'all'; state.taskTime = 'all'; state.taskFrom = ''; state.taskTo = ''; state.taskQuery = ''; render(); return; }
+    if(act === 'task-archive-one'){ const t = taskById(actEl.dataset.task); if(t && t.status === 'done' && !t.attention){ state.modal = { kind: 'archive', id: t.id }; openModal(archiveModal(t)); } return; }
+    if(act === 'confirm-archive'){ const ack = document.getElementById('archAck'); if(!ack || !ack.checked){ toast('先勾一下那句确认，再归档。', true); return; } if(archiveTask(actEl.dataset.task)){ closeModal(); state.drawer = null; render(); toast('已收进归档箱；它的运行记录和决定都还在。'); } return; }
+    if(act === 'task-restore'){ if(restoreTask(actEl.dataset.task)){ render(); toast('已取回任务列表，状态和历史都没变。'); } return; }
     if(act === 'toggle-history'){ ev.stopPropagation(); state.historyOpen[actEl.dataset.task] = !state.historyOpen[actEl.dataset.task]; render(); return; }
     if(act === 'toggle-expand'){ ev.stopPropagation(); state.expandedTask = state.expandedTask === actEl.dataset.task ? 'none' : actEl.dataset.task; render(); return; }
     if(act === 'open-task'){ const sp = $('#searchPop'); if(sp) sp.hidden = true; openTask(actEl.dataset.task); return; }
@@ -6186,10 +6337,16 @@ function updateSearchPop(){
 }
 
 document.addEventListener('change', function(ev){
-  if(ev.target.id === 'ntType'){
+  const id = ev.target.id;
+  if(id === 'ntType'){
     const box = document.getElementById('ntTypeFields');
     if(box) box.innerHTML = taskTypeFields(ev.target.value);
+    return;
   }
+  if(id === 'taskStatus'){ state.taskStatus = ev.target.value; render(); return; }
+  if(id === 'taskTime'){ state.taskTime = ev.target.value; if(ev.target.value !== 'custom'){ state.taskFrom = ''; state.taskTo = ''; } render(); return; }
+  if(id === 'taskFrom'){ state.taskFrom = ev.target.value; render(); return; }
+  if(id === 'taskTo'){ state.taskTo = ev.target.value; render(); return; }
 });
 
 document.addEventListener('input', function(ev){
