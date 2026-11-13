@@ -144,7 +144,8 @@ export class BridgeEventBuffer {
   private readonly events: BridgeEvent[] = []
   private bytes = 0
   private seqCursor = 0
-  private spillFile: string | null = null
+  // 落盘片段按序保留：二次 spill 不许覆盖前一段，否则早期事件取不回（规格 7.3 行 594）
+  private spillFiles: string[] = []
 
   constructor(opts: BridgeBufferOptions) {
     this.opts = opts
@@ -161,8 +162,16 @@ export class BridgeEventBuffer {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件序号倒退', { seq: ev.seq, lastSeq: this.seqCursor })
     }
     const gapFrom = ev.seq === this.seqCursor + 1 ? null : this.seqCursor + 1
+    const size = Buffer.byteLength(JSON.stringify(ev), 'utf8')
+    // 常驻内存有硬上限：先落盘再收；单条就超上限说明配置或事件异常
+    if (this.bytes + size > this.opts.limitBytes) {
+      this.spill()
+      if (size > this.opts.limitBytes) {
+        throw new OrchError('SERVICE_UNAVAILABLE', '单条桥事件超过缓冲上限，证据许可不了', { seq: ev.seq, size })
+      }
+    }
     this.events.push(ev)
-    this.bytes += Buffer.byteLength(JSON.stringify(ev), 'utf8')
+    this.bytes += size
     this.seqCursor = ev.seq
     if (this.bytes >= this.opts.highWaterBytes) this.spill()
     return { accepted: true, gapFrom }
@@ -172,7 +181,9 @@ export class BridgeEventBuffer {
   private spill(): void {
     const first = this.events[0]
     if (!first) return
-    const file = join(this.opts.spillDir, this.opts.agentId + '-' + first.seq + '.jsonl')
+    // 每段一个文件，文件名带起止序号；绝不复用上一段的文件名
+    const last = this.events[this.events.length - 1] ?? first
+    const file = join(this.opts.spillDir, this.opts.agentId + '-' + first.seq + '-' + last.seq + '.jsonl')
     const body = this.events.map((e) => JSON.stringify(e)).join('\n')
     try {
       appendFileSync(file, body + '\n', 'utf8')
@@ -182,40 +193,56 @@ export class BridgeEventBuffer {
         file: String(err), seq: first.seq,
       })
     }
-    this.spillFile = file
+    if (!this.spillFiles.includes(file)) this.spillFiles.push(file)
     this.events.length = 0
     this.bytes = 0
   }
 
-  // 取 fromSeq 之后的全部事件：内存里的加 spill 文件里的，合并后按 seq 排序
-  takeFrom(fromSeq: number): BridgeEvent[] {
+  private readSpill(file: string): BridgeEvent[] {
     const out: BridgeEvent[] = []
-    if (this.spillFile) {
-      const text = readFileSync(this.spillFile, 'utf8')
-      for (const line of text.split('\n')) {
-        if (line.trim() === '') continue
-        const ev = JSON.parse(line) as BridgeEvent
-        if (ev.seq >= fromSeq) out.push(ev)
-      }
+    const text = readFileSync(file, 'utf8')
+    for (const line of text.split('\n')) {
+      if (line.trim() === '') continue
+      out.push(JSON.parse(line) as BridgeEvent)
     }
-    for (const ev of this.events) {
-      if (ev.seq >= fromSeq) out.push(ev)
-    }
-    out.sort((a, b) => a.seq - b.seq)
     return out
   }
 
-  // 动作计时锚点：最近一条 tool.start 的时间（规格 7.2 行 590）
+  // 取 fromSeq 之后的全部事件：所有 spill 片段加内存，按 seq 去重排序
+  takeFrom(fromSeq: number): BridgeEvent[] {
+    const bySeq = new Map<number, BridgeEvent>()
+    for (const file of this.spillFiles) {
+      for (const ev of this.readSpill(file)) {
+        if (ev.seq >= fromSeq) bySeq.set(ev.seq, ev)
+      }
+    }
+    for (const ev of this.events) {
+      if (ev.seq >= fromSeq) bySeq.set(ev.seq, ev)
+    }
+    return [...bySeq.values()].sort((a, b) => a.seq - b.seq)
+  }
+
+  // 动作计时锚点：最近一条 tool.start 的时间，落盘的也要看（规格 7.2 行 590）
   toolStartAnchor(): string | null {
     for (let i = this.events.length - 1; i >= 0; i -= 1) {
       const ev = this.events[i]
       if (ev && ev.type === 'tool.start') return ev.toolStartAt ?? ev.at
     }
+    for (let f = this.spillFiles.length - 1; f >= 0; f -= 1) {
+      const file = this.spillFiles[f]
+      if (!file) continue
+      const evs = this.readSpill(file)
+      for (let i = evs.length - 1; i >= 0; i -= 1) {
+        const ev = evs[i]
+        if (ev && ev.type === 'tool.start') return ev.toolStartAt ?? ev.at
+      }
+    }
     return null
   }
 
   get lastSeq(): number { return this.seqCursor }
-  get spilled(): boolean { return this.spillFile !== null }
+  get spilled(): boolean { return this.spillFiles.length > 0 }
+  get spillCount(): number { return this.spillFiles.length }
   get bufferedBytes(): number { return this.bytes }
 }
 

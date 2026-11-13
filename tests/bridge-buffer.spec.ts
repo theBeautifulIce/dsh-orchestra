@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { BridgeClient, BridgeEventBuffer, refillPage, type BridgeEvent } from '../src/executor/bridge.ts'
@@ -51,8 +51,10 @@ describe('桥事件缓冲', () => {
     }
     expect(buf.spilled).toBe(true)
     expect(bytesAtSpill).toBe(0)
-    const file = join(dir, 'a1-1.jsonl')
-    expect(readFileSync(file, 'utf8').trim().split('\n').length).toBeGreaterThanOrEqual(1)
+    const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+    expect(files.length).toBeGreaterThanOrEqual(1)
+    // 文件名带起止序号，二次 spill 不许覆盖上一段
+    expect(files[0]).toMatch(/^a1-\d+-\d+\.jsonl$/)
     expect(buf.takeFrom(1).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6])
     rmSync(dir, { recursive: true, force: true })
   })
@@ -73,5 +75,17 @@ describe('桥事件缓冲', () => {
     const got: BridgeEvent[] = []
     await expect(refillPage(client, { executorAgentId: 'a1', attempt: 1, gapFrom: 5 }, (e) => got.push(...e))).rejects.toMatchObject({ code: 'SCHEMA_VERSION_UNSUPPORTED' })
     expect(got.map((e) => e.seq)).toEqual([5])
+  })
+})
+
+describe('多次落盘不丢早期事件（审计 F-06）', () => {
+  it('连续多次 spill 后 takeFrom(1) 仍取回全部', () => {
+    const dir = tmp()
+    const buf = new BridgeEventBuffer({ limitBytes: 4096, highWaterBytes: 120, spillDir: dir, agentId: 'a2' })
+    for (let i = 1; i <= 20; i += 1) buf.push(ev(i))
+    expect(buf.spillCount).toBeGreaterThanOrEqual(2)
+    expect(buf.takeFrom(1).map((e) => e.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1))
+    expect(buf.toolStartAnchor()).toBeNull()
+    rmSync(dir, { recursive: true, force: true })
   })
 })

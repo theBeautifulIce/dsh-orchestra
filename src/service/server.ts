@@ -5,6 +5,9 @@ import { sha256Hex } from '../core/canonical.ts'
 import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
+import type { ApplyResult } from '../core/report.ts'
+import type { CancelOutcome } from './commands/cancel.ts'
+import type { LoadWorkflowResult } from './workflows.ts'
 
 export type ServerDeps = {
   secret: string
@@ -16,6 +19,31 @@ export type ServerDeps = {
   appendLedgerEvent: (body: unknown, actor: string) => { seq: number; event_id: string }
   log?: Logger
   queue?: WriteQueue
+  // 生产路径的节点命令；缺省时这几条路由一律 404，老测试不受影响
+  commands?: NodeCommands
+}
+
+export type NodeCommands = {
+  acquireLease: (body: { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }) => {
+    lease_id: string; expires_at: string; action_generation: number
+  }
+  report: (body: {
+    nodeRunId: string; attempt: number; report: unknown; expectedStatus: string; generation: number; now: string
+  }) => ApplyResult
+  cancel: (body: {
+    nodeRunId: string; attempt: number; revision: number; cancelResult: string; now: string
+    graceMs: number; extendDeadlineMs?: number
+  }) => CancelOutcome
+  loadWorkflow: (body: unknown) => LoadWorkflowResult
+}
+
+// 请求体必填字段：缺一个就按结构错拒，别把 undefined 写进账本
+function requireFields(body: unknown, fields: string[]): Record<string, unknown> {
+  const record = body as Record<string, unknown>
+  if (!record || typeof record !== 'object') throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请求体要是对象', {})
+  const missing = fields.filter((f) => record[f] === undefined || record[f] === null)
+  if (missing.length > 0) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请求体缺字段', { missing })
+  return record
 }
 
 const MAX_BODY_BYTES = 1024 * 1024
@@ -90,6 +118,41 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const last = rows.length === 0 ? null : (rows[rows.length - 1] as { seq?: number }).seq
       const nextCursor = typeof last === 'number' ? encodeCursor(makeCursor('events', {}, String(last), '', deps.asOfSeq())) : null
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: rows, next_cursor: nextCursor }))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/workflows/load' && deps.commands) {
+      const body = await readJsonBody(req)
+      const out = await queue.run(() => deps.commands!.loadWorkflow(body))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/node-runs/lease' && deps.commands) {
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'ownerEpoch', 'leaseTtlMs', 'now'])
+      const out = await queue.run(() => deps.commands!.acquireLease({
+        nodeRunId: String(body.nodeRunId), ownerEpoch: Number(body.ownerEpoch),
+        leaseTtlMs: Number(body.leaseTtlMs), now: String(body.now),
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/node-runs/report' && deps.commands) {
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'report', 'expectedStatus', 'generation', 'now'])
+      const out = await queue.run(() => deps.commands!.report({
+        nodeRunId: String(body.nodeRunId), attempt: Number(body.attempt),
+        report: body.report, expectedStatus: String(body.expectedStatus),
+        generation: Number(body.generation), now: String(body.now),
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/node-runs/cancel' && deps.commands) {
+      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'revision', 'cancelResult', 'now', 'graceMs'])
+      const out = await queue.run(() => deps.commands!.cancel({
+        nodeRunId: String(body.nodeRunId), attempt: Number(body.attempt), revision: Number(body.revision),
+        cancelResult: String(body.cancelResult), now: String(body.now), graceMs: Number(body.graceMs),
+        extendDeadlineMs: body.extendDeadlineMs === undefined ? undefined : Number(body.extendDeadlineMs),
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/ledger/events') {

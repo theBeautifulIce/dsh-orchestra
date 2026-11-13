@@ -28,16 +28,25 @@ export type InjectionResult = {
   reconcile: string
 }
 
+// 证据要能重跑出同样的字节（审计 F-03）：临时路径统一写 <tmp>/文件名，事件 id 按首次出现归一成 evt_1、evt_2…
+function normalizeEvidence(text: string): string {
+  const ids = new Map<string, string>()
+  const idOf = (raw: string): string => {
+    let hit = ids.get(raw)
+    if (!hit) { hit = 'evt_' + String(ids.size + 1); ids.set(raw, hit) }
+    return hit
+  }
+  return text.replace(/evt_[0-9a-f]{20,}/g, (m) => idOf(m))
+}
+
 export function writeEvidence(dir: string, result: InjectionResult): void {
   mkdirSync(dir, { recursive: true })
-  // 临时目录每次跑都不一样：证据里统一写成 <tmp>，别让失效路径进账
-  const escapedTmp = JSON.stringify(tmpdir()).slice(1, -1)
-  const params = JSON.stringify(result.params).split(escapedTmp).join('<tmp>')
+  const params = normalizeEvidence(JSON.stringify(result.params, (key, value) => (key === 'db' ? '<tmp>/orchestra.db' : value)))
   writeFileSync(join(dir, result.case + '.md'),
     '# ' + result.case + '\n\n- 参数：' + params + '\n'
-    + '\n## 注入前账本片段\n\n```\n' + result.before + '\n```\n'
-    + '\n## 恢复后账本片段\n\n```\n' + result.after + '\n```\n'
-    + '\n## 对账查询\n\n```\n' + result.reconcile + '\n```\n', 'utf8')
+    + '\n## 注入前账本片段\n\n```\n' + normalizeEvidence(result.before) + '\n```\n'
+    + '\n## 恢复后账本片段\n\n```\n' + normalizeEvidence(result.after) + '\n```\n'
+    + '\n## 对账查询\n\n```\n' + normalizeEvidence(result.reconcile) + '\n```\n', 'utf8')
 }
 
 const DRIVER_URL = pathToFileURL(join(import.meta.dirname, '../src/infra/sqlite/driver.ts')).href
@@ -48,6 +57,25 @@ const dumpEvents = (file: string): string => {
   try {
     const rows = db.raw.prepare('SELECT seq, type, event_id FROM events ORDER BY seq ASC').all() as { seq: number; type: string; event_id: string }[]
     return rows.length === 0 ? '(空)' : rows.map((r) => String(r.seq) + ' ' + r.type + ' ' + r.event_id).join('\n')
+  } finally {
+    db.raw.close()
+  }
+}
+
+// S2 的注入证据要看节点行、节点事件与上报登记表：只 dump events 会让前后两段长得一样（审计 F-03）
+const dumpState = (file: string): string => {
+  const db = openDb(file, { readonly: true })
+  try {
+    const parts: string[] = []
+    const events = db.raw.prepare('SELECT seq, type, event_id FROM events ORDER BY seq ASC').all() as { seq: number; type: string; event_id: string }[]
+    parts.push('events: ' + (events.length === 0 ? '(空)' : events.map((r) => String(r.seq) + ' ' + r.type + ' ' + r.event_id).join('\n  ')))
+    const nodes = db.raw.prepare('SELECT node_run_id, status, attempt, revision, action_generation, fence_state FROM node_runs ORDER BY node_run_id ASC').all() as Record<string, unknown>[]
+    parts.push('node_runs: ' + (nodes.length === 0 ? '(空)' : nodes.map((r) => JSON.stringify(r)).join('\n  ')))
+    const nrev = db.raw.prepare('SELECT node_run_id, seq, type FROM node_run_events ORDER BY node_run_id ASC, seq ASC').all() as Record<string, unknown>[]
+    parts.push('node_run_events: ' + (nrev.length === 0 ? '(空)' : nrev.map((r) => JSON.stringify(r)).join('\n  ')))
+    const reg = db.raw.prepare('SELECT report_id, node_run_id, state FROM report_registry ORDER BY report_id ASC').all() as Record<string, unknown>[]
+    parts.push('report_registry: ' + (reg.length === 0 ? '(空)' : reg.map((r) => JSON.stringify(r)).join('\n  ')))
+    return parts.join('\n')
   } finally {
     db.raw.close()
   }
@@ -295,7 +323,7 @@ const NODE_ROW = (db: Db, id: string) => db.raw.prepare('SELECT status, action_g
 
 async function caseG03(): Promise<InjectionResult> {
   const { file, db } = freshLedger(); seed(db)
-  const before = dumpEvents(file)
+  const before = dumpState(file)
   injectQueued(db, 'nrun_g03')
   const policy = { passConditions: [{ path: 'evidence.exitCode', op: 'eq' as const, value: 0 }] }
   const run = () => inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
@@ -310,7 +338,7 @@ async function caseG03(): Promise<InjectionResult> {
   return {
     case: 'G-03',
     params: { db: file, report_id: 'rpt_g03_1', node_run_id: 'nrun_g03', repeat: 2 },
-    before, after: dumpEvents(file),
+    before, after: dumpState(file),
     reconcile: '第一次 accepted=' + String(first.accepted) + '；第二次 accepted=' + String(second.accepted) + ' state=' + String(second.registry_state)
       + '；report_applied 条数=' + String(applied) + '；registry 对账=' + JSON.stringify(reg),
   }
@@ -318,7 +346,7 @@ async function caseG03(): Promise<InjectionResult> {
 
 async function caseG04(): Promise<InjectionResult> {
   const { file, db } = freshLedger(); seed(db)
-  const before = dumpEvents(file)
+  const before = dumpState(file)
   injectQueued(db, 'nrun_g04')
   db.raw.prepare("UPDATE node_runs SET lease_expires_at = '2026-11-11T00:00:00.000Z' WHERE node_run_id = 'nrun_g04'").run()
   let code = ''
@@ -335,14 +363,14 @@ async function caseG04(): Promise<InjectionResult> {
   return {
     case: 'G-04',
     params: { db: file, node_run_id: 'nrun_g04', lease_ttl_ms: 30000, late_by: '2 天' },
-    before, after: dumpEvents(file),
+    before, after: dumpState(file),
     reconcile: '迟到上报被拒码=' + code + '；节点未动：' + JSON.stringify(row),
   }
 }
 
 async function caseG05(): Promise<InjectionResult> {
   const { file, db } = freshLedger(); seed(db)
-  const before = dumpEvents(file)
+  const before = dumpState(file)
   const revision = injectQueued(db, 'nrun_g05')
   const out = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
     nodeRunId: 'nrun_g05', attempt: 1, revision, cancelResult: 'interrupted', now: '2026-11-13T03:00:01.000Z', graceMs: 30000,
@@ -353,14 +381,14 @@ async function caseG05(): Promise<InjectionResult> {
   return {
     case: 'G-05',
     params: { db: file, node_run_id: 'nrun_g05', cancel_result: 'interrupted', grace_ms: 30000 },
-    before, after: dumpEvents(file),
+    before, after: dumpState(file),
     reconcile: '落位=' + JSON.stringify(out) + '；fence_armed 条数=' + String(armed) + '；节点行=' + JSON.stringify(row),
   }
 }
 
 async function caseG07(): Promise<InjectionResult> {
   const { file, db } = freshLedger(); seed(db)
-  const before = dumpEvents(file)
+  const before = dumpState(file)
   injectQueued(db, 'nrun_g07')
   const clock = new MonotonicClock('boot_g07', { wallClockMs: 1_000_000, monotonicNs: 0 })
   const drift = clock.sample(1_000_000 + 600_000, 1_000_000_000)
@@ -383,7 +411,7 @@ async function caseG07(): Promise<InjectionResult> {
   return {
     case: 'G-07',
     params: { db: file, node_run_id: 'nrun_g07', jump_ms: 600000 },
-    before, after: dumpEvents(file),
+    before, after: dumpState(file),
     reconcile: '向前跳十分钟 drift=' + String(drift) + 'ms 判=' + JSON.stringify(forward)
       + '；向后跳判=' + JSON.stringify(backward) + '；跨 boot 判=' + JSON.stringify(reboot) + '；节点行=' + JSON.stringify(row),
   }

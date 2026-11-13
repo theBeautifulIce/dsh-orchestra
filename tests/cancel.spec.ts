@@ -124,3 +124,41 @@ describe('围栏撤销与排队重放', () => {
     expect(state('rep_new')).toBe('rejected')
   })
 })
+
+describe('终态与重复取消（审计 F-07 / P12）', () => {
+  it('done 节点被取消：already_stopped，status 保持 done', () => {
+    const db = setup()
+    db.raw.prepare("UPDATE node_runs SET status='done' WHERE node_run_id='nr_c'").run()
+    const out = cancel(db, 'interrupted')
+    expect(out.cancel_result).toBe('already_stopped')
+    expect(out.reason).toBe('terminal_no_out_edge')
+    expect(nodeRow(db).status).toBe('done')
+    expect(nodeRow(db).fence_state).toBeNull()
+    expect(events(db, 'fence_armed')).toBe(0)
+  })
+
+  it('围栏已 armed 再取消：fence_already_armed，不再 arm 一次', () => {
+    const db = setup()
+    cancel(db, 'interrupted')
+    const out = cancel(db, 'interrupted')
+    expect(out.reason).toBe('fence_already_armed')
+    expect(events(db, 'fence_armed')).toBe(1)
+  })
+
+  it('宽限没到点不许撤销围栏', () => {
+    const db = setup()
+    cancel(db, 'interrupted')
+    const row = nodeRow(db)
+    const ok = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row, now: '2026-11-13T03:00:10.000Z' }))
+    expect(ok).toBe(false)
+    expect(nodeRow(db).status).toBe('timing_out')
+  })
+
+  it('撤销围栏后取队头：同一 attempt 最小 report_seq', () => {
+    const db = setup()
+    db.raw.prepare("INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES ('r2','nr_c',2,7,'rejected',?,?)").run(NOW, NOW)
+    db.raw.prepare("INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES ('r1','nr_c',2,3,'rejected',?,?)").run(NOW, NOW)
+    const head = withTx(db, (tx) => pickReplayHead(tx, 'nr_c', 2))
+    expect(head).toEqual({ report_id: 'r1', report_seq: 3 })
+  })
+})

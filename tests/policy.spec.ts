@@ -42,15 +42,17 @@ describe('判定规则', () => {
     expect(() => validateCondition({ path: 'evidence.exitCode', op: 'eq' })).not.toThrow()
   })
 
-  it('mergePassConditions：模板保留，节点追加；同路径同运算符取节点值', () => {
+  it('mergePassConditions：模板为基线，同路径同运算符不同值两条都留（AND），不覆盖模板', () => {
     const tmpl: PassCondition[] = [{ path: 'evidence.exitCode', op: 'eq', value: 0 }]
     const merged = mergePassConditions(tmpl, [
       { path: 'evidence.exitCode', op: 'eq', value: 1 },
       { path: 'evidence.hashes', op: 'hashContains', value: 'artifact' },
     ])
-    expect(merged).toHaveLength(2)
-    expect(merged[0]?.value).toBe(1)
-    expect(merged[1]?.op).toBe('hashContains')
+    // 模板条件和节点条件必须同时成立：覆盖会悄悄放宽判定（审计 M-04）
+    expect(merged).toHaveLength(3)
+    expect(merged[0]?.value).toBe(0)
+    expect(merged[1]?.value).toBe(1)
+    expect(merged[2]?.op).toBe('hashContains')
     expect(tmpl[0]?.value).toBe(0)
   })
 

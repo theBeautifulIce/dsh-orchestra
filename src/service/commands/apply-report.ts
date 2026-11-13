@@ -6,6 +6,7 @@ import type { Tx } from '../../infra/sqlite/driver.ts'
 import { runCas } from '../../infra/db/tx.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { assertLeaseValid, loadNodeRun, type NodeRunRow } from './lease.ts'
+import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
 import { canTransition } from '../../core/state-machine.ts'
 
@@ -54,6 +55,14 @@ function rejectReport(tx: Tx, secret: string, params: {
   const existing = readRegistry(tx, params.report.report_id)
   if (existing) {
     tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['rejected', params.now, params.report.report_id])
+    // 同一条报告同因重复被拒：只更新 registry，不再追加事件，账本不许被重试刷膨胀
+    const dup = tx.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = ? AND payload LIKE ? AND payload LIKE ?",
+      [params.nodeRunId, 'report_rejected', '%"report_id":"' + params.report.report_id + '"%', '%"reason":"' + params.reason + '"%'],
+    )
+    if ((dup?.n ?? 0) > 0) {
+      return { accepted: false, reason: params.reason, registry_state: 'rejected' }
+    }
   } else {
     tx.run(
       'INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -100,13 +109,22 @@ export function applyReport(
       })
       return { accepted: false, reason: 'already_replayed', registry_state: 'replayed' }
     }
-    // 已 rejected 的走重放路径：先验哈希链，再把状态推到 replayed，继续往下走
-    const chainOk = tx.get<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ?',
-      [params.nodeRunId],
+    // 已 rejected 的走重放路径：先验哈希链，再确认是当前 attempt 的队头（规格 4.2 行 304）
+    if (existing.attempt !== params.attempt) {
+      return { accepted: false, reason: 'replay_stale_attempt', registry_state: 'rejected' }
+    }
+    const brk = chainBreakOf(secret, readChain(tx, params.nodeRunId))
+    if (brk) {
+      // 链断了的账本不许再写：重放一律拒，等人工核
+      return { accepted: false, reason: 'replay_chain_broken', registry_state: 'rejected' }
+    }
+    const head = tx.get<{ min_seq: number | null }>(
+      'SELECT MIN(report_seq) AS min_seq FROM report_registry WHERE node_run_id = ? AND attempt = ? AND state = ?',
+      [params.nodeRunId, params.attempt, 'rejected'],
     )
-    if (!chainOk || chainOk.n === 0) {
-      throw new OrchError('STALE_GENERATION', '重放前哈希链为空，链路不完整', { nodeRunId: params.nodeRunId })
+    if ((head?.min_seq ?? null) !== existing.report_seq) {
+      // 不是队头：这次先不重放，保持 rejected
+      return { accepted: false, reason: 'replay_not_head', registry_state: 'rejected' }
     }
     tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['replayed', params.now, report.report_id])
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'report_replayed', {
@@ -128,12 +146,20 @@ export function applyReport(
   if (row.attempt !== params.attempt) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'attempt_mismatch', now: params.now })
   }
+  if (row.fence_state === 'armed') {
+    // 围栏立着时上报一律排队，撤销后只重放队头（规格 4.5 行 358）
+    return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'fence_armed', now: params.now })
+  }
   if (row.status !== params.expectedStatus) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'status_mismatch', now: params.now })
   }
   if (row.action_generation !== params.generation) {
-    // 动作代对不上：旧执行器的写，按过期写拒
-    return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'generation_mismatch', now: params.now })
+    // 动作代对不上：旧执行器的过期写，按 STALE_GENERATION 处理（规格 4.3 行 309）
+    throw new OrchError('STALE_GENERATION', '动作代对不上，旧执行器的写要丢掉', {
+      nodeRunId: params.nodeRunId,
+      expected: params.generation,
+      actual: row.action_generation,
+    })
   }
   assertLeaseValid(row, params.now)
   // 目标状态必须在合法迁移表里：非法迁移按拒绝处理，不许绕过状态机

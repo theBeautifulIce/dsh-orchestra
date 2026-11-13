@@ -71,9 +71,11 @@ describe('applyReport 六步收口', () => {
     expect(apply(db, {}, 'started').reason).toBe('status_mismatch')
   })
 
-  it('generation 不符 → generation_mismatch', () => {
+  it('generation 不符 → 抛 STALE_GENERATION，账本不落', () => {
     const db = setup()
-    expect(apply(db, {}, 'verifying', 9).reason).toBe('generation_mismatch')
+    expect(() => apply(db, {}, 'verifying', 9)).toThrowError(/动作代对不上/)
+    expect(registry(db)).toBeUndefined()
+    expect(nodeRow(db).status).toBe('verifying')
   })
 
   it('租约已过期 → 抛 LEASE_EXPIRED 且节点未变', () => {
@@ -105,5 +107,62 @@ describe('applyReport 六步收口', () => {
     expect(Number(nodeRow(db).revision)).toBe(before)
     expect(events(db, 'report_applied')).toBe(0)
     expect(events(db, 'report_rejected')).toBe(1)
+  })
+})
+
+describe('围栏与重放（审计 F-04 / F-05）', () => {
+  const rejected = (db: any, id: string) => {
+    db.raw.prepare("INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, 'nr_ar', 2, (SELECT COALESCE(MAX(report_seq),0)+1 FROM report_registry), 'rejected', ?, ?)").run(id, NOW, NOW)
+  }
+
+  it('围栏 armed 时上报一律 rejected，reason=fence_armed，节点不动', () => {
+    const db = setup()
+    db.raw.prepare("UPDATE node_runs SET status='timing_out', fence_state='armed', fence_grace_until='2026-11-13T03:00:30.000Z' WHERE node_run_id='nr_ar'").run()
+    const out = apply(db, {}, 'timing_out')
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('fence_armed')
+    expect(nodeRow(db).status).toBe('timing_out')
+  })
+
+  it('重放不是队头 → replay_not_head，保持 rejected', () => {
+    const db = setup()
+    rejected(db, 'rep_1')
+    rejected(db, 'rep_2')
+    const out = apply(db, { report_id: 'rep_2' })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('replay_not_head')
+    expect(registry(db, 'rep_2').state).toBe('rejected')
+  })
+
+  it('重放队头 → applied，且只落一次', () => {
+    const db = setup()
+    rejected(db, 'rep_1')
+    rejected(db, 'rep_2')
+    const first = apply(db, { report_id: 'rep_1' })
+    expect(first.accepted).toBe(true)
+    expect(registry(db, 'rep_1').state).toBe('applied')
+    expect(events(db, 'report_applied')).toBe(1)
+    const again = apply(db, { report_id: 'rep_1' })
+    expect(again.accepted).toBe(false)
+    expect(again.registry_state).toBe('replayed')
+    expect(events(db, 'report_applied')).toBe(1)
+  })
+
+  it('账本链断了 → replay_chain_broken，绝不重放', () => {
+    const db = setup()
+    rejected(db, 'rep_1')
+    db.raw.prepare("UPDATE node_run_events SET payload = '{\"tampered\":true}' WHERE seq = (SELECT MIN(seq) FROM node_run_events)").run()
+    const out = apply(db, { report_id: 'rep_1' })
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('replay_chain_broken')
+    expect(registry(db, 'rep_1').state).toBe('rejected')
+  })
+
+  it('同一条报告重复被拒只更新 registry，不再追加事件', () => {
+    const db = setup()
+    apply(db, {}, 'started')
+    const n = events(db, 'report_rejected')
+    apply(db, {}, 'started')
+    expect(events(db, 'report_rejected')).toBe(n)
   })
 })

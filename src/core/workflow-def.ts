@@ -1,12 +1,23 @@
 // src/core/workflow-def.ts —— 定义校验与阶段兼容（规格 2.4 行 122、11.1 行 930-937）
 import { OrchError } from './errors.ts'
 import { PHASE_CAPABILITIES, type Phase } from './config.ts'
+import type { PassCondition } from './policy.ts'
 
 export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait'
 
+export type WorkflowNodeDef = {
+  node_id: string
+  type: NodeType
+  tools?: { allow?: string[]; deny?: string[] }
+  // 节点自带的通过条件；和模板条件取 AND（规格 6.1 行 837）
+  pass_conditions?: PassCondition[]
+}
+
 export type WorkflowDefinition = {
   workflow_version: string
-  nodes: { node_id: string; type: NodeType; tools?: { allow?: string[]; deny?: string[] } }[]
+  // 模板级通过条件，作为基线（规格 6.1 行 838）
+  pass_conditions?: PassCondition[]
+  nodes: WorkflowNodeDef[]
 }
 
 // 节点类型对应的能力名

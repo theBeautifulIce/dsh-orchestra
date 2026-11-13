@@ -1,5 +1,5 @@
 // src/service/commands/node-state.ts —— 节点状态迁移（规格 4.3 行 309-311、3.5 行 176）
-import { OrchError } from '../../core/errors.ts'
+import { OrchError, proposedError } from '../../core/errors.ts'
 import { canTransition } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { runCas } from '../../infra/db/tx.ts'
@@ -17,6 +17,8 @@ export type TransitionParams = {
   rearmGeneration?: number
   now: string
   reason: string
+  // 阻塞必须挂一张裁决卡：没有 decision_id 就不许把节点卡住（规格 4.3、G2-06）
+  decisionId?: string
 }
 
 // 迁移必须合法，且 CAS 条件里带 revision 与 attempt
@@ -26,6 +28,9 @@ export function transitionNode(tx: Tx, secret: string, params: TransitionParams)
       from: params.from,
       to: params.to,
     })
+  }
+  if ((params.to === 'blocked_pre' || params.to === 'blocked_post') && !params.decisionId) {
+    throw proposedError('DECISION_REQUIRED', '阻塞节点要挂一张裁决卡，不能裸卡住', { to: params.to })
   }
   const sets: string[] = ['status = ?', 'revision = revision + 1', 'updated_at = ?']
   const values: unknown[] = [params.to, params.now]
@@ -52,6 +57,7 @@ export function transitionNode(tx: Tx, secret: string, params: TransitionParams)
     action_generation: params.actionGeneration,
     rearm_generation: params.rearmGeneration,
     reason: params.reason,
+    decision_id: params.decisionId,
   })
 }
 

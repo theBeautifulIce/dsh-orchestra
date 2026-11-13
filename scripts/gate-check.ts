@@ -23,12 +23,13 @@ export const GATE_SPECS: Record<string, { items: string[]; scopeBase: string; ex
   G1: {
     items: ['G1-01', 'G1-02', 'G1-03', 'G1-04', 'G1-05', 'G1-06', 'G1-07', 'G-01', 'G-02', 'G-08', 'G-09', 'G-14', 'G-15'],
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
-    excludes: ['docs/gates', 'docs/audits'],
+    // handoff 是活文档，每次收尾都会改；它进候选范围会让门哈希随一次文档更新失效（审计 F-02）
+    excludes: ['docs/gates', 'docs/audits', 'handoff.md'],
   },
   G2: {
     items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07'],
     scopeBase: '4f3ada7',
-    excludes: ['docs/gates', 'docs/audits'],
+    excludes: ['docs/gates', 'docs/audits', 'handoff.md'],
   },
 }
 
@@ -115,6 +116,36 @@ function checkInvariants(blocks: Block[], artifact: Record<string, unknown>, ent
   return { used, hash }
 }
 
+
+// 正文表与 GateArtifact 交叉校验（审计 F-02）：表里写的必过项、结果、证据必须和 artifact 同源
+function checkBodyTable(text: string, items: GateItem[]): void {
+  const start = text.indexOf('## 必过项与证据')
+  if (start < 0) throw new Error('门记录里找不到「## 必过项与证据」表')
+  const rest = text.slice(start + 1)
+  const end = rest.indexOf('\n## ')
+  const section = end < 0 ? rest : rest.slice(0, end)
+  const rows: { id: string; result: string; evidence: string[] }[] = []
+  for (const line of section.split(/\r?\n/)) {
+    if (!line.trim().startsWith('|')) continue
+    const cells = line.split('|').slice(1, -1).map((c) => c.trim())
+    if (cells.length < 4) continue
+    const id = cells[0] ?? ''
+    if (id === '编号' || /^-+$/.test(id)) continue
+    rows.push({ id, result: cells[2] ?? '', evidence: (cells[3] ?? '').split(/[,，\s]+/).filter((s) => s.length > 0 && s !== '无') })
+  }
+  if (rows.length !== items.length) throw new Error('正文必过项表有 ' + String(rows.length) + ' 行，artifact 有 ' + String(items.length) + ' 项')
+  for (let i = 0; i < items.length; i += 1) {
+    const row = rows[i]
+    if (!row) throw new Error('正文必过项表缺第 ' + String(i + 1) + ' 行')
+    const item = items[i] as GateItem
+    if (row.id !== item.id) throw new Error('正文必过项第 ' + String(i + 1) + ' 行是 ' + row.id + '，artifact 是 ' + item.id)
+    if (row.result !== 'pass') throw new Error('正文表里 ' + row.id + ' 的结果不是 pass：' + row.result)
+    const want = (item.evidence_ids ?? []).slice().sort().join(',')
+    const got = row.evidence.slice().sort().join(',')
+    if (want !== got) throw new Error('正文表里 ' + row.id + ' 的证据与 artifact 不一致：' + got + ' != ' + want)
+  }
+}
+
 function checkCandidate(artifact: Record<string, unknown>, spec: { scopeBase: string; excludes: string[] }, root: string): void {
   const paths = changedFiles(root, spec)
   const files = paths.map((path) => ({ path, sha256: sha256Hex(git(root, ['show', 'HEAD:' + path])) }))
@@ -181,6 +212,7 @@ export function verifyGateRecord(text: string, opts: { root?: string } = {}): Ch
   }
   const unused = evidence.entries.map((e) => e.id).filter((id) => !used.has(id))
   if (unused.length > 0) throw new Error('有证据没被任何必过项或不变量引用: ' + unused.join(','))
+  checkBodyTable(text, items)
   checkCandidate(artifact, spec, root)
 
   return { gate, artifactHash: expect, items: items.length, evidence: evidence.entries.length }

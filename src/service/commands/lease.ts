@@ -18,6 +18,11 @@ export type NodeRunRow = {
   heartbeat_at: string | null
   action_generation: number
   rearm_generation: number
+  fence_state: string
+  fence_grace_until: string | null
+  deadline_at: string | null
+  deadline_boot_id: string | null
+  deadline_monotonic_ns: number | null
 }
 
 export function loadNodeRun(tx: Tx, nodeRunId: string): NodeRunRow {

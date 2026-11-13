@@ -148,6 +148,9 @@ export class ReadOnlyToolRunner {
     this.workspaceRoot = workspaceRoot
   }
 
+  // 执行器只在自己挂载的根里跑，调用方要核命令哈希时得拿到同一个根
+  get root(): string { return this.workspaceRoot }
+
   async runTool(params: RunToolParams): Promise<RunToolResult> {
     // 命令必须命中注册表，且 capability 必须是 read_only
     const descriptor = this.registry.lookup(params.command)

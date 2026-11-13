@@ -4,6 +4,7 @@ import { acquireLease } from '../../src/service/commands/lease.ts'
 import { applyCancel } from '../../src/service/commands/cancel.ts'
 import { assertDefinitionAllowed } from '../../src/core/workflow-def.ts'
 import { MonotonicClock } from '../../src/core/clock.ts'
+import { transitionNode } from '../../src/service/commands/node-state.ts'
 import { inTx } from '../../src/infra/db/tx.ts'
 import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 import type { Db } from '../../src/infra/sqlite/driver.ts'
@@ -176,5 +177,35 @@ describe('G2 门必过项', () => {
     )
     expect(decision.kind).toBe('uncertain')
     expect(decision.kind === 'uncertain' ? decision.reason : '').toBe('clock_drift')
+  })
+
+  it('G2-06 阻塞必须挂裁决卡：没卡不许卡住，有卡才落 blocked_post', () => {
+    const { db } = freshLedger(); seed(db)
+    seedQueued(db, 'nrun_g2_10'); lease(db, 'nrun_g2_10')
+    inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_10', from: 'dispatched', to: 'started', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_10').revision), now: NOW, reason: 'executor_started' }))
+    let code = ''
+    try {
+      inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_10', from: 'started', to: 'blocked_post', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_10').revision), now: NOW, reason: 'need_human' }))
+    } catch (err) { code = (err as { code?: string }).code ?? '' }
+    expect(code).toBe('DECISION_REQUIRED')
+    expect(rowOf(db, 'nrun_g2_10').status).toBe('started')
+    inTx(db, (tx) => transitionNode(tx, TEST_SECRET, { nodeRunId: 'nrun_g2_10', from: 'started', to: 'blocked_post', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_10').revision), now: NOW, reason: 'need_human', decisionId: 'dec_g2_10' }))
+    expect(rowOf(db, 'nrun_g2_10').status).toBe('blocked_post')
+    const payload = JSON.parse((db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id = 'nrun_g2_10' AND type = 'status_changed' ORDER BY seq DESC LIMIT 1").get() as { payload: string }).payload)
+    expect(payload.decision_id).toBe('dec_g2_10')
+  })
+
+  it('G2-04 已完节点取消不动状态、不产生新 attempt', () => {
+    const { db } = freshLedger(); seed(db)
+    seedQueued(db, 'nrun_g2_11'); lease(db, 'nrun_g2_11')
+    db.raw.prepare("UPDATE node_runs SET status = 'done', revision = revision + 1 WHERE node_run_id = 'nrun_g2_11'").run()
+    const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+      nodeRunId: 'nrun_g2_11', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_11').revision), cancelResult: 'interrupted', now: NOW, graceMs: 30000,
+    }))
+    expect(outcome.next_status).toBe('done')
+    const row = rowOf(db, 'nrun_g2_11')
+    expect(row.status).toBe('done')
+    expect(row.attempt).toBe(1)
+    expect(countOf(db, 'SELECT COUNT(*) AS n FROM node_runs WHERE node_run_id = ?', ['nrun_g2_11'])).toBe(1)
   })
 })

@@ -73,8 +73,9 @@ export type PreviousClock = {
 // remaining = (deadline_monotonic_ns - prev.last_event_monotonic_ns) - (current_boot.started_at - prev.last_event_at)
 // 停机那段时间不算进预算（规格 4.4 行 342）
 export function remainingAcrossBoot(prev: PreviousClock, currentBoot: { startedAtMs: number; monotonicNs: number }): number {
-  const budgetNs = prev.deadlineMonotonicNs - prev.lastEventMonotonicNs
-  const downtimeMs = currentBoot.startedAtMs - prev.lastEventWallMs
-  const remainingMs = budgetNs / 1e6 - downtimeMs
+  const budgetMs = Math.max(0, (prev.deadlineMonotonicNs - prev.lastEventMonotonicNs) / 1e6)
+  // 墙钟回拨时 downtime 会是负数：夹到 0，且剩余不许超过预算（规格 4.4 行 342）
+  const downtimeMs = Math.max(0, currentBoot.startedAtMs - prev.lastEventWallMs)
+  const remainingMs = Math.min(budgetMs, budgetMs - downtimeMs)
   return remainingMs > 0 ? remainingMs : 0
 }

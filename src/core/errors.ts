@@ -93,6 +93,7 @@ export type OrchErrorCode = keyof typeof ERROR_STATUS
 export const PROPOSED_ERROR_CODES = {
   LEASE_EXPIRED: 409,
   BRIDGE_ACK_LAG: 409,
+  DECISION_REQUIRED: 422,
 } as const
 
 export type ProposedErrorCode = keyof typeof PROPOSED_ERROR_CODES

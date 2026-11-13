@@ -65,14 +65,14 @@ export function validateCondition(condition: PassCondition): void {
 }
 
 // 模板 passCondition 是 mandatory baseline，节点只能 and 追加（规格 4.7 行 390）
+// 模板条件是基线，节点只能追加更严的条件，不许覆盖模板值（规格 4.7 行 390）
+// 求值时逐条 AND，所以同路径不同值两条都留着，效果是“两个都要满足”
 export function mergePassConditions(template: PassCondition[], node: PassCondition[]): PassCondition[] {
   const merged = template.map((c) => ({ ...c }))
   for (const cond of node) {
-    const same = merged.find((c) => c.path === cond.path && c.op === cond.op)
-    if (same) {
-      same.value = cond.value
-      continue
-    }
+    const identical = merged.find((c) => c.path === cond.path && c.op === cond.op
+      && canonicalJson(c.value ?? null) === canonicalJson(cond.value ?? null))
+    if (identical) continue
     merged.push({ ...cond })
   }
   return merged
