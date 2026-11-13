@@ -257,3 +257,19 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 - 产物核读：`lib/client.js` 是 `window.__ModuleLoader__.load({ id: "dsh-orchestra", factory: (require) => { … } });`，内部只有 `exports.clientId = "dsh-orchestra"`，没有任何 `require("react")` 或 `require("@deepseek-ai/…")`。
 - 两处与计划原文的偏差：① 总纲 §5 内联的 tsdown 代码块 `neverBundle: [/^@deepseek-ai//, ...]` 是无效正则（斜杠未转义），client 端还漏了 `react/jsx-runtime`，已按 §4.1 权威块执行；② `.gitignore` 在 `c08fa3a` 已补齐 `node_modules/`、`lib/`、`storages/`，本任务无需再改。
 - GitHub 票 #8（Task 0）已更新到 100% 并入办上报；S1 不受 §16.3 六项开放参数阻塞，可以开工；S2 起受桥 RPC 绑定名未定影响。
+
+### 11.5 S1 账本地基已完成（2026-11-13 12:47，提交 `4c4fc20` 收口）
+
+**提交链**：`4b47bc3` SQLite 单写者与 epoch 栅栏 → `de283c5` 迁移框架与十张最小表 → `23c6ac9` 事件哈希链与账本写入口 → `98b4905` 服务骨架与认证信封 → `ae2cdf2` 备份校验与恢复 → `46dbeab` 只读查询与游标 → `61b43db` 故障注入与六条 G1 用例 → `4c4fc20` G1 门记录与门检查命令。
+
+**落地面**：`src/core/`（errors/config/canonical/ids/hash-chain）、`src/infra/`（sqlite/driver、db/open·tx·migrate·ledger、lock、logger、backup、service-state）、`src/service/`（server、envelope、write-queue、queries/{cursor,list_events,list_tasks,get_operation,verify_ledger}）、`src/infra/sqlite/migrations/001_init.sql`（十表五索引）、`scripts/fault-inject.ts`、`scripts/gate-check.ts`、`tests/`（13 个 spec，93 条用例）。
+
+**验收（全 exit 0）**：`pnpm check` 全绿（typecheck 0 错 / 93 tests passed / build 产出 `lib/index.js` 0.10 kB、`lib/client.js` 0.29 kB、迁移 SQL 复制到 `lib/infra/sqlite/migrations/001_init.sql`）；`pnpm gate` 输出「gate G1 通过（13 项必过，artifact_hash=0dd41ff1713a…）」；六条注入单跑 483–795ms 全过，证据文件重跑不再变化（测试只跑用例，证据只在 `node --no-warnings scripts/fault-inject.ts --case G-XX` 时覆盖生成）。
+
+**G1 门记录**：`docs/gates/G1.md`，13 项必过（G1-01 迁移可重复、G1-02 中途杀可重入、G1-03 杀进程不丢已提交事件、G1-04 备份行数哈希一致、G1-05 损坏备份可检出、G1-06 认证拒匿名写、G1-07 阶段开关拒未知值、G-01/G-02/G-08/G-09/G-14/G-15），无 run、`gate_run_id=null`、`run_terminal=not_applicable`、`producer=human`；`artifact_hash=0dd41ff1713adee72de7e4ac2ff8ad2d22352688bdcd63bce6e7da88d5a91383`，锚点在 GateArtifact 之后，补记只追加。
+
+**计划偏离七处**：提交顺序 Task 2→1→3；driver 补 `service_meta`/`schema_migrations` BOOTSTRAP；`uuidv7` 用 16 字节；cursor 加 `issued_at`；新增 `src/service/write-queue.ts`；tsdown 用 glob 复制迁移 SQL；证据文件改覆盖写、测试不写证据（否则每次重跑都会改哈希，门记录的 evidence_index_hash 立刻失真）。
+
+**G1 未覆盖、留给 S2 的**：终态证据表（node_run done/failed/timeout 等）与租约、幂等上报；S1 只做到「事件追加 + 链校验 + 备份恢复 + 认证 + 阶段开关」。**S1 禁止项全程未碰**：没有桥 RPC、没有 parallel/subworkflow、没有 `workflow.*` 命令、面板没接真实账本。
+
+**要主人拍**：G1 门记录的批准栏写的是 `human:啸春`、`approved_at` 为签字时刻；这份是自主跑完的卷子，主人认这个结论即是正式过门，要改任何一项我重签 `artifact_hash`。S2 开工仍卡桥 RPC 七方法绑定名（§11.2 第 3 条）。
