@@ -10,7 +10,7 @@ const path = process.argv[2] ?? 'docs/gates/G1.md'
 const root = resolve(process.cwd())
 let text = readFileSync(path, 'utf8')
 const blocks = [...text.matchAll(/```json[ \t]*([^\r\n]*)\r?\n([\s\S]*?)\r?\n```/g)]
-const artifactMatch = blocks.find((m) => { try { return JSON.parse(m[2] ?? '')?.gate === 'G1' } catch { return false } })
+const artifactMatch = blocks.find((m) => { try { return typeof JSON.parse(m[2] ?? '')?.gate === 'string' } catch { return false } })
 if (!artifactMatch) throw new Error('找不到 GateArtifact')
 const artifact = JSON.parse(artifactMatch[2] ?? '') as Record<string, any>
 const evidenceBlock = blocks.find((m) => {
@@ -39,7 +39,9 @@ text = text.slice(0, evidenceBlock.index) + '```json evidence-index\n' + JSON.st
 const invariants = (JSON.parse(invariantBlock[2] ?? '') as InvariantEntry[]).map((i) => ({ id: i.id, statement: i.statement, evidence_ids: i.evidence_ids.slice().sort() })).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 artifact.invariants_hash = sha256Hex(canonicalJson(invariants))
 
-const spec = GATE_SPECS.G1
+const gate = String(artifact.gate)
+const spec = GATE_SPECS[gate]
+if (!spec) throw new Error('没有这道门的校验规格: ' + gate)
 const git = (args: string[]) => execFileSync('git', args, { cwd: root, maxBuffer: 64 * 1024 * 1024 })
 const args = ['diff', '--name-only', '--diff-filter=ACMR', spec.scopeBase + '..HEAD', '--', '.']
 for (const dir of spec.excludes) args.push(':(exclude)' + dir)

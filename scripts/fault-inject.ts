@@ -11,8 +11,14 @@ import { listEvents } from '../src/service/queries/list_events.ts'
 import { WriteQueue } from '../src/service/write-queue.ts'
 import { backup, restore, sha256File, verifyBackup } from '../src/infra/backup.ts'
 import { eventSeqs, freshLedger, seed, TEST_SECRET } from '../tests/fixtures/ledger.ts'
+import { inTx } from '../src/infra/db/tx.ts'
+import { acquireLease } from '../src/service/commands/lease.ts'
+import { applyReport } from '../src/service/commands/apply-report.ts'
+import { applyCancel } from '../src/service/commands/cancel.ts'
+import { MonotonicClock } from '../src/core/clock.ts'
+import type { Db } from '../src/infra/sqlite/driver.ts'
 
-export type InjectionCase = 'G-01' | 'G-02' | 'G-08' | 'G-09' | 'G-14' | 'G-15'
+export type InjectionCase = 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-07' | 'G-08' | 'G-09' | 'G-14' | 'G-15'
 
 export type InjectionResult = {
   case: InjectionCase
@@ -267,10 +273,130 @@ async function caseG15(): Promise<InjectionResult> {
   }
 }
 
+// S2 注入前的统一夹具：一条 queued 的 agent 节点，跑完租约在 dispatched
+function injectQueued(db: Db, nodeRunId: string, now = '2026-11-13T03:00:00.000Z'): number {
+  inTx(db, (tx) => {
+    tx.run('INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation, rearm_generation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [nodeRunId, 'r1', 'n1', 9, 'agent', 1, 'queued', 0, 0, 0, now, now])
+  })
+  inTx(db, (tx) => acquireLease(tx, TEST_SECRET, { nodeRunId, ownerEpoch: 1, leaseTtlMs: 30000, now }))
+  const row = db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId) as { revision: number }
+  return Number(row.revision)
+}
+
+const strongReport = (nodeRunId: string, reportId: string, status: string) => ({
+  report_id: reportId,
+  node_run_id: nodeRunId,
+  attempt: 1,
+  status,
+  evidence: { source: 'run_tool' as const, exitCode: 0, stdoutHash: 'a'.repeat(64), stderrHash: 'b'.repeat(64), hashes: {}, producedAt: '2026-11-13T03:00:00.000Z' },
+})
+const NODE_ROW = (db: Db, id: string) => db.raw.prepare('SELECT status, action_generation, attempt, fence_state, cancel_result, lease_expires_at FROM node_runs WHERE node_run_id = ?').get(id)
+
+async function caseG03(): Promise<InjectionResult> {
+  const { file, db } = freshLedger(); seed(db)
+  const before = dumpEvents(file)
+  injectQueued(db, 'nrun_g03')
+  const policy = { passConditions: [{ path: 'evidence.exitCode', op: 'eq' as const, value: 0 }] }
+  const run = () => inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
+    nodeRunId: 'nrun_g03', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: '2026-11-13T03:00:00.000Z',
+    report: strongReport('nrun_g03', 'rpt_g03_1', 'started'),
+  }, policy))
+  const first = run()
+  const second = run()
+  const applied = (db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nrun_g03' AND type = 'report_applied'").get() as { n: number }).n
+  const reg = db.raw.prepare("SELECT report_id, state, COUNT(*) AS n FROM report_registry WHERE report_id = 'rpt_g03_1' GROUP BY report_id, state").all() as Record<string, unknown>[]
+  db.raw.close()
+  return {
+    case: 'G-03',
+    params: { db: file, report_id: 'rpt_g03_1', node_run_id: 'nrun_g03', repeat: 2 },
+    before, after: dumpEvents(file),
+    reconcile: '第一次 accepted=' + String(first.accepted) + '；第二次 accepted=' + String(second.accepted) + ' state=' + String(second.registry_state)
+      + '；report_applied 条数=' + String(applied) + '；registry 对账=' + JSON.stringify(reg),
+  }
+}
+
+async function caseG04(): Promise<InjectionResult> {
+  const { file, db } = freshLedger(); seed(db)
+  const before = dumpEvents(file)
+  injectQueued(db, 'nrun_g04')
+  db.raw.prepare("UPDATE node_runs SET lease_expires_at = '2026-11-11T00:00:00.000Z' WHERE node_run_id = 'nrun_g04'").run()
+  let code = ''
+  try {
+    inTx(db, (tx) => applyReport(tx, TEST_SECRET, {
+      nodeRunId: 'nrun_g04', attempt: 1, expectedStatus: 'dispatched', generation: 1, now: '2026-11-13T03:00:00.000Z',
+      report: strongReport('nrun_g04', 'rpt_g04_1', 'started'),
+    }, { passConditions: [] }))
+  } catch (err) {
+    code = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
+  }
+  const row = NODE_ROW(db, 'nrun_g04')
+  db.raw.close()
+  return {
+    case: 'G-04',
+    params: { db: file, node_run_id: 'nrun_g04', lease_ttl_ms: 30000, late_by: '2 天' },
+    before, after: dumpEvents(file),
+    reconcile: '迟到上报被拒码=' + code + '；节点未动：' + JSON.stringify(row),
+  }
+}
+
+async function caseG05(): Promise<InjectionResult> {
+  const { file, db } = freshLedger(); seed(db)
+  const before = dumpEvents(file)
+  const revision = injectQueued(db, 'nrun_g05')
+  const out = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+    nodeRunId: 'nrun_g05', attempt: 1, revision, cancelResult: 'interrupted', now: '2026-11-13T03:00:01.000Z', graceMs: 30000,
+  }))
+  const armed = (db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nrun_g05' AND type = 'fence_armed'").get() as { n: number }).n
+  const row = NODE_ROW(db, 'nrun_g05')
+  db.raw.close()
+  return {
+    case: 'G-05',
+    params: { db: file, node_run_id: 'nrun_g05', cancel_result: 'interrupted', grace_ms: 30000 },
+    before, after: dumpEvents(file),
+    reconcile: '落位=' + JSON.stringify(out) + '；fence_armed 条数=' + String(armed) + '；节点行=' + JSON.stringify(row),
+  }
+}
+
+async function caseG07(): Promise<InjectionResult> {
+  const { file, db } = freshLedger(); seed(db)
+  const before = dumpEvents(file)
+  injectQueued(db, 'nrun_g07')
+  const clock = new MonotonicClock('boot_g07', { wallClockMs: 1_000_000, monotonicNs: 0 })
+  const drift = clock.sample(1_000_000 + 600_000, 1_000_000_000)
+  const forward = clock.decide(
+    { bootId: 'boot_g07', monotonicNs: 60e9, wallClockMs: 1_060_000 },
+    { bootId: 'boot_g07', monotonicNs: 10e9, wallClockMs: 1_600_000 },
+  )
+  const backwardClock = new MonotonicClock('boot_g07', { wallClockMs: 1_000_000, monotonicNs: 0 })
+  backwardClock.sample(1_000_000 - 600_000, 0)
+  const backward = backwardClock.decide(
+    { bootId: 'boot_g07', monotonicNs: 60e9, wallClockMs: 1_060_000 },
+    { bootId: 'boot_g07', monotonicNs: 10e9, wallClockMs: 400_000 },
+  )
+  const reboot = clock.decide(
+    { bootId: 'boot_g07', monotonicNs: 60e9, wallClockMs: 1_060_000 },
+    { bootId: 'boot_g08', monotonicNs: 5e9, wallClockMs: 1_060_000 },
+  )
+  const row = db.raw.prepare("SELECT status, deadline_boot_id, deadline_monotonic_ns FROM node_runs WHERE node_run_id = 'nrun_g07'").get()
+  db.raw.close()
+  return {
+    case: 'G-07',
+    params: { db: file, node_run_id: 'nrun_g07', jump_ms: 600000 },
+    before, after: dumpEvents(file),
+    reconcile: '向前跳十分钟 drift=' + String(drift) + 'ms 判=' + JSON.stringify(forward)
+      + '；向后跳判=' + JSON.stringify(backward) + '；跨 boot 判=' + JSON.stringify(reboot) + '；节点行=' + JSON.stringify(row),
+  }
+}
+
 export async function runCase(name: InjectionCase): Promise<InjectionResult> {
   switch (name) {
     case 'G-01': return caseG01()
     case 'G-02': return caseG02()
+    case 'G-03': return caseG03()
+    case 'G-04': return caseG04()
+    case 'G-05': return caseG05()
+    case 'G-07': return caseG07()
     case 'G-08': return caseG08()
     case 'G-09': return caseG09()
     case 'G-14': return caseG14()
@@ -282,6 +408,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const idx = process.argv.indexOf('--case')
   const name = (idx >= 0 ? process.argv[idx + 1] : 'G-01') as InjectionCase
   const out = await runCase(name)
-  writeEvidence(join(process.cwd(), 'docs/gates/evidence/G1'), out)
+  const gate = ['G-03', 'G-04', 'G-05', 'G-07'].includes(name) ? 'G2' : 'G1'
+  writeEvidence(join(process.cwd(), 'docs/gates/evidence/' + gate), out)
   console.log(JSON.stringify(out, null, 2))
 }

@@ -25,6 +25,11 @@ export const GATE_SPECS: Record<string, { items: string[]; scopeBase: string; ex
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
     excludes: ['docs/gates', 'docs/audits'],
   },
+  G2: {
+    items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07'],
+    scopeBase: '4f3ada7',
+    excludes: ['docs/gates', 'docs/audits'],
+  },
 }
 
 export type GateItem = { id: string; result: string; evidence_ids?: string[] }
