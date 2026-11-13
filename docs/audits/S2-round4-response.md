@@ -32,7 +32,7 @@
 
 - `tsc --noEmit`：exit 0
 - `vitest run`：31 文件 / 272 例全过（14.64s，exit 0）
-- `gate-check.ts docs/gates/G1.md`：exit 0（13 项必过、13 份证据，artifact_hash=`18088365050c…`、body_hash=`d99ba65f3744…`）
-- `gate-check.ts docs/gates/G2.md`：exit 0（15 项必过、15 份证据，artifact_hash=`2b90f0fde3ca…`、body_hash=`3bed7c14d24b…`）
+- `gate-check.ts docs/gates/G1.md`：exit 0（13 项必过、13 份证据，candidate=`bbd322cf9d4e…`、artifact_hash=`1ce80f6080fb…`、body_hash=`446357f9e00e…`）
+- `gate-check.ts docs/gates/G2.md`：exit 0（15 项必过、15 份证据，candidate=`f11d0fb8751c…`、artifact_hash=`b5615b8b5725…`、body_hash=`ef21bb456813…`）
 - ev-g2-08 连跑两次 sha256 一致：`54e4b0e8415abd5bc65ce885c407245d91ec099390e64a2b3188c89cb1144cbf`
-- 提交：`a7b03cb`（整改）、`8881b9b`（G1 重签）、`e3f1fc7`（G2 重签）
+- 提交：`a7b03cb`（整改）、`ecbd247`（G1 重签）、`df7d23a`（G2 重签）；`8154e18` / `53d36cc` 为收口文档与 codebasemap 同步

@@ -436,10 +436,10 @@ Get-Content D:\aboutAI\dsh-orchestra\docs\orchestra-audit-ledger.md -Tail 25
 
 **验收（实测）**：
 - `tsc --noEmit` exit 0；`vitest run` 31 文件 / 272 例全绿（14.64s）。
-- `gate-check.ts docs/gates/G1.md` exit 0：13 项必过、13 份证据，artifact_hash=`18088365050c…`、body_hash=`d99ba65f3744…`。
-- `gate-check.ts docs/gates/G2.md` exit 0：15 项必过、15 份证据，artifact_hash=`2b90f0fde3ca…`、body_hash=`3bed7c14d24b…`。
+- `gate-check.ts docs/gates/G1.md` exit 0：13 项必过、13 份证据，candidate=`bbd322cf9d4e…`、artifact_hash=`1ce80f6080fb…`、body_hash=`446357f9e00e…`。
+- `gate-check.ts docs/gates/G2.md` exit 0：15 项必过、15 份证据，candidate=`f11d0fb8751c…`、artifact_hash=`b5615b8b5725…`、body_hash=`ef21bb456813…`。
 - ev-g2-08 连跑两次 sha256 一致：`54e4b0e8…`。
 
-**提交链**：`a7b03cb` 整改 → `8881b9b` G1 重签 → `e3f1fc7` G2 重签。对照表 `docs/audits/S2-round4-response.md`。
+**提交链**：`a7b03cb` 整改 → `ecbd247` G1 重签 → `df7d23a` G2 重签（`8154e18` / `53d36cc` 为收口文档与 codebasemap 同步）。对照表 `docs/audits/S2-round4-response.md`。
 
 **当前关口**：第五轮独立审计子代理 `ff0066da-1d07-4ae9-afc3-27044fc04734` 已派（不自测），结论回来前不开 S3 九节点与状态机。审计若判 pass，下一步按 `docs/superpowers/plans/2026-11-12-dsh-orchestra-s3-nodes-state.md` 开 S3；若再出重大项，回到 §11.12 表逐条整改。
