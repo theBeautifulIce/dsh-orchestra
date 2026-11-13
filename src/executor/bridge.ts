@@ -1,4 +1,6 @@
 // src/executor/bridge.ts —— 桥 RPC 客户端：最小七方法（规格 7.2 行 582-590）
+import { appendFileSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { OrchError, proposedError } from '../core/errors.ts'
 
 // 宿主侧传输契约：方法名 + 参数，返回值由宿主给
@@ -6,11 +8,17 @@ export type BridgeTransport = {
   request<T>(method: string, params: unknown): Promise<T>
 }
 
-/** 桥事件的最小形状。具体类型判别在 S2 Task 3 的缓冲层里做。 */
+// 事件类型固定五类，写别的直接拒（规格 7.2 行 590）
+export const BRIDGE_EVENT_TYPES = ['step', 'turn', 'tool.call', 'tool.start', 'tool.result'] as const
+export type BridgeEventType = (typeof BRIDGE_EVENT_TYPES)[number]
+
 export type BridgeEvent = {
   seq: number
-  type: string
-  payload?: unknown
+  type: BridgeEventType
+  at: string
+  // tool.start 的时间锚点；动作计时用它，不拿 tool.call 的时间当动作起点
+  toolStartAt: string | null
+  payload: unknown
 }
 
 export type SpawnParams = {
@@ -121,3 +129,118 @@ export class BridgeClient {
     return this.subscribed.has(executorAgentId)
   }
 }
+
+// —— 桥事件缓冲与断号重取（规格 7.3 行 594-597）——
+
+export type BridgeBufferOptions = {
+  limitBytes: number
+  highWaterBytes: number
+  spillDir: string
+  agentId: string
+}
+
+export class BridgeEventBuffer {
+  private readonly opts: BridgeBufferOptions
+  private readonly events: BridgeEvent[] = []
+  private bytes = 0
+  private seqCursor = 0
+  private spillFile: string | null = null
+
+  constructor(opts: BridgeBufferOptions) {
+    this.opts = opts
+  }
+
+  // 收一条事件：类型固定、序号单调、同号重复按幂等跳过
+  // 返回 gapFrom：非空表示中间断了号，调用方要整页重取
+  push(ev: BridgeEvent): { accepted: boolean; gapFrom: number | null } {
+    if (!BRIDGE_EVENT_TYPES.includes(ev.type)) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件类型不在固定清单里', { type: ev.type })
+    }
+    if (ev.seq <= this.seqCursor) {
+      if (ev.seq === this.seqCursor) return { accepted: false, gapFrom: null }
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件序号倒退', { seq: ev.seq, lastSeq: this.seqCursor })
+    }
+    const gapFrom = ev.seq === this.seqCursor + 1 ? null : this.seqCursor + 1
+    this.events.push(ev)
+    this.bytes += Buffer.byteLength(JSON.stringify(ev), 'utf8')
+    this.seqCursor = ev.seq
+    if (this.bytes >= this.opts.highWaterBytes) this.spill()
+    return { accepted: true, gapFrom }
+  }
+
+  // 超过高水位就落盘：证据不丢，只是搬到磁盘（规格 7.3 行 594）
+  private spill(): void {
+    const first = this.events[0]
+    if (!first) return
+    const file = join(this.opts.spillDir, this.opts.agentId + '-' + first.seq + '.jsonl')
+    const body = this.events.map((e) => JSON.stringify(e)).join('\n')
+    try {
+      appendFileSync(file, body + '\n', 'utf8')
+    } catch (err) {
+      // 落盘失败等于证据要丢，宁可报错也不许静默丢
+      throw new OrchError('SERVICE_UNAVAILABLE', '桥缓冲溢出且落盘失败，证据不许丢', {
+        file: String(err), seq: first.seq,
+      })
+    }
+    this.spillFile = file
+    this.events.length = 0
+    this.bytes = 0
+  }
+
+  // 取 fromSeq 之后的全部事件：内存里的加 spill 文件里的，合并后按 seq 排序
+  takeFrom(fromSeq: number): BridgeEvent[] {
+    const out: BridgeEvent[] = []
+    if (this.spillFile) {
+      const text = readFileSync(this.spillFile, 'utf8')
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        const ev = JSON.parse(line) as BridgeEvent
+        if (ev.seq >= fromSeq) out.push(ev)
+      }
+    }
+    for (const ev of this.events) {
+      if (ev.seq >= fromSeq) out.push(ev)
+    }
+    out.sort((a, b) => a.seq - b.seq)
+    return out
+  }
+
+  // 动作计时锚点：最近一条 tool.start 的时间（规格 7.2 行 590）
+  toolStartAnchor(): string | null {
+    for (let i = this.events.length - 1; i >= 0; i -= 1) {
+      const ev = this.events[i]
+      if (ev && ev.type === 'tool.start') return ev.toolStartAt ?? ev.at
+    }
+    return null
+  }
+
+  get lastSeq(): number { return this.seqCursor }
+  get spilled(): boolean { return this.spillFile !== null }
+  get bufferedBytes(): number { return this.bytes }
+}
+
+// 断号不许增量补洞：整页重取，从缺口起点一次拉一页（规格 7.3 行 595）
+export async function refillPage(
+  client: BridgeClient,
+  params: { executorAgentId: string; attempt: number; gapFrom: number; pageSize?: number },
+  receive: (events: BridgeEvent[]) => void,
+): Promise<number> {
+  const pageSize = params.pageSize ?? 256
+  // 宿主按 fromSeq 重放，回包里带事件页；页里序号连续才收
+  const page = await client.fetchPage({
+    executorAgentId: params.executorAgentId,
+    attempt: params.attempt,
+    fromSeq: params.gapFrom,
+    pageSize,
+  })
+  let cursor = params.gapFrom - 1
+  for (const ev of page.events) {
+    if (ev.seq !== cursor + 1) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '重取页里序号不连续', { expect: cursor + 1, got: ev.seq })
+    }
+    cursor = ev.seq
+    receive([ev])
+  }
+  return cursor
+}
+
