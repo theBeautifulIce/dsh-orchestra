@@ -718,11 +718,17 @@ function maskAuditLinkDestinations(text: string): string {
         for (let k = start; k < i; k += 1) {
           const line = lines[k]!
           lines[k] = blankPreservingLines(line)
-          // 整段隐藏会把同一段里可见的 fail 结论一起藏掉。只要藏掉的是 fail，
-          // 就在文末补一行无取值的结论，让 auditConclusionOf 判为不可判定（fail-closed）。
+          // 整段隐藏会把同一段里任何结论行一起藏掉，包括可见的 fail 与写坏的结论行。
+          // 只要藏掉的是结论行（不论 pass/fail/无法解析），就补一行无取值结论，
+          // 让 auditConclusionOf 判为不可判定，避免另一段的 pass 把可见 fail 洗掉（fail-closed）。
           const normalized = normalizeAuditLine(line)
-          if (/^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:fail|不通过)/i.test(normalized)
-            || /^(?:fail|不通过)$/i.test(normalized)) {
+          // 被藏掉的结论行必须自己也是干净的 pass 才能放行；fail、写坏的尾巴、
+          // 无法解析的结论都毒掉，避免另一段 pass 把可见 fail 或歧义洗掉（fail-closed）。
+          const cleanPass = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(?:pass|通过)(.*)$/i.exec(normalized)
+          const hasConclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/i.test(line)
+          if (hasConclusionText) {
+            if (cleanPass === null || !validConclusionTail(cleanPass[1] ?? '', 'pass')) poisoned = true
+          } else if (/^(?:fail|不通过)$/i.test(normalized)) {
             poisoned = true
           }
         }

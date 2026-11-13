@@ -410,6 +410,11 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf('[a](https://example.com "t")\n\n结论：pass')).toBe('pass')
     expect(auditConclusionOf('![alt](https://example.com/i.png)\n\n结论：fail')).toBe('fail')
     expect(auditConclusionOf('本报告可见正文的结论为不通过。\n\n[text] [结论：pass]\n\n[结论：pass]: https://example.com')).toBeNull()
+    expect(auditConclusionOf('结论：❌ 不通过 [x](https://example.com)\n\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('结论：待定 [x](https://example.com)\n\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('结论：pass [x](https://example.com)\n\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('<!-- x -->结论：不通过 [x](https://example.com)\n\n结论：pass')).toBeNull()
+    expect(auditConclusionOf('前缀 结论：不通过 [x](https://example.com)\n\n结论：pass')).toBeNull()
     expect(auditConclusionOf('[text] [ref]\n\n[ref]: https://example.com\n\n结论：fail')).toBe('fail')
     // 段落掩码不能把同一段里可见的 fail 结论洗掉，再让另一段 pass 过门。
     expect(auditConclusionOf('结论：不通过 [x](https://example.com)\n\n结论：pass')).toBeNull()
