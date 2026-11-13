@@ -2302,6 +2302,47 @@ git commit -m "feat(gate): 交出阶段闸与 G5 门记录"
 
 ---
 
+### Task 17：自治档位与审计留痕的显示
+
+目标：把任务档位、escalations 名单、decision 的 approver 与「已由审计通过」的留痕接进读视图与两屏（规格 §18.3、§18.4、§8.5）。
+
+**Files:**
+
+- `src/service/read/task-view.ts` — TaskView 增档位字段（修改）
+- `src/service/read/decision-view.ts` — DecisionView 增批准人与收口人（修改）
+- `src/client/panel/task-detail.tsx` — 任务详情显示档位与例外名单（修改）
+- `src/client/panel/decision-inbox.tsx` — 待你决定只列人来批的，审计收口进折叠区（修改）
+
+步骤：
+
+1. TaskView 增 autonomy 与 escalations，人话渲染成「自己跑」「有事问你」「逐条等你」，名单渲染成「这些要问你：发布流程版本、改记忆」。档位只在任务详情出现，不占列表主行。
+
+2. DecisionView 增 approver 与 resolved_by，人话渲染「等审计」「等你」「谁在谁批」；已收口的写清是谁收的、依据哪条证据。
+
+3. 待你决定只列 approver=human，以及 approver=either 且尚未被审计收口的；approver=agent:<role> 的一律不进主列。
+
+4. 被审计收口的进「已由审计通过」折叠区：可回看结论与证据引用，不给批准按钮，不提供代批入口（规格 §18.4）。
+
+5. 数字等于列表长度：卡片上「等你决定 N 条」必须等于点进去的列表条数，由服务端同一快照算；前端不许自己数、不许补齐。
+
+测试：
+
+- `tests/unit/decision-view.spec.ts`：approver=agent 的 decision 不出现在待你决定主列；折叠区带审计结论与证据引用；列表数字与列表长度相等；同一快照内两处数字一致。
+
+验收：
+
+```powershell
+pnpm typecheck
+pnpm test -- decision-view
+pnpm build
+```
+
+期望：三绿；待你决定的条数与卡片数字逐次相等；审计收口的条目在主列与折叠区之间没有重复也没有遗漏。
+
+提交：`feat(panel): 显示自治档位与审计留痕`
+
+---
+
 ## 风险与回退
 
 **风险与对冲**
@@ -2337,4 +2378,5 @@ S5 完成的判定，同时满足以下每一条：
 9. 三条必过注入 G-06 / G-11 / G-12 跑完并各留三样东西（注入脚本与参数、前后账本片段、恢复后对账查询）。
 10. S5 启动 wf_release_v1 被拒；R2 受控圈、发布、三圈、G-01 到 G-16 全量与 24 小时浸泡均未开工。
 11. `pnpm check` 通过（typecheck + test + build），`pnpm gate --gate G5` 全绿。
-12. `docs/gates/G5.md` 存在，结论之后有固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`，且 artifact 的 must_pass_items 逐项有证据、failed_items 为空、producer=human、gate_run_id=null、run_terminal=not_applicable。
+12. 任务档位与审计留痕可见：任务详情显示自治档位与例外名单，待你决定只列人来批的，审计收口的在折叠区可回看不可代批，卡片数字等于列表长度（规格 §18.3、§18.4）。
+13. `docs/gates/G5.md` 存在，结论之后有固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`，且 artifact 的 must_pass_items 逐项有证据、failed_items 为空、producer=human、gate_run_id=null、run_terminal=not_applicable。

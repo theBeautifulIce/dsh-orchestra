@@ -837,6 +837,49 @@ pnpm gate
 
 提交：`test(gates): 补齐 G3 故障注入与门记录`
 
+### Task 15：起运行命令与自治档位
+
+目标：交出 orchestration.start_run（建任务、固定版本、写自治档位）与 decision 的 approver 三档、审计能力位校验（规格 §18.3、§18.4）。
+
+**Files:**
+
+- `src/service/commands/start-run.ts` — start_run 命令（新建）
+- `src/service/decision/approver.ts` — approver 三档求值与提交者校验（新建）
+- `tests/unit/start-run.spec.ts` — 命令用例（新建）
+- `tests/unit/approver.spec.ts` — 批准人用例（新建）
+
+步骤：
+
+1. start_run 入参固定：workflow_id、workflow_version（必填）、task_title、input、autonomy?、escalations[]?、operation_id。缺 workflow_version 直接拒，不回退到 current（规格 §6.3 版本固定、§18.3 档位在任务上）；错误码只取规格 §17.1 现有码，不新造。
+
+2. autonomy 默认 autonomous，只接受 autonomous / assisted / supervised 三值，越界拒。值写进 tasks 行与 task.created 事件 payload，回执里带 autonomy，回读时字段一致。
+
+3. escalations 逐条转成匹配规则（节点类型 / 动作类别 / 流程版本发布三类），命中即在 decision 生成时置 confirm_required=true；未命中的不加打扰（规格 §18.3）。名单为空是合法值，表示只用硬性例外。
+
+4. decision 增 approver（agent:<role> / human / either）：生成时按 18.4 的默认分工写入；approver=agent:<role> 时校验提交者带 orchestra.audit，且该 agent 不是此 decision 证据的产出者（比对 node_run 的 executor_agent_id 与证据 producer），不满足则整笔拒绝并留事件。
+
+5. 幂等与回执：同 operation_id 重放返回同一 task_id / run_id 与 replayed=true；换 operation_id 建第二条任务，不合并。
+
+6. 改档走 task.set_autonomy(task_id, autonomy, expected_revision)：写事件、回执写明从哪条 decision 之后生效；已生成的 decision 不追溯（规格 §18.3）。
+
+7. 审计能力位在加载期授予（与 S5 阶段闸同一处校验），assisted 与 supervised 两种档位下 auditor 同样只能收口自己那一档，不越权。
+
+测试：
+
+- `tests/unit/start-run.spec.ts`：默认档位下不可逆动作与记忆写入仍到人；assisted 下 decision 过期按默认动作收口；supervised 下过期不自动收口；escalations 命中「发布流程版本」时该 decision 的 confirm_required=true；缺 workflow_version 被拒且没建出任务；同 operation_id 重放回执一致。
+- `tests/unit/approver.spec.ts`：approver=agent:<role> 时无 orchestra.audit 的提交被拒；自己产出证据的 decision 被拒；approver=human 时审计提交被拒；either 先到先收口且 resolved_by 落库。
+
+验收：
+
+```powershell
+pnpm check
+pnpm test -- start-run approver
+```
+
+期望：typecheck / test / build 全绿；两组用例全过；start_run 建出的任务带 autonomy 且回执可回读，缺版本号与越界档位都被拒。
+
+提交：`feat(commands): 交出起运行命令与自治档位`
+
 ## 风险与回退
 
 - 风险：M-01…M-61 有 61 条迁移，用例写漏一条就卡住 G3 的「M-01 到 M-61 全过」。缓解：Task 14 用数据驱动表把迁移行与用例行绑在一起，缺一条即编译失败。
@@ -854,4 +897,4 @@ pnpm gate
 - G-01/G-02/G-04/G-06/G-12/G-16 六个注入各跑一遍并留注入脚本、参数、前后账本片段与对账查询。
 - `docs/gates/G3.md` 存在，含逐项证据、failed_items 为空、conclusion、approver、approved_at，结论后有 `artifact_hash=SHA256(canonical_json(artifact))` 锚点。
 - `pnpm check` 与 `pnpm gate` 均通过。
-- 本批没有引入 workflow 发布路径，没有让面板接真实账本，没有记忆写入代码。
+- 本批没有引入 workflow 发布路径，没有让面板接真实账本，没有记忆写入代码；起运行命令只建任务与 run，不实现面板命令面（规格 §8.4 仍只开六条）。

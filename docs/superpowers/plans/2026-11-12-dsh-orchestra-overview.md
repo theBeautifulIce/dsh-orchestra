@@ -12,7 +12,7 @@
 
 ## 1. 规格来源与硬约束
 
-- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.2，1401 行 / 97769 bytes / SHA256 `EB46CA604B1C1DB6E95FEFBE3A0AF3EA0D3E2E7061009BB9689483C710315CE7`，commit `f094760`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
+- 实施规格：`docs/superpowers/specs/2026-11-11-workflow-orchestration-design.md`（v1.3，1493 行 / 106173 bytes / SHA256 `D78E4E2B7F3C569D20F8FEC27564B031240B4E1B947F34E47EF493CE9976F82E`，commit `待回填`）。本计划所有行为契约以该规格为准，规格与本计划冲突时以规格为准并回头修计划。
 - 设计稿论证与用例：`docs/orchestra-design-draft.md` v44。
 - 不得写的事（规格 1.2 / 10.3）：内嵌编排脚本、与原生 workflowEngine 半兼容、让模型做最终裁决、接受口头副作用等级、节点层跨节点业务判断、自动兜底放行、v1 记忆删除与跨运行补偿、把执行器全量 transcript 给大脑。
 - 账本只追加；已提交事件不改写；事件序号单调（不变量 I2）。
@@ -27,9 +27,9 @@
 | --- | --- | --- | --- | --- |
 | S1 账本地基 | `2026-11-12-dsh-orchestra-s1-ledger.md` | 服务骨架、配置、认证、单写者、迁移、哈希链、epoch 栅栏、备份恢复 | G1 | 无 |
 | S2 单节点闭环 | `2026-11-12-dsh-orchestra-s2-agent-loop.md` | 桥 RPC 最小集、agent 节点、租约、applyReport、终态、取消、超时、证据 | G2 | S1 |
-| S3 九节点与状态机 | `2026-11-12-dsh-orchestra-s3-nodes-state.md` | 九节点全量迁移、八种 decision、审批、并行、等待、子流程、补偿、恢复扫描 | G3 | S1、S2 |
+| S3 九节点与状态机 | `2026-11-12-dsh-orchestra-s3-nodes-state.md` | 九节点全量迁移、八种 decision、审批、并行、等待、子流程、补偿、恢复扫描、起运行命令与自治档位（15 个 Task） | G3 | S1、S2 |
 | S4 流程定义与版本 | `2026-11-12-dsh-orchestra-s4-workflow-version.md` | 三表四命令、校验、发布事务、版本固定、画布同源定义 | G4 | S1、S3 |
-| S5 面板与记忆 | `2026-11-12-dsh-orchestra-s5-panel-memory.md` | 读模型、查询、SSE、六屏、记忆全链路、视觉门槛 | G5 | S1–S4 |
+| S5 面板与记忆 | `2026-11-12-dsh-orchestra-s5-panel-memory.md` | 读模型、查询、SSE、六屏、记忆全链路、视觉门槛、自治档位与审计留痕的显示（17 个 Task） | G5 | S1–S4 |
 | S6 硬化与发布 | `2026-11-12-dsh-orchestra-s6-hardening-release.md` | G-01–G-16 注入、性能、浸泡、wf_release_v1、手册、升级回滚、R0/G6/R1/R2 | G6 | S1–S5 |
 
 每批计划开头都写明：本批能做什么、不能做什么、对应门（G1–G6）的必过项来自规格 11.2。
@@ -87,7 +87,7 @@ dsh-orchestra/
 │  ├─ service/                 # 编排服务
 │  │  ├─ server.ts             # HTTP 入口（127.0.0.1 + 共享密钥）
 │  │  ├─ envelope.ts           # 命令信封与回执
-│  │  ├─ commands/             # 每个命令一个文件
+│  │  ├─ commands/             # 每个命令一个文件（start-run.ts 等）
 │  │  ├─ queries/              # 每个查询一个文件
 │  │  └─ sweep.ts              # 维护扫描（每分钟）
 │  ├─ executor/                # 宿主侧执行器
