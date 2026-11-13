@@ -641,3 +641,13 @@ S1 第二十一轮（`docs/audits/S1-independent-audit-round21.md`，绑 G1 / 6c
 对照表：`docs/audits/S1-round21-response.md`、`docs/audits/S2-round25-response.md`。S1 r21 P2-1 是 G1 未签态哈希，留待重签；P2-2 的 11 例预签态噪声本段保留并在计数单列。
 
 下一步：按 HEAD c818778 重派 S1 第二十二轮与 S2 第二十六轮独立审计；两份都 pass 后按既有顺序重签 G1/G2、双门 gate-check exit 0、全量 359/359，再开 S3 九节点与状态机。任何一份 fail 都回表整改，不重签、不开 S3。
+
+### 11.24 S2 第二十六轮整改（2026-11-14 03:20）
+
+S2 第二十六轮（`docs/audits/S2-independent-audit-round26.md`，绑 G2 / ca2b196，判 fail：P0=2 / P1=1 / P2=3）整改完成，对照表 `docs/audits/S2-round26-response.md`。
+
+- P0-1/P0-2：`scripts/gate-check.ts` 的主语、连接词与裁决词表补裸 `否决/驳回/拒绝/反对/未采纳/拒收/不接收`、繁體 `否決/駁回/拒絕/反對/未採納`、`結論` 与 `為`；报告与门正文共用同一扫描器，`結論：fail` 读成 fail，10 条审计载荷不再读到 pass。回归在 `tests/gate-check.spec.ts`。
+- P1-1：`scripts/fault-inject.ts:70-73` 把 JSON 里的 `"revision":<数字>` 归一为 `"revision":<n>`；ev-g2-14 顺序两次、四路并发四次 sha256 全为 `12e34ba8fd59c17322b364a122a5f265af87d353e10a13b6b4328049ceb6b39f`；`docs/gates/G2.md:83` 与 `:386` 同步。
+- P2-1/P2-2：`src/core/policy.ts:52-72` 拒绝 null/undefined 产物；每个 required key 的产物摘要必须唯一，共用同一份内容返回 verification_too_weak。回归在 `tests/apply-report.spec.ts`。
+- 验证：`tsc --noEmit` exit 0；定向 135 例 124 passed / 11 failed；全量 32 文件 / 362 例 351 passed / 11 failed；11 红全部是 G1 预签态（`audit_report_sha256=0*64`），无新增回归。
+- 状态：未提交、未重签、未派新审计；S1 第二十二轮仍在跑。两份 pass 后重签 G1/G2、双门 exit 0、全量全绿，再开 S3。

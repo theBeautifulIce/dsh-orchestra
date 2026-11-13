@@ -343,6 +343,23 @@ describe('审计报告结论必须与门记录一致（第五轮审计 P0-1 / �
     expect(auditConclusionOf(base + '上一轮审计未通过，本轮已整改。本报告不通过。')).not.toBe('pass')
   })
 
+  it('S2 第二十六轮 P0-1/P0-2：裸裁决词与繁體結論不能保留 pass', () => {
+    const base = '结论：pass\n\n'
+    const negatives = [
+      '本次审计结论为否决。', '本次审计结论为驳回。', '本次审计结论为拒绝。',
+      '本次审计结论为反对。', '本次审计结论为未采纳。', '本次审计结论为拒收。',
+      '本次审计结论为不接收。', '結論：fail',
+      '本次審計結論為否決。', '本次審計結論為駁回。',
+    ]
+    for (const line of negatives) expect(auditConclusionOf(base + line), line).not.toBe('pass')
+    expect(auditConclusionOf('結論：fail')).toBe('fail')
+    expect(auditConclusionOf('結論：pass')).toBe('pass')
+    const head = '结论：pass\n\n## 必过项与证据\n\n'
+    expect(bodyConclusionOf(head + '本次审计结论为否决。')).toBe('fail')
+    expect(bodyConclusionOf(head + '本報告結論為駁回。')).toBe('fail')
+    expect(bodyConclusionOf(head + '本次审计否决项为 0。')).toBe('pass')
+  })
+
   it('pass 后带重大/阻断/未收口等 caveat 不能读成 pass（S1 第六轮 P1-1）', () => {
     expect(auditConclusionOf('结论：pass — 重大 3')).toBeNull()
     expect(auditConclusionOf('结论：pass（未收口）')).toBeNull()

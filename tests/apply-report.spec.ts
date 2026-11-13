@@ -426,6 +426,31 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
     expect(out.reason).toBe('verification_too_weak')
   })
 
+  it('required_hashes 的产物为 null 时不能拿 sha256(null) 通过（S2 第二十六轮 P2-1）', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact'] })
+    bindRunVersion(db, catalog)
+    const out = apply(db, {
+      output: { artifact: null },
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: sha256Hex(canonicalJson(null)) }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(false)
+    expect(out.reason).toBe('verification_too_weak')
+  })
+
+  it('两个 required key 各自绑定独立产物 → 正常收口（S2 第二十六轮 P2-2 阳性对照）', () => {
+    const db = setup()
+    const catalog = catalogFor(['n_ar', 'n_other'], { requiredHashes: ['artifact', 'bundle'] })
+    bindRunVersion(db, catalog)
+    const bundle = { file: 'build/bundle.zip' }
+    const out = apply(db, {
+      output: { artifact: ARTIFACT, bundle },
+      evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: { artifact: ARTIFACT_HASH, bundle: sha256Hex(canonicalJson(bundle)) }, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
+    }, 'verifying', 1, NOW, catalog)
+    expect(out.accepted).toBe(true)
+    expect(nodeRow(db).status).toBe('done')
+  })
+
   it('失败终态缺证据 → evidence_missing（S2 第二十三轮 P1-1）', () => {
     const db = setup()
     const out = apply(db, { status: 'failed', evidence: undefined })

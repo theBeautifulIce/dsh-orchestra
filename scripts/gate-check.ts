@@ -645,7 +645,7 @@ const FAIL_SUBJECTS = [
   '審計報告', '審核報告', '復核報告', '評審報告', '審計意見', '審核意見', '復核意見', '評審意見',
   '審計結論', '審核結論', '復核結論', '評審結論', '審計結果', '審核結果', '復核結果', '評審結果',
   '最終結論', '最終判定',
-  '审计', '审核', '复核', '评审', '结论', '判定', '審計', '審核', '復核', '評審', 'audit', 'review',
+  '审计', '审核', '复核', '评审', '结论', '結論', '判定', '審計', '審核', '復核', '評審', 'audit', 'review',
   'auditor', 'reviewer', '審計師',
 ].sort((a, b) => b.length - a.length)
 
@@ -666,6 +666,9 @@ const FAIL_VERDICTS = [
   '无法予以通过', '无法通过', '不予通过', '不获通过', '未获批准', '不获批准', '不予批准',
   '未达到通过标准', '未达标', '不达标', '未通过验收', '不通过验收', '未获审批', '不获审批',
   '被否决', '遭否决', '被驳回', '遭驳回', '被拒绝', '没能通过',
+  // 裸裁决词：结论为否决/驳回/拒绝/反对，或未采纳/拒收/不接收（S2 第二十六轮 P0-1）。
+  '未采纳', '未採納', '反对通过', '反對通過', '拒收', '不接收',
+  '否决', '驳回', '拒绝', '反对', '否決', '駁回', '拒絕', '反對',
   'cannot pass', 'unable to pass', 'not approved', 'not approve', 'did not approve',
   'failed to pass', 'refused to pass', 'no approval', 'denied approval',
   // S1 第二十一轮 P0：缩写否定、批准类否定与繁體带宾语写法。
@@ -680,11 +683,11 @@ const FAIL_CONNECTORS = [
   '审计结论', '审核结论', '复核结论', '评审结论',
   '审计结果', '审核结果', '复核结果', '评审结果',
   '最终结论', '最终判定', 'conclusions', 'conclusion', 'outcome',
-  '结果', '结论', '判定', '意见', '经过', '审计', '审核', '复核', '评审',
+  '结果', '结论', '結論', '判定', '意见', '经过', '审计', '审核', '复核', '评审',
   '报告', '報告', '最终', '最終', '依然', '还是', '总的', 'results', 'result', 'report', 'review',
   '審計', '審核', '復核', '評審', '結果', '意見',
   'audit', 'was', 'were', 'has', 'have', 'had', 'been', 'did', 'does', 'do',
-  'is', 'are', 'to', 'the', 'a', 'an', '经', '后', '仍', '为', '是', '的',
+  'is', 'are', 'to', 'the', 'a', 'an', '经', '后', '仍', '为', '為', '是', '的',
 ].sort((a, b) => b.length - a.length)
 
 function regexEscape(ch: string): string {
@@ -805,7 +808,7 @@ function matchStructuralNegative(rest: string): string | null {
 }
 const FAIL_SUBJECT_RE = new RegExp(FAIL_SUBJECTS.map(sepPattern).join('|'), 'g')
 const FAIL_SUBJECT_NO_BARE_RE = new RegExp(
-  FAIL_SUBJECTS.filter((s) => s !== '结论' && s !== '判定').map(sepPattern).join('|'),
+  FAIL_SUBJECTS.filter((s) => s !== '结论' && s !== '結論' && s !== '判定').map(sepPattern).join('|'),
   'g',
 )
 
@@ -868,13 +871,13 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   if (visible === null) return null
   let verdict: 'pass' | 'fail' | null = null
   let inlineFail = false
-  const conclusionText = /(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/
-  const conclusionWord = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)$/i
+  const conclusionText = /(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]/
+  const conclusionWord = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)$/i
   // 先把所有可见行按行边界拼起来做一次全文扫描：跨越任意多行的拆词都能命中。
   if (visibleFailStatement(visible.join('|'))) inlineFail = true
   for (let visibleIndex = 0; visibleIndex < visible.length; visibleIndex += 1) {
     const line = visible[visibleIndex]!
-    const strict = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]/.test(line)
+    const strict = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]/.test(line)
     const bare = /^(?:pass|fail|通过|不通过)$/i.test(line)
     if (!strict && !bare) {
       // 全文扫描已经在循环外完成；这里只保留链接定义与“结论”/“：fail”拆行的歧义判定。
@@ -894,7 +897,7 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
       verdict = rawVerdict(line)
       continue
     }
-    const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(.*)$/i.exec(line)
+    const m = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(.*)$/i.exec(line)
     if (!m) return null
     const raw = (m[1] ?? '').toLowerCase()
     const v = raw === 'pass' || raw === '通过' ? 'pass' : 'fail'
@@ -912,7 +915,7 @@ export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   if (visible === null) return null
   const found: Array<'pass' | 'fail'> = []
   for (const line of visible) {
-    const m = /^(?:审计)?(?:结论|判定|审计意见|最终判定|最终结论)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
+    const m = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)(?=$|[（(。．.！!？?；;，,、\s])/i.exec(line)
     if (m) found.push(rawVerdict(m[1] ?? ''))
   }
   // 正文不再按 160 字/24 字偏移截窗：长行和靠后的否定句同样能签过（S1 第二十轮 P0-4）。
@@ -920,7 +923,7 @@ export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   // 裸结论主语，只对以“结论/判定”开头的行补一次精确判定。
   if (visibleFailStatement(visible.join('|'), { bareConclusion: 'never' })) return 'fail'
   for (const line of visible) {
-    if (/^(?:结论|判定)/.test(line) && visibleFailStatement(line)) return 'fail'
+    if (/^(?:结论|結論|判定)/.test(line) && visibleFailStatement(line)) return 'fail'
   }
   return found.length === 1 ? found[0]! : null
 }

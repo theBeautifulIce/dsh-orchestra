@@ -45,7 +45,7 @@ export type InjectionResult = {
 type EvidenceMaps = { ids: Map<string, string>; entity: Map<string, string>; entityCount: Map<string, number> }
 
 // 同一份证据的四个区块必须共用一套映射：否则各自从 1 开始编号，会把 nrun_1/nrun_2 对调（第五轮审计 P2-3）
-function normalizeEvidence(text: string, shared?: EvidenceMaps): string {
+function normalizeEvidence(text: string, shared?: EvidenceMaps, normalizeRevision = false): string {
   const ids = shared?.ids ?? new Map<string, string>()
   const idOf = (raw: string): string => {
     let hit = ids.get(raw)
@@ -68,6 +68,9 @@ function normalizeEvidence(text: string, shared?: EvidenceMaps): string {
   }
   // 运行时刻（租约到期、工具开始、验收截止）也是环境噪声，统一写 <ts> 才谈得上重跑同字节。
   let out = text.replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, '<ts>')
+  // 续租次数取决于调度抖动，revision 每跑一次都可能不同；它不是行为事实，
+  // 写进证据会把“同一场景重跑同字节”变成偶然（S2 第二十六轮 P1-1）。
+  if (normalizeRevision) out = out.replace(/"revision":\d+/g, '"revision":<n>')
   out = out.replace(/evt_[0-9a-f]{20,}/g, (m) => idOf(m))
   out = out.replace(/lease_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, (m) => entityOf(m))
   out = out.replace(/(tsk|run|nrun|dec)_[0-9a-f]{32}/g, (m) => entityOf(m))
@@ -77,7 +80,8 @@ function normalizeEvidence(text: string, shared?: EvidenceMaps): string {
 export function writeEvidence(dir: string, result: InjectionResult): void {
   mkdirSync(dir, { recursive: true })
   const shared: EvidenceMaps = { ids: new Map(), entity: new Map(), entityCount: new Map() }
-  const norm = (value: string): string => normalizeEvidence(value, shared)
+  // 只有 ev-g2-14 的续租次数会随并发抖动；其余证据保持原字节，避免无谓改锚。
+  const norm = (value: string): string => normalizeEvidence(value, shared, result.case === 'ev-g2-14')
   const params = norm(JSON.stringify(result.params, (key, value) => (key === 'db' ? '<tmp>/orchestra.db' : value)))
   writeFileSync(join(dir, result.case + '.md'),
     '# ' + result.case + '\n\n- 参数：' + params + '\n'

@@ -54,10 +54,19 @@ export function evaluateEvidence(
       if (typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value)) return true
       // 键语义必须绑定到 output 的同名字段：没有产物、或产物哈希不等于证据值，都不算。
       if (outputObject === null || !Object.prototype.hasOwnProperty.call(outputObject, h)) return true
-      const expected = sha256Hex(canonicalJson(outputObject[h] ?? null))
+      // 产物为 null/undefined 时没有可核验内容，不能拿 sha256("null") 当凭据（S2 第二十六轮 P2-1）。
+      const product = outputObject[h]
+      if (product === null || product === undefined) return true
+      const expected = sha256Hex(canonicalJson(product))
       return value.toLowerCase() !== expected.toLowerCase()
     })
     if (invalid.length > 0) {
+      return { ok: false, reason: 'verification_too_weak', strength, digest, normalized }
+    }
+    // 每个 required key 必须对应一份独立产物：两个键共用同一份内容时，
+    // 一个产物只能证明一个 key，不能同时充当两份凭据（S2 第二十六轮 P2-2）。
+    const productDigests = requiredHashes.map((h) => sha256Hex(canonicalJson(outputObject![h])))
+    if (new Set(productDigests).size !== productDigests.length) {
       return { ok: false, reason: 'verification_too_weak', strength, digest, normalized }
     }
     if (strength === 'weak') {
