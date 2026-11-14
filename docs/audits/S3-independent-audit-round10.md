@@ -1,5 +1,8 @@
 # S3 独立审计 · 第 10 轮（837b0c6）
 
+门：G3
+候选提交：837b0c6bcf9382f54b0d9abce07cabeadf430cd0
+
 **verdict：pass**。P0 0 项、P1 0 项、P2 10 项；必过项 20/20；failed_items：空。
 
 候选 `837b0c6bcf9382f54b0d9abce07cabeadf430cd0`（`fix(service): cancel queued irreversible and blocked_pre nodes`，main，父 `df2fc08`，已推 origin/main）。审计在 detached 临时 worktree `C:\Users\ASUS\AppData\Local\Temp\orch-audit-s3-r10` 完成，主工作树源码未改，本报告为新增文件；审计结束后临时 worktree 已删除。
