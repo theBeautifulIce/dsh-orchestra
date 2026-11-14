@@ -1,6 +1,7 @@
 // src/executor/run-node.ts —— 单节点执行主链（规格 5.2 行 442-449）
 // 生产路径的顺序固定：租约 → 建执行器 → 上报 started → 只读工具出强证据 → 核命令哈希 → 进 verifying → 上报 done。
 import { OrchError } from '../core/errors.ts'
+import { toolExecutionId } from '../core/ids.ts'
 import type { Report } from '../core/report.ts'
 import type { Db } from '../infra/sqlite/driver.ts'
 import { withTx } from '../infra/sqlite/driver.ts'
@@ -148,7 +149,10 @@ async function runNodeActions(
     ? Date.now() - actionStartMs
     : (deps.runtime.clock!.sample().monotonicNs - actionStartNs) / 1e6
   // 每个工具都留一条轨迹：第一份失败证据不能被后面的成功覆盖（审计 P0-3）
-  const trace: { tool: string; exitCode: number; stdoutHash: string; stderrHash: string; commandHash: string }[] = []
+  // 轨迹同时带上这次执行的唯一身份：同名工具在同一次 attempt 里跑两次也不许混成一条（评审《第二次意见.md》P1）
+  const trace: { tool: string; toolSeq: number; executionId: string; exitCode: number; stdoutHash: string; stderrHash: string; commandHash: string }[] = []
+  // tool_seq 从 1 起按调用次序排；同一 attempt 已有痕迹时从最大序号续，重入也不撞主键
+  let toolSeq = nextToolSeq(deps, p)
   try {
     for (const tool of p.tools) {
       // 动作总时限真的参与执行：剩余额度用光就停，并按动作超时收口（第五轮审计 P2-1）
@@ -157,12 +161,18 @@ async function runNodeActions(
         markBlocked(deps, p, 'action_timeout', nowAt())
         throw new OrchError('OPERATION_TIMEOUT', '动作超过总时限，节点停在这里', { nodeRunId: p.nodeRunId, actionTimeoutMs })
       }
+      // 身份在工具起飞前就定下来：tool_started、tool_finished 与证据回执都绑同一个 execution_id
+      const seq = toolSeq
+      const executionId = toolExecutionId()
+      toolSeq += 1
       // 工具起飞前先把时刻和事件写下去：取消要能证明「工具在飞」（证据 G-05）
       withTx(deps.db, (tx) => {
         tx.run('UPDATE node_runs SET tool_start_at = ?, updated_at = ? WHERE node_run_id = ?', [nowAt(), nowAt(), p.nodeRunId])
         appendNodeRunEvent(tx, deps.secret, p.nodeRunId, 'tool_started', {
           tool: tool.command,
           attempt: p.attempt,
+          tool_seq: seq,
+          execution_id: executionId,
         })
       })
       const out = await deps.runner.runTool({
@@ -182,19 +192,24 @@ async function runNodeActions(
       evidence = out.evidence
       trace.push({
         tool: tool.command,
+        toolSeq: seq,
+        executionId,
         exitCode: out.evidence.exitCode,
         stdoutHash: out.evidence.stdoutHash,
         stderrHash: out.evidence.stderrHash,
         commandHash: out.evidence.commandHash,
       })
       // 工具执行痕迹落库：收口时拿它核对「这条 done 报告的证据是不是真跑出来的」（审计 R3-03）
+      // 痕迹行带上 tool_seq 与 execution_id：同名工具在同一次 attempt 里跑几次都不会撞主键
       withTx(deps.db, (tx) => {
         tx.run(
-          'INSERT INTO tool_executions (node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO tool_executions (node_run_id, attempt, tool_seq, tool, execution_id, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [
             p.nodeRunId,
             p.attempt,
+            seq,
             tool.command,
+            executionId,
             out.evidence.exitCode,
             out.evidence.stdoutHash ?? null,
             out.evidence.stderrHash ?? null,
@@ -206,6 +221,8 @@ async function runNodeActions(
         appendNodeRunEvent(tx, deps.secret, p.nodeRunId, 'tool_finished', {
           tool: tool.command,
           attempt: p.attempt,
+          tool_seq: seq,
+          execution_id: executionId,
           exit_code: out.evidence.exitCode,
           stdout_hash: out.evidence.stdoutHash ?? null,
           stderr_hash: out.evidence.stderrHash ?? null,
@@ -272,6 +289,15 @@ async function runNodeActions(
     })
   }
   return { node_run_id: p.nodeRunId, final_status: applied.next_status ?? 'unknown', evidence, agent_id: agent.agentId }
+}
+
+// 同一 attempt 里下一个工具序号：正常路径从 1 起；这一 attempt 已经有痕迹时从最大序号续，
+// 同一节点重入执行也不会撞 (node_run_id, attempt, tool_seq) 主键
+function nextToolSeq(deps: RunNodeDeps, p: RunNodeParams): number {
+  const row = deps.db.raw.prepare(
+    'SELECT MAX(tool_seq) AS max_seq FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
+  ).get(p.nodeRunId, p.attempt) as { max_seq: number | null } | undefined
+  return (row?.max_seq ?? 0) + 1
 }
 
 // 执行期时刻：以调用方给的时刻为基准，按单调钟往前推；墙钟跳变不该影响租约与时长判断（规格 3.4 行 171）

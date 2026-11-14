@@ -1,0 +1,198 @@
+// 执行调度器：真正限制同时执行的并发数（配置 execution.concurrency / human_slots）
+// 评审 P1：agent 执行是长时间任务，不许占着写队列的名额；并发闸单独放在这里，
+// 写队列只管短时数据库写与背压。配置里的 concurrency 与 human_slots 在这里真正生效。
+import { OrchError } from '../core/errors.ts'
+import { type Logger, nullLogger } from '../infra/logger.ts'
+import type { OrchestraConfig } from '../core/config.ts'
+
+// 与 orchestra.config.json 的定值一致：并发 3、人工名额 1
+export const DEFAULT_EXECUTION_CONCURRENCY = 3
+export const DEFAULT_HUMAN_SLOTS = 1
+
+export type ExecutionTaskOptions = {
+  // 占人工名额：等人复核的任务同时最多 human_slots 个
+  human?: boolean
+  // 任务名：只进日志与排队信息，便于定位是谁在排
+  label?: string
+}
+
+export type ExecutionStats = {
+  // 正在跑的任务数
+  inFlight: number
+  // 排队等名额的任务数
+  waiting: number
+  concurrency: number
+  humanSlots: number
+  // 正在跑且占着人工名额的任务数
+  humanInFlight: number
+  maxWaiting: number
+}
+
+export type ExecutionScheduler = {
+  // 排进调度器：名额空出来才开跑，任务抛错也照样释放名额
+  run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T>
+  stats(): ExecutionStats
+  readonly inFlight: number
+  readonly waiting: number
+  readonly concurrency: number
+  readonly humanSlots: number
+}
+
+type QueuedTask = {
+  human: boolean
+  label: string
+  // 真正开跑的那一步
+  invoke: () => Promise<unknown> | unknown
+  resolve: (value: unknown) => void
+  reject: (reason: unknown) => void
+}
+
+type SchedulerOptions = {
+  concurrency: number
+  humanSlots: number
+  maxWaiting: number
+  log: Logger
+}
+
+// 名额与上限都得是正经正数：配错就在装配期拒掉，不许带着 0 并发跑起来
+function positive(value: number, field: string): number {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '执行调度的参数不合法', { field, value })
+  }
+  return value
+}
+
+class Scheduler {
+  private readonly concurrencyLimit: number
+  private readonly humanSlotLimit: number
+  private readonly maxWaiting: number
+  private readonly log: Logger
+  // 等待中的任务：先进先出，谁先到谁先拿名额
+  private readonly queue: QueuedTask[] = []
+  private running = 0
+  private humanRunning = 0
+
+  constructor(opts: SchedulerOptions) {
+    this.concurrencyLimit = positive(opts.concurrency, 'concurrency')
+    this.humanSlotLimit = positive(opts.humanSlots, 'human_slots')
+    this.maxWaiting = opts.maxWaiting
+    this.log = opts.log
+  }
+
+  get inFlight(): number {
+    return this.running
+  }
+
+  get waiting(): number {
+    return this.queue.length
+  }
+
+  get concurrency(): number {
+    return this.concurrencyLimit
+  }
+
+  get humanSlots(): number {
+    return this.humanSlotLimit
+  }
+
+  stats(): ExecutionStats {
+    return {
+      inFlight: this.running,
+      waiting: this.queue.length,
+      concurrency: this.concurrencyLimit,
+      humanSlots: this.humanSlotLimit,
+      humanInFlight: this.humanRunning,
+      maxWaiting: this.maxWaiting,
+    }
+  }
+
+  run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (this.queue.length >= this.maxWaiting) {
+        this.log.warn('执行队列满了，拒掉这一件', { waiting: this.queue.length, maxWaiting: this.maxWaiting })
+        reject(new OrchError('SERVICE_UNAVAILABLE', '执行队列满了，先别排', {
+          maxWaiting: this.maxWaiting,
+          waiting: this.queue.length,
+        }))
+        return
+      }
+      const task: QueuedTask = {
+        human: opts?.human === true,
+        label: opts?.label ?? '',
+        invoke: fn,
+        resolve: (value) => { resolve(value as T) },
+        reject: (reason) => { reject(reason) },
+      }
+      this.queue.push(task)
+      this.log.info('执行任务入队', { label: task.label, waiting: this.queue.length, inFlight: this.running })
+      this.pump()
+    })
+  }
+
+  // 派名额：先给排在前面的任务；占人工名额的要等人工名额空出来
+  private pump(): void {
+    while (this.running < this.concurrencyLimit && this.queue.length > 0) {
+      const idx = this.queue.findIndex((t) => !t.human || this.humanRunning < this.humanSlotLimit)
+      if (idx < 0) return
+      const [task] = this.queue.splice(idx, 1)
+      if (!task) return
+      void this.launch(task)
+    }
+  }
+
+  // 跑一件任务：名额在答复调用方之前就还回去
+  // 这样调用方拿到结果时看到的计数已经是收干净的样子（成功与抛错都一样）
+  private async launch(task: QueuedTask): Promise<void> {
+    this.running += 1
+    if (task.human) this.humanRunning += 1
+    this.log.info('执行任务开跑', { label: task.label, inFlight: this.running, waiting: this.queue.length })
+    let value: unknown = undefined
+    let failure: unknown = null
+    let failed = false
+    try {
+      value = await task.invoke()
+    } catch (err) {
+      failed = true
+      failure = err
+    }
+    this.running -= 1
+    if (task.human) this.humanRunning -= 1
+    this.pump()
+    if (failed) task.reject(failure)
+    else task.resolve(value)
+  }
+}
+
+export function createExecutionScheduler(opts: {
+  concurrency?: number
+  humanSlots?: number
+  // 排队上限：超了直接拒（背压）。缺省不限
+  maxWaiting?: number
+  log?: Logger
+} = {}): ExecutionScheduler {
+  return new Scheduler({
+    concurrency: opts.concurrency ?? DEFAULT_EXECUTION_CONCURRENCY,
+    humanSlots: opts.humanSlots ?? DEFAULT_HUMAN_SLOTS,
+    maxWaiting: opts.maxWaiting ?? Number.POSITIVE_INFINITY,
+    log: opts.log ?? nullLogger,
+  })
+}
+
+// 配置是唯一来源：execution.concurrency 与 execution.human_slots 在这里真正落到调度上
+export function createExecutionSchedulerFromConfig(cfg: OrchestraConfig, log?: Logger): ExecutionScheduler {
+  return createExecutionScheduler({
+    concurrency: cfg.execution.concurrency,
+    humanSlots: cfg.execution.human_slots,
+    log,
+  })
+}
+
+// 没有装配调度器时的兜底：直接跑，不排队。老装配不受影响
+export async function runThroughScheduler<T>(
+  scheduler: ExecutionScheduler | undefined,
+  fn: () => Promise<T> | T,
+  opts?: ExecutionTaskOptions,
+): Promise<T> {
+  if (!scheduler) return await fn()
+  return await scheduler.run(fn, opts)
+}

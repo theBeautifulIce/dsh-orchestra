@@ -20,6 +20,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import MarkdownIt from 'markdown-it'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
+import { parseAuditVerdict, verdictProblems, VERDICT_BEGIN, VERDICT_END } from '../src/core/audit-verdict.ts'
 
 export const GATE_FIELDS = [
   'gate', 'schema_version', 'gate_run_id', 'candidate_hash', 'change_scope_hash',
@@ -42,6 +43,9 @@ export type GateSpec = {
   excludes: string[]
   prevGate: string | null
   gateFile: string
+  // 这道门的审计报告必须带结构化裁决块（第二次意见 P0）：有裁决块时以它为放行依据，
+  // 词法解析器退成兜底；没要求裁决块的旧门才走词法路径
+  requireVerdict?: boolean
 }
 
 export const GATE_SPECS: Record<string, GateSpec> = {
@@ -85,21 +89,22 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G-15': ['ev-g15'],
     },
     evidenceFiles: {
-      'ev-auth': 'tests/auth.spec.ts',
-      'ev-backup': 'tests/backup.spec.ts',
-      'ev-chain': 'tests/hash-chain.spec.ts',
-      'ev-epoch': 'tests/db-open.spec.ts',
+      'ev-auth': 'tests/contract/auth.spec.ts',
+      'ev-backup': 'tests/integration/backup.spec.ts',
+      'ev-chain': 'tests/integration/hash-chain.spec.ts',
+      'ev-epoch': 'tests/integration/db-open.spec.ts',
       'ev-g01': 'docs/gates/evidence/G1/G-01.md',
       'ev-g02': 'docs/gates/evidence/G1/G-02.md',
       'ev-g08': 'docs/gates/evidence/G1/G-08.md',
       'ev-g09': 'docs/gates/evidence/G1/G-09.md',
       'ev-g14': 'docs/gates/evidence/G1/G-14.md',
       'ev-g15': 'docs/gates/evidence/G1/G-15.md',
-      'ev-gatecheck': 'tests/gate-check.spec.ts',
-      'ev-migrate': 'tests/migrate.spec.ts',
-      'ev-phase': 'tests/config.spec.ts',
+      'ev-gatecheck': 'tests/gate/gate-check.spec.ts',
+      'ev-migrate': 'tests/integration/migrate.spec.ts',
+      'ev-phase': 'tests/unit/config.spec.ts',
     },
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
+    requireVerdict: true,
     // handoff 是活文档，每次收尾都会改；它进候选范围会让门哈希随一次文档更新失效（审计 F-02）
     excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: null,
@@ -184,6 +189,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'ev-g2-15': 'docs/gates/evidence/G2/ev-g2-15.md',
     },
     scopeBase: '4f3ada7',
+    requireVerdict: true,
     excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: 'G1',
     gateFile: 'docs/gates/G2.md',
@@ -536,11 +542,34 @@ function checkPreviousChain(artifact: Record<string, unknown>, spec: GateSpec, r
 // 之前靠正则模拟 CommonMark，S2 第二十轮 13 条 P0 全是渲染差异；这里直接对齐渲染器。
 const AUDIT_MARKDOWN = new MarkdownIt({ html: true, linkify: false, typographer: false })
 
-function renderedAuditLines(text: string): string[] | null {
+export interface AuditCell {
+  text: string
+  tableIndex: number
+  columnIndex: number
+  header: string
+  // 表头单元格只提供列名，既不是散文也不是结论格。
+  headerOnly?: boolean
+}
+
+export interface RenderedAudit {
+  lines: string[]
+  cells: (AuditCell | null)[]
+}
+
+// 表格单元格是片段，不是完整句子：判定时必须按“散文行”和“单元格”分层，
+// 否则「无裸 blocked」「LEASE_EXPIRED」这类单元格内容会被当成散文裁决词（S2 第四轮整改）。
+function renderedAuditWithCells(text: string): RenderedAudit | null {
   const lines: string[] = []
+  const cells: (AuditCell | null)[] = []
   let buffer = ''
   let ambiguous = false
   let paragraphHasLink = false
+  const openStack: string[] = []
+  const tableHeaders: Record<number, Record<number, string>> = {}
+  let tableIndex = -1
+  let rowIndex = -1
+  let columnIndex = -1
+  const inCell = (): boolean => openStack.includes('td_open') || openStack.includes('th_open')
   const flush = (): void => {
     if (buffer.trim() === '') {
       buffer = ''
@@ -550,7 +579,23 @@ function renderedAuditLines(text: string): string[] | null {
     // 链接所在段落里出现“结论：”时，可见正文可能只剩前缀而方括号已被解析掉；
     // 这类段落按歧义处理，不能让另一段干净 pass 过门（S1 第十三轮 P1）。
     if (paragraphHasLink && /(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))\s*[：:—–-]/i.test(buffer)) ambiguous = true
-    for (const line of buffer.split('\n')) lines.push(normalizeAuditLine(line))
+    const isCell = inCell()
+    for (const piece of buffer.split('\n')) {
+      const norm = normalizeAuditLine(piece)
+      lines.push(norm)
+      if (!isCell) {
+        cells.push(null)
+        continue
+      }
+      if (rowIndex === 0) {
+        // 表头行只记列名，不参与裁决判定。
+        const table = (tableHeaders[tableIndex] ??= {})
+        table[columnIndex] = table[columnIndex] ? table[columnIndex] + ' ' + norm : norm
+        cells.push({ text: norm, tableIndex, columnIndex, header: '', headerOnly: true })
+        continue
+      }
+      cells.push({ text: norm, tableIndex, columnIndex, header: tableHeaders[tableIndex]?.[columnIndex] ?? '' })
+    }
     buffer = ''
     paragraphHasLink = false
   }
@@ -590,8 +635,41 @@ function renderedAuditLines(text: string): string[] | null {
       flush()
       continue
     }
+    // 表格结构靠开闭标签栈还原：单元格内容也是 inline token，
+    // 没有栈就分不清“表格里的一格”与“正文里的一段”。
+    if (token.type === 'table_open') {
+      flush()
+      openStack.push(token.type)
+      tableIndex += 1
+      rowIndex = -1
+      columnIndex = -1
+      continue
+    }
+    if (token.type === 'table_close') {
+      flush()
+      openStack.pop()
+      continue
+    }
+    if (token.type === 'tr_open') {
+      flush()
+      openStack.push(token.type)
+      rowIndex += 1
+      columnIndex = -1
+      continue
+    }
+    if (token.type === 'th_open' || token.type === 'td_open') {
+      flush()
+      openStack.push(token.type)
+      columnIndex += 1
+      continue
+    }
+    if (token.type.endsWith('_open') || token.type.endsWith('_close')) {
+      flush()
+      if (token.type.endsWith('_close')) openStack.pop()
+      continue
+    }
     if (token.type !== 'inline') {
-      if (token.type.endsWith('_open') || token.type.endsWith('_close') || token.type === 'hr') flush()
+      if (token.type === 'hr') flush()
       continue
     }
     for (const child of token.children ?? []) {
@@ -626,7 +704,13 @@ function renderedAuditLines(text: string): string[] | null {
     }
   }
   flush()
-  return ambiguous ? null : lines
+  return ambiguous ? null : { lines, cells }
+}
+
+// 只要可见正文行：表格单元格也按渲染后的样子给出行。
+export function renderedAuditLines(text: string): string[] | null {
+  const rendered = renderedAuditWithCells(text)
+  return rendered === null ? null : rendered.lines
 }
 
 // 可见正文里的“本报告不通过 / 本次审计结论为 fail”这类判断句。
@@ -748,7 +832,7 @@ function regexEscape(ch: string): string {
 
 // 允许任意不可见/标点夹层：每个字符之间插 \|*。
 function sepPattern(token: string): string {
-  return Array.from(token).filter((ch) => !/\s/u.test(ch)).map(regexEscape).join('\\|*')
+  return Array.from(token).filter((ch) => !/\s/u.test(ch)).map(regexEscape).join('(?:\\|_*)*')
 }
 
 const HOMOGLYPHS: Record<string, string> = {
@@ -789,7 +873,9 @@ function foldForVerdict(raw: string): string {
       out += '|'
       continue
     }
-    if (/[\p{L}\p{N}]/u.test(ch)) {
+    // 下划线是标识符的一部分（blocked_post / lease_expired），不能当分隔符拆词，
+    // 否则会把它拆成独立裁决词误伤正文（S2 第四轮整改）。
+    if (/[\p{L}\p{N}_]/u.test(ch)) {
       out += ch
       continue
     }
@@ -1005,7 +1091,8 @@ function matchStructuralNegative(rest: string): string | null {
       // 谓词后可跟不止一个宾语：不推荐通过本报告 = 推荐 + 通过 + 本报告。
       for (let objDepth = 0; objDepth < 3; objDepth += 1) {
         const obj = matchPrefix(rest.slice(pos), FAIL_OBJECT_RES)
-        if (!obj) break
+        // 宾语跨了分隔符（换行/拆词）就不算同一句，不能让它顶掉收口判据。
+        if (!obj || obj.startsWith('|')) break
         pos += obj.length
       }
       return rest.slice(0, pos)
@@ -1023,22 +1110,10 @@ const FAIL_SUBJECT_NO_BARE_RE = new RegExp(
   'g',
 )
 
-type FailScan = { bareConclusion?: 'any' | 'never' }
+type FailScan = { bareConclusion?: 'any' | 'never'; bareVerdict?: 'any' | 'never' }
 
 function scanFailStatement(folded: string, scan: FailScan): boolean {
   if (folded.length === 0) return false
-  // 无主语的句尾固有否定也要收口：原则上有 3 项待补（S1 第二十七轮 R-16）。
-  for (const clause of folded.split('|')) {
-    if (clause.length === 0) continue
-    for (let i = 0; i < clause.length; i += 1) {
-      const tailVerdict = BARE_TAIL_RE.exec(clause.slice(i))
-      if (tailVerdict && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailVerdict[0].length))) return true
-      // 无主语的句尾裁决词：证据不充分 / 方案不合格（S1 第二十八轮 P0-1）。
-      // 但“算没过 / 视为未通过”是归类规则，不是本轮判定（G1.md:205 误伤）。
-      const tailFailure = FAIL_VERDICT_RE.exec(clause.slice(i))
-      if (tailFailure && !/^(?:pass|fail)$/i.test(tailFailure[0]) && !/(?:算|视为|视為|视作|視作|认定|認定|算作|记作|記作|记为|記為|属于|屬於|归为|歸為)$/.test(clause.slice(0, i)) && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + tailFailure[0].length))) return true
-    }
-  }
   const subjectRe = scan.bareConclusion === 'never' ? FAIL_SUBJECT_NO_BARE_RE : FAIL_SUBJECT_RE
   subjectRe.lastIndex = 0
   let sm: RegExpExecArray | null
@@ -1052,7 +1127,10 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
       if (vm) {
         // 裁决词本身可以带宾语（拒收本报告 / rejects the report），宾语属于同一句否定，
         // 不能因为紧跟名词就当作叙述放行（S2 第二十七轮 P0-1）。
-        const object = matchStructuralObject(rest.slice(vm[0].length))
+        // 跨行/跨词的宾语不算同一句：'本报告不|通|过|必过项与证据' 里 '必过项'
+        // 是下一行的标题词，被当成宾语吃掉会让收口判据失效（S1 第十九轮 P0-4）。
+        const afterVerdict = rest.slice(vm[0].length)
+        const object = afterVerdict.startsWith('|') ? 0 : matchStructuralObject(afterVerdict)
         const next = folded[pos + vm[0].length + object] ?? ''
         if (next === '' || next === '|' || /[需应已的了]/.test(next)) return true
       }
@@ -1073,6 +1151,14 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
       if (!advanced) break
     }
   }
+  // 裸裁决词与分句尾部否定只在散文行里生效：单元格是片段，
+  // 表格里的领域词（blocked / LEASE_EXPIRED）不是裁决（S2 第四轮整改）。
+  if (scan.bareVerdict === 'never') return false
+  return bareVerdictFailure(folded)
+}
+
+// 没有主语支撑的裁决词也算否决：句首裸否定、句尾裁决词、分句尾部否定。
+function bareVerdictFailure(folded: string): boolean {
   // 句首没有主语、直接以否定或裁决词开头的句子（“不予采信本报告。”）也要算否定，
   // 否则会被当成普通叙述漏掉（S2 第二十九轮 P0）。
   const lead = /^\|*/.exec(folded)?.[0].length ?? 0
@@ -1093,6 +1179,8 @@ function scanFailStatement(folded: string, scan: FailScan): boolean {
   for (const clause of folded.split('|')) {
     if (clause.length === 0) continue
     for (let i = 0; i < clause.length; i += 1) {
+      // 词内命中不算裁决（与上面的句尾裁决词同一口径）。
+      if (i > 0 && /[A-Za-z0-9_]/.test(clause[i - 1]!)) continue
       const neg = matchStructuralNegative(clause.slice(i))
       if (neg && /^[。．.！!？?；;，,、\s*_]*$/.test(clause.slice(i + neg.length))) return true
       // 固有否定词单独收口：仍有 3 项致命待补 / 原则上有 2 项待补（S1 第二十七轮 P0-1）。
@@ -1133,7 +1221,7 @@ const HISTORICAL_POSITIVE_RE = /通过|通過|passing|passed|approved?/i
 // 是在记录过去，不是本门当前结论（S1 第二十七轮 P1-1）。只剥整句，句后的本轮说明照常扫描。
 // 只有带本轮整改说明的历史句才是叙述；裸写“第 N 轮判不通过”仍按本轮否决算
 // （S1 第二十八轮 P0-4：历史剥离不能吞掉本轮 fail）。
-const HISTORICAL_AUDIT_SENTENCE_RE = /^(?:[ \t]*[-*+][ \t]+)?(?:第[一二三四五六七八九十百\d]{1,4}轮|round\s*\d{1,3}(?:\s+audit)?)[^。\n]*?(?:不通过|未通过|fail)[^。\n]*?(?:这版|這一版|本轮已|本輪已|已整改|已修复|已修復|已收口|逐条整改|逐條整改|按[^。\n]{0,40}整改)[^。\n]*。?/i
+const HISTORICAL_AUDIT_SENTENCE_RE = /^(?:[ \t]*[-*+][ \t]+)?(?:第[一二三四五六七八九十百\d]{1,4}轮|round\s*\d{1,3}(?:\s+audit)?)[^\n]*?(?:不通过|未通过|fail)[^\n]*?(?:这版|這一版|这一版|本轮已|本輪已|已整改|已修复|已修復|已收口|逐条整改|逐條整改|按[^\n]{0,40}整改)[^\n]*/i
 function stripHistoricalAuditSentence(line: string): string {
   return line.replace(HISTORICAL_AUDIT_SENTENCE_RE, '')
 }
@@ -1160,6 +1248,94 @@ function visibleFailStatement(line: string, scan: FailScan = {}): boolean {
   // 计数不足与“存在未完成项”不是一个谓词否定，先在原文上判一次（S1 第二十七轮 P0-1、S2 第三十二轮 P0-1）。
   if (countingFailure(text)) return true
   return scanFailStatement(foldForVerdict(text), scan)
+}
+// 单元格强否决词：结论列里出现在格首或标点边界就算否决。
+// 「无失败项」里的“失败”不在边界上，不会误伤；「不通过（3 项待补）」在格首，会被拦下。
+const CELL_FAIL_VERDICTS_STRONG = [
+  '不通过', '未通过', '没通过', '不能通过', '未能通过', '没有通过', '未得到通过',
+  '未获通过', '未予通过', '通不过', '不是通过', '不合格', '未合格',
+  '不成功', '未成功', '未达标', '不达标', '不批准', '未批准', '不获批准',
+  '未获批准', '不予批准', '不予通过', '未获批', '未被批准', '未获审批', '不获审批',
+  '未通过验收', '不通过验收', '未通过收口', '被否决', '否决', '被驳回', '驳回',
+  '被拒绝', '拒绝', '不予采信', '不采信', '未完成整改', '整改未完成',
+  '未完成修复', '未整改', '未修复', '未收口', '未受理', '不予受理',
+  '未接收', '不接收', '未接受', '不予接受', '不接受', '不予放行', '不放行',
+  '不予晋级', '不予准入', '不准入', '未准入', '失败', '退回', '打回',
+  '被退回', '被打回',
+  'fail', 'fails', 'failed', 'failing', 'failure', 'rejected', 'denied',
+  'refused', 'vetoed', 'not pass', 'not passed', 'not successful', 'not succeeded',
+  'not approved', 'no pass', 'unapproved', 'disapproved', 'unaccepted',
+  'no approval', 'failed to pass', 'not recommend', 'recommend against',
+]
+// 单元格弱裁决词：状态词，只有整格就是这个词才算数。
+// blocked / incomplete / red / on hold 在门正文表格里常常是领域词（节点状态、错误码）。
+const CELL_FAIL_VERDICTS_WEAK = [
+  'blocked', 'incomplete', 'insufficient', 'inconclusive', 'no-go', 'nogo',
+  'on hold', 'red', 'negative', 'partial', 'partially passed', 'conditional pass',
+  'conditionally passed', 'pending',
+  '部分通过', '有条件通过', '附条件通过', '暂缓', '搁置', '待定', '待整改',
+  '需整改', '待修复', '需修复', '未完成', '不足', '不够', '不完整',
+  '未就绪', '悬而未决', '保留意见', '待观察', '存疑', '有疑',
+  'declined', 'turned down', 'unsatisfactory', 'inadequate', 'unacceptable',
+  'noncompliant', 'unready', 'not ready',
+]
+// 结论列的列名归一：这些列里的值就是结论本身。
+const VERDICT_COLUMN_RE = /^(?:结果|結果|结论|結論|判定|裁决|裁決|状态|狀態|verdicts?|conclusions?|results?|outcomes?|status|grade|是否通过|通過與否)$/i
+// 非结论列里只有出现显式结论标记才按结论判。
+const CELL_CONCLUSION_MARKER_RE = /(?:结论|結論|判定|审计意见|审计结论|最终结论|verdict|conclusion|outcome|result)s?\s*[：:—–-]/i
+
+function isVerdictColumn(header: string): boolean {
+  const normalized = header.trim().replace(/[*_]/g, '').replace(/\s+/g, '')
+  if (normalized === '') return false
+  return VERDICT_COLUMN_RE.test(normalized)
+}
+
+function cellStrongFail(folded: string): boolean {
+  const haystack = folded.toLowerCase()
+  for (const word of CELL_FAIL_VERDICTS_STRONG) {
+    if (haystack.startsWith(word)) return true
+    let index = haystack.indexOf(word)
+    while (index > 0) {
+      if (haystack[index - 1] === '|') return true
+      index = haystack.indexOf(word, index + 1)
+    }
+  }
+  return false
+}
+
+function cellWeakFail(folded: string): boolean {
+  return CELL_FAIL_VERDICTS_WEAK.includes(folded.toLowerCase())
+}
+
+// 单元格失败判定：表格单元格是片段，不是完整句子，只有两种情况算矛盾：
+// (a) 单元格里出现显式结论行（“结论：fail”）；
+// (b) 结论列里整格是强否决词，或整格是一个状态裁决词。
+function cellFailStatement(cell: AuditCell): boolean {
+  const folded = foldForVerdict(cell.text)
+  if (isVerdictColumn(cell.header)) {
+    if (visibleFailStatement(cell.text, { bareConclusion: 'any', bareVerdict: 'never' })) return true
+    if (cellStrongFail(folded)) return true
+    return cellWeakFail(folded)
+  }
+  if (!CELL_CONCLUSION_MARKER_RE.test(cell.text)) return false
+  return visibleFailStatement(cell.text, { bareConclusion: 'any', bareVerdict: 'never' })
+}
+
+// 散文行与表格单元格分层：散文按整句判，单元格按片段判。
+function splitProseAndCells(visible: string[], cells: (AuditCell | null)[]): { prose: string[]; tableCells: AuditCell[] } {
+  const prose: string[] = []
+  const tableCells: AuditCell[] = []
+  for (let i = 0; i < visible.length; i += 1) {
+    const cell = cells[i] ?? null
+    const text = visible[i] ?? ''
+    if (cell === null) {
+      prose.push(text)
+      continue
+    }
+    if (cell.headerOnly) continue
+    tableCells.push({ ...cell, text })
+  }
+  return { prose, tableCells }
 }
 
 // 单行内的否定：先只认句首裸否定；结论词开头的行再按完整主语扫一遍。
@@ -1209,21 +1385,25 @@ function hiddenDefinitionFailure(text: string): boolean {
 
 export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   if (hiddenDefinitionFailure(text)) return null
-  const rendered = renderedAuditLines(text)
+  const rendered = renderedAuditWithCells(text)
   if (rendered === null) return null
   // 报告侧同样只剥“历史轮次 + 本轮已整改”的叙述，保持与门正文同口径（S1 第二十八轮 P1-2）。
-  const visible = rendered.map(stripHistoricalAuditSentence)
+  const visible = rendered.lines.map(stripHistoricalAuditSentence)
+  // 散文行与表格单元格分层判定：单元格是片段，不能当散文裁决（S2 第四轮整改）。
+  const { prose, tableCells } = splitProseAndCells(visible, rendered.cells)
   let verdict: 'pass' | 'fail' | null = null
   let inlineFail = false
   // 英文审计报告同样用 Conclusion/Verdict/Outcome 开结论行（S2 第二十七轮 P0-2）。
   const conclusionText = /(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))\s*[：:—–-]/i
   const conclusionWord = /^(?:审计|audit\s+)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|conclusions?|verdict|outcomes?|results?)$/i
   // 先把所有可见行按行边界拼起来做一次全文扫描：跨越任意多行的拆词都能命中。
-  if (visibleFailStatement(visible.join('|'))) inlineFail = true
+  if (visibleFailStatement(prose.join('|'))) inlineFail = true
   // 句首无主语的否定（“不予采信本报告。”）只在单行内成立；拼行扫描看不到行首，补一遍逐行。
-  for (const line of visible) if (lineFailure(line)) inlineFail = true
-  for (let visibleIndex = 0; visibleIndex < visible.length; visibleIndex += 1) {
-    const line = visible[visibleIndex]!
+  for (const line of prose) if (lineFailure(line)) inlineFail = true
+  // 表格单元格另按单元格口径判定：只有结论列里的否决词与显式结论行才算矛盾。
+  for (const cell of tableCells) if (cellFailStatement(cell)) inlineFail = true
+  for (let visibleIndex = 0; visibleIndex < prose.length; visibleIndex += 1) {
+    const line = prose[visibleIndex]!
     // 中文结论行即使值不合法也要按歧义拒绝；英文只在紧跟 pass/fail 时才当正式结论，
     // 避免把正文里的 “Conclusion: the design is sound” 误判成结论行。
     const strict = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:—–-]/.test(line)
@@ -1236,7 +1416,7 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
       if (line.includes('[') && conclusionText.test(line)) return null
       // 结论词被换行拆成“结论” + “：fail”时，下一行以冒号开头，按歧义处理。
       if (conclusionWord.test(line.trim())) {
-        const next = visible[visibleIndex + 1] ?? ''
+        const next = prose[visibleIndex + 1] ?? ''
         if (/^\s*[：:]/.test(next)) return null
       }
       continue
@@ -1262,12 +1442,14 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
 // 防止 artifact 写 pass、人读正文却看到 fail（S1 第十七轮 P2-1）。
 export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   if (hiddenDefinitionFailure(text)) return 'fail'
-  const rendered = renderedAuditLines(text)
+  const rendered = renderedAuditWithCells(text)
   if (rendered === null) return null
   // 历史审计叙述不是本门当前结论：整句剥掉后再扫（S1 第二十七轮 P1-1）。
-  const visible = rendered.map(stripHistoricalAuditSentence)
+  const visible = rendered.lines.map(stripHistoricalAuditSentence)
+  // 散文行与表格单元格分层判定：单元格是片段，不能当散文裁决（S2 第四轮整改）。
+  const { prose, tableCells } = splitProseAndCells(visible, rendered.cells)
   const found: Array<'pass' | 'fail'> = []
-  for (const line of visible) {
+  for (const line of prose) {
     const m = /^(?:审计|audit\s+)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論|conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)([\s\S]*)$/i.exec(line)
     if (m) {
       const v = rawVerdict(m[1] ?? '')
@@ -1281,14 +1463,16 @@ export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
   // 正文不再按 160 字/24 字偏移截窗：长行和靠后的否定句同样能签过（S1 第二十轮 P0-4）。
   // 历史段落里“门记录拿结论为 fail”这类叙述用裸“结论”会误杀，所以全文扫描排除
   // 裸结论主语；历史前缀截掉后，正文里出现正式“结论：fail”的行再补一次精确判定。
-  if (visibleFailStatement(visible.join('|'), { bareConclusion: 'never' })) return 'fail'
+  if (visibleFailStatement(prose.join('|'), { bareConclusion: 'never' })) return 'fail'
   // 句首无主语的否定同样要在门正文里算数（S2 第二十九轮 P0 的 A2 门正文注入）。
-  for (const line of visible) if (lineFailure(line)) return 'fail'
-  for (const line of visible) {
+  for (const line of prose) if (lineFailure(line)) return 'fail'
+  for (const line of prose) {
     // 历史前缀已经在 strip 阶段截掉；剩余正文里出现正式的“结论：fail”
     // 就是本轮否决，即使它前面还有别的文字（S1 第二十二轮 P0-2）。
     if (/(?:结论|結論|判定)\s*[：:]/.test(line) && visibleFailStatement(line)) return 'fail'
   }
+  // 表格单元格按单元格口径判定：只有结论列里的否决词与显式结论行才算门正文失败。
+  for (const cell of tableCells) if (cellFailStatement(cell)) return 'fail'
   return found.length === 1 ? found[0]! : null
 }
 
@@ -1898,15 +2082,32 @@ function checkAuditAnchor(artifact: Record<string, unknown>, spec: GateSpec, roo
     throw new Error('审计报告 sha256 与记录不符（报告改过就重新审计再签）：' + expectedHash.slice(0, 16) + '… != ' + actualHash.slice(0, 16) + '…')
   }
   const text = head.toString('utf8')
-  const actual = auditConclusionOf(text)
-  if (!actual) throw new Error('审计报告里找不到唯一结论行，不能拿它当门记录依据: ' + report)
-  if (actual !== artifact.conclusion) {
-    throw new Error('审计报告结论与门记录结论不符：报告=' + actual + '，门记录=' + String(artifact.conclusion))
-  }
   // 报告必须自己写清门名与候选提交：只有路径和轮次时，别轮/别门的 pass 报告能直接拿来签（S1 第八轮 P1-2）
   const binding = auditBindingOf(text)
   if (!binding) {
     throw new Error('审计报告缺少唯一的「门：G1」与「候选提交：<40 位 commit>」绑定行: ' + report)
+  }
+  // 结论以结构化裁决块为准（第二次意见 P0）：报告里的自然语言结论只当兜底
+  const parsed = parseAuditVerdict(text)
+  if (parsed && 'error' in parsed) {
+    throw new Error('审计报告的结构化裁决块无效：' + parsed.error + '（' + report + '）')
+  }
+  if (parsed) {
+    const problems = verdictProblems(parsed.verdict, {
+      gate: String(artifact.gate),
+      auditRound: Number(artifact.audit_round),
+      commit: binding.commit,
+      requiredItems: spec.items,
+    })
+    if (problems.length > 0) throw new Error('审计报告的结构化裁决不通过：' + problems.join('；'))
+  } else if (spec.requireVerdict) {
+    throw new Error('审计报告缺少结构化裁决块（' + VERDICT_BEGIN + ' … ' + VERDICT_END + '），这道门要求机器可判的结论: ' + report)
+  } else {
+    const actual = auditConclusionOf(text)
+    if (!actual) throw new Error('审计报告里找不到唯一结论行，不能拿它当门记录依据: ' + report)
+    if (actual !== artifact.conclusion) {
+      throw new Error('审计报告结论与门记录结论不符：报告=' + actual + '，门记录=' + String(artifact.conclusion))
+    }
   }
   if (binding.gate !== String(artifact.gate)) {
     throw new Error('审计报告绑定的门与门记录不符：报告=' + binding.gate + '，记录=' + String(artifact.gate))

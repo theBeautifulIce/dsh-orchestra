@@ -326,6 +326,9 @@ function systemEvidenceGate(report: Report): string | null {
 }
 
 type ToolExecutionRow = {
+  // 每次工具执行的唯一身份：认的是「哪一次执行」，不再只看工具名（评审《第二次意见.md》P1）
+  execution_id: string
+  tool_seq: number
   tool: string
   exit_code: number
   stdout_hash: string | null
@@ -337,11 +340,48 @@ type TraceBinding = {
   reason: string | null
 }
 
+// 报告里的工具执行回执：执行器把 execution_id 写进 report.output.evidence_trace，
+// 收口时按它回查痕迹行；只有带 execution_id 的条目才算「带执行身份」
+type TraceEntry = {
+  executionId: string
+  toolSeq: number | null
+  tool: string | null
+  exitCode: number | null
+  stdoutHash: string | null
+  stderrHash: string | null
+  commandHash: string | null
+}
+
+// 取报告里的执行回执：字段名与执行器写的一致（tool / exitCode / stdoutHash / stderrHash / commandHash）
+function traceEntriesOf(report: Report): TraceEntry[] {
+  const output = report.output
+  if (output === null || typeof output !== 'object' || Array.isArray(output)) return []
+  const trace = (output as { evidence_trace?: unknown }).evidence_trace
+  if (!Array.isArray(trace)) return []
+  const entries: TraceEntry[] = []
+  for (const item of trace) {
+    if (item === null || typeof item !== 'object') continue
+    const e = item as Record<string, unknown>
+    if (typeof e.executionId !== 'string' || e.executionId.length === 0) continue
+    entries.push({
+      executionId: e.executionId,
+      toolSeq: typeof e.toolSeq === 'number' ? e.toolSeq : null,
+      tool: typeof e.tool === 'string' ? e.tool : null,
+      exitCode: typeof e.exitCode === 'number' ? e.exitCode : null,
+      stdoutHash: typeof e.stdoutHash === 'string' ? e.stdoutHash : null,
+      stderrHash: typeof e.stderrHash === 'string' ? e.stderrHash : null,
+      commandHash: typeof e.commandHash === 'string' ? e.commandHash : null,
+    })
+  }
+  return entries
+}
+
 // 痕迹绑定门：证据要跟账本里的工具执行痕迹对得上，伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
 // 同一 attempt 只要有一行工具失败就不许 done；证据的命令名、退出码、stdout/stderr、命令哈希
 // 都要和同一行以及对应的 tool_finished 事件对齐（S2 第二十三轮 P0-2/P0-4）。
 // 失败/超时终态允许同 attempt 有失败行，但仍要求证据与其中一行及 tool_finished 全等，
 // 不能拿一条自报的 exitCode 收口（S2 第二十四轮 P1-2）。
+// 报告带了执行身份时按 execution_id 认行：同名工具跑两次也不许张冠李戴（评审《第二次意见.md》P1）。
 function traceBindingGate(
   tx: Tx,
   params: ApplyReportParams,
@@ -355,7 +395,7 @@ function traceBindingGate(
   if (typeof ev.commandHash !== 'string' || !/^[0-9a-f]{64}$/i.test(ev.commandHash)) return { reason: 'evidence_unverifiable' }
   if (typeof ev.producedAt !== 'string' || Number.isNaN(Date.parse(ev.producedAt))) return { reason: 'evidence_missing' }
   const rows = tx.all<ToolExecutionRow>(
-    'SELECT tool, exit_code, stdout_hash, stderr_hash, command_hash FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
+    'SELECT execution_id, tool_seq, tool, exit_code, stdout_hash, stderr_hash, command_hash FROM tool_executions WHERE node_run_id = ? AND attempt = ? ORDER BY tool_seq ASC',
     [params.nodeRunId, params.attempt],
   )
   if (rows.length === 0) return { reason: 'evidence_unverifiable' }
@@ -371,7 +411,7 @@ function traceBindingGate(
   // 不能拿一条成功行把异常盖过去（S2 第二十五轮 P1-2）。
   const candidates = failedRows.length > 0 ? failedRows : rows
   const hashes = ev.hashes ?? {}
-  const matched = candidates.find((r) => {
+  const rowMatches = (r: ToolExecutionRow): boolean => {
     if (r.exit_code !== ev.exitCode) return false
     if (r.tool !== ev.tool) return false
     if ((r.stdout_hash ?? '') !== (ev.stdoutHash ?? '')) return false
@@ -380,8 +420,29 @@ function traceBindingGate(
     if (hashes.stdout !== undefined && hashes.stdout !== r.stdout_hash) return false
     if (hashes.stderr !== undefined && hashes.stderr !== r.stderr_hash) return false
     return true
-  })
-  if (!matched) return { reason: 'evidence_unverifiable' }
+  }
+  // 报告带了执行身份：按 execution_id 认「哪一次执行」，认不出、对不上都不许收口
+  const entries = traceEntriesOf(report)
+  let boundExecutionId: string | null = null
+  if (entries.length > 0) {
+    const entry = entries.find((e) => (
+      e.tool === ev.tool
+      && e.exitCode === ev.exitCode
+      && (e.stdoutHash ?? '') === (ev.stdoutHash ?? '')
+      && (e.stderrHash ?? '') === (ev.stderrHash ?? '')
+      && (e.commandHash ?? '') === ev.commandHash
+    ))
+    if (!entry) return { reason: 'evidence_unverifiable' }
+    const row = candidates.find((r) => r.execution_id === entry.executionId)
+    if (!row) return { reason: 'evidence_unverifiable' }
+    // 序号对不上就是另一条执行：回执不许改序号顶替
+    if (entry.toolSeq !== null && row.tool_seq !== entry.toolSeq) return { reason: 'evidence_unverifiable' }
+    if (!rowMatches(row)) return { reason: 'evidence_unverifiable' }
+    boundExecutionId = row.execution_id
+  } else if (!candidates.find(rowMatches)) {
+    // 老上报路径没有执行身份：仍按命令名与哈希逐字段对齐（既有语义不变）
+    return { reason: 'evidence_unverifiable' }
+  }
   // 事件面也要对得上：只有工具执行表有行、没有 tool_finished 留痕，仍按证据不可核
   const events = tx.all<{ payload: string }>(
     "SELECT payload FROM node_run_events WHERE node_run_id = ? AND type = 'tool_finished'",
@@ -390,12 +451,15 @@ function traceBindingGate(
   const eventMatched = events.some((event) => {
     try {
       const p = JSON.parse(event.payload) as Record<string, unknown>
-      return p.attempt === params.attempt
-        && p.tool === ev.tool
-        && p.exit_code === ev.exitCode
-        && (p.stdout_hash ?? '') === (ev.stdoutHash ?? '')
-        && (p.stderr_hash ?? '') === (ev.stderrHash ?? '')
-        && (p.command_hash ?? '') === ev.commandHash
+      if (p.attempt !== params.attempt) return false
+      if (p.tool !== ev.tool) return false
+      if (p.exit_code !== ev.exitCode) return false
+      if ((p.stdout_hash ?? '') !== (ev.stdoutHash ?? '')) return false
+      if ((p.stderr_hash ?? '') !== (ev.stderrHash ?? '')) return false
+      if ((p.command_hash ?? '') !== ev.commandHash) return false
+      // 带执行身份时，事件面必须是同一个 execution_id：只对上工具名不算
+      if (boundExecutionId !== null && p.execution_id !== boundExecutionId) return false
+      return true
     } catch {
       return false
     }

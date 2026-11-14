@@ -1,7 +1,7 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-13 19:20。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-14 09:30。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
@@ -717,3 +717,20 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证（实测）：`tsc --noEmit` exit 0；`tests/gate-check.spec.ts` 151 例，137 passed / 14 failed；全量 33 文件 / 438 例，424 passed / 14 failed；14 红全部是 G1 预签态 `audit_report_sha256=0*64 != 50ba1b13cdf1b84d…`，不是解析器回归。
 - 仍留 P2：required_hashes 空清单放行、报告与门/证据只有词法校验、“第 33 轮”带空格的历史叙述误判；均记 S3 前置项，不阻断本轮。
 - 状态：G1/G2 未重签，S3 九节点与状态机继续冻结。本段整改与两份报告/对照表提交后，在新候选上重派 S1 与 S2 独立审计；两份都 pass 后才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
+
+### 11.31 外部评审第一批六项落地、测试分层与门预签态口径（2026-11-14 09:30）
+
+- 触发：2026-11-13 外部架构评审《第二次意见》（已归档为 `docs/reviews/2026-11-13-second-opinion.md`），逐条处置对照表 `docs/reviews/2026-11-13-second-opinion-response.md`。
+- 第一批六项落地：
+  - 结构化审计裁决：新增 `src/core/audit-verdict.ts`（`AUDIT_VERDICT_SCHEMA` / `parseAuditVerdict` / `validateAuditVerdict` / `verdictProblems`），`scripts/gate-check.ts` 以裁决块为放行权威（`GateSpec.requireVerdict`，G1、G2 都要求），词法解析降为第二道防线；`tests/unit/audit-verdict.spec.ts` 新增。
+  - 工具执行唯一性：迁移 `006_tool_executions_tool_seq.sql`（`tool_executions` 主键 `node_run_id+attempt+tool_seq`，`execution_id NOT NULL UNIQUE`）；`src/executor/run-node.ts` 每次执行给 tool_seq 与 execution_id 并绑进 tool_started/tool_finished 事件；`src/service/commands/apply-report.ts` 按 execution_id 核对痕迹行与事件。
+  - 目录不可变：`src/core/freeze.ts` 的 `deepFreeze`；`src/service/workflows.ts` 的 `get()` 返深拷贝、先落库再进内存（落库失败不留残影）；三条测试在 `tests/integration/workflows.spec.ts:87/103/114`。
+  - HTTP Schema：`src/service/schemas.ts`（Zod + `LIMITS`：租约 TTL 与续租间隔、工具超时、节点数、必留哈希数、attempt 范围、长度上限），`src/service/server.ts` 九条路由统一 `parseBody`。
+  - 并发控制：`src/service/execution-scheduler.ts`（默认并发 3、人工名额 1，接 `orchestra.config.json` 的 `concurrency` / `human_slots`）；`src/service/server.ts` 的 `/v1/runs/dispatch` 与 `/v1/node-runs/run` 两个长任务路由不再占写队列名额，续租不再被排队饿死。
+  - node_run_events 只追加：迁移 `007_node_run_events_append_only.sql` + `src/service/queries/verify_ledger.ts` 的链头核对（条数、链尾 seq、链尾 hash）。
+- 预签态口径（重要，接手先读）：门记录只能签在「最终候选提交上的那一轮独立审计」的报告上，审计之前门记录必然处于预签态（`audit_report_sha256` 是占位值），任何校验都先撞审计锚点检查。`tests/gate/gate-check.spec.ts` 引入 `PRE_SIGNED` 与 `expectRejected()`：预签态下断言「必须被拒」，门重签后自动恢复成「指名是哪一道检查拦下」；另有 `it.skipIf(!PRE_SIGNED)('门记录没签时必须被拒绝（预签态：签门前一律不放行）')` 记录这条口径。
+- 门解析器 F4：`scripts/gate-check.ts` 把表格单元格按语义分层（`AuditCell`、结论列判定 `VERDICT_COLUMN_RE`、强/弱失败词表），散文与单元格分开扫；`tests/gate/gate-check.spec.ts` 新增 5 条用例（状态列 blocked_post / decision_required / passed 不误伤；结论列写「不通过」仍拦；状态列整格 blocked 仍拦；正文「本报告不通过。」仍拦）。
+- 测试分层：`tests/*.spec.ts` 26 个迁进 `tests/unit|contract|integration|e2e|gate`；断言改动态（迁移条数取 `loadSteps(defaultMigrationsDir())`、表清单取实际）；新增 `tests/README.md` 与 `docs/agents/testing-conventions.md`；`scripts/check-test-layout.mjs` 语法错已修（根因是 `.replace(/\/g, '/')` 这个非法字面量，正确写法是 `/\//g`）。
+- 验证（实测）：`tsc --noEmit` exit 0；`pnpm check` 全量 36 文件 / 512 例，511 passed / 1 skipped（跳过的 1 条是预签态下的「G1 门记录通过」）；tsdown 构建通过。
+- 仍留（已写进对照表，不含糊）：Bridge 生产接线、事件 ACK 与断号重取、Agent 生命周期、DAG 依赖调度、Run 级聚合 → S3 第二批；「心跳时数据库不可用」故障注入用例 → S3 故障注入批次；workflow_id+version、Decision/Inbox、Compensation、压测与 UI → S4–S6。
+- 状态：G1/G2 仍未重签，S3 九节点与状态机继续冻结。本段作为候选提交后，在该候选上重派 S1 与 S2 第四轮独立审计（报告须内嵌结构化裁决块，绑定候选提交）；两份都 pass 才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。

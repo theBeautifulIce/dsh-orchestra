@@ -176,7 +176,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 - 「主人定了什么」 → `requirements.md` §3 拍板口径。
 - 「上一轮审到哪、下一轮改什么」 → `orchestra-audit-ledger.md` §五。
 
-### S2 源码与门证据落点（2026-11-13 第四轮整改后）
+### S2 源码与门证据落点（2026-11-14 第二批意见第一批收口后）
 
 | 文件 | 作用 |
 | --- | --- |
@@ -188,6 +188,14 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/service/runs.ts` | 生产装配：createRun 建 task/run/node_runs |
 | `src/service/dispatcher.ts` | 生产装配：dispatchRun 拾 queued 节点走 runNode |
 | `src/executor/tools.ts` | 工具注册表与授权（`assertToolsAuthorized`：deny 优先、必须注册、必须落在 allow 集） |
+| `src/core/audit-verdict.ts` | 结构化审计裁决（`AUDIT_VERDICT_SCHEMA` / `parseAuditVerdict` / `validateAuditVerdict` / `verdictProblems`）：门放行的权威输入，词法解析降为第二道防线 |
+| `src/core/freeze.ts` | `deepFreeze`：目录里的工作流定义冻结，外部拿到过引用也改不动 |
+| `src/service/schemas.ts` | Zod 入参 Schema 与 `LIMITS`（租约 TTL 与续租间隔、工具超时、节点数、attempt 范围、长度上限） |
+| `src/service/execution-scheduler.ts` | 执行调度器：并发上限与人工名额，接 `orchestra.config.json` 的 `concurrency` / `human_slots` |
+| `src/service/write-queue.ts` | 短写 FIFO 队列（tail 链）：只管数据库短写，长执行不占名额 |
+| `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收；按 execution_id 核对工具痕迹） |
+| `src/infra/sqlite/migrations/006_tool_executions_tool_seq.sql` | 工具执行唯一性：`tool_executions` 主键 `node_run_id+attempt+tool_seq`，`execution_id NOT NULL UNIQUE` |
+| `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |
 | `src/index.ts` | 装配入口（`openServiceOrchestra`：acquireDbLock → bumpEpoch → openServiceDb → createOrchestra） |
 | `src/service/sweep.ts` | 围栏与过期扫描（逐行事务，回收 verifying 超时） |
 | `src/infra/sqlite/migrations/003_s2_round3.sql` | 第三轮新增迁移（账本列与索引） |
@@ -196,6 +204,9 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `scripts/sign-gate.ts` | 门记录重签（83 行：回填证据 sha256 与各类哈希，自检后写回） |
 | `docs/gates/G1.md`、`docs/gates/G2.md` | 两道门记录（必过项表、证据表、不变量表、artifact） |
 | `docs/gates/evidence/G1/`（13 份）、`docs/gates/evidence/G2/`（19 份） | 门证据原文，哈希逐份复核 |
+| `tests/unit|contract|integration|e2e|gate/` | 测试分层（2026-11-14 起，原 `tests/*.spec.ts` 26 个迁入）；口径见 `tests/README.md` 与 `docs/agents/testing-conventions.md` |
+| `docs/reviews/2026-11-13-second-opinion.md` + `...-response.md` | 2026-11-13 外部架构评审原文与逐条处置对照表 |
+| `scripts/check-test-layout.mjs` | 测试目录布局检查 |
 
 ---
 

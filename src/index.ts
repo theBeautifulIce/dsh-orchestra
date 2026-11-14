@@ -16,6 +16,10 @@ import {
 import type { Phase } from './core/config.ts'
 import type { CancelResult } from './service/commands/cancel.ts'
 import { runNode, DEFAULT_LEASE_TTL_MS, type RunNodeDeps } from './executor/run-node.ts'
+import {
+  createExecutionScheduler, createExecutionSchedulerFromConfig, type ExecutionScheduler,
+} from './service/execution-scheduler.ts'
+import { loadConfig } from './core/config.ts'
 import { SystemClock } from './core/clock.ts'
 import { randomUUID } from 'node:crypto'
 
@@ -29,6 +33,10 @@ export type OrchestraOptions = {
   log?: Logger
   // 生产执行器：装配了就开 /v1/node-runs/run，没装配时该路由明确报未配置（审计 F-01）
   executor?: Omit<RunNodeDeps, 'runtime' | 'db' | 'secret'>
+  // 执行并发闸：agent 执行是长时间任务，不占写队列的名额，并发上限在这里生效（第二次意见 P1）
+  scheduler?: ExecutionScheduler
+  // 生产装配读配置的路径；读不到就退回默认并发（并发 3、人工名额 1）
+  configPath?: string
 }
 
 export type Orchestra = {
@@ -71,7 +79,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })
       }
-      return dispatchRun({ runtime, db, secret: opts.secret, ...opts.executor }, {
+      return dispatchRun({ runtime, db, secret: opts.secret, ...opts.executor, scheduler: opts.scheduler }, {
         runId: b.runId,
         nodes: b.nodes,
         now: b.now,
@@ -140,10 +148,13 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
 }): Promise<{ orchestra: Orchestra; endpoint: string; close: () => Promise<void> }> {
-  // 服务启动顺序固定：文件锁 → epoch → 打开服务库 → 迁移 → 起服务（第四轮审计 M3）
-  const service = await openServiceOrchestra(opts)
-  const orchestra = service.orchestra
   const log = opts.log ?? nullLogger
+  // 并发闸在生产装配这一层建：配置里的 execution.concurrency 与 human_slots 在这里真正生效。
+  // 配置读不到时退回默认定值（并发 3、人工名额 1），不让一个可选配置文件挡住服务启动。
+  const scheduler = opts.scheduler ?? schedulerFromConfig(opts.configPath, log)
+  // 服务启动顺序固定：文件锁 → epoch → 打开服务库 → 迁移 → 起服务（第四轮审计 M3）
+  const service = await openServiceOrchestra({ ...opts, scheduler })
+  const orchestra = service.orchestra
   // 维护扫描：租约过期、围栏宽限到点，2 秒一轮；失败只记日志，下一轮继续
   const sweepTimer = setInterval(() => {
     try {
@@ -175,6 +186,19 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     orchestra,
     endpoint: server.endpoint,
     close: async () => { clearInterval(sweepTimer); await server.close(); await service.release() },
+  }
+}
+
+// 配置是并发的唯一来源；配置缺失或读不动时退回默认定值，不让服务起不来
+function schedulerFromConfig(configPath: string | undefined, log: Logger): ExecutionScheduler {
+  try {
+    return createExecutionSchedulerFromConfig(loadConfig(configPath ?? 'orchestra.config.json'), log)
+  } catch (err) {
+    log.warn('读不到执行配置，按默认并发装配', {
+      path: configPath ?? 'orchestra.config.json',
+      err: err instanceof Error ? err.message : String(err),
+    })
+    return createExecutionScheduler({ log })
   }
 }
 

@@ -5,6 +5,10 @@ import { sha256Hex } from '../core/canonical.ts'
 import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
+import {
+  cancelSchema, createRunSchema, dispatchSchema, ledgerEventSchema, leaseSchema, parseBody,
+  renewSchema, reportSchema, runNodeSchema, workflowLoadSchema,
+} from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
 import type { LoadWorkflowResult } from './workflows.ts'
@@ -70,19 +74,8 @@ export type NodeCommands = {
   }) => Promise<RunNodeResult>
 }
 
-const CANCEL_RESULTS = ['interrupted', 'not_interruptible', 'already_stopped', 'unknown'] as const
-
 // 服务端时刻只从这里取：客户端发来的 now 仅作形状兼容，不进入租约/上报判定（S2 第二十三轮 P0-3）
 const serverNow = (deps: ServerDeps): string => deps.now ? deps.now() : new Date().toISOString()
-
-// 请求体必填字段：缺一个就按结构错拒，别把 undefined 写进账本
-function requireFields(body: unknown, fields: string[]): Record<string, unknown> {
-  const record = body as Record<string, unknown>
-  if (!record || typeof record !== 'object') throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请求体要是对象', {})
-  const missing = fields.filter((f) => record[f] === undefined || record[f] === null)
-  if (missing.length > 0) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请求体缺字段', { missing })
-  return record
-}
 
 const MAX_BODY_BYTES = 1024 * 1024
 
@@ -161,97 +154,93 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/workflows/load' && deps.commands) {
-      const body = await readJsonBody(req)
+      // 定义哈希按整个 body 算：schema 用 looseObject，未知键原样传下去
+      const body = parseBody(workflowLoadSchema, await readJsonBody(req), '加载工作流')
       const out = await queue.run(() => deps.commands!.loadWorkflow(body))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['taskTitle', 'workflowVersion'])
+      const body = parseBody(createRunSchema, await readJsonBody(req), '创建 run')
       const out = await queue.run(() => deps.commands!.createRun({
-        taskTitle: String(body.taskTitle),
-        workflowVersion: String(body.workflowVersion),
-        nodeIds: Array.isArray(body.nodeIds) ? body.nodeIds.map(String) : undefined,
+        taskTitle: body.taskTitle,
+        workflowVersion: body.workflowVersion,
+        nodeIds: body.nodeIds,
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs/dispatch' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['runId', 'nodes'])
-      if (typeof body.nodes !== 'object' || body.nodes === null || Array.isArray(body.nodes)) {
-        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'nodes 要是按 node_id 归类的对象', { nodes: body.nodes })
-      }
-      const out = await queue.run(() => deps.commands!.dispatch({
-        runId: String(body.runId),
-        nodes: body.nodes as Record<string, NodeSpec>,
+      const body = parseBody(dispatchSchema, await readJsonBody(req), '派发节点')
+      // 派发是长时间跑的 agent 执行，不占写队列的名额：写队列一满就拒，
+      // 排队里的续租会被饿死（租约过期 → 节点被判失败）。并发上限由 ExecutionScheduler 管，
+      // 里面的数据库写照旧走 withTx 单写者串行（第二次意见 P1）。
+      const out = await deps.commands!.dispatch({
+        runId: body.runId,
+        nodes: body.nodes,
         now: requestNow,
-        ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
-        leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
-        leaseRenewIntervalMs: body.leaseRenewIntervalMs === undefined ? undefined : Number(body.leaseRenewIntervalMs),
-      }))
+        ownerEpoch: body.ownerEpoch,
+        leaseTtlMs: body.leaseTtlMs,
+        leaseRenewIntervalMs: body.leaseRenewIntervalMs,
+      })
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/lease' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'ownerEpoch', 'leaseTtlMs'])
+      const body = parseBody(leaseSchema, await readJsonBody(req), '拿租约')
       const out = await queue.run(() => deps.commands!.acquireLease({
-        nodeRunId: String(body.nodeRunId), ownerEpoch: Number(body.ownerEpoch),
-        leaseTtlMs: Number(body.leaseTtlMs), now: requestNow,
+        nodeRunId: body.nodeRunId, ownerEpoch: body.ownerEpoch,
+        leaseTtlMs: body.leaseTtlMs, now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/renew' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'leaseTtlMs'])
+      const body = parseBody(renewSchema, await readJsonBody(req), '续租')
       const out = await queue.run(() => deps.commands!.renewLease({
-        nodeRunId: String(body.nodeRunId), leaseTtlMs: Number(body.leaseTtlMs), now: requestNow,
+        nodeRunId: body.nodeRunId, leaseTtlMs: body.leaseTtlMs, now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/report' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'report', 'expectedStatus', 'generation'])
+      const body = parseBody(reportSchema, await readJsonBody(req), '上报节点')
       const out = await queue.run(() => deps.commands!.report({
-        nodeRunId: String(body.nodeRunId), attempt: Number(body.attempt),
-        report: body.report, expectedStatus: String(body.expectedStatus),
-        generation: Number(body.generation), now: requestNow,
+        nodeRunId: body.nodeRunId, attempt: body.attempt,
+        report: body.report, expectedStatus: body.expectedStatus,
+        generation: body.generation, now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/run' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'nodeId', 'attempt', 'tools'])
-      if (!Array.isArray(body.tools)) {
-        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'tools 要是数组', { tools: body.tools })
-      }
-      const out = await queue.run(() => deps.commands!.runNode({
-        nodeRunId: String(body.nodeRunId), nodeId: String(body.nodeId), attempt: Number(body.attempt),
+      const body = parseBody(runNodeSchema, await readJsonBody(req), '执行节点')
+      // 同上：执行节点是长时间任务，不占写队列名额（第二次意见 P1）
+      const out = await deps.commands!.runNode({
+        nodeRunId: body.nodeRunId, nodeId: body.nodeId, attempt: body.attempt,
         input: body.input ?? {}, outputSchema: body.outputSchema ?? {},
-        tools: body.tools as { command: string; args: string[]; cwd: string; timeoutMs: number }[],
+        tools: body.tools,
         now: requestNow,
-        ownerEpoch: body.ownerEpoch === undefined ? undefined : Number(body.ownerEpoch),
-        leaseTtlMs: body.leaseTtlMs === undefined ? undefined : Number(body.leaseTtlMs),
-        leaseRenewIntervalMs: body.leaseRenewIntervalMs === undefined ? undefined : Number(body.leaseRenewIntervalMs),
-      }))
+        ownerEpoch: body.ownerEpoch,
+        leaseTtlMs: body.leaseTtlMs,
+        leaseRenewIntervalMs: body.leaseRenewIntervalMs,
+      })
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/cancel' && deps.commands) {
-      const body = requireFields(await readJsonBody(req), ['nodeRunId', 'attempt', 'revision', 'cancelResult', 'graceMs'])
-      if (!(CANCEL_RESULTS as readonly string[]).includes(String(body.cancelResult))) {
-        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'cancelResult 不在枚举里', { cancelResult: body.cancelResult })
-      }
+      const body = parseBody(cancelSchema, await readJsonBody(req), '取消节点')
       const out = await queue.run(() => deps.commands!.cancel({
-        nodeRunId: String(body.nodeRunId), attempt: Number(body.attempt), revision: Number(body.revision),
-        cancelResult: String(body.cancelResult), now: requestNow, graceMs: Number(body.graceMs),
-        extendDeadlineMs: body.extendDeadlineMs === undefined ? undefined : Number(body.extendDeadlineMs),
+        nodeRunId: body.nodeRunId, attempt: body.attempt, revision: body.revision,
+        cancelResult: body.cancelResult, now: requestNow, graceMs: body.graceMs,
+        extendDeadlineMs: body.extendDeadlineMs,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/ledger/events') {
-      const body = await readJsonBody(req)
+      const body = parseBody(ledgerEventSchema, await readJsonBody(req), '写账本事件')
       const out = await queue.run(() => deps.appendLedgerEvent(body, actor))
       sendJson(res, 200, okEnvelope(out.seq, { seq: out.seq, event_id: out.event_id, actor }))
       return

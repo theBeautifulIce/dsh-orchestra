@@ -1,0 +1,284 @@
+// 每条命令一套 Zod Schema：入参的类型与边界在这里定死，路由层只搬字段
+// （评审《第二次意见.md》行 567-621：以前只查字段在不在，再 String()/Number() 硬转，
+//   字符串数字、NaN、Infinity 都能一路进服务层）
+import { z } from 'zod'
+import { OrchError } from '../core/errors.ts'
+
+// 边界集中在这里，改一处就够。
+// 区间按「不破坏现有行为」取：租约上界 120000ms 对着现有默认 30s 与动作超时 120s 留了余量。
+export const LIMITS = {
+  identifierMaxLength: 128,
+  titleMaxLength: 200,
+  statusMaxLength: 64,
+  versionMaxLength: 64,
+  pathMaxLength: 256,
+  hashMaxLength: 128,
+  timestampMaxLength: 64,
+  leaseTtlMsMin: 1000,
+  leaseTtlMsMax: 120000,
+  leaseRenewIntervalMsMin: 100,
+  leaseRenewIntervalMsMax: 40000,
+  attemptMin: 1,
+  attemptMax: 1000,
+  toolCommandMaxLength: 256,
+  toolArgsMaxCount: 64,
+  toolArgMaxLength: 4096,
+  toolCwdMaxLength: 1024,
+  toolTimeoutMsMin: 1,
+  toolTimeoutMsMax: 600000,
+  toolsMaxCount: 64,
+  nodeIdsMaxCount: 256,
+  nodesMaxCount: 200,
+  passConditionsMaxCount: 64,
+  requiredHashesMaxCount: 64,
+  graceMsMax: 600000,
+  ledgerMaxKeys: 64,
+  ledgerMaxKeyLength: 128,
+  ledgerMaxStringLength: 8192,
+  ledgerMaxArrayLength: 256,
+  ledgerMaxDepth: 6,
+} as const
+
+// 取消结果只有这四种：与 src/service/commands/cancel.ts 的判定口径一致
+export const CANCEL_RESULTS = ['interrupted', 'not_interruptible', 'already_stopped', 'unknown'] as const
+
+// 入参不合法的回包：错误码沿用 PAYLOAD_SCHEMA_INVALID，信封沿用现有 failEnvelope；
+// 状态码改 400 —— 请求体本身不合法与服务端结构错（422）不是一回事
+export class RequestValidationError extends OrchError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super('PAYLOAD_SCHEMA_INVALID', message, details)
+  }
+
+  override get httpStatus(): number {
+    return 400
+  }
+}
+
+// 把 Zod 的 issue 翻成人话：哪一项非法、为什么非法都要说清楚，调用方才好改
+function describeIssue(issue: z.core.$ZodIssue): string {
+  switch (issue.code) {
+    case 'invalid_type': return '类型不对，期望 ' + String(issue.expected)
+    case 'too_small': return '小于下限 ' + String(issue.minimum)
+    case 'too_big': return '大于上限 ' + String(issue.maximum)
+    case 'invalid_value': return '取值不在允许的范围里'
+    case 'invalid_format': return '格式不对'
+    case 'unrecognized_keys': return '有不认识的字段'
+    case 'invalid_union': return '类型组合不合法'
+    case 'invalid_element': return '元素不合法'
+    case 'invalid_key': return '键不合法'
+    case 'not_multiple_of': return '不是 ' + String(issue.divisor) + ' 的倍数'
+    default: return issue.message
+  }
+}
+
+export type BodyIssue = { path: string; message: string }
+
+// 统一入口：校验不过就抛 400 的 RequestValidationError，details 里带每一项的问题
+export function parseBody<S extends z.ZodType>(schema: S, body: unknown, label: string): z.output<S> {
+  const result = schema.safeParse(body)
+  if (result.success) return result.data
+  const issues: BodyIssue[] = result.error.issues.map((issue) => ({
+    path: issue.path.length > 0 ? issue.path.map((part) => String(part)).join('.') : '(请求体)',
+    message: describeIssue(issue),
+  }))
+  const summary = issues.map((issue) => issue.path + ' ' + issue.message).join('；')
+  throw new RequestValidationError(label + '校验没过：' + summary, { issues })
+}
+
+// 标识类字段：非空且有长度上限，防止超长串进库进日志
+const identifier = z.string().min(1).max(LIMITS.identifierMaxLength)
+
+// 租约时长：整数 1000–120000ms（评审给的区间；现有默认 30s 在区间内）
+const leaseTtlMs = z.number().int().min(LIMITS.leaseTtlMsMin).max(LIMITS.leaseTtlMsMax)
+
+// 续租间隔：整数 100–40000ms；还要小于租约时长的一半，见 leasePairIssue
+const leaseRenewIntervalMs = z.number().int().min(LIMITS.leaseRenewIntervalMsMin).max(LIMITS.leaseRenewIntervalMsMax)
+
+// 与执行层兜底保持一致（src/executor/run-node.ts 的 DEFAULT_LEASE_TTL_MS = 30_000）：
+// 请求只给续租间隔时，服务层与执行层得按同一个租约算，否则两边结论会打架
+const DEFAULT_LEASE_TTL_MS = 30_000
+
+// 续租间隔与租约时长成对校验：间隔太长会在租约快过期时才续，间隔太短会把库写爆
+function leasePairIssue(value: { leaseTtlMs?: number; leaseRenewIntervalMs?: number }): string | null {
+  if (value.leaseRenewIntervalMs === undefined) return null
+  const ttl = value.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS
+  if (value.leaseRenewIntervalMs >= ttl / 2) {
+    return '续租间隔必须小于租约时长的一半（当前租约 ' + String(ttl) + 'ms）'
+  }
+  return null
+}
+
+// 一次只读工具调用：命令非空、参数是字符串数组、工作目录是字符串、超时有上下界
+export const toolSchema = z.object({
+  command: z.string().min(1).max(LIMITS.toolCommandMaxLength),
+  args: z.array(z.string().max(LIMITS.toolArgMaxLength)).max(LIMITS.toolArgsMaxCount),
+  cwd: z.string().min(1).max(LIMITS.toolCwdMaxLength),
+  timeoutMs: z.number().int().min(LIMITS.toolTimeoutMsMin).max(LIMITS.toolTimeoutMsMax),
+})
+
+// 一个节点的执行规格：工具清单有上限，input/outputSchema 由执行器自己解释
+const nodeSpecSchema = z.looseObject({
+  tools: z.array(toolSchema).max(LIMITS.toolsMaxCount),
+  input: z.unknown().optional(),
+  outputSchema: z.unknown().optional(),
+})
+
+// 通过条件：path 与 op 只做有界字符串，越界判定留给判定层（VERDICT_UNSUPPORTED）
+const passConditionSchema = z.looseObject({
+  path: z.string().min(1).max(LIMITS.pathMaxLength),
+  op: z.string().min(1).max(LIMITS.statusMaxLength),
+  value: z.unknown().optional(),
+})
+
+// 加载定义：定义哈希按整个 body 算，未知键必须原样保留，所以用 looseObject
+export const workflowLoadSchema = z.looseObject({
+  workflow_version: z.union([z.string().min(1).max(LIMITS.versionMaxLength), z.number().int()])
+    .transform((value) => String(value)),
+  nodes: z.array(z.looseObject({
+    node_id: identifier,
+    // 节点类型不在这里收成枚举：未知类型要落到目录层判 SCHEMA_VERSION_UNSUPPORTED（422）
+    type: z.string().min(1).max(LIMITS.statusMaxLength).optional(),
+    tools: z.looseObject({
+      allow: z.array(z.string().max(LIMITS.toolCommandMaxLength)).max(LIMITS.toolsMaxCount).optional(),
+      deny: z.array(z.string().max(LIMITS.toolCommandMaxLength)).max(LIMITS.toolsMaxCount).optional(),
+    }).optional(),
+    pass_conditions: z.array(passConditionSchema).max(LIMITS.passConditionsMaxCount).optional(),
+    required_hashes: z.array(z.string().min(1).max(LIMITS.identifierMaxLength)).max(LIMITS.requiredHashesMaxCount).optional(),
+  })).max(LIMITS.nodesMaxCount),
+  pass_conditions: z.array(passConditionSchema).max(LIMITS.passConditionsMaxCount).optional(),
+  required_hashes: z.array(z.string().min(1).max(LIMITS.identifierMaxLength)).max(LIMITS.requiredHashesMaxCount).optional(),
+})
+
+// 建 run：标题与版本号都要有，节点清单可选但有上限
+export const createRunSchema = z.looseObject({
+  taskTitle: z.string().min(1).max(LIMITS.titleMaxLength),
+  workflowVersion: z.union([z.string().min(1).max(LIMITS.versionMaxLength), z.number().int()])
+    .transform((value) => String(value)),
+  nodeIds: z.array(identifier).max(LIMITS.nodeIdsMaxCount).optional(),
+})
+
+// 派发：run 标识、节点规格表、租约三元组
+export const dispatchSchema = z.looseObject({
+  runId: identifier,
+  nodes: z.record(identifier, nodeSpecSchema),
+  ownerEpoch: z.number().int().nonnegative().optional(),
+  leaseTtlMs: leaseTtlMs.optional(),
+  leaseRenewIntervalMs: leaseRenewIntervalMs.optional(),
+}).superRefine((value, ctx) => {
+  const message = leasePairIssue(value)
+  if (message) ctx.addIssue({ code: 'custom', path: ['leaseRenewIntervalMs'], message })
+  if (Object.keys(value.nodes).length > LIMITS.nodesMaxCount) {
+    ctx.addIssue({ code: 'custom', path: ['nodes'], message: '节点数超过上限 ' + String(LIMITS.nodesMaxCount) })
+  }
+})
+
+// 拿租约：租约时长与 owner 代次都要严格
+export const leaseSchema = z.looseObject({
+  nodeRunId: identifier,
+  ownerEpoch: z.number().int().nonnegative(),
+  leaseTtlMs: leaseTtlMs,
+})
+
+// 续租：只搬 nodeRunId 与租约时长
+export const renewSchema = z.looseObject({
+  nodeRunId: identifier,
+  leaseTtlMs: leaseTtlMs,
+})
+
+// 上报：报告体自己也要有标识与状态，不能只查字段在不在
+export const reportSchema = z.looseObject({
+  nodeRunId: identifier,
+  attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
+  report: z.looseObject({
+    report_id: identifier,
+    node_run_id: identifier,
+    attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
+    status: z.string().min(1).max(LIMITS.statusMaxLength),
+    evidence: z.looseObject({
+      source: z.string().min(1).max(LIMITS.statusMaxLength),
+      exitCode: z.number().int().optional(),
+      stdoutHash: z.string().max(LIMITS.hashMaxLength).optional(),
+      stderrHash: z.string().max(LIMITS.hashMaxLength).optional(),
+      hashes: z.record(z.string().max(LIMITS.hashMaxLength), z.string().max(LIMITS.hashMaxLength)).optional(),
+      producedAt: z.string().max(LIMITS.timestampMaxLength).optional(),
+      tool: z.string().max(LIMITS.toolCommandMaxLength).optional(),
+      commandHash: z.string().max(LIMITS.hashMaxLength).optional(),
+    }).optional(),
+    output: z.unknown().optional(),
+    error_code: z.string().min(1).max(LIMITS.statusMaxLength).optional(),
+  }),
+  expectedStatus: z.string().min(1).max(LIMITS.statusMaxLength),
+  generation: z.number().int().nonnegative(),
+})
+
+// 生产执行入口：工具清单必须合法，租约三元组可选
+export const runNodeSchema = z.looseObject({
+  nodeRunId: identifier,
+  nodeId: identifier,
+  attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
+  tools: z.array(toolSchema).max(LIMITS.toolsMaxCount),
+  input: z.unknown().optional(),
+  outputSchema: z.unknown().optional(),
+  ownerEpoch: z.number().int().nonnegative().optional(),
+  leaseTtlMs: leaseTtlMs.optional(),
+  leaseRenewIntervalMs: leaseRenewIntervalMs.optional(),
+}).superRefine((value, ctx) => {
+  const message = leasePairIssue(value)
+  if (message) ctx.addIssue({ code: 'custom', path: ['leaseRenewIntervalMs'], message })
+})
+
+// 取消：结果枚举、宽限与延期都有上下界
+export const cancelSchema = z.looseObject({
+  nodeRunId: identifier,
+  attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
+  revision: z.number().int().nonnegative(),
+  cancelResult: z.enum(CANCEL_RESULTS),
+  graceMs: z.number().int().min(0).max(LIMITS.graceMsMax),
+  extendDeadlineMs: z.number().int().min(0).max(LIMITS.graceMsMax).optional(),
+})
+
+type LedgerProblem = { path: (string | number)[]; message: string }
+
+// 账本事件的体由宿主解释，字段随调用方变；这里只挡明显会打垮服务的负载：
+// 字段太多、字段名太长、字符串太长、数组太长、嵌套太深
+function collectLedgerProblems(value: unknown, path: (string | number)[], depth: number): LedgerProblem[] {
+  const problems: LedgerProblem[] = []
+  if (depth > LIMITS.ledgerMaxDepth) {
+    problems.push({ path, message: '嵌套层数超过上限 ' + String(LIMITS.ledgerMaxDepth) })
+    return problems
+  }
+  if (typeof value === 'string') {
+    if (value.length > LIMITS.ledgerMaxStringLength) {
+      problems.push({ path, message: '字符串长度超过上限 ' + String(LIMITS.ledgerMaxStringLength) })
+    }
+    return problems
+  }
+  if (Array.isArray(value)) {
+    if (value.length > LIMITS.ledgerMaxArrayLength) {
+      problems.push({ path, message: '数组长度超过上限 ' + String(LIMITS.ledgerMaxArrayLength) })
+    }
+    value.forEach((item, index) => { problems.push(...collectLedgerProblems(item, [...path, index], depth + 1)) })
+    return problems
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const keys = Object.keys(record)
+    if (keys.length > LIMITS.ledgerMaxKeys) {
+      problems.push({ path, message: '字段数超过上限 ' + String(LIMITS.ledgerMaxKeys) })
+    }
+    for (const key of keys) {
+      if (key.length > LIMITS.ledgerMaxKeyLength) {
+        problems.push({ path: [...path, key], message: '字段名长度超过上限 ' + String(LIMITS.ledgerMaxKeyLength) })
+      }
+      problems.push(...collectLedgerProblems(record[key], [...path, key], depth + 1))
+    }
+  }
+  return problems
+}
+
+// 写账本事件：体必须是一个对象，字段与值都要有上限
+export const ledgerEventSchema = z.looseObject({}).superRefine((value, ctx) => {
+  for (const problem of collectLedgerProblems(value, [], 1).slice(0, 10)) {
+    ctx.addIssue({ code: 'custom', path: problem.path, message: problem.message })
+  }
+})
