@@ -1,6 +1,8 @@
 // 生产路径端到端：命令装配 → 租约 → 执行 → 强证据 → 收口（审计 F-01）
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openServiceOrchestra } from '../../src/index.ts'
@@ -340,6 +342,32 @@ describe('生产路径跑通单节点', () => {
     )).rejects.toBeTruthy()
     expect(calls).toContain('executor.cancel')
     expect(calls).toContain('executor.dispose')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('B06 独立进程：工具副作用已发生、回传前 SIGKILL，恢复时只能人工核实，不能重跑', async () => {
+    const { dir, orchestra, release, registry, runner } = await setup([])
+    const marker = join(dir, 'tool-ran.txt')
+    const child = spawn(process.execPath, [
+      '--no-warnings',
+      join(process.cwd(), 'tests/fixtures/crash-collector-child.ts'),
+      join(dir, 'orchestra.db'), marker, 'nrun_1', 's3cr3t-runtime', dir,
+    ], { cwd: process.cwd(), stdio: 'ignore' })
+    await waitFor(() => existsSync(marker), 5_000)
+    child.kill('SIGKILL')
+    await once(child, 'exit')
+    expect(readFileSync(marker, 'utf8')).toBe('ran')
+
+    const collector = new EvidenceCollector({
+      db: orchestra.db, secret: 's3cr3t-runtime', registry, runner,
+      policy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
+      allowedTools: ['ro.echo'], nodeRunId: 'nrun_1', attempt: 1, executorAgentId: 'agent_1', nowAt: () => NOW,
+    })
+    await expect(collector.collect({ callId: 'call_child', tool: 'ro.echo', args: [], cwd: '.', timeoutMs: 60_000 }))
+      .rejects.toMatchObject({ code: 'EVIDENCE_SOURCE_UNAVAILABLE' })
+    // 重放没有再次触发宿主工具：副作用只有一次。
+    expect(readFileSync(marker, 'utf8')).toBe('ran')
     await release()
     rmSync(dir, { recursive: true, force: true })
   })

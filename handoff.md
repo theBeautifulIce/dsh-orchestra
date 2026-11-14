@@ -1010,4 +1010,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 测试：新增 `tests/unit/execution-cancels.spec.ts` 3 tests；runtime 新增「spawn 回包缺 agentId 落 startup_unknown」「runNode 外部取消不写 blocked_post」「commands.cancel 经注册表 abort 正在跑的 runNode」。
 - 验证：typecheck 0；全量 **604 passed | 1 skipped**（41 files）；build 成功（ESM 147.74kB / gzip 37.02kB、d.ts 14.00kB）。
 - 未完成：B06 仍是事务级重放，不是独立进程强杀；B07 的生产取消已接，但独立 kill 场景仍需补。
-TASK AS OF THIS BLOCK: 本轮改动未提交；下一步 commit/push，再继续 B06。
+- 状态：11d08fd 已提交并推送。
+
+### 11.54 B06 独立进程强杀（2026-11-14 17:15）
+
+- 新增 `tests/fixtures/crash-collector-child.ts`：独立 Node 进程打开同一个账本库，先写 outbox pending 与 `tool_started`，宿主工具写 marker 后挂住；父进程看到 marker 后 `SIGKILL`。
+- `tests/integration/runtime.spec.ts` 新增「B06 独立进程：工具副作用已发生、回传前 SIGKILL，恢复时只能人工核实，不能重跑」：子进程被杀后，父进程用同一 callId 重放，命中 pending outbox 抛 `EVIDENCE_SOURCE_UNAVAILABLE`，marker 仍只有一次，证明恢复不会盲目重跑。
+- 首次失败是 request_hash 不一致：子进程 `timeoutMs:60_000`，父进程重放 `timeoutMs:5_000`；统一为 60_000 后通过。request_hash 覆盖 tool/args/cwd/timeout，测试两侧必须完全一致。
+- 验证：typecheck 0；全量 41 文件 **605 passed | 1 skipped**；build 成功（ESM 147.74kB / gzip 37.02kB、d.ts 14.00kB）。
+- 状态：B06 独立进程已覆盖；B07 外部取消已接生产，缺独立进程 kill 场景。G1/G2 仍绑 `caae193`。
