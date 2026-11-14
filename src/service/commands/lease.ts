@@ -10,6 +10,7 @@ export type NodeRunRow = {
   run_id: string
   node_id: string
   node_type: string
+  seq: number
   attempt: number
   status: string
   revision: number
@@ -26,6 +27,10 @@ export type NodeRunRow = {
   deadline_at: string | null
   deadline_boot_id: string | null
   deadline_monotonic_ns: number | null
+  hang_reason: string | null
+  contradiction_decision_id: string | null
+  startup_unknown_deadline_at: string | null
+  startup_unknown_remaining_ns: number | null
 }
 
 export function loadNodeRun(tx: Tx, nodeRunId: string): NodeRunRow {

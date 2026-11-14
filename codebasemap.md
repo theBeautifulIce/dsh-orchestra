@@ -182,7 +182,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | --- | --- |
 | `src/core/clock.ts` | 墙钟、预算、跨 boot 的时钟口径（unknown 判定、verify 超时） |
 | `src/core/workflow-def.ts` | 流程定义与代次校验（workflow_version、代次单调） |
-| `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收；判定条件自己按 run 的 `workflow_version` 取，调用方不能带 policy） |
+| `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收；report_contradicted 挂起只认 uphold_report/uphold_decision，revision CAS 失败节点不动） |
 | `src/service/commands/node-state.ts` | 节点状态写入（verify_deadline_at 起钟、verify_remaining_ns 落列） |
 | `src/service/commands/runtime.ts` | 运行时装配（只把 catalog 交给 applyReport，命令层不自取 policy） |
 | `src/service/runs.ts` | 生产装配：createRun 按 `(workflow_id, version)` 建 task/run/node_runs，写复合身份与事件 |

@@ -5,7 +5,11 @@ import type { PassCondition } from '../../core/policy.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { transitionNode } from './node-state.ts'
-import { assertLeaseValid, loadNodeRun, type NodeRunRow } from './lease.ts'
+import { applyTransition, createNodeRun } from './nodes.ts'
+import { loadNodeRun, assertLeaseValid, type NodeRunRow } from './lease.ts'
+import { openDecision, resolveDecision, type Resolution } from './decisions.ts'
+import { HANG_REASON_REPORT_CONTRADICTED, type NodeStatus } from '../../core/state-machine.ts'
+import { uuidv7 } from '../../core/ids.ts'
 import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
 import { canTransition } from '../../core/state-machine.ts'
@@ -19,6 +23,22 @@ export type ApplyReportParams = {
   // 动作代：执行器回写时带自己看到的 Ga，对不上就是过期写（规格 4.3 行 309）
   generation: number
   now: string
+  // 只在挂起冲突的收口口上传；普通出口不许带（S3 Task 12）
+  decision?: ApplyDecision
+}
+
+export type ApplyDecision = {
+  decisionId: string
+  revision: number
+  resolution: 'confirm_applied' | 'confirm_not_applied' | 'uphold_report' | 'uphold_decision'
+}
+
+type ContradictionDecisionRow = {
+  decision_id: string
+  node_run_id: string | null
+  kind: string
+  status: string
+  revision: number
 }
 
 export type ApplyPolicy = { passConditions: PassCondition[]; requiredHashes?: string[] }
@@ -121,7 +141,140 @@ function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): App
   return catalog.policyFor(run.workflow_id ?? 'default', run.workflow_version, row.node_id)
 }
 
-// 六步固定顺序，全部在同一笔 BEGIN IMMEDIATE 事务里（规格 4.2 行 294-300）
+/**
+ * 把节点挂到「报告与人裁决冲突」：开 report_contradicted 卡，写 hang_reason 与卡号，
+ * 节点状态不前进；新 attempt 与普通出口都被挂起闸挡住。
+ */
+export function raiseReportContradiction(
+  tx: Tx,
+  secret: string,
+  args: { nodeRunId: string; attempt: number; runId: string; reportId: string; now: string; decisionId?: string },
+): { decisionId: string; created: boolean } {
+  const row = loadNodeRun(tx, args.nodeRunId)
+  if (row.status !== 'startup_unknown' && row.status !== 'indeterminate_side_effect') {
+    throw new OrchError('STALE_GENERATION', '只有 startup_unknown / indeterminate_side_effect 能挂报告冲突', {
+      nodeRunId: args.nodeRunId,
+      status: row.status,
+    })
+  }
+  const existing = tx.get<{ decision_id: string }>(
+    "SELECT decision_id FROM decisions WHERE node_run_id = ? AND kind = 'report_contradicted' AND status IN ('pending','acknowledged','blocked_for_human') LIMIT 1",
+    [args.nodeRunId],
+  )
+  const decisionId = existing?.decision_id ?? args.decisionId ?? 'dec_' + uuidv7()
+  if (!existing) {
+    openDecision(tx, {
+      decisionId,
+      runId: args.runId,
+      nodeRunId: args.nodeRunId,
+      kind: 'report_contradicted',
+      payload: { report_id: args.reportId, hung_status: row.status },
+      createdAt: args.now,
+    })
+  }
+  applyTransition(tx, {
+    nodeRunId: args.nodeRunId,
+    from: [row.status as NodeStatus],
+    to: row.status as NodeStatus,
+    attempt: args.attempt,
+    now: args.now,
+    allowHung: true,
+    patch: {
+      hang_reason: HANG_REASON_REPORT_CONTRADICTED,
+      contradiction_decision_id: decisionId,
+      startup_unknown_deadline_at: null,
+      startup_unknown_remaining_ns: null,
+    },
+  })
+  appendNodeRunEvent(tx, secret, args.nodeRunId, 'report.contradicted', {
+    report_id: args.reportId,
+    decision_id: decisionId,
+    hung_status: row.status,
+  })
+  return { decisionId, created: !existing }
+}
+
+function loadContradictionDecision(tx: Tx, params: ApplyReportParams): ContradictionDecisionRow {
+  const decision = tx.get<ContradictionDecisionRow>(
+    'SELECT decision_id, node_run_id, kind, status, revision FROM decisions WHERE decision_id = ?',
+    [params.decision?.decisionId ?? ''],
+  )
+  if (!decision) throw new OrchError('DECISION_REQUIRED', '冲突收口没有对应的裁决卡', {})
+  if (decision.kind !== 'report_contradicted' || decision.node_run_id !== params.nodeRunId) {
+    throw new OrchError('DECISION_REQUIRED', '裁决卡不是这个节点的报告冲突卡', {
+      decisionId: decision.decision_id,
+      kind: decision.kind,
+    })
+  }
+  if (!['pending', 'acknowledged', 'blocked_for_human'].includes(decision.status)) {
+    throw new OrchError('DECISION_REVISION_CONFLICT', '裁决卡已经收口', { status: decision.status })
+  }
+  if (decision.revision !== params.decision?.revision) {
+    throw new OrchError('DECISION_REVISION_CONFLICT', '裁决卡 revision 已过期', {
+      expected: params.decision?.revision,
+      actual: decision.revision,
+    })
+  }
+  return decision
+}
+
+/**
+ * uphold_decision：维持人的原裁决，迟到报告永久标 stale，旧行 superseded，新 attempt 从旧行接班。
+ * 裁决 CAS 与节点更新在同一事务里；revision 过期时节点一个字节不动。
+ */
+function upholdDecision(
+  tx: Tx,
+  secret: string,
+  params: ApplyReportParams,
+  row: NodeRunRow,
+  reportSeq: number,
+): ApplyResult {
+  const decision = loadContradictionDecision(tx, params)
+  resolveDecision(tx, {
+    decisionId: decision.decision_id,
+    revision: decision.revision,
+    resolution: 'uphold_decision' satisfies Resolution,
+    now: params.now,
+  })
+  const newNodeRunId = 'nrun_' + uuidv7()
+  applyTransition(tx, {
+    nodeRunId: params.nodeRunId,
+    from: [row.status as NodeStatus],
+    to: 'superseded',
+    attempt: params.attempt,
+    now: params.now,
+    allowHung: true,
+    patch: {
+      hang_reason: null,
+      contradiction_decision_id: null,
+      startup_unknown_deadline_at: null,
+      startup_unknown_remaining_ns: null,
+    },
+  })
+  createNodeRun(tx, {
+    newNodeRunId,
+    runId: row.run_id,
+    nodeId: row.node_id,
+    seq: row.seq,
+    nodeType: row.node_type,
+    attempt: params.attempt + 1,
+    originNodeRunId: params.nodeRunId,
+    now: params.now,
+  })
+  tx.run(
+    'INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [params.report.report_id, params.nodeRunId, params.attempt, reportSeq, 'stale', params.now, params.now],
+  )
+  appendNodeRunEvent(tx, secret, params.nodeRunId, 'report.stale', {
+    report_id: params.report.report_id,
+    report_seq: reportSeq,
+    decision_id: decision.decision_id,
+    reason: 'uphold_decision',
+  })
+  return { accepted: false, reason: 'uphold_decision', next_status: 'superseded', registry_state: 'stale' }
+}
+
+
 export function applyReport(
   tx: Tx,
   secret: string,
@@ -218,6 +371,35 @@ export function applyReport(
   if (row.status !== params.expectedStatus) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'status_mismatch', now: params.now })
   }
+  // 挂起闸：报告与人裁决冲突时，普通出口一律 STALE_HANG；
+  // 只有 uphold_report / uphold_decision 两张明确的收口口能穿过（M-59/M-60）。
+  let upholdReport = false
+  if (row.hang_reason === HANG_REASON_REPORT_CONTRADICTED) {
+    if (!params.decision) {
+      throw new OrchError('STALE_HANG', '节点挂在报告冲突上，普通出口不许推进', {
+        nodeRunId: params.nodeRunId,
+        hangReason: row.hang_reason,
+        decisionId: row.contradiction_decision_id,
+      })
+    }
+    if (params.decision.resolution === 'uphold_decision') {
+      return upholdDecision(tx, secret, params, row, reportSeq)
+    }
+    if (params.decision.resolution !== 'uphold_report') {
+      throw new OrchError('STALE_HANG', '挂起冲突只能用 uphold_report / uphold_decision 收口', {
+        nodeRunId: params.nodeRunId,
+        resolution: params.decision.resolution,
+      })
+    }
+    const decision = loadContradictionDecision(tx, params)
+    resolveDecision(tx, {
+      decisionId: decision.decision_id,
+      revision: decision.revision,
+      resolution: 'uphold_report',
+      now: params.now,
+    })
+    upholdReport = true
+  }
   if (row.action_generation !== params.generation) {
     // 动作代对不上：旧执行器的过期写，按 STALE_GENERATION 处理（规格 4.3 行 309）
     throw new OrchError('STALE_GENERATION', '动作代对不上，旧执行器的写要丢掉', {
@@ -228,7 +410,7 @@ export function applyReport(
   }
   assertLeaseValid(row, params.now)
   // 目标状态必须在合法迁移表里：非法迁移按拒绝处理，不许绕过状态机
-  if (!canTransition(row.status, report.status)) {
+  if (!upholdReport && !canTransition(row.status, report.status)) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'illegal_transition', now: params.now })
   }
   // 失败/超时终态也要有可核对的服务端证据：证据必须与同 attempt 的工具痕迹与 tool_finished 对齐，
@@ -294,16 +476,39 @@ export function applyReport(
       missing: Array.isArray(request?.missing) ? request.missing.map(String) : [],
     }
   }
-  transitionNode(tx, secret, {
-    nodeRunId: params.nodeRunId,
-    from: row.status,
-    to: report.status,
-    attempt: params.attempt,
-    revision: row.revision,
-    now: params.now,
-    reason: 'report_applied',
-    verifyHuman,
-  })
+  if (upholdReport) {
+    applyTransition(tx, {
+      nodeRunId: params.nodeRunId,
+      from: [row.status as NodeStatus],
+      to: report.status as NodeStatus,
+      attempt: params.attempt,
+      now: params.now,
+      allowHung: true,
+      patch: {
+        hang_reason: null,
+        contradiction_decision_id: null,
+        startup_unknown_deadline_at: null,
+        startup_unknown_remaining_ns: null,
+      },
+    })
+    appendNodeRunEvent(tx, secret, params.nodeRunId, 'status_changed', {
+      from: row.status,
+      to: report.status,
+      reason: 'uphold_report',
+      decision_id: params.decision?.decisionId,
+    })
+  } else {
+    transitionNode(tx, secret, {
+      nodeRunId: params.nodeRunId,
+      from: row.status,
+      to: report.status,
+      attempt: params.attempt,
+      revision: row.revision,
+      now: params.now,
+      reason: 'report_applied',
+      verifyHuman,
+    })
+  }
   if (existing) {
     tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['applied', params.now, report.report_id])
   } else {

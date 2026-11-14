@@ -99,7 +99,7 @@ export type Resolution =
   | 'uphold_report'
   | 'uphold_decision'
 
-const FINAL_RESOLUTIONS: readonly Resolution[] = ['approved', 'rejected', 'expired']
+const FINAL_RESOLUTIONS: readonly Resolution[] = ['approved', 'rejected', 'expired', 'uphold_report', 'uphold_decision']
 
 export type ResolveDecisionRequest = {
   decisionId: string
@@ -126,7 +126,11 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
   const closing = FINAL_RESOLUTIONS.includes(req.resolution)
   const nextStatus = closing ? 'resolved' : current.status
   const closedReason = closing
-    ? req.resolution === 'expired' ? 'expired_final' : req.resolution
+    ? req.resolution === 'expired'
+      ? 'expired_final'
+      : req.resolution === 'uphold_report'
+        ? 'approved'
+        : req.resolution
     : null
   const payloadJson = req.payload
     ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...req.payload })

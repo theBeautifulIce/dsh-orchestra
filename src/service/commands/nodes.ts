@@ -19,6 +19,7 @@ const PATCH_COLUMNS = new Set([
   'hang_reason',
   'contradiction_decision_id',
   'startup_unknown_remaining_ns',
+  'startup_unknown_deadline_at',
   'verify_remaining_ns',
   // 审批往返：blocked_pre 记回队目标与审批卡，同时收回旧租约
   'resume_state',
@@ -110,6 +111,15 @@ export type CreateNodeRunRequest = {
 export function createNodeRun(tx: Tx, req: CreateNodeRunRequest): void {
   if (req.attempt < 1) {
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'attempt 必须从 1 开始', { attempt: req.attempt })
+  }
+  if (req.originNodeRunId) {
+    const origin = tx.get<{ hang_reason: string | null }>('SELECT hang_reason FROM node_runs WHERE node_run_id = ?', [req.originNodeRunId])
+    if (origin?.hang_reason) {
+      throw new OrchError('STALE_HANG', '旧 attempt 挂在冲突上，新 attempt 要被挡住', {
+        originNodeRunId: req.originNodeRunId,
+        hangReason: origin.hang_reason,
+      })
+    }
   }
   tx.run(
     'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, origin_node_run_id, created_at, updated_at) ' +

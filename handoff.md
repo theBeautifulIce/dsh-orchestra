@@ -1207,3 +1207,15 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 测试 `tests/integration/compensation.spec.ts` 9 例：同 id、非法描述符、重放一行一事件、换参数冲突、失败落账、applied 不改状态、终态不可改判、NULL 幂等、done 不被降级。
 - 验证：typecheck 0；定向 9/9；全量 **52 files 707 passed | 1 skipped**；build ESM 155.45kB / gzip 38.65kB、d.ts 14.30kB。
 - 缺口：补偿执行器尚未接进 `run-node`；`settleCompensation` 的调用方（取消/失败收口）未接；补偿证据的固定字段集与 artifacts 写盘仍待接；证据待 S3 收口统一重生成。
+
+### 11.73 S3 Task 12：报告冲突与 uphold 收口（2026-11-14 19:36）
+
+- `apply-report.ts` 增 `ApplyDecision` 与可选 `decision` 入参；挂起节点（`hang_reason='report_contradicted'`）的普通出口抛 `STALE_HANG`，只认 `uphold_report` / `uphold_decision` 两条路。
+- `raiseReportContradiction`：只允许 `startup_unknown` / `indeterminate_side_effect`，复用或新开 `report_contradicted` 决策卡，同一事务写 `hang_reason`、`contradiction_decision_id` 并清 `startup_unknown_deadline_at` / `startup_unknown_remaining_ns`。
+- `uphold_report`：先 CAS 决策卡 revision，再走原有 schema/判定/证据门收口 `done`/`failed`，清挂起字段。
+- `uphold_decision`：决策卡收口 `uphold_decision`，旧行 `superseded`，新 attempt 从旧行接班为 `queued`，迟到报告落 `stale`。
+- `createNodeRun` 增挂起闸：旧行 `hang_reason` 非空时，新 attempt 报 `STALE_HANG`；`uphold_decision` 先清挂起字段再建新行，所以合法。
+- `resolveDecision` 把 `uphold_report` 收口为 `closed_reason='approved'`、`uphold_decision` 保留同名原因；`report_contradicted` 仍不参与 2h/24h 自动升级。
+- 测试 `tests/integration/apply-report.spec.ts` 新增 6 例：普通出口 `STALE_HANG`、`uphold_report` 清闸落 done、`uphold_decision` superseded+新 attempt、revision 过期节点不动、新 attempt 被挡、冲突卡不过期。
+- 验证：typecheck 0；定向 61/61；全量 **52 files 713 passed | 1 skipped**；build ESM 164.32kB / gzip 40.86kB、d.ts 14.30kB。
+- 缺口：`confirm_applied` / `confirm_not_applied` 分支尚未实现；`raiseReportContradiction` 尚未接 HTTP 命令与 run-node；uphold 事件与恢复扫描的联动未接；证据待 S3 收口统一重生成。

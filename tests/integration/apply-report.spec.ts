@@ -3,7 +3,9 @@ import { bindRunVersion, catalogFor, freshLedger, seed, TEST_SECRET } from '../f
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { acquireLease } from '../../src/service/commands/lease.ts'
-import { applyReport } from '../../src/service/commands/apply-report.ts'
+import { createNodeRun } from '../../src/service/commands/nodes.ts'
+import { applyReport, raiseReportContradiction } from '../../src/service/commands/apply-report.ts'
+import { escalateDecisions } from '../../src/service/commands/decisions.ts'
 import type { Report } from '../../src/core/report.ts'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
 
@@ -667,5 +669,99 @@ describe('工具执行唯一身份（第二次意见 P1）', () => {
     const out = apply(db, { output: { evidence_trace: [traceEntry({ toolSeq: 2, executionId: EXEC_SECOND })] } })
     expect(out.accepted).toBe(false)
     expect(out.reason).toBe('evidence_unverifiable')
+  })
+})
+
+describe('applyReport 报告冲突与 uphold 收口', () => {
+  function errorCode(fn: () => unknown): string | null {
+    try { fn(); return null } catch (error) { return (error as { code?: string }).code ?? null }
+  }
+  function hang(db: any) {
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET status='startup_unknown' WHERE node_run_id='nr_ar'"))
+    return withTx(db, (tx) => raiseReportContradiction(tx, TEST_SECRET, {
+      nodeRunId: 'nr_ar', attempt: 2, runId: 'r1', reportId: 'rep_conflict', now: NOW,
+    }))
+  }
+  function applyUphold(db: any, decision: { decisionId: string; revision: number; resolution: 'uphold_report' | 'uphold_decision' }) {
+    return withTx(db, (tx) => applyReport(tx, TEST_SECRET, {
+      nodeRunId: 'nr_ar', attempt: 2, report: rep({ report_id: 'rep_conflict' }),
+      expectedStatus: 'startup_unknown', generation: 1, now: NOW, decision,
+    }, CATALOG))
+  }
+
+  it('普通出口在挂起状态下报 STALE_HANG，节点与账本不动', () => {
+    const db = setup()
+    hang(db)
+    const before = nodeRow(db)
+    expect(errorCode(() => apply(db, { report_id: 'rep_conflict' }, 'startup_unknown'))).toBe('STALE_HANG')
+    const after = nodeRow(db)
+    expect(after.status).toBe('startup_unknown')
+    expect(after.revision).toBe(before.revision)
+    expect(events(db, 'report_applied')).toBe(0)
+  })
+
+  it('uphold_report：清 hang 与启动未知闸，节点落 done，裁决收口 approved', () => {
+    const db = setup()
+    const { decisionId } = hang(db)
+    const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
+    const out = applyUphold(db, { decisionId, revision: card.revision, resolution: 'uphold_report' })
+    expect(out).toEqual({ accepted: true, next_status: 'done', registry_state: 'applied' })
+    const row = nodeRow(db)
+    expect(row.status).toBe('done')
+    expect(row.hang_reason).toBeNull()
+    expect(row.contradiction_decision_id).toBeNull()
+    expect(row.startup_unknown_deadline_at).toBeNull()
+    const closed = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
+    expect(closed.status).toBe('resolved')
+    expect(closed.closed_reason).toBe('approved')
+  })
+
+  it('uphold_decision：旧行 superseded，新 attempt queued 接班，迟到报告标 stale', () => {
+    const db = setup()
+    const { decisionId } = hang(db)
+    const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
+    const out = applyUphold(db, { decisionId, revision: card.revision, resolution: 'uphold_decision' })
+    expect(out).toEqual({ accepted: false, reason: 'uphold_decision', next_status: 'superseded', registry_state: 'stale' })
+    const old = nodeRow(db)
+    expect(old.status).toBe('superseded')
+    expect(old.replacement_node_run_id).toBeTruthy()
+    const next = db.raw.prepare("SELECT * FROM node_runs WHERE origin_node_run_id='nr_ar'").get() as any
+    expect(next.status).toBe('queued')
+    expect(next.attempt).toBe(3)
+    expect(registry(db, 'rep_conflict').state).toBe('stale')
+    const closed = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
+    expect(closed.closed_reason).toBe('uphold_decision')
+  })
+
+  it('裁决 revision 过期：DECISION_REVISION_CONFLICT，节点一个字节不动', () => {
+    const db = setup()
+    const { decisionId } = hang(db)
+    const before = nodeRow(db)
+    expect(errorCode(() => applyUphold(db, { decisionId, revision: 999, resolution: 'uphold_report' }))).toBe('DECISION_REVISION_CONFLICT')
+    const after = nodeRow(db)
+    expect(after.status).toBe(before.status)
+    expect(after.revision).toBe(before.revision)
+    expect(after.hang_reason).toBe('report_contradicted')
+  })
+
+  it('挂起状态不许开新 attempt：createNodeRun 报 STALE_HANG，子行不落库', () => {
+    const db = setup()
+    hang(db)
+    const before = db.raw.prepare('SELECT COUNT(*) AS n FROM node_runs').get() as { n: number }
+    expect(errorCode(() => withTx(db, (tx) => createNodeRun(tx, {
+      newNodeRunId: 'nr_ar_attempt3', runId: 'r1', nodeId: 'n_ar', seq: 5, nodeType: 'agent',
+      attempt: 3, originNodeRunId: 'nr_ar', now: NOW,
+    })))).toBe('STALE_HANG')
+    const after = db.raw.prepare('SELECT COUNT(*) AS n FROM node_runs').get() as { n: number }
+    expect(after.n).toBe(before.n)
+  })
+
+  it('报告冲突卡不参与按时间自动升级/过期', () => {
+    const db = setup()
+    const { decisionId } = hang(db)
+    withTx(db, (tx) => escalateDecisions(tx, { now: '2026-11-20T00:00:00.000Z' }))
+    const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
+    expect(card.status).toBe('pending')
+    expect(card.closed_reason).toBeNull()
   })
 })
