@@ -25,10 +25,14 @@ export type CollectedToolResult = {
   exitCode: number
   stdout: string
   stderr: string
+  // outbox 里保存的宿主痕迹；重放已完成调用时用它恢复 trace/evidence，避免崩溃后收口缺证据。
+  trace?: ToolTraceEntry
+  evidence?: StrongEvidence
 }
 
 type OutboxRow = {
   status: 'pending' | 'completed' | 'failed'
+  request_hash: string
   result_json: string | null
 }
 
@@ -83,8 +87,18 @@ export class EvidenceCollector {
     }))
     const existing = this.readOutbox(call.callId)
     if (existing) {
+      if (existing.request_hash !== requestHash) {
+        throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '同一 callId 对应了不同的工具请求', {
+          callId: call.callId, expected: existing.request_hash, got: requestHash,
+        })
+      }
       if (existing.status === 'completed' && existing.result_json) {
-        return parseStoredResult(existing.result_json, call.callId)
+        const stored = parseStoredResult(existing.result_json, call.callId)
+        if (stored.evidence) this.lastEvidenceValue = { ...stored.evidence }
+        if (stored.trace && !this.trace.some((entry) => entry.executionId === stored.trace?.executionId)) {
+          this.trace.push({ ...stored.trace })
+        }
+        return stored
       }
       // 崩溃时可能已经执行了一半：没有完成回执就不许再跑一遍。
       throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '这次工具调用停在不明确的状态，先人工核实，不盲目重跑', {
@@ -113,7 +127,7 @@ export class EvidenceCollector {
 
   private readOutbox(callId: string): OutboxRow | undefined {
     return this.deps.db.raw.prepare(
-      'SELECT status, result_json FROM bridge_tool_outbox WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ? AND call_id = ?',
+      'SELECT status, request_hash, result_json FROM bridge_tool_outbox WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ? AND call_id = ?',
     ).get(this.deps.nodeRunId, this.deps.attempt, this.deps.executorAgentId, callId) as OutboxRow | undefined
   }
 
@@ -147,7 +161,9 @@ export class EvidenceCollector {
   private async runAndRecord(call: ToolCallPayload): Promise<CollectedToolResult> {
     const seq = this.nextToolSeq()
     const executionId = toolExecutionId()
-    const startedAt = this.deps.nowAt()
+    // 工具起止用真实墙钟；没有注入时钟时才退回节点的量化时刻。
+    const startSample = this.deps.clock?.sample()
+    const startedAt = startSample ? new Date(startSample.wallClockMs).toISOString() : this.deps.nowAt()
     const descriptor = this.deps.registry.require(call.tool)
     const cwd = resolveInside(this.deps.runner.root, call.cwd)
     withTx(this.deps.db, (tx) => {
@@ -158,6 +174,7 @@ export class EvidenceCollector {
         tool_seq: seq,
         execution_id: executionId,
         call_id: call.callId,
+        started_at: startedAt,
       })
     })
     const out = await this.deps.runner.runTool({
@@ -167,13 +184,14 @@ export class EvidenceCollector {
       timeoutMs: call.timeoutMs,
       workspaceRoot: this.deps.runner.root,
     })
-    const finishedAt = this.deps.nowAt()
+    const endSample = this.deps.clock?.sample()
+    const finishedAt = endSample ? new Date(endSample.wallClockMs).toISOString() : this.deps.nowAt()
     assertCommandHash(
       out.evidence,
       commandHashOf(descriptor.command.bin, descriptor.command.args, cwd, this.deps.runner.root),
     )
     this.lastEvidenceValue = { ...out.evidence }
-    this.trace.push({
+    const trace: ToolTraceEntry = {
       tool: call.tool,
       toolSeq: seq,
       executionId,
@@ -181,9 +199,11 @@ export class EvidenceCollector {
       stdoutHash: out.evidence.stdoutHash,
       stderrHash: out.evidence.stderrHash,
       commandHash: out.evidence.commandHash,
-    })
+    }
+    this.trace.push(trace)
     const result: CollectedToolResult = {
       callId: call.callId, exitCode: out.evidence.exitCode, stdout: out.stdout, stderr: out.stderr,
+      trace, evidence: out.evidence,
     }
     withTx(this.deps.db, (tx) => {
       tx.run(
@@ -206,10 +226,11 @@ export class EvidenceCollector {
         command_hash: out.evidence.commandHash ?? null,
         started_at: startedAt,
         finished_at: finishedAt,
+        duration_ns: startSample && endSample ? Math.max(0, endSample.monotonicNs - startSample.monotonicNs) : null,
       })
       tx.run(
         'UPDATE bridge_tool_outbox SET status = ?, result_json = ?, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ? AND call_id = ?',
-        ['completed', JSON.stringify(result), finishedAt, this.deps.nodeRunId, this.deps.attempt, this.deps.executorAgentId, call.callId],
+        ['completed', JSON.stringify({ result, trace, evidence: out.evidence }), finishedAt, this.deps.nodeRunId, this.deps.attempt, this.deps.executorAgentId, call.callId],
       )
     })
     return result
@@ -245,11 +266,23 @@ function parseToolCall(raw: unknown): ToolCallPayload {
 }
 
 function parseStoredResult(raw: string, callId: string): CollectedToolResult {
-  const p = JSON.parse(raw) as Record<string, unknown>
+  const envelope = JSON.parse(raw) as Record<string, unknown>
+  // 兼容旧 outbox 的裸结果；新记录是 { result, trace, evidence }。
+  const p = envelope.result && typeof envelope.result === 'object'
+    ? envelope.result as Record<string, unknown>
+    : envelope
+  const trace = envelope.trace && typeof envelope.trace === 'object'
+    ? envelope.trace as ToolTraceEntry
+    : undefined
+  const evidence = envelope.evidence && typeof envelope.evidence === 'object'
+    ? envelope.evidence as StrongEvidence
+    : undefined
   return {
     callId,
     exitCode: typeof p.exitCode === 'number' ? p.exitCode : -1,
     stdout: typeof p.stdout === 'string' ? p.stdout : '',
     stderr: typeof p.stderr === 'string' ? p.stderr : '',
+    trace,
+    evidence,
   }
 }

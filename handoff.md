@@ -932,3 +932,11 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 修掉 Node 26 strip-only 不支持的 TypeScript 参数属性：`AgentLifecycle`、`EvidenceCollector`、`BridgeConsumer`、`BridgeLedger` 改为显式字段赋值，否则证据复现脚本在 `node` 直跑时报 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`。
 - 验证：`pnpm typecheck` 0；全量 39 文件 **574 passed | 1 skipped**；`pnpm build` 成功（ESM 136.90kB）；迁移 009 使 G-14 证据漂移，已重生成 `docs/gates/evidence/G1/G-14.md`（表数 18→20、schema_migrations 含 9）。
 - 遗留：R5-D 故障注入 B01–B10、pending outbox 崩溃恢复、`buffer_limit_bytes` 计入 pending、R5-E 第 45 轮独立审计与 G1→G2 重签；R3 链头删除/单调耗时、R4 workflow 复合身份仍分开提交。
+
+### 11.47 R5-C 审计整改（2026-11-14 16:35，整改候选）
+
+- 独立审计 `r5c-auditor` 在 `d539e8b` 上 verdict **FAIL**：P0=0，P1=2，P2=7。旧 P1 已修：`lifecycle.stop()` 必须先于 `submitReport()`，停止未确认才能落 `blocked_post`；Agent 创建与 lifecycle 构造放进同一清理作用域，lifecycle 为 null 时按 agentId best-effort `cancel → whenIdle → state → dispose`。
+- P2 整改：节点指令只列 `p.tools`，不再泄露 policy 全量工具；outbox completed 读取校验 `request_hash`，同 callId 换 tool/args 拒绝重放；工具起止改用真实墙钟，`tool_started` 带 `started_at`，`tool_finished` 带 `started_at/finished_at/duration_ns`；`stop()` 必须 idle 且 state 为 idle/unloaded/deleted；dispose 成功后清理本 attempt spill，`spillDir` 从 `executor.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(configPath)` 接线。
+- 新增回归：stop 未确认时 `blocked_post` 且 `report_applied=0`；Agent 创建后 started 迁移失败仍释放宿主会话；B02 持久 ACK 重放、B03 整页补洞、B08 dispose 拒绝；runtime 的工具时间断言改为可解析且不倒挂，不再要求等于量化 `NOW`。
+- 验证：`pnpm typecheck` 0；全量 40 文件 **586 passed | 1 skipped**；`pnpm build` 成功（ESM 140.61kB、d.ts 13.52kB）。B06 仍是事务级重放，不是独立进程强杀；真实宿主 `spawn` 端到端仍未验证。
+- 状态：整改待提交；G1/G2 仍绑 `caae193`。下一步提交后请独立审计复审，再进 R5-D B01–B10 收口与 R5-E 第 45 轮重签。

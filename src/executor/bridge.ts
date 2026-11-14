@@ -1,5 +1,5 @@
 // src/executor/bridge.ts —— 桥 RPC 客户端：最小七方法（规格 7.2 行 582-590）
-import { appendFileSync, readdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { canonicalJson } from '../core/canonical.ts'
 import { OrchError, proposedError } from '../core/errors.ts'
@@ -233,6 +233,14 @@ export class BridgeEventBuffer {
       else this.pending.set(ev.seq, ev)
       if (ev.seq > this.lastReceivedSeqValue) this.lastReceivedSeqValue = ev.seq
     }
+  }
+
+  // 节点已确认收口并 dispose 后，清掉本 attempt 的 spill 段；删不掉只留文件，不影响账本。
+  cleanupSpill(): void {
+    for (const file of this.spillFiles) {
+      try { unlinkSync(file) } catch { /* 已被清理或占用 */ }
+    }
+    this.spillFiles = []
   }
 
   private spillPrefix(): string {

@@ -139,20 +139,20 @@ async function runNodeActions(
     toolPolicy: policy,
   })
   const generation = lease.action_generation
-  // started 是状态迁移不是完成上报：没过证据门的上报不该用来推进状态
-  withTx(deps.db, (tx) => {
-    const row = loadNodeRun(tx, p.nodeRunId)
-    transitionNode(tx, deps.secret, {
-      nodeRunId: p.nodeRunId, from: 'dispatched', to: 'started',
-      attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'executor_started',
-    })
-  })
-
   const actionTimeoutMs = p.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
   let lifecycle: AgentLifecycle | null = null
+  let stopped = false
   let evidence: StrongEvidence | null = null
   let failed: unknown = null
   try {
+    // started 是状态迁移不是完成上报：没过证据门的上报不该用来推进状态
+    withTx(deps.db, (tx) => {
+      const row = loadNodeRun(tx, p.nodeRunId)
+      transitionNode(tx, deps.secret, {
+        nodeRunId: p.nodeRunId, from: 'dispatched', to: 'started',
+        attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'executor_started',
+      })
+    })
     lifecycle = new AgentLifecycle({
       db: deps.db,
       secret: deps.secret,
@@ -164,15 +164,20 @@ async function runNodeActions(
       nodeRunId: p.nodeRunId,
       attempt: p.attempt,
       agent,
-      instruction: nodeInstruction(p, agent),
+      instruction: nodeInstruction(p),
       timeoutMs: actionTimeoutMs,
       idleTimeoutMs: 5_000,
       nowAt,
+      clock: deps.runtime.clock,
       spillDir: deps.spillDir ?? join(tmpdir(), 'dsh-orchestra-bridge'),
     })
     const envelope = await lifecycle.run(new AbortController().signal)
     const trace = lifecycle.trace
     evidence = (envelope.evidence as StrongEvidence | null) ?? null
+    // 停止确认必须在任何状态收口之前：stop 失败时节点还在 started，能落 blocked_post；
+    // 若先 submitReport 到 done，done 没有出边，stop 失败就只能留下“账本 done、Agent 未停”的矛盾。
+    await lifecycle.stop()
+    stopped = true
 
     // 续租失败过：动作已经失去合法租约，不许再进 verifying 收口（第五轮审计 P2-1）
     if (leaseState.lost) {
@@ -234,23 +239,59 @@ async function runNodeActions(
     throw err
   } finally {
     if (lifecycle) {
-      try {
-        await lifecycle.stop()
-      } catch (stopErr) {
-        if (failed === null) {
-          markBlocked(deps, p, 'agent_stop_unconfirmed', nowAt())
-          throw stopErr
+      if (!stopped) {
+        try {
+          await lifecycle.stop()
+        } catch (stopErr) {
+          if (failed === null) {
+            markBlocked(deps, p, 'agent_stop_unconfirmed', nowAt())
+            throw stopErr
+          }
         }
       }
+    } else {
+      // lifecycle 还没建起来就失败时，Agent 可能已经 spawn；按 agentId 做一次有界兜底释放。
+      await bestEffortReleaseAgent(deps, agent.agentId, p.attempt)
     }
   }
 }
 
+// 建 Agent 成功、lifecycle 尚未建立就失败：不能把宿主会话留成孤儿。
+// 只做有界清理；确认不了停止就保留，不把原始错误盖掉。
+async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, attempt: number): Promise<void> {
+  try {
+    await deps.bridge.cancel({ executorAgentId: agentId, attempt })
+  } catch {
+    // 取消不可用也继续查状态
+  }
+  let idle: { idle: boolean; timedOut: boolean } | null = null
+  try {
+    idle = await deps.bridge.whenIdle({ executorAgentId: agentId, timeoutMs: 1_000 })
+  } catch {
+    idle = null
+  }
+  let state: { state: string; toolCallSeq: number; hasToolCall: boolean } | null = null
+  try {
+    state = await deps.bridge.state({ executorAgentId: agentId })
+  } catch {
+    state = null
+  }
+  const idleOk = idle?.idle === true
+  const stateOk = state?.state === 'idle' || state?.state === 'unloaded' || state?.state === 'deleted'
+  if (!idleOk || !stateOk) return
+  try {
+    await deps.bridge.dispose({ executorAgentId: agentId, serviceAckSeq: 0, bridgeLastSeq: 0 })
+  } catch {
+    // 释放失败不覆盖节点上的原始错误
+  }
+}
+
 // 发给 Agent 的任务文本只描述节点与输出约束；完成与否仍由服务端收口。
-function nodeInstruction(p: RunNodeParams, agent: { tools: { name: string }[] }): string {
+function nodeInstruction(p: RunNodeParams): string {
   return [
     buildInstruction({ nodeId: p.nodeId, outputSchema: p.outputSchema }),
-    '可用只读工具：' + agent.tools.map((t) => t.name).join(', '),
+    // 指令里只列本次节点真正允许的清单，避免把 Agent 引向随后必被拒绝的工具。
+    '可用只读工具：' + p.tools.map((tool) => tool.command).join(', '),
     '节点输入：' + JSON.stringify(p.input ?? null),
   ].join('\n')
 }

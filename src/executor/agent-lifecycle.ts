@@ -7,6 +7,7 @@ import { BridgeConsumer } from './bridge-consumer.ts'
 import { BridgeLedger } from './bridge-ledger.ts'
 import { EvidenceCollector, type ToolTraceEntry } from './evidence-collector.ts'
 import type { Db } from '../infra/sqlite/driver.ts'
+import type { ClockProvider } from '../core/clock.ts'
 import type { ToolPolicy } from './session.ts'
 import type { ToolRegistry, ReadOnlyToolRunner } from './tools.ts'
 import type { ExecutorAgent } from './session.ts'
@@ -31,6 +32,7 @@ export type AgentLifecycleDeps = {
   timeoutMs: number
   idleTimeoutMs: number
   nowAt: () => string
+  clock?: ClockProvider
   spillDir: string
 }
 
@@ -66,6 +68,7 @@ export class AgentLifecycle {
       attempt: deps.attempt,
       executorAgentId: deps.agent.agentId,
       nowAt: deps.nowAt,
+      clock: deps.clock,
     })
     const cursor = this.ledger.cursor()
     this.buffer = new BufferImpl({
@@ -120,14 +123,10 @@ export class AgentLifecycle {
       if (!subscribed.subscribed) {
         throw new OrchError('BRIDGE_NOT_SUBSCRIBED', 'Agent 订阅未确认，不能开始执行', { agentId: this.agentId })
       }
-      const stream = this.deps.client.listen(
-        { executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq },
-        this.controller.signal,
-      )
       const report = new Promise<AgentReportEnvelope>((resolve, reject) => {
         this.waiter = { resolve, reject }
       })
-      this.running = this.consumer.run(stream, this.controller.signal).catch((err) => {
+      this.running = this.consume(this.controller.signal).catch((err) => {
         if (!this.reportSeen) this.waiter?.reject(err)
       })
       await this.deps.client.send({
@@ -146,6 +145,33 @@ export class AgentLifecycle {
       clearTimeout(timeout)
       signal.removeEventListener('abort', onAbort)
     }
+  }
+
+  // 断线重连：每次都从账本已确认位重新 listen，宿主按 fromSeq 重放；已落账事件由 buffer 幂等去重。
+  // 重试有界，连续失败就把错误交给 run()，节点按失败收口，不无限挂住。
+  private async consume(signal: AbortSignal): Promise<void> {
+    let lastError: unknown = null
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (signal.aborted) return
+      const fromSeq = this.ledger.cursor()
+      try {
+        const stream = this.deps.client.listen(
+          { executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq },
+          signal,
+        )
+        await this.consumer.run(stream, signal)
+        if (signal.aborted) return
+        lastError = new OrchError('SERVICE_UNAVAILABLE', '桥事件流提前结束，等待重连', { fromSeq })
+      } catch (err) {
+        if (signal.aborted) return
+        // 只有“流断了/宿主暂不可用”才重连；工具越权、协议冲突、证据缺失是确定性失败，
+        // 重放同一条事件只会把错误拖成 BRIDGE_SEQ_CONFLICT。
+        if (!(err instanceof OrchError) || err.code !== 'SERVICE_UNAVAILABLE') throw err
+        lastError = err
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    throw lastError ?? new OrchError('SERVICE_UNAVAILABLE', '桥事件流重连次数用尽', {})
   }
 
   // 让消费器把收到的最后一条追平到持久确认位；追不平就按未完成处理。
@@ -177,7 +203,11 @@ export class AgentLifecycle {
     } catch {
       state = null
     }
-    if (!idle?.idle && state?.state !== 'unloaded' && state?.state !== 'deleted') {
+    // 两个条件都要成立：whenIdle 只说明“当前没在跑”，state 才说明会话确实落到可释放的终态；
+    // idle:true + state:running 这种矛盾回包不能直接 dispose。
+    const idleOk = idle?.idle === true
+    const stateOk = state?.state === 'idle' || state?.state === 'unloaded' || state?.state === 'deleted'
+    if (!idleOk || !stateOk) {
       throw new OrchError('LEASE_EXPIRED', 'Agent 未确认停止，不能推断副作用不存在', {
         agentId: this.agentId, idle, state,
       })
@@ -188,6 +218,7 @@ export class AgentLifecycle {
       serviceAckSeq: this.ledger.cursor(),
       bridgeLastSeq: this.buffer.lastSeq,
     })
+    this.buffer.cleanupSpill()
   }
 
   private async onEvent(ev: BridgeEvent): Promise<void> {

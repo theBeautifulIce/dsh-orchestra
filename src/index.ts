@@ -40,6 +40,8 @@ export type OrchestraOptions = {
   scheduler?: ExecutionScheduler
   // 生产装配读配置的路径；读不到就退回默认并发（并发 3、人工名额 1）
   configPath?: string
+  // 桥未确认事件的落盘目录；不传则读配置 bridge.spill_dir，再退回临时目录
+  spillDir?: string
 }
 
 export type Orchestra = {
@@ -67,8 +69,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const clock = new SystemClock(randomUUID())
   const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
   const executor = opts.executor
+  const spillDir = executor?.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(opts.configPath)
   const executorDeps: RunNodeDeps | null = executor
-    ? { runtime, db, secret: opts.secret, ...executor }
+    ? { runtime, db, secret: opts.secret, ...executor, ...(spillDir ? { spillDir } : {}) }
     : null
   // 节点执行只有一个底层实现；调度只在装配层包一次（S2 第三十七轮 P0-01）。
   const executeNode = async (p: RunNodeParams): Promise<RunNodeResult> => {
@@ -213,6 +216,15 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         await service.release()
       }
     },
+  }
+}
+
+// 桥 spill 目录优先取装配参数，其次读配置；配置缺失时交给 runNode 的临时目录兜底。
+function bridgeSpillDirFromConfig(configPath: string | undefined): string | undefined {
+  try {
+    return loadConfig(configPath ?? 'orchestra.config.json').bridge.spill_dir
+  } catch {
+    return undefined
   }
 }
 

@@ -9,9 +9,11 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { ToolRegistry } from '../../src/executor/tools.ts'
 import { ReadOnlyToolRunner, type HostRunner } from '../../src/executor/tools.ts'
 import { runNode } from '../../src/executor/run-node.ts'
+import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
+import { BridgeClient, type BridgeTransport } from '../../src/executor/bridge.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { sweepNow } from '../../src/service/commands/runtime.ts'
-import { fakeAgentClient, type AgentToolStep } from '../fixtures/agent-bridge.ts'
+import { fakeAgentBridge, fakeAgentClient, type AgentToolStep } from '../fixtures/agent-bridge.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
@@ -66,6 +68,90 @@ describe('生产路径跑通单节点', () => {
     expect(Number(row.action_generation)).toBe(1)
     const applied = orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='report_applied'").get() as { n: number }
     expect(Number(applied.n)).toBe(1)
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('stop 未确认：节点不得先落 done，必须停在 blocked_post', async () => {
+    const { dir, orchestra, release, registry, agents, runner } = await setup([{ tool: 'ro.echo' }])
+    const base = fakeAgentBridge({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })
+    const bridge = new BridgeClient({
+      request: async (method, params) => {
+        if (method === 'executor.whenIdle') return { idle: false, timedOut: true } as never
+        if (method === 'executor.state') return { state: 'running', toolCallSeq: 1, hasToolCall: true } as never
+        return base.request(method, params)
+      },
+      listen: (params, signal) => base.listen(params, signal),
+    })
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toMatchObject({ code: 'LEASE_EXPIRED' })
+    expect(nodeRow(orchestra.db).status).toBe('blocked_post')
+    const applied = orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='report_applied'").get() as { n: number }
+    expect(Number(applied.n)).toBe(0)
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('Agent 创建后 started 迁移失败：仍要释放宿主会话', async () => {
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
+    const calls: string[] = []
+    const originalCreate = agents.create
+    agents.create = async (input) => {
+      // 在 create 成功和 transition 之间把状态改成 leased，让 started 迁移失败
+      withTx(orchestra.db, (tx) => tx.run("UPDATE node_runs SET status='leased' WHERE node_run_id='nrun_1'"))
+      return originalCreate(input)
+    }
+    const transport: BridgeTransport = {
+      request: async (method) => {
+        calls.push(method)
+        if (method === 'executor.cancel') return 'interrupted' as never
+        if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        return undefined as never
+      },
+      listen: () => { throw new Error('不该 listen') },
+    }
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge: new BridgeClient(transport), runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toBeTruthy()
+    expect(calls).toContain('executor.cancel')
+    expect(calls).toContain('executor.dispose')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('工具成功但回传前崩：重放已完成 outbox，恢复 trace/evidence 且不重跑', async () => {
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
+    const out = await runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )
+    expect(out.final_status).toBe('done')
+    const collector = new EvidenceCollector({
+      db: orchestra.db, secret: 's3cr3t-runtime', registry, runner,
+      policy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' },
+      allowedTools: ['ro.echo'], nodeRunId: 'nrun_1', attempt: 1, executorAgentId: 'agent_1', nowAt: () => NOW,
+    })
+    const replay = await collector.collect({ callId: 'call_1_1', tool: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 })
+    expect(replay.exitCode).toBe(0)
+    expect(replay.trace?.tool).toBe('ro.echo')
+    expect(replay.evidence?.source).toBe('run_tool')
+    expect(collector.traceEntries).toHaveLength(1)
     await release()
     rmSync(dir, { recursive: true, force: true })
   })
@@ -164,7 +250,8 @@ describe('生产路径跑通单节点', () => {
         now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
       },
     )
-    expect(nodeRow(orchestra.db).tool_start_at).toBe(NOW)
+    const startedAt = nodeRow(orchestra.db).tool_start_at as string
+    expect(Number.isFinite(Date.parse(startedAt))).toBe(true)
     const started = orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='tool_started'").get() as { n: number }
     expect(Number(started.n)).toBe(1)
     await release()
