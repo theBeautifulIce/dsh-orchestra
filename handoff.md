@@ -776,3 +776,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证（实测）：`tsc --noEmit` exit 0；全量 38 文件 **537 passed | 1 skipped**（1 skipped 是预签态用例）；`pnpm build` 通过；`check-evidence-repro.ts` exit 0（25 份，每份两遍与 HEAD 字节一致）。
 - 环境事故：主仓 `node_modules` 被换成指向 S2 克隆的失效 junction，`pnpm` 报 `ERR_PNPM_PACKAGE_MANAGER_REMOVE_MODULES_DIR ... 拒绝访问 (os error 5)`；`cmd /c rmdir /s /q node_modules` 后 `pnpm install --frozen-lockfile` 恢复（239 包，1.6s）。后续审计克隆不得改主仓 `node_modules`。
 - 状态：门记录仍绑定旧候选 `2f034a5`，`6b015c1` 尚未签署；须在 `6b015c1` 上重派 S1/S2 第三十八轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
+
+### 11.36 第三十八轮双审计整改：短分隔行溢出与注释拆段（2026-11-14 12:35，HEAD 99fe7fe）
+
+- 触发：在 `4826d7f` 上派 S1/S2 第三十八轮独立审计，两份都 fail，P1 同源：分隔行每格 1 个连字符时 markdown-it 仍按表格渲染，`isTableDelimiterRow` 只认 `-{3,}`，`rawTableOverflowIssues` 整表跳过，溢出第 4 格被丢弃。S1 探针签过 G1（artifact `7b2da158…` / body `cbc04e52…`）后 reset；S2 端到端签过 G2 后 reset。S1 为 P0=0/P1=1/P2=3，S2 为 P0=0/P1=1/P2=6，19 项必过全过。调度背压与停机由 S2 探针复测修住：40 个不返回任务 waiting≤1000，1002 个任务时第 1002 个拒绝，`maxWaiting=2` 时第 4 个拒绝，drain/close 探针 24+16 全通过；真实 HTTP 双入口 `maxActive=2`，`serveOrchestra.close` 后在跑任务 200 收尾、锁释放。
+- 修复 `99fe7fe`：`isTableDelimiterRow` 改为 `^:?-+:?$`（1 个及以上连字符），`rawTableOverflowIssues` 覆盖短分隔行；`hiddenCommentFailure` 合并全部注释体，失败词 +（结论词或必过项引用）即拒，覆盖 A9b/A9c；新增 `isRejectedAttackRow` 豁免攻击/用例矩阵的「拒 + 被拒文案」，避免 round36 报告 G2-05/G2-06 误杀；行级只认 `splitFailureAcrossCells`，非结论列只加 `cellStrongFail`，去掉整行 `visibleFailStatement` 对领域弱词的误判。
+- 回归：A8b（1 连字符 + 溢出格）、A9b、A9c、攻击矩阵（A8b 编号）、必过项要求列「无裸 blocked」各 1 例；round36 真实报告探针 `proseVerdictClashes(...,'pass',19项)===[]`。
+- 变异：`isTableDelimiterRow` 改回 `-{3,}`，A8b 红「expected '' to match /超过表头/」；恢复后 `tsc --noEmit` 0、全量 38 文件 542 passed | 1 skipped、build 通过、check-evidence-repro 25 份。
+- 尚留 P2（不阻断）：Agent Bridge 未接生产、工具 `started_at/finished_at` 同刻、围栏/注释内表格按设计屏蔽、配置非法时静默回落默认调度器（`parseConfig` 本身会拒）。
+- 状态：G1/G2 仍绑旧候选（G1 31 轮、G2 36 轮），`99fe7fe` 未签；须在 `99fe7fe` 上重派 S1/S2 第三十九轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
