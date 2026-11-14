@@ -595,6 +595,8 @@ type HttpBootOpts = {
   queueMax?: number
   holdAppend?: { entered: () => void; until: Promise<void> }
   logSink?: string[]
+  // 可推进的服务端时钟：租约到期类用例靠它把上报推到 TTL 之后（审计 r46 P1-1）
+  now?: () => string
 }
 
 // 起真服务：真库、真路由、真执行器；工具固定回 ok，重跑字节一致
@@ -639,6 +641,7 @@ async function bootHttp(secret: string, opts?: HttpBootOpts): Promise<HttpBoot> 
     appendLedgerEvent: append as unknown as (body: unknown, actor: string) => { seq: number; event_id: string },
     log,
     queue: opts?.queueMax === undefined ? undefined : new WriteQueue(opts.queueMax, log),
+    ...(opts?.now ? { now: opts.now } : {}),
     commands: orchestra.commands,
   })
   return {
@@ -1065,13 +1068,16 @@ async function caseEvG202(): Promise<InjectionResult> {
 // ev-g2-03：租约过期迟到上报被拒——租约只给 1 秒，执行器 5 秒后才回话（审计 R3-11）
 async function caseEvG203(): Promise<InjectionResult> {
   const secret = 'ev-g2-03-secret'
-  const boot = await bootHttp(secret)
+  // 服务端只认自己的时钟，请求体 now 不参与判定；这里把服务端时钟从 T0 推到 T0+5s。
+  let nowMs = Date.parse(EV_NOW)
+  const boot = await bootHttp(secret, { now: () => new Date(nowMs).toISOString() })
   const before = dumpProduction(boot.file)
   await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
   const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '租约过期迟到上报被拒', workflowVersion: '1', now: EV_NOW }, secret)
   const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
   const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 1000, now: EV_NOW }, secret)
   const gen = Number(leased.body?.data?.action_generation ?? 0)
+  nowMs += 5000
   const late = await postJson(boot.endpoint, '/v1/node-runs/report', {
     nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: '2026-11-13T03:00:05.000Z',
     report: { report_id: 'rpt_ev03_late', node_run_id: nodeRunId, attempt: 1, status: 'started' },
