@@ -111,7 +111,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     gateFile: 'docs/gates/G1.md',
   },
   G2: {
-    items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07', 'G2-08', 'G2-09', 'G2-10', 'G2-11', 'G2-12', 'G2-13', 'G2-14', 'G2-15'],
+    items: ['G2-01', 'G2-02', 'G2-03', 'G2-04', 'G2-05', 'G2-06', 'G2-07', 'G-03', 'G-04', 'G-05', 'G-07', 'G2-08', 'G2-09', 'G2-10', 'G2-11', 'G2-12', 'G2-13', 'G2-14', 'G2-15', 'G2-16'],
     content: {
       'G2-01': '单节点 queued 到终态一条路径（走生产装配）',
       'G2-02': '重复上报只落一次',
@@ -132,6 +132,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-13': '单写者锁与 epoch 围栏：第二写者拿不到锁，旧 epoch 写不进',
       'G2-14': '长动作靠心跳续租，扫描不误判过期',
       'G2-15': '同一工作流版本跨重启不可改写，在飞 run 的判定条件不跟着变',
+      'G2-16': 'Agent Bridge 生产闭环：B01–B10 可复现，工具证据只来自宿主执行',
     },
     invariants: {
       I1: { statement: '一个 node_run 最多一个终态：所有迁移带 CAS，终态不再接受普通出口', evidence_ids: ['ev-g2-01', 'ev-g2-02', 'ev-g2-04', 'ev-g2-05'] },
@@ -145,6 +146,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       I9: { statement: '单写者锁与 epoch 围栏：第二写者拿不到锁，旧 epoch 的连接写不进', evidence_ids: ['ev-g2-13'] },
       I10: { statement: '长动作靠心跳续租：租约 2 秒、动作 3 秒时 2.5 秒扫描不判过期', evidence_ids: ['ev-g2-14'] },
       I11: { statement: '工作流定义跨重启落库：同一版本改写被拒，在飞 run 的判定条件不跟着变', evidence_ids: ['ev-g2-15'] },
+      I12: { statement: 'Agent Bridge 生产闭环：事件先落账再确认，工具强证据只来自宿主执行，取消先确认停止，崩溃恢复不盲目重跑', evidence_ids: ['ev-g2-16'] },
     },
     evidenceMap: {
       'G2-01': ['ev-g2-01'],
@@ -166,6 +168,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G2-13': ['ev-g2-13'],
       'G2-14': ['ev-g2-14'],
       'G2-15': ['ev-g2-15'],
+      'G2-16': ['ev-g2-16'],
     },
     evidenceFiles: {
       'ev-g2-01': 'docs/gates/evidence/G2/ev-g2-01.md',
@@ -187,6 +190,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'ev-g2-13': 'docs/gates/evidence/G2/ev-g2-13.md',
       'ev-g2-14': 'docs/gates/evidence/G2/ev-g2-14.md',
       'ev-g2-15': 'docs/gates/evidence/G2/ev-g2-15.md',
+      'ev-g2-16': 'docs/gates/evidence/G2/ev-g2-16.md',
     },
     scopeBase: '4f3ada7',
     requireVerdict: true,
