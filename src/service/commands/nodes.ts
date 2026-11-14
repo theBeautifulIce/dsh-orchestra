@@ -25,6 +25,11 @@ const PATCH_COLUMNS = new Set([
   'blocked_decision_id',
   'lease_id',
   'lease_expires_at',
+  'executor_session_id',
+  'executor_agent_id',
+  // 等待节点：进入时收租约并挂 wait 钟，唤醒/超时时清钟
+  'wait_started_at',
+  'wait_deadline_at',
 ])
 
 export type TransitionRequest = {
@@ -37,6 +42,8 @@ export type TransitionRequest = {
   patch?: TransitionPatch
   // 只有写 hang_reason 的规则可以越过 hang_reason IS NULL 的普通出口闸门
   allowHung?: boolean
+  // 等待节点的 M-20/M-21/M-22 是重新武装，同一笔 CAS 里 Gr+1
+  bumpRearm?: boolean
 }
 
 /**
@@ -56,6 +63,7 @@ export function applyTransition(tx: Tx, req: TransitionRequest): void {
     }
   }
   const setSql = ['status = ?', 'revision = revision + 1', 'updated_at = ?']
+    .concat(req.bumpRearm ? ['rearm_generation = rearm_generation + 1'] : [])
     .concat(columns.map((column) => column + ' = ?'))
     .join(', ')
   const whereSql = [

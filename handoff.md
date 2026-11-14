@@ -1172,3 +1172,11 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - `cancel.ts` 对 `side_effect_policy='irreversible'` 的节点直接 `FORBIDDEN`；`lease.ts` 的 `NodeRunRow` 补父运行与副作用策略。
 - 测试 `tests/integration/parallel.spec.ts` 6 例；定向 6/6，typecheck 0，全量 **49 files 680 passed | 1 skipped**，build ESM 155.40kB / gzip 38.63kB、d.ts 14.30kB。
 - 缺口：扇出建子节点与 join 尚未接进 `run-node` 执行器；`run.settling_changed` 的读侧与恢复扫描未接；证据仍待 S3 收口统一重生成。
+
+### 11.70 S3 Task 9：wait 事件 inbox、登记与唤醒（2026-11-14 19:26）
+
+- 迁移 `018_wait_registrations.sql`：节点增 `wait_started_at`/`wait_deadline_at`；新建 `wait_event_inbox`（幂等键唯一）与 `wait_registrations`（每节点一条、active/woken/timed_out/cancelled，记 `cursor_seq`、匹配事件与唤醒派发饥饿计数）。
+- `src/service/commands/wait.ts`：`recordWaitEvent` 先落 inbox；`enterWaiting` 把 `started→waiting` 与建登记、清 executor 租约、`bumpRearm` 放同一事务，并回扫早到事件；`wakeOnEvent` 先记账再回放全部 active 登记；`scanRegistration` 命中后先 CAS 改 woken 再迁 `waiting→dispatched`，重复调用不落第二条；`markWakeStarvation` 与 `timeoutWaiting` 分记 `wait.wake_dispatch_starvation` / `wait.event_timeout`；`sweepWaitTimeouts` 可重入，`cancelWait` 只撤登记不改节点。
+- `src/service/commands/nodes.ts`：`PATCH_COLUMNS` 增 executor 绑定与 wait 时钟列；`TransitionRequest.bumpRearm` 让迁移与 Gr+1 同条 UPDATE。
+- 测试 `tests/integration/wait.spec.ts` 6 例；定向 6/6，typecheck 0，全量 **50 files 686 passed | 1 skipped**，build ESM 155.40kB / gzip 38.63kB、d.ts 14.30kB。
+- 缺口：wait 尚未接进 `run-node` 执行器；唤醒后的优先级派发与 slot 重抢未接；组结束时撤组内登记未接；证据仍待 S3 收口统一重生成。
