@@ -1317,7 +1317,7 @@ function isBareFailureCell(folded: string): boolean {
   if (text === '') return false
   for (let i = 0; i < 3; i += 1) {
     const next = text.replace(
-      /^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|本报告|本報告|暂|暫|尚|仍|并|並|也|还|還|均|都)\s*/,
+      /^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|该审计|該審計|本报告|本報告|该项|本项|此项|此項|该门|該門|本门|本門|暂|暫|尚|仍|并|並|也|还|還|均|都)\s*/,
       '',
     )
     if (next === text) break
