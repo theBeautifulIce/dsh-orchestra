@@ -3,6 +3,12 @@ import { OrchError } from '../../core/errors.ts'
 import type { NodeStatus } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { uuidv7 } from '../../core/ids.ts'
+import {
+  chooseBranch, evaluatePolicy,
+  type BranchChoice, type BranchEdge, type PolicyCondition, type PolicyOutcome,
+} from '../../core/policy.ts'
+import { openDecision } from './decisions.ts'
 
 export type TransitionPatch = Readonly<Record<string, string | number | null>>
 
@@ -294,4 +300,119 @@ export function resumeFromBlockedPre(tx: Tx, secret: string, req: ResumeFromBloc
     resolution: req.approved ? 'approved' : 'rejected',
     attempt: req.attempt,
   })
+}
+
+// ── branch 路由与 policy 求值落账（S3 Task 7）──────────────────────────────
+
+function branchPolicyOutcome(choice: BranchChoice): PolicyOutcome {
+  if (choice.kind === 'selected') {
+    return {
+      schema_version: 1,
+      matched: true,
+      ruleId: choice.ruleId,
+      decision: 'pass',
+      must_pass_items: [{ id: choice.ruleId, result: 'pass', evidence_ids: [] }],
+      failed_items: [],
+      evidence_ids: [],
+      reason: 'branch 命中',
+    }
+  }
+  const label = choice.reason === 'ambiguous' ? 'branch 多命中' : 'branch 无命中'
+  return {
+    schema_version: 1,
+    matched: false,
+    ruleId: null,
+    decision: 'fail',
+    must_pass_items: [],
+    failed_items: choice.matched,
+    evidence_ids: [],
+    reason: label,
+  }
+}
+
+export type ApplyBranchRouteRequest = {
+  nodeRunId: string
+  attempt: number
+  from: readonly NodeStatus[]
+  edges: readonly BranchEdge[]
+  input: unknown
+  now: string
+  // 无命中时生成的 rule_ambiguous 卡；缺省自动生成
+  decisionId?: string
+  runId?: string
+}
+
+/**
+ * branch 只做路由：
+ * - 多命中：抛 BRANCH_AMBIGUOUS，节点状态不动；
+ * - 全不命中且无 default：落 blocked_post 并生成 rule_ambiguous；
+ * - 单命中/default：追加 policy.evaluated，路由交给调用方。
+ */
+export function applyBranchRoute(tx: Tx, secret: string, req: ApplyBranchRouteRequest): BranchChoice {
+  const choice = chooseBranch(req.edges, req.input)
+  if (choice.kind === 'blocked' && choice.reason === 'ambiguous') {
+    throw new OrchError('BRANCH_AMBIGUOUS', 'branch 运行期多命中，不能猜', {
+      nodeRunId: req.nodeRunId,
+      matched: choice.matched,
+    })
+  }
+  if (choice.kind === 'selected') {
+    appendNodeRunEvent(tx, secret, req.nodeRunId, 'policy.evaluated', branchPolicyOutcome(choice))
+    return choice
+  }
+  const decisionId = req.decisionId ?? 'dec_' + uuidv7()
+  const runId = req.runId ?? tx.get<{ run_id: string }>(
+    'SELECT run_id FROM node_runs WHERE node_run_id = ?', [req.nodeRunId],
+  )?.run_id
+  if (!runId) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: req.nodeRunId })
+  openDecision(tx, {
+    decisionId,
+    runId,
+    nodeRunId: req.nodeRunId,
+    kind: 'rule_ambiguous',
+    payload: { matched: choice.matched, edges: req.edges.map((edge) => edge.to) },
+    createdAt: req.now,
+  })
+  for (const from of req.from) {
+    const exists = tx.get<{ node_run_id: string }>(
+      'SELECT node_run_id FROM node_runs WHERE node_run_id = ? AND status = ? AND attempt = ?',
+      [req.nodeRunId, from, req.attempt],
+    )
+    if (!exists) continue
+    applyTransition(tx, {
+      nodeRunId: req.nodeRunId,
+      from: [from],
+      to: 'blocked_post',
+      attempt: req.attempt,
+      now: req.now,
+      patch: { resume_state: null },
+    })
+    appendNodeRunEvent(tx, secret, req.nodeRunId, 'policy.evaluated', branchPolicyOutcome(choice))
+    appendNodeRunEvent(tx, secret, req.nodeRunId, 'status_changed', {
+      from,
+      to: 'blocked_post',
+      decision_id: decisionId,
+      reason: 'rule_ambiguous',
+    })
+    return choice
+  }
+  throw new OrchError('STALE_GENERATION', 'branch 节点不在声明的来源状态', {
+    nodeRunId: req.nodeRunId,
+    from: req.from,
+    attempt: req.attempt,
+  })
+}
+
+/** 单个 policy 条件求值并落到 node_run_events；不镜像进 events。 */
+export function recordPolicyEvaluation(
+  tx: Tx,
+  secret: string,
+  nodeRunId: string,
+  condition: PolicyCondition | readonly PolicyCondition[],
+  input: unknown,
+  options?: { ruleId?: string; evidenceIds?: string[] },
+): PolicyOutcome {
+  const outcome = evaluatePolicy(condition, input, options)
+  appendNodeRunEvent(tx, secret, nodeRunId, 'policy.evaluated', outcome)
+  return outcome
 }

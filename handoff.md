@@ -1147,3 +1147,20 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证：typecheck 0；全量 **46 files 649 passed | 1 skipped**；build ESM 155.15kB / gzip 38.57kB、d.ts 14.30kB。
 - 缺口（明确未完成）：迁移表尚未接到 `transitionNode` 生产路径；014 的 `verify_remaining_ns`/`startup_unknown_remaining_ns` 读点与恢复重挂尚未接；Task 6–15（审批、policy/branch、并行、wait、子流程、补偿、报告冲突、恢复扫描、G3 故障注入、起运行命令）未做；014/015 已使 G-14 与 ev-g2-16 计数过期，证据与门要等 S3 收口后统一重生成。
 - 下一步：Task 6 审批与 blocked_pre 放行；随后按计划 7–15 推进，最后统一重生成证据、派第 51 轮双审计并重签。候选推送待本轮收口。
+
+### 11.67 S3 Task 6：审批往返与不可逆前置审批（2026-11-14 19:17）
+
+- 迁移 `016_approval_binding.sql` 给 `node_runs` 补 `resume_state`/`blocked_decision_id`，给 `decisions` 补 `content_hash`/`expires_at`。
+- `decisions.ts` 增 `ensurePreExecutionDecision`：仅 `irreversible` 自动开 `pre_execution` 卡，已有活跃同 kind 复用；`openDecision` 落内容哈希与有效期。
+- `nodes.ts` 增 `enterBlockedPre` 与 `resumeFromBlockedPre`：进入时清租约并记 `resume_state`；批准要求卡 `resolved/approved` 且内容哈希一致，回 queued 且 attempt 不变；拒绝或超时落 failed；旧租约、内容漂移、过期批准分别报错。
+- 测试 `approval.spec.ts` 7 例；typecheck 0，全量 **47 files 656 passed | 1 skipped**。
+- 提交 `efb6d81`（5 files，+433/−4）。
+
+### 11.68 S3 Task 7：policy 求值与 branch 路由（2026-11-14 19:21）
+
+- `src/core/policy.ts` 增九算子、显式 all/any/not、深度 32 与正则校验、固定裁决载荷；`evaluatePolicy` 对数组根按 all 求值，未命中给出 `必过项未通过：<id>`。
+- 同文件增 `BranchEdge`/`validateBranchEdges`/`chooseBranch`：多命中不按 priority 猜，零命中有 default 走 default，否则 no_match。
+- `src/service/commands/nodes.ts` 增 `applyBranchRoute` 与 `recordPolicyEvaluation`：多命中在动状态前抛 `BRANCH_AMBIGUOUS`；无命中先开 `rule_ambiguous` 卡再落 `blocked_post`；选中只追加 `policy.evaluated`。
+- 测试 `tests/integration/policy-branch.spec.ts` 18 例；定向 18/18，typecheck 0，全量 **48 files 674 passed | 1 skipped**，build ESM 155.15kB / gzip 38.57kB、d.ts 14.30kB。
+- 缺口：branch 路由尚未接进 `run-node` 执行器；`blocked_post` 的后续人工收口与 `rule_ambiguous` 处置在 Task 8 之后接；证据仍待 S3 收口统一重生成。
+- 下一步：提交 Task 7，随后 Task 8 并行分支与 join。
