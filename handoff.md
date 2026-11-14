@@ -1134,3 +1134,16 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 报告已提交 `5f9f8e9`；G1 绑定第 50 轮后提交 `2eb7377`，artifact_hash=`1c0903777d79bf86ed0ebc6ff54349965dbd4778e429b155b494fba2b7875b97`，body_hash=`e3b7a0ddcb1ca23d2d0da7d8b42c8d02dbe2a24a6a0c61aca7d32e4b214ba22f`；G2 绑定后提交 `abffd35`，artifact_hash=`c5b4564a40669b44179dd10e01059f6ec92b5816cf2cf15e86046055501f4d5a`，body_hash=`daec42cc20f3d5ee5a57b959502d9dbd9a9ec5072bfe906c383e66bf10132a4a`。
 - 双门 `gate-check` 均 exit 0（G1 13/13、G2 20/20 证据复核）；签后全量 3 次 **624 passed | 1 skipped**、build ESM 154.88kB / gzip 38.52kB、evidence-repro 25/25。
 - 下一轮 P2：把 `ev-g2-16` 桥闭环计数改 71、必过路径 125（改了要重新生成证据并重签）；补 P2-04；再开 S3 九节点与状态机。
+
+### 11.66 S3 Task 1–5：迁移表、CAS、决策卡、半态时钟（2026-11-14 19:16）
+
+- S3 正式开工。迁移编号顺延到 014/015（计划里的 010/011 已被 R4 与桥迁移占用）。
+- `src/core/state-machine.ts` 新增 M-01…M-61 迁移规则表：58 条状态规则 + 2 条建行规则 + 1 条挂起闸门，带触发语义、终态/挂起闸门与半态分叉（M-18/M-19、M-28/M-29/M-30、M-61）。旧 `ALLOWED_TRANSITIONS` 保留，S2 调用方不受影响。
+- 迁移 `014_node_run_transitions.sql`：补 `hang_reason`、`contradiction_decision_id`、`origin_node_run_id`、`replacement_node_run_id`，建 attempt 唯一索引与来源唯一索引。
+- `src/service/commands/nodes.ts`：单条 CAS `applyTransition`（from 集合、attempt、action_generation、`hang_reason IS NULL`，patch 列白名单）与 `createNodeRun`（新 attempt 接班，旧行只接一次）。
+- 迁移 `015_decisions.sql` 与 `src/service/commands/decisions.ts`：八种 decision kind、五种状态、run 级与节点级活跃唯一索引；`resolveDecision` 支持 approved/rejected/expired 收口与 confirm/continue/uphold 续版；`escalateDecisions` 满 2h 升 blocked_for_human、满 24h expired，`report_contradicted` 不参与。
+- `src/core/half-state.ts`：半态集合、跨 boot 剩余量（停机不计入、回拨夹 0）、桥断冻结矩阵（startup/action 继续、unknown/verify 冻结、timing_out 不累计）、`rearmFromRemaining`（0 立即到点、NULL 才补满额）。
+- 测试新增 `tests/integration/transition-rules.spec.ts`（8）、`node-runs.spec.ts`（6）、`decisions.spec.ts`（6）、`half-state.spec.ts`（5）；提交 `f5149ce`、`63f2266`、`0e1f980`、`e4c2df9`、`1d57249`。
+- 验证：typecheck 0；全量 **46 files 649 passed | 1 skipped**；build ESM 155.15kB / gzip 38.57kB、d.ts 14.30kB。
+- 缺口（明确未完成）：迁移表尚未接到 `transitionNode` 生产路径；014 的 `verify_remaining_ns`/`startup_unknown_remaining_ns` 读点与恢复重挂尚未接；Task 6–15（审批、policy/branch、并行、wait、子流程、补偿、报告冲突、恢复扫描、G3 故障注入、起运行命令）未做；014/015 已使 G-14 与 ev-g2-16 计数过期，证据与门要等 S3 收口后统一重生成。
+- 下一步：Task 6 审批与 blocked_pre 放行；随后按计划 7–15 推进，最后统一重生成证据、派第 51 轮双审计并重签。候选推送待本轮收口。

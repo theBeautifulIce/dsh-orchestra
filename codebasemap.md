@@ -203,6 +203,12 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/infra/sqlite/migrations/011_workflow_version_identity.sql` | 工作流版本复合身份：`workflow_versions` 主键改 `(workflow_id, version)`，旧数据归 default |
 | `src/infra/sqlite/migrations/012_node_run_chain_guard.sql` | 节点事件链数据库级守卫：事件接链头、链头只 +1、首条对应、链头禁删 |
 | `src/infra/sqlite/migrations/013_node_run_chain_head_replace_guard.sql` | 链头 INSERT 守卫：已有链头时拒绝重复插入/REPLACE 重置，补 012 看不到的 REPLACE 路径 |
+| `src/infra/sqlite/migrations/014_node_run_transitions.sql` | S3 迁移执行器底座：`hang_reason`/`contradiction_decision_id`/`origin_node_run_id`/`replacement_node_run_id`，以及 attempt 与来源唯一索引 |
+| `src/infra/sqlite/migrations/015_decisions.sql` | S3 决策卡：八种 kind、五种状态，run 级与节点级各一条活跃唯一索引 |
+| `src/core/state-machine.ts` | S3 迁移表 M-01…M-61、触发语义、终态/挂起闸门；旧 20 条边表保留给 S2 调用方 |
+| `src/core/half-state.ts` | 半态集合、跨 boot 剩余量、桥断冻结矩阵、半态恢复重挂 |
+| `src/service/commands/nodes.ts` | 单条 CAS 迁移执行器（attempt/action_generation/挂起闸门）与新 attempt 接班 |
+| `src/service/commands/decisions.ts` | 决策卡生成、查重、结论落地、续期与 2h/24h 升级 |
 | `src/infra/sqlite/migrations/008_bridge_event_receipts.sql` | 桥事件收据与按 `(node_run_id, attempt, executor_agent_id)` 隔离的持久确认游标 |
 | `src/infra/sqlite/migrations/009_bridge_tool_outbox.sql` | 工具调用 outbox：pending/completed/failed，防重复执行与结果丢失 |
 | `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |
