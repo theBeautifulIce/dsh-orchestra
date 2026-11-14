@@ -1108,3 +1108,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 证据：G-14 的 `schema_migrations` 增加 12，重生成后 LF SHA-256=`afb074b7fe5a087fb62d9f720503a672e21c02e266fca458c6166eeebe8ae18c`，G1.md 表与 artifact 已同步。
 - 验证：typecheck 0；全量 **42 files 619 passed | 1 skipped**；build ESM 152.57kB / gzip 37.94kB、d.ts 14.30kB。
 - 下一步：提交候选、跑证据复现，派第 49 轮 S1/S2 审计并重签双门；再补 R4 的 011 升级回归与 workflow_id 输入约束。
+
+### 11.63 第 49 轮双审计 PASS 与 G1/G2 重签（2026-11-14 18:48）
+
+- `s1-audit-r49` 对 `ce8c2e6` 判 G1 **PASS**：13/13，P0/P1/P2=0/0/2；全量 3 次 42 files / **619 passed | 1 skipped**，桥闭环 2 次 70 passed，typecheck/build/evidence-repro 均 0；报告 LF SHA-256=`e3efae6e8e8c8fdff3642de09a260d3a826cac51c827b84c455778589a50e7c0`。P2 是门记录待重签与「触发器只校验结构、不校验 HMAC 且可被 DDL 删除」，后者由 `verifyLedger` 兜底。
+- `s2-audit-r49` 对同候选判 G2 **PASS**：20/20，P0/P1/P2=0/0/2；全量 3 次 619/1、桥闭环 4 次 70、必过路径 124 tests、证据复现 25/25；报告 LF SHA-256=`463ca76cd980bd46d096dda799ac7356cfc434e3fc2c71d2ba848492da7cad66`。P2：① `INSERT OR REPLACE INTO node_run_chain_heads` 可绕过 DELETE 触发器重置链头，但 `verifyLedger` 会报条数缺口、后续追加会主键冲突；② `ev-g2-16` 辅助的 `pnpm test` 行仍写 41/607，实际 42/619，桥闭环 70 本身四次一致。
+- 两份报告已提交 `19827a5`；G1 改 `audit_round=49`、报告路径后提交 `1bdd1f2`，签名再提交 `8d392eb`，artifact_hash=`55093169b74d03d886bb638fa14710bb7cbd174caca7bb1e3b4a1948b239e2f4`；G2 改同两项与 `previous_artifact_hash` 后提交 `a90acfc`，签名再提交 `9947e20`，artifact_hash=`935aaf65ff05…`。
+- 双门 `gate-check` 均 exit 0（G1 13/13 证据、G2 20/20 证据）；签后全量 **42 files 619 passed | 1 skipped**、evidence-repro 25/25。
+- 下一步：补 R4 的 011 正式升级回归、workflow_id/version 输入约束、run-node 绑定哈希复核；把 `INSERT OR REPLACE` 链头重置与 ev-g2-16 计数放进下一候选；再开 S3 九节点与状态机。
+- 遗留：P2-04 审计证据引用；R5 桥闭环已完成，S3 未开。
