@@ -53,6 +53,7 @@ describe('八种 decision 与活跃唯一性', () => {
     withTx(db, (tx) => {
       resolveDecision(tx, {
         decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW,
+        actor: { kind: 'human', id: 'human:test' },
       })
     })
     expect(row(db, 'd1').status).toBe('resolved')
@@ -130,5 +131,42 @@ describe('八种 decision 与活跃唯一性', () => {
     expect(row(db, 'd1').closed_reason).toBe('expired_final')
     expect(row(db, 'd1').revision).toBe(3)
     expect(row(db, 'd2').status).toBe('blocked_for_human')
+  })
+
+  it('escalations 命中时开卡即 confirm_required，未显式确认不许收口', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO tasks (task_id, title, status, revision, escalations_json, created_at, updated_at) VALUES ('t1','升级','running',1,?,?,?)",
+        [JSON.stringify([{ kind: 'action_category', value: 'irreversible' }]), NOW, NOW])
+      tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('r1','t1','running',1,?,?)", [NOW, NOW])
+      openDecision(tx, {
+        decisionId: 'd1', runId: 'r1', nodeRunId: null, kind: 'rule_ambiguous', createdAt: NOW,
+        payload: { action_category: 'irreversible' },
+      })
+    })
+    expect(row(db, 'd1').confirm_required).toBe(1)
+    expect(() => withTx(db, (tx) => {
+      resolveDecision(tx, {
+        decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW,
+        actor: { kind: 'human', id: 'human:test' },
+      })
+    })).toThrowError(/必须显式确认/)
+    withTx(db, (tx) => {
+      resolveDecision(tx, {
+        decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW,
+        confirm: true, actor: { kind: 'human', id: 'human:test' },
+      })
+    })
+    expect(row(db, 'd1').status).toBe('resolved')
+  })
+
+  it('非纯人工卡不传批准人时拒绝，不能整体跳过校验', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: null, kind: 'audit_result', createdAt: NOW })
+    })
+    expect(() => withTx(db, (tx) => {
+      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW })
+    })).toThrowError(/必须说明批准人/)
   })
 })

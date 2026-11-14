@@ -33,36 +33,6 @@ export function isTerminal(status: string): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status)
 }
 
-// 合法迁移表：从哪个状态能去哪儿；终态没有出边（规格 3.5 行 179）
-export const ALLOWED_TRANSITIONS: Record<NodeStatus, readonly NodeStatus[]> = {
-  queued: ['leased', 'blocked_pre', 'superseded'],
-  leased: ['dispatched', 'queued', 'blocked_pre', 'superseded'],
-  dispatched: ['started', 'stopping', 'startup_unknown', 'timing_out', 'paused_bridge_missing', 'blocked_pre', 'superseded'],
-  started: ['verifying', 'stopping', 'startup_unknown', 'timing_out', 'indeterminate_side_effect', 'blocked_pre', 'blocked_post', 'superseded'],
-  waiting: ['dispatched', 'started', 'stopping', 'blocked_pre', 'blocked_post', 'superseded'],
-  verifying: ['done', 'failed', 'blocked_post', 'timeout', 'failed_with_unverified', 'stopping', 'superseded'],
-  timing_out: ['stopping', 'timeout', 'done', 'failed', 'orphaned'],
-  stopping: ['timeout', 'failed', 'orphaned', 'indeterminate_side_effect', 'done', 'failed_with_unverified'],
-  startup_unknown: ['started', 'stopping', 'orphaned', 'indeterminate_side_effect', 'blocked_post'],
-  paused_bridge_missing: ['dispatched', 'started', 'stopping', 'orphaned'],
-  blocked_pre: ['dispatched', 'queued', 'started', 'blocked_post'],
-  blocked_post: ['dispatched', 'verifying', 'failed', 'timeout', 'orphaned'],
-  indeterminate_side_effect: ['verifying', 'failed_with_unverified', 'abandoned_unverified', 'orphaned'],
-  done: [],
-  failed: [],
-  timeout: [],
-  abandoned_unverified: [],
-  failed_with_unverified: [],
-  orphaned: [],
-  superseded: [],
-}
-
-export function canTransition(from: string, to: string): boolean {
-  const edges = ALLOWED_TRANSITIONS[from as NodeStatus]
-  if (!edges) return false
-  return edges.includes(to as NodeStatus)
-}
-
 // 八种 decision（规格 3.6 行 188-198）
 export type DecisionKind =
   | 'pre_execution'
@@ -162,7 +132,6 @@ export type TransitionRule = {
 
 export const HANG_REASON_REPORT_CONTRADICTED = 'report_contradicted' as const
 
-const A = ALLOWED_TRANSITIONS
 const NON_TERMINAL = [...NON_TERMINAL_STATUSES]
 
 // M-01…M-61 逐行迁移规则（设计稿 §8 迁移表）。from/to 用数组保留一行的多目标语义。
@@ -181,7 +150,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-13', from: ['startup_unknown'], to: ['startup_unknown'], trigger: 'unloaded-reattach' },
   { id: 'M-14', from: ['startup_unknown'], to: ['paused_bridge_missing'], trigger: 'bridge-lost' },
   { id: 'M-15', from: ['started'], to: ['verifying'], trigger: 'verifier-dispatched' },
-  { id: 'M-16', from: ['verifying'], to: ['done', 'failed'], trigger: 'verdict' },
+  { id: 'M-16', from: ['verifying'], to: ['done', 'failed', 'timeout'], trigger: 'verdict' },
   { id: 'M-17', from: ['verifying'], to: ['blocked_post'], trigger: 'verify-timeout' },
   { id: 'M-18', from: ['verifying'], to: ['failed'], trigger: 'verify-timeout-fail-on-timeout', requires: (c) => c.sideEffectVerifiedNone },
   { id: 'M-19', from: ['verifying'], to: ['failed_with_unverified'], trigger: 'verify-timeout-fail-on-timeout', requires: (c) => !c.sideEffectVerifiedNone },
@@ -204,7 +173,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-36', from: ['stopping'], to: ['abandoned_unverified'], trigger: 'abandon-stopping' },
   { id: 'M-37', from: ['abandoned_unverified'], to: ['stopping'], trigger: 'abandon-ack-rejected', allowTerminal: true },
   { id: 'M-38', from: ['abandoned_unverified'], to: ['abandoned_unverified'], trigger: 'confirm-stopped', allowTerminal: true },
-  { id: 'M-39', from: ['queued', 'leased'], to: ['blocked_pre'], trigger: 'pre-approval' },
+  { id: 'M-39', from: ['queued', 'leased', 'dispatched'], to: ['blocked_pre'], trigger: 'pre-approval' },
   { id: 'M-40', from: ['blocked_pre'], to: ['queued'], trigger: 'approval-granted' },
   { id: 'M-41', from: ['blocked_pre'], to: ['failed'], trigger: 'approval-rejected' },
   { id: 'M-42', from: ['started', 'verifying'], to: ['blocked_post'], trigger: 'post-verification' },
@@ -226,6 +195,47 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-60', from: ['startup_unknown', 'indeterminate_side_effect'], to: ['superseded', 'failed'], trigger: 'uphold-decision', allowHung: true },
   { id: 'M-61', from: ['startup_unknown'], to: ['stopping'], trigger: 'confirm-started-with-tool', requires: (c) => c.hasToolCall },
 ]
+
+// 唯一迁移表：canTransition / ALLOWED_TRANSITIONS 都从 TRANSITIONS 派生，避免两套表分叉。
+const ALL_STATUSES: readonly NodeStatus[] = [...NON_TERMINAL_STATUSES, ...TERMINAL_STATUSES]
+
+function pairAllowed(rule: TransitionRule, from: string, to: string): boolean {
+  if (!rule.from.includes(from as NodeStatus)) return false
+  if (!rule.to.includes(to as NodeStatus)) return false
+  if ((TERMINAL_STATUSES as readonly string[]).includes(from) && !rule.allowTerminal) return false
+  return true
+}
+
+export const ALLOWED_TRANSITIONS: Record<NodeStatus, readonly NodeStatus[]> = (() => {
+  const edges = new Map<NodeStatus, NodeStatus[]>(ALL_STATUSES.map((status) => [status, []]))
+  for (const rule of TRANSITIONS) {
+    for (const from of rule.from) {
+      if ((TERMINAL_STATUSES as readonly string[]).includes(from) && !rule.allowTerminal) continue
+      const bucket = edges.get(from)
+      if (!bucket) continue
+      for (const to of rule.to) {
+        if (!bucket.includes(to)) bucket.push(to)
+      }
+    }
+  }
+  const result = {} as Record<NodeStatus, readonly NodeStatus[]>
+  for (const [status, targets] of edges) result[status] = Object.freeze(targets)
+  return Object.freeze(result)
+})()
+
+// 状态对级判定：任何一条规则能走这对 from/to 即合法；终态源必须带 allowTerminal。
+export function canTransition(from: string, to: string): boolean {
+  return TRANSITIONS.some((rule) => pairAllowed(rule, from, to))
+}
+
+/**
+ * 上报只能走不需要额外上下文的迁移边。
+ * 例如 dispatched→done 只在 cancelResult='already_stopped' 时成立（M-29），
+ * 普通报告不能借这条边直跳；把它排除掉，避免“结构上存在边”被误当成“这次能走”。
+ */
+export function canReportTransition(from: string, to: string): boolean {
+  return TRANSITIONS.some((rule) => rule.requires === undefined && pairAllowed(rule, from, to))
+}
 
 // 建行规则与跨行闸门：它们不是状态迁移，但属于 M-01…M-61 的必过项。
 export const CREATION_RULES = [

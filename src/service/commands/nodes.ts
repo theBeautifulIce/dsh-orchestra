@@ -1,6 +1,6 @@
 // src/service/commands/nodes.ts —— 单条 CAS 迁移执行器（S3 Task 2，规格 4.3/4.4）
 import { OrchError } from '../../core/errors.ts'
-import type { NodeStatus } from '../../core/state-machine.ts'
+import { canTransition, type NodeStatus } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { uuidv7 } from '../../core/ids.ts'
@@ -55,6 +55,17 @@ export type TransitionRequest = {
 export function applyTransition(tx: Tx, req: TransitionRequest): void {
   if (req.from.length === 0) {
     throw new OrchError('STALE_GENERATION', '迁移缺少来源状态', { nodeRunId: req.nodeRunId })
+  }
+  // 状态对必须来自唯一迁移表；同状态写只用于挂起/清挂起，不改变状态。
+  for (const from of req.from) {
+    if (from === req.to) continue
+    if (!canTransition(from, req.to)) {
+      throw new OrchError('STALE_GENERATION', '这条迁移不在合法迁移表里', {
+        nodeRunId: req.nodeRunId,
+        from,
+        to: req.to,
+      })
+    }
   }
   const patch = req.patch ?? {}
   const columns = Object.keys(patch)

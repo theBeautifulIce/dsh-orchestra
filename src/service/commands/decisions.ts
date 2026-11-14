@@ -2,6 +2,7 @@
 import { OrchError } from '../../core/errors.ts'
 import type { DecisionKind } from '../../core/state-machine.ts'
 import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
+import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 
 export const DECISION_KINDS: readonly DecisionKind[] = [
@@ -57,6 +58,14 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
   const payload = draft.payload ?? {}
   const actionCategory = typeof payload.action_category === 'string' ? payload.action_category : undefined
   const approver = draft.approver ?? defaultApprover(draft.kind, actionCategory)
+  // 任务级 escalations 在开卡时就要翻成 confirm_required，不能只写字段没人读。
+  const nodeType = typeof payload.node_type === 'string' ? payload.node_type : undefined
+  const confirmRequired = draft.confirmRequired ?? decisionConfirmRequired(tx, draft.runId, {
+    nodeType,
+    actionCategory,
+    workflowId: typeof payload.workflow_id === 'string' ? payload.workflow_id : undefined,
+    workflowVersion: typeof payload.workflow_version === 'string' ? payload.workflow_version : undefined,
+  })
   tx.run(
     'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, approver, confirm_required, created_at) ' +
       "VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?)",
@@ -69,7 +78,7 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
       draft.contentHash ?? null,
       draft.expiresAt ?? null,
       approver,
-      draft.confirmRequired ? 1 : 0,
+      confirmRequired ? 1 : 0,
       draft.createdAt ?? new Date().toISOString(),
     ],
   )
@@ -120,6 +129,8 @@ export type ResolveDecisionRequest = {
   // 批准人校验；旧调用不传 actor 时保持原有收口语义
   actor?: Actor
   evidenceProducers?: readonly string[]
+  // escalations 命中 confirm_required=1 时，必须显式带 confirm=true
+  confirm?: boolean
 }
 
 /**
@@ -129,20 +140,31 @@ export type ResolveDecisionRequest = {
  * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
  */
 export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
-  const current = tx.get<{ status: string; payload_json: string; approver: string }>(
-    'SELECT status, payload_json, approver FROM decisions WHERE decision_id = ?',
+  const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number }>(
+    'SELECT status, payload_json, approver, confirm_required FROM decisions WHERE decision_id = ?',
     [req.decisionId],
   )
   if (!current) {
     throw new OrchError('DECISION_REVISION_CONFLICT', 'decision 不存在', { decisionId: req.decisionId })
   }
-  if (req.actor) {
-    assertApprover({
-      approver: current.approver as Approver,
-      actor: req.actor,
-      evidenceProducers: req.evidenceProducers,
+  if (current.confirm_required === 1 && req.confirm !== true) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '这张 decision 命中升级规则，必须显式确认', {
+      decisionId: req.decisionId,
     })
   }
+  const actor = req.actor ?? (current.approver === 'human'
+    ? { kind: 'human' as const, id: 'human:requester' }
+    : undefined)
+  if (!actor) {
+    throw new OrchError('FORBIDDEN', '这张 decision 不是纯人工卡，必须说明批准人', {
+      approver: current.approver,
+    })
+  }
+  assertApprover({
+    approver: current.approver as Approver,
+    actor,
+    evidenceProducers: req.evidenceProducers,
+  })
   const closing = FINAL_RESOLUTIONS.includes(req.resolution)
   const nextStatus = closing ? 'resolved' : current.status
   const closedReason = closing
@@ -158,7 +180,7 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
   const res = tx.run(
     'UPDATE decisions SET status = ?, revision = revision + 1, closed_reason = ?, decided_at = ?, payload_json = ?, resolved_by = COALESCE(?, resolved_by) ' +
       `WHERE decision_id = ? AND revision = ? AND status IN ${ACTIVE_STATUSES}`,
-    [nextStatus, closedReason, closing ? req.now : null, payloadJson, req.actor?.id ?? null, req.decisionId, req.revision],
+    [nextStatus, closedReason, closing ? req.now : null, payloadJson, actor.id, req.decisionId, req.revision],
   )
   if (res.changes !== 1) {
     throw new OrchError('DECISION_REVISION_CONFLICT', 'decision 收口 CAS 未命中', {

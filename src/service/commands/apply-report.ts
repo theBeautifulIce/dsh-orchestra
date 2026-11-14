@@ -12,7 +12,7 @@ import { HANG_REASON_REPORT_CONTRADICTED, type NodeStatus } from '../../core/sta
 import { uuidv7 } from '../../core/ids.ts'
 import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
-import { canTransition } from '../../core/state-machine.ts'
+import { canReportTransition } from '../../core/state-machine.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 
 export type ApplyReportParams = {
@@ -235,6 +235,7 @@ function upholdDecision(
     revision: decision.revision,
     resolution: 'uphold_decision' satisfies Resolution,
     now: params.now,
+    actor: { kind: 'human', id: 'human:uphold' },
   })
   const newNodeRunId = 'nrun_' + uuidv7()
   applyTransition(tx, {
@@ -261,10 +262,16 @@ function upholdDecision(
     originNodeRunId: params.nodeRunId,
     now: params.now,
   })
-  tx.run(
-    'INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [params.report.report_id, params.nodeRunId, params.attempt, reportSeq, 'stale', params.now, params.now],
+  const stale = tx.run(
+    'UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?',
+    ['stale', params.now, params.report.report_id],
   )
+  if (stale.changes === 0) {
+    tx.run(
+      'INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [params.report.report_id, params.nodeRunId, params.attempt, reportSeq, 'stale', params.now, params.now],
+    )
+  }
   appendNodeRunEvent(tx, secret, params.nodeRunId, 'report.stale', {
     report_id: params.report.report_id,
     report_seq: reportSeq,
@@ -397,6 +404,7 @@ export function applyReport(
       revision: decision.revision,
       resolution: 'uphold_report',
       now: params.now,
+      actor: { kind: 'human', id: 'human:uphold' },
     })
     upholdReport = true
   }
@@ -410,7 +418,7 @@ export function applyReport(
   }
   assertLeaseValid(row, params.now)
   // 目标状态必须在合法迁移表里：非法迁移按拒绝处理，不许绕过状态机
-  if (!upholdReport && !canTransition(row.status, report.status)) {
+  if (!canReportTransition(row.status, report.status)) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'illegal_transition', now: params.now })
   }
   // 失败/超时终态也要有可核对的服务端证据：证据必须与同 attempt 的工具痕迹与 tool_finished 对齐，

@@ -1,7 +1,7 @@
 // M-01…M-61 逐条用例：每条规则都有正例，终态源、挂起源、错误触发与错误目标都被拒。
 import { describe, expect, it } from 'vitest'
 import {
-  CREATION_RULES, HANG_GUARD, MIGRATION_CASE_IDS, TRANSITIONS,
+  CREATION_RULES, HANG_GUARD, MIGRATION_CASE_IDS, TERMINAL_STATUSES, TRANSITIONS,
   allows, findTransition, type TransitionContext, type TransitionRule,
 } from '../../src/core/state-machine.ts'
 
@@ -33,14 +33,32 @@ describe('M-01…M-61 迁移用例', () => {
   })
 
   for (const rule of TRANSITIONS) {
-    it(`${rule.id} 正例命中，错误触发与错误目标被拒`, () => {
+    it(`${rule.id} 的每个来源×目标都命中，错误触发与错误目标被拒`, () => {
+      for (const from of rule.from) {
+        for (const to of rule.to) {
+          const ctx: TransitionContext = { ...contextFor(rule), status: from, target: to }
+          expect(allows(rule, ctx), `${rule.id} ${from}→${to}`).toBe(true)
+          expect(findTransition(ctx)?.id, `${rule.id} ${from}→${to}`).toBe(rule.id)
+        }
+      }
       const ctx = contextFor(rule)
-      expect(allows(rule, ctx)).toBe(true)
-      expect(findTransition(ctx)?.id).toBe(rule.id)
       expect(allows(rule, { ...ctx, trigger: rule.trigger === 'lease' ? 'verdict' : 'lease' })).toBe(false)
       expect(allows(rule, { ...ctx, target: rule.to.includes('queued') ? 'done' : 'queued' })).toBe(false)
     })
   }
+
+  it('每条 requires 规则都有被前提拒绝的反例', () => {
+    for (const rule of TRANSITIONS) {
+      if (!rule.requires) continue
+      const bad: TransitionContext = {
+        ...contextFor(rule),
+        hasToolCall: rule.id === 'M-06' || rule.id === 'M-07' || rule.id === 'M-28',
+        cancelResult: null,
+        sideEffectVerifiedNone: rule.id === 'M-19',
+      }
+      expect(allows(rule, bad), `${rule.id} 应被 requires 拒绝`).toBe(false)
+    }
+  })
 
   it('M-01 / M-58 建行规则只落 queued', () => {
     expect(CREATION_RULES).toEqual([
@@ -49,16 +67,22 @@ describe('M-01…M-61 迁移用例', () => {
     ])
   })
 
-  it('M-56 挂起闸只放行 allowHung 的规则', () => {
-    expect(HANG_GUARD.allows(TRANSITIONS.find((rule) => rule.id === 'M-45')!)).toBe(true)
-    expect(HANG_GUARD.allows(TRANSITIONS.find((rule) => rule.id === 'M-59')!)).toBe(true)
-    expect(HANG_GUARD.allows(TRANSITIONS.find((rule) => rule.id === 'M-02')!)).toBe(false)
+  it('M-56 挂起闸对每条 allowHung 规则都放行，普通规则一律拒绝', () => {
+    const hung = TRANSITIONS.filter((rule) => rule.allowHung)
+    expect(hung.map((rule) => rule.id).sort()).toEqual(['M-45', 'M-59', 'M-60'])
+    for (const rule of hung) expect(HANG_GUARD.allows(rule), rule.id).toBe(true)
+    const ordinary = TRANSITIONS.filter((rule) => !rule.allowHung)
+    expect(ordinary.length).toBeGreaterThan(50)
+    for (const rule of ordinary) expect(HANG_GUARD.allows(rule), rule.id).toBe(false)
   })
 
-  it('终态源没有 allowTerminal 时一律拒绝', () => {
-    expect(findTransition({
-      status: 'done', target: 'queued', trigger: 'lease', hasToolCall: false,
-      cancelResult: null, hangReason: null, sideEffectVerifiedNone: false,
-    })).toBeNull()
+  it('终态来源必须逐条带 allowTerminal，不能靠整体表放行', () => {
+    const terminal = new Set<string>(TERMINAL_STATUSES)
+    for (const rule of TRANSITIONS) {
+      const fromTerminal = rule.from.filter((from) => terminal.has(from))
+      if (fromTerminal.length > 0) {
+        expect(rule.allowTerminal, `${rule.id} 的终态来源 ${fromTerminal.join(',')}`).toBe(true)
+      }
+    }
   })
 })

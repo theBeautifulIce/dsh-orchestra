@@ -28,11 +28,11 @@ export type CompensationRow = {
   updated_at: string
 }
 
+// 只有迁移表 M-54/M-55 真正允许落 failed_with_unverified 的源状态：
+// failed、indeterminate_side_effect、abandoned_unverified。旧表里不存在规则的
+// verifying/stopping/timeout 不能放进来源集合，否则整笔 CAS 会被 applyTransition 拒绝。
 const UNVERIFIED_FROM = [
-  'verifying',
-  'stopping',
   'failed',
-  'timeout',
   'indeterminate_side_effect',
   'abandoned_unverified',
 ] as const
@@ -118,7 +118,7 @@ function markUnverified(tx: Tx, secret: string, nodeRunId: string, attempt: numb
   }
   applyTransition(tx, {
     nodeRunId,
-    from: UNVERIFIED_FROM,
+    from: [node.status as (typeof UNVERIFIED_FROM)[number]],
     to: 'failed_with_unverified',
     attempt,
     now,
