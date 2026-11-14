@@ -5,6 +5,9 @@ import { sweepExpiredLeases } from './commands/lease.ts'
 import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts'
 import { transitionNode } from './commands/node-state.ts'
 import { applyTransition } from './commands/nodes.ts'
+import { applyReport } from './commands/apply-report.ts'
+import type { WorkflowCatalog } from './workflows.ts'
+import type { Report } from '../core/report.ts'
 import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { canTransition, isTerminal, type NodeStatus } from '../core/state-machine.ts'
 import type { ClockProvider, Deadline } from '../core/clock.ts'
@@ -17,6 +20,8 @@ export type SweepParams = {
   bridgeMissing?: readonly string[]
   // 桥恢复信号：按 resume_state 逐态重入，重挂剩余预算，不把未知态续成满额
   bridgeRestored?: readonly string[]
+  // 围栏撤销后重放队头需要按 run 绑定的工作流取判定策略
+  catalog?: WorkflowCatalog
 }
 
 export type SweepResult = {
@@ -68,7 +73,10 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       if (!revokeFence(tx, secret, { row, now: params.now, clock: params.clock })) continue
       revoked.push(row.node_run_id)
       const head = pickReplayHead(tx, row.node_run_id, row.attempt)
-      if (head) heads.push({ node_run_id: row.node_run_id, report_id: head.report_id, report_seq: head.report_seq })
+      if (head) {
+        heads.push({ node_run_id: row.node_run_id, report_id: head.report_id, report_seq: head.report_seq })
+        if (params.catalog) replayQueued(tx, secret, row.node_run_id, head.report_id, row.attempt, params.now, params.catalog)
+      }
     }
     // 判定时限：只读 boot_id 与单调纳秒，墙钟只用于展示（规格 3.4 行 171、12.3 行 1066）
     const timedOut: string[] = []
@@ -245,7 +253,54 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
   })
 }
 
-// 同一现场的优先级：终态、挂起、未知态、停止中、围栏中、桥暂挂都不许被恢复扫描改写
+// 围栏撤销后重放队头：报告原文在 report_rejected 事件里，registry 只用来排队。
+// 只重放当前 attempt 的队头；失败就留在队列，等下一轮扫描或人工处理。
+function replayQueued(
+  tx: Tx,
+  secret: string,
+  nodeRunId: string,
+  reportId: string,
+  attempt: number,
+  now: string,
+  catalog: WorkflowCatalog,
+): void {
+  try {
+    const events = tx.all<{ payload: string }>(
+      "SELECT payload FROM node_run_events WHERE node_run_id = ? AND type = 'report_rejected' ORDER BY seq DESC",
+      [nodeRunId],
+    )
+    let report: Report | undefined
+    for (const ev of events) {
+      try {
+        const body = JSON.parse(ev.payload) as { report_id?: string; report?: Report }
+        if (body.report_id === reportId && body.report) {
+          report = body.report
+          break
+        }
+      } catch {
+        // 坏事件跳过，不能让一整轮扫描被一条脏 payload 拖死
+      }
+    }
+    if (!report) return
+    const row = tx.get<{ status: string; action_generation: number; attempt: number }>(
+      'SELECT status, action_generation, attempt FROM node_runs WHERE node_run_id = ?',
+      [nodeRunId],
+    )
+    if (!row || row.attempt !== attempt || row.status !== 'stopping') return
+    applyReport(tx, secret, {
+      nodeRunId,
+      attempt,
+      report,
+      expectedStatus: 'stopping',
+      generation: row.action_generation,
+      now,
+    }, catalog)
+  } catch {
+    // 重放被拒：registry 仍是 rejected，下一轮还可以再试；不把围栏撤销回滚
+  }
+}
+
+
 function recoverySkip(row: { status: string; hang_reason: string | null }): boolean {
   if (isTerminal(row.status)) return true
   if (row.hang_reason !== null) return true

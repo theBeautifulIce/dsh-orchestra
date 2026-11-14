@@ -60,5 +60,5 @@ export function submitCancel(deps: RuntimeDeps, p: {
 }
 
 export function sweepNow(deps: RuntimeDeps, now: string): SweepResult {
-  return sweep(deps.db, deps.secret, { now, clock: deps.clock })
+  return sweep(deps.db, deps.secret, { now, clock: deps.clock, catalog: deps.catalog })
 }

@@ -110,6 +110,8 @@ function rejectReport(tx: Tx, secret: string, params: {
     report_id: params.report.report_id,
     report_seq: params.reportSeq,
     reason: params.reason,
+    // 被挡下的报告原样留在链上：围栏撤销后要按队头重放，registry 只是投影
+    report: params.report,
   })
   return { accepted: false, reason: params.reason, registry_state: 'rejected' }
 }
