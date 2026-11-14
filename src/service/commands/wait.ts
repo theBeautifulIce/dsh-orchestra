@@ -335,13 +335,16 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
   return true
 }
 
-export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock?: ClockProvider): number {
+export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock?: ClockProvider, skipNodeRunIds?: ReadonlySet<string>): number {
   const rows = tx.all<{ node_run_id: string }>(
     "SELECT w.node_run_id FROM wait_registrations w JOIN node_runs n ON n.node_run_id = w.node_run_id " +
       "WHERE w.state = 'active' AND n.status = 'waiting' AND n.wait_deadline_at IS NOT NULL ORDER BY w.registration_id",
   )
   let timedOut = 0
-  for (const row of rows) if (timeoutWaiting(tx, secret, row.node_run_id, now, clock)) timedOut++
+  for (const row of rows) {
+    if (skipNodeRunIds?.has(row.node_run_id)) continue
+    if (timeoutWaiting(tx, secret, row.node_run_id, now, clock)) timedOut++
+  }
   return timedOut
 }
 

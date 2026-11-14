@@ -6,6 +6,7 @@ import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts
 import { transitionNode } from './commands/node-state.ts'
 import { applyTransition } from './commands/nodes.ts'
 import { applyReport } from './commands/apply-report.ts'
+import { sweepWaitTimeouts } from './commands/wait.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import type { Report } from '../core/report.ts'
 import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
@@ -41,6 +42,8 @@ export type SweepResult = {
   bridge_paused: string[]
   // 显式桥恢复信号按 resume_state 重入
   bridge_restored: string[]
+  // wait 到点由同一轮维护扫描收口，不再依赖调用方另起一轮
+  wait_timed_out: number
   scanned_at: string
 }
 
@@ -61,6 +64,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     for (const row of tx.all<{ node_run_id: string }>('SELECT node_run_id FROM node_runs')) {
       if (chainBreakOf(secret, readChain(tx, row.node_run_id))) broken.add(row.node_run_id)
     }
+    // wait 到点与租约、围栏同轮处理：同一个扫描入口，不靠外部再记得调一次
+    const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, broken)
     const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken, clock: params.clock })
     // 围栏宽限到点：撤围栏回 stopping，并把当前 attempt 的队头挑出来（规格 4.5 行 346）
     const fences = tx.all<FenceRow>(
@@ -247,6 +252,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       startup_unknown_expired: unknownExpired,
       bridge_paused: bridgePaused,
       bridge_restored: bridgeRestored,
+      wait_timed_out: waitTimedOut,
       scanned_at: params.now,
     }
   })

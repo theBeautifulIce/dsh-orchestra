@@ -204,7 +204,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G3-11', 'G-01', 'G-02', 'G-04', 'G-06', 'G-12', 'G-16', 'G3-12', 'G3-13', 'G3-14',
     ],
     content: {
-      'G3-01': 'M-01 到 M-61 逐条迁移用例，非法迁移全拒',
+      'G3-01': 'M-01 到 M-62 逐条迁移用例，非法迁移全拒',
       'G3-02': '所有节点迁移走 CAS，迟到 attempt 不污染新行',
       'G3-03': '半态时钟与桥断冻结矩阵：跨 boot 剩余量不计停机、回拨夹零',
       'G3-04': 'blocked_pre 审批往返：旧租约清除、内容哈希绑定、拒绝和超时不回 queued',
@@ -226,7 +226,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G3-14': 'S3 全量测试与构建全绿',
     },
     invariants: {
-      I1: { statement: 'M-01 到 M-61 是唯一迁移口径：每条规则有独立用例，非法迁移和终态普通出口都拒', evidence_ids: ['ev-g3-01', 'ev-g3-02'] },
+      I1: { statement: 'M-01 到 M-62 是唯一迁移口径：每条规则有独立用例，非法迁移和终态普通出口都拒', evidence_ids: ['ev-g3-01', 'ev-g3-02'] },
       I2: { statement: '所有节点迁移带 CAS：迟到 attempt、旧 revision、挂起节点都不能被普通出口改写', evidence_ids: ['ev-g3-02', 'ev-g3-10'] },
       I3: { statement: '子流程先 pin 版本再执行：深度、环、父取消都按运行关系判定，父 run 不得先于子 run 收口', evidence_ids: ['ev-g3-08'] },
       I4: { statement: '补偿只执行一次：失败或未核验落 failed_with_unverified，不落普通 failed', evidence_ids: ['ev-g3-09'] },

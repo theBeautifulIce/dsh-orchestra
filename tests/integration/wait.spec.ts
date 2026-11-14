@@ -6,6 +6,7 @@ import {
   sweepWaitTimeouts, timeoutWaiting, wakeOnEvent,
 } from '../../src/service/commands/wait.ts'
 import { ScriptedClock } from '../../src/core/clock.ts'
+import { sweep } from '../../src/service/sweep.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'wait-secret'
@@ -172,6 +173,22 @@ describe('等待节点', () => {
     withTx(db, (tx) => expect(sweepWaitTimeouts(tx, SECRET, at)).toBe(0))
     expect(node(db, 'n1').status).toBe('timeout')
     expect(node(db, 'n2').status).toBe('waiting')
+  })
+
+  it('维护扫描本身就会收 wait 超时，不靠调用方另起一轮', () => {
+    const db = memoryDb()
+    seedNode(db, 'n1')
+    withTx(db, (tx) => {
+      enterWaiting(tx, SECRET, {
+        nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'timer', match: { type: 'never' },
+        idempotencyKey: 'wait-1', maxWaitMs: 1_000, now: NOW,
+      })
+    })
+    const at = new Date(Date.parse(NOW) + 2_000).toISOString()
+    const result = sweep(db, SECRET, { now: at })
+    expect(result.wait_timed_out).toBe(1)
+    expect(node(db, 'n1').status).toBe('timeout')
+    expect(sweep(db, SECRET, { now: at }).wait_timed_out).toBe(0)
   })
 
   it('组结束撤等待登记，节点状态由调用方负责', () => {
