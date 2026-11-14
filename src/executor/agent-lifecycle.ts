@@ -229,17 +229,20 @@ export class AgentLifecycle {
     }
   }
 
-  // 先停止监听，再取消会话；interrupted 不当作已停止，必须 whenIdle+state 复核。
+  // 先 abort 监听并取消会话，再等消费任务退出。
+  // 顺序不能反：工具执行中的 run() 会卡在 onEvent 的宿主工具上，若先 await running，
+  // cancel 永远发不出去，B07 的真实进程取消会死锁。
   private async stopInternal(): Promise<void> {
     this.controller.abort(new OrchError('SERVICE_UNAVAILABLE', '节点收口，停止监听', {}))
-    if (this.running) {
-      await this.running.catch(() => undefined)
-      this.running = null
-    }
     try {
       await this.bounded(this.deps.client.cancel({ executorAgentId: this.agentId, attempt: this.deps.attempt }), 'cancel')
     } catch {
       // 取消失败不掩盖真正的失败原因；下面仍要复核状态
+    }
+    if (this.running) {
+      // 工具可能不响应 abort；消费任务只做有界等待，真正的停止结论仍看 whenIdle+state。
+      await this.bounded(this.running.catch(() => undefined), 'running').catch(() => undefined)
+      this.running = null
     }
     let idle: { idle: boolean; timedOut: boolean } | null = null
     try {

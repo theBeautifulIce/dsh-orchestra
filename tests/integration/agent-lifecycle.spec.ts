@@ -1,6 +1,8 @@
 // R5-D：AgentLifecycle 的生产故障注入（B01/B08/B09/B10）
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentLifecycle } from '../../src/executor/agent-lifecycle.ts'
@@ -10,6 +12,14 @@ import { ToolRegistry, ReadOnlyToolRunner, type HostRunner } from '../../src/exe
 import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
+
+async function waitFor(cond: () => boolean, timeoutMs: number): Promise<void> {
+  const began = Date.now()
+  while (!cond()) {
+    if (Date.now() - began > timeoutMs) throw new Error('waitFor 超时')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
 const ev = (seq: number, type: BridgeEvent['type'], payload: unknown, attempt = 1): BridgeEvent => ({
   seq, type, at: NOW, toolStartAt: null, payload, attempt, executorAgentId: 'agent_1',
 })
@@ -210,22 +220,65 @@ describe('AgentLifecycle 故障注入', () => {
     h.cleanup()
   })
 
-  it('B07 工具执行中取消：未确认停止就不放行', async () => {
-    const calls: string[] = []
+  it('B07 工具执行中取消：先杀掉真实子进程并确认停止，才允许 dispose', async () => {
+    const { dir, db } = freshLedger()
+    seed(db)
+    const marker = join(dir, 'tool-running.txt')
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+    const exit = once(child, 'exit')
+    let disposeCalls = 0
+
+    const registry = new ToolRegistry()
+    registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
+    const host: HostRunner = {
+      readonlyAvailable: () => true,
+      run: async () => {
+        writeFileSync(marker, 'running')
+        await exit
+        return { exitCode: 0, stdout: 'killed\n', stderr: '' }
+      },
+    }
     const transport: BridgeTransport = {
       request: async (method) => {
-        calls.push(method)
-        if (method === 'executor.cancel') return 'interrupted' as never
-        if (method === 'executor.whenIdle') return { idle: false, timedOut: true } as never
-        if (method === 'executor.state') return { state: 'running', toolCallSeq: 0, hasToolCall: false } as never
+        if (method === 'executor.subscribe') return { subscribed: true, fromSeq: 0, lastSeq: 0 } as never
+        if (method === 'executor.send') return undefined as never
+        if (method === 'executor.cancel') { child.kill('SIGKILL'); return 'interrupted' as never }
+        if (method === 'executor.whenIdle') { await exit; return { idle: true, timedOut: false } as never }
+        if (method === 'executor.state') return { state: child.exitCode === null && child.signalCode === null ? 'running' : 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        if (method === 'executor.dispose') { disposeCalls += 1; return undefined as never }
         return {} as never
       },
-      listen: () => { throw new Error('不该 listen') },
+      listen: async function* (_params, signal) {
+        yield ev(1, 'tool.call', { callId: 'c1', tool: 'ro.echo', args: [], cwd: '.', timeoutMs: 30_000 })
+        // 真实桥在 abort 时会结束流；测试替身也必须如此，否则 stop 会卡在 running。
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve()
+          else signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      },
     }
-    const h = harness(transport)
-    await expect(h.lifecycle.stop()).rejects.toMatchObject({ code: 'LEASE_EXPIRED' })
-    expect(calls).not.toContain('executor.dispose')
-    h.cleanup()
+    const lifecycle = new AgentLifecycle({
+      db, secret: TEST_SECRET, client: new BridgeClient(transport), registry,
+      runner: new ReadOnlyToolRunner(registry, host, dir),
+      policy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' }, allowedTools: ['ro.echo'],
+      nodeRunId: 'nr1', attempt: 1,
+      agent: { agentId: 'agent_1', sessionId: 'sess_1', tools: [{ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } }] },
+      instruction: 'do it', timeoutMs: 30_000, idleTimeoutMs: 1_000, nowAt: () => NOW, spillDir: join(dir, 'spill'),
+    })
+    try {
+      const ac = new AbortController()
+      const run = lifecycle.run(ac.signal)
+      await waitFor(() => existsSync(marker), 5_000)
+      ac.abort(new Error('用户取消'))
+      await expect(run).rejects.toBeTruthy()
+      await lifecycle.stop()
+      expect(child.exitCode !== null || child.signalCode !== null).toBe(true)
+      expect(disposeCalls).toBe(1)
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL')
+      db.raw.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('B08 dispose 前 ACK 落后：客户端拒绝释放 Agent', async () => {

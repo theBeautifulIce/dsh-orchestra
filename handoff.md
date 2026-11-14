@@ -1019,3 +1019,11 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 首次失败是 request_hash 不一致：子进程 `timeoutMs:60_000`，父进程重放 `timeoutMs:5_000`；统一为 60_000 后通过。request_hash 覆盖 tool/args/cwd/timeout，测试两侧必须完全一致。
 - 验证：typecheck 0；全量 41 文件 **605 passed | 1 skipped**；build 成功（ESM 147.74kB / gzip 37.02kB、d.ts 14.00kB）。
 - 状态：B06 独立进程已覆盖；B07 外部取消已接生产，缺独立进程 kill 场景。G1/G2 仍绑 `caae193`。
+
+### 11.55 B07 真实子进程强杀与 stop 顺序修复（2026-11-14 17:18，待提交）
+
+- `tests/integration/agent-lifecycle.spec.ts` 的 B07 改为真实子进程：`spawn(process.execPath, ['-e', 'setInterval(...)'])` 作为工具进程，宿主 `run` 写 marker 后等 `exit`；`commands.cancel` 发 SIGKILL；`stop` 必须确认 `exitCode` 或 `signalCode` 非空才允许 dispose。
+- 首次失败是 `stopInternal` 顺序死锁：先 abort 再 `await this.running`，但 running 卡在工具执行，cancel 永远发不出去。修复为 `abort → bounded(cancel) → bounded(running) → whenIdle/state → dispose`，`bounded(running)` 防工具不响应 abort 时无限等待。这是生产修复，不只测试。
+- 第二次失败是 SIGKILL 后 `child.exitCode` 仍为 null，`state` 误判 running；改为 `exitCode === null && signalCode === null` 才 running，断言改为 `exitCode !== null || signalCode !== null`。
+- 验证：typecheck 0；全量 41 文件 **605 passed | 1 skipped**；build 成功（ESM 147.78kB / gzip 37.03kB、d.ts 14.00kB）。
+- 状态：B06/B07 均已独立进程级；B04/B05 由 bridge-ledger/bridge-buffer 覆盖。G1/G2 仍绑 `caae193`，待 R5-D 全量收口后进 R5-E 第 45 轮独立审计。
