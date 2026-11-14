@@ -4,7 +4,17 @@ import { inTx } from '../infra/db/tx.ts'
 import { sweepExpiredLeases } from './commands/lease.ts'
 import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts'
 import { transitionNode } from './commands/node-state.ts'
+import { applyTransition } from './commands/nodes.ts'
+import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
+import { isTerminal, type NodeStatus } from '../core/state-machine.ts'
 import type { ClockProvider, Deadline } from '../core/clock.ts'
+
+export type SweepParams = {
+  now: string
+  clock?: ClockProvider
+  // 运行时观察到的桥断节点：只有拿到显式信号才挂起，不猜
+  bridgeMissing?: readonly string[]
+}
 
 export type SweepResult = {
   lease_expired: string[]
@@ -15,6 +25,12 @@ export type SweepResult = {
   verify_uncertain: string[]
   // 围栏撤销后该重放的队头；S3 接上决定重放后由决策循环消费
   replay_heads: { node_run_id: string; report_id: string; report_seq: number }[]
+  // 哈希链断裂的节点：整轮扫描跳过，绝不写坏账本
+  chain_broken: string[]
+  // startup_unknown 钟到点后转 indeterminate_side_effect
+  startup_unknown_expired: string[]
+  // 显式桥断信号置 paused_bridge_missing
+  bridge_paused: string[]
   scanned_at: string
 }
 
@@ -28,9 +44,14 @@ type VerifyRow = {
 }
 
 // 扫描必须可重入：重复跑不会产生第二份副作用
-export function sweep(db: Db, secret: string, params: { now: string; clock?: ClockProvider }): SweepResult {
+export function sweep(db: Db, secret: string, params: SweepParams): SweepResult {
   return inTx(db, (tx) => {
-    const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0 })
+    // 恢复前先验链：断链节点整轮跳过，恢复动作不许把坏账本再往前推
+    const broken = new Set<string>()
+    for (const row of tx.all<{ node_run_id: string }>('SELECT node_run_id FROM node_runs')) {
+      if (chainBreakOf(secret, readChain(tx, row.node_run_id))) broken.add(row.node_run_id)
+    }
+    const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken })
     // 围栏宽限到点：撤围栏回 stopping，并把当前 attempt 的队头挑出来（规格 4.5 行 346）
     const fences = tx.all<FenceRow>(
       'SELECT node_run_id, attempt, revision, status, fence_state, fence_grace_until FROM node_runs WHERE fence_state = ? AND fence_grace_until IS NOT NULL',
@@ -70,15 +91,89 @@ export function sweep(db: Db, secret: string, params: { now: string; clock?: Clo
         uncertain.push(row.node_run_id)
       }
     }
+    // startup_unknown 按钟：到点转 indeterminate_side_effect，保留 uncertainty，不直接判终态
+    const unknownExpired: string[] = []
+    const unknownRows = tx.all<{ node_run_id: string; attempt: number; status: string; hang_reason: string | null; startup_unknown_deadline_at: string | null }>(
+      'SELECT node_run_id, attempt, status, hang_reason, startup_unknown_deadline_at FROM node_runs WHERE status = ?',
+      ['startup_unknown'],
+    )
+    for (const row of unknownRows) {
+      if (broken.has(row.node_run_id) || row.hang_reason !== null) continue
+      if (!row.startup_unknown_deadline_at || Date.parse(row.startup_unknown_deadline_at) > Date.parse(params.now)) continue
+      try {
+        applyTransition(tx, {
+          nodeRunId: row.node_run_id,
+          from: ['startup_unknown'],
+          to: 'indeterminate_side_effect',
+          attempt: row.attempt,
+          now: params.now,
+          bumpRearm: true,
+          patch: { startup_unknown_deadline_at: null, startup_unknown_remaining_ns: null },
+        })
+        appendNodeRunEvent(tx, secret, row.node_run_id, 'recovery.startup_unknown_expired', {
+          from: 'startup_unknown',
+          to: 'indeterminate_side_effect',
+          deadline_at: row.startup_unknown_deadline_at,
+        })
+        unknownExpired.push(row.node_run_id)
+      } catch {
+        // 并发流程已经改过这一行：跳过
+      }
+    }
+
+    // 显式桥断信号：只挂起，不猜副作用；resume_state 留给桥恢复时按原状态继续
+    const bridgePaused: string[] = []
+    for (const nodeRunId of new Set(params.bridgeMissing ?? [])) {
+      if (broken.has(nodeRunId)) continue
+      const row = tx.get<{ attempt: number; status: string; hang_reason: string | null }>(
+        'SELECT attempt, status, hang_reason FROM node_runs WHERE node_run_id = ?',
+        [nodeRunId],
+      )
+      if (!row || recoverySkip(row)) continue
+      try {
+        applyTransition(tx, {
+          nodeRunId,
+          from: [row.status as NodeStatus],
+          to: 'paused_bridge_missing',
+          attempt: row.attempt,
+          now: params.now,
+          bumpRearm: true,
+          patch: { resume_state: row.status },
+        })
+        appendNodeRunEvent(tx, secret, nodeRunId, 'recovery.bridge_missing', {
+          from: row.status,
+          to: 'paused_bridge_missing',
+          resume_state: row.status,
+        })
+        bridgePaused.push(nodeRunId)
+      } catch {
+        // 并发流程已经改过这一行：跳过
+      }
+    }
+
     return {
       lease_expired: leaseExpired,
       fence_revoked: revoked,
       verify_timed_out: timedOut,
       verify_uncertain: uncertain,
       replay_heads: heads,
+      chain_broken: [...broken],
+      startup_unknown_expired: unknownExpired,
+      bridge_paused: bridgePaused,
       scanned_at: params.now,
     }
   })
+}
+
+// 同一现场的优先级：终态、挂起、未知态、停止中、围栏中、桥暂挂都不许被恢复扫描改写
+function recoverySkip(row: { status: string; hang_reason: string | null }): boolean {
+  if (isTerminal(row.status)) return true
+  if (row.hang_reason !== null) return true
+  return row.status === 'indeterminate_side_effect'
+    || row.status === 'stopping'
+    || row.status === 'timing_out'
+    || row.status === 'paused_bridge_missing'
+    || row.status === 'startup_unknown'
 }
 
 // 节点行上的判定锚点 → 判定用的 Deadline；墙钟只是展示用（规格 3.4 行 171）

@@ -209,4 +209,47 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(JSON.parse(payload.payload).reason).toBe('timer_uncertain')
     expect(JSON.parse(payload.payload).missing).toContain('verify_deadline_anchor_missing')
   })
+
+  it('桥断信号：置 paused_bridge_missing 并记 resume_state，重复扫描不追加事件', () => {
+    const db = setup()
+    const first = sweep(db, TEST_SECRET, { now: NOW, bridgeMissing: ['nr_sw'] })
+    expect(first.bridge_paused).toEqual(['nr_sw'])
+    expect(row(db).status).toBe('paused_bridge_missing')
+    expect(row(db).resume_state).toBe('dispatched')
+    const count = () => (db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nr_sw' AND type='recovery.bridge_missing'").get() as { n: number }).n
+    expect(count()).toBe(1)
+    const second = sweep(db, TEST_SECRET, { now: NOW, bridgeMissing: ['nr_sw'] })
+    expect(second.bridge_paused).toEqual([])
+    expect(count()).toBe(1)
+  })
+
+  it('startup_unknown 钟到点转 indeterminate，重复扫描不产生第二个终态', () => {
+    const db = setup()
+    withTx(db, (tx) => tx.run(
+      "UPDATE node_runs SET status='startup_unknown', startup_unknown_deadline_at=? WHERE node_run_id='nr_sw'",
+      [NOW],
+    ))
+    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:01.000Z' })
+    expect(first.startup_unknown_expired).toEqual(['nr_sw'])
+    expect(row(db).status).toBe('indeterminate_side_effect')
+    const second = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:02.000Z' })
+    expect(second.startup_unknown_expired).toEqual([])
+    expect(row(db).status).toBe('indeterminate_side_effect')
+    const count = (db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nr_sw' AND type='recovery.startup_unknown_expired'").get() as { n: number }).n
+    expect(count).toBe(1)
+  })
+
+  it('哈希链断裂：整轮跳过该节点，不写恢复迁移', () => {
+    const db = setup()
+    // 模拟库外破坏：临时拆掉只追加触发器再改 payload，链头哈希对不上
+    db.raw.exec('DROP TRIGGER trg_node_run_events_no_update')
+    withTx(db, (tx) => {
+      const ev = tx.get<{ seq: number }>("SELECT seq FROM node_run_events WHERE node_run_id='nr_sw' ORDER BY seq DESC LIMIT 1")
+      tx.run("UPDATE node_run_events SET payload='{\"tampered\":true}' WHERE node_run_id='nr_sw' AND seq=?", [ev!.seq])
+    })
+    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:01.000Z', bridgeMissing: ['nr_sw'] })
+    expect(out.chain_broken).toContain('nr_sw')
+    expect(out.bridge_paused).toEqual([])
+    expect(row(db).status).toBe('dispatched')
+  })
 })

@@ -4,6 +4,7 @@ import { uuidv7 } from '../../core/ids.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { runCas } from '../../infra/db/tx.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { applyTransition } from './nodes.ts'
 
 export type NodeRunRow = {
   node_run_id: string
@@ -132,23 +133,31 @@ export function assertLeaseValid(row: NodeRunRow, now: string): void {
 }
 
 // 过期扫描：dispatched 或 started 的租约过期后先转 startup_unknown 或 stopping（规格 4.9 行 426）
-export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string; leaseTtlMs: number }): string[] {
+export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string; leaseTtlMs: number; skipNodeRunIds?: ReadonlySet<string> }): string[] {
   const rows = tx.all<NodeRunRow>(
     'SELECT * FROM node_runs WHERE status IN (?, ?) AND lease_expires_at IS NOT NULL',
     ['dispatched', 'started'],
   )
   const touched: string[] = []
   for (const row of rows) {
+    if (params.skipNodeRunIds?.has(row.node_run_id)) continue
     if (!row.lease_expires_at) continue
     if (Date.parse(row.lease_expires_at) > Date.parse(params.now)) continue
     // 跑过启动的先转 startup_unknown，没跑过的转 stopping，两边都要留痕
     const next = row.status === 'started' ? 'startup_unknown' : 'stopping'
-    runCas(
-      tx,
-      'UPDATE node_runs SET status = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND status = ? AND revision = ?',
-      [next, params.now, row.node_run_id, row.status, row.revision],
-      { rows: 1, what: 'sweepExpiredLeases' },
-    )
+    try {
+      applyTransition(tx, {
+        nodeRunId: row.node_run_id,
+        from: [row.status as 'dispatched' | 'started'],
+        to: next,
+        attempt: row.attempt,
+        now: params.now,
+        patch: { lease_id: null, lease_expires_at: null },
+      })
+    } catch {
+      // 并发扫描已经处理过这一行：跳过，不把整批扫描拖垮
+      continue
+    }
     appendNodeRunEvent(tx, secret, row.node_run_id, 'lease_expired', {
       from: row.status,
       to: next,

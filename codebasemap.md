@@ -223,7 +223,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/infra/sqlite/migrations/009_bridge_tool_outbox.sql` | 工具调用 outbox：pending/completed/failed，防重复执行与结果丢失 |
 | `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |
 | `src/index.ts` | 装配入口（`openServiceOrchestra`：acquireDbLock → bumpEpoch → openServiceDb → createOrchestra） |
-| `src/service/sweep.ts` | 围栏与过期扫描（逐行事务，回收 verifying 超时） |
+| `src/service/sweep.ts` | 可重入恢复扫描：先验哈希链、按优先级跳过终态/挂起/未知/停止中/围栏中，桥断置 paused_bridge_missing，startup_unknown 到点转 indeterminate |
 | `src/infra/sqlite/migrations/003_s2_round3.sql` | 第三轮新增迁移（账本列与索引） |
 | `scripts/fault-inject.ts` | 故障注入取证（1377 行；InjectionCase `ev-g2-01`…`ev-g2-15`，写 `docs/gates/evidence/`，输出时间戳归一） |
 | `scripts/gate-check.ts` | 门检查校验链（2062 行：必过项 / 证据 / 不变量 / 正文表 / 候选 / 哈希 / 结论解析、计数语义与隐藏定义防护） |

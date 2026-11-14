@@ -1219,3 +1219,15 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 测试 `tests/integration/apply-report.spec.ts` 新增 6 例：普通出口 `STALE_HANG`、`uphold_report` 清闸落 done、`uphold_decision` superseded+新 attempt、revision 过期节点不动、新 attempt 被挡、冲突卡不过期。
 - 验证：typecheck 0；定向 61/61；全量 **52 files 713 passed | 1 skipped**；build ESM 164.32kB / gzip 40.86kB、d.ts 14.30kB。
 - 缺口：`confirm_applied` / `confirm_not_applied` 分支尚未实现；`raiseReportContradiction` 尚未接 HTTP 命令与 run-node；uphold 事件与恢复扫描的联动未接；证据待 S3 收口统一重生成。
+
+### 11.74 S3 Task 13：可重入恢复扫描（2026-11-14 19:38）
+
+- `sweep.ts` 改 `SweepParams`：`now`、可选 `clock`、可选 `bridgeMissing`；`SweepResult` 增 `chain_broken`、`startup_unknown_expired`、`bridge_paused`。
+- 恢复前逐节点验 `node_run_events` 哈希链，断链节点进入 `chain_broken` 并整轮跳过，租约扫描也不碰。
+- 优先级 `recoverySkip`：终态、`hang_reason` 非空、`indeterminate_side_effect`、`stopping`、`timing_out`、`paused_bridge_missing`、`startup_unknown` 不被桥断扫描改写。
+- 桥断：只认显式 `bridgeMissing` 信号，`applyTransition` 到 `paused_bridge_missing` 并写 `resume_state=原状态`，事件 `recovery.bridge_missing`；重复扫描不追加。
+- `startup_unknown` 到点：`applyTransition` 转 `indeterminate_side_effect`，清启动未知钟，`bumpRearm`，事件 `recovery.startup_unknown_expired`；重复扫描不再动。
+- 租约扫描改走 `applyTransition`（普通出口带 `hang_reason IS NULL`），并接受 `skipNodeRunIds`。
+- 测试 `tests/integration/sweep.spec.ts` 增 3 例：桥断挂起与幂等、startup_unknown 到点转未知态且不重复、断链节点整轮跳过（临时拆只追加触发器模拟库外破坏）。
+- 验证：typecheck 0；定向 12/12；全量 **52 files 716 passed | 1 skipped**。
+- 缺口：`bridgeMissing` 尚无生产运行时信号源；executor 失联、动作到期、回执过期三类扫描未接；启动锁仅由 SQLite `BEGIN IMMEDIATE` 提供，未加显式 advisory lock；证据待 S3 收口统一重生成。
