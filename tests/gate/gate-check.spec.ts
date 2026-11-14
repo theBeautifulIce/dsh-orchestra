@@ -1589,6 +1589,23 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
     expect(proseVerdictClashes(md, 'pass', ['G1-01']).join('\n')).toMatch(/G1-01/)
   })
 
+  it('攻击行备注格的限定/括号/冒号否决仍拒绝，名词短语不误伤', () => {
+    const report = (remark: string) => head + [
+      '| 用例编号 | 必过项 | 期望 | 备注 |',
+      '| --- | --- | --- | --- |',
+      '| A1 | G1-01 | 拒 | ' + remark + ' |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    for (const remark of ['未通过（本轮）', '本轮未通过', '未通过：证据不足', '不通过（3 项待补）']) {
+      expect(proseVerdictClashes(report(remark), 'pass', ['G1-01']).join('\n'), remark).toMatch(/G1-01/)
+    }
+    for (const remark of ['未通过项为空', '失败项为空']) {
+      expect(proseVerdictClashes(report(remark), 'pass', ['G1-01']), remark).toEqual([])
+    }
+  })
+
   it('必过项要求列里的领域弱词不误伤', () => {
     const md = head + [
       '| 必过项 | 要求 | 结论 |',

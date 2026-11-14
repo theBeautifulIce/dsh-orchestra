@@ -1309,12 +1309,21 @@ function cellWeakFail(folded: string): boolean {
   return CELL_FAIL_VERDICTS_WEAK.includes(folded.toLowerCase())
 }
 
-// 整格只有一个失败裁决词（允许尾随标点）：不管列名叫「结论」「备注」还是别的，
-// 它都不是描述性文字，攻击矩阵不能靠改列名把它豁免掉。
+// 整格只有一个失败裁决词（允许前缀限定、括号说明或冒号理由，允许尾随标点）：
+// 不管列名叫「结论」「备注」还是别的，它都不是描述性文字，攻击矩阵不能靠改列名把它豁免掉。
+// 「未通过项为空」「失败项为空」这类名词短语不算裸裁决。
 function isBareFailureCell(folded: string): boolean {
-  const text = folded.trim().replace(/[。；;，,、.!！?？]+$/g, '').trim().toLowerCase()
+  let text = folded.trim().replace(/[。；;，,、.!！?？]+$/g, '').trim().toLowerCase()
   if (text === '') return false
-  return [...CELL_FAIL_VERDICTS_STRONG, ...CELL_FAIL_VERDICTS_WEAK].some((word) => text === word.toLowerCase())
+  text = text.replace(/^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|本报告|本報告)\s*/, '')
+  for (const word of [...CELL_FAIL_VERDICTS_STRONG, ...CELL_FAIL_VERDICTS_WEAK]) {
+    const target = word.toLowerCase()
+    if (text === target) return true
+    if (!text.startsWith(target)) continue
+    const rest = text.slice(target.length).trim()
+    if (rest !== '' && /^[|：:（(]/.test(rest)) return true
+  }
+  return false
 }
 
 // 失败词被拆到相邻单元格：逐格都干净，拼起来才是“未通过”。
@@ -1686,6 +1695,7 @@ export function proseVerdictClashes(
         if (rejectedAttack && !conclusionCell && !bareFailure) continue
         // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。
         const cellFails = cellFailStatement(cell)
+          || (bareFailure && (rejectedAttack || conclusionCell || hit.length > 0))
           || (!conclusionCell && hit.length > 0 && cellStrongFail(foldForVerdict(cell.text)))
         if (cellFails) {
           clashes.push(hit.length > 0
