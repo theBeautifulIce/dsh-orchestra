@@ -76,22 +76,24 @@ export class BridgeConsumer {
     throw new OrchError('SERVICE_UNAVAILABLE', '补洞超过上限，缺口仍未补齐', { fromSeq })
   }
 
-  // 从持久确认位之后取连续事件：落账成功后才 ACK；onEvent 抛错时停在这里，让上层阻断节点。
+  // 从「已处理位」之后取连续事件：落账与 onEvent 都成功后才推进处理位。
+  // 只落账不处理就推进，会让 onEvent 抛错后重连跳过该事件。
   async drain(): Promise<void> {
     for (;;) {
-      const next = this.ledger.cursor() + 1
+      const next = this.ledger.handled() + 1
       const ev = this.buffer.takeFrom(next).find((candidate) => candidate.seq === next)
       if (!ev) return
       const ingested = this.ledger.ingest(ev)
       await this.onEvent(ev, ingested.ledgerSeq)
-      this.buffer.ack(ingested.ackSeq, ingested.ackSeq)
+      this.ledger.markHandled(ingested.ackSeq)
+      this.buffer.ack(ingested.ackSeq, this.ledger.handled())
     }
   }
 
-  // 等到某个序号完成持久确认；正常收口前必须追平，不能凭内存里的 lastSeq 释放。
+  // 等到某个序号完成处理；正常收口前必须追平，不能凭内存里的 lastSeq 释放。
   async waitPersisted(seq: number, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs
-    while (this.ledger.cursor() < seq) {
+    while (this.ledger.handled() < seq) {
       if (Date.now() >= deadline) return false
       await new Promise((resolve) => setTimeout(resolve, 10))
     }

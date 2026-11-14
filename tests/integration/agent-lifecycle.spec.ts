@@ -60,6 +60,9 @@ describe('AgentLifecycle 故障注入', () => {
       request: async (method) => {
         calls.push(method)
         if (method === 'executor.subscribe') return { subscribed: false } as never
+        if (method === 'executor.cancel') return 'interrupted' as never
+        if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
         return {} as never
       },
       listen: () => { throw new Error('不该 listen') },
@@ -67,6 +70,9 @@ describe('AgentLifecycle 故障注入', () => {
     const h = harness(transport)
     await expect(h.lifecycle.run(new AbortController().signal)).rejects.toMatchObject({ code: 'BRIDGE_NOT_SUBSCRIBED' })
     expect(calls).not.toContain('executor.send')
+    await h.lifecycle.stop()
+    expect(calls.filter((method) => method === 'executor.cancel')).toHaveLength(1)
+    expect(calls.filter((method) => method === 'executor.dispose')).toHaveLength(1)
     h.cleanup()
   })
 
@@ -227,6 +233,7 @@ describe('AgentLifecycle 故障注入', () => {
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
     const exit = once(child, 'exit')
     let disposeCalls = 0
+    let disposedAfterExit = false
 
     const registry = new ToolRegistry()
     registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
@@ -245,7 +252,11 @@ describe('AgentLifecycle 故障注入', () => {
         if (method === 'executor.cancel') { child.kill('SIGKILL'); return 'interrupted' as never }
         if (method === 'executor.whenIdle') { await exit; return { idle: true, timedOut: false } as never }
         if (method === 'executor.state') return { state: child.exitCode === null && child.signalCode === null ? 'running' : 'idle', toolCallSeq: 0, hasToolCall: false } as never
-        if (method === 'executor.dispose') { disposeCalls += 1; return undefined as never }
+        if (method === 'executor.dispose') {
+          disposeCalls += 1
+          disposedAfterExit = child.exitCode !== null || child.signalCode !== null
+          return undefined as never
+        }
         return {} as never
       },
       listen: async function* (_params, signal) {
@@ -274,6 +285,7 @@ describe('AgentLifecycle 故障注入', () => {
       await lifecycle.stop()
       expect(child.exitCode !== null || child.signalCode !== null).toBe(true)
       expect(disposeCalls).toBe(1)
+      expect(disposedAfterExit).toBe(true)
     } finally {
       if (child.exitCode === null) child.kill('SIGKILL')
       db.raw.close()
@@ -320,7 +332,8 @@ describe('AgentLifecycle 故障注入', () => {
     }
     const h = harness(transport, (db) => {
       const ledger = new BridgeLedger(db, TEST_SECRET, { nodeRunId: 'nr1', attempt: 1, executorAgentId: 'agent_1' })
-      ledger.ingest(ev(1, 'step', { kind: 'step' }))
+      const ingested = ledger.ingest(ev(1, 'step', { kind: 'step' }))
+      ledger.markHandled(ingested.ackSeq)
     })
     const envelope = await h.lifecycle.run(new AbortController().signal)
     expect(envelope.report).toMatchObject({ status: 'done' })
@@ -352,6 +365,14 @@ describe('AgentLifecycle 故障注入', () => {
     const envelope = await h.lifecycle.run(new AbortController().signal)
     expect(envelope.report).toMatchObject({ status: 'done' })
     expect(pageFrom).toBe(1)
+    const receipts = h.db.raw.prepare(
+      'SELECT bridge_seq FROM bridge_event_receipts WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ? ORDER BY bridge_seq',
+    ).all('nr1', 1, 'agent_1') as { bridge_seq: number }[]
+    expect(receipts.map((row) => row.bridge_seq)).toEqual([1, 2, 3])
+    const cursor = h.db.raw.prepare(
+      'SELECT last_persisted_ack_seq, last_handled_seq FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+    ).get('nr1', 1, 'agent_1') as { last_persisted_ack_seq: number; last_handled_seq: number }
+    expect(cursor).toEqual({ last_persisted_ack_seq: 3, last_handled_seq: 3 })
     await h.lifecycle.stop()
     h.cleanup()
   })

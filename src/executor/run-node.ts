@@ -387,11 +387,11 @@ async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRu
   const idleOk = idle?.idle === true
   const stateOk = state?.state === 'idle' || state?.state === 'unloaded' || state?.state === 'deleted'
   if (!idleOk || !stateOk) return
-  // 不能拿 0/0 绕过 ACK 滞后保护：按本 attempt 的持久确认位与已落账最大桥序号真实取值。
+  // 不能拿 0/0 绕过 ACK 滞后保护：按本 attempt 的已处理位与已落账最大桥序号真实取值。
   // 若桥事件位仍领先确认位，dispose 会被 BRIDGE_ACK_LAG 拒绝，这正是我们要保留的语义。
   try {
     const ack = deps.db.raw.prepare(
-      'SELECT last_persisted_ack_seq AS n FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+      'SELECT last_handled_seq AS n FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
     ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
     const last = deps.db.raw.prepare(
       'SELECT COALESCE(MAX(bridge_seq), 0) AS n FROM bridge_event_receipts WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',

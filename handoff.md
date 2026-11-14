@@ -1035,3 +1035,14 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - `docs/gates/G2.md`：顶部结论 20 项；必过表补 G2-16；证据表补 ev-g2-16；不变量表补 I12；GateArtifact 的 `must_pass_items`、`evidence`、`invariants` 三处同步；复现命令补桥闭环定向命令。历史段落仍保留当时轮次的“19 项”。
 - 验证：`pnpm typecheck` 0；`pnpm vitest run tests/gate/gate-check.spec.ts` 183 passed | 1 skipped；桥闭环 6 文件 68 passed。
 - 状态：G2 的四个哈希与 artifact_hash 仍是旧值，等第 45 轮独立审计通过后再按 G1→G2 顺序重签；G1/G2 正式门仍绑 `caae193`。
+
+### 11.57 第 45 轮 S1/S2 双 FAIL 与整改（2026-11-14 17:36，待第 46 轮复审）
+
+- S1 对 `3b779b6` 判 FAIL（P0=0/P1=2/P2=5）：P1 是 B06 冷态 5s 超时与 ev-g2-16 的 B01 过度声明；P2 是 B03/B06/B07 证据时序与 B07 dispose 顺序未钉。
+- S2 对同一候选判 FAIL（P0=0/P1=2/P2=4，20 项 13 pass / 7 fail）：P1 是 5/30 证据重跑漂移（`G-05`、`ev-g2-01/08/10/14`）与 G2-16 的 68 tests 不可复现；P2 是 B03 缺账本断言、桥消费先推进持久游标再 `onEvent`。
+- B06 超时根因：`child.kill('SIGKILL')` 之后才挂 `once(child,'exit')`，exit 可能在挂监听前发出；改为 spawn 后立即挂监听，`waitFor(marker,20s)`，kill 后 `await exited`，用例 30s 上限。
+- 取消/停止测试补齐：B01 在 run 失败后真正 `stop()` 并断言 cancel/dispose 各一次；B07 在 dispose 回包里断言 `exitCode/signalCode` 已非空；新增“取租约前已取消不产生 lease_acquired”用例。
+- S2 P2-4 修复：迁移 `010_bridge_handled_seq.sql` 给 `bridge_stream_cursors` 加 `last_handled_seq`；`BridgeLedger` 新增 `handled()`/`markHandled()`；`BridgeConsumer.drain()` 改成 `ingest → onEvent → markHandled → buffer.ack`，重连与 dispose 都从已处理位取值，不再从已落账位跳过未处理事件。
+- 证据重生成：5 份 G2 证据与 `G1/G-14` 按新事件序列/迁移 010 重生成；另发现 `G1/ev-migrate` 指向的 `tests/integration/migrate.spec.ts` 在 R5-B 已变，G1 表哈希一并更新。
+- 验证：typecheck 0；6 文件桥闭环 **70 passed**；全量 41 文件 **607 passed | 1 skipped**；build 成功（ESM 149.00kB / gzip 37.18kB、d.ts 14.00kB）；gate 定向 183 passed | 1 skipped。
+- 状态：G2 仍绑旧审计，pre-sign gate-check 预期失败；本轮候选只为第 46 轮 S1/S2 复审，审计 pass 后再按 G1→G2 重签。

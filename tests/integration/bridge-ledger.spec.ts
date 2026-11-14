@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { rmSync } from 'node:fs'
 import { BridgeEventBuffer, type BridgeEvent } from '../../src/executor/bridge.ts'
+import { BridgeConsumer } from '../../src/executor/bridge-consumer.ts'
 import { BridgeLedger } from '../../src/executor/bridge-ledger.ts'
+import { OrchError } from '../../src/core/errors.ts'
 import { openDb, type Db } from '../../src/infra/sqlite/driver.ts'
 import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 
@@ -162,5 +164,30 @@ describe('R5-B 桥事件落账', () => {
     expect(oldAttempt.cursor()).toBe(1)
     expect(newAttempt.cursor()).toBe(1)
     expect(count(db, 'SELECT COUNT(*) AS n FROM bridge_event_receipts')).toBe(2)
+  })
+
+  it('onEvent 失败只推进已落账位：重连从已处理位重放，不跳过该事件', async () => {
+    const { dir, db } = freshLedger()
+    dirs.push(dir)
+    dbs.push(db)
+    seed(db)
+    const ledger = ledgerFor(db)
+    const buf = new BridgeEventBuffer(
+      { limitBytes: 8192, highWaterBytes: 4096, spillDir: dir, agentId: 'a1' },
+      { lastPersistedAckSeq: ledger.handled(), lookupPersisted: (seq) => ledger.lookup(seq) },
+    )
+    let calls = 0
+    const consumer = new BridgeConsumer({} as never, buf, ledger, async () => {
+      calls += 1
+      if (calls === 1) throw new OrchError('SERVICE_UNAVAILABLE', '宿主暂不可用')
+    })
+    await expect(consumer.receive(ev(1))).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(ledger.cursor()).toBe(1)
+    expect(ledger.handled()).toBe(0)
+    await consumer.receive(ev(1))
+    expect(calls).toBe(2)
+    expect(ledger.cursor()).toBe(1)
+    expect(ledger.handled()).toBe(1)
+    expect(count(db, 'SELECT COUNT(*) AS n FROM bridge_event_receipts')).toBe(1)
   })
 })

@@ -354,9 +354,14 @@ describe('生产路径跑通单节点', () => {
       join(process.cwd(), 'tests/fixtures/crash-collector-child.ts'),
       join(dir, 'orchestra.db'), marker, 'nrun_1', 's3cr3t-runtime', dir,
     ], { cwd: process.cwd(), stdio: 'ignore' })
-    await waitFor(() => existsSync(marker), 5_000)
+    // exit 监听必须在 kill 之前就挂上：SIGKILL 后 exit 可能在下一行 await 之前发出，
+    // 事后挂 once 会永远等不到，表现为随机 5s/30s 超时。
+    const exited = once(child, 'exit')
+    // 干净克隆首次启动子进程会被杀软/文件缓存拖慢，默认 5s 会抖动；
+    // 只放宽等待与用例时限，不改断言语义。
+    await waitFor(() => existsSync(marker), 20_000)
     child.kill('SIGKILL')
-    await once(child, 'exit')
+    await exited
     expect(readFileSync(marker, 'utf8')).toBe('ran')
 
     const collector = new EvidenceCollector({
@@ -368,6 +373,27 @@ describe('生产路径跑通单节点', () => {
       .rejects.toMatchObject({ code: 'EVIDENCE_SOURCE_UNAVAILABLE' })
     // 重放没有再次触发宿主工具：副作用只有一次。
     expect(readFileSync(marker, 'utf8')).toBe('ran')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  }, 30_000)
+
+  it('入口已取消：在取租约之前拒绝，不产生 lease_acquired 事件', async () => {
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([])
+    const controller = new AbortController()
+    controller.abort('cancel:interrupted')
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner, cancelSignal: controller.signal },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(nodeRow(orchestra.db).status).toBe('queued')
+    const leased = orchestra.db.raw.prepare(
+      "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='lease_acquired'",
+    ).get() as { n: number }
+    expect(Number(leased.n)).toBe(0)
     await release()
     rmSync(dir, { recursive: true, force: true })
   })

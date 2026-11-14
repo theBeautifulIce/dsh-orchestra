@@ -19,6 +19,7 @@ export type BridgeIngestResult = {
 }
 
 type CursorRow = { last_persisted_ack_seq: number }
+type HandledRow = { last_persisted_ack_seq: number; last_handled_seq: number }
 type ReceiptRow = { payload_hash: string; ledger_seq: number }
 
 export class BridgeLedger {
@@ -32,12 +33,40 @@ export class BridgeLedger {
     this.key = key
   }
 
-  // 重启后唯一可信的恢复点；没有记录就是 0
+  // 已落账位：事件、receipt、游标在同一笔事务里提交后推进。
   cursor(): number {
     const row = this.db.raw.prepare(
       'SELECT last_persisted_ack_seq FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
     ).get(this.key.nodeRunId, this.key.attempt, this.key.executorAgentId) as CursorRow | undefined
     return Number(row?.last_persisted_ack_seq ?? 0)
+  }
+
+  // 已处理位：onEvent 返回后才推进；断线重连必须从这里重放，不能从 cursor() 重放。
+  handled(): number {
+    const row = this.db.raw.prepare(
+      'SELECT last_handled_seq FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+    ).get(this.key.nodeRunId, this.key.attempt, this.key.executorAgentId) as { last_handled_seq: number } | undefined
+    return Number(row?.last_handled_seq ?? 0)
+  }
+
+  // 只允许在已落账范围内向前推进，且必须单独成事务提交。
+  markHandled(seq: number): void {
+    withTx(this.db, (tx) => {
+      const row = tx.get<HandledRow>(
+        'SELECT last_persisted_ack_seq, last_handled_seq FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+        [this.key.nodeRunId, this.key.attempt, this.key.executorAgentId],
+      )
+      const persisted = Number(row?.last_persisted_ack_seq ?? 0)
+      const handled = Number(row?.last_handled_seq ?? 0)
+      if (seq > persisted) {
+        throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '处理位不能越过已落账位', { seq, persisted })
+      }
+      if (seq <= handled) return
+      tx.run(
+        'UPDATE bridge_stream_cursors SET last_handled_seq = ?, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+        [seq, new Date().toISOString(), this.key.nodeRunId, this.key.attempt, this.key.executorAgentId],
+      )
+    })
   }
 
   // 重启后按桥序号回查已落账事件；只认本 attempt/agent 的 receipt，旧 attempt 不串读

@@ -75,7 +75,7 @@ export class AgentLifecycle {
       nowAt: deps.nowAt,
       clock: deps.clock,
     })
-    const cursor = this.ledger.cursor()
+    const cursor = this.ledger.handled()
     this.buffer = new BufferImpl({
       agentId: deps.agent.agentId,
       attempt: deps.attempt,
@@ -103,7 +103,7 @@ export class AgentLifecycle {
   }
 
   get cursor(): number {
-    return this.ledger.cursor()
+    return this.ledger.handled()
   }
 
   get lastSeq(): number {
@@ -130,7 +130,7 @@ export class AgentLifecycle {
     void aborted.catch(() => {})
     const guarded = <T>(task: Promise<T>): Promise<T> => Promise.race([task, aborted])
     try {
-      const fromSeq = this.ledger.cursor()
+      const fromSeq = this.ledger.handled()
       const subscribed = await guarded(this.deps.client.subscribe({
         executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq,
       }))
@@ -171,7 +171,7 @@ export class AgentLifecycle {
     let lastError: unknown = null
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (signal.aborted) return
-      const fromSeq = this.ledger.cursor()
+      const fromSeq = this.ledger.handled()
       try {
         const stream = this.deps.client.listen(
           { executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq },
@@ -271,7 +271,7 @@ export class AgentLifecycle {
     // 服务端确认位没追平桥事件位时，dispose 会拒绝；这是有意的，不能提前放掉宿主。
     await this.bounded(this.deps.client.dispose({
       executorAgentId: this.agentId,
-      serviceAckSeq: this.ledger.cursor(),
+      serviceAckSeq: this.ledger.handled(),
       bridgeLastSeq: this.buffer.lastSeq,
     }), 'dispose')
     this.buffer.cleanupSpill()
@@ -297,7 +297,7 @@ export class AgentLifecycle {
       void this.flush(5_000).then((persisted) => {
         if (persisted) this.waiter?.resolve({ report, evidence: this.collector.lastEvidence })
         else this.waiter?.reject(new OrchError('SERVICE_UNAVAILABLE', 'Agent 报告未落账，不能收口', {
-          lastSeq: this.buffer.lastSeq, cursor: this.ledger.cursor(),
+          lastSeq: this.buffer.lastSeq, cursor: this.ledger.handled(),
         }))
       }, (err: unknown) => { this.waiter?.reject(err) })
     }
