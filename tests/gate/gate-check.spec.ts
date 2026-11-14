@@ -1408,4 +1408,72 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
     const md = head + '\n上一轮 P1-1 未通过，本轮已修好；必过项逐项核对通过。\n\n结论：pass。\n'
     expect(proseVerdictClashes(md, 'pass', items)).toEqual([])
   })
+
+  it('A4：表格把必过项写成未通过要拒绝', () => {
+    const md = head + [
+      '| 必过项 | 结果 |',
+      '| --- | --- |',
+      '| G2-11 | 未通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    const clashes = proseVerdictClashes(md, 'pass', items)
+    expect(clashes.join('\n')).toMatch(/G2-11/)
+    expect(clashes.join('\n')).toMatch(/表格/)
+  })
+
+  it('A5：表格结论列与裁决相反要拒绝', () => {
+    const md = head + [
+      '| 编号 | 结论 | 说明 |',
+      '| --- | --- | --- |',
+      '| G2-06 | fail | 证据缺一份 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    const clashes = proseVerdictClashes(md, 'pass', items)
+    expect(clashes.join('\n')).toMatch(/表格结论与裁决 pass 冲突/)
+  })
+
+  it('历史审计轮次表不误伤，本轮/未来轮次的 fail 仍拒绝', () => {
+    const history = head + [
+      '| 审计轮次 | 历史结论 |',
+      '| --- | --- |',
+      '| Round 35 | fail |',
+      '| Round 36 | pass |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(history, 'pass', items, { auditRound: 36 })).toEqual([])
+    const future = history.replace('Round 35 | fail', 'Round 37 | fail')
+    expect(proseVerdictClashes(future, 'pass', items, { auditRound: 36 }).join('\n')).toMatch(/表格结论与裁决 pass 冲突/)
+  })
+
+  it('fail 裁决下必过项与表格的失败描述不产生自相矛盾告警', () => {
+    const md = head + [
+      '本报告复核 G2-11，G2-11 未通过。',
+      '',
+      '| 必过项 | 结论 |',
+      '| --- | --- |',
+      '| G2-11 | fail |',
+      '',
+      '结论：fail。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'fail', items)).toEqual([])
+  })
+
+  it('故障场景表里的「失败」不是本轮裁决，不误伤', () => {
+    const md = head + [
+      '| 场景 | 结果 |',
+      '| --- | --- |',
+      '| subscribe 失败 | 已注入并通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'pass', items)).toEqual([])
+  })
 })

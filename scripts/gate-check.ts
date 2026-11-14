@@ -545,6 +545,7 @@ const AUDIT_MARKDOWN = new MarkdownIt({ html: true, linkify: false, typographer:
 export interface AuditCell {
   text: string
   tableIndex: number
+  rowIndex: number
   columnIndex: number
   header: string
   // 表头单元格只提供列名，既不是散文也不是结论格。
@@ -591,10 +592,10 @@ function renderedAuditWithCells(text: string): RenderedAudit | null {
         // 表头行只记列名，不参与裁决判定。
         const table = (tableHeaders[tableIndex] ??= {})
         table[columnIndex] = table[columnIndex] ? table[columnIndex] + ' ' + norm : norm
-        cells.push({ text: norm, tableIndex, columnIndex, header: '', headerOnly: true })
+        cells.push({ text: norm, tableIndex, rowIndex, columnIndex, header: '', headerOnly: true })
         continue
       }
-      cells.push({ text: norm, tableIndex, columnIndex, header: tableHeaders[tableIndex]?.[columnIndex] ?? '' })
+      cells.push({ text: norm, tableIndex, rowIndex, columnIndex, header: tableHeaders[tableIndex]?.[columnIndex] ?? '' })
     }
     buffer = ''
     paragraphHasLink = false
@@ -1280,7 +1281,8 @@ const CELL_FAIL_VERDICTS_WEAK = [
   'noncompliant', 'unready', 'not ready',
 ]
 // 结论列的列名归一：这些列里的值就是结论本身。
-const VERDICT_COLUMN_RE = /^(?:结果|結果|结论|結論|判定|裁决|裁決|状态|狀態|verdicts?|conclusions?|results?|outcomes?|status|grade|是否通过|通過與否)$/i
+// 允许「历史结论/本轮结论」这类前缀：历史行另有整行豁免，前缀不影响当前行判定。
+const VERDICT_COLUMN_RE = /^(?:(?:历史|歷史|本轮|本輪|当前|當前|本次|当期|當期|审计|審計)\s*)?(?:结果|結果|结论|結論|判定|裁决|裁決|状态|狀態|verdicts?|conclusions?|results?|outcomes?|status|grade|是否通过|通過與否)$/i
 // 非结论列里只有出现显式结论标记才按结论判。
 const CELL_CONCLUSION_MARKER_RE = /(?:结论|結論|判定|审计意见|审计结论|最终结论|verdict|conclusion|outcome|result)s?\s*[：:—–-]/i
 
@@ -1438,17 +1440,57 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   return verdict
 }
 
+// 表格里的历史审计记录不是本轮结论（S2 第三十七轮 P0-02）：
+// 轮次列 + 轮次数字，且没有「本轮/当前轮」标记，才按历史行跳过。
+// 给了当前轮次时只认严格更早的轮次，防止把「Round 37 | fail」藏进历史表。
+function tableRoundNumber(cell: AuditCell): number | null {
+  const text = cell.text.trim()
+  const m = /^(?:第\s*)?(\d{1,3})\s*轮$/i.exec(text) ?? /^round\s*(\d{1,3})(?:\s+audit)?$/i.exec(text)
+  if (m) return Number(m[1])
+  if (/轮次|轮|round|审计|history|历史/i.test(cell.header) && /^\d{1,3}$/.test(text)) return Number(text)
+  return null
+}
+
+function historicalTableRows(cells: AuditCell[], auditRound?: number): Set<string> {
+  const rows = new Map<string, AuditCell[]>()
+  for (const cell of cells) {
+    const key = String(cell.tableIndex) + ':' + String(cell.rowIndex)
+    const list = rows.get(key)
+    if (list) list.push(cell)
+    else rows.set(key, [cell])
+  }
+  const historical = new Set<string>()
+  for (const [key, row] of rows) {
+    const text = row.map((cell) => cell.text).join(' | ')
+    // 自己写了「本轮/当前轮」的行不能按历史放行。
+    if (/本轮|本輪|当前轮|當前輪|本次审计|本次審計|this\s+round|current\s+round/i.test(text)) continue
+    const rounds = row.map(tableRoundNumber).filter((n): n is number => n !== null)
+    if (rounds.length === 0) continue
+    if (!row.some((cell) => /轮次|轮|round|审计|history|历史|previous/i.test(cell.header))) continue
+    const newest = Math.max(...rounds)
+    if (auditRound === undefined || newest < auditRound) historical.add(key)
+  }
+  return historical
+}
+
 // 裁决块写 pass 时正文不能同时唱反调（S2 第三十五轮 P2-1）：
 // 以前只在 auditConclusionOf 返回非 null 时才比对，正文写成「两行结论」或「某项未通过」时
-// 该函数返回 null，一致性检查被静默跳过，改正文就能签过门。这里独立扫三类背离：
-// 结论行不唯一、结论行与裁决相反、必过项在正文里被写成未通过。
-export function proseVerdictClashes(text: string, verdict: 'pass' | 'fail', requiredItems: string[]): string[] {
+// 该函数返回 null，一致性检查被静默跳过，改正文就能签过门。这里独立扫四类背离：
+// 结论行不唯一、结论行与裁决相反、必过项在散文里被写成未通过、
+// 表格单元格（结论列/必过项/显式结论标记）与裁决相反（S2 第三十六轮 A4/A5）。
+// 必过项与表格扫描只在 verdict === 'pass' 时执行：fail 裁决下这些内容不构成矛盾（P2-2）。
+export function proseVerdictClashes(
+  text: string,
+  verdict: 'pass' | 'fail',
+  requiredItems: string[],
+  opts: { auditRound?: number } = {},
+): string[] {
   const clashes: string[] = []
   if (hiddenDefinitionFailure(text)) return ['正文藏着看不见的判定']
   const rendered = renderedAuditWithCells(text)
   if (rendered === null) return ['正文渲染失败，无法核对结论']
   const visible = rendered.lines.map(stripHistoricalAuditSentence)
-  const { prose } = splitProseAndCells(visible, rendered.cells)
+  const { prose, tableCells } = splitProseAndCells(visible, rendered.cells)
   const strictLead = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)/i
   const englishLead = /^(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail)\b/i
   const bareLead = /^(?:pass|fail|通过|不通过)$/i
@@ -1460,14 +1502,41 @@ export function proseVerdictClashes(text: string, verdict: 'pass' | 'fail', requ
   }
   if (seen.length > 1) clashes.push('正文出现 ' + String(seen.length) + ' 条结论行（' + seen.join('、') + '），结论必须唯一')
   else if (seen.length === 1 && seen[0] !== verdict) clashes.push('正文结论行是 ' + String(seen[0]) + '，裁决是 ' + verdict)
-  for (const line of prose) {
-    const hit = requiredItems.filter((id) => line.includes(id))
-    if (hit.length === 0) continue
-    if (lineFailure(line) || visibleFailStatement(line, { bareConclusion: 'any' })) {
-      clashes.push('正文把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict))
+  if (verdict === 'pass') {
+    for (const line of prose) {
+      const hit = requiredItems.filter((id) => line.includes(id))
+      if (hit.length === 0) continue
+      if (lineFailure(line) || visibleFailStatement(line, { bareConclusion: 'any' })) {
+        clashes.push('正文把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict))
+      }
+    }
+    // 表格单元格以前整批被丢掉，A4/A5 因此能签过（S2 第三十六轮 P2-1）。
+    // 只判三类格：结论列、带显式结论标记的格、点名必过项的格；领域词与故障场景不误伤。
+    // 必过项可能写在同行另一格（A4：必过项 G2-11 | 结果 未通过），所以按整行收集命中的 id。
+    const historical = historicalTableRows(tableCells, opts.auditRound)
+    const rows = new Map<string, AuditCell[]>()
+    for (const cell of tableCells) {
+      const key = String(cell.tableIndex) + ':' + String(cell.rowIndex)
+      const list = rows.get(key)
+      if (list) list.push(cell)
+      else rows.set(key, [cell])
+    }
+    for (const [key, row] of rows) {
+      if (historical.has(key)) continue
+      const rowText = row.map((cell) => cell.text).join(' | ')
+      const hit = requiredItems.filter((id) => rowText.includes(id))
+      for (const cell of row) {
+        const conclusionCell = isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text)
+        if (hit.length === 0 && !conclusionCell) continue
+        if (cellFailStatement(cell) || visibleFailStatement(cell.text, { bareConclusion: 'any' })) {
+          clashes.push(hit.length > 0
+            ? '审计报告表格把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict)
+            : '审计报告表格结论与裁决 ' + String(verdict) + ' 冲突：' + cell.text.slice(0, 60))
+        }
+      }
     }
   }
-  return clashes
+  return [...new Set(clashes)]
 }
 
 // 门记录正文顶部的结论行必须与 GateArtifact 的 conclusion 一致：
@@ -2134,7 +2203,7 @@ function checkAuditAnchor(artifact: Record<string, unknown>, spec: GateSpec, roo
     if (problems.length > 0) throw new Error('审计报告的结构化裁决不通过：' + problems.join('；'))
     // 裁决与正文自述不能互相打脸（第三十四轮 P2-1 / 第三十五轮 P2-1）：
     // 正文写 fail 要拦，正文写多行结论或把必过项写成未通过同样要拦——这些情况以前返回 null 就被跳过了。
-    const clashes = proseVerdictClashes(text, parsed.verdict.conclusion, spec.items)
+    const clashes = proseVerdictClashes(text, parsed.verdict.conclusion, spec.items, { auditRound: Number(artifact.audit_round) })
     if (clashes.length > 0) {
       throw new Error('审计报告正文与结构化裁决不一致：' + clashes.join('；') + '（' + report + '）')
     }
