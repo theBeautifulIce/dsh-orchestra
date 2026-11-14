@@ -308,6 +308,8 @@ export function startSubworkflowNode(
     resumeFrom: p.resumeFrom,
     now: p.now,
   })
+  // 子流程父节点是纯控制节点：它的状态只表达调度的结果，不能把子运行里的副作用算到自己头上
+  tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = ?", [p.nodeRunId])
   applyTransition(tx, {
     nodeRunId: p.nodeRunId,
     from: ['started'],
@@ -335,8 +337,18 @@ function isRunTerminal(status: string): boolean {
   return (RUN_TERMINAL as readonly string[]).includes(status)
 }
 
+const NODE_TERMINAL = [
+  'done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified',
+  'orphaned', 'superseded', 'cancelled',
+] as const
+
+const CHILD_SUCCESS = ['succeeded', 'succeeded_with_unverified', 'done'] as const
+const CHILD_CANCELLED = ['superseded', 'cancelled'] as const
+
 /**
- * 子运行落终态后唤醒父节点。只允许 waiting→dispatched；重复调用在看到 dispatched 时幂等返回。
+ * 子运行落终态后收口父控制节点。
+ * 父节点在 waiting 时按子 run 终态映射 done/failed/superseded，不能一律当成功；
+ * 已终态或已取消的父节点直接幂等返回，让 sweep 继续收口父 run。
  */
 export function finishSubworkflowChild(
   tx: Tx,
@@ -354,8 +366,41 @@ export function finishSubworkflowChild(
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '子运行没有父节点，不能唤醒', { childRunId: p.childRunId })
   }
   const node = loadNodeRun(tx, child.parent_node_run_id)
-  if (node.status === 'done') {
+  if ((NODE_TERMINAL as readonly string[]).includes(node.status)) {
     return { parentNodeRunId: node.node_run_id, status: node.status }
+  }
+  // 旧数据里父节点可能已经被取消围栏推进到 timing_out/stopping：为它补一个终态出口，
+  // 不能因为取消路径和唤醒路径互斥而把父 run 永久悬空。
+  if (node.status === 'timing_out') {
+    applyTransition(tx, {
+      nodeRunId: node.node_run_id,
+      from: ['timing_out'],
+      to: 'timeout',
+      attempt: node.attempt,
+      now: p.now,
+    })
+    appendNodeRunEvent(tx, secret, node.node_run_id, 'subworkflow.finished', {
+      child_run_id: p.childRunId,
+      child_status: child.status,
+      parent_status: 'timeout',
+    })
+    return { parentNodeRunId: node.node_run_id, status: 'timeout' }
+  }
+  if (node.status === 'stopping') {
+    applyTransition(tx, {
+      nodeRunId: node.node_run_id,
+      from: ['stopping'],
+      to: 'abandoned_unverified',
+      attempt: node.attempt,
+      now: p.now,
+      allowHung: true,
+    })
+    appendNodeRunEvent(tx, secret, node.node_run_id, 'subworkflow.finished', {
+      child_run_id: p.childRunId,
+      child_status: child.status,
+      parent_status: 'abandoned_unverified',
+    })
+    return { parentNodeRunId: node.node_run_id, status: 'abandoned_unverified' }
   }
   if (node.status !== 'waiting') {
     throw new OrchError('STALE_GENERATION', '父节点不在等待中，不能被子流程唤醒', {
@@ -363,21 +408,31 @@ export function finishSubworkflowChild(
       status: node.status,
     })
   }
+  const target: 'done' | 'failed' | 'superseded' =
+    (CHILD_SUCCESS as readonly string[]).includes(child.status) ? 'done'
+      : (CHILD_CANCELLED as readonly string[]).includes(child.status) ? 'superseded'
+        : 'failed'
   applyTransition(tx, {
     nodeRunId: node.node_run_id,
     from: ['waiting'],
-    to: 'done',
+    to: target,
     attempt: node.attempt,
     now: p.now,
-    // 子流程父节点也是控制节点：子运行终态即完成，不再排队重派（M-63）
-    context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true, controlCompletion: true },
+    context: {
+      hasToolCall: false,
+      cancelResult: null,
+      hangReason: null,
+      sideEffectVerifiedNone: true,
+      controlCompletion: true,
+    },
     patch: { wait_started_at: null, lease_id: null, lease_expires_at: null },
   })
   appendNodeRunEvent(tx, secret, node.node_run_id, 'subworkflow.finished', {
     child_run_id: p.childRunId,
     child_status: child.status,
+    parent_status: target,
   })
-  return { parentNodeRunId: node.node_run_id, status: 'done' }
+  return { parentNodeRunId: node.node_run_id, status: target }
 }
 
 export type PropagateCancelParams = {

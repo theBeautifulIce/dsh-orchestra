@@ -27,14 +27,14 @@ function baseContext(rule: TransitionRule): TransitionContext {
   if (rule.id === 'M-27') ctx.cancelResult = 'not_interruptible'
   if (rule.id === 'M-29' || rule.id === 'M-30') ctx.cancelResult = 'already_stopped'
   if (rule.id === 'M-61') ctx.hasToolCall = true
-  if (rule.id === 'M-63') ctx.controlCompletion = true
+  if (rule.id === 'M-63' || rule.id === 'M-64' || rule.id === 'M-65') ctx.controlCompletion = true
   return ctx
 }
 
-describe('M-01…M-63 迁移规则表', () => {
-  it('63 个迁移用例 id 全覆盖，60 条状态规则 + 2 条建行 + 1 条挂起闸门', () => {
-    expect(new Set(MIGRATION_CASE_IDS).size).toBe(63)
-    expect(TRANSITIONS).toHaveLength(60)
+describe('M-01…M-65 迁移规则表', () => {
+  it('65 个迁移用例 id 全覆盖，62 条状态规则 + 2 条建行 + 1 条挂起闸门', () => {
+    expect(new Set(MIGRATION_CASE_IDS).size).toBe(65)
+    expect(TRANSITIONS).toHaveLength(62)
     expect(CREATION_RULES).toHaveLength(2)
     expect(HANG_GUARD.id).toBe('M-56')
     const covered = [
@@ -42,7 +42,7 @@ describe('M-01…M-63 迁移规则表', () => {
       ...CREATION_RULES.map((r) => r.id),
       HANG_GUARD.id,
     ]
-    expect(new Set(covered).size).toBe(63)
+    expect(new Set(covered).size).toBe(65)
     expect([...covered].sort()).toEqual([...MIGRATION_CASE_IDS].sort())
   })
 

@@ -8,6 +8,7 @@ import { applyTransition } from './commands/nodes.ts'
 import { applyReport } from './commands/apply-report.ts'
 import { sweepWaitTimeouts } from './commands/wait.ts'
 import { finishSubworkflowChild } from './commands/subworkflow.ts'
+import { closeRun } from './commands/run-close.ts'
 import { activeDecision, openDecision } from './commands/decisions.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import type { Report } from '../core/report.ts'
@@ -56,8 +57,10 @@ export type SweepResult = {
   // 在途命令超时收成 rejected；回执过期清掉 receipt_json
   operations_timed_out: number
   receipts_expired: number
-  // 子 run 已收口但父节点还挂在 waiting：由维护扫描推进父节点
+  // 子 run 已收口但父节点还挂在 waiting/timing_out/stopping：由维护扫描推进父节点
   subworkflow_finished: string[]
+  // 本轮扫描把“所有节点已终态”的运行推进到 run 终态
+  runs_closed: string[]
   scanned_at: string
 }
 
@@ -326,21 +329,27 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
 
     const subworkflowFinished: string[] = []
-    const finishedChildren = tx.all<{ run_id: string; parent_node_run_id: string }>(
-      'SELECT r.run_id, r.parent_node_run_id FROM runs r JOIN node_runs n ON n.node_run_id = r.parent_node_run_id '
-      + "WHERE r.parent_node_run_id IS NOT NULL AND n.status = 'waiting' AND r.status IN "
+    const finishedChildren = tx.all<{ run_id: string; parent_run_id: string | null; parent_node_run_id: string }>(
+      'SELECT r.run_id, r.parent_run_id, r.parent_node_run_id FROM runs r JOIN node_runs n ON n.node_run_id = r.parent_node_run_id '
+      + "WHERE r.parent_node_run_id IS NOT NULL AND n.status IN ('waiting', 'timing_out', 'stopping') AND r.status IN "
       + "('succeeded', 'succeeded_with_unverified', 'done', 'failed', 'failed_with_unverified', 'timeout', 'abandoned_unverified', 'orphaned', 'superseded', 'cancelled')",
     )
     for (const child of finishedChildren) {
       try {
         const out = finishSubworkflowChild(tx, secret, { childRunId: child.run_id, now: params.now })
-        if (out.status === 'done') subworkflowFinished.push(out.parentNodeRunId)
+        if (out.status !== 'waiting') subworkflowFinished.push(out.parentNodeRunId)
+        if (child.parent_run_id) closeRun(tx, child.parent_run_id, params.now)
       } catch {
         // 并发已推进这个父节点：跳过，不把整轮扫描拖垮
       }
     }
 
     const receipts = sweepInboxReceipts(tx, params.now)
+    // 控制节点链路不依赖宿主再发一次空 dispatch：每轮扫描对“节点全终态”的 run 统一收口。
+    const runsClosed: string[] = []
+    for (const row of tx.all<{ run_id: string }>("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id")) {
+      if (closeRun(tx, row.run_id, params.now)) runsClosed.push(row.run_id)
+    }
 
     return {
       lease_expired: leaseExpired,
@@ -358,6 +367,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       operations_timed_out: receipts.timedOut,
       receipts_expired: receipts.expired,
       subworkflow_finished: subworkflowFinished,
+      runs_closed: runsClosed,
       scanned_at: params.now,
     }
   })

@@ -8,6 +8,7 @@ import {
   type SubworkflowEdge,
 } from '../../src/service/commands/subworkflow.ts'
 import { assertRunCanTerminal } from '../../src/service/commands/parallel.ts'
+import { closeRun } from '../../src/service/commands/run-close.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'subworkflow-secret'
@@ -197,6 +198,35 @@ describe('子运行 pin、深度与唤醒', () => {
         'SELECT status, lease_id FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
       )).toEqual({ status: 'done', lease_id: null })
       expect(finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW }).status).toBe('done')
+    })
+  })
+
+  it('失败子运行收口父节点为 failed，父 run 不冒充成功', () => {
+    const db = memoryDb()
+    const c = catalog()
+    withTx(db, (tx) => {
+      const child = startSubworkflowNode(tx, SECRET, c, {
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+      })
+      tx.run("UPDATE runs SET status = 'failed_with_unverified' WHERE run_id = ?", [child.run_id])
+      const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
+      expect(out.status).toBe('failed')
+      expect(closeRun(tx, 'r1', NOW)).toBe('failed')
+    })
+  })
+
+  it('取消的子运行收口父节点为 superseded，父 run 落 cancelled', () => {
+    const db = memoryDb()
+    const c = catalog()
+    withTx(db, (tx) => {
+      const child = startSubworkflowNode(tx, SECRET, c, {
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+      })
+      tx.run("UPDATE runs SET status = 'cancelled', cancel_requested_at = ? WHERE run_id = ?", [NOW, child.run_id])
+      tx.run("UPDATE runs SET cancel_requested_at = ?, cancel_result = 'interrupted' WHERE run_id = 'r1'", [NOW])
+      const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
+      expect(out.status).toBe('superseded')
+      expect(closeRun(tx, 'r1', NOW)).toBe('cancelled')
     })
   })
 })

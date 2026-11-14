@@ -73,6 +73,18 @@ const lateReport = (id = 'nr_sw') => ({
 })
 
 describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
+  it('节点全部终态但 run 还 running 时，扫描自己收口 run，不靠空 dispatch', () => {
+    const { db } = freshLedger()
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t1', '收口', 'running', 1, ?, ?)", [NOW, NOW])
+      tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('r1', 't1', 'running', 1, ?, ?)", [NOW, NOW])
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('nr_done', 'r1', 'n_done', 1, 'agent', 1, 'done', 2, 'pure', ?, ?)", [NOW, NOW])
+    })
+    const result = sweep(db, TEST_SECRET, { now: NOW })
+    expect(result.runs_closed).toContain('r1')
+    expect((db.raw.prepare("SELECT status FROM runs WHERE run_id='r1'").get() as { status: string }).status).toBe('succeeded')
+  })
+
   it('围栏立着时再收 unknown：状态不动、围栏还在，宽限到点才撤围栏回 stopping', () => {
     const db = setup()
     const first = cancel(db, 'interrupted')
@@ -353,7 +365,8 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
   it('子运行以真实成功终态收口但父节点仍 waiting：维护扫描推进父节点', () => {
     const db = setup()
     withTx(db, (tx) => {
-      tx.run("UPDATE node_runs SET status='waiting', wait_started_at=? WHERE node_run_id='nr_sw'", [NOW])
+      tx.run("UPDATE node_runs SET status='waiting', wait_started_at=?, side_effect_policy='pure' WHERE node_run_id='nr_sw'", [NOW])
+      tx.run("UPDATE node_runs SET status='done', side_effect_policy='pure' WHERE node_run_id='nr1'")
       tx.run(
         "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, parent_run_id, parent_node_run_id, status, revision, created_at, updated_at) " +
           "VALUES ('r_child','t1','wf',1,'r1','nr_sw','succeeded',1,?,?)",
@@ -363,6 +376,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     const out = sweep(db, TEST_SECRET, { now: NOW })
     expect(out.subworkflow_finished).toContain('nr_sw')
     expect(row(db).status).toBe('done')
+    expect((db.raw.prepare("SELECT status FROM runs WHERE run_id='r1'").get() as { status: string }).status).toBe('succeeded')
     expect(evCount(db, 'subworkflow.finished')).toBe(1)
   })
 })

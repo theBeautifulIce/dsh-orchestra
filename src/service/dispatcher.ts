@@ -137,6 +137,7 @@ async function dispatchControlNode(
     const now = p.now
     if (control.kind === 'wait') {
       inTx(deps.db, (tx) => {
+        tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = ?", [row.node_run_id])
         const current = loadNodeRun(tx, row.node_run_id)
         transitionNode(tx, deps.secret, {
           nodeRunId: row.node_run_id,
@@ -166,6 +167,7 @@ async function dispatchControlNode(
       throw new Error('subworkflow 节点缺少工作流目录，不能固定子流程版本')
     }
     const child = inTx(deps.db, (tx) => {
+      tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = ?", [row.node_run_id])
       const current = loadNodeRun(tx, row.node_run_id)
       transitionNode(tx, deps.secret, {
         nodeRunId: row.node_run_id,

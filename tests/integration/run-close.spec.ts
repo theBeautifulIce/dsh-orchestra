@@ -55,6 +55,17 @@ describe('运行终态收口', () => {
     expect(runStatus(db)).toBe('running')
   })
 
+  it('取消过的运行即使节点全 done 也落 cancelled，不冒充成功', () => {
+    const db = setup()
+    setNode(db, { status: 'done', side_effect_policy: 'pure' })
+    withTx(db, (tx) => tx.run(
+      "UPDATE runs SET cancel_requested_at = ?, cancel_result = 'interrupted' WHERE run_id = 'r1'",
+      [NOW],
+    ))
+    expect(withTx(db, (tx) => closeRun(tx, 'r1', NOW))).toBe('cancelled')
+    expect(runStatus(db)).toBe('cancelled')
+  })
+
   it('幂等：已终态再调返回 null，不追加事件', () => {
     const db = setup()
     setNode(db, { status: 'done', side_effect_policy: 'pure' })

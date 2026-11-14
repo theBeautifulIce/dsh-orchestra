@@ -72,6 +72,8 @@ export type TransitionTrigger =
   | 'wait-entered'
   | 'wait-event'
   | 'wait-completed'
+  | 'control-failed'
+  | 'control-cancelled'
   | 'wait-timeout'
   | 'action-timeout-interrupted'
   | 'timing-out-pure'
@@ -161,6 +163,9 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-21', from: ['waiting'], to: ['dispatched'], trigger: 'wait-event' },
   // 等待/子流程这类控制节点没有可恢复的宿主执行实例：控制条件满足即完成，不能再排队重派
   { id: 'M-63', from: ['waiting'], to: ['done'], trigger: 'wait-completed', requires: (c) => c.controlCompletion === true },
+  // 控制节点不能把子流程的失败/取消吞成成功：子运行终态直接映射父节点出口
+  { id: 'M-64', from: ['waiting'], to: ['failed'], trigger: 'control-failed', requires: (c) => c.controlCompletion === true },
+  { id: 'M-65', from: ['waiting'], to: ['superseded'], trigger: 'control-cancelled', requires: (c) => c.controlCompletion === true },
   { id: 'M-22', from: ['waiting'], to: ['timeout'], trigger: 'wait-timeout' },
   { id: 'M-23', from: ['dispatched', 'started', 'waiting', 'verifying', 'stopping', 'timing_out'], to: ['timing_out'], trigger: 'action-timeout-interrupted', requires: (c) => c.cancelResult === 'interrupted' },
   { id: 'M-24', from: ['timing_out'], to: ['timeout'], trigger: 'timing-out-pure' },
@@ -268,7 +273,7 @@ export const MIGRATION_CASE_IDS = [
   'M-31', 'M-32', 'M-33', 'M-34', 'M-35', 'M-36', 'M-37', 'M-38', 'M-39', 'M-40',
   'M-41', 'M-42', 'M-43', 'M-44', 'M-45', 'M-46', 'M-47', 'M-48', 'M-49', 'M-50',
   'M-51', 'M-52', 'M-53', 'M-54', 'M-55', 'M-56', 'M-57', 'M-58', 'M-59', 'M-60',
-  'M-61', 'M-62', 'M-63',
+  'M-61', 'M-62', 'M-63', 'M-64', 'M-65',
 ] as const
 
 export function allows(rule: TransitionRule, ctx: TransitionContext): boolean {

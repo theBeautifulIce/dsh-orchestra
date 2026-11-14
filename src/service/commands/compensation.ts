@@ -4,6 +4,7 @@ import { canonicalJson, compensationId, sha256Hex } from '../../core/canonical.t
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { applyTransition } from './nodes.ts'
+import { closeRun } from './run-close.ts'
 
 export type CompensationState = 'running' | 'applied' | 'failed' | 'unverified' | 'skipped'
 
@@ -169,6 +170,8 @@ export function settleCompensation(
   if (args.state !== 'applied') {
     markUnverified(tx, secret, row.node_run_id, row.attempt, args.now, args.reason ?? `compensation_${args.state}`)
   }
+  const owner = tx.get<{ run_id: string }>('SELECT run_id FROM node_runs WHERE node_run_id = ?', [row.node_run_id])
+  if (owner) closeRun(tx, owner.run_id, args.now)
   return true
 }
 

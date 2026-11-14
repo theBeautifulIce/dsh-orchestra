@@ -229,12 +229,14 @@ export function createExecutionSchedulerFromConfig(cfg: OrchestraConfig, log?: L
   })
 }
 
-// 没有装配调度器时的兜底：直接跑，不排队。老装配不受影响
+// 没有装配调度器时的兜底也必须有界：默认并发 3、人工 1、排队 1000。
+// 老装配不传 scheduler 时仍然受同一个上限约束，不能成为绕过并发闸的后门。
+const fallbackScheduler = createExecutionScheduler()
+
 export async function runThroughScheduler<T>(
   scheduler: ExecutionScheduler | undefined,
   fn: () => Promise<T> | T,
   opts?: ExecutionTaskOptions,
 ): Promise<T> {
-  if (!scheduler) return await fn()
-  return await scheduler.run(fn, opts)
+  return await (scheduler ?? fallbackScheduler).run(fn, opts)
 }

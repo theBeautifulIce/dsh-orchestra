@@ -7,6 +7,7 @@ import { isTerminal } from '../../core/state-machine.ts'
 import { deadlineFromAnchors, deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 import { loadNodeRun } from './lease.ts'
 import { applyTransition } from './nodes.ts'
+import { cancelWait } from './wait.ts'
 
 export type CancelResult = 'interrupted' | 'not_interruptible' | 'already_stopped' | 'unknown'
 
@@ -71,6 +72,40 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       to: 'superseded',
     })
     return { cancel_result: params.cancelResult, next_status: 'superseded', fence_state: null, reason: 'cancelled_before_dispatch' }
+  }
+  // 纯控制节点（wait/subworkflow）没有宿主执行实例：取消即收口，
+  // 不能先立围栏再等一个永远不会回来的执行器。
+  if (row.status === 'waiting' && row.side_effect_policy === 'pure') {
+    cancelWait(tx, params.nodeRunId, params.now)
+    applyTransition(tx, {
+      nodeRunId: params.nodeRunId,
+      from: ['waiting'],
+      to: 'superseded',
+      attempt: params.attempt,
+      now: params.now,
+      expectedRevision: params.revision,
+      allowHung: true,
+      context: {
+        hasToolCall: false,
+        cancelResult: params.cancelResult,
+        hangReason: null,
+        sideEffectVerifiedNone: true,
+        controlCompletion: true,
+      },
+      patch: {
+        cancel_requested_at: params.now,
+        cancel_result: params.cancelResult,
+        wait_started_at: null,
+        lease_id: null,
+        lease_expires_at: null,
+      },
+    })
+    appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_control_node', {
+      cancel_result: params.cancelResult,
+      from: 'waiting',
+      to: 'superseded',
+    })
+    return { cancel_result: params.cancelResult, next_status: 'superseded', fence_state: null, reason: 'control_node_cancelled' }
   }
   if (params.cancelResult === 'interrupted') {
     // 围栏已经立着：第二次取消不许再立一次（G-05 要求一次取消只arm一次）

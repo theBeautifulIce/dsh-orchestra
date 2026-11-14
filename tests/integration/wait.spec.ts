@@ -7,6 +7,7 @@ import {
 } from '../../src/service/commands/wait.ts'
 import { ScriptedClock } from '../../src/core/clock.ts'
 import { sweep } from '../../src/service/sweep.ts'
+import { applyCancel } from '../../src/service/commands/cancel.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'wait-secret'
@@ -24,8 +25,8 @@ function memoryDb(): Db {
 function seedNode(db: Db, id: string, status = 'started', attempt = 1): void {
   withTx(db, (tx) => {
     tx.run(
-      "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, lease_id, lease_expires_at, executor_session_id, executor_agent_id, created_at, updated_at) " +
-        "VALUES (?, 'r1', ?, 1, 'wait', ?, ?, 1, 'lease-old', ?, 'sess-old', 'agent-old', ?, ?)",
+      "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, lease_id, lease_expires_at, executor_session_id, executor_agent_id, side_effect_policy, created_at, updated_at) " +
+        "VALUES (?, 'r1', ?, 1, 'wait', ?, ?, 1, 'lease-old', ?, 'sess-old', 'agent-old', 'pure', ?, ?)",
       [id, id, attempt, status, NOW, NOW, NOW],
     )
   })
@@ -65,6 +66,7 @@ describe('等待节点', () => {
     })
     expect(count(db, "SELECT COUNT(*) AS n FROM wait_registrations WHERE state = 'woken'")).toBe(1)
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'n1' AND type = 'wait.woken'")).toBe(1)
+    expect((db.raw.prepare("SELECT status FROM runs WHERE run_id='r1'").get() as { status: string }).status).toBe('succeeded')
   })
 
   it('重复事件与重复唤醒都只落一条；幂等键重复投递不新增 inbox', () => {
@@ -128,6 +130,7 @@ describe('等待节点', () => {
     expect(node(db, 'n1')).toMatchObject({ status: 'timeout', wait_deadline_at: null, rearm_generation: 2 })
     expect((db.raw.prepare("SELECT state FROM wait_registrations WHERE node_run_id = 'n1'").get() as any).state).toBe('timed_out')
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'wait.event_timeout'")).toBe(1)
+    expect((db.raw.prepare("SELECT status FROM runs WHERE run_id='r1'").get() as { status: string }).status).toBe('failed')
   })
 
   it('等待钟按单调锚点判：墙钟跳远不误超时，单调钟到点才转 timeout', () => {
@@ -204,5 +207,35 @@ describe('等待节点', () => {
     withTx(db, (tx) => expect(cancelWait(tx, 'n1', NOW)).toBe(false))
     expect((db.raw.prepare("SELECT state FROM wait_registrations WHERE node_run_id = 'n1'").get() as any).state).toBe('cancelled')
     expect(node(db, 'n1').status).toBe('waiting')
+  })
+
+  it('取消等待节点：登记撤销、节点 superseded，后续事件只落 inbox 不再 409', () => {
+    const db = memoryDb()
+    seedNode(db, 'n1')
+    withTx(db, (tx) => {
+      enterWaiting(tx, SECRET, {
+        nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'event',
+        match: { type: 'approval.approved', path: 'requestId', equals: 'q1' },
+        idempotencyKey: 'wait-cancel', maxWaitMs: 60_000, now: NOW,
+      })
+    })
+    const before = node(db, 'n1')
+    withTx(db, (tx) => {
+      const out = applyCancel(tx, SECRET, {
+        nodeRunId: 'n1', attempt: before.attempt, revision: before.revision,
+        cancelResult: 'interrupted', now: NOW, graceMs: 5_000,
+      })
+      expect(out.next_status).toBe('superseded')
+    })
+    expect(node(db, 'n1').status).toBe('superseded')
+    expect((db.raw.prepare("SELECT state FROM wait_registrations WHERE node_run_id = 'n1'").get() as any).state).toBe('cancelled')
+    withTx(db, (tx) => {
+      const out = wakeOnEvent(tx, SECRET, {
+        runId: 'r1', eventType: 'approval.approved', payload: { requestId: 'q1' }, idempotencyKey: 'late-1', now: NOW,
+      })
+      expect(out.woken).toBe(0)
+    })
+    expect(node(db, 'n1').status).toBe('superseded')
+    expect(count(db, "SELECT COUNT(*) AS n FROM wait_event_inbox WHERE idempotency_key = 'late-1'")).toBe(1)
   })
 })

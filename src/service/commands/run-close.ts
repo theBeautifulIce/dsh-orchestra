@@ -3,7 +3,9 @@ import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
 
-export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned'
+export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
+
+const RUN_TERMINAL: readonly RunTerminal[] = ['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled']
 
 type NodeRow = {
   node_run_id: string
@@ -21,8 +23,11 @@ type NodeRow = {
  * - 已有终态或条件未满足时返回 null，不写半截。
  */
 export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null {
-  const run = tx.get<{ status: string }>('SELECT status FROM runs WHERE run_id = ?', [runId])
-  if (!run || ['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'paused'].includes(run.status)) {
+  const run = tx.get<{ status: string; cancel_requested_at: string | null; cancel_result: string | null }>(
+    'SELECT status, cancel_requested_at, cancel_result FROM runs WHERE run_id = ?',
+    [runId],
+  )
+  if (!run || RUN_TERMINAL.includes(run.status as RunTerminal) || run.status === 'paused') {
     return null
   }
   refreshRunSettling(tx, runId, now)
@@ -49,16 +54,17 @@ export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null
   const orphaned = nodes.some((node) => node.status === 'orphaned' && !node.replacement_node_run_id)
   const hasUnverified = nodes.some(unverified)
   let terminalStatus: RunTerminal
-  if (failed) terminalStatus = nodes.some((node) => node.status === 'failed_with_unverified') || hasUnverified ? 'failed_with_unverified' : 'failed'
+  if (run.cancel_requested_at) terminalStatus = 'cancelled'
+  else if (failed) terminalStatus = nodes.some((node) => node.status === 'failed_with_unverified') || hasUnverified ? 'failed_with_unverified' : 'failed'
   else if (orphaned) terminalStatus = 'orphaned'
   else if (hasUnverified) terminalStatus = 'succeeded_with_unverified'
   else terminalStatus = 'succeeded'
 
   const res = tx.run(
-    "UPDATE runs SET status = ?, ended_at = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND status NOT IN ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned')",
+    "UPDATE runs SET status = ?, ended_at = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND status NOT IN ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')",
     [terminalStatus, now, now, runId],
   )
   if (res.changes !== 1) return null
-  appendEvent(tx, { type: 'run.terminal', runId, payload: { status: terminalStatus } })
+  appendEvent(tx, { type: 'run.terminal', runId, payload: { status: terminalStatus, cancel_result: run.cancel_result } })
   return terminalStatus
 }

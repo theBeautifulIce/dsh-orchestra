@@ -191,14 +191,19 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       idempotencyKey: b.idempotencyKey ?? null,
       now: b.now,
     })),
-    cancelRun: (b) => inTx(db, (tx) => propagateRunCancellation(tx, opts.secret, {
-      runId: b.runId,
-      cancelResult: b.cancelResult as CancelResult,
-      graceMs: b.graceMs,
-      extendDeadlineMs: b.extendDeadlineMs,
-      now: b.now,
-      clock,
-    })),
+    cancelRun: (b) => inTx(db, (tx) => {
+      const out = propagateRunCancellation(tx, opts.secret, {
+        runId: b.runId,
+        cancelResult: b.cancelResult as CancelResult,
+        graceMs: b.graceMs,
+        extendDeadlineMs: b.extendDeadlineMs,
+        now: b.now,
+        clock,
+      })
+      // 纯控制节点取消后立即终态；若还有执行器节点在围栏里，sweep 后续再收口
+      closeRun(tx, b.runId, b.now)
+      return out
+    }),
     dispatch: async (b) => {
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })

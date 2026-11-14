@@ -3,6 +3,7 @@ import { OrchError } from '../../core/errors.ts'
 import { appendNodeRunEvent, appendEvent } from '../../infra/db/ledger.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { applyTransition } from './nodes.ts'
+import { closeRun } from './run-close.ts'
 import { deadlineFromAnchors, deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 
 export type WaitKind = 'event' | 'timer'
@@ -236,6 +237,8 @@ export function enterWaiting(tx: Tx, secret: string, req: {
     ? deadlineFromSample(req.clock, req.maxWaitMs)
     : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(req.now) + req.maxWaitMs }
   const deadline = new Date(waitDeadline.wallClockMs).toISOString()
+  // 等待节点是纯控制节点：等待本身不产生副作用，不能按默认补偿语义收成 unverified
+  tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = ?", [req.nodeRunId])
   applyTransition(tx, {
     nodeRunId: req.nodeRunId,
     from: ['started'],
@@ -272,6 +275,7 @@ export function enterWaiting(tx: Tx, secret: string, req: {
   })
   const registration = getWaitRegistration(tx, req.nodeRunId)!
   const woken = scanRegistration(tx, secret, registration, req.now)
+  if (woken) closeRun(tx, req.runId, req.now)
   return { registration: getWaitRegistration(tx, req.nodeRunId)!, woken }
 }
 
@@ -284,7 +288,10 @@ export function wakeOnEvent(tx: Tx, secret: string, input: {
   now: string
 }): { eventSeq: number; woken: number } {
   const eventSeq = recordWaitEvent(tx, input)
-  return { eventSeq, woken: scanRun(tx, secret, input.runId, input.now) }
+  const woken = scanRun(tx, secret, input.runId, input.now)
+  // 控制节点等待条件满足即完成：若本 run 已无未终态节点，同一事务内收口
+  closeRun(tx, input.runId, input.now)
+  return { eventSeq, woken }
 }
 
 /** 事件命中但调度器抢不到 slot：节点继续等，单独记 starvation，不算 event_timeout。 */
@@ -306,8 +313,8 @@ export function markWakeStarvation(tx: Tx, secret: string, nodeRunId: string, no
 export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: string, clock?: ClockProvider): boolean {
   const row = tx.get<WaitRow>("SELECT * FROM wait_registrations WHERE node_run_id = ? AND state = 'active'", [nodeRunId])
   if (!row) return false
-  const node = tx.get<{ status: string; attempt: number; wait_deadline_at: string | null; wait_deadline_boot_id: string | null; wait_deadline_monotonic_ns: number | null }>(
-    'SELECT status, attempt, wait_deadline_at, wait_deadline_boot_id, wait_deadline_monotonic_ns FROM node_runs WHERE node_run_id = ?', [nodeRunId],
+  const node = tx.get<{ status: string; attempt: number; run_id: string; wait_deadline_at: string | null; wait_deadline_boot_id: string | null; wait_deadline_monotonic_ns: number | null }>(
+    'SELECT status, attempt, run_id, wait_deadline_at, wait_deadline_boot_id, wait_deadline_monotonic_ns FROM node_runs WHERE node_run_id = ?', [nodeRunId],
   )
   if (!node || node.status !== 'waiting') return false
   if (node.wait_deadline_at === null) return false
@@ -332,6 +339,7 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
     deadline_at: node.wait_deadline_at,
   })
   appendEvent(tx, { type: 'wait.event_timeout', runId: row.run_id, nodeRunId })
+  closeRun(tx, node.run_id, now)
   return true
 }
 

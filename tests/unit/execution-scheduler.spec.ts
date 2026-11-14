@@ -9,6 +9,7 @@ import {
   DEFAULT_EXECUTION_CONCURRENCY,
   DEFAULT_HUMAN_SLOTS,
   DEFAULT_MAX_WAITING,
+  runThroughScheduler,
 } from '../../src/service/execution-scheduler.ts'
 
 const delay = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
@@ -194,6 +195,21 @@ describe('执行调度器', () => {
 })
 
 describe('dispatcher 与调度器接线', () => {
+  it('不显式传调度器时，兜底闸仍把并发压到默认上限', async () => {
+    let active = 0
+    let maxActive = 0
+    const tasks = Array.from({ length: DEFAULT_EXECUTION_CONCURRENCY + 3 }, () =>
+      runThroughScheduler(undefined, async () => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        active -= 1
+      }),
+    )
+    await Promise.all(tasks)
+    expect(maxActive).toBe(DEFAULT_EXECUTION_CONCURRENCY)
+  })
+
   it('dispatcher 只调注入的已调度执行函数，自己不再排一次队', async () => {
     const rows = [
       { node_run_id: 'nr1', node_id: 'check', seq: 1, attempt: 1 },
