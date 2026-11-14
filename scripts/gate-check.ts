@@ -1315,7 +1315,14 @@ function cellWeakFail(folded: string): boolean {
 function isBareFailureCell(folded: string): boolean {
   let text = folded.trim().replace(/[。；;，,、.!！?？]+$/g, '').trim().toLowerCase()
   if (text === '') return false
-  text = text.replace(/^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|本报告|本報告)\s*/, '')
+  for (let i = 0; i < 3; i += 1) {
+    const next = text.replace(
+      /^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|本报告|本報告|暂|暫|尚|仍|并|並|也|还|還|均|都)\s*/,
+      '',
+    )
+    if (next === text) break
+    text = next
+  }
   for (const word of [...CELL_FAIL_VERDICTS_STRONG, ...CELL_FAIL_VERDICTS_WEAK]) {
     const target = word.toLowerCase()
     if (text === target) return true
