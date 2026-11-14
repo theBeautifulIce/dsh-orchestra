@@ -300,4 +300,53 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(out.bridge_paused).toEqual([])
     expect(row(db).status).toBe('dispatched')
   })
+
+  it('动作时限到点：只开 action_overrun 卡并挂起节点，不替人改状态；重复扫描不重复开卡', () => {
+    const db = setup()
+    cancel(db, 'not_interruptible')
+    withTx(db, (tx) => tx.run(
+      "UPDATE node_runs SET deadline_at=?, deadline_boot_id=NULL, deadline_monotonic_ns=NULL WHERE node_run_id='nr_sw'",
+      ['2026-11-13T03:00:10.000Z'],
+    ))
+    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:11.000Z' })
+    expect(first.action_overrun).toEqual(['nr_sw'])
+    expect(row(db).status).toBe('stopping')
+    expect(row(db).hang_reason).toBe('action_overrun')
+    const second = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:12.000Z' })
+    expect(second.action_overrun).toEqual([])
+    const count = (db.raw.prepare("SELECT COUNT(*) AS n FROM decisions WHERE node_run_id='nr_sw' AND kind='action_overrun'").get() as { n: number }).n
+    expect(count).toBe(1)
+  })
+
+  it('显式执行器失联信号：执行器手上的节点置 orphaned，重复扫描不重复迁移', () => {
+    const db = setup()
+    const first = sweep(db, TEST_SECRET, { now: NOW, executorLost: ['nr_sw'] })
+    expect(first.executor_orphaned).toEqual(['nr_sw'])
+    expect(row(db).status).toBe('orphaned')
+    expect(evCount(db, 'recovery.executor_lost')).toBe(1)
+    const second = sweep(db, TEST_SECRET, { now: NOW, executorLost: ['nr_sw'] })
+    expect(second.executor_orphaned).toEqual([])
+  })
+
+  it('命令回执：在途超时收 rejected，完成满 7 天清 receipt_json', () => {
+    const db = setup()
+    withTx(db, (tx) => {
+      tx.run(
+        "INSERT INTO inbox (kind, operation_id, request_hash, status, receipt_json, created_at) VALUES ('command', 'op_inflight', 'h1', 'in_progress', NULL, ?)",
+        ['2026-11-13T02:40:00.000Z'],
+      )
+      tx.run(
+        "INSERT INTO inbox (kind, operation_id, request_hash, status, receipt_json, created_at, completed_at) VALUES ('command', 'op_done', 'h2', 'done', '{}', ?, ?)",
+        ['2026-11-01T00:00:00.000Z', '2026-11-01T00:00:01.000Z'],
+      )
+    })
+    const out = sweep(db, TEST_SECRET, { now: NOW })
+    expect(out.operations_timed_out).toBe(1)
+    expect(out.receipts_expired).toBe(1)
+    const inflight = db.raw.prepare("SELECT status, receipt_json FROM inbox WHERE operation_id='op_inflight'").get() as { status: string; receipt_json: string }
+    expect(inflight.status).toBe('rejected')
+    expect(JSON.parse(inflight.receipt_json).error.code).toBe('OPERATION_TIMEOUT')
+    const done = db.raw.prepare("SELECT receipt_json FROM inbox WHERE operation_id='op_done'").get() as { receipt_json: string | null }
+    expect(done.receipt_json).toBeNull()
+  })
 })

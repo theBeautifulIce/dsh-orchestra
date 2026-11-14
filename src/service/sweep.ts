@@ -7,10 +7,12 @@ import { transitionNode } from './commands/node-state.ts'
 import { applyTransition } from './commands/nodes.ts'
 import { applyReport } from './commands/apply-report.ts'
 import { sweepWaitTimeouts } from './commands/wait.ts'
+import { activeDecision, openDecision } from './commands/decisions.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import type { Report } from '../core/report.ts'
 import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { canTransition, isTerminal, type NodeStatus } from '../core/state-machine.ts'
+import { uuidv7 } from '../core/ids.ts'
 import type { ClockProvider, Deadline } from '../core/clock.ts'
 import { deadlineFromAnchors, deadlineFromSample } from '../core/clock.ts'
 
@@ -21,6 +23,8 @@ export type SweepParams = {
   bridgeMissing?: readonly string[]
   // 桥恢复信号：按 resume_state 逐态重入，重挂剩余预算，不把未知态续成满额
   bridgeRestored?: readonly string[]
+  // 运行时确认执行器已失联的节点：只按显式信号置 orphaned 候选，不猜
+  executorLost?: readonly string[]
   // 围栏撤销后重放队头需要按 run 绑定的工作流取判定策略
   catalog?: WorkflowCatalog
 }
@@ -44,6 +48,13 @@ export type SweepResult = {
   bridge_restored: string[]
   // wait 到点由同一轮维护扫描收口，不再依赖调用方另起一轮
   wait_timed_out: number
+  // 显式执行器失联信号置 orphaned
+  executor_orphaned: string[]
+  // 动作时限到点生成 action_overrun 裁决卡（不改状态）
+  action_overrun: string[]
+  // 在途命令超时收成 rejected；回执过期清掉 receipt_json
+  operations_timed_out: number
+  receipts_expired: number
   scanned_at: string
 }
 
@@ -242,6 +253,77 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       }
     }
 
+    // 动作时限：stopping 的 deadline 到点只生成 action_overrun 卡，不替人改状态
+    const actionOverrun: string[] = []
+    const actionRows = tx.all<ActionDeadlineRow>(
+      'SELECT node_run_id, run_id, attempt, revision, status, deadline_at, deadline_boot_id, deadline_monotonic_ns FROM node_runs WHERE status = ? AND deadline_at IS NOT NULL AND hang_reason IS NULL',
+      ['stopping'],
+    )
+    for (const row of actionRows) {
+      if (broken.has(row.node_run_id)) continue
+      const anchored = deadlineFromAnchors({
+        deadlineAt: row.deadline_at,
+        bootId: row.deadline_boot_id,
+        monotonicNs: row.deadline_monotonic_ns,
+      })
+      const expired = anchored && params.clock
+        ? params.clock.decide(anchored).kind === 'expired'
+        : Date.parse(row.deadline_at) <= Date.parse(params.now)
+      if (!expired) continue
+      if (activeDecision(tx, row.run_id, 'action_overrun', row.node_run_id)) continue
+      const decisionId = 'dec_' + uuidv7()
+      openDecision(tx, {
+        decisionId,
+        runId: row.run_id,
+        nodeRunId: row.node_run_id,
+        kind: 'action_overrun',
+        payload: { deadline_at: row.deadline_at, status: row.status, attempt: row.attempt },
+        createdAt: params.now,
+      })
+      // 只挂卡、不改状态：裁决后再由迁移表走 M-32/M-35/M-36 等出口
+      tx.run(
+        'UPDATE node_runs SET hang_reason = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND status = ? AND revision = ? AND hang_reason IS NULL',
+        ['action_overrun', params.now, row.node_run_id, row.status, row.revision],
+      )
+      appendNodeRunEvent(tx, secret, row.node_run_id, 'recovery.action_overrun', {
+        decision_id: decisionId,
+        deadline_at: row.deadline_at,
+      })
+      actionOverrun.push(row.node_run_id)
+    }
+
+    // 显式执行器失联信号：置 orphaned 候选，不替人判断副作用是否存在
+    const executorOrphaned: string[] = []
+    for (const nodeRunId of new Set(params.executorLost ?? [])) {
+      if (broken.has(nodeRunId)) continue
+      const row = tx.get<{ attempt: number; status: string; hang_reason: string | null }>(
+        'SELECT attempt, status, hang_reason FROM node_runs WHERE node_run_id = ?',
+        [nodeRunId],
+      )
+      if (!row || !EXECUTOR_BOUND.includes(row.status)) continue
+      try {
+        applyTransition(tx, {
+          nodeRunId,
+          from: [row.status as NodeStatus],
+          to: 'orphaned',
+          attempt: row.attempt,
+          now: params.now,
+          bumpRearm: true,
+          allowHung: true,
+          patch: { lease_id: null, lease_expires_at: null, hang_reason: null },
+        })
+        appendNodeRunEvent(tx, secret, nodeRunId, 'recovery.executor_lost', {
+          from: row.status,
+          to: 'orphaned',
+        })
+        executorOrphaned.push(nodeRunId)
+      } catch {
+        // 并发已改这一行：跳过
+      }
+    }
+
+    const receipts = sweepInboxReceipts(tx, params.now)
+
     return {
       lease_expired: leaseExpired,
       fence_revoked: revoked,
@@ -253,6 +335,10 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       bridge_paused: bridgePaused,
       bridge_restored: bridgeRestored,
       wait_timed_out: waitTimedOut,
+      executor_orphaned: executorOrphaned,
+      action_overrun: actionOverrun,
+      operations_timed_out: receipts.timedOut,
+      receipts_expired: receipts.expired,
       scanned_at: params.now,
     }
   })
@@ -305,6 +391,48 @@ function replayQueued(
   }
 }
 
+
+type ActionDeadlineRow = {
+  node_run_id: string
+  run_id: string
+  attempt: number
+  revision: number
+  status: string
+  deadline_at: string
+  deadline_boot_id: string | null
+  deadline_monotonic_ns: number | null
+}
+
+// 只有执行器手上的状态才可能因失联变 orphaned；人工卡与终态不在此列
+const EXECUTOR_BOUND: readonly string[] = [
+  'dispatched',
+  'started',
+  'waiting',
+  'verifying',
+  'stopping',
+  'timing_out',
+  'startup_unknown',
+]
+
+const IN_FLIGHT_TIMEOUT_MS = 10 * 60_000
+const RECEIPT_TTL_MS = 7 * 24 * 60 * 60_000
+
+// 命令回执：在途超时收 rejected；完成后满 7 天清 receipt_json，查询侧据此返回 OPERATION_EXPIRED
+function sweepInboxReceipts(tx: Tx, now: string): { timedOut: number; expired: number } {
+  const nowMs = Date.parse(now)
+  const inFlightBefore = new Date(nowMs - IN_FLIGHT_TIMEOUT_MS).toISOString()
+  const receiptBefore = new Date(nowMs - RECEIPT_TTL_MS).toISOString()
+  const timedOut = tx.run(
+    "UPDATE inbox SET status = 'rejected', receipt_json = ?, completed_at = ?, receipt_expired_at = ? " +
+      "WHERE completed_at IS NULL AND created_at <= ? AND status IN ('pending', 'in_progress', 'in_flight')",
+    [JSON.stringify({ error: { code: 'OPERATION_TIMEOUT', message: '命令在途超时，未执行' } }), now, new Date(nowMs + RECEIPT_TTL_MS).toISOString(), inFlightBefore],
+  ).changes
+  const expired = tx.run(
+    'UPDATE inbox SET receipt_json = NULL, receipt_expired_at = ? WHERE completed_at IS NOT NULL AND completed_at <= ? AND receipt_json IS NOT NULL',
+    [now, receiptBefore],
+  ).changes
+  return { timedOut, expired }
+}
 
 function recoverySkip(row: { status: string; hang_reason: string | null }): boolean {
   if (isTerminal(row.status)) return true
