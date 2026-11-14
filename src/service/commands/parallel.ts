@@ -1,6 +1,7 @@
 // src/service/commands/parallel.ts —— 并行扇出与汇聚（规格 3.3 行 153、5.7 行 500-505）
 import { OrchError } from '../../core/errors.ts'
 import { isTerminal } from '../../core/state-machine.ts'
+import { assertNoOpenChildRuns } from './subworkflow.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 
@@ -165,4 +166,5 @@ export function assertRunCanTerminal(tx: Tx, runId: string): void {
       pending_irreversible_children: pending,
     })
   }
+  assertNoOpenChildRuns(tx, runId)
 }

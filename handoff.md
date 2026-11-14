@@ -1180,3 +1180,17 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - `src/service/commands/nodes.ts`：`PATCH_COLUMNS` 增 executor 绑定与 wait 时钟列；`TransitionRequest.bumpRearm` 让迁移与 Gr+1 同条 UPDATE。
 - 测试 `tests/integration/wait.spec.ts` 6 例；定向 6/6，typecheck 0，全量 **50 files 686 passed | 1 skipped**，build ESM 155.40kB / gzip 38.63kB、d.ts 14.30kB。
 - 缺口：wait 尚未接进 `run-node` 执行器；唤醒后的优先级派发与 slot 重抢未接；组结束时撤组内登记未接；证据仍待 S3 收口统一重生成。
+
+### 11.71 S3 Task 10：子流程 pin、深度/环与取消传播（2026-11-14 19:30）
+
+- 迁移 `019_subworkflow_runs.sql`：`runs` 增 `parent_run_id`、`parent_node_run_id`、`root_run_id`、`subworkflow_depth`、`resume_from`、取消请求字段；父节点唯一子运行索引与父 run 索引；旧行回填 `root_run_id = run_id`。
+- `src/service/commands/subworkflow.ts`：
+  - `assertSubworkflowGraph` 按**递归栈**判环（菱形共享子流程不误报）、深度上限 2、pin 必须正整数，返回子图最大副作用策略（pure < compensable < irreversible）。
+  - `createSubworkflowRun` 只按显式 pin 取版本，缺版本报 `WORKFLOW_SUBWORKFLOW_VERSION_MISSING`；同一父节点重复调用幂等返回，换 pin 报 `OPERATION_ID_CONFLICT`；祖先链递归 CTE 再判一次环；库层深度超过 2 直接拒。
+  - `startSubworkflowNode` 把子运行创建与 `started→waiting` 放同一事务；`finishSubworkflowChild` 只在子运行终态后唤醒 `waiting→dispatched`，重复调用幂等。
+  - `propagateRunCancellation` 把取消请求落到每个子 run，对可取消节点调 `applyCancel`，不可逆节点跳过；`assertNoOpenChildRuns` 挡住未收口子运行。
+  - `parallel.ts:assertRunCanTerminal` 同时调用子运行闸，父 run 不再能先于子 run 收口。
+- `runs.ts` 新建根 run 时写 `root_run_id = run_id`、`subworkflow_depth = 0`。
+- 测试 `tests/integration/subworkflow.spec.ts` 12 例：环、深度 2/3、菱形 DAG、策略取最大、非法 pin、pin 不存在、父节点非 started、运行前祖先环、pin 版本落库与幂等、库层深度、waiting 唤醒、取消传播与终态闸。
+- 验证：typecheck 0；定向 12/12；全量 **51 files 696 passed | 1 skipped**。
+- 缺口：子流程节点尚未接进 `run-node` 执行器；有效副作用策略还没接到前置审批；子运行补偿逆序留给 Task 11；证据仍待 S3 收口统一重生成。

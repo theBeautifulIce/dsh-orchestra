@@ -65,8 +65,8 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
       [taskIdValue, p.taskTitle, workflowId, version, 'running', p.now, p.now],
     )
     tx.run(
-      'INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)',
-      [runIdValue, taskIdValue, workflowId, version, definitionHash, 'running', p.now, p.now, p.now],
+      'INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, started_at, created_at, updated_at, root_run_id, subworkflow_depth) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0)',
+      [runIdValue, taskIdValue, workflowId, version, definitionHash, 'running', p.now, p.now, p.now, runIdValue],
     )
     picked.forEach((n, idx) => {
       const id = newNodeRunId()

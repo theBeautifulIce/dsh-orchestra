@@ -9,6 +9,7 @@ export type NodeRunRow = {
   node_run_id: string
   run_id: string
   node_id: string
+  node_type: string
   attempt: number
   status: string
   revision: number

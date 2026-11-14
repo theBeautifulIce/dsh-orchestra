@@ -208,6 +208,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/infra/sqlite/migrations/016_approval_binding.sql` | 审批绑定：节点 `resume_state`/`blocked_decision_id`，决策卡内容哈希与有效期 |
 | `src/infra/sqlite/migrations/017_parallel_groups.sql` | 并行分组：节点父运行与副作用策略，运行 settling 与未收口不可逆子节点清单 |
 | `src/infra/sqlite/migrations/018_wait_registrations.sql` | 等待登记：事件 inbox、每节点一条 wait_registration、wait 时钟与唤醒/超时状态 |
+| `src/infra/sqlite/migrations/019_subworkflow_runs.sql` | 子流程运行关系：父子 run、根 run、pin 深度、resume_from、取消请求与父节点唯一子运行 |
 | `src/core/state-machine.ts` | S3 迁移表 M-01…M-61、触发语义、终态/挂起闸门；旧 20 条边表保留给 S2 调用方 |
 | `src/core/half-state.ts` | 半态集合、跨 boot 剩余量、桥断冻结矩阵、半态恢复重挂 |
 | `src/core/policy.ts` | 证据门求值之外新增分支策略：九算子、all/any/not、固定裁决载荷、branch 静态校验与命中选择 |
@@ -215,6 +216,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/service/commands/decisions.ts` | 决策卡生成、查重、结论落地、续期与 2h/24h 升级；不可逆动作复用前置审批 |
 | `src/service/commands/parallel.ts` | 并行汇聚 all/any/quorum、不可逆子节点派生闸、取消分级、运行 settling 重算与终态闸 |
 | `src/service/commands/wait.ts` | 等待：事件 inbox 幂等落库、登记与迁移同事务、早到回扫、唤醒 CAS、饥饿与事件超时分记、撤销登记 |
+| `src/service/commands/subworkflow.ts` | 子流程：pin 版本与递归栈判环/深度、有效副作用策略、子运行创建与唤醒、父取消传播、未收口子运行终态闸 |
 | `src/infra/sqlite/migrations/008_bridge_event_receipts.sql` | 桥事件收据与按 `(node_run_id, attempt, executor_agent_id)` 隔离的持久确认游标 |
 | `src/infra/sqlite/migrations/009_bridge_tool_outbox.sql` | 工具调用 outbox：pending/completed/failed，防重复执行与结果丢失 |
 | `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |
