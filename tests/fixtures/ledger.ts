@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
-import { definitionHashOf, WorkflowCatalog } from '../../src/service/workflows.ts'
+import { definitionHashOf, workflowIdOf, WorkflowCatalog } from '../../src/service/workflows.ts'
 import type { PassCondition } from '../../src/core/policy.ts'
 
 export const TEST_SECRET = 'test-secret-for-g1'
@@ -15,10 +15,11 @@ export const DEFAULT_PASS: PassCondition[] = [{ path: 'evidence.exitCode', op: '
 
 export function catalogFor(
   nodeIds: string[],
-  opts: { version?: string; passConditions?: PassCondition[]; requiredHashes?: string[] } = {},
+  opts: { workflowId?: string; version?: string; passConditions?: PassCondition[]; requiredHashes?: string[] } = {},
 ): WorkflowCatalog {
   const catalog = new WorkflowCatalog('S2')
   catalog.load({
+    ...(opts.workflowId === undefined ? {} : { workflow_id: opts.workflowId }),
     workflow_version: opts.version ?? '1',
     pass_conditions: opts.passConditions ?? DEFAULT_PASS,
     required_hashes: opts.requiredHashes,
@@ -29,8 +30,12 @@ export function catalogFor(
 
 // 让 run 绑上工作流版本与定义哈希：没有版本/哈希就没有判定条件，done 报告会被 VERDICT_UNSUPPORTED 拒
 export function bindRunVersion(db: Db, catalog: WorkflowCatalog, version: number | string = 1, runId = 'r1'): void {
-  const hash = definitionHashOf(catalog.get(version))
-  withTx(db, (tx) => tx.run('UPDATE runs SET workflow_version = ?, workflow_definition_hash = ? WHERE run_id = ?', [version, hash, runId]))
+  const def = catalog.get(version)
+  const hash = definitionHashOf(def)
+  withTx(db, (tx) => tx.run(
+    'UPDATE runs SET workflow_id = ?, workflow_version = ?, workflow_definition_hash = ? WHERE run_id = ?',
+    [workflowIdOf(def), version, hash, runId],
+  ))
 }
 
 export function freshLedger(dir?: string): { dir: string; file: string; db: Db } {

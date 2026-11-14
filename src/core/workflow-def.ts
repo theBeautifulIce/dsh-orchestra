@@ -16,6 +16,8 @@ export type WorkflowNodeDef = {
 }
 
 export type WorkflowDefinition = {
+  // 工作流命名空间；省略即 default（旧定义与旧 run 的兼容口径）
+  workflow_id?: string
   workflow_version: string
   // 模板级通过条件，作为基线（规格 6.1 行 838）
   pass_conditions?: PassCondition[]

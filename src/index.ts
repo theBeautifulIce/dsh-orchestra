@@ -117,6 +117,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     loadWorkflow: (body) => catalog.load(body as Parameters<WorkflowCatalog['load']>[0]),
     createRun: (b) => createRun(db, catalog, {
       taskTitle: b.taskTitle,
+      workflowId: b.workflowId,
       workflowVersion: b.workflowVersion,
       nodeIds: b.nodeIds,
       now: b.now,

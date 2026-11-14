@@ -1072,3 +1072,19 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 说明：sign-gate 在候选清单里会探测历史已删除测试路径，stderr 出现若干 `fatal: path ... does not exist`，但退出码 0，随后门检查与全量均通过；不是签名失败。
 - 当前正式门：G1 audit_round=47、G2 audit_round=47，双门 exit 0。
 - 遗留：R3 链头 DELETE/同事务严格 seq/prev_hash、工具真实耗时；R4 workflow_id+version 复合身份；P2-04 审计证据引用；S3 九节点与状态机未开。
+
+### 11.60 R4 工作流复合身份（2026-11-14 18:20，待第 48 轮审计）
+
+- 问题：`workflow_versions.version` 是主键、`WorkflowCatalog.defs` 按版本单键，两个不同工作流不能各自拥有版本 1；`runs`/`tasks` 虽有 `workflow_id` 列，生产建 run 路径不写，执行器与收口只按版本取目录。
+- 迁移 `011_workflow_version_identity.sql`：重建 `workflow_versions`，主键改为 `(workflow_id, version)`；旧数据全部复制为 `workflow_id='default'`；保留 `version` 索引。
+- `src/service/workflows.ts`：
+  - `DEFAULT_WORKFLOW_ID='default'`、`workflowIdOf(def)`；`WorkflowDefinition.workflow_id?` 可选，缺省即 default。
+  - 目录内部键改为 `workflow_id + '\u0000' + version`；两参 `get/definitionHash/toolPolicyFor/policyFor` 精确取，单参保持旧调用，但同版本号跨多个工作流时抛 `WORKFLOW_VERSION_CONFLICT`，不猜。
+  - `definitionHashOf` 对 `default`/缺省 id 剥掉 `workflow_id` 再哈希，旧库 content_hash 与 G1 证据不因命名空间改名漂移；非 default 的 id 参与哈希。
+- `src/service/runs.ts`：`CreateRunParams.workflowId?`；任务、run、`task.created`/`run.created` 事件都写 `workflow_id`；结果增加 `workflow_id`。`src/service/server.ts` 与 `schemas.ts` 的 `POST /v1/runs` 接可选 `workflowId`，`POST /v1/workflows/load` 接可选 `workflow_id`。
+- `src/executor/run-node.ts` 与 `src/service/commands/apply-report.ts`：从 run 读 `workflow_id` 并按其取工具授权/判定条件；旧行 null 归 default。
+- 测试：`tests/integration/workflow-identity.spec.ts` 3 例（两工作流同版本建 run 不串、单参歧义拒绝、旧口径归 default）；`workflows.spec.ts` 增复合身份与歧义 2 例；`tests/fixtures/ledger.ts` 的 `bindRunVersion` 同步写 `workflow_id`；runtime 与 G-05 夹具的 `workflow_id` 改成 `default`。
+- 证据：迁移 011 使 `G1/G-14`、`ev-g2-01`、`ev-g2-07`、`ev-g2-15` 的 `schema_migrations` 片段变化，已用 `fault-inject.ts` 重生成并连跑两遍字节一致；新 LF SHA-256：G-14=`d655af7e2b77f3736aee6422e2e3e133d4f936a6572a82c98a40a4877740de39`，ev-g2-01=`71825a7db387884c2b9148dc991dc1415b2bb0d0605d05fb780a0990626a76a6`，ev-g2-07=`64fa6c33ed9f4b33f5f8cc2306a8ad618d99d06ce1698e7aa1c8b537beeae05d`，ev-g2-15=`8c21ebd8e00ea8563f910fd2f3b3beb96b678812260620c9d0f05480e1f7ca6d`。G1/G2 表与 artifact 已同步。
+- 验证：typecheck 0；全量 42 文件 **612 passed | 1 skipped**；build 成功（ESM 152.60kB / gzip 37.89kB、d.ts 14.30kB）。
+- 状态：候选改动未提交，门记录仍绑第 47 轮候选；pre-sign gate-check 预期失败。下一步提交候选，派 S1/S2 第 48 轮审计，pass 后按 G1→G2 重签。
+- 遗留：R3 链头 DELETE/同事务严格 seq/prev_hash、工具真实耗时；P2-04 审计证据引用；S3 九节点与状态机未开。

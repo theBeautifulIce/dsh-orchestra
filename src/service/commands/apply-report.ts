@@ -96,8 +96,8 @@ function rejectReport(tx: Tx, secret: string, params: {
 
 // 判定条件由服务端按 run 绑定的工作流版本取：调用方传不进来，执行器也改不了（规格 4.2 行 293、6.1 行 839）
 function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): ApplyPolicy {
-  const run = tx.get<{ workflow_version: number | string | null; workflow_definition_hash: string | null }>(
-    'SELECT workflow_version, workflow_definition_hash FROM runs WHERE run_id = ?',
+  const run = tx.get<{ workflow_id: string | null; workflow_version: number | string | null; workflow_definition_hash: string | null }>(
+    'SELECT workflow_id, workflow_version, workflow_definition_hash FROM runs WHERE run_id = ?',
     [row.run_id],
   )
   if (!run) throw new OrchError('NOT_FOUND', 'node_run 没有对应的 run', { nodeRunId: row.node_run_id })
@@ -108,7 +108,8 @@ function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): App
     throw new OrchError('VERDICT_UNSUPPORTED', '这个 run 没有绑定工作流定义哈希', { nodeRunId: row.node_run_id })
   }
   // 定义哈希必须与创建 run 时一致：重启后同版本换内容，在飞 run 的判定条件就变了（第六轮审计 P1-1）
-  const current = catalog.definitionHash(run.workflow_version)
+  // 旧 run 的 workflow_id 为空，归到 default 命名空间；新 run 的判定条件只认自己工作流里的那个版本
+  const current = catalog.definitionHash(run.workflow_id ?? 'default', run.workflow_version)
   if (current !== run.workflow_definition_hash) {
     throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', 'run 绑定的工作流定义与当前版本不一致，判定条件不许中途换', {
       nodeRunId: row.node_run_id,
@@ -117,7 +118,7 @@ function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): App
       current,
     })
   }
-  return catalog.policyFor(run.workflow_version, row.node_id)
+  return catalog.policyFor(run.workflow_id ?? 'default', run.workflow_version, row.node_id)
 }
 
 // 六步固定顺序，全部在同一笔 BEGIN IMMEDIATE 事务里（规格 4.2 行 294-300）

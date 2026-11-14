@@ -7,12 +7,24 @@ import { mergePassConditions, type PassCondition } from '../core/policy.ts'
 import { assertDefinitionAllowed, type WorkflowDefinition, type WorkflowNodeDef } from '../core/workflow-def.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 
+// 旧版本号没有工作流命名空间：读旧库、旧 run、旧 API 全部归到这个默认空间
+export const DEFAULT_WORKFLOW_ID = 'default'
+
 export type LoadWorkflowResult = {
+  workflow_id: string
   workflow_version: string
   nodes: { node_id: string; type: string; pass_conditions: PassCondition[] }[]
 }
 
-type WorkflowVersionRow = { version: string; content_hash: string; definition_json: string }
+type WorkflowVersionRow = { workflow_id: string; version: string; content_hash: string; definition_json: string }
+
+export function workflowIdOf(def: WorkflowDefinition): string {
+  return String(def.workflow_id ?? DEFAULT_WORKFLOW_ID)
+}
+
+function keyOf(workflowId: string, version: string): string {
+  return `${workflowId}\u0000${version}`
+}
 
 // 定义只许从入口加载：加载期就按阶段拒越界能力，别等到派发才发现
 // 传了 db 就落 workflow_versions：跨重启同版本改内容必须被拒，在飞 run 的判定条件不跟着变（第六轮审计 P1-1）
@@ -29,15 +41,18 @@ export class WorkflowCatalog {
   // 启动时把已落库的定义装回内存；落库内容同样过阶段校验，旧库里的越界定义不能借重启复活
   hydrate(): number {
     if (!this.db) return 0
-    const rows = this.db.raw.prepare('SELECT version, content_hash, definition_json FROM workflow_versions ORDER BY version ASC').all() as WorkflowVersionRow[]
+    const rows = this.db.raw.prepare('SELECT workflow_id, version, content_hash, definition_json FROM workflow_versions ORDER BY workflow_id ASC, version ASC').all() as WorkflowVersionRow[]
     for (const row of rows) {
       // 快照化：落库文本先还原成独立对象，校验、哈希、进目录都只认这份快照
       const snapshot = snapshotOf(JSON.parse(row.definition_json) as WorkflowDefinition)
       assertDefinitionAllowed(snapshot, this.phase)
       if (definitionHashOf(snapshot) !== row.content_hash) {
-        throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '工作流定义的落库哈希对不上，库被改过', { workflow_version: row.version })
+        throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '工作流定义的落库哈希对不上，库被改过', {
+          workflow_id: row.workflow_id,
+          workflow_version: row.version,
+        })
       }
-      this.remember(row.version, snapshot)
+      this.remember(row.workflow_id, row.version, snapshot)
     }
     return rows.length
   }
@@ -47,62 +62,84 @@ export class WorkflowCatalog {
     // 调用方之后再改原对象（哪怕改嵌套的 tools.allow）也影响不到目录里的定义（第二次意见 P1 问题 A）
     const snapshot = snapshotOf(def)
     assertDefinitionAllowed(snapshot, this.phase)
+    const workflowId = workflowIdOf(snapshot)
     const key = String(snapshot.workflow_version)
     const hash = definitionHashOf(snapshot)
-    // 同一版本号只能对应一份定义：reload 改写已建 run 的判定条件，就是绕过不可变模板（第五轮审计 P1-1）
-    const persisted = this.db?.raw.prepare('SELECT version, content_hash, definition_json FROM workflow_versions WHERE version = ?').get(key) as WorkflowVersionRow | undefined
+    // 同一 workflow 的同一版本号只能对应一份定义：reload 改写已建 run 的判定条件，就是绕过不可变模板（第五轮审计 P1-1）
+    const persisted = this.db?.raw.prepare(
+      'SELECT workflow_id, version, content_hash, definition_json FROM workflow_versions WHERE workflow_id = ? AND version = ?',
+    ).get(workflowId, key) as WorkflowVersionRow | undefined
     if (persisted && persisted.content_hash !== hash) {
-      throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '同一工作流版本不许改写定义，要改请升版本号', { workflow_version: key })
+      throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '同一工作流版本不许改写定义，要改请升版本号', {
+        workflow_id: workflowId,
+        workflow_version: key,
+      })
     }
-    const existing = this.defs.get(key)
+    const existing = this.defs.get(keyOf(workflowId, key))
     if (existing) {
       if (definitionHashOf(existing) !== hash) {
-        throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '同一工作流版本不许改写定义，要改请升版本号', { workflow_version: key })
+        throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '同一工作流版本不许改写定义，要改请升版本号', {
+          workflow_id: workflowId,
+          workflow_version: key,
+        })
       }
-      return summarize(snapshot)
+      return summarize(workflowId, snapshot)
     }
     // 版本号别名撞车要在落库之前判：先写库再报错，库里会多出一行没通过检查的定义
-    this.assertAliasFree(key, snapshot)
+    this.assertAliasFree(workflowId, key, snapshot)
     // 先落库再进内存：事务失败就整份定义没进目录，内存不留未经持久化的残影（第二次意见 P1 问题 B）
     if (this.db && !persisted) {
       try {
         withTx(this.db, (tx) => {
           tx.run(
-            'INSERT INTO workflow_versions (version, content_hash, definition_json, created_at) VALUES (?, ?, ?, ?)',
-            [key, hash, canonicalJson(snapshot), new Date().toISOString()],
+            'INSERT INTO workflow_versions (workflow_id, version, content_hash, definition_json, created_at) VALUES (?, ?, ?, ?, ?)',
+            [workflowId, key, hash, canonicalJson(snapshot), new Date().toISOString()],
           )
         })
       } catch (err) {
         throw new OrchError('SERVICE_UNAVAILABLE', '工作流定义落库失败，这份定义没有进目录', {
+          workflow_id: workflowId,
           workflow_version: key,
           cause: err instanceof Error ? err.message : String(err),
         })
       }
     }
-    this.remember(key, snapshot)
-    return summarize(snapshot)
+    this.remember(workflowId, key, snapshot)
+    return summarize(workflowId, snapshot)
   }
 
-  get(version: string | number): WorkflowDefinition {
+  // 两参：按 (workflow_id, version) 精确取；单参：向后兼容，要求这个版本号在所有工作流里唯一
+  get(workflowIdOrVersion: string | number, maybeVersion?: string | number): WorkflowDefinition {
     // 交出去的是深拷贝：调用方拿到的是能随便改的独立副本，目录里的本体不受影响（第二次意见 P1 问题 A）
-    return snapshotOf(this.internal(version))
+    return snapshotOf(this.resolve(workflowIdOrVersion, maybeVersion))
   }
 
   // run 绑定的定义哈希：收口时拿它和当前目录比，跨重启改内容的一律拒
-  definitionHash(version: string | number): string {
-    return definitionHashOf(this.internal(version))
+  definitionHash(workflowIdOrVersion: string | number, maybeVersion?: string | number): string {
+    return definitionHashOf(this.resolve(workflowIdOrVersion, maybeVersion))
   }
 
   // 节点可用的只读工具：只从加载过的定义里取，请求体不能自带（第五轮审计 P1-2）
-  toolPolicyFor(version: string | number, nodeId: string): { allow: string[]; deny: string[] } {
-    const node = this.nodeOf(this.internal(version), version, nodeId)
+  toolPolicyFor(workflowIdOrVersion: string | number, versionOrNodeId: string | number, maybeNodeId?: string): { allow: string[]; deny: string[] } {
+    if (maybeNodeId === undefined) {
+      const version = String(workflowIdOrVersion)
+      const node = this.nodeOf(this.resolve(version), undefined, version, String(versionOrNodeId))
+      return { allow: [...(node.tools?.allow ?? [])], deny: [...(node.tools?.deny ?? [])] }
+    }
+    const workflowId = String(workflowIdOrVersion)
+    const version = String(versionOrNodeId)
+    const node = this.nodeOf(this.resolve(workflowId, version), workflowId, version, maybeNodeId)
     return { allow: [...(node.tools?.allow ?? [])], deny: [...(node.tools?.deny ?? [])] }
   }
 
   // 节点收口用的判定条件：模板条件为基线，节点条件按 AND 追加（规格 6.1 行 837）
-  policyFor(version: string | number, nodeId: string): { passConditions: PassCondition[]; requiredHashes: string[] } {
-    const def = this.internal(version)
-    const node = this.nodeOf(def, version, nodeId)
+  policyFor(workflowIdOrVersion: string | number, versionOrNodeId: string | number, maybeNodeId?: string): { passConditions: PassCondition[]; requiredHashes: string[] } {
+    const single = maybeNodeId === undefined
+    const workflowId = single ? undefined : String(workflowIdOrVersion)
+    const version = single ? String(workflowIdOrVersion) : String(versionOrNodeId)
+    const nodeId = single ? String(versionOrNodeId) : maybeNodeId
+    const def = this.resolve(workflowIdOrVersion, single ? undefined : version)
+    const node = this.nodeOf(def, workflowId, version, nodeId)
     // 必留哈希：模板要求与节点要求取并集，缺一个都不许收口（规格 4.7 行 380）
     const requiredHashes = Array.from(new Set([...(def.required_hashes ?? []), ...(node.required_hashes ?? [])]))
     return {
@@ -112,44 +149,88 @@ export class WorkflowCatalog {
   }
 
   // 目录本体：只有目录自己用，拿到的是冻结的那一份
-  private internal(version: string | number): WorkflowDefinition {
-    const def = this.defs.get(String(version))
-    if (!def) throw new OrchError('NOT_FOUND', '工作流版本没加载过', { workflow_version: String(version) })
-    return def
+  private internal(workflowId: string, version: string): WorkflowDefinition {
+    const direct = this.defs.get(keyOf(workflowId, version))
+    if (direct) return direct
+    // workflow_version 在账本里是整数列：'01' 这类版本号读回来是 1，按同一命名空间的别名兜住
+    if (/^\d+$/.test(version)) {
+      const alias = this.defs.get(keyOf(workflowId, String(Number(version))))
+      if (alias) return alias
+    }
+    throw new OrchError('NOT_FOUND', '工作流版本没加载过', { workflow_id: workflowId, workflow_version: version })
   }
 
-  private nodeOf(def: WorkflowDefinition, version: string | number, nodeId: string): WorkflowNodeDef {
+  // 单参兼容：同一个版本号只能命中一份定义；两个工作流各有一份就必须显式给 workflow_id
+  private resolve(workflowIdOrVersion: string | number, maybeVersion?: string | number): WorkflowDefinition {
+    if (maybeVersion !== undefined) return this.internal(String(workflowIdOrVersion), String(maybeVersion))
+    const requested = String(workflowIdOrVersion)
+    const matches: WorkflowDefinition[] = []
+    const seen = new Set<WorkflowDefinition>()
+    for (const def of this.defs.values()) {
+      if (seen.has(def)) continue
+      seen.add(def)
+      const actual = String(def.workflow_version)
+      const same = actual === requested || (/^\d+$/.test(requested) && /^\d+$/.test(actual) && Number(actual) === Number(requested))
+      if (same) matches.push(def)
+    }
+    if (matches.length === 1) return matches[0]!
+    if (matches.length === 0) throw new OrchError('NOT_FOUND', '工作流版本没加载过', { workflow_version: requested })
+    throw new OrchError('WORKFLOW_VERSION_CONFLICT', '这个版本号同时存在于多个工作流，必须带 workflow_id', {
+      workflow_version: requested,
+      workflow_ids: matches.map((d) => workflowIdOf(d)),
+    })
+  }
+
+  private nodeOf(def: WorkflowDefinition, workflowId: string | undefined, version: string, nodeId: string): WorkflowNodeDef {
     const node = def.nodes.find((n) => n.node_id === nodeId)
-    if (!node) throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '节点不在这个工作流版本里', { workflow_version: String(version), nodeId })
+    if (!node) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '节点不在这个工作流版本里', {
+        ...(workflowId === undefined ? {} : { workflow_id: workflowId }),
+        workflow_version: version,
+        nodeId,
+      })
+    }
     return node
   }
 
   // 别名预检：账本里 workflow_version 是整数列，'01' 落库后与 '1' 是同一份定义，撞上另一份就要拒
-  private assertAliasFree(key: string, def: WorkflowDefinition): void {
+  private assertAliasFree(workflowId: string, key: string, def: WorkflowDefinition): void {
     if (!/^\d+$/.test(key)) return
     const alias = String(Number(key))
     if (alias === key) return
-    const hit = this.defs.get(alias)
+    const hit = this.defs.get(keyOf(workflowId, alias))
     if (hit && definitionHashOf(hit) !== definitionHashOf(def)) {
-      throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '版本号别名撞上了另一份定义', { workflow_version: key, alias })
+      throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '版本号别名撞上了另一份定义', {
+        workflow_id: workflowId,
+        workflow_version: key,
+        alias,
+      })
     }
   }
 
-  private remember(key: string, def: WorkflowDefinition): void {
+  private remember(workflowId: string, key: string, def: WorkflowDefinition): void {
     // 冻结后进目录：外部拿到过这份引用也改不动它
     const frozen = deepFreeze(def)
     // 别名撞车先判再落 Map：撞上了整份定义就不进目录，不留半份（原来先落 Map 再抛，目录里会多一份没通过检查的定义）
-    this.assertAliasFree(key, frozen)
-    this.defs.set(key, frozen)
+    this.assertAliasFree(workflowId, key, frozen)
+    this.defs.set(keyOf(workflowId, key), frozen)
     // 账本里 workflow_version 是整数列：'01' 这类版本号存进去会变成 1，别名兜住它
     if (/^\d+$/.test(key)) {
-      this.defs.set(String(Number(key)), frozen)
+      this.defs.set(keyOf(workflowId, String(Number(key))), frozen)
     }
   }
 }
 
 export function definitionHashOf(def: WorkflowDefinition): string {
-  return sha256Hex(canonicalJson(def))
+  // default 是旧数据的命名空间，不是定义内容：显式写 default 与省略 id 必须得到同一个哈希。
+  // 非 default 的 workflow_id 参与哈希，两个工作流各自版本 1 的内容从此彼此独立。
+  const copy = { ...def }
+  if (copy.workflow_id === undefined || String(copy.workflow_id) === DEFAULT_WORKFLOW_ID) {
+    delete (copy as { workflow_id?: string }).workflow_id
+  } else {
+    copy.workflow_id = String(copy.workflow_id)
+  }
+  return sha256Hex(canonicalJson(copy))
 }
 
 // 快照：canonical_json 走一遍再解析，得到的副本与来源彻底断开，也统一成规范键序
@@ -157,8 +238,9 @@ function snapshotOf(def: WorkflowDefinition): WorkflowDefinition {
   return JSON.parse(canonicalJson(def)) as WorkflowDefinition
 }
 
-function summarize(def: WorkflowDefinition): LoadWorkflowResult {
+function summarize(workflowId: string, def: WorkflowDefinition): LoadWorkflowResult {
   return {
+    workflow_id: workflowId,
     workflow_version: String(def.workflow_version),
     nodes: def.nodes.map((n) => ({
       node_id: n.node_id,

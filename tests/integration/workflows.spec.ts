@@ -19,7 +19,7 @@ const def: WorkflowDefinition = {
 function miniLedger(): Db {
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-wf-'))
   const db = openDb(join(dir, 'orchestra.db'))
-  db.raw.exec('CREATE TABLE workflow_versions (version TEXT PRIMARY KEY, content_hash TEXT NOT NULL, definition_json TEXT NOT NULL, created_at TEXT NOT NULL)')
+  db.raw.exec('CREATE TABLE workflow_versions (workflow_id TEXT NOT NULL, version TEXT NOT NULL, content_hash TEXT NOT NULL, definition_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (workflow_id, version))')
   return db
 }
 
@@ -121,6 +121,25 @@ describe('目录里的定义不可变（第二次意见 P1）', () => {
     // 失败的事务不留痕：库里也没有这一行
     const row = db.raw.prepare('SELECT COUNT(*) AS n FROM workflow_versions').get() as { n: number }
     expect(Number(row.n)).toBe(0)
+  })
+
+  it('两个工作流可以各自拥有版本 1，但单参取版本号必须拒绝歧义', () => {
+    const catalog = new WorkflowCatalog('S2')
+    catalog.load({ ...def, workflow_id: 'wf-a', nodes: [{ node_id: 'a', type: 'agent', tools: { allow: ['ro.echo'] } }] })
+    catalog.load({ ...def, workflow_id: 'wf-b', nodes: [{ node_id: 'b', type: 'agent', tools: { allow: ['ro.read'] } }] })
+    expect(catalog.get('wf-a', '1').nodes[0]!.node_id).toBe('a')
+    expect(catalog.get('wf-b', '1').nodes[0]!.node_id).toBe('b')
+    expect(catalog.toolPolicyFor('wf-a', '1', 'a')).toEqual({ allow: ['ro.echo'], deny: [] })
+    expect(catalog.toolPolicyFor('wf-b', '1', 'b')).toEqual({ allow: ['ro.read'], deny: [] })
+    expect(catalog.definitionHash('wf-a', '1')).not.toBe(catalog.definitionHash('wf-b', '1'))
+    expect(() => catalog.get('1')).toThrowError(/必须带 workflow_id/)
+  })
+
+  it('同一工作流的同一版本仍然不许改写定义', () => {
+    const catalog = new WorkflowCatalog('S2')
+    catalog.load({ ...def, workflow_id: 'wf-a' })
+    expect(() => catalog.load({ ...def, workflow_id: 'wf-a', nodes: [{ node_id: 'other', type: 'agent' }] }))
+      .toThrowError(/同一工作流版本不许改写定义/)
   })
 
   it('版本号别名（01 与 1）在冻结对象下照旧工作', () => {

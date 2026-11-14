@@ -185,12 +185,12 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收；判定条件自己按 run 的 `workflow_version` 取，调用方不能带 policy） |
 | `src/service/commands/node-state.ts` | 节点状态写入（verify_deadline_at 起钟、verify_remaining_ns 落列） |
 | `src/service/commands/runtime.ts` | 运行时装配（只把 catalog 交给 applyReport，命令层不自取 policy） |
-| `src/service/runs.ts` | 生产装配：createRun 建 task/run/node_runs |
+| `src/service/runs.ts` | 生产装配：createRun 按 `(workflow_id, version)` 建 task/run/node_runs，写复合身份与事件 |
 | `src/service/dispatcher.ts` | 生产装配：dispatchRun 拾 queued 节点走 runNode |
 | `src/executor/tools.ts` | 工具注册表与授权（`assertToolsAuthorized`：deny 优先、必须注册、必须落在 allow 集） |
 | `src/core/audit-verdict.ts` | 结构化审计裁决（`AUDIT_VERDICT_SCHEMA` / `parseAuditVerdict` / `validateAuditVerdict` / `verdictProblems`）：门放行的权威输入，词法解析降为第二道防线 |
 | `src/core/freeze.ts` | `deepFreeze`：目录里的工作流定义冻结，外部拿到过引用也改不动 |
-| `src/service/schemas.ts` | Zod 入参 Schema 与 `LIMITS`（租约 TTL 与续租间隔、工具超时、节点数、attempt 范围、长度上限） |
+| `src/service/schemas.ts` | Zod 入参 Schema 与 `LIMITS`（租约 TTL 与续租间隔、工具超时、节点数、attempt 范围、长度上限；workflow_id/workflowId 可选） |
 | `src/service/execution-scheduler.ts` | 执行调度器：并发上限与人工名额，接 `orchestra.config.json` 的 `concurrency` / `human_slots` |
 | `src/service/write-queue.ts` | 短写 FIFO 队列（tail 链）：只管数据库短写，长执行不占名额 |
 | `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收；按 execution_id 核对工具痕迹） |
@@ -200,6 +200,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/executor/evidence-collector.ts` | 宿主工具证据：重过注册表/策略、outbox 去重、真实起止时间与 `tool_*` 事件 |
 | `src/executor/agent-lifecycle.ts` | 单节点 Agent 生命周期：订阅/监听/指令/toolResult/结构化报告/取消复核 |
 | `src/infra/sqlite/migrations/006_tool_executions_tool_seq.sql` | 工具执行唯一性：`tool_executions` 主键 `node_run_id+attempt+tool_seq`，`execution_id NOT NULL UNIQUE` |
+| `src/infra/sqlite/migrations/011_workflow_version_identity.sql` | 工作流版本复合身份：`workflow_versions` 主键改 `(workflow_id, version)`，旧数据归 default |
 | `src/infra/sqlite/migrations/008_bridge_event_receipts.sql` | 桥事件收据与按 `(node_run_id, attempt, executor_agent_id)` 隔离的持久确认游标 |
 | `src/infra/sqlite/migrations/009_bridge_tool_outbox.sql` | 工具调用 outbox：pending/completed/failed，防重复执行与结果丢失 |
 | `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |

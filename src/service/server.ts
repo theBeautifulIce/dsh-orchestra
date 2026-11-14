@@ -49,7 +49,7 @@ export type NodeCommands = {
   }) => CancelOutcome
   loadWorkflow: (body: unknown) => LoadWorkflowResult
   // 建 run 与节点：定义加载后由服务层建行，不许靠手写 INSERT 起节点（审计 F-01）
-  createRun: (body: { taskTitle: string; workflowVersion: string; nodeIds?: string[]; now: string }) => CreateRunResult
+  createRun: (body: { taskTitle: string; workflowId?: string; workflowVersion: string; nodeIds?: string[]; now: string }) => CreateRunResult
   // 派发：把 run 下排队中的节点交给生产执行器跑
   dispatch: (body: {
     runId: string
@@ -164,6 +164,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const body = parseBody(createRunSchema, await readJsonBody(req), '创建 run')
       const out = await queue.run(() => deps.commands!.createRun({
         taskTitle: body.taskTitle,
+        workflowId: body.workflowId,
         workflowVersion: body.workflowVersion,
         nodeIds: body.nodeIds,
         now: requestNow,

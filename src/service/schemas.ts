@@ -137,6 +137,8 @@ const passConditionSchema = z.looseObject({
 
 // 加载定义：定义哈希按整个 body 算，未知键必须原样保留，所以用 looseObject
 export const workflowLoadSchema = z.looseObject({
+  // 工作流命名空间；省略即 default，旧客户端不需要改
+  workflow_id: z.string().min(1).max(LIMITS.identifierMaxLength).optional(),
   workflow_version: z.union([z.string().min(1).max(LIMITS.versionMaxLength), z.number().int()])
     .transform((value) => String(value)),
   nodes: z.array(z.looseObject({
@@ -157,6 +159,8 @@ export const workflowLoadSchema = z.looseObject({
 // 建 run：标题与版本号都要有，节点清单可选但有上限
 export const createRunSchema = z.looseObject({
   taskTitle: z.string().min(1).max(LIMITS.titleMaxLength),
+  // 两个工作流各有同版本号时必须带；省略按唯一版本或 default 解析
+  workflowId: z.string().min(1).max(LIMITS.identifierMaxLength).optional(),
   workflowVersion: z.union([z.string().min(1).max(LIMITS.versionMaxLength), z.number().int()])
     .transform((value) => String(value)),
   nodeIds: z.array(identifier).max(LIMITS.nodeIdsMaxCount).optional(),
