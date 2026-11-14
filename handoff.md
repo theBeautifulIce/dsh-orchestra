@@ -824,3 +824,14 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - S1 其余：A6/A6b/A7/A8/A8b/A9/A9b/A9c、中文数字历史、未来轮次、干净 pass、故障场景、合法攻击描述全部无回退；调度探针 8/8、真实 HTTP 双入口 14 passed、maxActive=2；tsc/全量/build/证据复现 25 份全 0；六项哈希中仅 `ev-gatecheck` 与 candidate/change_scope 属预签态失配。
 - S1 的 P2：`docs/audits/S1-independent-audit-round29.md:67` 攻防表里的「结论：fail」被 fail-closed 误报；未签门的 G1 证据漂移。均非本轮 P1。
 - 状态：`s2-audit-r40` 仍在跑，同样绑 `9c75ad1`；主仓 HEAD `08f3eab`，工作树干净。G1/G2 未签。
+
+### 11.41 第四十轮 S2 结论与格内拆词/期望列收口（2026-11-14 13:14，HEAD 4154c0e）
+
+- 触发：S2 第四十轮在 `9c75ad1` 上判 **fail**（P0=0 / P1=1 / P2=1），报告 `D:/aboutAI/_audit-r40-s2/docs/audits/S2-independent-audit-round40.md`，克隆提交 `ce5f98a`（当前 `8d48cda`）。P1 与 S1 同源：备注格 `未通过（本轮）`、`本轮未通过`、`未 通过`、`待定`、`blocked` 可签过，`fail` 与裸 `未通过` 被拦。S2 明确主仓 `43badda` 已含同类修复，但 `未 通过` 仍放行，期望列 `blocked` 反而误伤。
+- 修复 `58baafc`：`isBareFailureCell` 不再只认整格相等，改为对失败词逐字符生成 `\|*` 连接的正则，词间空白/标点折成的 `|` 仍算同一裁决；词后还有实词（`未通过项为空`）不匹配。新增 `isExpectationColumn`，攻击行的「期望/预期/expected」格不再参与失败扫描，`拒绝`/`rejected`/`blocked` 期望不再误伤。测试补 `未 通过`、`待定`、`blocked` 与期望列三变体；全量 **547 passed | 1 skipped**（gate 180 tests），build 成功。
+- 追加 `b7c03d4`：`isBareFailureCell` 的前缀剥离补 `该项/本项/此项/此項/该门/該門/本门/本門/该审计/該審計`，覆盖 `该项未通过`；全量仍 547 passed | 1 skipped。
+- 追加 `4154c0e`：期望列用例补 `blocked`，定向 1 passed。
+- 追加 `161589d`：攻击行不再「非裸词即跳过」。只跳过期望列、攻击描述/载荷列（表头或正文含被拒/载荷/输入等标记）与 `未通过项为空` 这类零失败短语；「备注/说明/附注」里的 `必过项 G1-01 未通过`、`该项未通过` 都按必过项否决拦截。全量仍 **547 passed | 1 skipped**，证据复现 25 份一致。
+- S2 其余：调度探针 24/24（默认 maxWaiting=1000、第 1002 个拒、maxWaiting=2 第 4 个拒、drain 两分支、重复 close 同 Promise、失败释放名额）；真实 HTTP 16/16（双入口 maxActive=2、异常 503 归零、close 后拒新、在跑 200 收尾、锁释放）；tsc/全量/build/证据复现 25 份全 0；独立临时门六项哈希全匹配（candidate `c2ba727a…`、change_scope `c7759fb5…`、evidence_index `9c477151…`、invariants `6f75465b…`、artifact `289473a7…`、body `73c28961…`）。
+- 正式 G1/G2 仍预签态：artifact/body 自洽，candidate/change_scope（G1 还含 evidence_index）与 HEAD 不一致，`gate-check` 两门 exit 1「候选提交之后候选文件又被改过」；未签。
+- 结论：第四十轮两路 fail 均因候选停在 `9c75ad1`。限定词、格内拆词、期望列、主语前缀这批修复已进 `4154c0e`，需在新候选上重跑 S1/S2 第四十一轮；不得用本轮 fail 报告重签。
