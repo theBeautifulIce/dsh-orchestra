@@ -815,3 +815,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证：`tsc --noEmit` 0；`pnpm test` 38 文件 **546 passed | 1 skipped**（gate 179 tests）；`pnpm build` 成功（CJS 0.29kB、ESM 110.17kB、d.ts 10.76kB）；改动 2 文件 +31/−4。提交 `757b499`「Reject qualified bare failure verdicts in attack-matrix remarks」。
 - 追加 `efb3302`「Cover adverbial prefixes before bare failure verdicts」：前缀最多连续剥 3 层，补 `暂/暫/尚/仍/并/並/也/还/還/均/都`，覆盖 `尚未通过`、`暂未通过`、`仍未通过`、`并未通过`、`本轮仍未通过`；全量仍 546 passed | 1 skipped。
 - 状态：`s1-audit-r40` / `s2-audit-r40` 仍跑在 `9c75ad1` 上，未覆盖本笔；G1/G2 未签。下一轮审计应绑本 handoff 提交后的新 HEAD，并把四类限定词载荷列为必测。
+
+### 11.40 第四十轮 S1 结论与限定词补洞（2026-11-14 13:12，HEAD 08f3eab）
+
+- 触发：S1 第四十轮在 `9c75ad1` 上判 **fail**（P0=0 / P1=1 / P2=2），报告 `docs/audits/S1-independent-audit-round40.md`，克隆 `D:/aboutAI/_audit-r40-s1`、基线 `c7884ea`、提交 `fd970b8`（报告）与 `b257ad4`（探针）。P1：攻击行备注格 `未通过（本轮）` 等限定写法可签过，因为候选尚未包含 `757b499` 的限定词修复；24 例矩阵中 4 例绕过，追加 7 例中 4 例绕过。S1 也确认 `757b499` 等是候选之后的改动，留待下一轮复核。
+- 复核：当前 HEAD 已覆盖 S1 列出的全部变体：`未通过（本轮）`、`未通过（3 项待补）`、`未通过，待整改`、`未通过 - 3 项`、`未通过（见备注）`、`未通过 —— 3 项`、`未通过/待整改`、`待整改`、`已否决（本轮）`。展开后唯一漏网是 `已否决（本轮）`，因为强否决表只有「否决」「被否决」，没有「已否决」。
+- 修复 `08f3eab`：`CELL_FAIL_VERDICTS_STRONG` 补 `已否决`、`已驳回`、`已拒绝`、`已退回`、`已打回`；攻击行备注格限定词用例从 9 种扩到 17 种，正控 `未通过项为空`、`失败项为空` 仍为空。定向 1 passed；全量 546 passed | 1 skipped；build 成功。
+- S1 其余：A6/A6b/A7/A8/A8b/A9/A9b/A9c、中文数字历史、未来轮次、干净 pass、故障场景、合法攻击描述全部无回退；调度探针 8/8、真实 HTTP 双入口 14 passed、maxActive=2；tsc/全量/build/证据复现 25 份全 0；六项哈希中仅 `ev-gatecheck` 与 candidate/change_scope 属预签态失配。
+- S1 的 P2：`docs/audits/S1-independent-audit-round29.md:67` 攻防表里的「结论：fail」被 fail-closed 误报；未签门的 G1 证据漂移。均非本轮 P1。
+- 状态：`s2-audit-r40` 仍在跑，同样绑 `9c75ad1`；主仓 HEAD `08f3eab`，工作树干净。G1/G2 未签。
