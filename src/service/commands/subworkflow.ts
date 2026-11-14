@@ -474,13 +474,49 @@ export function propagateRunCancellation(
     [p.now, p.cancelResult, p.now, p.runId],
   )
   // 运行级取消先收目标 run 自己的在跑节点，再向子 run 传播
-  const ownNodes = tx.all<Pick<NodeRunRow, 'node_run_id' | 'status' | 'attempt' | 'revision' | 'side_effect_policy'>>(
-    'SELECT node_run_id, status, attempt, revision, side_effect_policy FROM node_runs WHERE run_id = ? ORDER BY node_run_id',
+  const ownNodes = tx.all<{
+    node_run_id: string
+    status: string
+    attempt: number
+    revision: number
+    side_effect_policy: SideEffectPolicy
+    blocked_decision_id: string | null
+  }>(
+    'SELECT node_run_id, status, attempt, revision, side_effect_policy, blocked_decision_id FROM node_runs WHERE run_id = ? ORDER BY node_run_id',
     [p.runId],
   )
   for (const node of ownNodes) {
+    if (node.status === 'blocked_pre') {
+      // 取消 run 时压在审批卡上的节点不能留着：批准入口会在取消后把它放回 queued，
+      // 而 dispatcher 拒绝执行已取消的 run，节点就会永远停在 queued、run 永远 running。
+      if (node.blocked_decision_id) {
+        tx.run(
+          "UPDATE decisions SET status = 'resolved', closed_reason = 'expired_final', revision = revision + 1, decided_at = ? " +
+            "WHERE decision_id = ? AND status IN ('pending', 'acknowledged', 'blocked_for_human')",
+          [p.now, node.blocked_decision_id],
+        )
+      }
+      applyTransition(tx, {
+        nodeRunId: node.node_run_id,
+        from: ['blocked_pre'],
+        to: 'failed',
+        attempt: node.attempt,
+        now: p.now,
+        patch: { resume_state: null, blocked_decision_id: null, wait_started_at: null },
+      })
+      appendNodeRunEvent(tx, secret, node.node_run_id, 'cancel_blocked_pre', {
+        cancel_result: p.cancelResult,
+        decision_id: node.blocked_decision_id,
+      })
+      cancelledNodes.push(node.node_run_id)
+      continue
+    }
     if (['queued', 'leased', 'dispatched', 'started', 'waiting', 'verifying'].includes(node.status) === false) continue
-    if (node.side_effect_policy === 'irreversible') {
+    // 已派发/在跑的不可逆节点不能取消；但 queued/leased 的副作用尚未发生，
+    // 仍走 applyCancel 的作废分支，否则 run 会永远等一个永远不会执行的节点。
+    const irreversibleRunning = node.side_effect_policy === 'irreversible'
+      && ['dispatched', 'started', 'waiting', 'verifying'].includes(node.status)
+    if (irreversibleRunning) {
       skippedIrreversible.push(node.node_run_id)
       continue
     }

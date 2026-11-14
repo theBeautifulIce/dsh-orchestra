@@ -246,6 +246,33 @@ describe('子运行 pin、深度与唤醒', () => {
 })
 
 describe('父取消传播与终态闸', () => {
+  it('取消压在审批卡上的节点：决定卡一起过期，节点 failed，run 能落 cancelled', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status = 'blocked_pre', blocked_decision_id = 'd1' WHERE node_run_id = 'nr-parent'")
+      tx.run("INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, created_at) VALUES ('d1', 'r1', 'nr-parent', 'pre_execution', 'pending', 1, '{}', ?)", [NOW])
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      expect(out.cancelledNodes).toContain('nr-parent')
+      expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!.status).toBe('failed')
+      expect(tx.get<{ status: string; closed_reason: string }>('SELECT status, closed_reason FROM decisions WHERE decision_id = ?', ['d1']))
+        .toMatchObject({ status: 'resolved', closed_reason: 'expired_final' })
+      expect(closeRun(tx, 'r1', NOW)).toBe('cancelled')
+    })
+  })
+
+  it('run 级取消把 queued 的不可逆节点作废，run 才能落 cancelled', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status = 'done' WHERE node_run_id = 'nr-parent'")
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('nr-irr', 'r1', 'irr', 2, 'agent', 1, 'queued', 1, 'irreversible', ?, ?)", [NOW, NOW])
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      expect(out.cancelledNodes).toContain('nr-irr')
+      expect(out.skippedIrreversible).not.toContain('nr-irr')
+      expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-irr'])!.status).toBe('superseded')
+      expect(closeRun(tx, 'r1', NOW)).toBe('cancelled')
+    })
+  })
+
   it('取消落到子 run 和可取消节点，不可逆节点跳过；父 run 在子 run 收口前不能进终态', () => {
     const db = memoryDb()
     const c = catalog()
