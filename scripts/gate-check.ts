@@ -1258,7 +1258,7 @@ const CELL_FAIL_VERDICTS_STRONG = [
   '不成功', '未成功', '未达标', '不达标', '不批准', '未批准', '不获批准',
   '未获批准', '不予批准', '不予通过', '未获批', '未被批准', '未获审批', '不获审批',
   '未通过验收', '不通过验收', '未通过收口', '被否决', '否决', '已否决', '被驳回', '驳回',
-  '已驳回', '被拒绝', '拒绝', '已拒绝', '不予采信', '不采信', '未完成整改', '整改未完成',
+  '已驳回', '被拒绝', '拒绝', '已拒绝', '被拒', '已拒', '不予采信', '不采信', '未完成整改', '整改未完成',
   '未完成修复', '未整改', '未修复', '未收口', '未受理', '不予受理',
   '未接收', '不接收', '未接受', '不予接受', '不接受', '不予放行', '不放行',
   '不予晋级', '不予准入', '不准入', '未准入', '失败', '退回', '已退回', '打回', '已打回',
@@ -1344,7 +1344,7 @@ function isExpectationColumn(header: string): boolean {
 // 但「备注/说明/附注」不是描述列：里面若出现必过项否决，仍要判。
 function isAttackDescriptionCell(cell: AuditCell): boolean {
   return /(?:攻击|用例|场景|输入|载荷|样本|案例|case|attack|scenario|payload|input)/i.test(cell.header)
-    || /(?:被拒|已拒|拒绝文案|驳回文案|拦截|拦下|攻击载荷|载荷|输入|尝试|样例|样本|应被拒|期望拒绝|被\s*blocked|blocked\s*by)/i.test(cell.text)
+    || /(?:被拒文案|拒绝文案|驳回文案|被拒载荷|已拒载荷|被拒原因|拒绝原因|拦截|拦下|攻击载荷|载荷|输入|尝试|样例|样本|应被拒|期望拒绝|被\s*blocked|blocked\s*by)/i.test(cell.text)
 }
 
 function isZeroFailurePhrase(folded: string): boolean {
@@ -1401,7 +1401,7 @@ function isRejectedAttackRow(row: AuditCell[]): boolean {
   if (!/攻击|attack|用例|case|场景|scenario/i.test(headerText)) return false
   // 攻击矩阵常把“拒”写在「期望」列，而不是「结果」列；两列都认。
   const rejected = row.some((cell) => /期望|expected|预期|结果|结论|判定/i.test(cell.header)
-    && /^(?:拒|拒绝|已拒|拦下|拦截|blocked|rejected|denied)$/i.test(cell.text.trim()))
+    && /^(?:(?:期望|预期|应|应被|必须|需要|要求|expected?|should)\s*)?(?:拒|拒绝|已拒|已拒绝|禁止通过|拦下|拦截|blocked|rejected|denied)(?:\s*[（(][^）)]*[）)])?$/i.test(cell.text.trim()))
   if (!rejected) return false
   return /^(?:[A-Za-z]{1,4}[-_]?\d+[a-z]?|\d+)$/.test((row[0]?.text ?? '').trim())
 }
@@ -1719,7 +1719,7 @@ export function proseVerdictClashes(
         // 列名可以改，「备注」里只写「未通过」这种裸否决仍要判。
         const bareFailure = isBareFailureCell(foldForVerdict(cell.text))
         const expectationCell = isExpectationColumn(cell.header)
-        const descriptionCell = isAttackDescriptionCell(cell)
+        const descriptionCell = !conclusionCell && isAttackDescriptionCell(cell)
         const zeroFailure = isZeroFailurePhrase(foldForVerdict(cell.text))
         if (rejectedAttack && (expectationCell || descriptionCell || zeroFailure)) continue
         // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。

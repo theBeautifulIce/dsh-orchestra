@@ -1606,6 +1606,20 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
     }
   })
 
+  it('攻击行结论列写已拒绝/被拒绝/已拒仍拒绝', () => {
+    const report = (verdict: string) => head + [
+      '| 用例编号 | 必过项 | 期望 | 结论 |',
+      '| --- | --- | --- | --- |',
+      '| A1 | G2-11 | 拒 | ' + verdict + ' |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    for (const verdict of ['G2-11 已拒绝：证据不足', 'G2-11 被拒绝', '已拒（本轮）']) {
+      expect(proseVerdictClashes(report(verdict), 'pass', ['G2-11']).join('\n'), verdict).toMatch(/G2-11/)
+    }
+  })
+
   it('攻击矩阵期望列写拒绝/ rejected 不算本轮否决', () => {
     const report = (expected: string) => head + [
       '| 用例编号 | 必过项 | 期望 | 备注 |',
@@ -1615,7 +1629,7 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
       '结论：pass。',
       '',
     ].join('\n')
-    for (const expected of ['拒绝', 'rejected', 'blocked']) {
+    for (const expected of ['拒绝', 'rejected', 'blocked', '期望拒绝', '已拒绝', '拒绝（本轮）', '禁止通过']) {
       expect(proseVerdictClashes(report(expected), 'pass', ['G1-01']), expected).toEqual([])
     }
   })
