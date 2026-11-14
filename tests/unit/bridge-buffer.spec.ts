@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { BridgeClient, BridgeEventBuffer, refillPage, type BridgeEvent } from '../../src/executor/bridge.ts'
@@ -133,13 +133,31 @@ describe('桥事件缓冲', () => {
     expect(buf.lastPersistedAckSeq).toBe(2)
   })
 
+  it('有持久确认位但没有已落账回查 → 构造直接拒绝', () => {
+    expect(() => new BridgeEventBuffer(
+      { limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' },
+      { lastPersistedAckSeq: 3 },
+    )).toThrowError(/必须注入已落账事件回查/)
+  })
+
   it('重启后从持久确认位恢复：已确认事件重复推送幂等，后续从 ack+1 接上', () => {
-    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' }, { lastPersistedAckSeq: 3 })
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' }, { lastPersistedAckSeq: 3, lookupPersisted: () => undefined })
     expect(buf.lastContiguousSeq).toBe(3)
     expect(buf.push(ev(2)).accepted).toBe(false)
     expect(buf.push(ev(3)).accepted).toBe(false)
     expect(buf.push(ev(4)).gapFrom).toBeNull()
     expect(buf.lastContiguousSeq).toBe(4)
+  })
+
+  it('spill 末尾半行 → 重启跳过残行，完整事件仍可恢复', () => {
+    const dir = tmp()
+    const buf = new BridgeEventBuffer({ limitBytes: 4096, highWaterBytes: 1, spillDir: dir, agentId: 'a1' })
+    for (let i = 1; i <= 3; i += 1) buf.push(ev(i))
+    const file = readdirSync(dir).find((f) => f.endsWith('.jsonl'))!
+    appendFileSync(join(dir, file), '{"seq":4')
+    const reopened = new BridgeEventBuffer({ limitBytes: 4096, highWaterBytes: 1, spillDir: dir, agentId: 'a1' })
+    expect(reopened.takeFrom(1).map((e) => e.seq)).toEqual([1, 2, 3])
+    rmSync(dir, { recursive: true, force: true })
   })
 
   it('过高水位自动 spill：spilled=true、内存清空、文件在、takeFrom(1) 取回全部', () => {

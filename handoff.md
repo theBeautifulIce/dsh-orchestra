@@ -907,3 +907,13 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - P2-4 处理口径：008 已随 `34548b6` 推送，按“不得修改已发布迁移”不再改它；`CHECK`/外键留后续 010 重建表时补，当前由 `BridgeLedger` 写入前校验 attempt、seq、游标。设计 §6 已与实际 008 对齐，删除 `node_runs.bridge_ack_seq`/`bridge_last_seq`/`bridge_tool_outbox` 的旧描述，outbox 明确放 R5-C 的 009。
 - 验证：`pnpm typecheck` 0；全量 39 文件 **572 passed | 1 skipped**；`pnpm build` 成功（ESM 110.22kB）；证据复现 25 份字节一致。
 - 状态：R5-B 进入复审；R5-C 仍未开工。G1/G2 仍绑 `caae193`，第 45 轮重签要等 R5-C/D 与复审通过。
+
+### 11.45 R5-B 复审 PASS 与 P2 收口（2026-11-14 15:55，R5-B P2 候选）
+
+- `r5b-auditor` 在 `6d33ef8` 上复审 verdict **PASS**：P0=0、P1=0，四条旧 P1 全部闭合；克隆 `tmp/audit-r5b-r2`，定向 43 passed、探针 15 passed、全量 572 passed | 1 skipped，主仓审计前后 HEAD/工作树未变，克隆已删。
+- 复审 P2-1：`lookupPersisted` 不能靠调用方自觉。`BridgeEventBuffer` 构造器现在对 `lastPersistedAckSeq > 0 && !lookupPersisted` 直接抛 `SCHEMA_VERSION_UNSUPPORTED`，避免重启冲突检测静默退化成“已收到”；补构造拒绝用例。
+- 复审 P2-2：`readSpill()` 只容错文件末尾没有换行的半行，完整行损坏仍抛错；补“末尾半行后重启仍取回 1..3”用例。
+- 复审 P2-4/P2-5：设计 §6 写明 `payload_hash` 前像为 `canonicalJson({ type: 裸 type, payload })`，从 receipt/账本回查先剥 `bridge.`；`listen(params, signal)` 的 `signal` 改为必填，与实现一致。
+- P2-3（pending 未计入 `buffer_limit_bytes`）保留给 R5-C，在消费器接管 pending 时一并收紧；008 的 CHECK/外键按已拍板口径留 010。
+- 验证：`pnpm typecheck` 0；全量 39 文件 **574 passed | 1 skipped**；`pnpm build` 成功（ESM 110.22kB）；G1/G2 仍绑 `caae193`，候选取本轮代码提交。
+- 状态：R5-B 库层、迁移层、测试层收口完成；P2 修复后需一次聚焦复审，PASS 后开 R5-C 接 `runNode()`。

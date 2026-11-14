@@ -95,7 +95,7 @@ describe('R5-B 桥事件落账', () => {
     const reopened = openDb(dir + '/orchestra.db')
     const ledger2 = ledgerFor(reopened)
     expect(ledger2.cursor()).toBe(2)
-    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: dir, agentId: 'a1' }, { lastPersistedAckSeq: ledger2.cursor() })
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: dir, agentId: 'a1' }, { lastPersistedAckSeq: ledger2.cursor(), lookupPersisted: () => undefined })
     expect(buf.push(ev(3)).gapFrom).toBeNull()
     expect(ledger2.ingest(ev(3)).appended).toBe(true)
     expect(ledger2.cursor()).toBe(3)

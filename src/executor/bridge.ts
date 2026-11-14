@@ -184,6 +184,10 @@ export class BridgeEventBuffer {
     if (!Number.isInteger(ack) || ack < 0) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '持久确认游标必须是非负整数', { lastPersistedAckSeq: ack })
     }
+    // 有持久确认位却查不到已落账事件，重启冲突检测会静默退化成“已收到”，必须拒绝构造
+    if (ack > 0 && !init.lookupPersisted) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '有持久确认位时必须注入已落账事件回查，否则重启冲突检测会静默失效', { lastPersistedAckSeq: ack })
+    }
     this.lastPersistedAckSeqValue = ack
     this.lastContiguousSeqValue = ack
     this.lastReceivedSeqValue = ack
@@ -352,9 +356,18 @@ export class BridgeEventBuffer {
   private readSpill(file: string): BridgeEvent[] {
     const out: BridgeEvent[] = []
     const text = readFileSync(file, 'utf8')
-    for (const line of text.split('\n')) {
+    const lines = text.split('\n')
+    // 崩溃可能留下没有换行的半行；只容错最后一行，完整行的损坏仍要报错
+    const endsWithNewline = text.endsWith('\n')
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]!
       if (line.trim() === '') continue
-      out.push(JSON.parse(line) as BridgeEvent)
+      try {
+        out.push(JSON.parse(line) as BridgeEvent)
+      } catch (err) {
+        if (!endsWithNewline && i === lines.length - 1) break
+        throw err
+      }
     }
     return out
   }

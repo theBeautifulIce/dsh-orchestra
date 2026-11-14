@@ -114,7 +114,7 @@ export type RunNodeDeps = {
 export type BridgeEventStream = {
   listen(
     params: { executorAgentId: string; attempt: number; fromSeq: number },
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): AsyncIterable<BridgeEvent>
 }
 
@@ -122,7 +122,7 @@ export type BridgeTransport = {
   request<T>(method: string, params: unknown): Promise<T>
   listen(
     params: { executorAgentId: string; attempt: number; fromSeq: number },
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): AsyncIterable<BridgeEvent>
 }
 ```
@@ -195,6 +195,8 @@ CREATE TABLE bridge_event_receipts (
 008 已随 `34548b6` 推送，按“不修改已发布迁移”的约束不再改它；`CHECK`/外键如需数据库兜底，放到后续 010 重建表时补，当前由 `BridgeLedger` 在写入前校验 attempt、seq 与游标。
 
 桥事件在 `node_run_events` 里统一写 `bridge.<type>`（如 `bridge.tool.start`），receipt 的 `event_type` 用同一前缀；`ledger_seq` 就是该条 `node_run_events.seq`。事件类型固定清单以 `src/executor/bridge.ts` 的 `BRIDGE_EVENT_TYPES` 为准，消费方按该清单校验。
+
+`payload_hash` 的前像固定为 `sha256(canonicalJson({ type: 裸 type, payload }))`，不包含 `at`、`toolStartAt`、`attempt` 等外围字段；receipt 只存带前缀的 `event_type`，从 receipt 或账本行回查时先剥掉 `bridge.` 再重算，保证同 seq 同 payload 幂等、仅时间字段不同不误判冲突。
 
 消费事务顺序：
 
