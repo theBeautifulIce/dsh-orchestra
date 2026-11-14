@@ -104,6 +104,10 @@ describe('生产路径跑通单节点', () => {
     )).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
     expect(Date.now() - began).toBeLessThan(1000)
     expect(nodeRow(orchestra.db).status).toBe('startup_unknown')
+    const blocked = orchestra.db.raw.prepare(
+      "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='blocked_post'",
+    ).get() as { n: number }
+    expect(Number(blocked.n)).toBe(0)
     await release()
     rmSync(dir, { recursive: true, force: true })
   })

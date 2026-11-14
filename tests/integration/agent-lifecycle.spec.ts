@@ -106,6 +106,7 @@ describe('AgentLifecycle 故障注入', () => {
     expect(Date.now() - began).toBeLessThan(1000)
     await h.lifecycle.stop()
     expect(calls).toContain('executor.cancel')
+    expect(calls).toContain('executor.dispose')
     h.cleanup()
   })
 
@@ -133,6 +134,35 @@ describe('AgentLifecycle 故障注入', () => {
     expect(calls).toContain('executor.cancel')
     expect(calls).toContain('executor.dispose')
     h.cleanup()
+  })
+
+  it('B15 listen 先失败、send 还挂着：report 的拒绝必须被消费，不能 unhandledRejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const transport: BridgeTransport = {
+      request: async (method) => {
+        if (method === 'executor.subscribe') return { subscribed: true, fromSeq: 0, lastSeq: 0 } as never
+        if (method === 'executor.send') return new Promise<never>(() => {}) as never
+        if (method === 'executor.cancel') return 'interrupted' as never
+        if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        return undefined as never
+      },
+      listen: () => (async function* () {
+        throw new Error('listen boom')
+      })(),
+    }
+    const h = harness(transport, undefined, 50)
+    try {
+      await expect(h.lifecycle.run(new AbortController().signal)).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
+      await h.lifecycle.stop()
+      await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      h.cleanup()
+    }
   })
 
   it('B12 stop 失败后再次调用不重发取消/释放', async () => {

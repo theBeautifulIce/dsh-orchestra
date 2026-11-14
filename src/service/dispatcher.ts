@@ -34,6 +34,8 @@ export type DispatchOutcome = {
 // 注入后 dispatcher 不再自己调 scheduler：一次节点执行只占一个名额。
 export type DispatchDeps = RunNodeDeps & {
   executeNode?: (p: RunNodeParams) => Promise<RunNodeResult>
+  // 生产装配从配置读出的执行时限；缺省时由 runNode 使用默认值。
+  executionLimits?: Pick<RunNodeParams, 'actionTimeoutMs' | 'startupTimeoutMs' | 'verifyTimeoutMs'>
 }
 
 // 只派发排队中的节点：一个节点失败不拖垮同批别的节点
@@ -73,6 +75,7 @@ async function dispatchOne(
       ownerEpoch: p.ownerEpoch ?? deps.db.epoch,
       leaseTtlMs: p.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
       leaseRenewIntervalMs: p.leaseRenewIntervalMs,
+      ...deps.executionLimits,
     }
     const res = deps.executeNode
       ? await deps.executeNode(params)

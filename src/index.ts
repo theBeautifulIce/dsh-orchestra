@@ -73,6 +73,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
   const executor = opts.executor
   const spillDir = executor?.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(opts.configPath)
+  // 执行时限同样只能来自配置：不把 action_timeout_ms / startup_timeout_ms / verify_timeout_ms
+  // 读进来，配置写了也不生效（复审 P2-1）。读不到就交给 runNode 的默认值。
+  const executionLimits = executionLimitsFromConfig(opts.configPath)
   const agents = executor ? (executor.agents ?? bridgeHostAgentFactory(executor.bridge)) : null
   const executorDeps: RunNodeDeps | null = executor && agents
     ? { runtime, db, secret: opts.secret, ...executor, agents, ...(spillDir ? { spillDir } : {}) }
@@ -104,7 +107,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })
       }
-      return dispatchRun({ ...executorDeps!, executeNode: executeScheduled }, {
+      return dispatchRun({ ...executorDeps!, executeNode: executeScheduled, executionLimits }, {
         runId: b.runId,
         nodes: b.nodes,
         now: b.now,
@@ -128,6 +131,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         ownerEpoch: b.ownerEpoch ?? db.epoch,
         leaseTtlMs: b.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
         leaseRenewIntervalMs: b.leaseRenewIntervalMs,
+        ...executionLimits,
       })
     },
   }
@@ -220,6 +224,20 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         await service.release()
       }
     },
+  }
+}
+
+// 执行时限：配置缺失或读不动时返回空对象，由 runNode 使用默认值，不让配置文件挡住启动。
+function executionLimitsFromConfig(configPath: string | undefined): Pick<RunNodeParams, 'actionTimeoutMs' | 'startupTimeoutMs' | 'verifyTimeoutMs'> {
+  try {
+    const cfg = loadConfig(configPath ?? 'orchestra.config.json')
+    return {
+      actionTimeoutMs: cfg.execution.action_timeout_ms,
+      startupTimeoutMs: cfg.execution.startup_timeout_ms,
+      verifyTimeoutMs: cfg.execution.verify_timeout_ms,
+    }
+  } catch {
+    return {}
   }
 }
 

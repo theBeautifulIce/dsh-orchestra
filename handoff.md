@@ -965,3 +965,13 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 回归：B13 订阅挂住、B14 发送挂住，均断言 <1s 内 `OPERATION_TIMEOUT` 且仍 cancel/dispose；B12 增加 cancel/idle 各一次断言；runtime 新增「spawn 挂住：启动超时落 startup_unknown」。
 - 验证：`pnpm typecheck` 0；全量 40 文件 **594 passed | 1 skipped**；`pnpm build` 成功（ESM 143.34kB / gzip 35.96kB、d.ts 13.63kB）。
 - 遗留：`startup_unknown` 仍无自动推进（sweep 只扫 `verifying`）；spawn catch 对确定性错误的分类仍偏宽；B06 仍是事务级重放，B07 外部取消通道仍未接生产。G1/G2 仍绑 `caae193`。
+
+### 11.50 f662902 复审 report 未处理拒绝与配置时限（2026-11-14 16:55，整改候选）
+
+- 独立复审 `r5c-reaudit` 在 `6efcbeb` 上 verdict **FAIL**：P0=0，P1=1，P2=4。六项复核成立：subscribe 超时可打穿、send 超时可打穿、spawn 应用层超时落 `startup_unknown`、B12 cancel/idle/dispose 各一次、bestEffort 游标查询已入 try、B13/B14 主路径通过。
+- P1：`report` 在 `send` 挂起期间被 `consume` 拒绝时还没有 handler，形成 `unhandledRejection`；探针 `PROBE7_SEND_REPORT` 实测 `unhandled:1`，Node 默认会因未处理拒绝退出。
+- 修复：`report` 创建后立即挂 `void report.catch(() => {})`; 只兜住“send 未返回”这段窗口，后面的 `guarded(report)` 仍然把真实错误抛出，不吞结果。
+- 新增 B15：`listen` 立即失败、`send` 挂起，断言最终 `OPERATION_TIMEOUT`、`unhandledRejection` 为空；B13 补 `dispose` 断言；runtime spawn 挂住补“无 blocked_post 事件”断言。
+- P2-1 同步收口：`createOrchestra` 新增 `executionLimitsFromConfig()`，把 `execution.action_timeout_ms`、`startup_timeout_ms`、`verify_timeout_ms` 注入 `runNode` 与 `dispatcher` 的节点参数；配置缺失时仍用 `runNode` 默认值。
+- 验证：`pnpm typecheck` 0；全量 40 文件 **595 passed | 1 skipped**；`pnpm build` 成功（ESM 143.84kB / gzip 36.05kB、d.ts 13.63kB）。
+- 遗留：`startup_unknown` 仍无自动推进；spawn catch 对确定性错误的分类偏宽；B06 仍是事务级重放，B07 外部取消通道仍未接生产。G1/G2 仍绑 `caae193`。

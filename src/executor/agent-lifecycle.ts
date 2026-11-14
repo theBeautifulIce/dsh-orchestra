@@ -136,6 +136,10 @@ export class AgentLifecycle {
       const report = new Promise<AgentReportEnvelope>((resolve, reject) => {
         this.waiter = { resolve, reject }
       })
+      // consume 可能在 send 还没返回时就拒绝 report；此刻还没有 await 挂 handler。
+      // 先挂一个空白 catch，避免这段窗口变成 unhandledRejection；真正的错误仍由后面的
+      // guarded(report) 抛出，不吞结果。
+      void report.catch(() => {})
       this.running = this.consume(this.controller.signal).catch((err) => {
         if (!this.reportSeen) this.waiter?.reject(err)
       })
