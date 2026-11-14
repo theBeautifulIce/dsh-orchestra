@@ -997,3 +997,17 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - P2-4：配置非法时 `openServiceOrchestra` 先开 db，`createOrchestra` 抛错后 db 未关，删除临时目录报 EPERM。
 - 已知遗留：`startup_unknown` 仍无自动推进/sweep。
 - 状态：R5-C 可进 R5-D；G1/G2 仍绑 `caae193`，未签门。
+
+### 11.53 R5-D 起步：外部取消接生产 + R5-C 复审 P2 清理（2026-11-14 17:14）
+
+- 新增 `src/service/execution-cancels.ts`：`ExecutionCancels.register(nodeRunId, attempt)` 返回 AbortSignal，`abort()` 只打对应 `node_run+attempt`，`release()` 清槽；旧 attempt 的取消不会打断新 attempt。
+- `src/index.ts`：`Orchestra.cancels` 暴露注册表；`executeNode` 注册信号后传给 `runNode`，`finally` 释放；`commands.cancel` 在 `submitCancel` 落账后对非 `already_stopped` 结果 `abort` 当前 attempt。
+- `src/executor/run-node.ts`：`RunNodeDeps.cancelSignal?`；起跑前已取消直接拒绝；`AgentLifecycle.run` 使用该信号；报告与收口之间再查一次 aborted，取消后不写 done；catch 在 `cancelSignal.aborted` 时跳过 `blocked_post`，已由 cancel 路径落 `timing_out/stopping`。
+- R5-C 复审 P2 清理：
+  - P2-2：`bestEffortReleaseAgent` 的 cancel/whenIdle/state/dispose 全部包 2s `withTimeout`，晚到会话不再无界挂住。
+  - P2-3：`isDeterministicSpawnFailure` 改为显式白名单（FORBIDDEN/TOOL_NOT_ALLOWED/TOOL_NOT_REGISTERED/RUN_TOOL_NOT_READ_ONLY/VERIFIER_TOOL_POLICY_MUTATING/PAYLOAD_SCHEMA_INVALID）；`PROTOCOL_VERSION_MISMATCH` 不再冒充宿主明确拒绝，落 `startup_unknown`。
+  - P2-4：`openServiceOrchestra` 在 `createOrchestra` 抛错且 orchestra 未建时关闭已打开的 db，避免临时目录 EPERM。
+- 测试：新增 `tests/unit/execution-cancels.spec.ts` 3 tests；runtime 新增「spawn 回包缺 agentId 落 startup_unknown」「runNode 外部取消不写 blocked_post」「commands.cancel 经注册表 abort 正在跑的 runNode」。
+- 验证：typecheck 0；全量 **604 passed | 1 skipped**（41 files）；build 成功（ESM 147.74kB / gzip 37.02kB、d.ts 14.00kB）。
+- 未完成：B06 仍是事务级重放，不是独立进程强杀；B07 的生产取消已接，但独立 kill 场景仍需补。
+TASK AS OF THIS BLOCK: 本轮改动未提交；下一步 commit/push，再继续 B06。

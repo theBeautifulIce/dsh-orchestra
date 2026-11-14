@@ -43,6 +43,7 @@ export const DEFAULT_LEASE_TTL_MS = 30_000
 export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 10_000
 export const DEFAULT_ACTION_TIMEOUT_MS = 120_000
 export const DEFAULT_STARTUP_TIMEOUT_MS = 30_000
+const STOP_RPC_TIMEOUT_MS = 2_000
 
 export type RunNodeResult = {
   node_run_id: string
@@ -62,9 +63,14 @@ export type RunNodeDeps = {
   bridge: BridgeClient
   // 未确认事件的落盘目录；同 node_run+agent+attempt 的文件前缀彼此隔离
   spillDir?: string
+  // 外部取消信号：只用于把取消请求送进当前 attempt，不改变账本状态
+  cancelSignal?: AbortSignal
 }
 
 export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunNodeResult> {
+  if (deps.cancelSignal?.aborted) {
+    throw new OrchError('SERVICE_UNAVAILABLE', '节点执行已被取消', { nodeRunId: p.nodeRunId, attempt: p.attempt })
+  }
   // 工具策略只从服务端加载过的定义取：请求体给什么不算数（第五轮审计 P1-2）
   const policy = policyForNodeRun(deps, p)
   // 前向路径只接只读工具；有副作用的动作走补偿或不可逆流程（规格 4.7 行 396）
@@ -108,9 +114,19 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
   }
 }
 
-// 宿主明确拒绝与“结果未知”必须分开：4xx 类 OrchError 没有副作用，只有超时/传输错误才落 startup_unknown。
+// 只有“宿主明确拒绝且没有建会话”的码才落 blocked_pre。
+// 回包缺 agentId 的 PROTOCOL_VERSION_MISMATCH 不能算明确失败：宿主可能已经建了会话。
+const DETERMINISTIC_SPAWN_FAILURES: ReadonlySet<string> = new Set([
+  'FORBIDDEN',
+  'TOOL_NOT_ALLOWED',
+  'TOOL_NOT_REGISTERED',
+  'RUN_TOOL_NOT_READ_ONLY',
+  'VERIFIER_TOOL_POLICY_MUTATING',
+  'PAYLOAD_SCHEMA_INVALID',
+])
+
 function isDeterministicSpawnFailure(err: unknown): boolean {
-  return err instanceof OrchError && err.code !== 'OPERATION_TIMEOUT' && err.code !== 'SERVICE_UNAVAILABLE'
+  return err instanceof OrchError && DETERMINISTIC_SPAWN_FAILURES.has(err.code)
 }
 
 // 启动阶段的超时：spawn 可能永远不回来，不能让 runNode 无界等待（复审 P1 残留）。
@@ -243,7 +259,11 @@ async function runNodeActions(
       clock: deps.runtime.clock,
       spillDir: deps.spillDir ?? join(tmpdir(), 'dsh-orchestra-bridge'),
     })
-    const envelope = await lifecycle.run(new AbortController().signal)
+    const envelope = await lifecycle.run(deps.cancelSignal ?? new AbortController().signal)
+    // 取消请求可能刚好落在报告与收口之间：此时不能再把 done 写进账本。
+    if (deps.cancelSignal?.aborted) {
+      throw new OrchError('SERVICE_UNAVAILABLE', '节点执行已被取消', { nodeRunId: p.nodeRunId, attempt: p.attempt })
+    }
     const trace = lifecycle.trace
     evidence = (envelope.evidence as StrongEvidence | null) ?? null
     // 停止确认必须在任何状态收口之前：stop 失败时节点还在 started，能落 blocked_post；
@@ -312,7 +332,8 @@ async function runNodeActions(
   } catch (err) {
     failed = err
     // spawn 结果未知已经落 startup_unknown；再走 blocked_post 会把“副作用未知”误写成“已确认阻断”。
-    if (!spawnUnknown && !spawnRejected) {
+    // 外部取消已经由 cancel 路径落 timing_out/stopping；这里再写 blocked_post 会撞状态机或改错归属。
+    if (!spawnUnknown && !spawnRejected && !deps.cancelSignal?.aborted) {
       const reason = stopFailure !== null
         ? 'agent_stop_unconfirmed'
         : err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
@@ -341,20 +362,25 @@ async function runNodeActions(
 // 建 Agent 成功、lifecycle 尚未建立就失败：不能把宿主会话留成孤儿。
 // 只做有界清理；确认不了停止就保留，不把原始错误盖掉。
 async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRunId: string, attempt: number): Promise<void> {
+  const bounded = <T>(task: Promise<T>, method: string): Promise<T> => withTimeout(
+    task,
+    STOP_RPC_TIMEOUT_MS,
+    () => new OrchError('OPERATION_TIMEOUT', `Agent 释放确认超时：${method}`, { agentId, method }),
+  )
   try {
-    await deps.bridge.cancel({ executorAgentId: agentId, attempt })
+    await bounded(deps.bridge.cancel({ executorAgentId: agentId, attempt }), 'cancel')
   } catch {
     // 取消不可用也继续查状态
   }
   let idle: { idle: boolean; timedOut: boolean } | null = null
   try {
-    idle = await deps.bridge.whenIdle({ executorAgentId: agentId, timeoutMs: 1_000 })
+    idle = await bounded(deps.bridge.whenIdle({ executorAgentId: agentId, timeoutMs: 1_000 }), 'whenIdle')
   } catch {
     idle = null
   }
   let state: { state: string; toolCallSeq: number; hasToolCall: boolean } | null = null
   try {
-    state = await deps.bridge.state({ executorAgentId: agentId })
+    state = await bounded(deps.bridge.state({ executorAgentId: agentId }), 'state')
   } catch {
     state = null
   }
@@ -370,11 +396,11 @@ async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRu
     const last = deps.db.raw.prepare(
       'SELECT COALESCE(MAX(bridge_seq), 0) AS n FROM bridge_event_receipts WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
     ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
-    await deps.bridge.dispose({
+    await bounded(deps.bridge.dispose({
       executorAgentId: agentId,
       serviceAckSeq: Number(ack?.n ?? 0),
       bridgeLastSeq: Number(last?.n ?? 0),
-    })
+    }), 'dispose')
   } catch {
     // 清理是尽力而为：ACK 滞后、桥不可用或查询失败时保留会话，且不覆盖节点上的原始错误
   }

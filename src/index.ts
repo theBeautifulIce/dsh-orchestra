@@ -22,6 +22,7 @@ import {
 } from './executor/run-node.ts'
 import { bridgeHostAgentFactory } from './executor/bridge.ts'
 import type { HostAgentFactory } from './executor/session.ts'
+import { ExecutionCancels } from './service/execution-cancels.ts'
 import {
   createExecutionScheduler, createExecutionSchedulerFromConfig, runThroughScheduler, type ExecutionScheduler,
 } from './service/execution-scheduler.ts'
@@ -53,6 +54,8 @@ export type Orchestra = {
   runtime: RuntimeDeps
   catalog: WorkflowCatalog
   commands: NodeCommands
+  // 执行中取消的进程内注册表：账本记取消事实，这里把 AbortSignal 送到对应的 runNode
+  cancels: ExecutionCancels
   close: () => void
 }
 
@@ -78,6 +81,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   // 读进来，配置写了也不生效（复审 P2-1）。读不到就交给 runNode 的默认值。
   const executionLimits = executionLimitsFromConfig(opts.configPath)
   const agents = executor ? (executor.agents ?? bridgeHostAgentFactory(executor.bridge)) : null
+  const cancels = new ExecutionCancels()
   const executorDeps: RunNodeDeps | null = executor && agents
     ? { runtime, db, secret: opts.secret, ...executor, agents, ...(spillDir ? { spillDir } : {}) }
     : null
@@ -86,7 +90,12 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     if (!executorDeps) {
       throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑节点', { nodeRunId: p.nodeRunId })
     }
-    return runNode(executorDeps, p)
+    const signal = cancels.register(p.nodeRunId, p.attempt)
+    try {
+      return await runNode({ ...executorDeps, cancelSignal: signal }, p)
+    } finally {
+      cancels.release(p.nodeRunId, p.attempt)
+    }
   }
   // 两条入口（/v1/runs/dispatch 与 /v1/node-runs/run）共用这一个带闸函数：
   // 不允许 dispatcher 自己再排一次，否则同一次执行会重复占两个并发名额。
@@ -96,7 +105,15 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     acquireLease: (b) => acquireNodeRun(runtime, b),
     renewLease: (b) => renewNodeLease(runtime, b),
     report: (b) => submitReport(runtime, b as Parameters<typeof submitReport>[1]),
-    cancel: (b) => submitCancel(runtime, { ...b, cancelResult: b.cancelResult as CancelResult }),
+    cancel: (b) => {
+      const out = submitCancel(runtime, { ...b, cancelResult: b.cancelResult as CancelResult })
+      // 账本先落取消事实，再把停止请求送到正在跑的那个 attempt；
+      // 已停的节点没有在跑实例，不打断任何东西。
+      if (out.cancel_result !== 'already_stopped') {
+        cancels.abort(b.nodeRunId, b.attempt, `cancel:${out.cancel_result}`)
+      }
+      return out
+    },
     loadWorkflow: (body) => catalog.load(body as Parameters<WorkflowCatalog['load']>[0]),
     createRun: (b) => createRun(db, catalog, {
       taskTitle: b.taskTitle,
@@ -141,6 +158,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     runtime,
     catalog,
     commands,
+    cancels,
     close: () => { db.raw.close() },
   }
 }
@@ -153,9 +171,10 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 }> {
   const releaseLock = await acquireDbLock(opts.dbFile)
   let orchestra: Orchestra | null = null
+  let db: Db | null = null
   try {
     const epoch = bumpEpoch(opts.dbFile)
-    const db = openServiceDb(opts.dbFile, epoch)
+    db = openServiceDb(opts.dbFile, epoch)
     orchestra = createOrchestra({ ...opts, db }, ORCHESTRA_LOCK_PROOF)
     return {
       orchestra,
@@ -165,7 +184,12 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
       },
     }
   } catch (err) {
+    // createOrchestra 可能在读完配置后抛错；此时 orchestra 还没建出来，
+    // 但 db 已经打开，必须在这里关掉，否则临时目录删除会报 EPERM。
     if (orchestra) orchestra.close()
+    else {
+      try { db?.raw.close() } catch { /* 关闭失败不覆盖原始错误 */ }
+    }
     await releaseLock()
     throw err
   }

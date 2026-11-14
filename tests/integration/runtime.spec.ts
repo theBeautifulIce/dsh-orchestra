@@ -13,7 +13,7 @@ import { runNode } from '../../src/executor/run-node.ts'
 import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
 import { BridgeClient, type BridgeTransport } from '../../src/executor/bridge.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
-import { sweepNow } from '../../src/service/commands/runtime.ts'
+import { submitCancel, sweepNow } from '../../src/service/commands/runtime.ts'
 import { fakeAgentBridge, fakeAgentClient, type AgentToolStep } from '../fixtures/agent-bridge.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -50,7 +50,78 @@ async function setup(steps: AgentToolStep[] = []) {
 
 const nodeRow = (db: any) => db.raw.prepare("SELECT * FROM node_runs WHERE node_run_id='nrun_1'").get() as any
 
+// 生产命令装配版：cancel 必须经 commands.cancel 打中正在跑的 runNode，
+// 不能只测 runNode 自己的 cancelSignal。
+async function setupCommands() {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-cancel-'))
+  const registry = new ToolRegistry()
+  registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
+  const host: HostRunner = {
+    readonlyAvailable: () => true,
+    run: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '' }),
+  }
+  const runner = new ReadOnlyToolRunner(registry, host, dir)
+  const agents: HostAgentFactory = {
+    create: async () => ({ agentId: 'agent_1', sessionId: 'sess_1' }),
+  }
+  const base = fakeAgentBridge({ agentId: 'agent_1', steps: [], at: NOW })
+  const bridge = new BridgeClient({
+    request: async (method, params) => base.request(method, params),
+    listen: async function* (_params, signal) {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve()
+        else signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    },
+  })
+  const service = await openServiceOrchestra({
+    dbFile: join(dir, 'orchestra.db'), secret: 's3cr3t-runtime', phase: 'S2',
+    executor: { registry, runner, bridge, agents },
+  })
+  const orchestra = service.orchestra
+  withTx(orchestra.db, (tx) => {
+    tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t1','生产路径','running',1,?,?)", [NOW, NOW])
+    tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, status, revision, created_at, updated_at) VALUES ('r1','t1','wf',7,'running',1,?,?)", [NOW, NOW])
+    tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nrun_1','r1','check',1,'agent',1,'queued',0,?,?)", [NOW, NOW])
+  })
+  orchestra.catalog.load({
+    workflow_version: '7',
+    pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
+    nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
+  })
+  withTx(orchestra.db, (tx) => tx.run('UPDATE runs SET workflow_definition_hash = ? WHERE run_id = ?', [definitionHashOf(orchestra.catalog.get('7')), 'r1']))
+  return { dir, orchestra, release: service.release }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const started = Date.now()
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) throw new Error('waitFor timeout')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
 describe('生产路径跑通单节点', () => {
+  it('commands.cancel 经注册表 abort 正在跑的 runNode，节点落 timing_out', async () => {
+    const { dir, orchestra, release } = await setupCommands()
+    const running = orchestra.commands.runNode({
+      nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+      tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+      now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+    })
+    await waitFor(() => nodeRow(orchestra.db).status === 'started')
+    const row = nodeRow(orchestra.db)
+    const out = orchestra.commands.cancel({
+      nodeRunId: 'nrun_1', attempt: 1, revision: row.revision,
+      cancelResult: 'interrupted', now: NOW, graceMs: 5000,
+    })
+    expect(out.cancel_result).toBe('interrupted')
+    await expect(running).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(nodeRow(orchestra.db).status).toBe('timing_out')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('queued → dispatched → started → verifying → done，落强证据', async () => {
     const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
     const out = await runNode(
@@ -105,6 +176,62 @@ describe('生产路径跑通单节点', () => {
       },
     )).rejects.toMatchObject({ code: 'FORBIDDEN' })
     expect(nodeRow(orchestra.db).status).toBe('blocked_pre')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('spawn 回包缺 agentId：协议错误不能算宿主明确拒绝，必须落 startup_unknown', async () => {
+    const { dir, orchestra, release, registry, bridge, runner } = await setup([])
+    const badAgents: HostAgentFactory = {
+      create: async () => { throw new OrchError('PROTOCOL_VERSION_MISMATCH', 'spawn 回包缺 agentId') },
+    }
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents: badAgents, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toMatchObject({ code: 'PROTOCOL_VERSION_MISMATCH' })
+    expect(nodeRow(orchestra.db).status).toBe('startup_unknown')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('外部取消：abort 当前 attempt，节点停在 timing_out，不写 blocked_post', async () => {
+    const { dir, orchestra, release, registry, agents, runner } = await setup([])
+    const base = fakeAgentBridge({ agentId: 'agent_1', steps: [], at: NOW })
+    const bridge = new BridgeClient({
+      request: async (method, params) => base.request(method, params),
+      listen: async function* (_params, signal) {
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve()
+          else signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      },
+    })
+    const controller = new AbortController()
+    const running = runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner, cancelSignal: controller.signal },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )
+    await waitFor(() => nodeRow(orchestra.db).status === 'started')
+    const row = nodeRow(orchestra.db)
+    submitCancel(orchestra.runtime, {
+      nodeRunId: 'nrun_1', attempt: 1, revision: row.revision,
+      cancelResult: 'interrupted', now: NOW, graceMs: 5000,
+    })
+    controller.abort('cancel:interrupted')
+    await expect(running).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(nodeRow(orchestra.db).status).toBe('timing_out')
+    const blocked = orchestra.db.raw.prepare(
+      "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='blocked_post'",
+    ).get() as { n: number }
+    expect(Number(blocked.n)).toBe(0)
     await release()
     rmSync(dir, { recursive: true, force: true })
   })
