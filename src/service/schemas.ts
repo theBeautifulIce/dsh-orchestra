@@ -234,6 +234,12 @@ export const renewSchema = z.looseObject({
 })
 
 // 上报：报告体自己也要有标识与状态，不能只查字段在不在
+export const confirmStartSchema = z.looseObject({
+  nodeRunId: identifier,
+  attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
+  attested: z.boolean().optional(),
+})
+
 export const reportSchema = z.looseObject({
   nodeRunId: identifier,
   attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),

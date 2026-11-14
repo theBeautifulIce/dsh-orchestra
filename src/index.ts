@@ -10,6 +10,7 @@ import { WorkflowCatalog } from './service/workflows.ts'
 import { createRun } from './service/runs.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { resolveDecision } from './service/commands/decisions.ts'
+import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
 import { closeRun } from './service/commands/run-close.ts'
 import { inTx } from './infra/db/tx.ts'
@@ -146,6 +147,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       confirm: b.confirm,
       now: b.now,
     })),
+    confirmStart: (b) => confirmStartup(db, opts.secret, b),
     dispatch: async (b) => {
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })

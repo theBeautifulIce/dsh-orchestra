@@ -6,7 +6,7 @@ import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import {
-  cancelSchema, createRunSchema, dispatchSchema, ledgerEventSchema, leaseSchema, parseBody,
+  cancelSchema, confirmStartSchema, createRunSchema, dispatchSchema, ledgerEventSchema, leaseSchema, parseBody,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, workflowLoadSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
@@ -77,6 +77,10 @@ export type NodeCommands = {
     confirm?: boolean
     now: string
   }) => void
+  // 启动未知的人工确认：M-08/M-09/M-61 的生产入口
+  confirmStart: (body: { nodeRunId: string; attempt: number; attested?: boolean; now: string }) => {
+    trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'
+  }
   // 派发：把 run 下排队中的节点交给生产执行器跑
   dispatch: (body: {
     runId: string
@@ -284,6 +288,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         leaseTtlMs: body.leaseTtlMs,
         leaseRenewIntervalMs: body.leaseRenewIntervalMs,
       })
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/node-runs/confirm-start' && deps.commands) {
+      const body = parseBody(confirmStartSchema, await readJsonBody(req), '确认启动')
+      const out = await queue.run(() => deps.commands!.confirmStart({
+        nodeRunId: body.nodeRunId,
+        attempt: body.attempt,
+        attested: body.attested,
+        now: requestNow,
+      }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
