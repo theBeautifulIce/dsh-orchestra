@@ -314,7 +314,8 @@ export function startSubworkflowNode(
     to: 'waiting',
     attempt: p.attempt,
     now: p.now,
-    patch: { wait_started_at: p.now },
+    // 父节点等待子运行时不能再占租约/执行器：否则扫描会把等待节点当失联，Dispatcher 也派不进来
+    patch: { wait_started_at: p.now, lease_id: null, lease_expires_at: null, executor_session_id: null, executor_agent_id: null },
   })
   appendNodeRunEvent(tx, secret, p.nodeRunId, 'subworkflow.waiting', {
     child_run_id: child.run_id,

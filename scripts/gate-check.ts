@@ -1,5 +1,5 @@
 // 门记录校验：读 S*.md 里的 GateArtifact，核字段、结论规则、必过项清单、证据文件哈希与四个哈希的原像（规格 11.3 行 978-986）
-// 用法：node --no-warnings scripts/gate-check.ts docs/gates/G1.md
+// 用法：node --no-warnings scripts/gate-check.ts [可选：门记录路径…]；无参依次校验 G1/G2/G3
 //
 // 哈希口径（门记录里的值都能重算，不是手写数）：
 //   candidate_hash      = SHA256(canonical_json([{path, sha256}]，按 path 升序))，取 HEAD 上候选范围内的文件内容
@@ -2697,12 +2697,17 @@ export function verifyGateRecord(text: string, opts: { root?: string; allowDirty
 }
 
 if (process.argv[1] && /gate-check\.ts$/.test(process.argv[1].replace(/\\/g, '/'))) {
-  const path = process.argv[2] ?? 'docs/gates/G1.md'
-  try {
-    const out = verifyGateRecord(readFileSync(path, 'utf8'), { path })
-    console.log('gate ' + out.gate + ' 通过（' + String(out.items) + ' 项必过、' + String(out.evidence) + ' 份证据哈希复核，artifact_hash=' + out.artifactHash.slice(0, 12) + '… body_hash=' + out.bodyHash.slice(0, 12) + '…）')
-  } catch (err) {
-    console.error('门检查失败：' + (err instanceof Error ? err.message : String(err)))
-    process.exitCode = 1
+  // 无参默认把三道门都验完：只查 G1 会让 G2/G3 的正文与证据悄悄漂移（S3 审计 P0-3）
+  const paths = process.argv.length > 2
+    ? process.argv.slice(2)
+    : ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md']
+  for (const path of paths) {
+    try {
+      const out = verifyGateRecord(readFileSync(path, 'utf8'), { path })
+      console.log('gate ' + out.gate + ' 通过（' + String(out.items) + ' 项必过、' + String(out.evidence) + ' 份证据哈希复核，artifact_hash=' + out.artifactHash.slice(0, 12) + '… body_hash=' + out.bodyHash.slice(0, 12) + '…）')
+    } catch (err) {
+      console.error('门检查失败（' + path + '）：' + (err instanceof Error ? err.message : String(err)))
+      process.exitCode = 1
+    }
   }
 }
