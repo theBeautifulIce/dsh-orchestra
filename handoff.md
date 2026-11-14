@@ -1117,3 +1117,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 双门 `gate-check` 均 exit 0（G1 13/13 证据、G2 20/20 证据）；签后全量 **42 files 619 passed | 1 skipped**、evidence-repro 25/25。
 - 下一步：补 R4 的 011 正式升级回归、workflow_id/version 输入约束、run-node 绑定哈希复核；把 `INSERT OR REPLACE` 链头重置与 ev-g2-16 计数放进下一候选；再开 S3 九节点与状态机。
 - 遗留：P2-04 审计证据引用；R5 桥闭环已完成，S3 未开。
+
+### 11.64 R4/S2 的 P2 收口与第 50 轮候选预签（2026-11-14 18:55）
+
+- 链头 REPLACE 绕过：新增迁移 `013_node_run_chain_head_replace_guard.sql`，链头 INSERT 时若同 `node_run_id` 已有链头直接 abort，补 012 的 DELETE 守卫看不到的 REPLACE 冲突路径；测试用 seq=1 的 hash 构造能过首条校验的载荷，断言被拒且链头仍是 `last_seq=2, event_count=2`。
+- R4 P2：`workflows.ts` 增加 `WORKFLOW_IDENTITY_PATTERN` 与长度上限，`load()` 算哈希前校验；`hydrate()` 交叉校验行键与快照身份，不一致抛 `WORKFLOW_VERSION_IMMUTABLE`；`schemas.ts` 对 `workflow_id`/`workflowId` 与版本号做同一约束；`run-node.ts` 取工具授权前复核 `runs.workflow_definition_hash`，不一致在 spawn 前拒绝。
+- 测试：`workflow-identity.spec.ts` 3→6 例（非法身份、hydrate 交叉校验、001–010→011–013 旧库升级），`ledger-integrity.spec.ts` 21 例，`runtime.spec.ts` 23 例；定向 50 tests 全过。
+- 证据：`G-14` 更新为 13 步迁移，`ev-g2-16` 计数改 42/624，G2-15 文案改「同一工作流的同一版本」；G-05 注入补齐 `workflow_definition_hash` 绑定。全量 **42 files 624 passed | 1 skipped**、typecheck 0、build ESM 154.88kB / gzip 38.52kB、evidence-repro 25/25。
+- 预签：`docs/gates/G1.md`、`G2.md` 的证据索引、candidate、artifact/body 自锚已重算，`audit_round` 仍 49，门检查停在审计锚点，属第 50 轮正式审计前的预期态。候选提交 `c5e0014`。
+- 下一步：派 S1/S2 第 50 轮审计；双 PASS 后提交报告并按 G1→G2 正式重签，双门 exit 0。
