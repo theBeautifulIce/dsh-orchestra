@@ -985,3 +985,15 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - P2 配置收口：`executionLimitsFromConfig()` 改为文件不存在才回退默认值；文件存在但非法时 `loadConfig` 抛错，不再静默吞配置错误。
 - 验证：`pnpm typecheck` 0；全量 40 文件 **598 passed | 1 skipped**；`pnpm build` 成功（ESM 145.59kB / gzip 36.45kB、d.ts 13.63kB）。
 - 遗留：`startup_unknown` 仍无自动推进（sweep 只扫 `dispatched`/`started` 的租约过期）；B06 仍是事务级重放，B07 外部取消通道仍未接生产。G1/G2 仍绑 `caae193`。
+
+### 11.52 R5-C 复审 PASS（a281e5f，2026-11-14 17:10）
+
+- `r5c-reaudit` 在 `a281e5f` 上 verdict **PASS**：P0=0 / P1=0 / P2=4；克隆 `tmp/audit-r5c-r5`，工作树干净。
+- 复核成立：stop 四个 RPC 各自 2s 上限；state/dispose 挂住约 2.07s 落 `blocked_post`、`report_applied=0`、`verify_human.reason=agent_stop_unconfirmed`，state 只调一次、未误 dispose；`stopTask` 保证 finally 二次调用不重发 RPC；spawn 4xx 落 `blocked_pre`、超时落 `startup_unknown`、晚到会话被释放；坏配置 `SCHEMA_VERSION_UNSUPPORTED` fail-fast。
+- 复跑：install 0、typecheck 0、定向 44 passed、全量 **598 passed | 1 skipped**、build 0（ESM 145.59kB / gzip 36.45kB、d.ts 13.63kB）。
+- P2-1（口径）：cancel 超时后 whenIdle/state 已确认 idle 时节点落 done；按设计第 243-249 行「idle + state 确认」判 P2，若要求 cancel 超时本身即阻断则升 P1。
+- P2-2：`bestEffortReleaseAgent` 的 cancel/state/dispose 仍无单次上限；晚到 spawn + cancel 挂住会留宿主会话。
+- P2-3：spawn 回包缺 agentId 的 `PROTOCOL_VERSION_MISMATCH` 被归为确定性失败落 `blocked_pre`，宿主可能已建会话。
+- P2-4：配置非法时 `openServiceOrchestra` 先开 db，`createOrchestra` 抛错后 db 未关，删除临时目录报 EPERM。
+- 已知遗留：`startup_unknown` 仍无自动推进/sweep。
+- 状态：R5-C 可进 R5-D；G1/G2 仍绑 `caae193`，未签门。
