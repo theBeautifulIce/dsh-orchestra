@@ -1553,6 +1553,18 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
     expect(proseVerdictClashes(md, 'pass', items)).toEqual([])
   })
 
+  it('攻击矩阵只豁免描述格，结论列写未通过仍拒绝', () => {
+    const md = head + [
+      '| 用例编号 | 必过项 | 期望 | 结论 |',
+      '| --- | --- | --- | --- |',
+      '| A1 | G2-11 | 拒 | 未通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'pass', items).join('\n')).toMatch(/G2-11/)
+  })
+
   it('必过项要求列里的领域弱词不误伤', () => {
     const md = head + [
       '| 必过项 | 要求 | 结论 |',

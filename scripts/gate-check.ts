@@ -1653,14 +1653,17 @@ export function proseVerdictClashes(
       else rows.set(key, [cell])
     }
     for (const [key, row] of rows) {
-      if (historical.has(key) || isRejectedAttackRow(row)) continue
+      if (historical.has(key)) continue
+      // 攻击矩阵只豁免“描述攻击”的普通格；结论列仍然要判，否则
+      // `| A1 | G2-11 | 拒 | 未通过 |` 会把当前否决藏进用例表（S2 第三十九轮 P1）。
+      const rejectedAttack = isRejectedAttackRow(row)
       // 同一行内去掉分隔符再拼一次：否定词与必过项 id 被拆到相邻格时，逐格判各自都干净。
       // 行内点名了必过项、且失败词被单元格边界切开时，按矛盾拒（S1 第三十七轮 P0）。
       const joined = row.map((cell) => cell.text).join('')
       const hit = requiredItems.filter((id) => joined.includes(id))
       // 只把“失败词被单元格边界切开”当作跨格矛盾；整行再跑一遍失败扫描会把
       // 要求列里的领域词（例如「无裸 blocked」）和正常的「通过」拼成假否决（S2 第三十八轮 P2）。
-      const joinedFail = splitFailureAcrossCells(row)
+      const joinedFail = !rejectedAttack && splitFailureAcrossCells(row)
       if (joinedFail && hit.length > 0) {
         clashes.push('审计报告表格把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict))
       } else if (joinedFail && row.some((cell) => isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text))) {
@@ -1669,6 +1672,8 @@ export function proseVerdictClashes(
       for (const cell of row) {
         const conclusionCell = isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text)
         if (hit.length === 0 && !conclusionCell) continue
+        // 攻击行的描述/证据格可以引用失败文案；但结论列不能被整行豁免。
+        if (rejectedAttack && !conclusionCell) continue
         // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。
         const cellFails = cellFailStatement(cell)
           || (!conclusionCell && hit.length > 0 && cellStrongFail(foldForVerdict(cell.text)))
