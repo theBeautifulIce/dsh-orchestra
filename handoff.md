@@ -1,8 +1,34 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-14 09:30。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-14 23:40。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
+
+---
+
+## 0.1 最新接手续接（2026-11-14 23:40，HEAD `6fc6f6c`）
+
+### 当前进度
+
+- 工作树干净，HEAD `6fc6f6c`，比 `origin/main` 领先 8 个提交；本次暂停时尚未 push。
+- 最新通过审计的候选是 `837b0c6`：S1 r58 / S2 r58 / S3 r10 均 pass，P0/P1=0，必过项分别 13/13、20/20、20/20；全量 856 passed | 1 skipped，build ESM 251.67 kB / gzip 60.19 kB，证据复现 25/25。
+- 之后又提交 `6fc6f6c`（`fix(gate): cover M-63 through M-65 in G3 fixed invariants`）：把 gate-check 固定项 `G3-01` 与不变量 `I1` 的 M-62 改为 M-65，修正门规格与 `docs/gates/G3.md` 的口径不一致。这个提交在完整 test/build/证据复现之后才加入，**尚未完整复跑，也尚未独立审计**。
+- G1/G2 曾在 `837b0c6` 上签（G1 `6c55ec1`、G2 `f0e9536`），候选推进到 `6fc6f6c` 后签名作废，需按新候选重签。
+- G3 未签：`docs/gates/G3.md` 已指向 S3 round10、`audit_round=10`，但当时 sign-gate 因固定项仍写 M-62 而失败；spec 已在 `6fc6f6c` 修正。暂停时 S1 r59 / S2 r59 / S3 r11 三个复审计已派出但被中断，没有产出报告，不能拿旧报告签 `6fc6f6c`。
+
+### 接手先做什么
+
+1. `git status` 确认干净，`git log --oneline -10` 确认 HEAD 是 `6fc6f6c`。
+2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`，确认全量 856 passed | 1 skipped、build 251.67 kB、证据 25/25。
+3. 在 `6fc6f6c` 上重新派 S1 r59、S2 r59、S3 r11 独立审计。报告必须含唯一的 `门：Gx` 行与 `候选提交：<40位>` 行，以及结构化 verdict 块；P0/P1 必须为 0。
+4. 提交审计报告后，更新 G1/G2/G3 的 `audit_round` 与 `audit_report`，按 G1→G2→G3 顺序跑 `sign-gate`，每次签完先提交；三门 `gate-check` 都 exit 0 后再跑一次全量 test，最后 push。
+5. 清 `tmp/` 与 `D:\aboutAI` 根目录下的过程文件，正式测试只放 `tests/<分类>/`。
+
+### 已修与已知 P2
+
+- 已修：控制节点终态后 run 不收口、取消 wait 登记仍 active、取消子流程父节点卡 stopping、失败子流程被当成功、取消子 run 被判 succeeded_with_unverified、run 级取消跳过 queued irreversible、blocked_pre 取消后仍可批准回 queued。
+- 已知 P2（不阻断重签，接手可做）：`blocked_post` 取消后 run 仍 running；`blocked_pre` 关闭 decision 用裸 UPDATE、缺 `decision.resolved` 事件；终态 run 再取消仍写取消列；G2-16 计数仍写 624/70；`wait_event_inbox.idempotency_key` 全局唯一；M-64 可被无 requires 的 M-48 绕过；G3 证据未进 `check-evidence-repro`；无 executor 时 control-only 节点被挡；节点级取消 waiting 后 run 落 succeeded。
+- 门检查固定项已改为 M-65；`docs/gates/evidence/G3/full-suite.md` 已写 856 / 251.67 / 60.19。
 
 ---
 
