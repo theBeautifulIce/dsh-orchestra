@@ -3,7 +3,7 @@ import { BridgeClient, bridgeHostAgentFactory } from '../../src/executor/bridge.
 import { OrchError } from '../../src/core/errors.ts'
 import { defaultBridgeReply, fakeBridge } from '../fixtures/bridge.ts'
 
-const spawnParams = { nodeRunId: 'nr1', attempt: 1, input: {}, outputSchema: {}, toolPolicy: {} }
+const spawnParams = { nodeRunId: 'nr1', attempt: 1, input: {}, outputSchema: {}, toolPolicy: {}, inheritHistory: false as const }
 const sendParams = { executorAgentId: 'agent_1', attempt: 1, instruction: '开工', attemptId: 'a1' }
 
 describe('桥 RPC 客户端', () => {
@@ -110,7 +110,7 @@ describe('桥 RPC 客户端', () => {
     await expect(bad.state({ executorAgentId: 'agent_1' })).rejects.toMatchObject({ code: 'PROTOCOL_VERSION_MISMATCH' })
   })
 
-  it('生产宿主工厂走 bridge.spawn，不把 inheritHistory 透给宿主协议', async () => {
+  it('生产宿主工厂走 bridge.spawn，并显式声明不继承历史', async () => {
     const transport = fakeBridge(() => defaultBridgeReply('executor.spawn'))
     const factory = bridgeHostAgentFactory(new BridgeClient(transport))
     await expect(factory.create({
@@ -118,8 +118,7 @@ describe('桥 RPC 客户端', () => {
     })).resolves.toEqual({ agentId: 'agent_1', sessionId: 'sess_1' })
     expect(transport.calls[0]).toMatchObject({
       method: 'executor.spawn',
-      params: { nodeRunId: 'nr1', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: ['ro.echo'] } },
+      params: { nodeRunId: 'nr1', attempt: 1, input: {}, outputSchema: {}, toolPolicy: { allow: ['ro.echo'] }, inheritHistory: false },
     })
-    expect(transport.calls[0]?.params).not.toHaveProperty('inheritHistory')
   })
 })

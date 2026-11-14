@@ -19,7 +19,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) { try { rmSync(dir, { recursive: true, force: true }) } catch { /* 句柄晚释放 */ } }
 })
 
-async function boot() {
+async function boot(opts: { omitAgents?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'orch-prod-'))
   dirs.push(dir)
   const registry = new ToolRegistry()
@@ -32,7 +32,7 @@ async function boot() {
     dbFile: join(dir, 'orchestra.db'),
     secret: SECRET,
     phase: 'S2',
-    executor: { registry, agents, bridge, runner: new ReadOnlyToolRunner(registry, host, dir) },
+    executor: { registry, ...(opts.omitAgents ? {} : { agents }), bridge, runner: new ReadOnlyToolRunner(registry, host, dir) },
   })
   const orchestra = service.orchestra
   const svc = await startServer({
@@ -44,7 +44,7 @@ async function boot() {
     commands: orchestra.commands,
   })
   closers.push(async () => { await svc.close(); await service.release() })
-  return { endpoint: svc.endpoint, db: orchestra.db }
+  return { endpoint: svc.endpoint, db: orchestra.db, bridge }
 }
 
 const post = (url: string, body: unknown) => fetch(url, {
@@ -135,6 +135,28 @@ describe('生产全链路：定义 → run → 派发 → 收口', () => {
       const node = db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get(createdBody.data.nodes[0].node_run_id) as any
       expect(node.status).toBe('queued')
     }
+  })
+
+  it('省略 agents：createOrchestra 用 bridge.spawn 兜底跑完整条链', async () => {
+    const { endpoint, db, bridge } = await boot({ omitAgents: true })
+    await post(endpoint + '/v1/workflows/load', {
+      workflow_version: '1',
+      pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
+      nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
+    })
+    const created = await post(endpoint + '/v1/runs', { taskTitle: 'spawn 兜底', workflowVersion: '1', now: NOW })
+    const createdBody = await created.json() as any
+    const res = await post(endpoint + '/v1/runs/dispatch', {
+      runId: createdBody.data.run_id,
+      now: NOW,
+      nodes: { check: { tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }] } },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as any
+    expect(body.data[0].status).toBe('done')
+    expect(bridge.calls.some((call) => call.method === 'executor.spawn')).toBe(true)
+    const node = db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get(createdBody.data.nodes[0].node_run_id) as any
+    expect(node.status).toBe('done')
   })
 
   it('节点缺工具配置 → 这一轮跳过，不动节点状态', async () => {

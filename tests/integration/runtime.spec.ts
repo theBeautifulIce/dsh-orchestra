@@ -72,6 +72,24 @@ describe('生产路径跑通单节点', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('spawn 回包失败：节点落 startup_unknown，不能永远停在 dispatched', async () => {
+    const { dir, orchestra, release, registry, bridge, runner } = await setup([])
+    const badAgents: HostAgentFactory = {
+      create: async () => { throw new Error('spawn response lost') },
+    }
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents: badAgents, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toThrow('spawn response lost')
+    expect(nodeRow(orchestra.db).status).toBe('startup_unknown')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('stop 未确认：节点不得先落 done，必须停在 blocked_post', async () => {
     const { dir, orchestra, release, registry, agents, runner } = await setup([{ tool: 'ro.echo' }])
     const base = fakeAgentBridge({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })
@@ -252,8 +270,13 @@ describe('生产路径跑通单节点', () => {
     )
     const startedAt = nodeRow(orchestra.db).tool_start_at as string
     expect(Number.isFinite(Date.parse(startedAt))).toBe(true)
+    // 量化的 NOW 只能当展示锚点；工具起止必须来自真实墙钟，且完成不早于开始。
+    expect(startedAt).not.toBe(NOW)
     const started = orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='tool_started'").get() as { n: number }
     expect(Number(started.n)).toBe(1)
+    const finished = orchestra.db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nrun_1' AND type='tool_finished' ORDER BY seq DESC LIMIT 1").get() as { payload: string }
+    const finishedPayload = JSON.parse(finished.payload) as { started_at: string; finished_at: string }
+    expect(Date.parse(finishedPayload.finished_at)).toBeGreaterThanOrEqual(Date.parse(finishedPayload.started_at))
     await release()
     rmSync(dir, { recursive: true, force: true })
   })

@@ -131,20 +131,41 @@ async function runNodeActions(
   policy: ToolPolicy,
   leaseState: { lost: string | null },
 ): Promise<RunNodeResult> {
-  const agent = await createExecutorAgent(deps.agents, deps.registry, {
-    nodeRunId: p.nodeRunId,
-    attempt: p.attempt,
-    input: p.input,
-    outputSchema: p.outputSchema,
-    toolPolicy: policy,
-  })
   const generation = lease.action_generation
   const actionTimeoutMs = p.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
+  let agent: Awaited<ReturnType<typeof createExecutorAgent>> | null = null
   let lifecycle: AgentLifecycle | null = null
   let stopped = false
   let evidence: StrongEvidence | null = null
   let failed: unknown = null
+  let spawnUnknown = false
   try {
+    // spawn 回包失败时也可能已经在宿主建了会话；放进 try，外层 catch 至少能 markBlocked，
+    // finally 再按 agentId 做有界释放，不能把节点留在 dispatched。
+    try {
+      agent = await createExecutorAgent(deps.agents, deps.registry, {
+        nodeRunId: p.nodeRunId,
+        attempt: p.attempt,
+        input: p.input,
+        outputSchema: p.outputSchema,
+        toolPolicy: policy,
+      })
+    } catch (err) {
+      // spawn 回包失败时宿主可能已经建了会话，但我们拿不到 agentId：不能声称已停，
+      // 也不能留在 dispatched。按规格落 startup_unknown，交给 sweep/人工核副作用。
+      withTx(deps.db, (tx) => {
+        const row = loadNodeRun(tx, p.nodeRunId)
+        if (row.status === 'dispatched') {
+          transitionNode(tx, deps.secret, {
+            nodeRunId: p.nodeRunId, from: 'dispatched', to: 'startup_unknown',
+            attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'agent_spawn_unknown',
+          })
+        }
+      })
+      spawnUnknown = true
+      throw err
+    }
+    const created = agent
     // started 是状态迁移不是完成上报：没过证据门的上报不该用来推进状态
     withTx(deps.db, (tx) => {
       const row = loadNodeRun(tx, p.nodeRunId)
@@ -231,11 +252,14 @@ async function runNodeActions(
         registry_state: applied.registry_state,
       })
     }
-    return { node_run_id: p.nodeRunId, final_status: applied.next_status ?? 'unknown', evidence, agent_id: agent.agentId }
+    return { node_run_id: p.nodeRunId, final_status: applied.next_status ?? 'unknown', evidence, agent_id: created.agentId }
   } catch (err) {
     failed = err
-    const reason = err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
-    markBlocked(deps, p, reason, nowAt())
+    // spawn 结果未知已经落 startup_unknown；再走 blocked_post 会把“副作用未知”误写成“已确认阻断”。
+    if (!spawnUnknown) {
+      const reason = err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
+      markBlocked(deps, p, reason, nowAt())
+    }
     throw err
   } finally {
     if (lifecycle) {
@@ -249,16 +273,16 @@ async function runNodeActions(
           }
         }
       }
-    } else {
+    } else if (agent) {
       // lifecycle 还没建起来就失败时，Agent 可能已经 spawn；按 agentId 做一次有界兜底释放。
-      await bestEffortReleaseAgent(deps, agent.agentId, p.attempt)
+      await bestEffortReleaseAgent(deps, agent.agentId, p.nodeRunId, p.attempt)
     }
   }
 }
 
 // 建 Agent 成功、lifecycle 尚未建立就失败：不能把宿主会话留成孤儿。
 // 只做有界清理；确认不了停止就保留，不把原始错误盖掉。
-async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, attempt: number): Promise<void> {
+async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRunId: string, attempt: number): Promise<void> {
   try {
     await deps.bridge.cancel({ executorAgentId: agentId, attempt })
   } catch {
@@ -279,8 +303,20 @@ async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, attemp
   const idleOk = idle?.idle === true
   const stateOk = state?.state === 'idle' || state?.state === 'unloaded' || state?.state === 'deleted'
   if (!idleOk || !stateOk) return
+  // 不能拿 0/0 绕过 ACK 滞后保护：按本 attempt 的持久确认位与已落账最大桥序号真实取值。
+  // 若桥事件位仍领先确认位，dispose 会被 BRIDGE_ACK_LAG 拒绝，这正是我们要保留的语义。
+  const ack = deps.db.raw.prepare(
+    'SELECT last_persisted_ack_seq AS n FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+  ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
+  const last = deps.db.raw.prepare(
+    'SELECT COALESCE(MAX(bridge_seq), 0) AS n FROM bridge_event_receipts WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+  ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
   try {
-    await deps.bridge.dispose({ executorAgentId: agentId, serviceAckSeq: 0, bridgeLastSeq: 0 })
+    await deps.bridge.dispose({
+      executorAgentId: agentId,
+      serviceAckSeq: Number(ack?.n ?? 0),
+      bridgeLastSeq: Number(last?.n ?? 0),
+    })
   } catch {
     // 释放失败不覆盖节点上的原始错误
   }

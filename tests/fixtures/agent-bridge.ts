@@ -43,6 +43,7 @@ export function fakeAgentBridge(opts: AgentBridgeOptions): FakeAgentBridge {
     get cancelled(): boolean { return cancelled },
     async request<T>(method: string, params: unknown): Promise<T> {
       calls.push({ method, params })
+      if (method === 'executor.spawn') return { agentId: opts.agentId, sessionId: 'sess_' + opts.agentId } as T
       if (method === 'executor.subscribe') return { subscribed: true, fromSeq: 0, lastSeq: 0 } as T
       if (method === 'executor.send') { startResolve?.(); return undefined as T }
       if (method === 'executor.toolResult') {
@@ -98,6 +99,12 @@ export function fakeAgentBridge(opts: AgentBridgeOptions): FakeAgentBridge {
 }
 
 // 生产装配要的是 BridgeClient；替身只实现传输层，这里包一层真实客户端。
-export function fakeAgentClient(opts: AgentBridgeOptions): BridgeClient {
-  return new BridgeClient(fakeAgentBridge(opts))
+// 额外挂出 calls，让 E2E 能确认生产路径确实走了 bridge.spawn。
+export type FakeAgentClient = BridgeClient & { calls: { method: string; params: unknown }[] }
+
+export function fakeAgentClient(opts: AgentBridgeOptions): FakeAgentClient {
+  const transport = fakeAgentBridge(opts)
+  const client = new BridgeClient(transport) as FakeAgentClient
+  client.calls = transport.calls
+  return client
 }

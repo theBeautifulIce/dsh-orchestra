@@ -40,6 +40,8 @@ export type SpawnParams = {
   input: unknown
   outputSchema: unknown
   toolPolicy: unknown
+  // 节点执行永远开新会话；把这条意图放进协议，不能只靠宿主默认行为。
+  inheritHistory: false
 }
 
 export type SpawnResult = { sessionId: string; agentId: string }
@@ -68,6 +70,7 @@ export function bridgeHostAgentFactory(client: BridgeClient): HostAgentFactory {
         input: input.input,
         outputSchema: input.outputSchema,
         toolPolicy: input.toolPolicy,
+        inheritHistory: false,
       })
       return { agentId: res.agentId, sessionId: res.sessionId }
     },

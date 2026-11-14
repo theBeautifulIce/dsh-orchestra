@@ -940,4 +940,17 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 新增回归：stop 未确认时 `blocked_post` 且 `report_applied=0`；Agent 创建后 started 迁移失败仍释放宿主会话；B02 持久 ACK 重放、B03 整页补洞、B08 dispose 拒绝；runtime 的工具时间断言改为可解析且不倒挂，不再要求等于量化 `NOW`。
 - 验证：`pnpm typecheck` 0；全量 40 文件 **586 passed | 1 skipped**；`pnpm build` 成功（ESM 140.61kB、d.ts 13.52kB）。B06 仍是事务级重放，不是独立进程强杀；真实宿主 `spawn` 端到端仍未验证。
 - 状态：整改待提交；G1/G2 仍绑 `caae193`。下一步提交后请独立审计复审，再进 R5-D B01–B10 收口与 R5-E 第 45 轮重签。
-- R5-D 起步补生产 spawn：`bridgeHostAgentFactory(client)` 把 `HostAgentFactory.create` 映射到 `BridgeClient.spawn`，不把 `inheritHistory` 透给宿主协议；`createOrchestra` 在 executor 没显式给 `agents` 时用它兜底，生产路径不再依赖外部顺手塞宿主工厂。单测断言 spawn 参数与返回值；全量 40 文件 **587 passed | 1 skipped**，build 成功（ESM 141.07kB）。该提交在 R5-C 复审候选之后，复审仍需按新 HEAD 复核 spawn 兜底。
+- R5-D 起步补生产 spawn：`bridgeHostAgentFactory(client)` 把 `HostAgentFactory.create` 映射到 `BridgeClient.spawn`；`createOrchestra` 在 executor 没显式给 `agents` 时用它兜底，生产路径不再依赖外部顺手塞宿主工厂。单测断言 spawn 参数与返回值；全量 40 文件 **587 passed | 1 skipped**，build 成功（ESM 141.07kB）。该提交在 R5-C 复审候选之后，复审仍需按新 HEAD 复核 spawn 兜底。
+
+### 11.48 R5-C 复审动作超时 P1 与 R5-D 收口（2026-11-14 16:43，待提交）
+
+- 独立复审 `r5c-reaudit` 在 `d9f8cc1` 上 verdict **FAIL**：P0=0，P1=1，P2=6。4398baf 的两条 P1 与六条 P2 整改全部复核成立；新的 P1 是动作超时只 `abort`，`BridgeConsumer` 在 abort 时正常 return，`consume().catch` 不触发，`await report` 永不 settle，节点会永久停在 `started`。
+- P1 修复：`AgentLifecycle.run()` 把 `report` 与 abort 竞速；`abortReason()` 统一把 `OPERATION_TIMEOUT` 原样抛出，超时不再挂在 waiter 上。新增 B11 动作超时回归（50ms，断言 `OPERATION_TIMEOUT`、耗时 <1s、仍走 cancel/dispose）。
+- P2-1：`stop()` 改为 `stopTask` 单次入队，首次失败后 finally 再调不重发 cancel/dispose；新增 B12 断言 dispose 只调用一次。
+- P2-2：runtime 工具时间断言加 `finished_at >= started_at` 且 `startedAt != NOW`。
+- P2-3：`createExecutorAgent` 纳入 try；spawn 回包失败落 `startup_unknown`，不再留 `dispatched`，也不误写 `blocked_post`；新增 runtime 回归。
+- P2-4：`bestEffortReleaseAgent` 按 `bridge_stream_cursors.last_persisted_ack_seq` 与 `bridge_event_receipts.MAX(bridge_seq)` 真实取值，不再用 0/0 绕过 `BRIDGE_ACK_LAG`。
+- P2-5：`tests/fixtures/agent-bridge.ts` 的 `fakeAgentClient` 暴露 `calls` 并支持 `executor.spawn`；新增 E2E「省略 agents 走 bridge.spawn 兜底跑完 dispatch→done」。
+- P2-6：`SpawnParams` 增加 `inheritHistory: false` 并由 `bridgeHostAgentFactory` 显式发送；单测同步断言。
+- 验证：`pnpm typecheck` 0；全量 40 文件 **591 passed | 1 skipped**；`pnpm build` 成功（ESM 142.74kB / gzip 35.80kB、d.ts 13.60kB）。
+- 状态：本轮整改待提交；G1/G2 仍绑 `caae193`。下一步提交推送后按新 HEAD 做独立复审；B06 仍是事务级重放，B07 外部取消通道仍未接生产，R5-D 尚未收口。

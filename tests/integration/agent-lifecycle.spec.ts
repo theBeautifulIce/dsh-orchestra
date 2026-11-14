@@ -14,7 +14,7 @@ const ev = (seq: number, type: BridgeEvent['type'], payload: unknown, attempt = 
   seq, type, at: NOW, toolStartAt: null, payload, attempt, executorAgentId: 'agent_1',
 })
 
-function harness(transport: BridgeTransport, prep?: (db: ReturnType<typeof freshLedger>['db']) => void) {
+function harness(transport: BridgeTransport, prep?: (db: ReturnType<typeof freshLedger>['db']) => void, timeoutMs = 2000) {
   const { dir, db } = freshLedger()
   seed(db)
   prep?.(db)
@@ -34,7 +34,7 @@ function harness(transport: BridgeTransport, prep?: (db: ReturnType<typeof fresh
       agentId: 'agent_1', sessionId: 'sess_1',
       tools: [{ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } }],
     },
-    instruction: 'do it', timeoutMs: 2000, idleTimeoutMs: 50, nowAt: () => NOW,
+    instruction: 'do it', timeoutMs, idleTimeoutMs: 50, nowAt: () => NOW,
     spillDir: join(dir, 'spill'),
   })
   return {
@@ -57,6 +57,52 @@ describe('AgentLifecycle 故障注入', () => {
     const h = harness(transport)
     await expect(h.lifecycle.run(new AbortController().signal)).rejects.toMatchObject({ code: 'BRIDGE_NOT_SUBSCRIBED' })
     expect(calls).not.toContain('executor.send')
+    h.cleanup()
+  })
+
+  it('B11 动作超时：abort 必须打穿等待，不能永久挂起', async () => {
+    const calls: string[] = []
+    const transport: BridgeTransport = {
+      request: async (method) => {
+        calls.push(method)
+        if (method === 'executor.subscribe') return { subscribed: true, fromSeq: 0, lastSeq: 0 } as never
+        if (method === 'executor.send') return undefined as never
+        if (method === 'executor.cancel') return 'interrupted' as never
+        if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        return undefined as never
+      },
+      listen: (_params, signal) => (async function* () {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      })(),
+    }
+    const h = harness(transport, undefined, 50)
+    const began = Date.now()
+    await expect(h.lifecycle.run(new AbortController().signal)).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
+    expect(Date.now() - began).toBeLessThan(1000)
+    // 超时后仍要走完整停止确认，不能把会话留在宿主。
+    await h.lifecycle.stop()
+    expect(calls).toContain('executor.cancel')
+    expect(calls).toContain('executor.dispose')
+    h.cleanup()
+  })
+
+  it('B12 stop 失败后再次调用不重发取消/释放', async () => {
+    let disposeCalls = 0
+    const transport: BridgeTransport = {
+      request: async (method) => {
+        if (method === 'executor.cancel') return 'interrupted' as never
+        if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        if (method === 'executor.dispose') { disposeCalls += 1; throw new Error('transient dispose failure') }
+        return undefined as never
+      },
+      listen: () => { throw new Error('不该 listen') },
+    }
+    const h = harness(transport)
+    await expect(h.lifecycle.stop()).rejects.toThrow('transient dispose failure')
+    await expect(h.lifecycle.stop()).rejects.toThrow('transient dispose failure')
+    expect(disposeCalls).toBe(1)
     h.cleanup()
   })
 

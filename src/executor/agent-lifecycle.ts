@@ -52,6 +52,7 @@ export class AgentLifecycle {
   private waiter: ReportWaiter | null = null
   private reportSeen = false
   private running: Promise<void> | null = null
+  private stopTask: Promise<void> | null = null
 
   constructor(deps: AgentLifecycleDeps) {
     this.deps = deps
@@ -126,6 +127,13 @@ export class AgentLifecycle {
       const report = new Promise<AgentReportEnvelope>((resolve, reject) => {
         this.waiter = { resolve, reject }
       })
+      // abort 时 consume() 可能正常返回，单靠 .catch 不会 reject waiter；必须把中止
+      // 本身也放进竞速，否则动作超时会永久挂在 started。
+      const aborted = new Promise<never>((_, reject) => {
+        const onStop = (): void => { reject(this.abortReason()) }
+        if (this.controller.signal.aborted) onStop()
+        else this.controller.signal.addEventListener('abort', onStop, { once: true })
+      })
       this.running = this.consume(this.controller.signal).catch((err) => {
         if (!this.reportSeen) this.waiter?.reject(err)
       })
@@ -135,7 +143,7 @@ export class AgentLifecycle {
         instruction: this.deps.instruction,
         attemptId: this.deps.nodeRunId + ':' + String(this.deps.attempt),
       })
-      return await report
+      return await Promise.race([report, aborted])
     } catch (err) {
       if (this.controller.signal.aborted && this.controller.signal.reason instanceof OrchError) {
         throw this.controller.signal.reason
@@ -179,8 +187,23 @@ export class AgentLifecycle {
     return this.consumer.waitPersisted(this.buffer.lastSeq, timeoutMs)
   }
 
+  // 同一次生命周期只执行一轮停止：第一次失败后 finally 再调不能重发取消/释放，
+  // 否则会把一次可确认的失败变成两次副作用。
+  stop(): Promise<void> {
+    this.stopTask ??= this.stopInternal()
+    return this.stopTask
+  }
+
+  private abortReason(): OrchError {
+    const reason = this.controller.signal.reason
+    if (reason instanceof OrchError) return reason
+    return new OrchError('SERVICE_UNAVAILABLE', 'Agent 生命周期被中止', {
+      nodeRunId: this.deps.nodeRunId, attempt: this.deps.attempt,
+    })
+  }
+
   // 先停止监听，再取消会话；interrupted 不当作已停止，必须 whenIdle+state 复核。
-  async stop(): Promise<void> {
+  private async stopInternal(): Promise<void> {
     this.controller.abort(new OrchError('SERVICE_UNAVAILABLE', '节点收口，停止监听', {}))
     if (this.running) {
       await this.running.catch(() => undefined)
