@@ -579,6 +579,37 @@ describe('生产路径跑通单节点', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('生产维护扫描：桥游标十分钟不动就挂起，恢复后按信号重启', async () => {
+    const { dir, orchestra, release } = await setup([])
+    orchestra.db.raw.prepare(
+      "UPDATE node_runs SET status='started', started_at=?, updated_at=? WHERE node_run_id='nrun_1'",
+    ).run('2026-11-13T02:00:00.000Z', '2026-11-13T02:00:00.000Z')
+    orchestra.db.raw.prepare(
+      'INSERT INTO bridge_stream_cursors (node_run_id, attempt, executor_agent_id, last_persisted_ack_seq, updated_at) VALUES (?, ?, ?, ?, ?)',
+    ).run('nrun_1', 1, 'agent_1', 0, '2026-11-13T02:00:00.000Z')
+    const paused = sweepNow(orchestra.runtime, NOW)
+    expect(paused.bridge_paused).toContain('nrun_1')
+    expect(nodeRow(orchestra.db).status).toBe('paused_bridge_missing')
+    orchestra.db.raw.prepare("UPDATE bridge_stream_cursors SET updated_at=? WHERE node_run_id='nrun_1'").run(NOW)
+    const restored = sweepNow(orchestra.runtime, NOW)
+    expect(restored.bridge_restored).toContain('nrun_1')
+    expect(nodeRow(orchestra.db).status).not.toBe('paused_bridge_missing')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('生产维护扫描：从没建立桥游标的在跑节点按执行器失联收口', async () => {
+    const { dir, orchestra, release } = await setup([])
+    orchestra.db.raw.prepare(
+      "UPDATE node_runs SET status='started', started_at=?, updated_at=? WHERE node_run_id='nrun_1'",
+    ).run('2026-11-13T02:00:00.000Z', '2026-11-13T02:00:00.000Z')
+    const out = sweepNow(orchestra.runtime, NOW)
+    expect(out.executor_orphaned).toContain('nrun_1')
+    expect(nodeRow(orchestra.db).status).toBe('orphaned')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('多工具：第一份失败即停，不会被后面的成功覆盖', async () => {
     const { dir, orchestra, release, registry, agents, bridge } = await setup([{ tool: 'ro.fail' }, { tool: 'ro.ok' }])
     registry.register({ name: 'ro.fail', capability: 'read_only', command: { bin: 'fail', args: [] } })

@@ -6,9 +6,9 @@ import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import {
-  cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
+  cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
   ledgerEventSchema, leaseSchema, parseBody,
-  renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, workflowLoadSchema,
+  renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
@@ -91,6 +91,14 @@ export type NodeCommands = {
   settleCompensation: (body: {
     compensationId: string; state: 'applied' | 'failed' | 'unverified'; evidence?: unknown; now: string; reason?: string
   }) => { settled: boolean }
+  // 等待事件的生产入口：先落 inbox，再回放该 run 下所有活跃等待
+  wakeOnEvent: (body: {
+    runId: string; eventType: string; payload?: unknown; idempotencyKey?: string | null; now: string
+  }) => { eventSeq: number; woken: number }
+  // 运行级取消：父取消必须向子 run 传播，不可逆节点跳过
+  cancelRun: (body: {
+    runId: string; cancelResult: string; graceMs: number; extendDeadlineMs?: number; now: string
+  }) => { cancelledRuns: string[]; cancelledNodes: string[]; skippedIrreversible: string[] }
   // 派发：把 run 下排队中的节点交给生产执行器跑
   dispatch: (body: {
     runId: string
@@ -342,6 +350,30 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         state: body.state,
         evidence: body.evidence,
         reason: body.reason,
+        now: requestNow,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/wait/events' && deps.commands) {
+      const body = parseBody(waitEventSchema, await readJsonBody(req), '等待事件')
+      const out = await queue.run(() => deps.commands!.wakeOnEvent({
+        runId: body.runId,
+        eventType: body.eventType,
+        payload: body.payload,
+        idempotencyKey: body.idempotencyKey ?? null,
+        now: requestNow,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/runs/cancel' && deps.commands) {
+      const body = parseBody(cancelRunSchema, await readJsonBody(req), '取消运行')
+      const out = await queue.run(() => deps.commands!.cancelRun({
+        runId: body.runId,
+        cancelResult: body.cancelResult,
+        graceMs: body.graceMs,
+        extendDeadlineMs: body.extendDeadlineMs,
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))

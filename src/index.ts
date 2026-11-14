@@ -15,6 +15,8 @@ import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
 import { closeRun } from './service/commands/run-close.ts'
 import { settleCompensation, startCompensation } from './service/commands/compensation.ts'
+import { wakeOnEvent } from './service/commands/wait.ts'
+import { propagateRunCancellation } from './service/commands/subworkflow.ts'
 import { inTx } from './infra/db/tx.ts'
 import type { NodeCommands, ServerDeps } from './service/server.ts'
 import { startServer } from './service/server.ts'
@@ -148,6 +150,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         actor: b.actor,
         evidenceProducers: b.evidenceProducers,
         confirm: b.confirm,
+        contentHash: b.contentHash,
         now: b.now,
       })
       // 生产入口必须把审批结论落回节点：批准回 queued，拒绝/过期落 failed。
@@ -180,6 +183,21 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         reason: b.reason,
         now: b.now,
       }),
+    })),
+    wakeOnEvent: (b) => inTx(db, (tx) => wakeOnEvent(tx, opts.secret, {
+      runId: b.runId,
+      eventType: b.eventType,
+      payload: b.payload,
+      idempotencyKey: b.idempotencyKey ?? null,
+      now: b.now,
+    })),
+    cancelRun: (b) => inTx(db, (tx) => propagateRunCancellation(tx, opts.secret, {
+      runId: b.runId,
+      cancelResult: b.cancelResult as CancelResult,
+      graceMs: b.graceMs,
+      extendDeadlineMs: b.extendDeadlineMs,
+      now: b.now,
+      clock,
     })),
     dispatch: async (b) => {
       if (!opts.executor) {

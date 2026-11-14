@@ -337,6 +337,22 @@ export const compensateSettleSchema = z.looseObject({
   reason: z.string().max(LIMITS.statusMaxLength).optional(),
 })
 
+// 等待事件：先落 inbox，再由服务端回放匹配；事件体只做通用限长
+export const waitEventSchema = z.looseObject({
+  runId: identifier,
+  eventType: z.string().min(1).max(LIMITS.statusMaxLength),
+  payload: z.unknown().optional(),
+  idempotencyKey: z.string().min(1).max(LIMITS.hashMaxLength).nullish(),
+})
+
+// 运行级取消：父运行取消必须向子 run 传播；节点级取消仍走 /v1/node-runs/cancel
+export const cancelRunSchema = z.looseObject({
+  runId: identifier,
+  cancelResult: z.enum(CANCEL_RESULTS),
+  graceMs: z.number().int().min(0).max(LIMITS.graceMsMax),
+  extendDeadlineMs: z.number().int().min(0).max(LIMITS.graceMsMax).optional(),
+})
+
 type LedgerProblem = { path: (string | number)[]; message: string }
 
 // 账本事件的体由宿主解释，字段随调用方变；这里只挡明显会打垮服务的负载：

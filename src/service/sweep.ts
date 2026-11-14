@@ -7,6 +7,7 @@ import { transitionNode } from './commands/node-state.ts'
 import { applyTransition } from './commands/nodes.ts'
 import { applyReport } from './commands/apply-report.ts'
 import { sweepWaitTimeouts } from './commands/wait.ts'
+import { finishSubworkflowChild } from './commands/subworkflow.ts'
 import { activeDecision, openDecision } from './commands/decisions.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import type { Report } from '../core/report.ts'
@@ -55,6 +56,8 @@ export type SweepResult = {
   // 在途命令超时收成 rejected；回执过期清掉 receipt_json
   operations_timed_out: number
   receipts_expired: number
+  // 子 run 已收口但父节点还挂在 waiting：由维护扫描推进父节点
+  subworkflow_finished: string[]
   scanned_at: string
 }
 
@@ -322,6 +325,21 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       }
     }
 
+    const subworkflowFinished: string[] = []
+    const finishedChildren = tx.all<{ run_id: string; parent_node_run_id: string }>(
+      'SELECT r.run_id, r.parent_node_run_id FROM runs r JOIN node_runs n ON n.node_run_id = r.parent_node_run_id '
+      + "WHERE r.parent_node_run_id IS NOT NULL AND n.status = 'waiting' AND r.status IN "
+      + "('done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded', 'cancelled')",
+    )
+    for (const child of finishedChildren) {
+      try {
+        const out = finishSubworkflowChild(tx, secret, { childRunId: child.run_id, now: params.now })
+        if (out.status === 'dispatched') subworkflowFinished.push(out.parentNodeRunId)
+      } catch {
+        // 并发已推进这个父节点：跳过，不把整轮扫描拖垮
+      }
+    }
+
     const receipts = sweepInboxReceipts(tx, params.now)
 
     return {
@@ -339,6 +357,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       action_overrun: actionOverrun,
       operations_timed_out: receipts.timedOut,
       receipts_expired: receipts.expired,
+      subworkflow_finished: subworkflowFinished,
       scanned_at: params.now,
     }
   })

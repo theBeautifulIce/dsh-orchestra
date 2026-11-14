@@ -10,6 +10,7 @@ import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../../src/exe
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { bindRunVersion } from '../fixtures/ledger.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
+import { enterWaiting } from '../../src/service/commands/wait.ts'
 import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
 
 const SECRET = 'routes-secret'
@@ -339,5 +340,53 @@ describe('起运行与裁决收口路由', () => {
     expect((await settled.json() as any).data.settled).toBe(true)
     const node = orchestra.db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get('nrun_comp') as { status: string }
     expect(node.status).toBe('failed')
+  })
+
+  it('等待事件走生产路由：先落 inbox，再唤醒同 run 的活跃等待', async () => {
+    const { endpoint: base, orchestra } = await boot()
+    withTx(orchestra.db, (tx) => {
+      tx.run(
+        "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) " +
+          "VALUES ('nrun_wait','r1','wait',2,'wait',1,'started',0,?,?)",
+        [NOW, NOW],
+      )
+      enterWaiting(tx, SECRET, {
+        nodeRunId: 'nrun_wait', attempt: 1, runId: 'r1', waitKind: 'event',
+        match: { type: 'build.done', path: 'buildId', equals: 'b1' },
+        idempotencyKey: 'wait-route-1', maxWaitMs: 60_000, now: NOW,
+      })
+    })
+    const res = await post(base + '/v1/wait/events', {
+      runId: 'r1', eventType: 'build.done', payload: { buildId: 'b1' }, idempotencyKey: 'evt-route-1',
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as any
+    expect(body.data.woken).toBe(1)
+    const node = orchestra.db.raw.prepare('SELECT status, wait_deadline_at FROM node_runs WHERE node_run_id = ?').get('nrun_wait') as { status: string; wait_deadline_at: string | null }
+    expect(node.status).toBe('dispatched')
+    expect(node.wait_deadline_at).toBeNull()
+  })
+
+  it('运行级取消走生产路由并向子运行传播', async () => {
+    const { endpoint: base, orchestra } = await boot()
+    withTx(orchestra.db, (tx) => {
+      tx.run(
+        "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, parent_run_id, parent_node_run_id, status, revision, created_at, updated_at) " +
+          "VALUES ('r_child','t1','wf',1,'r1','nrun_1','running',1,?,?)",
+        [NOW, NOW],
+      )
+      tx.run(
+        "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) " +
+          "VALUES ('nrun_child','r_child','child',1,'agent',1,'started',0,?,?)",
+        [NOW, NOW],
+      )
+    })
+    const res = await post(base + '/v1/runs/cancel', { runId: 'r1', cancelResult: 'interrupted', graceMs: 0 })
+    expect(res.status).toBe(200)
+    const body = await res.json() as any
+    expect(body.data.cancelledRuns).toContain('r_child')
+    expect(body.data.cancelledNodes).toContain('nrun_child')
+    const child = orchestra.db.raw.prepare('SELECT cancel_result FROM runs WHERE run_id = ?').get('r_child') as { cancel_result: string | null }
+    expect(child.cancel_result).toBe('interrupted')
   })
 })

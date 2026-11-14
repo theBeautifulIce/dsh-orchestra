@@ -349,4 +349,20 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     const done = db.raw.prepare("SELECT receipt_json FROM inbox WHERE operation_id='op_done'").get() as { receipt_json: string | null }
     expect(done.receipt_json).toBeNull()
   })
+
+  it('子运行已收口但父节点仍 waiting：维护扫描推进父节点', () => {
+    const db = setup()
+    withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status='waiting', wait_started_at=? WHERE node_run_id='nr_sw'", [NOW])
+      tx.run(
+        "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, parent_run_id, parent_node_run_id, status, revision, created_at, updated_at) " +
+          "VALUES ('r_child','t1','wf',1,'r1','nr_sw','done',1,?,?)",
+        [NOW, NOW],
+      )
+    })
+    const out = sweep(db, TEST_SECRET, { now: NOW })
+    expect(out.subworkflow_finished).toContain('nr_sw')
+    expect(row(db).status).toBe('dispatched')
+    expect(evCount(db, 'subworkflow.finished')).toBe(1)
+  })
 })
