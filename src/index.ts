@@ -14,6 +14,7 @@ import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
 import { closeRun } from './service/commands/run-close.ts'
+import { settleCompensation, startCompensation } from './service/commands/compensation.ts'
 import { inTx } from './infra/db/tx.ts'
 import type { NodeCommands, ServerDeps } from './service/server.ts'
 import { startServer } from './service/server.ts'
@@ -165,6 +166,21 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       return out
     }),
     confirmStart: (b) => confirmStartup(db, opts.secret, { ...b, clock }),
+    startCompensation: (b) => inTx(db, (tx) => startCompensation(tx, opts.secret, {
+      nodeRunId: b.nodeRunId,
+      attempt: b.attempt,
+      descriptor: b.descriptor,
+      now: b.now,
+    })),
+    settleCompensation: (b) => inTx(db, (tx) => ({
+      settled: settleCompensation(tx, opts.secret, {
+        compensationId: b.compensationId,
+        state: b.state,
+        evidence: b.evidence,
+        reason: b.reason,
+        now: b.now,
+      }),
+    })),
     dispatch: async (b) => {
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })

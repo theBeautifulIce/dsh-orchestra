@@ -6,11 +6,13 @@ import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import {
-  cancelSchema, confirmStartSchema, createRunSchema, dispatchSchema, ledgerEventSchema, leaseSchema, parseBody,
+  cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
+  ledgerEventSchema, leaseSchema, parseBody,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, workflowLoadSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
+import type { CompensationDescriptor } from './commands/compensation.ts'
 import type { LoadWorkflowResult } from './workflows.ts'
 import type { CreateRunResult } from './runs.ts'
 import type { StartRunResult } from './commands/start-run.ts'
@@ -82,6 +84,13 @@ export type NodeCommands = {
   confirmStart: (body: { nodeRunId: string; attempt: number; attested?: boolean; now: string; actor?: string }) => {
     trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'
   }
+  // 补偿的生产入口：开始与收口都由服务层做幂等和状态迁移，HTTP 只搬描述符
+  startCompensation: (body: {
+    nodeRunId: string; attempt: number; descriptor: CompensationDescriptor; now: string
+  }) => { compensationId: string; started: boolean }
+  settleCompensation: (body: {
+    compensationId: string; state: 'applied' | 'failed' | 'unverified'; evidence?: unknown; now: string; reason?: string
+  }) => { settled: boolean }
   // 派发：把 run 下排队中的节点交给生产执行器跑
   dispatch: (body: {
     runId: string
@@ -311,6 +320,29 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         nodeRunId: body.nodeRunId, attempt: body.attempt, revision: body.revision,
         cancelResult: body.cancelResult, now: requestNow, graceMs: body.graceMs,
         extendDeadlineMs: body.extendDeadlineMs,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/compensations/start' && deps.commands) {
+      const body = parseBody(compensateStartSchema, await readJsonBody(req), '开始补偿')
+      const out = await queue.run(() => deps.commands!.startCompensation({
+        nodeRunId: body.nodeRunId,
+        attempt: body.attempt,
+        descriptor: body.descriptor,
+        now: requestNow,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/compensations/settle' && deps.commands) {
+      const body = parseBody(compensateSettleSchema, await readJsonBody(req), '收口补偿')
+      const out = await queue.run(() => deps.commands!.settleCompensation({
+        compensationId: body.compensationId,
+        state: body.state,
+        evidence: body.evidence,
+        reason: body.reason,
+        now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return

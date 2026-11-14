@@ -315,4 +315,29 @@ describe('起运行与裁决收口路由', () => {
     })
     expect(stale.status).toBe(409)
   })
+
+  it('补偿开始与收口都有生产路由，收口保留原节点状态', async () => {
+    const { endpoint: base, orchestra } = await boot()
+    withTx(orchestra.db, (tx) => {
+      tx.run(
+        "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) " +
+          "VALUES ('nrun_comp','r1','comp',3,'agent',1,'failed',0,?,?)",
+        [NOW, NOW],
+      )
+    })
+    const started = await post(base + '/v1/compensations/start', {
+      nodeRunId: 'nrun_comp', attempt: 1,
+      descriptor: { tool: 'rm', args: ['tmp/a'], verify: { command: 'test', args: ['!', '-e', 'tmp/a'] }, descriptorVersion: 'v1' },
+    })
+    expect(started.status).toBe(200)
+    const a = await started.json() as any
+    expect(a.data.started).toBe(true)
+    const settled = await post(base + '/v1/compensations/settle', {
+      compensationId: a.data.compensationId, state: 'applied', evidence: { exitCode: 0 },
+    })
+    expect(settled.status).toBe(200)
+    expect((await settled.json() as any).data.settled).toBe(true)
+    const node = orchestra.db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get('nrun_comp') as { status: string }
+    expect(node.status).toBe('failed')
+  })
 })

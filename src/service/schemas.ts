@@ -315,6 +315,28 @@ export const cancelSchema = z.looseObject({
   extendDeadlineMs: z.number().int().min(0).max(LIMITS.graceMsMax).optional(),
 })
 
+// 补偿：描述符必须能真正执行，参数只收字符串数组；收口状态只收三个终态
+export const compensateStartSchema = z.looseObject({
+  nodeRunId: identifier,
+  attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
+  descriptor: z.looseObject({
+    tool: z.string().min(1).max(LIMITS.toolCommandMaxLength),
+    args: z.array(z.string().max(LIMITS.hashMaxLength)).max(LIMITS.toolsMaxCount),
+    verify: z.looseObject({
+      command: z.string().min(1).max(LIMITS.toolCommandMaxLength),
+      args: z.array(z.string().max(LIMITS.hashMaxLength)).max(LIMITS.toolsMaxCount),
+    }),
+    descriptorVersion: z.string().min(1).max(LIMITS.statusMaxLength),
+  }),
+})
+
+export const compensateSettleSchema = z.looseObject({
+  compensationId: identifier,
+  state: z.enum(['applied', 'failed', 'unverified']),
+  evidence: z.unknown().optional(),
+  reason: z.string().max(LIMITS.statusMaxLength).optional(),
+})
+
 type LedgerProblem = { path: (string | number)[]; message: string }
 
 // 账本事件的体由宿主解释，字段随调用方变；这里只挡明显会打垮服务的负载：
