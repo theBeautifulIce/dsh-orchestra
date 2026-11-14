@@ -8,6 +8,7 @@ import {
   createExecutionSchedulerFromConfig,
   DEFAULT_EXECUTION_CONCURRENCY,
   DEFAULT_HUMAN_SLOTS,
+  DEFAULT_MAX_WAITING,
 } from '../../src/service/execution-scheduler.ts'
 
 const delay = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
@@ -126,20 +127,58 @@ describe('执行调度器', () => {
     await second
   })
 
-  it('缺省值与配置定值一致：并发 3、人工名额 1', () => {
+  it('缺省值与配置定值一致：并发 3、人工名额 1、排队上限有界', () => {
     const sched = createExecutionScheduler()
     expect(sched.concurrency).toBe(DEFAULT_EXECUTION_CONCURRENCY)
     expect(sched.humanSlots).toBe(DEFAULT_HUMAN_SLOTS)
     expect(DEFAULT_EXECUTION_CONCURRENCY).toBe(3)
     expect(DEFAULT_HUMAN_SLOTS).toBe(1)
+    expect(DEFAULT_MAX_WAITING).toBe(1000)
+    expect(sched.stats().maxWaiting).toBe(DEFAULT_MAX_WAITING)
   })
 
-  it('配置里的 execution.concurrency 与 human_slots 真的接到调度上', () => {
+  it('配置里的 execution.concurrency、human_slots 与 max_waiting 真的接到调度上', () => {
     const cfg = parseConfig(CONFIG_SAMPLE)
     const sched = createExecutionSchedulerFromConfig(cfg)
     expect(sched.concurrency).toBe(cfg.execution.concurrency)
     expect(sched.humanSlots).toBe(cfg.execution.human_slots)
+    expect(sched.stats().maxWaiting).toBe(DEFAULT_MAX_WAITING)
     expect(sched.stats()).toMatchObject({ inFlight: 0, waiting: 0, concurrency: 3, humanSlots: 1 })
+    const tight = parseConfig({ ...CONFIG_SAMPLE, execution: { ...CONFIG_SAMPLE.execution, max_waiting: 7 } })
+    expect(createExecutionSchedulerFromConfig(tight).stats().maxWaiting).toBe(7)
+  })
+
+  it('close({drain:true}) 停收新任务，但把已在排队的任务跑完', async () => {
+    const sched = createExecutionScheduler({ concurrency: 1 })
+    const order: number[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => { release = r })
+    const first = sched.run(async () => { order.push(1); await gate })
+    const second = sched.run(async () => { order.push(2) })
+    const closing = sched.close({ drain: true })
+    await expect(sched.run(async () => 'late')).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(sched.waiting).toBe(1)
+    release()
+    await Promise.all([first, second])
+    await closing
+    expect(order).toEqual([1, 2])
+    expect(sched.inFlight).toBe(0)
+    expect(sched.waiting).toBe(0)
+  })
+
+  it('close({drain:false}) 立即拒掉排队任务，在跑任务收尾后关闭', async () => {
+    const sched = createExecutionScheduler({ concurrency: 1 })
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => { release = r })
+    const first = sched.run(() => gate)
+    const waiting = sched.run(async () => 'waiting')
+    const closing = sched.close({ drain: false })
+    await expect(waiting).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    expect(sched.waiting).toBe(0)
+    release()
+    await first
+    await closing
+    expect(sched.inFlight).toBe(0)
   })
 
   it('参数不合法在装配期就拒掉', () => {

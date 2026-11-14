@@ -203,7 +203,16 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   return {
     orchestra,
     endpoint: server.endpoint,
-    close: async () => { clearInterval(sweepTimer); await server.close(); await service.release() },
+    close: async () => {
+      clearInterval(sweepTimer)
+      try {
+        await server.close()
+      } finally {
+        // 先停入口，再把在跑与排队的任务收干净，最后才释放服务锁。
+        await scheduler.close({ drain: true })
+        await service.release()
+      }
+    },
   }
 }
 

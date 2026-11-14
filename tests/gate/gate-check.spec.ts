@@ -1476,4 +1476,61 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
     ].join('\n')
     expect(proseVerdictClashes(md, 'pass', items)).toEqual([])
   })
+
+  it('A6：否定词被拆到相邻格仍拒绝', () => {
+    const md = head + [
+      '| 编号 | 说明 | 结果 | 补充 | 备注 |',
+      '| --- | --- | --- | --- | --- |',
+      '| G2-11 | 迁移空库可重复 | pass | 未 | 通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    const clashes = proseVerdictClashes(md, 'pass', items)
+    expect(clashes.join('\n')).toMatch(/G2-11/)
+  })
+
+  it('A7：必过项 id 被拆到相邻格仍拒绝', () => {
+    const md = head + [
+      '| 编号 | 说明 | 结果 | 备注 |',
+      '| --- | --- | --- | --- |',
+      '| G2- | 11 | pass | 未通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'pass', items).join('\n')).toMatch(/G2-11/)
+  })
+
+  it('A8：原始表格行超过表头列数直接拒绝', () => {
+    const md = head + [
+      '| 编号 | 说明 | 结果 |',
+      '| --- | --- | --- |',
+      '| G2-11 | 迁移空库可重复 | pass | 未通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'pass', items).join('\n')).toMatch(/超过表头/)
+  })
+
+  it('A9：HTML 注释里的失败裁决按隐藏判定拒绝', () => {
+    const md = head + '\n<!-- 结论：fail；必过项 G2-11 未通过 -->\n\n结论：pass。\n'
+    expect(proseVerdictClashes(md, 'pass', items)).toContain('正文藏着看不见的判定')
+  })
+
+  it('历史表用中文数字轮次也不误伤，未来轮次仍拒绝', () => {
+    const history = head + [
+      '| 审计轮次 | 历史结论 |',
+      '| --- | --- |',
+      '| 第三十五轮 | fail |',
+      '| 第三十六轮 | pass |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(history, 'pass', items, { auditRound: 36 })).toEqual([])
+    const future = history.replace('第三十五轮 | fail', '第三十七轮 | fail')
+    expect(proseVerdictClashes(future, 'pass', items, { auditRound: 36 }).join('\n')).toMatch(/表格结论与裁决 pass 冲突/)
+  })
 })

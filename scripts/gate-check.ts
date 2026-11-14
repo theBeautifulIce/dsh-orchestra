@@ -1309,6 +1309,32 @@ function cellWeakFail(folded: string): boolean {
   return CELL_FAIL_VERDICTS_WEAK.includes(folded.toLowerCase())
 }
 
+// 失败词被拆到相邻单元格：逐格都干净，拼起来才是“未通过”。
+// 只认跨过单元格边界的那部分，整词落在单格里的仍交给 cellFailStatement，
+// 避免把“未通过项为空”这类正常说明当成否决（S1 第三十七轮 P0）。
+function splitFailureAcrossCells(row: AuditCell[]): boolean {
+  const joined = row.map((cell) => cell.text).join('')
+  const boundaries = new Set<number>()
+  let offset = 0
+  for (const cell of row) {
+    offset += cell.text.length
+    boundaries.add(offset)
+  }
+  for (const word of [...CELL_FAIL_VERDICTS_STRONG, ...CELL_FAIL_VERDICTS_WEAK]) {
+    const re = new RegExp(regexEscape(word), 'gi')
+    let match: RegExpExecArray | null
+    while ((match = re.exec(joined)) !== null) {
+      const start = match.index
+      const end = start + match[0].length
+      for (let at = start + 1; at < end; at += 1) {
+        if (boundaries.has(at)) return true
+      }
+      if (match[0].length === 0) re.lastIndex += 1
+    }
+  }
+  return false
+}
+
 // 单元格失败判定：表格单元格是片段，不是完整句子，只有两种情况算矛盾：
 // (a) 单元格里出现显式结论行（“结论：fail”）；
 // (b) 结论列里整格是强否决词，或整格是一个状态裁决词。
@@ -1364,7 +1390,24 @@ function stripDefinitionContainers(line: string): string {
 function stripDefinitionDestination(line: string): string {
   return line.replace(new RegExp('^(\\[[^\\]]*\\]\\s*:\\s*)(?:' + DEFINITION_DEST + ')', 'i'), '$1')
 }
+// HTML 注释在渲染视图里不可见，但把“结论：fail”藏进注释仍是隐藏判定（S1 第三十七轮 P1-2）。
+// 只拦“结论词 + 失败词”同现的注释：普通说明性注释、结构化裁决标记不误伤。
+function hiddenCommentFailure(text: string): boolean {
+  // 围栏代码里的注释是示例，不是正文，先掩掉再扫。
+  const masked = maskFencedAuditCode(text)
+  const comment = /<!--([\s\S]*?)-->/g
+  let match: RegExpExecArray | null
+  while ((match = comment.exec(masked)) !== null) {
+    const body = decodeHtmlEntitiesForInspection(match[1] ?? '')
+    const hasConclusion = /(?:结论|結論|判定|审计意见|审计結論|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))/i.test(body)
+    const hasFailure = /(?:\b(?:fail(?:ed|ure|s)?|reject(?:ed|s)?|den(?:y|ied|ies))\b|不通过|未通过|没通过|否决|驳回|失败|不合格)/i.test(body)
+    if (hasConclusion && hasFailure) return true
+  }
+  return false
+}
+
 function hiddenDefinitionFailure(text: string): boolean {
+  if (hiddenCommentFailure(text)) return true
   const lines = text.split(/\r?\n/)
   let inBlock = false
   for (const raw of lines) {
@@ -1443,10 +1486,31 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
 // 表格里的历史审计记录不是本轮结论（S2 第三十七轮 P0-02）：
 // 轮次列 + 轮次数字，且没有「本轮/当前轮」标记，才按历史行跳过。
 // 给了当前轮次时只认严格更早的轮次，防止把「Round 37 | fail」藏进历史表。
+// 中文数字轮次（第三十五轮）也要认，否则历史行会被当成本轮（S1 第三十七轮 P2）。
+function chineseNumber(text: string): number | null {
+  const digits: Record<string, number> = {
+    '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+    '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
+  }
+  let total = 0
+  let current = 0
+  let seen = false
+  for (const ch of text) {
+    const digit = digits[ch]
+    if (digit !== undefined) { current = digit; seen = true; continue }
+    if (ch === '十') { total += (current === 0 ? 1 : current) * 10; current = 0; seen = true; continue }
+    if (ch === '百') { total += (current === 0 ? 1 : current) * 100; current = 0; seen = true; continue }
+    return null
+  }
+  return seen ? total + current : null
+}
+
 function tableRoundNumber(cell: AuditCell): number | null {
   const text = cell.text.trim()
-  const m = /^(?:第\s*)?(\d{1,3})\s*轮$/i.exec(text) ?? /^round\s*(\d{1,3})(?:\s+audit)?$/i.exec(text)
-  if (m) return Number(m[1])
+  const arabic = /^(?:第\s*)?(\d{1,3})\s*轮$/i.exec(text) ?? /^round\s*(\d{1,3})(?:\s+audit)?$/i.exec(text)
+  if (arabic) return Number(arabic[1])
+  const chinese = /^第\s*([零〇一二三四五六七八九十百两]+)\s*[轮輪]$/.exec(text)
+  if (chinese) return chineseNumber(chinese[1] ?? '')
   if (/轮次|轮|round|审计|history|历史/i.test(cell.header) && /^\d{1,3}$/.test(text)) return Number(text)
   return null
 }
@@ -1473,6 +1537,51 @@ function historicalTableRows(cells: AuditCell[], auditRound?: number): Set<strin
   return historical
 }
 
+// 原始 Markdown 表格行不受渲染器截列影响：3 列表头写 4 格时，markdown-it 会丢掉第 4 格，
+// 但原文仍在，按渲染结果检查就会漏（S1 第三十七轮 P1-1）。这里直接按源码数格。
+function splitTableRowCells(line: string): string[] {
+  let body = line.trim().replace(/^(?:>\s*)+/, '')
+  if (body.startsWith('|')) body = body.slice(1)
+  if (body.endsWith('|') && !body.endsWith('\\|')) body = body.slice(0, -1)
+  const cells: string[] = []
+  let current = ''
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i]!
+    if (ch === '\\' && body[i + 1] === '|') { current += '|'; i += 1; continue }
+    if (ch === '|') { cells.push(current); current = ''; continue }
+    current += ch
+  }
+  cells.push(current)
+  return cells
+}
+
+function isTableDelimiterRow(line: string): boolean {
+  const cells = splitTableRowCells(line)
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+}
+
+function rawTableOverflowIssues(text: string): string[] {
+  const lines = maskHtmlComments(maskFencedAuditCode(text)).split('\n')
+  const issues: string[] = []
+  for (let i = 0; i + 1 < lines.length; i += 1) {
+    const header = lines[i]!
+    if (!header.includes('|') || !isTableDelimiterRow(lines[i + 1]!)) continue
+    const headerCount = splitTableRowCells(header).length
+    let j = i + 2
+    while (j < lines.length && lines[j]!.trim() !== '' && lines[j]!.includes('|')) {
+      if (!isTableDelimiterRow(lines[j]!)) {
+        const count = splitTableRowCells(lines[j]!).length
+        if (count > headerCount) {
+          issues.push('审计报告表格第 ' + String(j + 1) + ' 行有 ' + String(count) + ' 格，超过表头的 ' + String(headerCount) + ' 格')
+        }
+      }
+      j += 1
+    }
+    i = j - 1
+  }
+  return [...new Set(issues)]
+}
+
 // 裁决块写 pass 时正文不能同时唱反调（S2 第三十五轮 P2-1）：
 // 以前只在 auditConclusionOf 返回非 null 时才比对，正文写成「两行结论」或「某项未通过」时
 // 该函数返回 null，一致性检查被静默跳过，改正文就能签过门。这里独立扫四类背离：
@@ -1487,6 +1596,8 @@ export function proseVerdictClashes(
 ): string[] {
   const clashes: string[] = []
   if (hiddenDefinitionFailure(text)) return ['正文藏着看不见的判定']
+  // 溢出列不是在渲染视图里被截掉就算没事：原文有、表头没写，按畸形表格直接拒。
+  for (const issue of rawTableOverflowIssues(text)) clashes.push(issue)
   const rendered = renderedAuditWithCells(text)
   if (rendered === null) return ['正文渲染失败，无法核对结论']
   const visible = rendered.lines.map(stripHistoricalAuditSentence)
@@ -1523,8 +1634,16 @@ export function proseVerdictClashes(
     }
     for (const [key, row] of rows) {
       if (historical.has(key)) continue
-      const rowText = row.map((cell) => cell.text).join(' | ')
-      const hit = requiredItems.filter((id) => rowText.includes(id))
+      // 同一行内去掉分隔符再拼一次：否定词与必过项 id 被拆到相邻格时，逐格判各自都干净。
+      // 行内只要点名了必过项且拼接后出现失败谓词，就按矛盾拒（S1 第三十七轮 P0）。
+      const joined = row.map((cell) => cell.text).join('')
+      const hit = requiredItems.filter((id) => joined.includes(id))
+      const joinedFail = visibleFailStatement(joined, { bareConclusion: 'any' }) || splitFailureAcrossCells(row)
+      if (joinedFail && hit.length > 0) {
+        clashes.push('审计报告表格把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict))
+      } else if (joinedFail && row.some((cell) => isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text))) {
+        clashes.push('审计报告表格结论与裁决 ' + String(verdict) + ' 冲突：' + joined.slice(0, 60))
+      }
       for (const cell of row) {
         const conclusionCell = isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text)
         if (hit.length === 0 && !conclusionCell) continue

@@ -31,6 +31,8 @@ export const configSchema = z.object({
   execution: z.object({
     concurrency: positiveInt(1),
     human_slots: positiveInt(1),
+    // S2 第三十七轮 P1-01：排队必须有界；缺省给生产可用的 1000，配置可收紧到 1..10000。
+    max_waiting: positiveInt(1).max(10000).default(1000),
     startup_timeout_ms: positiveInt(0),
     unknown_watchdog_ms: positiveInt(0),
     verify_timeout_ms: positiveInt(0),

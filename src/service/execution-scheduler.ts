@@ -8,6 +8,8 @@ import type { OrchestraConfig } from '../core/config.ts'
 // 与 orchestra.config.json 的定值一致：并发 3、人工名额 1
 export const DEFAULT_EXECUTION_CONCURRENCY = 3
 export const DEFAULT_HUMAN_SLOTS = 1
+// 排队上限：生产默认必须有界，不能让无限 Promise 把内存与停机时间拖垮（S2 第三十七轮 P1-01）。
+export const DEFAULT_MAX_WAITING = 1000
 
 export type ExecutionTaskOptions = {
   // 占人工名额：等人复核的任务同时最多 human_slots 个
@@ -36,6 +38,9 @@ export type ExecutionScheduler = {
   readonly waiting: number
   readonly concurrency: number
   readonly humanSlots: number
+  // 关闭调度器：drain=true 等队列与在跑任务收完；drain=false 立即拒掉排队任务，在跑任务自然结束。
+  // 两种模式都会停止接收新任务，重复调用返回同一个 Promise。
+  close(opts?: { drain?: boolean }): Promise<void>
 }
 
 type QueuedTask = {
@@ -71,6 +76,11 @@ class Scheduler {
   private readonly queue: QueuedTask[] = []
   private running = 0
   private humanRunning = 0
+  // 关闭状态：accepting=false 后新任务一律拒；draining=true 时队列继续跑完。
+  private accepting = true
+  private draining = false
+  private closePromise: Promise<void> | null = null
+  private resolveClose: (() => void) | null = null
 
   constructor(opts: SchedulerOptions) {
     this.concurrencyLimit = positive(opts.concurrency, 'concurrency')
@@ -108,6 +118,10 @@ class Scheduler {
 
   run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T> {
     return new Promise<T>((resolve, reject) => {
+      if (!this.accepting) {
+        reject(new OrchError('SERVICE_UNAVAILABLE', '调度器已关闭，先别排', { label: opts?.label ?? '' }))
+        return
+      }
       if (this.queue.length >= this.maxWaiting) {
         this.log.warn('执行队列满了，拒掉这一件', { waiting: this.queue.length, maxWaiting: this.maxWaiting })
         reject(new OrchError('SERVICE_UNAVAILABLE', '执行队列满了，先别排', {
@@ -127,6 +141,32 @@ class Scheduler {
       this.log.info('执行任务入队', { label: task.label, waiting: this.queue.length, inFlight: this.running })
       this.pump()
     })
+  }
+
+  close(opts: { drain?: boolean } = {}): Promise<void> {
+    if (this.closePromise) return this.closePromise
+    this.accepting = false
+    this.draining = opts.drain !== false
+    this.closePromise = new Promise<void>((resolve) => { this.resolveClose = resolve })
+    if (!this.draining) {
+      const pending = this.queue.splice(0)
+      for (const task of pending) {
+        this.log.warn('调度器关闭，取消排队任务', { label: task.label, waiting: pending.length })
+        task.reject(new OrchError('SERVICE_UNAVAILABLE', '调度器已关闭，排队任务已取消', { label: task.label }))
+      }
+    } else {
+      this.pump()
+    }
+    this.settleClose()
+    return this.closePromise
+  }
+
+  // 只在所有该收的都收完时兑现关闭 Promise：drain 模式要等队列清空，紧急模式只等在跑任务结束。
+  private settleClose(): void {
+    if (this.accepting || this.running > 0) return
+    if (this.draining && this.queue.length > 0) return
+    this.resolveClose?.()
+    this.resolveClose = null
   }
 
   // 派名额：先给排在前面的任务；占人工名额的要等人工名额空出来
@@ -158,6 +198,7 @@ class Scheduler {
     this.running -= 1
     if (task.human) this.humanRunning -= 1
     this.pump()
+    this.settleClose()
     if (failed) task.reject(failure)
     else task.resolve(value)
   }
@@ -166,23 +207,24 @@ class Scheduler {
 export function createExecutionScheduler(opts: {
   concurrency?: number
   humanSlots?: number
-  // 排队上限：超了直接拒（背压）。缺省不限
+  // 排队上限：超了直接拒（背压）。缺省为有界默认值，避免生产队列无界
   maxWaiting?: number
   log?: Logger
 } = {}): ExecutionScheduler {
   return new Scheduler({
     concurrency: opts.concurrency ?? DEFAULT_EXECUTION_CONCURRENCY,
     humanSlots: opts.humanSlots ?? DEFAULT_HUMAN_SLOTS,
-    maxWaiting: opts.maxWaiting ?? Number.POSITIVE_INFINITY,
+    maxWaiting: opts.maxWaiting ?? DEFAULT_MAX_WAITING,
     log: opts.log ?? nullLogger,
   })
 }
 
-// 配置是唯一来源：execution.concurrency 与 execution.human_slots 在这里真正落到调度上
+// 配置是唯一来源：execution.concurrency / human_slots / max_waiting 在这里真正落到调度上
 export function createExecutionSchedulerFromConfig(cfg: OrchestraConfig, log?: Logger): ExecutionScheduler {
   return createExecutionScheduler({
     concurrency: cfg.execution.concurrency,
     humanSlots: cfg.execution.human_slots,
+    maxWaiting: cfg.execution.max_waiting,
     log,
   })
 }
