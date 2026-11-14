@@ -3,6 +3,7 @@ import { appendFileSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { canonicalJson } from '../core/canonical.ts'
 import { OrchError, proposedError } from '../core/errors.ts'
+import type { HostAgentFactory } from './session.ts'
 
 // 宿主侧事件流：长生命周期的 AsyncIterable，AbortSignal 负责取消/释放
 export type BridgeEventSource = {
@@ -56,6 +57,22 @@ export type ExecutorState = 'loaded' | 'unloaded' | 'deleted' | 'running' | 'idl
 export type StateResult = { state: ExecutorState; toolCallSeq: number; hasToolCall: boolean }
 
 export type WhenIdleParams = { executorAgentId: string; timeoutMs: number }
+
+// 生产装配的默认宿主工厂：节点执行只经桥 spawn，不在编排进程里直接造 Agent 会话。
+export function bridgeHostAgentFactory(client: BridgeClient): HostAgentFactory {
+  return {
+    create: async (input) => {
+      const res = await client.spawn({
+        nodeRunId: input.nodeRunId,
+        attempt: input.attempt,
+        input: input.input,
+        outputSchema: input.outputSchema,
+        toolPolicy: input.toolPolicy,
+      })
+      return { agentId: res.agentId, sessionId: res.sessionId }
+    },
+  }
+}
 
 export class BridgeClient {
   private readonly transport: BridgeTransport

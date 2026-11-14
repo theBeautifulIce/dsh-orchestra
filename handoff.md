@@ -940,3 +940,4 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 新增回归：stop 未确认时 `blocked_post` 且 `report_applied=0`；Agent 创建后 started 迁移失败仍释放宿主会话；B02 持久 ACK 重放、B03 整页补洞、B08 dispose 拒绝；runtime 的工具时间断言改为可解析且不倒挂，不再要求等于量化 `NOW`。
 - 验证：`pnpm typecheck` 0；全量 40 文件 **586 passed | 1 skipped**；`pnpm build` 成功（ESM 140.61kB、d.ts 13.52kB）。B06 仍是事务级重放，不是独立进程强杀；真实宿主 `spawn` 端到端仍未验证。
 - 状态：整改待提交；G1/G2 仍绑 `caae193`。下一步提交后请独立审计复审，再进 R5-D B01–B10 收口与 R5-E 第 45 轮重签。
+- R5-D 起步补生产 spawn：`bridgeHostAgentFactory(client)` 把 `HostAgentFactory.create` 映射到 `BridgeClient.spawn`，不把 `inheritHistory` 透给宿主协议；`createOrchestra` 在 executor 没显式给 `agents` 时用它兜底，生产路径不再依赖外部顺手塞宿主工厂。单测断言 spawn 参数与返回值；全量 40 文件 **587 passed | 1 skipped**，build 成功（ESM 141.07kB）。该提交在 R5-C 复审候选之后，复审仍需按新 HEAD 复核 spawn 兜底。

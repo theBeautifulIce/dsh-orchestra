@@ -19,6 +19,8 @@ import {
   runNode, DEFAULT_LEASE_TTL_MS,
   type RunNodeDeps, type RunNodeParams, type RunNodeResult,
 } from './executor/run-node.ts'
+import { bridgeHostAgentFactory } from './executor/bridge.ts'
+import type { HostAgentFactory } from './executor/session.ts'
 import {
   createExecutionScheduler, createExecutionSchedulerFromConfig, runThroughScheduler, type ExecutionScheduler,
 } from './service/execution-scheduler.ts'
@@ -35,7 +37,8 @@ export type OrchestraOptions = {
   phase: Phase
   log?: Logger
   // 生产执行器：装配了就开 /v1/node-runs/run，没装配时该路由明确报未配置（审计 F-01）
-  executor?: Omit<RunNodeDeps, 'runtime' | 'db' | 'secret'>
+  // agents 省略时由 bridge.spawn 兜底，生产路径不靠外部顺手塞一个宿主工厂。
+  executor?: Omit<RunNodeDeps, 'runtime' | 'db' | 'secret' | 'agents'> & { agents?: HostAgentFactory }
   // 执行并发闸：agent 执行是长时间任务，不占写队列的名额，并发上限在这里生效（第二次意见 P1）
   scheduler?: ExecutionScheduler
   // 生产装配读配置的路径；读不到就退回默认并发（并发 3、人工名额 1）
@@ -70,8 +73,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
   const executor = opts.executor
   const spillDir = executor?.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(opts.configPath)
-  const executorDeps: RunNodeDeps | null = executor
-    ? { runtime, db, secret: opts.secret, ...executor, ...(spillDir ? { spillDir } : {}) }
+  const agents = executor ? (executor.agents ?? bridgeHostAgentFactory(executor.bridge)) : null
+  const executorDeps: RunNodeDeps | null = executor && agents
+    ? { runtime, db, secret: opts.secret, ...executor, agents, ...(spillDir ? { spillDir } : {}) }
     : null
   // 节点执行只有一个底层实现；调度只在装配层包一次（S2 第三十七轮 P0-01）。
   const executeNode = async (p: RunNodeParams): Promise<RunNodeResult> => {
