@@ -1326,11 +1326,18 @@ function isBareFailureCell(folded: string): boolean {
   for (const word of [...CELL_FAIL_VERDICTS_STRONG, ...CELL_FAIL_VERDICTS_WEAK]) {
     const target = word.toLowerCase()
     if (text === target) return true
-    if (!text.startsWith(target)) continue
-    const rest = text.slice(target.length).trim()
-    if (rest !== '' && /^[|：:（(]/.test(rest)) return true
+    // 同一格内的词间空白/标点会被 foldForVerdict 折成 |：未 通过、未|通过、未通过（本轮）
+    // 都还是裸否决；「未通过项为空」在失败词后还有实词，不匹配。
+    const body = Array.from(target)
+      .map((ch) => (/[\p{L}\p{N}]/u.test(ch) ? regexEscape(ch) : '\\|*'))
+      .join('\\|*')
+    if (new RegExp('^' + body + '(?:\\||$)').test(text)) return true
   }
   return false
+}
+
+function isExpectationColumn(header: string): boolean {
+  return /(?:期望|预期|expected|expectation|should)/i.test(header)
 }
 
 // 失败词被拆到相邻单元格：逐格都干净，拼起来才是“未通过”。
@@ -1699,7 +1706,8 @@ export function proseVerdictClashes(
         // 攻击行的描述/证据格可以引用失败文案；但结论列不能被整行豁免。
         // 列名可以改，「备注」里只写「未通过」这种裸否决仍要判。
         const bareFailure = isBareFailureCell(foldForVerdict(cell.text))
-        if (rejectedAttack && !conclusionCell && !bareFailure) continue
+        const expectationCell = isExpectationColumn(cell.header)
+        if (rejectedAttack && (expectationCell || (!conclusionCell && !bareFailure))) continue
         // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。
         const cellFails = cellFailStatement(cell)
           || (bareFailure && (rejectedAttack || conclusionCell || hit.length > 0))
