@@ -2,6 +2,7 @@
 import { OrchError } from '../../core/errors.ts'
 import type { DecisionKind } from '../../core/state-machine.ts'
 import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
+import { appendEvent } from '../../infra/db/ledger.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 
@@ -126,7 +127,7 @@ export type ResolveDecisionRequest = {
   resolution: Resolution
   now: string
   payload?: Record<string, unknown>
-  // 批准人校验；旧调用不传 actor 时保持原有收口语义
+  // 批准人校验：actor 必须由命令入口给出，不能从卡类型反推
   actor?: Actor
   evidenceProducers?: readonly string[]
   // escalations 命中 confirm_required=1 时，必须显式带 confirm=true
@@ -152,13 +153,9 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
       decisionId: req.decisionId,
     })
   }
-  const actor = req.actor ?? (current.approver === 'human'
-    ? { kind: 'human' as const, id: 'human:requester' }
-    : undefined)
+  const actor = req.actor
   if (!actor) {
-    throw new OrchError('FORBIDDEN', '这张 decision 不是纯人工卡，必须说明批准人', {
-      approver: current.approver,
-    })
+    throw new OrchError('FORBIDDEN', '必须说明批准人', { approver: current.approver })
   }
   assertApprover({
     approver: current.approver as Approver,
@@ -188,6 +185,16 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
       revision: req.revision,
     })
   }
+  appendEvent(tx, {
+    type: 'decision.resolved',
+    payload: {
+      decisionId: req.decisionId,
+      revision: req.revision + 1,
+      resolution: req.resolution,
+      status: nextStatus,
+      resolvedBy: actor.id,
+    },
+  })
 }
 
 // 继续等 / 继续跟踪：只续一版，不改变 status

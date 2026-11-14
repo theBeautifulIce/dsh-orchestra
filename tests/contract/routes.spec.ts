@@ -283,9 +283,12 @@ describe('起运行与裁决收口路由', () => {
       decisionId: 'd-route', runId: 'r1', nodeRunId: null, kind: 'pre_execution', approver: 'human', payload: {},
     }))
     const ok = await post(base + '/v1/decisions/resolve', {
-      decisionId: 'd-route', revision: 1, resolution: 'approved', actor: { kind: 'human', id: 'human:test' },
+      decisionId: 'd-route', revision: 1, resolution: 'approved', actor: { kind: 'human', id: 'human:forged' },
     })
     expect(ok.status).toBe(200)
+    const resolvedBy = (orchestra.db.raw.prepare('SELECT resolved_by FROM decisions WHERE decision_id = ?').get('d-route') as { resolved_by: string }).resolved_by
+    expect(resolvedBy.startsWith('service:')).toBe(true)
+    expect(resolvedBy).not.toContain('forged')
     const stale = await post(base + '/v1/decisions/resolve', {
       decisionId: 'd-route', revision: 1, resolution: 'approved', actor: { kind: 'human', id: 'human:test' },
     })

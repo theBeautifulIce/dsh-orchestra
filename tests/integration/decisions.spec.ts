@@ -87,7 +87,7 @@ describe('八种 decision 与活跃唯一性', () => {
       openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: 'nr1', kind: 'pre_execution', createdAt: NOW })
     })
     expect(() => withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 99, resolution: 'rejected', now: NOW })
+      resolveDecision(tx, { decisionId: 'd1', revision: 99, resolution: 'rejected', actor: { kind: 'human', id: 'human:test' }, now: NOW })
     })).toThrowError(/CAS 未命中/)
     expect(row(db, 'd1').status).toBe('pending')
   })
@@ -98,7 +98,7 @@ describe('八种 decision 与活跃唯一性', () => {
       openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: 'nr1', kind: 'action_overrun', createdAt: NOW })
     })
     withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'continue_wait', now: NOW })
+      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'continue_wait', actor: { kind: 'human', id: 'human:test' }, now: NOW })
     })
     expect(row(db, 'd1').status).toBe('pending')
     expect(row(db, 'd1').revision).toBe(2)

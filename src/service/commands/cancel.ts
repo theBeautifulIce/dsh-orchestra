@@ -106,8 +106,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     }
     runCas(
       tx,
-      'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
-      ['stopping', params.now, 'not_interruptible', deadline, extended.bootId, extended.monotonicNs, params.now, params.nodeRunId, params.attempt, params.revision, ...CANCELABLE],
+      'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, revision = revision + 1, rearm_generation = rearm_generation + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND rearm_generation = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
+      ['stopping', params.now, 'not_interruptible', deadline, extended.bootId, extended.monotonicNs, params.now, params.nodeRunId, params.attempt, params.revision, row.rearm_generation, ...CANCELABLE],
       { rows: 1, what: 'cancel-not-interruptible' },
     )
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline })
@@ -148,8 +148,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   }
   runCas(
     tx,
-    'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
-    ['stopping', params.now, 'unknown', params.now, params.nodeRunId, params.attempt, params.revision, ...CANCELABLE],
+    'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, rearm_generation = rearm_generation + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND rearm_generation = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
+    ['stopping', params.now, 'unknown', params.now, params.nodeRunId, params.attempt, params.revision, row.rearm_generation, ...CANCELABLE],
     { rows: 1, what: 'cancel-unknown' },
   )
   appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_unknown', {})

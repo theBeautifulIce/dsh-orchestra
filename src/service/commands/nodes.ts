@@ -1,6 +1,6 @@
 // src/service/commands/nodes.ts —— 单条 CAS 迁移执行器（S3 Task 2，规格 4.3/4.4）
 import { OrchError } from '../../core/errors.ts'
-import { canTransition, type NodeStatus } from '../../core/state-machine.ts'
+import { canTransition, TRANSITIONS, type NodeStatus, type TransitionContext } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { uuidv7 } from '../../core/ids.ts'
@@ -62,6 +62,8 @@ export type TransitionRequest = {
   allowHung?: boolean
   // 等待节点的 M-20/M-21/M-22 是重新武装，同一笔 CAS 里 Gr+1
   bumpRearm?: boolean
+  // 带 requires 的迁移必须带判定上下文；只给形状、触发条件由命中的规则补齐
+  context?: Omit<TransitionContext, 'status' | 'target' | 'trigger'>
 }
 
 /**
@@ -82,6 +84,24 @@ export function applyTransition(tx: Tx, req: TransitionRequest): void {
         from,
         to: req.to,
       })
+    }
+    // 只有 requires 边时，必须拿到上下文并真正满足前提；不能凭“表里有这条边”放行。
+    const candidates = TRANSITIONS.filter((rule) => rule.from.includes(from) && rule.to.includes(req.to))
+    if (candidates.length > 0 && candidates.every((rule) => rule.requires !== undefined)) {
+      const ctx = req.context
+      const satisfied = ctx !== undefined && candidates.some((rule) => rule.requires?.({
+        ...ctx,
+        status: from,
+        target: req.to,
+        trigger: rule.trigger,
+      }) === true)
+      if (!satisfied) {
+        throw new OrchError('STALE_GENERATION', '这条迁移的前提不成立', {
+          nodeRunId: req.nodeRunId,
+          from,
+          to: req.to,
+        })
+      }
     }
   }
   const patch = req.patch ?? {}

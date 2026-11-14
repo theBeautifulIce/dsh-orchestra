@@ -554,18 +554,20 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
 
   it('timeout 只有成功行 → tool_execution_failed（S2 第二十八轮 P2-1）', () => {
     const db = setup()
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET status='timing_out', cancel_result='interrupted' WHERE node_run_id='nr_ar'"))
     const out = apply(db, {
       status: 'timeout',
       evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
-    })
+    }, 'timing_out')
     expect(out.accepted).toBe(false)
     expect(out.reason).toBe('tool_execution_failed')
-    expect(nodeRow(db).status).toBe('verifying')
+    expect(nodeRow(db).status).toBe('timing_out')
   })
 
   it('timeout 同 attempt 另有失败行时，也不能拿成功行收口', () => {
     const db = setup()
     withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status='timing_out', cancel_result='interrupted' WHERE node_run_id='nr_ar'")
       tx.run(
         "UPDATE tool_executions SET exit_code = 2, stdout_hash = 'bad' WHERE node_run_id = 'nr_ar' AND attempt = 2 AND tool = 'ro.echo'",
       )
@@ -573,10 +575,10 @@ describe('系统级证据门与痕迹绑定（审计 R3-03）', () => {
     const out = apply(db, {
       status: 'timeout',
       evidence: { source: 'run_tool', exitCode: 0, stdoutHash: 'h', hashes: {}, producedAt: NOW, tool: 'ro.echo', commandHash: CMD },
-    })
+    }, 'timing_out')
     expect(out.accepted).toBe(false)
     expect(out.reason).toBe('evidence_unverifiable')
-    expect(nodeRow(db).status).toBe('verifying')
+    expect(nodeRow(db).status).toBe('timing_out')
   })
 
   it('失败终态的失败行与 tool_finished 对齐 → 正常收口（S2 第二十四轮 P1-2 阳性对照）', () => {

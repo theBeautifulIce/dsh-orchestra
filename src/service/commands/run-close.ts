@@ -43,7 +43,8 @@ export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null
     return null
   }
 
-  const unverified = (node: NodeRow) => node.side_effect_policy !== 'pure' && node.side_effect_verified_none !== 1 && !node.stop_evidence
+  // stop_evidence 只证明执行停了，不证明副作用已核实；有副作用策略的节点必须 verified_none=1
+  const unverified = (node: NodeRow) => node.side_effect_policy !== 'pure' && node.side_effect_verified_none !== 1
   const failed = nodes.some((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status))
   const orphaned = nodes.some((node) => node.status === 'orphaned' && !node.replacement_node_run_id)
   const hasUnverified = nodes.some(unverified)

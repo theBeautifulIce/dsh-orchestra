@@ -42,6 +42,12 @@ describe('运行终态收口', () => {
     expect(withTx(db, (tx) => closeRun(tx, 'r1', NOW))).toBe('failed_with_unverified')
   })
 
+  it('done 但有 stop_evidence 仍不能证明副作用已核实 → succeeded_with_unverified', () => {
+    const db = setup()
+    setNode(db, { status: 'done', side_effect_policy: 'irreversible', side_effect_verified_none: 0, stop_evidence: 'stopped-cleanly' })
+    expect(withTx(db, (tx) => closeRun(tx, 'r1', NOW))).toBe('succeeded_with_unverified')
+  })
+
   it('仍有未终态节点 → 不落终态', () => {
     const db = setup()
     setNode(db, { status: 'started' })

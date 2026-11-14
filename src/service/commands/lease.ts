@@ -159,6 +159,7 @@ export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string
         to: next,
         attempt: row.attempt,
         now: params.now,
+        context: { hasToolCall: false, cancelResult: 'unknown', hangReason: null, sideEffectVerifiedNone: false },
         patch: {
           lease_id: null,
           lease_expires_at: null,

@@ -41,10 +41,10 @@ describe('M-01…M-61 迁移用例', () => {
       hasRequires: typeof rule.requires === 'function',
     })))
     expect(createHash('sha256').update(canonical).digest('hex'))
-      .toBe('327e92cdd66d3deed963ff7827d9d033fd2e04cf0780e98d85b9dbf8dfa2ae45')
+      .toBe('70b165bded51b451b510aef2f69387a7984a2a5b4d0bac6d523cee9086af46d4')
     expect(TRANSITIONS).toHaveLength(58)
     expect(TRANSITIONS.reduce((n, rule) => n + rule.from.length, 0)).toBe(112)
-    expect(TRANSITIONS.reduce((n, rule) => n + rule.to.length, 0)).toBe(72)
+    expect(TRANSITIONS.reduce((n, rule) => n + rule.to.length, 0)).toBe(71)
     expect(TRANSITIONS.filter((rule) => rule.requires).length).toBe(10)
   })
 

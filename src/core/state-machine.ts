@@ -150,7 +150,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-13', from: ['startup_unknown'], to: ['startup_unknown'], trigger: 'unloaded-reattach' },
   { id: 'M-14', from: ['startup_unknown'], to: ['paused_bridge_missing'], trigger: 'bridge-lost' },
   { id: 'M-15', from: ['started'], to: ['verifying'], trigger: 'verifier-dispatched' },
-  { id: 'M-16', from: ['verifying'], to: ['done', 'failed', 'timeout'], trigger: 'verdict' },
+  { id: 'M-16', from: ['verifying'], to: ['done', 'failed'], trigger: 'verdict' },
   { id: 'M-17', from: ['verifying'], to: ['blocked_post'], trigger: 'verify-timeout' },
   { id: 'M-18', from: ['verifying'], to: ['failed'], trigger: 'verify-timeout-fail-on-timeout', requires: (c) => c.sideEffectVerifiedNone },
   { id: 'M-19', from: ['verifying'], to: ['failed_with_unverified'], trigger: 'verify-timeout-fail-on-timeout', requires: (c) => !c.sideEffectVerifiedNone },
@@ -234,6 +234,10 @@ export function canTransition(from: string, to: string): boolean {
  * 普通报告不能借这条边直跳；把它排除掉，避免“结构上存在边”被误当成“这次能走”。
  */
 export function canReportTransition(from: string, to: string): boolean {
+  // 执行器上报只能落执行类状态；orphaned / indeterminate_side_effect / superseded
+  // 是恢复或补证路径的裁决，不能由普通报告自报（第 2 轮审计 P0-3）。
+  // 只挡住“裁决/补证才能产生的状态”，执行过程中的进度上报仍可走。
+  if (['orphaned', 'indeterminate_side_effect', 'abandoned_unverified', 'failed_with_unverified', 'superseded'].includes(to)) return false
   return TRANSITIONS.some((rule) => rule.requires === undefined && pairAllowed(rule, from, to))
 }
 

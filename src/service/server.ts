@@ -213,7 +213,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         revision: body.revision,
         resolution: body.resolution,
         payload: body.payload,
-        actor: body.actor,
+        actor: { kind: 'human', id: actor },
         evidenceProducers: body.evidenceProducers,
         confirm: body.confirm,
         now: requestNow,

@@ -479,7 +479,8 @@ async function caseG06(): Promise<InjectionResult> {
   return {
     case: 'G-06',
     params: { db: file, call_id: 'call_g06', tool: 'ro.echo', retry_after_lost_result: true },
-    before, after: dumpState(file),
+    before,
+    after: dumpState(file) + '\nbridge_tool_outbox: ' + JSON.stringify(outbox),
     reconcile: '宿主实际执行次数=' + String(executions)
       + '；两次回传 exitCode=' + String(first.exitCode) + '/' + String(second.exitCode)
       + '；outbox=' + outbox.status,
@@ -496,18 +497,20 @@ function caseG12(): InjectionResult {
   }))
   const approve = () => inTx(db, (tx) => resolveDecision(tx, {
     decisionId: 'dec_g12', revision: 1, resolution: 'approved', now,
+    actor: { kind: 'human', id: 'human:g12' },
   }))
   approve()
   let code = ''
   try { approve() } catch (err) {
     code = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
   }
-  const row = db.raw.prepare('SELECT status, revision, closed_reason FROM decisions WHERE decision_id = ?').get('dec_g12')
+  const row = db.raw.prepare('SELECT decision_id, status, revision, closed_reason FROM decisions WHERE decision_id = ?').get('dec_g12')
   db.raw.close()
   return {
     case: 'G-12',
     params: { db: file, decision_id: 'dec_g12', clicks: 2, same_revision: 1 },
-    before, after: dumpState(file),
+    before,
+    after: dumpState(file) + '\ndecisions: ' + JSON.stringify(row),
     reconcile: '第二次审批被拒码=' + code + '；决策行=' + JSON.stringify(row),
   }
 }
@@ -531,7 +534,8 @@ function caseG16(): InjectionResult {
   return {
     case: 'G-16',
     params: { db: file, parent_run_id: 'r1', child_run_id: 'r2', grace_ms: 1000 },
-    before, after: dumpState(file),
+    before,
+    after: dumpState(file) + '\nchild_run: ' + JSON.stringify(childRun) + '\nchild_nodes: ' + JSON.stringify(nodes),
     reconcile: '取消传播=' + JSON.stringify(result) + '；子 run=' + JSON.stringify(childRun) + '；子节点=' + JSON.stringify(nodes),
   }
 }
