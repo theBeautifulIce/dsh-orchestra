@@ -785,3 +785,13 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 变异：`isTableDelimiterRow` 改回 `-{3,}`，A8b 红「expected '' to match /超过表头/」；恢复后 `tsc --noEmit` 0、全量 38 文件 542 passed | 1 skipped、build 通过、check-evidence-repro 25 份。
 - 尚留 P2（不阻断）：Agent Bridge 未接生产、工具 `started_at/finished_at` 同刻、围栏/注释内表格按设计屏蔽、配置非法时静默回落默认调度器（`parseConfig` 本身会拒）。
 - 状态：G1/G2 仍绑旧候选（G1 31 轮、G2 36 轮），`99fe7fe` 未签；须在 `99fe7fe` 上重派 S1/S2 第三十九轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
+
+### 11.37 第三十九轮 S2 回归整改：攻击矩阵整行豁免（2026-11-14 12:50，HEAD 6ea145d）
+
+- 触发：S2 第三十九轮在 `920a5dd` 上判 **fail**（P0=0 / P1=1 / P2=5，19/19 必过项实测通过），报告 `D:/aboutAI/_audit-r39-s2/docs/audits/S2-independent-audit-round39.md`，克隆提交 `0b729db2…`。P1 是 `99fe7fe` 引入的回归：`isRejectedAttackRow` 在 `scripts/gate-check.ts:1656` 整行 `continue`，攻击表 `| 用例编号 | 必过项 | 期望 | 结论 |` + `| A1 | G2-11 | 拒 | 未通过 |` 可签过（artifact `0a04e41d…` / body `71557479…`）；首列/首格/期望列任一改动都会 exit 1，确认是整行豁免导致。
+- 修复 `6ea145d`：不再整行跳过。`const rejectedAttack = isRejectedAttackRow(row)`；行级 `joinedFail = !rejectedAttack && splitFailureAcrossCells(row)`；逐格循环加 `if (rejectedAttack && !conclusionCell) continue`，攻击描述/证据格可引用失败文案，但结论列与显式结论标记仍逐格判。新增用例 `攻击矩阵只豁免描述格，结论列写未通过仍拒绝`（`tests/gate/gate-check.spec.ts`，表头 `用例编号/必过项/期望/结论`，行 `A1 | G2-11 | 拒 | 未通过`，断言命中 `/G2-11/`）。
+- 变异：把条件临时改成 `if (rejectedAttack) continue`，新用例红「expected '' to match /G2-11/」；恢复后定向 `-t "攻击矩阵|A8b"` 3 passed。
+- 验证（实测）：`tsc --noEmit` 0；全量 38 文件 **543 passed | 1 skipped**（较上轮 +1）；`pnpm build` 通过；`check-evidence-repro` 25 份字节一致。
+- 其余复核：S2 的调度背压/停机 24 项、真实 HTTP 并发/close 16 项全 pass（默认 maxWaiting=1000；第 1002 个拒；maxWaiting=2 第 4 个拒；drain 两分支；同 Promise；失败释放名额；双入口 maxActive=2；异常 503 后归零；close 后拒新、在跑 200 收尾、锁释放）。A8b/A8c/A8dash3、A9b/A9c 均 exit 1；历史行、round36 形攻击矩阵、「无裸 blocked」、干净 pass、围栏内表格不误伤；G2 证据 19 份 LF sha256 与五项哈希一致。
+- 尚留 P2：round38 fail 报告被 `hiddenCommentFailure` 误判、Agent Bridge 未接生产、工具 started/finished 同刻、围栏/注释内表格屏蔽、配置非法回落默认调度器。
+- 状态：S1 第三十九轮尚未回；G1/G2 仍绑旧候选，`6ea145d` 未签。S1 回后合并结论，在新候选上重派 S1/S2 第四十轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
