@@ -916,4 +916,6 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 复审 P2-4/P2-5：设计 §6 写明 `payload_hash` 前像为 `canonicalJson({ type: 裸 type, payload })`，从 receipt/账本回查先剥 `bridge.`；`listen(params, signal)` 的 `signal` 改为必填，与实现一致。
 - P2-3（pending 未计入 `buffer_limit_bytes`）保留给 R5-C，在消费器接管 pending 时一并收紧；008 的 CHECK/外键按已拍板口径留 010。
 - 验证：`pnpm typecheck` 0；全量 39 文件 **574 passed | 1 skipped**；`pnpm build` 成功（ESM 110.22kB）；G1/G2 仍绑 `caae193`，候选取本轮代码提交。
-- 状态：R5-B 库层、迁移层、测试层收口完成；P2 修复后需一次聚焦复审，PASS 后开 R5-C 接 `runNode()`。
+- 聚焦复审 `7cba5ca` verdict **PASS**：P0=0、P1=0；P2-1 错误码契约、P2-2 末尾半行、P2-4 哈希前像、P2-5 signal 必填均实测成立。复审克隆 `tmp/audit-r5b-r3`，定向 45 passed，全量 574（扣探针）| 1 skipped，主仓前后干净。
+- 复审 P2 补全：`tests/unit/bridge-buffer.spec.ts` 增加 `err.code === 'SCHEMA_VERSION_UNSUPPORTED'` 断言；设计 §5.2 写明 `lastPersistedAckSeq > 0` 必须同时注入 `lookupPersisted(seq)`，缺回调拒绝构造。
+- 状态：R5-B 库层、迁移层、测试层收口完成；R5-C 可以开工，接 `runNode()` 时必须注入真实 `lookupPersisted`。

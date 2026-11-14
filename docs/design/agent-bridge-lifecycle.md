@@ -135,7 +135,7 @@ export type BridgeTransport = {
 - `lastContiguousSeq`：已经连续收到并处理的 seq。
 - `lastPersistedAckSeq`：已经落账并确认的连续 seq。
 
-三者不能合成一个 `seqCursor`。`BridgeEventBuffer` 构造时注入 `lastPersistedAckSeq`，不从 0 开始。
+三者不能合成一个 `seqCursor`。`BridgeEventBuffer` 构造时注入 `lastPersistedAckSeq`，不从 0 开始；`lastPersistedAckSeq > 0` 时必须同时注入 `lookupPersisted(seq)` 回查已落账事件，缺回调直接拒绝构造，避免重启冲突检测静默退化。
 
 ### 5.3 push 算法
 

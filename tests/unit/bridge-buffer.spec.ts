@@ -134,10 +134,17 @@ describe('桥事件缓冲', () => {
   })
 
   it('有持久确认位但没有已落账回查 → 构造直接拒绝', () => {
-    expect(() => new BridgeEventBuffer(
-      { limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' },
-      { lastPersistedAckSeq: 3 },
-    )).toThrowError(/必须注入已落账事件回查/)
+    let err: any
+    try {
+      new BridgeEventBuffer(
+        { limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' },
+        { lastPersistedAckSeq: 3 },
+      )
+    } catch (e) {
+      err = e
+    }
+    expect(err?.code).toBe('SCHEMA_VERSION_UNSUPPORTED')
+    expect(err?.message).toMatch(/必须注入已落账事件回查/)
   })
 
   it('重启后从持久确认位恢复：已确认事件重复推送幂等，后续从 ack+1 接上', () => {
