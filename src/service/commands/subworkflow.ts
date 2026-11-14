@@ -408,9 +408,15 @@ export function finishSubworkflowChild(
       status: node.status,
     })
   }
+  // 子运行自己取消、而父运行没有取消意图时，父节点不能记成 superseded：
+  // 那会让父 run 在所有节点终态后收成 succeeded。没有替代物就按失败收口。
+  const parentCancelled = tx.get<{ cancel_requested_at: string | null }>(
+    'SELECT cancel_requested_at FROM runs WHERE run_id = ?', [node.run_id],
+  )?.cancel_requested_at != null
+  const childCancelled = (CHILD_CANCELLED as readonly string[]).includes(child.status)
   const target: 'done' | 'failed' | 'superseded' =
     (CHILD_SUCCESS as readonly string[]).includes(child.status) ? 'done'
-      : (CHILD_CANCELLED as readonly string[]).includes(child.status) ? 'superseded'
+      : childCancelled && parentCancelled ? 'superseded'
         : 'failed'
   applyTransition(tx, {
     nodeRunId: node.node_run_id,

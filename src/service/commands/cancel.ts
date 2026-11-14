@@ -42,16 +42,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   if (isTerminal(row.status)) {
     return { cancel_result: 'already_stopped', next_status: row.status, fence_state: null, reason: 'terminal_no_out_edge' }
   }
-  // 不可逆子节点不许取消：已发生的副作用不能靠取消掩盖，只能走核实/补偿
-  if (row.side_effect_policy === 'irreversible') {
-    throw new OrchError('FORBIDDEN', '不可逆子节点不许取消', {
-      nodeRunId: params.nodeRunId,
-      attempt: params.attempt,
-      status: row.status,
-      sideEffectPolicy: row.side_effect_policy,
-    })
-  }
-  // 还没派发就取消：直接作废，不进围栏、不产生新 attempt（审计 N-08）
+  // 还没派发就取消：直接作废，不进围栏、不产生新 attempt（审计 N-08）。
+  // 这条必须先于不可逆检查：queued/leased 的不可逆节点尚未执行，作废不会掩盖已发生的副作用。
   if (row.status === 'queued' || row.status === 'leased') {
     applyTransition(tx, {
       nodeRunId: params.nodeRunId,
@@ -64,6 +56,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       patch: {
         cancel_requested_at: params.now,
         cancel_result: params.cancelResult,
+        lease_id: null,
+        lease_expires_at: null,
       },
     })
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_before_dispatch', {
@@ -72,6 +66,15 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       to: 'superseded',
     })
     return { cancel_result: params.cancelResult, next_status: 'superseded', fence_state: null, reason: 'cancelled_before_dispatch' }
+  }
+  // 不可逆子节点不许取消：已发生的副作用不能靠取消掩盖，只能走核实/补偿
+  if (row.side_effect_policy === 'irreversible') {
+    throw new OrchError('FORBIDDEN', '不可逆子节点不许取消', {
+      nodeRunId: params.nodeRunId,
+      attempt: params.attempt,
+      status: row.status,
+      sideEffectPolicy: row.side_effect_policy,
+    })
   }
   // 纯控制节点（wait/subworkflow）没有宿主执行实例：取消即收口，
   // 不能先立围栏再等一个永远不会回来的执行器。

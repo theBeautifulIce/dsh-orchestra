@@ -75,6 +75,14 @@ async function dispatchOne(  deps: DispatchDeps,
   p: DispatchParams,
   row: { node_run_id: string; node_id: string; seq: number; attempt: number },
 ): Promise<DispatchOutcome> {
+  // 取消与派发可能并发：选行之后、真正执行之前再查一次取消位，
+  // 避免已取消的 run 因为节点还留在 queued 又被执行一次。
+  const run = deps.db.raw.prepare('SELECT cancel_requested_at FROM runs WHERE run_id = ?').get(p.runId) as
+    | { cancel_requested_at: string | null }
+    | undefined
+  if (run?.cancel_requested_at) {
+    return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'skipped', reason: 'run_cancelled' }
+  }
   const spec = p.nodes[row.node_id]
   if (!spec) {
     return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'skipped', reason: 'no_node_spec' }

@@ -4,7 +4,7 @@
 - 候选提交：e0f96507add0021aa8c18a36d87c933f3c0f30cb
 - 审计时间：2026-11-14
 - 审计范围：候选 `4f3ada7..e0f9650` 的代码、测试与脚本（`candidate_hash` / `change_scope_hash` 覆盖这一段，排除 `docs/gates/G1.md`、`docs/gates/G2.md` 门记录自身与 `docs/audits`、`docs/reviews`、`handoff.md`；证据文件仍计入候选）。
-- 审计方式：只读。审计开始时 `git status --porcelain` 为空、HEAD 为 `e0f9650`；审计中途（22:37–22:42）同目录出现其他 agent 的跟踪文件改动与未跟踪审计报告，非本报告产物。为把结论钉在候选上，全部测量与探针改在 `git worktree add --detach tmp/r55-wt e0f9650` 的干净树复跑（worktree `git status --porcelain` 为空），没有改源码、没有提交、没有签门；本报告是本轮唯一新增的报告文件。工作树被改动的事实本身记入本报告，worktree 在审计结束后删除。
+- 审计方式：只读。审计开始时 `git status --porcelain` 为空、HEAD 为 `e0f9650`；审计中途（22:37–22:42）同目录出现其他 agent 的跟踪文件改动与未跟踪审计报告，非本报告产物。为把结论钉在候选上，全部测量与探针改在 `git worktree add --detach tmp/r55-wt e0f9650` 的干净树复跑（worktree `git status --porcelain` 为空），没有改源码、没有提交、没有签门；本报告是本轮唯一新增的报告文件。工作树被改动的事实本身记入本报告，worktree 在审计结束后删除。审计结束时主仓库 HEAD 已被其他 agent 推进到 `af3970b`（该提交同时包含本报告）；`e0f9650` 之后候选文件已被再次改动，这份报告不能再直接用于在 HEAD 签 G2（`gate-check` 会报“候选提交之后，候选文件又被改过”），要签需对 `af3970b` 重新审计。
 
 ## 一、命令与结果
 
@@ -47,7 +47,7 @@
 | G2-02 | 重复上报只落一次 | pass | 一致 | `ev-g2-02` 复现通过；`g2.spec.ts` / `apply-report.spec.ts` 通过 |
 | G2-03 | 租约过期迟到上报被拒 | pass | 一致 | `ev-g2-03` 复现通过；租约用例通过 |
 | G2-04 | 取消后不产生新 attempt | pass | 一致 | `ev-g2-04` 复现通过；节点级取消 attempt 不变、新 attempt 上报被 `attempt_mismatch` 拒。run 级取消的派发闸缺失单列 P1-2 |
-| G2-05 | 终态必带证据 | pass | 一致（证据文件 sha 待刷新） | `ev-g2-05`、`ev-g2-10` 复现通过；系统级证据门在 `src/service/commands/apply-report.ts:539`、痕迹绑定在 `:608-692`；`ev-g2-10` sha 旧值见 P2-2 |
+| G2-05 | 终态必带证据 | pass | 一致（证据文件 sha 待刷新） | `ev-g2-05`、`ev-g2-10` 复现通过；系统级证据门在 `src/service/commands/apply-report.ts:543-546`、痕迹绑定在 `:615-625`；`ev-g2-10` sha 旧值见 P2-2 |
 | G2-06 | 无裸 blocked（没裁决卡不许卡住） | pass | 一致 | `ev-g2-06` 复现通过；`DECISION_REQUIRED` 拒无凭据 blocked |
 | G2-07 | S2 加载 parallel 被拒 | pass | 一致 | `ev-g2-07` 复现通过；`production-path.spec.ts` 通过 |
 | G-03 | 同一 report_id 上报两次只落一次 | pass | 一致 | `ev-g2-g03` 复现通过；`report_registry` 去重 |
@@ -66,7 +66,7 @@
 
 本轮另核（不单独计项）：
 
-- 三游标在 `src/executor/bridge.ts:202-204`（`lastReceivedSeqValue` / `lastContiguousSeqValue` / `lastPersistedAckSeqValue`），`ack(seq)` 只允许 `seq === lastPersistedAckSeq + 1` 且已落账（`bridge.ts:325-340`）；`src/executor/bridge-ledger.ts:100-130` 在同一事务内写 receipt 与 `last_persisted_ack_seq`，同 seq 同 payload 幂等、不同 payload 抛 `BRIDGE_SEQ_CONFLICT`，不连续序号拒收。本地 ACK 以事务提交成功为准。
+- 三游标在 `src/executor/bridge.ts:202-204`（`lastReceivedSeqValue` / `lastContiguousSeqValue` / `lastPersistedAckSeqValue`），`ack(seq)` 只允许 `seq === lastPersistedAckSeq + 1` 且已落账（`bridge.ts:318-340`）；`src/executor/bridge-ledger.ts:100-130` 在同一事务内写 receipt 与 `last_persisted_ack_seq`，同 seq 同 payload 幂等、不同 payload 抛 `BRIDGE_SEQ_CONFLICT`，不连续序号拒收。本地 ACK 以事务提交成功为准。
 - 账本事件链（`prev_hash` / `hash`）与 `report_seq` 去重由必过集合与全量用例覆盖；证据复现 25/25。
 
 行为 20/20 通过；`must_pass_passed` 记 20，`failed_items` 留空。P1 不在任一必过项的行为上。
@@ -126,9 +126,9 @@
 
 ## 五、P2（单列，不阻断本轮必过项）
 
-1. **`leased` → `superseded` 不清租约，残留租约永不回收。** `src/service/commands/cancel.ts:53-75` 的取消前分支只 patch `cancel_requested_at` / `cancel_result`；`src/service/commands/lease.ts:141` 的过期扫描只取 `status IN ('dispatched','started')`。实测：`nc_l` 取消后 `status=superseded`，`lease_id='lease_l'`、`lease_expires_at='2026-11-14T23:00:00.000Z'` 仍在。节点不会再被派发，但租约字段与“终态无租约”的账本口径不一致，也永远不会被扫描清掉。
+1. **`leased` → `superseded` 不清租约，残留租约永不回收。** `src/service/commands/cancel.ts:58-73` 的取消前分支只 patch `cancel_requested_at` / `cancel_result`；`src/service/commands/lease.ts:141` 的过期扫描只取 `status IN ('dispatched','started')`。实测：`nc_l` 取消后 `status=superseded`，`lease_id='lease_l'`、`lease_expires_at='2026-11-14T23:00:00.000Z'` 仍在。节点不会再被派发，但租约字段与“终态无租约”的账本口径不一致，也永远不会被扫描清掉。
 
-2. **G2 门记录仍是签前态，审计锚点、候选哈希、正文自锚与四份证据 sha 全部过期；G1 的自锚同样失配。** `docs/gates/G2.md` 记 `audit_round=51`、`audit_report=S2-independent-audit-round51.md`、`audit_report_sha256=b386173930739945…`，HEAD 上该报告的 LF sha 是 `3e0753072f37a86ead6fc37feb7e6424c4e2fd5646281a9bdc297d7c375d2010`，且报告结论是 fail。按 HEAD 重算：`candidate_hash` 记录 `8fa91fbb…`、实际 `a31eb4c6b58df25dd678311bb40272f2ef38dbdbfb979797edd511fe47710270`（202 文件）；`change_scope_hash` 记录 `a66761ea…`、实际 `c24ebe4e4520d6dacb791d9499c2f48b22a52ea5a8f7192109f3bddadcddf973`（202 路径）；`body_hash` 锚 `daec42cc…`、实际 `0179a365b2fe4d45b5b97213075159873190edb6503ad003e80f8608748568b0`；`artifact_hash` 锚 `c5b4564a…`、实际 `09be93b27e5f6e3103e3756b6c7a67f66ce4800d0216aa54f7d572d643cbf07d`；`evidence_index_hash` 记录 `45cb5d6d…` 与表内 20 条自洽，但 4 份证据文件内容已变：`ev-g2-01` `71825a7d…`→`cee94009…`、`ev-g2-10` `3f3ba099…`→`bd360512…`、`ev-g2-14` `61e9c435…`→`6d69d74d…`、`ev-g2-g05` `d400f29d…`→`85b2ed07…`；`invariants_hash` 记录 `6a7adcb0…` 与实际一致（12 条）。成因可追到提交 `0a576ea` 手工把 G1/G2 的 `audit_round` 50→51、报告路径指向 round51，但没有重跑 `sign-gate`，锚点停在 round50；`166ca70` 只改正文说明。G1 同样失配：正文锚 `1c090377…`，artifact 实算 `6b059c8ab09be42d881ff1380d42d094d72e1a5d63d75a7ca22c9bf2fa0962ea`，`gate-check G1` 首错为审计报告 sha `355a1a58…` != `e3eee746…`。G2 的 `previous_artifact_hash` 目前正好等于 G1 正文锚，所以前序链检查会过；G1 重签后必须同步更新。
+2. **G2 门记录仍是签前态，审计锚点、候选哈希、正文自锚与四份证据 sha 全部过期；G1 的自锚同样失配。** `docs/gates/G2.md` 记 `audit_round=51`、`audit_report=S2-independent-audit-round51.md`、`audit_report_sha256=b386173930739945…`，候选树上该报告的 LF sha 是 `3e0753072f37a86ead6fc37feb7e6424c4e2fd5646281a9bdc297d7c375d2010`，且报告结论是 fail。按候选 `e0f9650` 重算：`candidate_hash` 记录 `8fa91fbb…`、实际 `a31eb4c6b58df25dd678311bb40272f2ef38dbdbfb979797edd511fe47710270`（202 文件）；`change_scope_hash` 记录 `a66761ea…`、实际 `c24ebe4e4520d6dacb791d9499c2f48b22a52ea5a8f7192109f3bddadcddf973`（202 路径）；`body_hash` 锚 `daec42cc…`、实际 `0179a365b2fe4d45b5b97213075159873190edb6503ad003e80f8608748568b0`；`artifact_hash` 锚 `c5b4564a…`、实际 `09be93b27e5f6e3103e3756b6c7a67f66ce4800d0216aa54f7d572d643cbf07d`；`evidence_index_hash` 记录 `45cb5d6d…` 与表内 20 条自洽，但 4 份证据文件内容已变：`ev-g2-01` `71825a7d…`→`cee94009…`、`ev-g2-10` `3f3ba099…`→`bd360512…`、`ev-g2-14` `61e9c435…`→`6d69d74d…`、`ev-g2-g05` `d400f29d…`→`85b2ed07…`；`invariants_hash` 记录 `6a7adcb0…` 与实际一致（12 条）。成因可追到提交 `0a576ea` 手工把 G1/G2 的 `audit_round` 50→51、报告路径指向 round51，但没有重跑 `sign-gate`，锚点停在 round50；`166ca70` 只改正文说明。G1 同样失配：正文锚 `1c090377…`，artifact 实算 `6b059c8ab09be42d881ff1380d42d094d72e1a5d63d75a7ca22c9bf2fa0962ea`，`gate-check G1` 首错为审计报告 sha `355a1a58…` != `e3eee746…`。G2 的 `previous_artifact_hash` 目前正好等于 G1 正文锚，所以前序链检查会过；G1 重签后必须同步更新。
 
 3. **`ev-g2-16` 桥闭环计数仍是旧数。** `docs/gates/evidence/G2/ev-g2-16.md:51` 写 `6 files passed, 70 tests passed`，本轮实测 73 passed（agent-lifecycle 13、bridge-ledger 10、bridge-buffer 19、runtime 25、production-path 5、execution-concurrency 1）；`:54` 写 `42 files passed, 624 passed | 1 skipped`，本轮全量是 61 files、844 passed | 1 skipped。行为通过，计数文本待更新。
 

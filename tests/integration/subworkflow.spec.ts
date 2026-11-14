@@ -215,6 +215,20 @@ describe('子运行 pin、深度与唤醒', () => {
     })
   })
 
+  it('子运行自己取消、父未取消时父节点落 failed，不能把父 run 收成 succeeded', () => {
+    const db = memoryDb()
+    const c = catalog()
+    withTx(db, (tx) => {
+      const child = startSubworkflowNode(tx, SECRET, c, {
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+      })
+      tx.run("UPDATE runs SET status = 'cancelled' WHERE run_id = ?", [child.run_id])
+      const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
+      expect(out.status).toBe('failed')
+      expect(closeRun(tx, 'r1', NOW)).toBe('failed')
+    })
+  })
+
   it('取消的子运行收口父节点为 superseded，父 run 落 cancelled', () => {
     const db = memoryDb()
     const c = catalog()

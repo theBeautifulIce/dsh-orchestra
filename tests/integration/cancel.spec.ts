@@ -28,6 +28,18 @@ function cancel(db: any, result: CancelResult, over: { graceMs?: number; extendD
 }
 
 describe('取消四值与围栏', () => {
+  it('未派发的不可逆节点可以作废：副作用尚未发生，不能靠跳过把 run 卡在 running', () => {
+    const { db } = freshLedger(); seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('nr_c', 'r1', 'n_c', 5, 'agent', 2, 'queued', 10, 'irreversible', ?, ?)", [NOW, NOW])
+    })
+    const out = cancel(db, 'interrupted')
+    expect(out.next_status).toBe('superseded')
+    expect(nodeRow(db).status).toBe('superseded')
+    expect(nodeRow(db).lease_id).toBeNull()
+    expect(events(db, 'cancel_before_dispatch')).toBe(1)
+  })
+
   it('interrupted → timing_out + fence armed，宽限到点等于 now 加宽限', () => {
     const db = setup()
     const out = cancel(db, 'interrupted', { graceMs: 30000 })
