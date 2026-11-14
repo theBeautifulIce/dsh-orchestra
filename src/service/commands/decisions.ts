@@ -1,6 +1,7 @@
 // src/service/commands/decisions.ts —— 八种 decision 的生成、查重与收口（S3 Task 3，规格 3.6）
 import { OrchError } from '../../core/errors.ts'
 import type { DecisionKind } from '../../core/state-machine.ts'
+import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 
 export const DECISION_KINDS: readonly DecisionKind[] = [
@@ -26,6 +27,10 @@ export type DecisionDraft = {
   // I6：审批绑定内容哈希与有效期；内容变或过期，审批不得放行。
   contentHash?: string | null
   expiresAt?: string | null
+  // 批准人档位；旧调用不传时用 either，保持既有行为
+  approver?: string
+  // 升级规则命中时置 1，批准动作必须带 confirm
+  confirmRequired?: boolean
 }
 
 export function activeDecision(tx: Tx, runId: string, kind: DecisionKind, nodeRunId: string | null): { decision_id: string } | undefined {
@@ -49,17 +54,22 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
       nodeRunId: draft.nodeRunId,
     })
   }
+  const payload = draft.payload ?? {}
+  const actionCategory = typeof payload.action_category === 'string' ? payload.action_category : undefined
+  const approver = draft.approver ?? defaultApprover(draft.kind, actionCategory)
   tx.run(
-    'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, created_at) ' +
-      "VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)",
+    'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, approver, confirm_required, created_at) ' +
+      "VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?)",
     [
       draft.decisionId,
       draft.runId,
       draft.nodeRunId,
       draft.kind,
-      JSON.stringify(draft.payload ?? {}),
+      JSON.stringify(payload),
       draft.contentHash ?? null,
       draft.expiresAt ?? null,
+      approver,
+      draft.confirmRequired ? 1 : 0,
       draft.createdAt ?? new Date().toISOString(),
     ],
   )
@@ -107,6 +117,9 @@ export type ResolveDecisionRequest = {
   resolution: Resolution
   now: string
   payload?: Record<string, unknown>
+  // 批准人校验；旧调用不传 actor 时保持原有收口语义
+  actor?: Actor
+  evidenceProducers?: readonly string[]
 }
 
 /**
@@ -116,12 +129,19 @@ export type ResolveDecisionRequest = {
  * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
  */
 export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
-  const current = tx.get<{ status: string; payload_json: string }>(
-    'SELECT status, payload_json FROM decisions WHERE decision_id = ?',
+  const current = tx.get<{ status: string; payload_json: string; approver: string }>(
+    'SELECT status, payload_json, approver FROM decisions WHERE decision_id = ?',
     [req.decisionId],
   )
   if (!current) {
     throw new OrchError('DECISION_REVISION_CONFLICT', 'decision 不存在', { decisionId: req.decisionId })
+  }
+  if (req.actor) {
+    assertApprover({
+      approver: current.approver as Approver,
+      actor: req.actor,
+      evidenceProducers: req.evidenceProducers,
+    })
   }
   const closing = FINAL_RESOLUTIONS.includes(req.resolution)
   const nextStatus = closing ? 'resolved' : current.status
@@ -136,9 +156,9 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
     ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...req.payload })
     : current.payload_json
   const res = tx.run(
-    'UPDATE decisions SET status = ?, revision = revision + 1, closed_reason = ?, decided_at = ?, payload_json = ? ' +
+    'UPDATE decisions SET status = ?, revision = revision + 1, closed_reason = ?, decided_at = ?, payload_json = ?, resolved_by = COALESCE(?, resolved_by) ' +
       `WHERE decision_id = ? AND revision = ? AND status IN ${ACTIVE_STATUSES}`,
-    [nextStatus, closedReason, closing ? req.now : null, payloadJson, req.decisionId, req.revision],
+    [nextStatus, closedReason, closing ? req.now : null, payloadJson, req.actor?.id ?? null, req.decisionId, req.revision],
   )
   if (res.changes !== 1) {
     throw new OrchError('DECISION_REVISION_CONFLICT', 'decision 收口 CAS 未命中', {
@@ -161,23 +181,32 @@ export type EscalateOptions = {
   expireAfterMs?: number
 }
 
+export type DecisionTimeoutDisposition = 'default_action' | 'hold_for_human'
+
+// supervised 是唯一不允许超时自动收口的档位；其余档位按默认动作过期。
+export function timeoutDisposition(autonomy: string): DecisionTimeoutDisposition {
+  return autonomy === 'supervised' ? 'hold_for_human' : 'default_action'
+}
+
 /**
  * 超时升级：活跃且非 report_contradicted 的卡，满 2 小时升 blocked_for_human，满 24 小时 expired。
- * report_contradicted 不参与升级，避免把“报告与人裁决冲突”自动关掉。
+ * supervised 档只升级不自动收口；report_contradicted 不参与升级，避免把“报告与人裁决冲突”自动关掉。
  */
 export function escalateDecisions(tx: Tx, opts: EscalateOptions): { blocked: number; expired: number } {
   const nowMs = Date.parse(opts.now)
   const blockedAfterMs = opts.blockedAfterMs ?? 2 * 60 * 60 * 1000
   const expireAfterMs = opts.expireAfterMs ?? 24 * 60 * 60 * 1000
-  const rows = tx.all<{ decision_id: string; status: string; revision: number; created_at: string }>(
-    "SELECT decision_id, status, revision, created_at FROM decisions WHERE kind <> 'report_contradicted' " +
-      `AND status IN ${ACTIVE_STATUSES}`,
+  const rows = tx.all<{ decision_id: string; status: string; revision: number; created_at: string; autonomy: string }>(
+    'SELECT d.decision_id, d.status, d.revision, d.created_at, COALESCE(t.autonomy, \'autonomous\') AS autonomy ' +
+      'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id ' +
+      "WHERE d.kind <> 'report_contradicted' " +
+      `AND d.status IN ${ACTIVE_STATUSES}`,
   )
   let blocked = 0
   let expired = 0
   for (const row of rows) {
     const age = nowMs - Date.parse(row.created_at)
-    if (age >= expireAfterMs) {
+    if (age >= expireAfterMs && timeoutDisposition(row.autonomy) === 'default_action') {
       tx.run(
         "UPDATE decisions SET status = 'resolved', closed_reason = 'expired_final', revision = revision + 1, decided_at = ? " +
           'WHERE decision_id = ? AND revision = ?',

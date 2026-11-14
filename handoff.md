@@ -1240,3 +1240,14 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 新增 `tests/integration/migration-cases.spec.ts` 62 例：61 个 id 全覆盖、58 条状态规则逐条正例、错误触发/目标拒绝、M-01/M-58 建行规则、M-56 挂起闸、终态源无 allowTerminal 拒绝。
 - 验证：typecheck 0；G3 定向 68/68；全量待跑。
 - 缺口：`docs/gates/G3.md` 与 `GATE_SPECS.G3` 尚未落，等 Task 15 完成后按第 51 轮独立审计再签；六份 G3 证据尚未写盘。
+
+### 11.76 S3 Task 15：起运行命令与自治档位（2026-11-14 19:50）
+
+- 迁移 `021_start_run_autonomy.sql`：tasks 增 autonomy/escalations_json；decisions 增 approver/resolved_by/confirm_required；新表 start_run_operations 保证 operation_id 幂等。
+- `startRun`：workflow_version 必填、operationId 必填，默认 autonomous，越界档位与非法 escalations 直接拒；同 operation_id 重放返回同一 task/run 且 replayed=true，换 id 不合并。
+- `setTaskAutonomy`：按 expected_revision CAS，落 task.autonomy_changed 事件；冲突方整笔拒绝。
+- 批准人：`defaultApprover` 把 pre_execution/action_overrun/verify_human 与 irreversible 归 human，audit_result 归 either；`assertApprover` 要求 agent 带 orchestra.audit 且不得是证据产出者。
+- `openDecision` 生成时按 kind/action_category 写默认 approver，补写 confirm_required；`resolveDecision` 带 actor 时校验批准人并写 resolved_by。
+- 超时分档：`timeoutDisposition` 只有 supervised 为 hold_for_human，autonomous/assisted 到 24h 按默认动作 expired_final；`decisionConfirmRequired` 把任务 escalations 翻成 confirm_required。
+- 测试：start-run 10 例、approver 5 例；typecheck 0；全量 **56 files 799 passed | 1 skipped**；build ESM 169.20kB / gzip 42.03kB、d.ts 14.47kB。
+- 缺口：HTTP 命令面未开（计划明确只建任务与 run）；approver 的加载期能力位授予留 S5；证据待 S3 收口统一重生成。
