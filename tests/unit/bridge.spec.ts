@@ -19,6 +19,15 @@ describe('桥 RPC 客户端', () => {
     await expect(bad.spawn(spawnParams)).rejects.toMatchObject({ code: 'PROTOCOL_VERSION_MISMATCH' })
   })
 
+  it('listen 透传 fromSeq 与 signal，作为持续事件流入口', () => {
+    const transport = fakeBridge(defaultBridgeReply)
+    const client = new BridgeClient(transport)
+    const ac = new AbortController()
+    const stream = client.listen({ executorAgentId: 'agent_1', attempt: 1, fromSeq: 4 }, ac.signal)
+    expect(transport.lastCall('executor.listen')?.params).toEqual({ executorAgentId: 'agent_1', attempt: 1, fromSeq: 4 })
+    expect(stream[Symbol.asyncIterator]).toBeTypeOf('function')
+  })
+
   it('subscribe 透传 fromSeq，重连两次用同一个 fromSeq 参数一致', async () => {
     const transport = fakeBridge(() => ({ subscribed: true, fromSeq: 7, lastSeq: 9 }))
     const client = new BridgeClient(transport)

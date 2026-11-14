@@ -16,7 +16,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-const CORE_TABLES = ['tasks', 'runs', 'node_runs', 'events', 'node_run_events', 'inbox', 'leases', 'artifacts', 'report_registry', 'service_meta', 'workflow_versions', 'tool_executions', 'node_run_chain_heads']
+const CORE_TABLES = ['tasks', 'runs', 'node_runs', 'events', 'node_run_events', 'inbox', 'leases', 'artifacts', 'report_registry', 'service_meta', 'workflow_versions', 'tool_executions', 'node_run_chain_heads', 'bridge_event_receipts', 'bridge_stream_cursors']
 
 const tables = (raw: { prepare: (sql: string) => { all: () => unknown[] } }): string[] =>
   (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((r) => r.name)

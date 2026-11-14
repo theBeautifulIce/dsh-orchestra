@@ -194,7 +194,10 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/service/execution-scheduler.ts` | 执行调度器：并发上限与人工名额，接 `orchestra.config.json` 的 `concurrency` / `human_slots` |
 | `src/service/write-queue.ts` | 短写 FIFO 队列（tail 链）：只管数据库短写，长执行不占名额 |
 | `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收；按 execution_id 核对工具痕迹） |
+| `src/executor/bridge.ts` | 桥 RPC 客户端、`BridgeEventSource.listen` 事件流、三游标 `BridgeEventBuffer`、断号重取 |
+| `src/executor/bridge-ledger.ts` | 桥事件落账唯一入口：事务内校验跳号、receipt 幂等/冲突、推进 `bridge_stream_cursors` |
 | `src/infra/sqlite/migrations/006_tool_executions_tool_seq.sql` | 工具执行唯一性：`tool_executions` 主键 `node_run_id+attempt+tool_seq`，`execution_id NOT NULL UNIQUE` |
+| `src/infra/sqlite/migrations/008_bridge_event_receipts.sql` | 桥事件收据与按 `(node_run_id, attempt, executor_agent_id)` 隔离的持久确认游标 |
 | `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |
 | `src/index.ts` | 装配入口（`openServiceOrchestra`：acquireDbLock → bumpEpoch → openServiceDb → createOrchestra） |
 | `src/service/sweep.ts` | 围栏与过期扫描（逐行事务，回收 verifying 超时） |

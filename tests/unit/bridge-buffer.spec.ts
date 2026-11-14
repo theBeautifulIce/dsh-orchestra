@@ -34,10 +34,55 @@ describe('桥事件缓冲', () => {
     expect(buf.takeFrom(1).length).toBe(2)
   })
 
-  it('序号倒退 → SCHEMA_VERSION_UNSUPPORTED', () => {
+  it('迟到的缺号事件补洞：先收 2 再收 1，连续位推进到 2', () => {
     const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' })
+    expect(buf.push(ev(2)).gapFrom).toBe(1)
+    expect(buf.push(ev(1)).gapFrom).toBeNull()
+    expect(buf.lastContiguousSeq).toBe(2)
+    expect(buf.takeFrom(1).map((e) => e.seq)).toEqual([1, 2])
+  })
+
+  it('收到 5 缺 3/4：暂存 5、补 3/4 后连续位到 5', () => {
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' })
+    buf.push(ev(1))
     buf.push(ev(2))
-    expect(() => buf.push(ev(1))).toThrowError(/序号倒退/)
+    buf.ack(1)
+    buf.ack(2)
+    expect(buf.push(ev(5)).gapFrom).toBe(3)
+    expect(buf.lastContiguousSeq).toBe(2)
+    expect(buf.push(ev(3)).gapFrom).toBe(4)
+    expect(buf.push(ev(4)).gapFrom).toBeNull()
+    expect(buf.lastContiguousSeq).toBe(5)
+    expect(buf.pendingCount).toBe(0)
+    expect(buf.takeFrom(3).map((e) => e.seq)).toEqual([3, 4, 5])
+  })
+
+  it('同 seq 不同 payload → BRIDGE_SEQ_CONFLICT；相同 payload 幂等', () => {
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' })
+    buf.push(ev(1))
+    expect(buf.push(ev(1)).accepted).toBe(false)
+    expect(() => buf.push({ ...ev(1), payload: { seq: 999 } })).toThrowError(/协议冲突/)
+  })
+
+  it('确认位只能逐条推进，且不能超过连续收到位', () => {
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' })
+    buf.push(ev(1))
+    buf.push(ev(2))
+    expect(() => buf.ack(2)).toThrowError(/逐条推进/)
+    buf.ack(1)
+    expect(buf.lastPersistedAckSeq).toBe(1)
+    expect(() => buf.ack(3)).toThrowError(/连续收到位/)
+    buf.ack(2)
+    expect(buf.lastPersistedAckSeq).toBe(2)
+  })
+
+  it('重启后从持久确认位恢复：已确认事件重复推送幂等，后续从 ack+1 接上', () => {
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' }, { lastPersistedAckSeq: 3 })
+    expect(buf.lastContiguousSeq).toBe(3)
+    expect(buf.push(ev(2)).accepted).toBe(false)
+    expect(buf.push(ev(3)).accepted).toBe(false)
+    expect(buf.push(ev(4)).gapFrom).toBeNull()
+    expect(buf.lastContiguousSeq).toBe(4)
   })
 
   it('过高水位自动 spill：spilled=true、内存清空、文件在、takeFrom(1) 取回全部', () => {

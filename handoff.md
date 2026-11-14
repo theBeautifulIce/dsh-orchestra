@@ -882,3 +882,16 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 变异：删掉前缀循环后的 `.replace(/^\|+/, '')`，新用例红；恢复后定向 1 passed、gate spec 183 passed | 1 skipped。
 - 验证：`tsc --noEmit` 0；全量 38 文件 **552 passed | 1 skipped**；`pnpm build` 成功（CJS 0.29kB、ESM 110.19kB、d.ts 10.76kB）；证据复现 25 份字节一致。
 - 状态：G1/G2 仍绑第 31/36 轮旧候选，未签；`f6e10e6` 的 S2 pass 报告不能复用到 `bc1005a`，G1 也还没有 pass。下一步在 `bc1005a` 上派第四十四轮 S1/S2，重点复测 residual 去 id 后的本轮/双标签载荷、round36 覆盖点与清零正句、暂缓/繁体、A6/A7/A8b/A9、调度背压与真实 HTTP 并发、六项哈希与 25 份证据。
+
+### 11.43 R5-A 协议拍板与 R5-B 事件层落地（2026-11-14 15:30，R5-B 候选）
+
+- 第 44 轮双门仍签在 `caae193`；本次 R5-B 代码提交会改变 candidate，G1/G2 进入待第 45 轮重签状态，正式签署仍以 `caae193` 为准。
+- 设计稿 `docs/design/agent-bridge-lifecycle.md` 已从“提议稿”改为拍板稿：事件流用 `AsyncIterable` 的 `BridgeEventSource.listen(params, signal)`；`subscribe()` 只做订阅确认，`fetchPage()` 补洞，`AbortSignal` 结束监听；`subscribe`/`listen` 之间不得丢事件，宿主必须能从 `fromSeq` 重放。
+- ACK 以服务端本地持久确认为准：校验、查 receipt、同一 SQLite 事务追加 `node_run_events` + 写 receipt + 推进游标，提交成功后才算确认；`executor.ack` 只是宿主可选显式确认，禁止先 ACK 宿主再写账本。
+- 三游标：`lastReceivedSeq`（收到最大，不持久化）、`lastContiguousSeq`（连续收到最大，不持久化）、`lastPersistedAckSeq`（连续落账并提交最大，持久化）。重启只信 `lastPersistedAckSeq`。同 seq 同 payload 幂等，同 seq 不同 payload 抛 `BRIDGE_SEQ_CONFLICT`。
+- 迁移 `008_bridge_event_receipts.sql`：新增 `bridge_stream_cursors`（主键 `node_run_id, attempt, executor_agent_id`，`last_persisted_ack_seq`）与 `bridge_event_receipts`（同键 + `bridge_seq`，带 `payload_hash`、`ledger_seq`）。新 attempt 不继承旧游标。
+- `BridgeEventBuffer` 改为三游标 + pending 暂存：收到 5 缺 3/4 时暂存 5、不推进连续位；补 3/4 后按 3/4/5 放行；`ack()` 只允许逐条推进且不超过连续收到位；构造时注入持久确认位，重启不从 0 开始。
+- 新增 `src/executor/bridge-ledger.ts`：`BridgeLedger.ingest()` 是桥事件落账唯一入口，事务内校验跳号、查 receipt、追加 `bridge.<type>` 事件、写 receipt、推进游标；事务失败全部回滚。
+- 测试：`tests/unit/bridge-buffer.spec.ts` 覆盖连续、缺口补洞、幂等/冲突、逐条 ACK、重启恢复；`tests/integration/bridge-ledger.spec.ts` 覆盖连续落账、重复/冲突、跳号、写事务失败、提交后重启、旧 attempt 隔离、宿主显式 ACK 失败不回滚、缺口不落账；`tests/unit/bridge.spec.ts` 补 `listen` 透传。
+- 验证：`tsc --noEmit` 0；全量 39 文件 **565 passed | 1 skipped**；`pnpm build` 成功（ESM 110.22kB）。迁移 008 使 G-14 证据漂移，已重生成 `docs/gates/evidence/G1/G-14.md`；提交后用 `check-evidence-repro` 复核 26 份。
+- 边界：R5-B 只做事件接收、排序、持久化、恢复，`run-node.ts` 未改；R5-C 才接 AgentLifecycle/BridgeConsumer/EvidenceCollector，R5-D 做 B01–B10，R5-E 第 45 轮独立审计后按 G1→G2 重签。R3 账本链头与单调耗时、R4 workflow 复合身份仍分开提交。

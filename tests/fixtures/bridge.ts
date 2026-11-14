@@ -1,5 +1,5 @@
 // tests/fixtures/bridge.ts —— 桥的替身：按方法名回放预设回包，并记下调用
-import type { BridgeTransport } from '../../src/executor/bridge.ts'
+import type { BridgeEvent, BridgeTransport } from '../../src/executor/bridge.ts'
 
 export type FakeCall = { method: string; params: unknown }
 
@@ -16,6 +16,10 @@ export function fakeBridge(reply: (method: string, params: unknown) => unknown):
     async request<T>(method: string, params: unknown): Promise<T> {
       calls.push({ method, params })
       return reply(method, params) as T
+    },
+    listen(params: { executorAgentId: string; attempt: number; fromSeq: number }, _signal: AbortSignal): AsyncIterable<BridgeEvent> {
+      calls.push({ method: 'executor.listen', params })
+      return (async function* () {})()
     },
   }
 }

@@ -1,10 +1,19 @@
 // src/executor/bridge.ts —— 桥 RPC 客户端：最小七方法（规格 7.2 行 582-590）
 import { appendFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { canonicalJson } from '../core/canonical.ts'
 import { OrchError, proposedError } from '../core/errors.ts'
 
-// 宿主侧传输契约：方法名 + 参数，返回值由宿主给
-export type BridgeTransport = {
+// 宿主侧事件流：长生命周期的 AsyncIterable，AbortSignal 负责取消/释放
+export type BridgeEventSource = {
+  listen(
+    params: { executorAgentId: string; attempt: number; fromSeq: number },
+    signal: AbortSignal,
+  ): AsyncIterable<BridgeEvent>
+}
+
+// 宿主侧传输契约：方法名 + 参数，返回值由宿主给；listen 是持续事件流
+export type BridgeTransport = BridgeEventSource & {
   request<T>(method: string, params: unknown): Promise<T>
 }
 
@@ -124,6 +133,11 @@ export class BridgeClient {
     return this.transport.request<{ events: BridgeEvent[] }>('executor.page', params)
   }
 
+  // 持续事件流：订阅确认后从 fromSeq 开始重放并继续收；signal 结束监听
+  listen(params: { executorAgentId: string; attempt: number; fromSeq: number }, signal: AbortSignal): AsyncIterable<BridgeEvent> {
+    return this.transport.listen(params, signal)
+  }
+
   // 订阅态给上层看：围栏里判断「要不要等」时用
   isSubscribed(executorAgentId: string): boolean {
     return this.subscribed.has(executorAgentId)
@@ -139,29 +153,86 @@ export type BridgeBufferOptions = {
   agentId: string
 }
 
+export type BridgeBufferInit = { lastPersistedAckSeq?: number }
+
 export class BridgeEventBuffer {
   private readonly opts: BridgeBufferOptions
   private readonly events: BridgeEvent[] = []
   private bytes = 0
-  private seqCursor = 0
+  private lastReceivedSeqValue = 0
+  private lastContiguousSeqValue = 0
+  private lastPersistedAckSeqValue = 0
+  // 已收到但还没连成连续段的事件：按 seq 暂存，补洞后依次放行
+  private readonly pending = new Map<number, BridgeEvent>()
   // 落盘片段按序保留：二次 spill 不许覆盖前一段，否则早期事件取不回（规格 7.3 行 594）
   private spillFiles: string[] = []
 
-  constructor(opts: BridgeBufferOptions) {
+  constructor(opts: BridgeBufferOptions, init: BridgeBufferInit = {}) {
     this.opts = opts
+    const ack = init.lastPersistedAckSeq ?? 0
+    if (!Number.isInteger(ack) || ack < 0) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '持久确认游标必须是非负整数', { lastPersistedAckSeq: ack })
+    }
+    this.lastPersistedAckSeqValue = ack
+    this.lastContiguousSeqValue = ack
+    this.lastReceivedSeqValue = ack
   }
 
-  // 收一条事件：类型固定、序号单调、同号重复按幂等跳过
+  // 收一条事件：类型固定、同号同 payload 幂等、同号不同 payload 协议冲突
   // 返回 gapFrom：非空表示中间断了号，调用方要整页重取
   push(ev: BridgeEvent): { accepted: boolean; gapFrom: number | null } {
     if (!BRIDGE_EVENT_TYPES.includes(ev.type)) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件类型不在固定清单里', { type: ev.type })
     }
-    if (ev.seq <= this.seqCursor) {
-      if (ev.seq === this.seqCursor) return { accepted: false, gapFrom: null }
-      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件序号倒退', { seq: ev.seq, lastSeq: this.seqCursor })
+    if (!Number.isInteger(ev.seq) || ev.seq < 1) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件序号必须是正整数', { seq: ev.seq })
     }
-    const gapFrom = ev.seq === this.seqCursor + 1 ? null : this.seqCursor + 1
+    if (ev.seq <= this.lastPersistedAckSeqValue) {
+      const stored = this.findStored(ev.seq)
+      if (stored) this.assertSamePayload(stored, ev)
+      return { accepted: false, gapFrom: null }
+    }
+    const stored = this.findStored(ev.seq)
+    if (stored) {
+      this.assertSamePayload(stored, ev)
+      return { accepted: false, gapFrom: null }
+    }
+    if (ev.seq <= this.lastContiguousSeqValue) return { accepted: false, gapFrom: null }
+
+    this.store(ev)
+    this.pending.set(ev.seq, ev)
+    if (ev.seq > this.lastReceivedSeqValue) this.lastReceivedSeqValue = ev.seq
+    // 只有从已确认位置之后连续到达的事件才推进连续游标
+    while (this.pending.has(this.lastContiguousSeqValue + 1)) {
+      this.pending.delete(this.lastContiguousSeqValue + 1)
+      this.lastContiguousSeqValue += 1
+    }
+    return {
+      accepted: true,
+      gapFrom: this.pending.size > 0 ? this.lastContiguousSeqValue + 1 : null,
+    }
+  }
+
+  // 本地账本提交成功后调用：只能逐条推进，跳号说明消费器顺序错了
+  ack(seq: number): void {
+    if (!Number.isInteger(seq) || seq < 0) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '确认序号必须是非负整数', { seq })
+    }
+    if (seq <= this.lastPersistedAckSeqValue) return
+    if (seq > this.lastContiguousSeqValue) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '确认位超过连续收到位，先补洞', {
+        seq, lastContiguousSeq: this.lastContiguousSeqValue,
+      })
+    }
+    if (seq !== this.lastPersistedAckSeqValue + 1) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '确认位必须逐条推进', {
+        seq, lastPersistedAckSeq: this.lastPersistedAckSeqValue,
+      })
+    }
+    this.lastPersistedAckSeqValue = seq
+  }
+
+  private store(ev: BridgeEvent): void {
     const size = Buffer.byteLength(JSON.stringify(ev), 'utf8')
     // 常驻内存有硬上限：先落盘再收；单条就超上限说明配置或事件异常
     if (this.bytes + size > this.opts.limitBytes) {
@@ -172,9 +243,23 @@ export class BridgeEventBuffer {
     }
     this.events.push(ev)
     this.bytes += size
-    this.seqCursor = ev.seq
     if (this.bytes >= this.opts.highWaterBytes) this.spill()
-    return { accepted: true, gapFrom }
+  }
+
+  private findStored(seq: number): BridgeEvent | undefined {
+    for (const ev of this.events) if (ev.seq === seq) return ev
+    for (const file of this.spillFiles) {
+      for (const ev of this.readSpill(file)) if (ev.seq === seq) return ev
+    }
+    return undefined
+  }
+
+  private assertSamePayload(a: BridgeEvent, b: BridgeEvent): void {
+    if (canonicalJson(a) !== canonicalJson(b)) {
+      throw proposedError('BRIDGE_SEQ_CONFLICT', '同一桥序号出现了不同 payload，按协议冲突拒绝', {
+        seq: b.seq,
+      })
+    }
   }
 
   // 超过高水位就落盘：证据不丢，只是搬到磁盘（规格 7.3 行 594）
@@ -240,7 +325,12 @@ export class BridgeEventBuffer {
     return null
   }
 
-  get lastSeq(): number { return this.seqCursor }
+  get lastSeq(): number { return this.lastReceivedSeqValue }
+  get lastReceivedSeq(): number { return this.lastReceivedSeqValue }
+  get lastContiguousSeq(): number { return this.lastContiguousSeqValue }
+  get lastPersistedAckSeq(): number { return this.lastPersistedAckSeqValue }
+  get pendingCount(): number { return this.pending.size }
+  get gapFrom(): number | null { return this.pending.size > 0 ? this.lastContiguousSeqValue + 1 : null }
   get spilled(): boolean { return this.spillFiles.length > 0 }
   get spillCount(): number { return this.spillFiles.length }
   get bufferedBytes(): number { return this.bytes }
