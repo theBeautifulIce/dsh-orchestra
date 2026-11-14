@@ -1340,15 +1340,22 @@ function matchesFailureWord(text: string): boolean {
 // 不管列名叫「结论」「备注」还是别的，它都不是描述性文字，攻击矩阵不能靠改列名把它豁免掉。
 // 「未通过项为空」「失败项为空」这类名词短语不算裸裁决。
 function isBareFailureCell(folded: string): boolean {
-  let text = folded.trim().replace(/[。；;，,、.!！?？]+$/g, '').trim().toLowerCase()
+  let text = folded
+    .trim()
+    .replace(/[。；;，,、.!！?？]+$/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\|+/, '')
   if (text === '') return false
   // 先按原样匹配：暂缓、暫緩 这类本身就是完整弱否决词，不能被单字前缀「暂/暫」剥成「缓」。
   if (matchesFailureWord(text)) return true
   for (let i = 0; i < 3; i += 1) {
-    const next = text.replace(
-      /^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|该审计|該審計|本报告|本報告|该项|本项|此项|此項|本項|該項|该门|該門|本门|本門|暂|暫|尚|仍|并|並|也|还|還|均|都)\s*/,
-      '',
-    )
+    const next = text
+      .replace(
+        /^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|该审计|該審計|本报告|本報告|该项|本项|此项|此項|本項|該項|该门|該門|本门|本門|暂|暫|尚|仍|并|並|也|还|還|均|都)\s*/,
+        '',
+      )
+      .replace(/^\|+/, '')
     if (next === text) break
     text = next
     if (matchesFailureWord(text)) return true
@@ -1379,10 +1386,15 @@ function residualAfterRequiredItems(folded: string, requiredItems: string[]): st
       if (needle !== '') out = out.split(needle).join('|')
     }
   }
-  return out
-    .replace(/\|+/g, '|')
-    .replace(/^\|+|\|+$/g, '')
-    .replace(/^(?:必过项|必過項|通过项|通過項|该项|本项|此项|本項|該項|该门|本门|該門|本門)\|+/, '')
+  out = out.replace(/\|+/g, '|').replace(/^\|+|\|+$/g, '')
+  for (let i = 0; i < 3; i += 1) {
+    const next = out
+      .replace(/^\|+/, '')
+      .replace(/^(?:必过项|必過項|通过项|通過項|该项|本项|此项|本項|該項|该门|本门|該門|本門)\|+/, '')
+    if (next === out) break
+    out = next
+  }
+  return out.replace(/^\|+|\|+$/g, '')
 }
 
 // 失败词被拆到相邻单元格：逐格都干净，拼起来才是“未通过”。

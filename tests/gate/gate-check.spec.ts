@@ -1630,6 +1630,29 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
     expect(proseVerdictClashes(report('通过'), 'pass', ['G1-01'])).toEqual([])
   })
 
+  it('S1 第四十三轮 P1：去 id 后的本轮限定与双标签仍算裸否决', () => {
+    const ordinary = (remark: string) => head + [
+      '| 必过项 | 结论 | 备注 |',
+      '| --- | --- | --- |',
+      '| G1-01 | 通过 | ' + remark + ' |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    for (const remark of ['必过项 G1-01（本轮）未通过', '必过项 必过项 G1-01 未通过']) {
+      expect(proseVerdictClashes(ordinary(remark), 'pass', ['G1-01']).join('\n'), remark).toMatch(/G1-01/)
+    }
+    const attack = head + [
+      '| 用例编号 | 必过项 | 期望 | 备注 |',
+      '| --- | --- | --- | --- |',
+      '| A1 | G1-01 | 拒 | 必过项 G1-01（本轮）未通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(attack, 'pass', ['G1-01']).join('\n')).toMatch(/G1-01/)
+  })
+
   it('覆盖点里的被拒与清零正句不误伤', () => {
     const coverage = head + [
       '| 必过项 | 覆盖点 | 结论 |',
