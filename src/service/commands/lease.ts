@@ -20,6 +20,8 @@ export type NodeRunRow = {
   rearm_generation: number
   fence_state: string
   fence_grace_until: string | null
+  parent_node_run_id: string | null
+  side_effect_policy: 'pure' | 'compensable' | 'irreversible'
   deadline_at: string | null
   deadline_boot_id: string | null
   deadline_monotonic_ns: number | null

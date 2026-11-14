@@ -1,5 +1,6 @@
 // src/service/commands/cancel.ts —— 取消与超时围栏（规格 4.5 行 344-358）
 import type { Tx } from '../../infra/sqlite/driver.ts'
+import { OrchError } from '../../core/errors.ts'
 import { runCas } from '../../infra/db/tx.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { isTerminal } from '../../core/state-machine.ts'
@@ -35,6 +36,15 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   // 已经到终态：按已停事实判定，不写状态、不立围栏
   if (isTerminal(row.status)) {
     return { cancel_result: 'already_stopped', next_status: row.status, fence_state: null, reason: 'terminal_no_out_edge' }
+  }
+  // 不可逆子节点不许取消：已发生的副作用不能靠取消掩盖，只能走核实/补偿
+  if (row.side_effect_policy === 'irreversible') {
+    throw new OrchError('FORBIDDEN', '不可逆子节点不许取消', {
+      nodeRunId: params.nodeRunId,
+      attempt: params.attempt,
+      status: row.status,
+      sideEffectPolicy: row.side_effect_policy,
+    })
   }
   // 还没派发就取消：直接作废，不进围栏、不产生新 attempt（审计 N-08）
   if (row.status === 'queued' || row.status === 'leased') {

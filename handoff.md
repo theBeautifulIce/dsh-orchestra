@@ -1164,3 +1164,11 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 测试 `tests/integration/policy-branch.spec.ts` 18 例；定向 18/18，typecheck 0，全量 **48 files 674 passed | 1 skipped**，build ESM 155.15kB / gzip 38.57kB、d.ts 14.30kB。
 - 缺口：branch 路由尚未接进 `run-node` 执行器；`blocked_post` 的后续人工收口与 `rule_ambiguous` 处置在 Task 8 之后接；证据仍待 S3 收口统一重生成。
 - 下一步：提交 Task 7，随后 Task 8 并行分支与 join。
+
+### 11.69 S3 Task 8：并行汇聚与不可逆子节点闸（2026-11-14 19:24）
+
+- 迁移 `017_parallel_groups.sql`：`node_runs.parent_node_run_id`、`side_effect_policy`（pure/compensable/irreversible），`runs.settling` 与 `pending_irreversible_children_json`，父节点索引。
+- `src/service/commands/parallel.ts`：all/any/quorum 收敛（quorum 只认 done、缺省过半数）、未收口不可逆子节点派生、默认不许进组、取消分级、`refreshRunSettling` 从账本重算并只在变化时落 `run.settling_changed`、`assertRunCanTerminal` 挡住带未收口不可逆子节点的运行。
+- `cancel.ts` 对 `side_effect_policy='irreversible'` 的节点直接 `FORBIDDEN`；`lease.ts` 的 `NodeRunRow` 补父运行与副作用策略。
+- 测试 `tests/integration/parallel.spec.ts` 6 例；定向 6/6，typecheck 0，全量 **49 files 680 passed | 1 skipped**，build ESM 155.40kB / gzip 38.63kB、d.ts 14.30kB。
+- 缺口：扇出建子节点与 join 尚未接进 `run-node` 执行器；`run.settling_changed` 的读侧与恢复扫描未接；证据仍待 S3 收口统一重生成。
