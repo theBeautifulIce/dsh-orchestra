@@ -233,6 +233,31 @@ describe('围栏与重放（审计 F-04 / F-05）', () => {
     apply(db, {}, 'started')
     expect(events(db, 'report_rejected')).toBe(n)
   })
+
+  // 第三十四轮审计 P1-1：report_id 带引号时 JSON 会转义，按 JSON 文本拼模式的判重会失效
+  it('report_id 带引号时重复上报仍判为 replayed，事件只落一条', () => {
+    const db = setup()
+    const quoted = 'rep_"quote'
+    const first = apply(db, { report_id: quoted })
+    expect(first.accepted).toBe(true)
+    expect(events(db, 'report_applied')).toBe(1)
+    const again = apply(db, { report_id: quoted })
+    expect(again.accepted).toBe(false)
+    expect(again.registry_state).toBe('replayed')
+    expect(events(db, 'report_replayed')).toBe(1)
+    expect(events(db, 'report_applied')).toBe(1)
+  })
+
+  it('report_id 带引号时重复被拒只落一条 report_rejected', () => {
+    const db = setup()
+    const quoted = 'rep_"rej'
+    apply(db, { report_id: quoted }, 'started')
+    const n = events(db, 'report_rejected')
+    expect(n).toBe(1)
+    apply(db, { report_id: quoted }, 'started')
+    apply(db, { report_id: quoted }, 'started')
+    expect(events(db, 'report_rejected')).toBe(1)
+  })
 })
 
 describe('阻塞凭据：卡住必须挂 verify_human（审计 N-01）', () => {

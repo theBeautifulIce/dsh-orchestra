@@ -114,8 +114,17 @@ export function validateAuditVerdict(value: unknown): { verdict: AuditVerdict } 
   return { verdict }
 }
 
+const countOf = (text: string, needle: string): number => text.split(needle).length - 1
+
 // 从报告正文里解析裁决块：没有裁决块返回 null（走老的词法兜底），有但坏了返回 error
+// 裁决块必须正好一个：多个块时「取第一个」等于让后追加的 fail 块白写，也等于让前一个 pass 块作废（S1 第 29 轮 P2-3）
 export function parseAuditVerdict(text: string): VerdictParse {
+  const begins = countOf(text, VERDICT_BEGIN)
+  const ends = countOf(text, VERDICT_END)
+  if (begins === 0 && ends === 0) return null
+  if (begins !== 1 || ends !== 1) {
+    return { error: '裁决块必须正好一个（找到 ' + String(begins) + ' 个开始标记、' + String(ends) + ' 个结束标记）：多块时谁算数不能靠猜' }
+  }
   const raw = extractVerdictJson(text)
   if (raw === null) return null
   let value: unknown
@@ -160,5 +169,9 @@ export function verdictProblems(v: AuditVerdict, ctx: VerdictContext): string[] 
   const covered = new Set(v.must_pass_ids)
   const missing = ctx.requiredItems.filter((id) => !covered.has(id))
   if (missing.length > 0) problems.push('审计没覆盖这些必过项：' + missing.join(','))
+  // 只比条数会让清单里混进规格外的 id 凑数：每个 id 都必须是这道门的必过项（S1 第 29 轮 P2-2）
+  const allowed = new Set(ctx.requiredItems)
+  const unknown = v.must_pass_ids.filter((id) => !allowed.has(id))
+  if (unknown.length > 0) problems.push('must_pass_ids 里有门规格之外的项：' + unknown.join(','))
   return problems
 }

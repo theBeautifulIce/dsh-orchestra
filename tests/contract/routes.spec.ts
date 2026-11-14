@@ -230,6 +230,17 @@ describe('入参校验：每条命令一套 Zod Schema', () => {
     await expectBadRequest(res, 'report.report_id')
   })
 
+  it('report_id 带引号/反斜杠 → 400 并点名 report.report_id（第三十四轮审计 P1-1）', async () => {
+    const { endpoint: base } = await boot()
+    for (const bad of ['rep_"quote', 'rep_\\back', 'rep_ sp ace']) {
+      const res = await post(base + '/v1/node-runs/report', {
+        nodeRunId: 'nrun_1', attempt: 1, expectedStatus: 'dispatched', generation: 1,
+        report: { report_id: bad, node_run_id: 'nrun_1', attempt: 1, status: 'done', evidence: { source: 'run_tool', exitCode: 0 } },
+      })
+      await expectBadRequest(res, 'report.report_id')
+    }
+  })
+
   it('建 run 缺 taskTitle → 400', async () => {
     const { endpoint: base } = await boot()
     const res = await post(base + '/v1/runs', { workflowVersion: '1' })

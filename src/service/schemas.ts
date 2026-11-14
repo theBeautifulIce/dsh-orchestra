@@ -87,6 +87,11 @@ export function parseBody<S extends z.ZodType>(schema: S, body: unknown, label: 
 
 // 标识类字段：非空且有长度上限，防止超长串进库进日志
 const identifier = z.string().min(1).max(LIMITS.identifierMaxLength)
+// report_id 会进账本事件、还要按列判重：字符集限死，引号与反斜杠这类会破坏 JSON 文本比对的字符不许进（第三十四轮审计 P1-1）
+const reportIdentifier = identifier.regex(
+  /^[A-Za-z0-9._:-]+$/,
+  '只能由字母、数字与 . _ : - 组成',
+)
 
 // 租约时长：整数 1000–120000ms（评审给的区间；现有默认 30s 在区间内）
 const leaseTtlMs = z.number().int().min(LIMITS.leaseTtlMsMin).max(LIMITS.leaseTtlMsMax)
@@ -190,7 +195,7 @@ export const reportSchema = z.looseObject({
   nodeRunId: identifier,
   attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
   report: z.looseObject({
-    report_id: identifier,
+    report_id: reportIdentifier,
     node_run_id: identifier,
     attempt: z.number().int().min(LIMITS.attemptMin).max(LIMITS.attemptMax),
     status: z.string().min(1).max(LIMITS.statusMaxLength),

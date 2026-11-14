@@ -134,4 +134,33 @@ describe('结构化审计裁决：与门记录对账', () => {
     expect(problems.join('\n')).toMatch(/没覆盖/)
     expect(problems.join('\n')).toMatch(/G2-02/)
   })
+
+  it('must_pass_ids 混进规格外的项要拦（不是只比条数）', () => {
+    const problems = verdictProblems(
+      { ...base, must_pass_total: 3, must_pass_passed: 3, must_pass_ids: ['G2-01', 'G2-02', 'G2-99'] } as AuditVerdict,
+      ctx,
+    )
+    expect(problems.join('\n')).toMatch(/门规格之外/)
+    expect(problems.join('\n')).toMatch(/G2-99/)
+  })
+})
+
+describe('结构化审计裁决：裁决块唯一', () => {
+  it('两个裁决块时判为坏块，不按位置取第一个', () => {
+    const one = [VERDICT_BEGIN, FENCE + 'json', JSON.stringify(base), FENCE, VERDICT_END].join('\n')
+    const parsed = parseAuditVerdict(one + '\n' + one)
+    expect(errorOf(parsed)).toMatch(/正好一个/)
+  })
+
+  it('两个块一 pass 一 fail 同样判为坏块', () => {
+    const pass = [VERDICT_BEGIN, FENCE + 'json', JSON.stringify(base), FENCE, VERDICT_END].join('\n')
+    const fail = [VERDICT_BEGIN, FENCE + 'json', JSON.stringify({ ...base, conclusion: 'fail' }), FENCE, VERDICT_END].join('\n')
+    const parsed = parseAuditVerdict(pass + '\n' + fail)
+    expect(errorOf(parsed)).toMatch(/正好一个/)
+  })
+
+  it('只有一个块时照旧解析（阳性对照）', () => {
+    const parsed = parseAuditVerdict(report(base))
+    expect(parsed && 'verdict' in parsed && parsed.verdict.conclusion).toBe('pass')
+  })
 })

@@ -44,13 +44,21 @@ function nextReportSeq(tx: Tx, nodeRunId: string): number {
   return (row?.max_seq ?? 0) + 1
 }
 
+// 事件 payload 是 JSON 文本，判重一律按里面的结构化字段比对，不拼字符串模式：
+// report_id 带引号或反斜杠时 JSON 会转义，拼出来的 LIKE 永远配不上原文，判重就失效（第三十四轮审计 P1-1）
+// CASE 包住 json_extract：payload 万一不是合法 JSON 也让这一行判不成，而不是把查询打挂
+function countReportEvent(tx: Tx, nodeRunId: string, type: string, field: 'report_id' | 'reason', value: string): number {
+  const row = tx.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = ? "
+    + "AND CASE WHEN json_valid(payload) THEN json_extract(payload, ?) END = ?",
+    [nodeRunId, type, '$.' + field, value],
+  )
+  return Number(row?.n ?? 0)
+}
+
 // 同一个 report_id 的同类事件只留一条：账本不许被重试刷膨胀（审计 R3-04）
 function hasNodeRunEvent(tx: Tx, nodeRunId: string, type: string, reportId: string): boolean {
-  const row = tx.get<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = ? AND payload LIKE ?",
-    [nodeRunId, type, '%"report_id":"' + reportId + '"%'],
-  )
-  return (row?.n ?? 0) > 0
+  return countReportEvent(tx, nodeRunId, type, 'report_id', reportId) > 0
 }
 
 // 拒绝也要留痕：registry 落 rejected，哈希链追加 report_rejected（规格 4.2 行 298）
@@ -66,11 +74,10 @@ function rejectReport(tx: Tx, secret: string, params: {
   if (existing) {
     tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['rejected', params.now, params.report.report_id])
     // 同一条报告同因重复被拒：只更新 registry，不再追加事件，账本不许被重试刷膨胀
-    const dup = tx.get<{ n: number }>(
-      "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ? AND type = ? AND payload LIKE ? AND payload LIKE ?",
-      [params.nodeRunId, 'report_rejected', '%"report_id":"' + params.report.report_id + '"%', '%"reason":"' + params.reason + '"%'],
-    )
-    if ((dup?.n ?? 0) > 0) {
+    if (
+      countReportEvent(tx, params.nodeRunId, 'report_rejected', 'report_id', params.report.report_id) > 0
+      && countReportEvent(tx, params.nodeRunId, 'report_rejected', 'reason', params.reason) > 0
+    ) {
       return { accepted: false, reason: params.reason, registry_state: 'rejected' }
     }
   } else {

@@ -1141,6 +1141,18 @@ async function caseEvG211(): Promise<InjectionResult> {
     codes.push(res.status)
     results.push(res.body?.data ?? res.body)
   }
+  // report_id 带引号：JSON 转义会让按文本比对的判重失效，所以入口就按字符集挡下（第三十四轮审计 P1-1）
+  const quotedBody = {
+    nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: 0, now: EV_NOW,
+    report: { report_id: 'rpt_"ev11_quote', node_run_id: nodeRunId, attempt: 1, status: 'started' },
+  }
+  const quotedCodes: number[] = []
+  const quotedResults: unknown[] = []
+  for (let i = 0; i < 2; i += 1) {
+    const res = await postJson(boot.endpoint, '/v1/node-runs/report', quotedBody, secret)
+    quotedCodes.push(res.status)
+    quotedResults.push(res.body?.error ?? res.body?.data ?? res.body)
+  }
   const rejected = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_rejected'").get() as { n: number }
   const replayed = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_replayed'").get() as { n: number }
   const applied = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'report_applied'").get() as { n: number }
@@ -1151,9 +1163,11 @@ async function caseEvG211(): Promise<InjectionResult> {
   const after = dumpProduction(boot.file)
   return {
     case: 'ev-g2-11',
-    params: { db: boot.file, 入口: 'POST /v1/node-runs/report', 节点: nodeRunId, 报告: '同一个 report_id 连投四次（每次都被拒）' },
+    params: { db: boot.file, 入口: 'POST /v1/node-runs/report', 节点: nodeRunId, 报告: '同一个 report_id 连投四次（每次都被拒）；再用带引号的 report_id 连投两次' },
     before, after,
     reconcile: '四次 HTTP 码=' + JSON.stringify(codes)
+      + '；带引号 report_id 的 HTTP 码=' + JSON.stringify(quotedCodes)
+      + '；带引号 report_id 的返回=' + JSON.stringify(quotedResults)
       + '；逐次返回=' + JSON.stringify(results)
       + '；report_rejected 条数=' + String(rejected.n)
       + '；report_replayed 条数=' + String(replayed.n)

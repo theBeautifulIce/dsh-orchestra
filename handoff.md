@@ -734,3 +734,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证（实测）：`tsc --noEmit` exit 0；`pnpm check` 全量 36 文件 / 512 例，511 passed / 1 skipped（跳过的 1 条是预签态下的「G1 门记录通过」）；tsdown 构建通过。
 - 仍留（已写进对照表，不含糊）：Bridge 生产接线、事件 ACK 与断号重取、Agent 生命周期、DAG 依赖调度、Run 级聚合 → S3 第二批；「心跳时数据库不可用」故障注入用例 → S3 故障注入批次；workflow_id+version、Decision/Inbox、Compensation、压测与 UI → S4–S6。
 - 状态：G1/G2 仍未重签，S3 九节点与状态机继续冻结。本段作为候选提交后，在该候选上重派 S1 与 S2 第四轮独立审计（报告须内嵌结构化裁决块，绑定候选提交）；两份都 pass 才重签 G1/G2、双门 exit 0、全量全绿，再开 S3。
+
+### 11.32 S2 第三十四轮 P1 整改：report_id 判重与裁决一致性（2026-11-14 10:05）
+
+- 触发：S2 第三十四轮独立审计 fail（P0=0 / P1=1 / P2=1，19 项必过 18/19，失败项 G2-11）；S1 第二十九轮 pass（13/13，P2=3）。
+- P1-1（G2-11）：`apply-report.ts` 的判重原本在 JSON 文本上拼 LIKE 模式，report_id 带引号被转义后永不匹配，重投能无限追加事件。改为 `countReportEvent()` 按 `json_extract` 列比对（`CASE WHEN json_valid(payload)` 包住，坏 payload 不炸查询）；rejectReport 的同因重复判定同样改成两列同时命中。`schemas.ts` 新增 `reportIdentifier` 字符集（`^[A-Za-z0-9._:-]+$`）接到 `reportSchema.report_id`，入口 400 挡下。
+- P2-1（与 S1 第二十九轮 P2 同源）：`checkAuditAnchor` 在裁决核对之后加正文一致性核对，正文结论与裁决不一致即拒；`parseAuditVerdict` 要求裁决块正好一对，多块报错；`verdictProblems` 逐个校验 must_pass_ids 必须在门规格内。
+- 证据：`caseEvG211` 增补带引号 report_id 连投两次（两次 HTTP 400、事件不增长），`docs/gates/evidence/G2/ev-g2-11.md` 重新生成，两次重跑 sha256 一致（fb72ef55…）。
+- 验证（实测）：tsc --noEmit exit 0；全量 36 文件 / 518 passed | 1 skipped，exit 0；新增回归 apply-report 2 例、routes 1 例、audit-verdict 4 例。
+- 状态：G1/G2 未重签；S1 第二十九轮 pass 报告与 S2 第三十四轮 fail 报告都在 docs/audits 未跟踪。本轮候选改动导致候选变更，需在新候选上重派两路审计。

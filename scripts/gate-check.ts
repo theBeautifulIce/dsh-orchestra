@@ -2100,6 +2100,11 @@ function checkAuditAnchor(artifact: Record<string, unknown>, spec: GateSpec, roo
       requiredItems: spec.items,
     })
     if (problems.length > 0) throw new Error('审计报告的结构化裁决不通过：' + problems.join('；'))
+    // 裁决与正文自述不能互相打脸：正文写 fail、裁决写 pass 时，两处都得对得上才签（第三十四轮 P2-1）
+    const prose = auditConclusionOf(text)
+    if (prose && prose !== parsed.verdict.conclusion) {
+      throw new Error('审计报告正文结论与结构化裁决不符：正文=' + prose + '，裁决=' + parsed.verdict.conclusion)
+    }
   } else if (spec.requireVerdict) {
     throw new Error('审计报告缺少结构化裁决块（' + VERDICT_BEGIN + ' … ' + VERDICT_END + '），这道门要求机器可判的结论: ' + report)
   } else {
