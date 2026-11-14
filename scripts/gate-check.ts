@@ -1340,6 +1340,18 @@ function isExpectationColumn(header: string): boolean {
   return /(?:期望|预期|expected|expectation|should)/i.test(header)
 }
 
+// 攻击矩阵的描述/载荷列可以引用失败文案（例如“被拒文案：未通过”），
+// 但「备注/说明/附注」不是描述列：里面若出现必过项否决，仍要判。
+function isAttackDescriptionCell(cell: AuditCell): boolean {
+  return /(?:攻击|用例|场景|输入|载荷|样本|案例|case|attack|scenario|payload|input)/i.test(cell.header)
+    || /(?:被拒|已拒|拒绝文案|驳回文案|拦截|拦下|攻击载荷|载荷|输入|尝试|样例|样本|应被拒|期望拒绝|被\s*blocked|blocked\s*by)/i.test(cell.text)
+}
+
+function isZeroFailurePhrase(folded: string): boolean {
+  const compact = folded.replace(/\|/g, '')
+  return /^(?:未通过|不通过|失败)项为(?:空|0)$/.test(compact)
+}
+
 // 失败词被拆到相邻单元格：逐格都干净，拼起来才是“未通过”。
 // 只认跨过单元格边界的那部分，整词落在单格里的仍交给 cellFailStatement，
 // 避免把“未通过项为空”这类正常说明当成否决（S1 第三十七轮 P0）。
@@ -1707,7 +1719,9 @@ export function proseVerdictClashes(
         // 列名可以改，「备注」里只写「未通过」这种裸否决仍要判。
         const bareFailure = isBareFailureCell(foldForVerdict(cell.text))
         const expectationCell = isExpectationColumn(cell.header)
-        if (rejectedAttack && (expectationCell || (!conclusionCell && !bareFailure))) continue
+        const descriptionCell = isAttackDescriptionCell(cell)
+        const zeroFailure = isZeroFailurePhrase(foldForVerdict(cell.text))
+        if (rejectedAttack && (expectationCell || descriptionCell || zeroFailure)) continue
         // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。
         const cellFails = cellFailStatement(cell)
           || (bareFailure && (rejectedAttack || conclusionCell || hit.length > 0))
