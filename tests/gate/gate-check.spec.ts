@@ -1615,7 +1615,7 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
       '结论：pass。',
       '',
     ].join('\n')
-    for (const expected of ['拒绝', 'rejected']) {
+    for (const expected of ['拒绝', 'rejected', 'blocked']) {
       expect(proseVerdictClashes(report(expected), 'pass', ['G1-01']), expected).toEqual([])
     }
   })
