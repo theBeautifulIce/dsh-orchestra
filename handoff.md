@@ -764,3 +764,15 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - P0-02 回归：`tests/gate/gate-check.spec.ts` 新增 5 例（A4 表格写 G2-11 未通过、A5 结论列 fail、历史 35 fail/36 pass 不误伤且 37 fail 仍拒、fail 裁决零告警、故障场景表不误伤）。变异：把表格循环改成 `continue`，A4/A5/未来轮次三例全红。
 - 验证（实测）：`tsc --noEmit` exit 0；全量 38 文件 **530 passed | 1 skipped**（1 skipped 是预签态用例）；`pnpm build` 通过。定向 `tests/gate/gate-check.spec.ts` 164 passed | 1 skipped。
 - 尚存/待办：门记录仍绑定旧候选 `2f034a5`，当前提交不是签署候选；须在 `45880b0` 上派 S1/S2 第三十七轮独立审计（不改 r36 报告），两份 pass 后重签。任务书余项：P1-02 Scheduler `max_waiting` 背压与 close、R3 链头同事务/单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计，不混进 R1–R4）、P2-04 审计生成器与跨版本审计。
+
+### 11.35 第三十七轮双审计整改：调度背压与审计表格跨格（2026-11-14 12:10，HEAD 6b015c1）
+
+- 触发：在 `fab7c2a` 上派 S1/S2 第三十七轮独立审计，两份都 fail。
+  - S1（`docs/audits/S1-independent-audit-round37.md`，克隆 `D:/aboutAI/_audit-r37-s1`）P0=1 / P1=2 / P2=4：P0 是否定词拆到相邻格（`| G1-01 | … | pass | 未 | 通过 |`）仍签过；P1 是 3 列表头写 4 格、溢出列被 markdown-it 丢弃后仍签过，以及 HTML 注释里写 `结论：fail` 不被扫描。
+  - S2（`docs/audits/S2-independent-audit-round37.md`，克隆 `D:/aboutAI/_audit-r37-s2`，提交 `f3e0825`）P0=0 / P1=1 / P2=3：P1 是生产调度器无 `max_waiting` 背压、无 `close` 停机语义；P2 是 Agent Bridge 未接生产、工具 `started_at/finished_at` 同刻、围栏/注释内表格被屏蔽。P0-01 并发旁路经真实 HTTP 复测确认修住（双入口 6 节点，maxActive=2，异常后名额归零）。
+- 调度背压（`6b015c1`）：`src/service/execution-scheduler.ts` 新增 `DEFAULT_MAX_WAITING=1000` 与 `close({drain})`；`drain:true` 停收新任务并跑完队列，`drain:false` 立即拒排队、在跑任务收尾；`ExecutionScheduler` 接口补 `close`；工厂默认有界，配置工厂传 `cfg.execution.max_waiting`。`src/core/config.ts` 的 `execution` 增 `max_waiting: positiveInt(1).max(10000).default(1000)`。`src/index.ts` 的 `serveOrchestra.close` 先关 HTTP，再 `scheduler.close({drain:true})`，最后释放服务锁。
+- 审计表格（`6b015c1`）：`scripts/gate-check.ts` 新增 `splitFailureAcrossCells`（按单元格累计长度建边界，强/弱失败词跨边界即判失败）、`rawTableOverflowIssues`（按源码数格，数据行超过表头直接拒）、`hiddenCommentFailure`（HTML 注释内「结论词 + 失败词」同现按隐藏判定拒）、`chineseNumber`（认 `第三十五轮`）；`proseVerdictClashes` 用无分隔拼接行同时命中被拆开的必过项 id 与失败词，保留原逐格判定与历史行豁免。
+- 回归：`tests/gate/gate-check.spec.ts` 新增 A6–A9 与中文轮次 5 例；`tests/unit/execution-scheduler.spec.ts` 新增默认上限、配置接线、`close({drain:true})`、`close({drain:false})` 4 项断言/用例。A6 变异（把边界判断改成 false）实测转红，恢复后全绿。
+- 验证（实测）：`tsc --noEmit` exit 0；全量 38 文件 **537 passed | 1 skipped**（1 skipped 是预签态用例）；`pnpm build` 通过；`check-evidence-repro.ts` exit 0（25 份，每份两遍与 HEAD 字节一致）。
+- 环境事故：主仓 `node_modules` 被换成指向 S2 克隆的失效 junction，`pnpm` 报 `ERR_PNPM_PACKAGE_MANAGER_REMOVE_MODULES_DIR ... 拒绝访问 (os error 5)`；`cmd /c rmdir /s /q node_modules` 后 `pnpm install --frozen-lockfile` 恢复（239 包，1.6s）。后续审计克隆不得改主仓 `node_modules`。
+- 状态：门记录仍绑定旧候选 `2f034a5`，`6b015c1` 尚未签署；须在 `6b015c1` 上重派 S1/S2 第三十八轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
