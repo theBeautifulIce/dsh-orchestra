@@ -805,3 +805,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证（实测）：`tsc --noEmit` 0；全量 38 文件 **545 passed | 1 skipped**；`pnpm build` 通过；`check-evidence-repro` 25 份字节一致。
 - S1 P2（不阻断）：①正文行内代码/旧样本里同写 id 与否定词仍会被当本轮判否（误杀，不是绕过）；②`gate-check` 传绝对路径会误报「门记录不在 HEAD 里」，应 normalize 成仓库相对路径；③无结论词、无必过项 id 的隐藏注释不触发扫描；④`sign-gate` 枚举已删除的旧测试路径会向 stderr 打 `fatal: path ... does not exist` 噪声。
 - 状态：两路第三十九轮都 fail 在同一攻击矩阵整行豁免；修复已落在 `2cd6a62`，精确回归在 `48d4fb3`。G1/G2 仍绑旧候选，`48d4fb3` 未签；下一步在 `48d4fb3` 上重派 S1/S2 第四十轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
+
+### 11.39 第三十九轮补洞：攻击行备注限定词否决（2026-11-14 13:05，HEAD 757b499）
+
+- 主动探针在 `9c75ad1` 上发现第三类旁路：攻击行表头 `用例编号/必过项/期望/备注`、结论列改名 `备注`、备注格写 `未通过（本轮）`、`本轮未通过`、`未通过：证据不足`、`不通过（3 项待补）` 时，sign-gate 与 gate-check 都 exit 0。
+- 根因：`foldForVerdict` 把括号、冒号、空格折成 `|`，旧 `isBareFailureCell` 只认整格完全等于失败词；带限定词后既不等于，也不在格首标点边界，逐格检测漏掉。
+- 修复 `757b499`：`isBareFailureCell` 先剥前缀「本轮/本輪/当前/當前/本次/当期/當期/最终/最終/审计/審計/本报告/本報告」，失败词后可接 `[|：:（(]` 引导的限定/括号/理由；`cellFails` 增加 `bareFailure && (rejectedAttack || conclusionCell || hit.length > 0)`，确保攻击行备注格与必过项命中格的限定否决进入判定。
+- 新增用例「攻击行备注格的限定/括号/冒号否决仍拒绝，名词短语不误伤」：四种攻击载荷全部 exit 1；正控 `未通过项为空`、`失败项为空` 仍 exit 0。
+- 验证：`tsc --noEmit` 0；`pnpm test` 38 文件 **546 passed | 1 skipped**（gate 179 tests）；`pnpm build` 成功（CJS 0.29kB、ESM 110.17kB、d.ts 10.76kB）；改动 2 文件 +31/−4。提交 `757b499`「Reject qualified bare failure verdicts in attack-matrix remarks」。
+- 状态：`s1-audit-r40` / `s2-audit-r40` 仍跑在 `9c75ad1` 上，未覆盖本笔；G1/G2 未签。下一轮审计应绑本 handoff 提交后的新 HEAD，并把四类限定词载荷列为必测。
