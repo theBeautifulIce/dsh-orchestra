@@ -856,3 +856,20 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 尚留 P2（记录，不阻断）：round29 攻防表「结论：fail」误报；`sign-gate` 探测已删除旧路径时 `git()` 未抑制 stderr，打 `fatal: path ... does not exist in 'HEAD'` 噪声；`gate-check` 绝对路径误报；无 id/结论词的隐藏注释不扫；Agent Bridge 未接生产；工具 started/finished 同刻；配置非法回落默认调度器。
 - 状态：G1/G2 仍绑第 31/36 轮旧候选，未签；`4a7d4f1` 之后需补本段 handoff 提交作为第四十二轮候选。
 - 下一步：在本段提交上派第四十二轮 S1/S2 独立审计，必测暂缓族、繁体表格、攻击行结论格三变体、期望列限定写法，同时复核 A6/A7/A8b/A9、历史行、干净 pass、调度背压/停机、真实 HTTP 并发、六项哈希与 25 份证据；两路 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项 R3/R4/R5 与 P2-04 不变。
+
+### 11.41 第四十二轮双审计：S2 pass、S1 覆盖点误伤修复（2026-11-14 13:52，HEAD 6f4e175）
+
+- S2 第四十二轮 **pass**（P0=0 / P1=0 / P2=3），候选 `142104c`，报告 `D:/aboutAI/_audit-r42-s2/docs/audits/S2-independent-audit-round42.md`（sha256 `83232107…`），克隆 HEAD `14f11912…`。P2：`createExecutionScheduler` 未校验直接传入的 `maxWaiting`；正式门仍绑旧候选；`sign-gate` 探测已删除路径时 `git show` 的 `fatal: path ... does not exist` 漏到 stderr。S2 复核 549 passed、build、证据 25 份、调度 20/20、HTTP 11/11、临时门 G1/G2 双 exit 0。
+- S1 第四十二轮 **fail**（P0=0 / P1=2 / P2=2），候选 `142104c`，报告 `D:/aboutAI/_audit-r42-s1/docs/audits/S1-independent-audit-round42.md`，克隆 `ae62fb04…`。
+  - P1-1：合法 pass 报告 `docs/audits/S2-independent-audit-round36.md:132` 的 `| G2-07 | S2 加载 parallel 被拒 | 通过 |` 被 `cellStrongFail` 当成格内否决，误报「把必过项 G2-07 写成未通过」；`99fe7fe` 引入。
+  - P1-2：普通表 `| G1-01 | 通过 | 未通过项为空 |` 也被同一支误判，清零正句只在攻击行豁免，口径不一致。
+  - P2：`isAttackDescriptionCell` 用 `被拒|已拒` 子串（`f3a39ac` 已修，审计对象未含）；`sign-gate` 探测已删除旧路径的 stderr 噪声。
+- 修复 `6f4e175`「Separate required-item coverage from residual failure verdicts (S1 round42 P1)」：
+  - 新增 `residualAfterRequiredItems(folded, requiredItems)`：先小写，按 id 原文与 `foldForVerdict(id)` 两种形态去掉行内必过项 id，压缩 `|`，剥掉格首「必过项/通过项/该项/本项/此项/本項/該項/该门/本门/該門/本門」标签；这样 `foldForVerdict` 把 `G2-11` 折成 `g2|11` 时也能剥净。
+  - 表格第三支从 `cellStrongFail(foldForVerdict(cell.text))` 改为 `residual !== '' && isBareFailureCell(residual)`，只判「去掉必过项后整格仍是裁决」；覆盖点描述（`S2 加载 parallel 被拒`）与清零正句（`未通过项为空`）留在残句里但不是裸否决，因此不误伤；`G2-11 未通过` 去 id 后仍是 `未通过`，仍拦。
+  - 新增用例「覆盖点里的被拒与清零正句不误伤」，含 round36 行与普通清零表。
+  - 顺手补 S2 P2-1：`Scheduler` 构造器对 `maxWaiting` 调 `positive(opts.maxWaiting, 'max_waiting')`，直接传 0 / -1 / 1.5 在装配期抛「执行调度的参数不合法」；新增 1 例。
+- 变异：把 `residualFail` 临时固定为 `false`，限定词用例在 `必过项 G2-11 未通过` 上红「expected '' to match /G2-11/」；恢复后通过。
+- 验证（实测）：`tsc --noEmit` 0；全量 38 文件 **551 passed | 1 skipped**（gate 183 tests，scheduler 14）；`pnpm build` 成功（CJS 0.29kB、ESM 110.19kB、d.ts 10.76kB）；证据复现 25 份字节一致。
+- 状态：G1/G2 仍绑第 31/36 轮旧候选，未签。S2 第 42 轮报告可作 G2 报告，但 G1 没有对应 pass 报告；且 `6f4e175` 已是新候选，需在新 HEAD 上重派 S1/S2 第四十三轮，S1 必须拿 pass 报告才能签 G1。
+- 任务书余项：R3 链头 DELETE 触发器/同事务严格 seq/prev_hash、工具真实 startedAt/finishedAt 与单调 durationNs；R4 workflow_id+version 复合身份与 WorkflowDefinitionSchema.parse 统一 hydrate；R5 Agent Bridge 生产生命周期（单独提交设计）；P2-04 审计证据引用与跨版本审计。
