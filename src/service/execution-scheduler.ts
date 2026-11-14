@@ -85,7 +85,7 @@ class Scheduler {
   constructor(opts: SchedulerOptions) {
     this.concurrencyLimit = positive(opts.concurrency, 'concurrency')
     this.humanSlotLimit = positive(opts.humanSlots, 'human_slots')
-    this.maxWaiting = opts.maxWaiting
+    this.maxWaiting = positive(opts.maxWaiting, 'max_waiting')
     this.log = opts.log
   }
 

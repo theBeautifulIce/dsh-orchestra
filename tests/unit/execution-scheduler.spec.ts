@@ -148,6 +148,12 @@ describe('执行调度器', () => {
     expect(createExecutionSchedulerFromConfig(tight).stats().maxWaiting).toBe(7)
   })
 
+  it('直接传非法 max_waiting 在装配期拒绝', () => {
+    expect(() => createExecutionScheduler({ maxWaiting: 0 })).toThrow(/执行调度的参数不合法/)
+    expect(() => createExecutionScheduler({ maxWaiting: -1 })).toThrow(/执行调度的参数不合法/)
+    expect(() => createExecutionScheduler({ maxWaiting: 1.5 })).toThrow(/执行调度的参数不合法/)
+  })
+
   it('close({drain:true}) 停收新任务，但把已在排队的任务跑完', async () => {
     const sched = createExecutionScheduler({ concurrency: 1 })
     const order: number[] = []

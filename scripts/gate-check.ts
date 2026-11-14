@@ -1372,6 +1372,19 @@ function isZeroFailurePhrase(folded: string): boolean {
   return /^(?:未通过|不通过|失败)项为(?:空|0)$/.test(compact)
 }
 
+function residualAfterRequiredItems(folded: string, requiredItems: string[]): string {
+  let out = folded.toLowerCase()
+  for (const id of requiredItems) {
+    for (const needle of new Set([id.toLowerCase(), foldForVerdict(id).toLowerCase()])) {
+      if (needle !== '') out = out.split(needle).join('|')
+    }
+  }
+  return out
+    .replace(/\|+/g, '|')
+    .replace(/^\|+|\|+$/g, '')
+    .replace(/^(?:必过项|必過項|通过项|通過項|该项|本项|此项|本項|該項|该门|本门|該門|本門)\|+/, '')
+}
+
 // 失败词被拆到相邻单元格：逐格都干净，拼起来才是“未通过”。
 // 只认跨过单元格边界的那部分，整词落在单格里的仍交给 cellFailStatement，
 // 避免把“未通过项为空”这类正常说明当成否决（S1 第三十七轮 P0）。
@@ -1742,10 +1755,14 @@ export function proseVerdictClashes(
         const descriptionCell = !conclusionCell && isAttackDescriptionCell(cell)
         const zeroFailure = isZeroFailurePhrase(foldForVerdict(cell.text))
         if (rejectedAttack && (expectationCell || descriptionCell || zeroFailure)) continue
-        // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。
+        // 非结论列里点名必过项的否决：先去掉 id，再看剩余部分是否仍是整格裁决。
+        // 这样「G2-07 | S2 加载 parallel 被拒 | 通过」这种覆盖点描述不会被当成否决，
+        // 「G2-11 未通过」仍会被拦下（S1 第四十二轮 P1-1/P1-2）。
+        const residual = residualAfterRequiredItems(foldForVerdict(cell.text), requiredItems)
+        const residualFail = residual !== '' && isBareFailureCell(residual)
         const cellFails = cellFailStatement(cell)
           || (bareFailure && (rejectedAttack || conclusionCell || hit.length > 0))
-          || (!conclusionCell && hit.length > 0 && cellStrongFail(foldForVerdict(cell.text)))
+          || (!conclusionCell && hit.length > 0 && residualFail)
         if (cellFails) {
           clashes.push(hit.length > 0
             ? '审计报告表格把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict)
