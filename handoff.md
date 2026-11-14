@@ -873,3 +873,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证（实测）：`tsc --noEmit` 0；全量 38 文件 **551 passed | 1 skipped**（gate 183 tests，scheduler 14）；`pnpm build` 成功（CJS 0.29kB、ESM 110.19kB、d.ts 10.76kB）；证据复现 25 份字节一致。
 - 状态：G1/G2 仍绑第 31/36 轮旧候选，未签。S2 第 42 轮报告可作 G2 报告，但 G1 没有对应 pass 报告；且 `6f4e175` 已是新候选，需在新 HEAD 上重派 S1/S2 第四十三轮，S1 必须拿 pass 报告才能签 G1。
 - 任务书余项：R3 链头 DELETE 触发器/同事务严格 seq/prev_hash、工具真实 startedAt/finishedAt 与单调 durationNs；R4 workflow_id+version 复合身份与 WorkflowDefinitionSchema.parse 统一 hydrate；R5 Agent Bridge 生产生命周期（单独提交设计）；P2-04 审计证据引用与跨版本审计。
+
+### 11.42 第四十三轮双审计：S2 pass、S1 residual 假阴性（2026-11-14 14:20，HEAD bc1005a）
+
+- 候选 `f6e10e6` 上同时派出 S1/S2。S2 第四十三轮 **pass**（P0=0 / P1=0 / P2=2），报告 `D:/aboutAI/_audit-r43-s2/docs/audits/S2-independent-audit-round43.md`，克隆最终 `4c6fa6a`；调度背压 32/32、真实 HTTP 双入口 13/13（6 节点 `maxActive=2`、503 后归零、锁可重取）、临时 G2 sign/check 均 0、19 项必过与 25 份证据全中。P2 仅为 `sign-gate` 探测已删除路径的 stderr 噪声与正式门仍旧候选。
+- S1 第四十三轮 **fail**（P0=0 / P1=1 / P2=3），报告 `D:/aboutAI/_audit-r43-s1/docs/audits/S1-independent-audit-round43.md`，克隆 `0b64d27`。P1：`residualAfterRequiredItems` 去掉必过项 id 后只剥一层格首标签，留下 `本轮|未通过`；`isBareFailureCell` 剥掉「本轮」后剩 `|未通过`，前导分隔符让 `matchesFailureWord` 锚首匹配失败。普通表 `| G1-01 | 通过 | 必过项 G1-01（本轮）未通过 |` 与攻击行都能签过（临时门 artifact `c52a1329…` / `47f63d28…`）。P2：双标签 `必过项 必过项 G1-01 未通过` 同根因；`fatal: path ... does not exist` stderr 噪声；正式门仍旧候选。
+- 修复 `bc1005a`：`isBareFailureCell` 在初始清洗与每轮前缀剥离后都去掉前导 `|`；`residualAfterRequiredItems` 最多循环 3 次剥格首标签与前导分隔符，双标签也能落到 `未通过`。新增用例 `S1 第四十三轮 P1：去 id 后的本轮限定与双标签仍算裸否决`，覆盖普通表 `必过项 G1-01（本轮）未通过`、`必过项 必过项 G1-01 未通过` 与攻击行同载荷。
+- 变异：删掉前缀循环后的 `.replace(/^\|+/, '')`，新用例红；恢复后定向 1 passed、gate spec 183 passed | 1 skipped。
+- 验证：`tsc --noEmit` 0；全量 38 文件 **552 passed | 1 skipped**；`pnpm build` 成功（CJS 0.29kB、ESM 110.19kB、d.ts 10.76kB）；证据复现 25 份字节一致。
+- 状态：G1/G2 仍绑第 31/36 轮旧候选，未签；`f6e10e6` 的 S2 pass 报告不能复用到 `bc1005a`，G1 也还没有 pass。下一步在 `bc1005a` 上派第四十四轮 S1/S2，重点复测 residual 去 id 后的本轮/双标签载荷、round36 覆盖点与清零正句、暂缓/繁体、A6/A7/A8b/A9、调度背压与真实 HTTP 并发、六项哈希与 25 份证据。
