@@ -44,7 +44,13 @@ export class BridgeLedger {
     if (!Number.isInteger(ev.seq) || ev.seq < 1) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件序号必须是正整数', { seq: ev.seq })
     }
-    const payloadHash = sha256Hex(canonicalJson(ev))
+    if (ev.attempt !== undefined && ev.attempt !== this.key.attempt) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件 attempt 与当前账本不一致', { eventAttempt: ev.attempt, ledgerAttempt: this.key.attempt })
+    }
+    if (ev.executorAgentId !== undefined && ev.executorAgentId !== this.key.executorAgentId) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件 executorAgentId 与当前账本不一致', { eventAgent: ev.executorAgentId, ledgerAgent: this.key.executorAgentId })
+    }
+    const payloadHash = sha256Hex(canonicalJson({ type: ev.type, payload: ev.payload }))
     return withTx(this.db, (tx) => {
       const cursor = tx.get<CursorRow>(
         'SELECT last_persisted_ack_seq FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
@@ -71,7 +77,7 @@ export class BridgeLedger {
       const now = new Date().toISOString()
       tx.run(
         'INSERT INTO bridge_event_receipts (node_run_id, attempt, executor_agent_id, bridge_seq, event_type, payload_hash, ledger_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [this.key.nodeRunId, this.key.attempt, this.key.executorAgentId, ev.seq, ev.type, payloadHash, appended.seq, now],
+        [this.key.nodeRunId, this.key.attempt, this.key.executorAgentId, ev.seq, 'bridge.' + ev.type, payloadHash, appended.seq, now],
       )
       tx.run(
         'INSERT INTO bridge_stream_cursors (node_run_id, attempt, executor_agent_id, last_persisted_ack_seq, updated_at) VALUES (?, ?, ?, ?, ?) '

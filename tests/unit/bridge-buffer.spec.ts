@@ -46,8 +46,8 @@ describe('桥事件缓冲', () => {
     const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' })
     buf.push(ev(1))
     buf.push(ev(2))
-    buf.ack(1)
-    buf.ack(2)
+    buf.ack(1, 1)
+    buf.ack(2, 2)
     expect(buf.push(ev(5)).gapFrom).toBe(3)
     expect(buf.lastContiguousSeq).toBe(2)
     expect(buf.push(ev(3)).gapFrom).toBe(4)
@@ -55,6 +55,62 @@ describe('桥事件缓冲', () => {
     expect(buf.lastContiguousSeq).toBe(5)
     expect(buf.pendingCount).toBe(0)
     expect(buf.takeFrom(3).map((e) => e.seq)).toEqual([3, 4, 5])
+  })
+
+  it('缺口未补时重复收到 5：accepted=false，但仍返回 gapFrom=3', () => {
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' })
+    buf.push(ev(1))
+    buf.push(ev(2))
+    buf.ack(1, 1)
+    buf.ack(2, 2)
+    expect(buf.push(ev(5)).gapFrom).toBe(3)
+    expect(buf.push(ev(5))).toEqual({ accepted: false, gapFrom: 3 })
+    expect(buf.pendingCount).toBe(1)
+  })
+
+  it('重启后同 seq 不同 payload 仍判冲突；只有 at 变化按幂等', () => {
+    const persisted = ev(2)
+    const buf = new BridgeEventBuffer(
+      { limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' },
+      { lastPersistedAckSeq: 2, lookupPersisted: (seq) => (seq === 2 ? persisted : undefined) },
+    )
+    expect(() => buf.push({ ...ev(2), payload: { seq: 2, changed: true } })).toThrowError(/协议冲突/)
+    expect(buf.push({ ...ev(2), at: '2026-01-01T00:00:09Z' }).accepted).toBe(false)
+    expect(buf.push(ev(3)).gapFrom).toBeNull()
+  })
+
+  it('重启后认回本 attempt 的 spill，并恢复连续位', () => {
+    const dir = tmp()
+    const first = new BridgeEventBuffer(
+      { limitBytes: 1024, highWaterBytes: 1, spillDir: dir, agentId: 'a1', attempt: 1, nodeRunId: 'nr1' },
+    )
+    for (let i = 1; i <= 6; i += 1) first.push(ev(i))
+    expect(first.spilled).toBe(true)
+    const second = new BridgeEventBuffer(
+      { limitBytes: 1024, highWaterBytes: 300, spillDir: dir, agentId: 'a1', attempt: 1, nodeRunId: 'nr1' },
+      { lastPersistedAckSeq: 0 },
+    )
+    expect(second.takeFrom(1).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6])
+    expect(second.lastContiguousSeq).toBe(6)
+  })
+
+  it('不同 attempt 的 spill 文件互不追加、互不串读', () => {
+    const dir = tmp()
+    const opts = { limitBytes: 1024, highWaterBytes: 300, spillDir: dir, agentId: 'a1', nodeRunId: 'nr1' }
+    const a1 = new BridgeEventBuffer({ ...opts, attempt: 1 })
+    const a2 = new BridgeEventBuffer({ ...opts, attempt: 2 })
+    for (let i = 1; i <= 6; i += 1) a1.push({ ...ev(i), payload: { seq: i, attempt: 1 } })
+    for (let i = 1; i <= 6; i += 1) a2.push({ ...ev(i), payload: { seq: i, attempt: 2 } })
+    expect(a1.takeFrom(1).every((e) => (e.payload as { attempt: number }).attempt === 1)).toBe(true)
+    expect(a2.takeFrom(1).every((e) => (e.payload as { attempt: number }).attempt === 2)).toBe(true)
+    expect(readdirSync(dir).filter((f) => f.endsWith('.jsonl')).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('事件自带 attempt/agent 与当前缓冲不一致 → 拒绝，不落内存', () => {
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1', attempt: 1 })
+    expect(() => buf.push({ ...ev(1), attempt: 2 })).toThrowError(/attempt 与当前缓冲不一致/)
+    expect(() => buf.push({ ...ev(1), executorAgentId: 'a2' })).toThrowError(/executorAgentId 与当前缓冲不一致/)
+    expect(buf.lastReceivedSeq).toBe(0)
   })
 
   it('同 seq 不同 payload → BRIDGE_SEQ_CONFLICT；相同 payload 幂等', () => {
@@ -68,11 +124,12 @@ describe('桥事件缓冲', () => {
     const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: tmp(), agentId: 'a1' })
     buf.push(ev(1))
     buf.push(ev(2))
-    expect(() => buf.ack(2)).toThrowError(/逐条推进/)
-    buf.ack(1)
+    expect(() => buf.ack(2, 2)).toThrowError(/逐条推进/)
+    expect(() => buf.ack(1, 0)).toThrowError(/尚未落账/)
+    buf.ack(1, 1)
     expect(buf.lastPersistedAckSeq).toBe(1)
-    expect(() => buf.ack(3)).toThrowError(/连续收到位/)
-    buf.ack(2)
+    expect(() => buf.ack(3, 3)).toThrowError(/连续收到位/)
+    buf.ack(2, 2)
     expect(buf.lastPersistedAckSeq).toBe(2)
   })
 
@@ -99,7 +156,7 @@ describe('桥事件缓冲', () => {
     const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
     expect(files.length).toBeGreaterThanOrEqual(1)
     // 文件名带起止序号，二次 spill 不许覆盖上一段
-    expect(files[0]).toMatch(/^a1-\d+-\d+\.jsonl$/)
+    expect(files[0]).toMatch(/^nr-a1-a0-\d+-\d+\.jsonl$/)
     expect(buf.takeFrom(1).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6])
     rmSync(dir, { recursive: true, force: true })
   })

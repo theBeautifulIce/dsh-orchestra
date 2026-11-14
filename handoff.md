@@ -895,3 +895,15 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 测试：`tests/unit/bridge-buffer.spec.ts` 覆盖连续、缺口补洞、幂等/冲突、逐条 ACK、重启恢复；`tests/integration/bridge-ledger.spec.ts` 覆盖连续落账、重复/冲突、跳号、写事务失败、提交后重启、旧 attempt 隔离、宿主显式 ACK 失败不回滚、缺口不落账；`tests/unit/bridge.spec.ts` 补 `listen` 透传。
 - 验证：`tsc --noEmit` 0；全量 39 文件 **565 passed | 1 skipped**；`pnpm build` 成功（ESM 110.22kB）。迁移 008 使 G-14 证据漂移，已重生成 `docs/gates/evidence/G1/G-14.md`；提交后用 `check-evidence-repro` 复核 26 份。
 - 边界：R5-B 只做事件接收、排序、持久化、恢复，`run-node.ts` 未改；R5-C 才接 AgentLifecycle/BridgeConsumer/EvidenceCollector，R5-D 做 B01–B10，R5-E 第 45 轮独立审计后按 G1→G2 重签。R3 账本链头与单调耗时、R4 workflow 复合身份仍分开提交。
+
+### 11.44 R5-B 独立审计 FAIL 与整改（2026-11-14 15:45，R5-B 复审候选）
+
+- 独立审计 `r5b-auditor` 在 `871f118` 上 verdict **FAIL**：P0=0，P1=4，P2=8。克隆内 `pnpm install --offline --frozen-lockfile`、`pnpm typecheck`、定向 36 用例、全量 565 passed | 1 skipped 均跑过；主仓审计前后无改动，克隆已删。
+- P1-1 缺口未补时重复收到 5：`push()` 返回 `gapFrom:null`。已改为所有重复/已确认分支统一 `currentGap()`，pending 非空时始终返回 `lastContiguousSeq + 1`。
+- P1-2 重启后同 seq 不同 payload 不报冲突：构造器未查已落账 receipt。`BridgeBufferInit` 增加 `lookupPersisted(seq)`，`findStored()` 在本进程内存/本 attempt spill 之后回查已落账事件，冲突由 `assertSamePayload()` 抛出 `BRIDGE_SEQ_CONFLICT`；只比 `type + payload`，`at` 重建不误伤。
+- P1-3 重启不恢复 spill：构造器调用 `loadSpill()`，按 `node_run_id + agentId + attempt` 前缀认回本 attempt 的 JSONL，按 seq 去重、跳过 `lastPersistedAckSeq` 之前的事件，恢复连续位与 pending 缺口。
+- P1-4 跨 attempt 共 spill 文件：文件名改为 `spillPrefix()`（nodeRunId+agent+attempt），旧 attempt 不再追加进新 attempt；新增跨 attempt 互不串读用例。
+- P2 整改：`ack(seq, persistedAckSeq)` 要求账本已提交位不小于确认位；`BridgeLedger` 的 `payload_hash` 改为 `{type,payload}`；receipt 的 `event_type` 与账本同为 `bridge.<type>`；`BridgeEvent` 增加可选 `attempt`/`executorAgentId`，缓冲与账本在字段存在时校验一致；回滚 trigger 改挂 `bridge_stream_cursors`，宿主显式 ACK 失败用例改成“落账→本地 ACK→宿主 ACK 抛错仍不回滚”；migrate 增补 008 复合主键隔离用例。
+- P2-4 处理口径：008 已随 `34548b6` 推送，按“不得修改已发布迁移”不再改它；`CHECK`/外键留后续 010 重建表时补，当前由 `BridgeLedger` 写入前校验 attempt、seq、游标。设计 §6 已与实际 008 对齐，删除 `node_runs.bridge_ack_seq`/`bridge_last_seq`/`bridge_tool_outbox` 的旧描述，outbox 明确放 R5-C 的 009。
+- 验证：`pnpm typecheck` 0；全量 39 文件 **572 passed | 1 skipped**；`pnpm build` 成功（ESM 110.22kB）；证据复现 25 份字节一致。
+- 状态：R5-B 进入复审；R5-C 仍未开工。G1/G2 仍绑 `caae193`，第 45 轮重签要等 R5-C/D 与复审通过。

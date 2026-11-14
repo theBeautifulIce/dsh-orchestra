@@ -74,7 +74,8 @@ describe('R5-B 桥事件落账', () => {
     dbs.push(db)
     seed(db)
     const ledger = ledgerFor(db)
-    db.raw.exec("CREATE TRIGGER bridge_boom BEFORE INSERT ON node_run_events BEGIN SELECT RAISE(ABORT, 'boom'); END")
+    // 挂在最后一条写（游标）上，才能验到前面的事件与 receipt 一起回滚
+    db.raw.exec("CREATE TRIGGER bridge_boom BEFORE INSERT ON bridge_stream_cursors BEGIN SELECT RAISE(ABORT, 'boom'); END")
     expect(() => ledger.ingest(ev(1))).toThrow()
     db.raw.exec('DROP TRIGGER bridge_boom')
     expect(ledger.cursor()).toBe(0)
@@ -107,10 +108,17 @@ describe('R5-B 桥事件落账', () => {
     dbs.push(db)
     seed(db)
     const ledger = ledgerFor(db)
-    ledger.ingest(ev(1))
+    const buf = new BridgeEventBuffer({ limitBytes: 8192, highWaterBytes: 4096, spillDir: dir, agentId: 'a1' })
     const hostAck = (): void => { throw new Error('host ack failed') }
-    expect(() => hostAck()).toThrowError(/host ack failed/)
+    const consume = (): void => {
+      buf.push(ev(1))
+      ledger.ingest(ev(1))
+      buf.ack(1, ledger.cursor())
+      hostAck()
+    }
+    expect(consume).toThrowError(/host ack failed/)
     expect(ledger.cursor()).toBe(1)
+    expect(buf.lastPersistedAckSeq).toBe(1)
     expect(ledger.ingest(ev(1)).appended).toBe(false)
     expect(ledger.cursor()).toBe(1)
   })
@@ -127,6 +135,18 @@ describe('R5-B 桥事件落账', () => {
     expect(ledger.cursor()).toBe(0)
     expect(buf.lastPersistedAckSeq).toBe(0)
     expect(buf.lastContiguousSeq).toBe(0)
+  })
+
+  it('事件自带 attempt/agent 与当前账本不一致 → 拒绝且不落账', () => {
+    const { dir, db } = freshLedger()
+    dirs.push(dir)
+    dbs.push(db)
+    seed(db)
+    const ledger = ledgerFor(db)
+    expect(() => ledger.ingest({ ...ev(1), attempt: 2 })).toThrowError(/attempt 与当前账本不一致/)
+    expect(() => ledger.ingest({ ...ev(1), executorAgentId: 'a2' })).toThrowError(/executorAgentId 与当前账本不一致/)
+    expect(ledger.cursor()).toBe(0)
+    expect(count(db, 'SELECT COUNT(*) AS n FROM bridge_event_receipts')).toBe(0)
   })
 
   it('旧 attempt 不污染新 attempt 的游标', () => {

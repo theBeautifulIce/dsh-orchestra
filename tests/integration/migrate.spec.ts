@@ -102,6 +102,24 @@ describe('迁移框架', () => {
     expect(codeOf(() => loadSteps(dir))).toBe('SCHEMA_VERSION_UNSUPPORTED')
   })
 
+  it('008 桥表：复合主键按 node_run/attempt/agent 隔离', () => {
+    const db = openDb(dbFile())
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    const cursorCols = db.raw.prepare("SELECT name, pk FROM pragma_table_info('bridge_stream_cursors')").all() as { name: string; pk: number }[]
+    expect(cursorCols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(['node_run_id', 'attempt', 'executor_agent_id'])
+    const receiptCols = db.raw.prepare("SELECT name, pk FROM pragma_table_info('bridge_event_receipts')").all() as { name: string; pk: number }[]
+    expect(receiptCols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(['node_run_id', 'attempt', 'executor_agent_id', 'bridge_seq'])
+
+    db.raw.prepare("INSERT INTO bridge_stream_cursors (node_run_id, attempt, executor_agent_id, last_persisted_ack_seq, updated_at) VALUES ('nr1', 1, 'agent1', 0, 'now')").run()
+    expect(() => db.raw.prepare("INSERT INTO bridge_stream_cursors (node_run_id, attempt, executor_agent_id, last_persisted_ack_seq, updated_at) VALUES ('nr1', 1, 'agent1', 1, 'now')").run()).toThrow(/UNIQUE/)
+    db.raw.prepare("INSERT INTO bridge_stream_cursors (node_run_id, attempt, executor_agent_id, last_persisted_ack_seq, updated_at) VALUES ('nr1', 2, 'agent1', 0, 'now')").run()
+
+    const receiptSql = 'INSERT INTO bridge_event_receipts (node_run_id, attempt, executor_agent_id, bridge_seq, event_type, payload_hash, ledger_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    db.raw.prepare(receiptSql).run('nr1', 1, 'agent1', 1, 'bridge.start', 'h1', 1, 'now')
+    expect(() => db.raw.prepare(receiptSql).run('nr1', 1, 'agent1', 1, 'bridge.start', 'h1', 2, 'now')).toThrow(/UNIQUE/)
+    db.raw.close()
+  })
+
   it('events 表只追加：UPDATE 与 DELETE 都被数据库拒绝（S1 第九轮 P2-3）', () => {
     const db = openDb(dbFile())
     applySteps(db, loadSteps(defaultMigrationsDir()))

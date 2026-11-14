@@ -1,5 +1,5 @@
 // src/executor/bridge.ts —— 桥 RPC 客户端：最小七方法（规格 7.2 行 582-590）
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { canonicalJson } from '../core/canonical.ts'
 import { OrchError, proposedError } from '../core/errors.ts'
@@ -28,6 +28,9 @@ export type BridgeEvent = {
   // tool.start 的时间锚点；动作计时用它，不拿 tool.call 的时间当动作起点
   toolStartAt: string | null
   payload: unknown
+  // 宿主能带就带；带了就必须与当前 attempt/agent 一致，防止旧流串进新 attempt
+  attempt?: number
+  executorAgentId?: string
 }
 
 export type SpawnParams = {
@@ -151,9 +154,16 @@ export type BridgeBufferOptions = {
   highWaterBytes: number
   spillDir: string
   agentId: string
+  // spill 文件名按 attempt 隔离，防止旧 attempt 追加进同一文件
+  attempt?: number
+  nodeRunId?: string
 }
 
-export type BridgeBufferInit = { lastPersistedAckSeq?: number }
+export type BridgeBufferInit = {
+  lastPersistedAckSeq?: number
+  // 已落账事件按 seq 回查：重启后同 seq 不同 payload 仍能判冲突
+  lookupPersisted?: (seq: number) => BridgeEvent | undefined
+}
 
 export class BridgeEventBuffer {
   private readonly opts: BridgeBufferOptions
@@ -164,6 +174,7 @@ export class BridgeEventBuffer {
   private lastPersistedAckSeqValue = 0
   // 已收到但还没连成连续段的事件：按 seq 暂存，补洞后依次放行
   private readonly pending = new Map<number, BridgeEvent>()
+  private readonly lookupPersisted?: (seq: number) => BridgeEvent | undefined
   // 落盘片段按序保留：二次 spill 不许覆盖前一段，否则早期事件取不回（规格 7.3 行 594）
   private spillFiles: string[] = []
 
@@ -176,6 +187,48 @@ export class BridgeEventBuffer {
     this.lastPersistedAckSeqValue = ack
     this.lastContiguousSeqValue = ack
     this.lastReceivedSeqValue = ack
+    this.lookupPersisted = init.lookupPersisted
+    this.loadSpill()
+  }
+
+  // 重启后先按 attempt 前缀认回自己的 spill，再按 seq 恢复连续位与缺口
+  private loadSpill(): void {
+    let names: string[]
+    try {
+      names = readdirSync(this.opts.spillDir)
+    } catch {
+      return
+    }
+    const prefix = this.spillPrefix()
+    const files = names
+      .filter((name) => name.startsWith(prefix) && name.endsWith('.jsonl'))
+      .map((name) => join(this.opts.spillDir, name))
+      .sort()
+    if (files.length === 0) return
+    this.spillFiles = files
+    const bySeq = new Map<number, BridgeEvent>()
+    for (const file of files) {
+      for (const ev of this.readSpill(file)) {
+        if (!bySeq.has(ev.seq)) bySeq.set(ev.seq, ev)
+      }
+    }
+    for (const seq of [...bySeq.keys()].sort((a, b) => a - b)) {
+      const ev = bySeq.get(seq)!
+      if (ev.seq <= this.lastPersistedAckSeqValue) continue
+      if (ev.seq === this.lastContiguousSeqValue + 1) this.lastContiguousSeqValue = ev.seq
+      else this.pending.set(ev.seq, ev)
+      if (ev.seq > this.lastReceivedSeqValue) this.lastReceivedSeqValue = ev.seq
+    }
+  }
+
+  private spillPrefix(): string {
+    const run = (this.opts.nodeRunId ?? 'nr').replace(/[^A-Za-z0-9_.-]/g, '_')
+    const agent = this.opts.agentId.replace(/[^A-Za-z0-9_.-]/g, '_')
+    return run + '-' + agent + '-a' + String(this.opts.attempt ?? 0) + '-'
+  }
+
+  private currentGap(): number | null {
+    return this.pending.size > 0 ? this.lastContiguousSeqValue + 1 : null
   }
 
   // 收一条事件：类型固定、同号同 payload 幂等、同号不同 payload 协议冲突
@@ -187,17 +240,23 @@ export class BridgeEventBuffer {
     if (!Number.isInteger(ev.seq) || ev.seq < 1) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件序号必须是正整数', { seq: ev.seq })
     }
+    if (ev.attempt !== undefined && this.opts.attempt !== undefined && ev.attempt !== this.opts.attempt) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件 attempt 与当前缓冲不一致', { eventAttempt: ev.attempt, bufferAttempt: this.opts.attempt })
+    }
+    if (ev.executorAgentId !== undefined && ev.executorAgentId !== this.opts.agentId) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件 executorAgentId 与当前缓冲不一致', { eventAgent: ev.executorAgentId, bufferAgent: this.opts.agentId })
+    }
     if (ev.seq <= this.lastPersistedAckSeqValue) {
       const stored = this.findStored(ev.seq)
       if (stored) this.assertSamePayload(stored, ev)
-      return { accepted: false, gapFrom: null }
+      return { accepted: false, gapFrom: this.currentGap() }
     }
     const stored = this.findStored(ev.seq)
     if (stored) {
       this.assertSamePayload(stored, ev)
-      return { accepted: false, gapFrom: null }
+      return { accepted: false, gapFrom: this.currentGap() }
     }
-    if (ev.seq <= this.lastContiguousSeqValue) return { accepted: false, gapFrom: null }
+    if (ev.seq <= this.lastContiguousSeqValue) return { accepted: false, gapFrom: this.currentGap() }
 
     this.store(ev)
     this.pending.set(ev.seq, ev)
@@ -213,12 +272,18 @@ export class BridgeEventBuffer {
     }
   }
 
-  // 本地账本提交成功后调用：只能逐条推进，跳号说明消费器顺序错了
-  ack(seq: number): void {
+  // 本地账本提交成功后调用：必须同时给账本已提交的游标，只能逐条推进
+  ack(seq: number, persistedAckSeq: number): void {
     if (!Number.isInteger(seq) || seq < 0) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '确认序号必须是非负整数', { seq })
     }
+    if (!Number.isInteger(persistedAckSeq) || persistedAckSeq < 0) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '账本确认游标必须是非负整数', { persistedAckSeq })
+    }
     if (seq <= this.lastPersistedAckSeqValue) return
+    if (persistedAckSeq < seq) {
+      throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '确认位尚未落账，先提交账本', { seq, persistedAckSeq })
+    }
     if (seq > this.lastContiguousSeqValue) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '确认位超过连续收到位，先补洞', {
         seq, lastContiguousSeq: this.lastContiguousSeqValue,
@@ -251,11 +316,12 @@ export class BridgeEventBuffer {
     for (const file of this.spillFiles) {
       for (const ev of this.readSpill(file)) if (ev.seq === seq) return ev
     }
-    return undefined
+    return this.lookupPersisted?.(seq)
   }
 
+  // 幂等只认 type + payload；宿主持久重放重建 at 字段时不误判冲突
   private assertSamePayload(a: BridgeEvent, b: BridgeEvent): void {
-    if (canonicalJson(a) !== canonicalJson(b)) {
+    if (a.type !== b.type || canonicalJson(a.payload) !== canonicalJson(b.payload)) {
       throw proposedError('BRIDGE_SEQ_CONFLICT', '同一桥序号出现了不同 payload，按协议冲突拒绝', {
         seq: b.seq,
       })
@@ -268,7 +334,7 @@ export class BridgeEventBuffer {
     if (!first) return
     // 每段一个文件，文件名带起止序号；绝不复用上一段的文件名
     const last = this.events[this.events.length - 1] ?? first
-    const file = join(this.opts.spillDir, this.opts.agentId + '-' + first.seq + '-' + last.seq + '.jsonl')
+    const file = join(this.opts.spillDir, this.spillPrefix() + first.seq + '-' + last.seq + '.jsonl')
     const body = this.events.map((e) => JSON.stringify(e)).join('\n')
     try {
       appendFileSync(file, body + '\n', 'utf8')

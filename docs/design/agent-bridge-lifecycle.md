@@ -1,6 +1,6 @@
 # Agent Bridge 生产生命周期设计（R5-A）
 
-状态：协议已拍板，R5-B 已实施（提交 `34548b6`）；R5-C 起才接 `runNode()`。G1/G2 仍绑第 44 轮候选 `caae193`，R5-B 已改变 candidate，正式签署待第 45 轮重签。
+状态：协议已拍板，R5-B 已实施并完成独立审计 P1/P2 整改，待复审；R5-C 起才接 `runNode()`。G1/G2 仍绑第 44 轮候选 `caae193`，R5-B 已改变 candidate，正式签署待第 45 轮重签。
 
 ## 1. 范围
 
@@ -49,7 +49,7 @@ R3、R4 分别独立提交，不和 R5 混在一起。
 职责：
 
 - `start()`：spawn，记录 `executor_agent_id`，建立事件流，发任务指令。
-- `resume()`：按持久化 `bridge_ack_seq` 重新订阅并重放，不重复 spawn。
+- `resume()`：按 `bridge_stream_cursors.last_persisted_ack_seq` 重新订阅并重放，不重复 spawn。
 - `sendInstruction()`：只在订阅确认后发送。
 - `cancel()`：向宿主发取消，返回四值枚举，不直接写账本。
 - `awaitTermination()`：`whenIdle()` + `state()`，确认 Agent 已停。
@@ -161,15 +161,21 @@ push(ev):
 
 ### 5.4 落盘
 
-溢出仍按现有 `spill()` 落 JSONL，但 `takeFrom()` 必须同时覆盖 pending 与 spill，按 seq 去重排序。重连恢复时先读账本 `bridge_ack_seq`，再读 spill 补齐；不依赖内存游标。
+溢出仍按现有 `spill()` 落 JSONL，但 `takeFrom()` 必须同时覆盖 pending 与 spill，按 seq 去重排序。spill 文件名带 `node_run_id + executor_agent_id + attempt` 前缀，跨 attempt 不共文件。重连恢复时先读 `bridge_stream_cursors.last_persisted_ack_seq`，再读本 attempt 的 spill 补齐；不依赖内存游标。
 
 ## 6. 持久化
 
-新增 `src/infra/sqlite/migrations/008_bridge_event_receipts.sql`：
+R5-B 新增 `src/infra/sqlite/migrations/008_bridge_event_receipts.sql`，不修改 `node_runs` 旧表：
 
 ```sql
-ALTER TABLE node_runs ADD COLUMN bridge_ack_seq INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE node_runs ADD COLUMN bridge_last_seq INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE bridge_stream_cursors (
+  node_run_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  executor_agent_id TEXT NOT NULL,
+  last_persisted_ack_seq INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (node_run_id, attempt, executor_agent_id)
+);
 
 CREATE TABLE bridge_event_receipts (
   node_run_id TEXT NOT NULL,
@@ -182,29 +188,23 @@ CREATE TABLE bridge_event_receipts (
   created_at TEXT NOT NULL,
   PRIMARY KEY (node_run_id, attempt, executor_agent_id, bridge_seq)
 );
-
-CREATE TABLE bridge_tool_outbox (
-  execution_id TEXT PRIMARY KEY,
-  node_run_id TEXT NOT NULL,
-  attempt INTEGER NOT NULL,
-  tool_seq INTEGER NOT NULL,
-  payload_hash TEXT NOT NULL,
-  state TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  sent_at TEXT,
-  acked_at TEXT
-);
 ```
+
+`bridge_tool_outbox` 属于 R5-C 工具闭环，另开迁移 009，不塞进 008；在 009 落地前，R5-C 的 outbox 只存在于设计。
+
+008 已随 `34548b6` 推送，按“不修改已发布迁移”的约束不再改它；`CHECK`/外键如需数据库兜底，放到后续 010 重建表时补，当前由 `BridgeLedger` 在写入前校验 attempt、seq 与游标。
+
+桥事件在 `node_run_events` 里统一写 `bridge.<type>`（如 `bridge.tool.start`），receipt 的 `event_type` 用同一前缀；`ledger_seq` 就是该条 `node_run_events.seq`。事件类型固定清单以 `src/executor/bridge.ts` 的 `BRIDGE_EVENT_TYPES` 为准，消费方按该清单校验。
 
 消费事务顺序：
 
 1. 校验 schema/attempt/agent/seq。
 2. 查 receipt：同 seq 同 payload 直接幂等返回；不同 payload 抛 `BRIDGE_SEQ_CONFLICT`。
-3. 开事务：`appendNodeRunEvent()` -> 插 receipt -> 更新 `node_runs.bridge_ack_seq`。
+3. 开事务：`appendNodeRunEvent()` -> 插 receipt -> upsert `bridge_stream_cursors.last_persisted_ack_seq`。
 4. 提交。
-5. 提交成功后才 `buffer.ack(seq)`。
+5. 提交成功后才 `buffer.ack(seq, persistedAckSeq)`。
 
-崩溃窗口：写账本成功、ACK 未返回时，重连按 `bridge_ack_seq` 重放；receipt 命中即幂等，不会重复写账本。
+崩溃窗口：写账本成功、ACK 未返回时，重连按 `bridge_stream_cursors.last_persisted_ack_seq` 重放；receipt 命中即幂等，不会重复写账本。
 
 ## 7. 工具调用闭环
 
@@ -244,7 +244,7 @@ Agent tool.call
    - `already_stopped`：记录已停止事实。
    - `unknown`：进入 `stopping`/`startup_unknown`，不推断副作用不存在。
 4. `whenIdle()` 超时按未确认停止处理。
-5. 释放条件：Agent 已确认停止 AND `bridge_last_seq` 已知 AND `bridge_ack_seq >= bridge_last_seq` AND 所有在途工具已结算或明确待核实。
+5. 释放条件：Agent 已确认停止 AND 宿主已给出结束序号 `lastSeq` AND `lastPersistedAckSeq >= lastSeq` AND 所有在途工具已结算或明确待核实。
 6. 条件满足才 `dispose()`。
 
 HTTP 取消接口不能再凭调用方提交的 `cancelResult` 认定停止；该字段最多作为兼容输入，服务端以 Bridge 观测结果为准。
