@@ -3,6 +3,7 @@ import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import {
   DECISION_KINDS,
+  escalateDecisions,
   openDecision,
   resolveDecision,
 } from '../../src/service/commands/decisions.ts'
@@ -51,10 +52,11 @@ describe('八种 decision 与活跃唯一性', () => {
 
     withTx(db, (tx) => {
       resolveDecision(tx, {
-        decisionId: 'd1', revision: 1, status: 'resolved', closedReason: '已裁决', now: NOW,
+        decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW,
       })
     })
     expect(row(db, 'd1').status).toBe('resolved')
+    expect(row(db, 'd1').closed_reason).toBe('approved')
     expect(row(db, 'd1').revision).toBe(2)
 
     withTx(db, (tx) => {
@@ -84,8 +86,49 @@ describe('八种 decision 与活跃唯一性', () => {
       openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: 'nr1', kind: 'pre_execution', createdAt: NOW })
     })
     expect(() => withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 99, status: 'resolved', closedReason: '旧', now: NOW })
+      resolveDecision(tx, { decisionId: 'd1', revision: 99, resolution: 'rejected', now: NOW })
     })).toThrowError(/CAS 未命中/)
     expect(row(db, 'd1').status).toBe('pending')
+  })
+
+  it('continue_wait 只续一版，status 不变', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: 'nr1', kind: 'action_overrun', createdAt: NOW })
+    })
+    withTx(db, (tx) => {
+      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'continue_wait', now: NOW })
+    })
+    expect(row(db, 'd1').status).toBe('pending')
+    expect(row(db, 'd1').revision).toBe(2)
+    expect(row(db, 'd1').decided_at).toBeNull()
+  })
+
+  it('2 小时升 blocked_for_human，24 小时 expired；report_contradicted 不参与', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: null, kind: 'rule_ambiguous', createdAt: '2026-11-14T00:00:00.000Z' })
+      openDecision(tx, { decisionId: 'd2', runId: 'r1', nodeRunId: null, kind: 'report_contradicted', createdAt: '2026-11-14T00:00:00.000Z' })
+      tx.run("UPDATE decisions SET status = 'blocked_for_human' WHERE decision_id = 'd2'")
+    })
+    withTx(db, (tx) => {
+      expect(escalateDecisions(tx, { now: '2026-11-14T01:00:00.000Z' })).toEqual({ blocked: 0, expired: 0 })
+    })
+    expect(row(db, 'd1').status).toBe('pending')
+
+    withTx(db, (tx) => {
+      expect(escalateDecisions(tx, { now: '2026-11-14T02:00:00.000Z' })).toEqual({ blocked: 1, expired: 0 })
+    })
+    expect(row(db, 'd1').status).toBe('blocked_for_human')
+    expect(row(db, 'd1').revision).toBe(2)
+    expect(row(db, 'd2').status).toBe('blocked_for_human')
+
+    withTx(db, (tx) => {
+      expect(escalateDecisions(tx, { now: '2026-11-15T00:00:00.000Z' })).toEqual({ blocked: 0, expired: 1 })
+    })
+    expect(row(db, 'd1').status).toBe('resolved')
+    expect(row(db, 'd1').closed_reason).toBe('expired_final')
+    expect(row(db, 'd1').revision).toBe(3)
+    expect(row(db, 'd2').status).toBe('blocked_for_human')
   })
 })

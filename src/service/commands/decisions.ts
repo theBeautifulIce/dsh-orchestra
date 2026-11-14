@@ -60,19 +60,56 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
   )
 }
 
+export type Resolution =
+  | 'approved'
+  | 'rejected'
+  | 'expired'
+  | 'confirm_applied'
+  | 'confirm_not_applied'
+  | 'confirm_started'
+  | 'confirm_not_started'
+  | 'continue_tracking'
+  | 'continue_wait'
+  | 'abandon'
+  | 'uphold_report'
+  | 'uphold_decision'
+
+const FINAL_RESOLUTIONS: readonly Resolution[] = ['approved', 'rejected', 'expired']
+
 export type ResolveDecisionRequest = {
   decisionId: string
   revision: number
-  status: 'resolved' | 'superseded'
-  closedReason: string
+  resolution: Resolution
   now: string
+  payload?: Record<string, unknown>
 }
 
+/**
+ * 结论落地：
+ * - approved/rejected/expired 收口为 resolved，closed_reason 记 approved/rejected/expired_final；
+ * - confirm/continue/abandon/uphold 类结论只推进 revision，status 保持原活跃态。
+ * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
+ */
 export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
+  const current = tx.get<{ status: string; payload_json: string }>(
+    'SELECT status, payload_json FROM decisions WHERE decision_id = ?',
+    [req.decisionId],
+  )
+  if (!current) {
+    throw new OrchError('DECISION_REVISION_CONFLICT', 'decision 不存在', { decisionId: req.decisionId })
+  }
+  const closing = FINAL_RESOLUTIONS.includes(req.resolution)
+  const nextStatus = closing ? 'resolved' : current.status
+  const closedReason = closing
+    ? req.resolution === 'expired' ? 'expired_final' : req.resolution
+    : null
+  const payloadJson = req.payload
+    ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...req.payload })
+    : current.payload_json
   const res = tx.run(
-    'UPDATE decisions SET status = ?, revision = revision + 1, closed_reason = ?, decided_at = ? ' +
+    'UPDATE decisions SET status = ?, revision = revision + 1, closed_reason = ?, decided_at = ?, payload_json = ? ' +
       `WHERE decision_id = ? AND revision = ? AND status IN ${ACTIVE_STATUSES}`,
-    [req.status, req.closedReason, req.now, req.decisionId, req.revision],
+    [nextStatus, closedReason, closing ? req.now : null, payloadJson, req.decisionId, req.revision],
   )
   if (res.changes !== 1) {
     throw new OrchError('DECISION_REVISION_CONFLICT', 'decision 收口 CAS 未命中', {
@@ -81,3 +118,51 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
     })
   }
 }
+
+// 继续等 / 继续跟踪：只续一版，不改变 status
+export function extendDecision(tx: Tx, req: Omit<ResolveDecisionRequest, 'resolution'> & {
+  resolution: 'continue_wait' | 'continue_tracking'
+}): void {
+  resolveDecision(tx, req)
+}
+
+export type EscalateOptions = {
+  now: string
+  blockedAfterMs?: number
+  expireAfterMs?: number
+}
+
+/**
+ * 超时升级：活跃且非 report_contradicted 的卡，满 2 小时升 blocked_for_human，满 24 小时 expired。
+ * report_contradicted 不参与升级，避免把“报告与人裁决冲突”自动关掉。
+ */
+export function escalateDecisions(tx: Tx, opts: EscalateOptions): { blocked: number; expired: number } {
+  const nowMs = Date.parse(opts.now)
+  const blockedAfterMs = opts.blockedAfterMs ?? 2 * 60 * 60 * 1000
+  const expireAfterMs = opts.expireAfterMs ?? 24 * 60 * 60 * 1000
+  const rows = tx.all<{ decision_id: string; status: string; revision: number; created_at: string }>(
+    "SELECT decision_id, status, revision, created_at FROM decisions WHERE kind <> 'report_contradicted' " +
+      `AND status IN ${ACTIVE_STATUSES}`,
+  )
+  let blocked = 0
+  let expired = 0
+  for (const row of rows) {
+    const age = nowMs - Date.parse(row.created_at)
+    if (age >= expireAfterMs) {
+      tx.run(
+        "UPDATE decisions SET status = 'resolved', closed_reason = 'expired_final', revision = revision + 1, decided_at = ? " +
+          'WHERE decision_id = ? AND revision = ?',
+        [opts.now, row.decision_id, row.revision],
+      )
+      expired += 1
+    } else if (age >= blockedAfterMs && row.status !== 'blocked_for_human') {
+      tx.run(
+        "UPDATE decisions SET status = 'blocked_for_human', revision = revision + 1 WHERE decision_id = ? AND revision = ?",
+        [row.decision_id, row.revision],
+      )
+      blocked += 1
+    }
+  }
+  return { blocked, expired }
+}
+
