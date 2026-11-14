@@ -135,11 +135,11 @@ function scanRegistration(tx: Tx, secret: string, registration: WaitRegistration
     applyTransition(tx, {
       nodeRunId: registration.nodeRunId,
       from: ['waiting'],
-      to: 'dispatched',
+      to: 'queued',
       attempt: currentAttempt(tx, registration.nodeRunId),
       now,
       bumpRearm: true,
-      // 唤醒重新排队：旧租约和旧 executor 绑定一律不许复用（M-21）
+      // 唤醒重新排队：旧租约和旧 executor 绑定一律不许复用（M-63）
       patch: {
         lease_id: null,
         lease_expires_at: null,

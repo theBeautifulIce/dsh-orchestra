@@ -71,6 +71,7 @@ export type TransitionTrigger =
   | 'verify-timeout-fail-on-timeout'
   | 'wait-entered'
   | 'wait-event'
+  | 'wait-rearmed'
   | 'wait-timeout'
   | 'action-timeout-interrupted'
   | 'timing-out-pure'
@@ -135,7 +136,7 @@ export const HANG_REASON_REPORT_CONTRADICTED = 'report_contradicted' as const
 
 const NON_TERMINAL = [...NON_TERMINAL_STATUSES]
 
-// M-01…M-61 逐行迁移规则（设计稿 §8 迁移表）。from/to 用数组保留一行的多目标语义。
+// M-01…M-63 逐行迁移规则（设计稿 §8 迁移表）。from/to 用数组保留一行的多目标语义。
 export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-02', from: ['queued'], to: ['leased'], trigger: 'lease' },
   { id: 'M-03', from: ['leased'], to: ['dispatched'], trigger: 'dispatch' },
@@ -157,6 +158,8 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-19', from: ['verifying'], to: ['failed_with_unverified'], trigger: 'verify-timeout-fail-on-timeout', requires: (c) => !c.sideEffectVerifiedNone },
   { id: 'M-20', from: ['started'], to: ['waiting'], trigger: 'wait-entered' },
   { id: 'M-21', from: ['waiting'], to: ['dispatched'], trigger: 'wait-event' },
+  // 等待唤醒或子流程收口后重新排队：旧租约/旧 executor 已释放，不能再以 dispatched 悬空
+  { id: 'M-63', from: ['waiting'], to: ['queued'], trigger: 'wait-rearmed' },
   { id: 'M-22', from: ['waiting'], to: ['timeout'], trigger: 'wait-timeout' },
   { id: 'M-23', from: ['dispatched', 'started', 'waiting', 'verifying', 'stopping', 'timing_out'], to: ['timing_out'], trigger: 'action-timeout-interrupted', requires: (c) => c.cancelResult === 'interrupted' },
   { id: 'M-24', from: ['timing_out'], to: ['timeout'], trigger: 'timing-out-pure' },
@@ -244,7 +247,7 @@ export function canReportTransition(from: string, to: string): boolean {
   return TRANSITIONS.some((rule) => rule.requires === undefined && pairAllowed(rule, from, to))
 }
 
-// 建行规则与跨行闸门：它们不是状态迁移，但属于 M-01…M-61 的必过项。
+// 建行规则与跨行闸门：它们不是状态迁移，但属于 M-01…M-63 的必过项。
 export const CREATION_RULES = [
   { id: 'M-01', to: 'queued', trigger: 'create' },
   { id: 'M-58', to: 'queued', trigger: 'create' },
@@ -264,7 +267,7 @@ export const MIGRATION_CASE_IDS = [
   'M-31', 'M-32', 'M-33', 'M-34', 'M-35', 'M-36', 'M-37', 'M-38', 'M-39', 'M-40',
   'M-41', 'M-42', 'M-43', 'M-44', 'M-45', 'M-46', 'M-47', 'M-48', 'M-49', 'M-50',
   'M-51', 'M-52', 'M-53', 'M-54', 'M-55', 'M-56', 'M-57', 'M-58', 'M-59', 'M-60',
-  'M-61', 'M-62',
+  'M-61', 'M-62', 'M-63',
 ] as const
 
 export function allows(rule: TransitionRule, ctx: TransitionContext): boolean {

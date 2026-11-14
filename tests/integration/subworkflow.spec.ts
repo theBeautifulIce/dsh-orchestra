@@ -180,7 +180,7 @@ describe('子运行 pin、深度与唤醒', () => {
     })
   })
 
-  it('started 父节点进 waiting，子运行终态后才能唤醒回 dispatched', () => {
+  it('started 父节点进 waiting，子运行终态后才能唤醒回 queued', () => {
     const db = memoryDb()
     const c = catalog()
     withTx(db, (tx) => {
@@ -192,8 +192,11 @@ describe('子运行 pin、深度与唤醒', () => {
         .toThrowError(/还没收口/)
       tx.run("UPDATE runs SET status = 'done' WHERE run_id = ?", [child.run_id])
       const woke = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
-      expect(woke).toEqual({ parentNodeRunId: 'nr-parent', status: 'dispatched' })
-      expect(finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW }).status).toBe('dispatched')
+      expect(woke).toEqual({ parentNodeRunId: 'nr-parent', status: 'queued' })
+      expect(tx.get<{ status: string; lease_id: string | null }>(
+        'SELECT status, lease_id FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
+      )).toEqual({ status: 'queued', lease_id: null })
+      expect(finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW }).status).toBe('queued')
     })
   })
 })
@@ -214,7 +217,7 @@ describe('父取消传播与终态闸', () => {
         runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000,
       })
       expect(out.cancelledRuns).toEqual([childId])
-      expect(out.cancelledNodes).toEqual([])
+      expect(out.cancelledNodes).toEqual(['nr-parent'])
       expect(out.skippedIrreversible.length).toBe(1)
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE run_id = ?', [childId])!.status).toBe('started')
       expect(() => assertNoOpenChildRuns(tx, 'r1')).toThrowError(/未收口的子运行/)

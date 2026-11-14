@@ -350,7 +350,7 @@ export function finishSubworkflowChild(
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '子运行没有父节点，不能唤醒', { childRunId: p.childRunId })
   }
   const node = loadNodeRun(tx, child.parent_node_run_id)
-  if (node.status === 'dispatched') {
+  if (node.status === 'dispatched' || node.status === 'queued') {
     return { parentNodeRunId: node.node_run_id, status: node.status }
   }
   if (node.status !== 'waiting') {
@@ -362,16 +362,16 @@ export function finishSubworkflowChild(
   applyTransition(tx, {
     nodeRunId: node.node_run_id,
     from: ['waiting'],
-    to: 'dispatched',
+    to: 'queued',
     attempt: node.attempt,
     now: p.now,
-    patch: { wait_started_at: null },
+    patch: { wait_started_at: null, lease_id: null, lease_expires_at: null },
   })
   appendNodeRunEvent(tx, secret, node.node_run_id, 'subworkflow.finished', {
     child_run_id: p.childRunId,
     child_status: child.status,
   })
-  return { parentNodeRunId: node.node_run_id, status: 'dispatched' }
+  return { parentNodeRunId: node.node_run_id, status: 'queued' }
 }
 
 export type PropagateCancelParams = {
@@ -406,6 +406,29 @@ export function propagateRunCancellation(
     'UPDATE runs SET cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE run_id = ?',
     [p.now, p.cancelResult, p.now, p.runId],
   )
+  // 运行级取消先收目标 run 自己的在跑节点，再向子 run 传播
+  const ownNodes = tx.all<Pick<NodeRunRow, 'node_run_id' | 'status' | 'attempt' | 'revision' | 'side_effect_policy'>>(
+    'SELECT node_run_id, status, attempt, revision, side_effect_policy FROM node_runs WHERE run_id = ? ORDER BY node_run_id',
+    [p.runId],
+  )
+  for (const node of ownNodes) {
+    if (['dispatched', 'started', 'waiting', 'verifying'].includes(node.status) === false) continue
+    if (node.side_effect_policy === 'irreversible') {
+      skippedIrreversible.push(node.node_run_id)
+      continue
+    }
+    applyCancel(tx, secret, {
+      nodeRunId: node.node_run_id,
+      attempt: node.attempt,
+      revision: node.revision,
+      cancelResult: p.cancelResult,
+      now: p.now,
+      graceMs: p.graceMs,
+      extendDeadlineMs: p.extendDeadlineMs,
+      clock: p.clock,
+    })
+    cancelledNodes.push(node.node_run_id)
+  }
   const children = tx.all<{ run_id: string; status: string }>(
     'SELECT run_id, status FROM runs WHERE parent_run_id = ? ORDER BY run_id', [p.runId],
   )
@@ -416,28 +439,6 @@ export function propagateRunCancellation(
       [p.now, p.cancelResult, p.now, child.run_id],
     )
     cancelledRuns.push(child.run_id)
-    const nodes = tx.all<Pick<NodeRunRow, 'node_run_id' | 'status' | 'attempt' | 'revision' | 'side_effect_policy'>>(
-      'SELECT node_run_id, status, attempt, revision, side_effect_policy FROM node_runs WHERE run_id = ? ORDER BY node_run_id',
-      [child.run_id],
-    )
-    for (const node of nodes) {
-      if (['dispatched', 'started', 'waiting', 'verifying'].includes(node.status) === false) continue
-      if (node.side_effect_policy === 'irreversible') {
-        skippedIrreversible.push(node.node_run_id)
-        continue
-      }
-      applyCancel(tx, secret, {
-        nodeRunId: node.node_run_id,
-        attempt: node.attempt,
-        revision: node.revision,
-        cancelResult: p.cancelResult,
-        now: p.now,
-        graceMs: p.graceMs,
-        extendDeadlineMs: p.extendDeadlineMs,
-        clock: p.clock,
-      })
-      cancelledNodes.push(node.node_run_id)
-    }
     const nested = propagateRunCancellation(tx, secret, { ...p, runId: child.run_id })
     cancelledRuns.push(...nested.cancelledRuns)
     cancelledNodes.push(...nested.cancelledNodes)

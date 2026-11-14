@@ -334,7 +334,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     for (const child of finishedChildren) {
       try {
         const out = finishSubworkflowChild(tx, secret, { childRunId: child.run_id, now: params.now })
-        if (out.status === 'dispatched') subworkflowFinished.push(out.parentNodeRunId)
+        if (out.status === 'queued') subworkflowFinished.push(out.parentNodeRunId)
       } catch {
         // 并发已推进这个父节点：跳过，不把整轮扫描拖垮
       }

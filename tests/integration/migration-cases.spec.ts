@@ -1,4 +1,4 @@
-// M-01…M-62 逐条用例：每条规则都有正例，终态源、挂起源、错误触发与错误目标都被拒。
+// M-01…M-63 逐条用例：每条规则都有正例，终态源、挂起源、错误触发与错误目标都被拒。
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import {
@@ -22,14 +22,14 @@ function contextFor(rule: TransitionRule): TransitionContext {
   }
 }
 
-describe('M-01…M-62 迁移用例', () => {
-  it('61 个迁移 id 全覆盖，且没有表外规则', () => {
+describe('M-01…M-63 迁移用例', () => {
+  it('63 个迁移 id 全覆盖，且没有表外规则', () => {
     const ids = [
       ...TRANSITIONS.map((rule) => rule.id),
       ...CREATION_RULES.map((rule) => rule.id),
       HANG_GUARD.id,
     ]
-    expect(new Set(ids).size).toBe(62)
+    expect(new Set(ids).size).toBe(63)
     expect([...ids].sort()).toEqual([...MIGRATION_CASE_IDS].sort())
   })
 
@@ -41,10 +41,10 @@ describe('M-01…M-62 迁移用例', () => {
       hasRequires: typeof rule.requires === 'function',
     })))
     expect(createHash('sha256').update(canonical).digest('hex'))
-      .toBe('047cc97d4c99877eb42fe78007af1a71c5e753a740ea381b85a6808c40bdb109')
-    expect(TRANSITIONS).toHaveLength(59)
-    expect(TRANSITIONS.reduce((n, rule) => n + rule.from.length, 0)).toBe(123)
-    expect(TRANSITIONS.reduce((n, rule) => n + rule.to.length, 0)).toBe(72)
+      .toBe('48fecb63f273bec2463724a1c27bdfb06e6509f0cf89c6fa1d405423e0094d4d')
+    expect(TRANSITIONS).toHaveLength(60)
+    expect(TRANSITIONS.reduce((n, rule) => n + rule.from.length, 0)).toBe(124)
+    expect(TRANSITIONS.reduce((n, rule) => n + rule.to.length, 0)).toBe(73)
     expect(TRANSITIONS.filter((rule) => rule.requires).length).toBe(10)
   })
 

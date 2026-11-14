@@ -30,16 +30,19 @@ function baseContext(rule: TransitionRule): TransitionContext {
   return ctx
 }
 
-describe('M-01…M-62 迁移规则表', () => {
-  it('62 个迁移用例 id 全覆盖，59 条状态规则 + 2 条建行 + 1 条挂起闸门', () => {
+describe('M-01…M-63 迁移规则表', () => {
+  it('63 个迁移用例 id 全覆盖，60 条状态规则 + 2 条建行 + 1 条挂起闸门', () => {
+    expect(new Set(MIGRATION_CASE_IDS).size).toBe(63)
+    expect(TRANSITIONS).toHaveLength(60)
+    expect(CREATION_RULES).toHaveLength(2)
+    expect(HANG_GUARD.id).toBe('M-56')
     const covered = [
       ...TRANSITIONS.map((r) => r.id),
       ...CREATION_RULES.map((r) => r.id),
       HANG_GUARD.id,
     ]
-    expect(new Set(covered).size).toBe(62)
+    expect(new Set(covered).size).toBe(63)
     expect([...covered].sort()).toEqual([...MIGRATION_CASE_IDS].sort())
-    expect(TRANSITIONS).toHaveLength(59)
   })
 
   it('每条状态规则在自己的上下文里放行', () => {

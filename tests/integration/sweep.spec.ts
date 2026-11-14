@@ -362,7 +362,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     })
     const out = sweep(db, TEST_SECRET, { now: NOW })
     expect(out.subworkflow_finished).toContain('nr_sw')
-    expect(row(db).status).toBe('dispatched')
+    expect(row(db).status).toBe('queued')
     expect(evCount(db, 'subworkflow.finished')).toBe(1)
   })
 })

@@ -363,7 +363,7 @@ describe('起运行与裁决收口路由', () => {
     const body = await res.json() as any
     expect(body.data.woken).toBe(1)
     const node = orchestra.db.raw.prepare('SELECT status, wait_deadline_at FROM node_runs WHERE node_run_id = ?').get('nrun_wait') as { status: string; wait_deadline_at: string | null }
-    expect(node.status).toBe('dispatched')
+    expect(node.status).toBe('queued')
     expect(node.wait_deadline_at).toBeNull()
   })
 
