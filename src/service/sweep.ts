@@ -118,13 +118,11 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
         bootId: row.startup_unknown_boot_id,
         monotonicNs: row.startup_unknown_monotonic_ns,
       })
-      // 有锚点只看单调钟；旧行没有锚点才退回墙钟比较（升级兼容，不把新写入降级）
+      // 有锚点只看单调钟；缺锚点的旧行不能拿墙钟硬判超时，直接按“不确定”收口。
       if (anchored && params.clock) {
         const decision = params.clock.decide(anchored)
         if (decision.kind === 'pending') continue
         if (decision.kind === 'uncertain') continue
-      } else if (Date.parse(row.startup_unknown_deadline_at) > Date.parse(params.now)) {
-        continue
       }
       try {
         applyTransition(tx, {
@@ -207,7 +205,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
         patch.startup_unknown_remaining_ns = null
       }
       if (target === 'verifying') {
-        const remaining = row.verify_remaining_ns ?? 0
+        // 断线期间没记下剩余量，恢复时不能按 0 立即到期，给完整一轮判定窗口。
+        const remaining = row.verify_remaining_ns ?? 120_000
         const d = params.clock
           ? deadlineFromSample(params.clock, remaining)
           : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + remaining }

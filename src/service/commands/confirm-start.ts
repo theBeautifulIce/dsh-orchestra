@@ -4,6 +4,7 @@ import { withTx, type Db } from '../../infra/sqlite/driver.ts'
 import { OrchError } from '../../core/errors.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { applyTransition } from './nodes.ts'
+import { deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 
 export type ConfirmStartParams = {
   nodeRunId: string
@@ -11,6 +12,11 @@ export type ConfirmStartParams = {
   now: string
   /** 人工确认“确实启动了”，没有工具调用时走 M-09，否则走 M-61 */
   attested?: boolean
+  /** 确认人；写进事件，不能只留一个匿名动作 */
+  actor?: string
+  /** 人工确认后转入 stopping 的动作时限，必须落单调锚点 */
+  clock?: ClockProvider
+  actionDeadlineMs?: number
 }
 
 export function confirmStartup(
@@ -34,6 +40,8 @@ export function confirmStartup(
       [p.nodeRunId],
     ))
     const trigger = hasTool ? 'confirm-started-with-tool' : p.attested ? 'confirm-started-attested' : 'confirm-started'
+    const actionDeadlineMs = p.actionDeadlineMs ?? 30_000
+    const deadline = p.clock ? deadlineFromSample(p.clock, actionDeadlineMs) : null
     applyTransition(tx, {
       nodeRunId: p.nodeRunId,
       from: ['startup_unknown'],
@@ -47,9 +55,20 @@ export function confirmStartup(
         startup_unknown_boot_id: null,
         startup_unknown_monotonic_ns: null,
         startup_unknown_remaining_ns: null,
+        ...(deadline
+          ? {
+              deadline_at: new Date(deadline.wallClockMs).toISOString(),
+              deadline_boot_id: deadline.bootId,
+              deadline_monotonic_ns: deadline.monotonicNs,
+            }
+          : {}),
       },
     })
-    appendNodeRunEvent(tx, secret, p.nodeRunId, 'startup.confirmed', { trigger })
+    appendNodeRunEvent(tx, secret, p.nodeRunId, 'startup.confirmed', {
+      trigger,
+      actor: p.actor ?? null,
+      action_deadline_ms: actionDeadlineMs,
+    })
     return { trigger }
   })
 }

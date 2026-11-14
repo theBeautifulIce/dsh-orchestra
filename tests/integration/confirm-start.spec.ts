@@ -3,6 +3,7 @@ import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { confirmStartup } from '../../src/service/commands/confirm-start.ts'
+import { SystemClock } from '../../src/core/clock.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
@@ -35,6 +36,19 @@ describe('确认启动 M-08/M-09/M-61', () => {
     const out = confirmStartup(db, TEST_SECRET, { nodeRunId: 'nr1', attempt: 1, now: NOW })
     expect(out.trigger).toBe('confirm-started-with-tool')
     expect(statusOf(db)).toBe('stopping')
+  })
+
+  it('确认后写动作时限锚点、来源与确认人', () => {
+    const db = startupUnknown()
+    confirmStartup(db, TEST_SECRET, {
+      nodeRunId: 'nr1', attempt: 1, now: NOW, actor: 'service:human', clock: new SystemClock('boot-confirm'),
+    })
+    const row = db.raw.prepare("SELECT deadline_boot_id, deadline_monotonic_ns, deadline_at FROM node_runs WHERE node_run_id='nr1'").get() as Record<string, unknown>
+    expect(row.deadline_boot_id).toBe('boot-confirm')
+    expect(row.deadline_monotonic_ns).not.toBeNull()
+    expect(row.deadline_at).not.toBeNull()
+    const ev = db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nr1' AND type='startup.confirmed'").get() as { payload: string }
+    expect(JSON.parse(ev.payload)).toMatchObject({ actor: 'service:human', action_deadline_ms: 30000 })
   })
 
   it('非 startup_unknown 不允许确认', () => {

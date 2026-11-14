@@ -78,7 +78,7 @@ export type NodeCommands = {
     now: string
   }) => void
   // 启动未知的人工确认：M-08/M-09/M-61 的生产入口
-  confirmStart: (body: { nodeRunId: string; attempt: number; attested?: boolean; now: string }) => {
+  confirmStart: (body: { nodeRunId: string; attempt: number; attested?: boolean; now: string; actor?: string }) => {
     trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'
   }
   // 派发：把 run 下排队中的节点交给生产执行器跑
@@ -297,6 +297,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         nodeRunId: body.nodeRunId,
         attempt: body.attempt,
         attested: body.attested,
+        actor,
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))

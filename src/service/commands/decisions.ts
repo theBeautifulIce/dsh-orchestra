@@ -3,6 +3,7 @@ import { OrchError } from '../../core/errors.ts'
 import type { DecisionKind } from '../../core/state-machine.ts'
 import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
+import { closeRun } from './run-close.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 
@@ -141,8 +142,8 @@ export type ResolveDecisionRequest = {
  * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
  */
 export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
-  const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number }>(
-    'SELECT status, payload_json, approver, confirm_required FROM decisions WHERE decision_id = ?',
+  const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string }>(
+    'SELECT status, payload_json, approver, confirm_required, run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
   )
   if (!current) {
@@ -195,6 +196,8 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
       resolvedBy: actor.id,
     },
   })
+  // 裁决卡收口后，若所有节点都已到终态，run 也要在同一笔事务里收口。
+  if (closing) closeRun(tx, current.run_id, req.now)
 }
 
 // 继续等 / 继续跟踪：只续一版，不改变 status

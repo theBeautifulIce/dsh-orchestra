@@ -147,7 +147,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       confirm: b.confirm,
       now: b.now,
     })),
-    confirmStart: (b) => confirmStartup(db, opts.secret, b),
+    confirmStart: (b) => confirmStartup(db, opts.secret, { ...b, clock }),
     dispatch: async (b) => {
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })
