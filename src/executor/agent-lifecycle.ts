@@ -116,34 +116,36 @@ export class AgentLifecycle {
     const onAbort = (): void => { this.controller.abort(signal.reason) }
     if (signal.aborted) onAbort()
     else signal.addEventListener('abort', onAbort, { once: true })
+    // 中止竞速必须从 subscribe 之前就存在：订阅或发送挂住时，动作超时同样要能打穿。
+    const aborted = new Promise<never>((_, reject) => {
+      const onStop = (): void => { reject(this.abortReason()) }
+      if (this.controller.signal.aborted) onStop()
+      else this.controller.signal.addEventListener('abort', onStop, { once: true })
+    })
+    // 若超时先发生、后续才走到 race，这个拒绝仍然必须被视为已处理，不能让进程因 unhandledRejection 退出。
+    void aborted.catch(() => {})
+    const guarded = <T>(task: Promise<T>): Promise<T> => Promise.race([task, aborted])
     try {
       const fromSeq = this.ledger.cursor()
-      const subscribed = await this.deps.client.subscribe({
+      const subscribed = await guarded(this.deps.client.subscribe({
         executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq,
-      })
+      }))
       if (!subscribed.subscribed) {
         throw new OrchError('BRIDGE_NOT_SUBSCRIBED', 'Agent 订阅未确认，不能开始执行', { agentId: this.agentId })
       }
       const report = new Promise<AgentReportEnvelope>((resolve, reject) => {
         this.waiter = { resolve, reject }
       })
-      // abort 时 consume() 可能正常返回，单靠 .catch 不会 reject waiter；必须把中止
-      // 本身也放进竞速，否则动作超时会永久挂在 started。
-      const aborted = new Promise<never>((_, reject) => {
-        const onStop = (): void => { reject(this.abortReason()) }
-        if (this.controller.signal.aborted) onStop()
-        else this.controller.signal.addEventListener('abort', onStop, { once: true })
-      })
       this.running = this.consume(this.controller.signal).catch((err) => {
         if (!this.reportSeen) this.waiter?.reject(err)
       })
-      await this.deps.client.send({
+      await guarded(this.deps.client.send({
         executorAgentId: this.agentId,
         attempt: this.deps.attempt,
         instruction: this.deps.instruction,
         attemptId: this.deps.nodeRunId + ':' + String(this.deps.attempt),
-      })
-      return await Promise.race([report, aborted])
+      }))
+      return await guarded(report)
     } catch (err) {
       if (this.controller.signal.aborted && this.controller.signal.reason instanceof OrchError) {
         throw this.controller.signal.reason

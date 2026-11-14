@@ -954,3 +954,14 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - P2-6：`SpawnParams` 增加 `inheritHistory: false` 并由 `bridgeHostAgentFactory` 显式发送；单测同步断言。
 - 验证：`pnpm typecheck` 0；全量 40 文件 **591 passed | 1 skipped**；`pnpm build` 成功（ESM 142.74kB / gzip 35.80kB、d.ts 13.60kB）。
 - 状态：本轮整改待提交；G1/G2 仍绑 `caae193`。下一步提交推送后按新 HEAD 做独立复审；B06 仍是事务级重放，B07 外部取消通道仍未接生产，R5-D 尚未收口。
+
+### 11.49 f662902 复审超时边界 P1 收口（2026-11-14 16:50，整改候选）
+
+- 独立复审 `r5c-reaudit` 在 `f662902` 上 verdict **FAIL**：P0=0，P1=1，P2=4。七项复核中六项 PASS：stop 幂等、spawn 回包失败落 `startup_unknown`、bestEffort 使用真实游标、工具时间断言、省略 agents 的 E2E、`inheritHistory:false` 均成立。
+- 残留 P1：动作超时只覆盖 `await report`；`subscribe` 与 `send` 自身仍可永久挂起，且 `aborted` 在 subscribe 之后才创建，send 慢于超时时会留下未处理拒绝；`spawn` 也没有应用层超时。探针复现 `PROBE3_SEND`/`PROBE3_SUBSCRIBE` 均 HANG，并出现未处理 `OPERATION_TIMEOUT`。
+- `AgentLifecycle.run()`：`aborted` promise 提前到 `subscribe` 之前创建，并挂 `void aborted.catch(() => {})` 吃掉竞速另一侧的拒绝；`guarded()` 用 `Promise.race([task, aborted])` 同时包住 `subscribe`、`send`、`report`，三条路径都能被动作超时打穿。
+- `runNode`：新增 `DEFAULT_STARTUP_TIMEOUT_MS = 30_000` 与 `RunNodeParams.startupTimeoutMs?`；`withTimeout()` 包住 `createExecutorAgent`，超时抛 `OPERATION_TIMEOUT` 后落 `startup_unknown`，不再永久停在 `dispatched`。
+- P2-2：`bestEffortReleaseAgent` 的 ACK/MAX 查询与 dispose 全部移入同一个 try，查询失败不会覆盖原始 spawn/迁移错误。
+- 回归：B13 订阅挂住、B14 发送挂住，均断言 <1s 内 `OPERATION_TIMEOUT` 且仍 cancel/dispose；B12 增加 cancel/idle 各一次断言；runtime 新增「spawn 挂住：启动超时落 startup_unknown」。
+- 验证：`pnpm typecheck` 0；全量 40 文件 **594 passed | 1 skipped**；`pnpm build` 成功（ESM 143.34kB / gzip 35.96kB、d.ts 13.63kB）。
+- 遗留：`startup_unknown` 仍无自动推进（sweep 只扫 `verifying`）；spawn catch 对确定性错误的分类仍偏宽；B06 仍是事务级重放，B07 外部取消通道仍未接生产。G1/G2 仍绑 `caae193`。

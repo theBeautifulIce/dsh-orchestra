@@ -34,12 +34,15 @@ export type RunNodeParams = {
   verifyTimeoutMs?: number
   // 动作总时限；不传就用 120 秒（规格 execution.action_timeout_ms；第五轮审计 P2-1）
   actionTimeoutMs?: number
+  // 宿主建会话的上限；不传就用 30 秒。spawn 挂住时不能把节点永远留在 dispatched。
+  startupTimeoutMs?: number
 }
 
 // 租约 30 秒、心跳 10 秒：与门记录 G2.md 的本批定值一致（第四轮审计 M4）
 export const DEFAULT_LEASE_TTL_MS = 30_000
 export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 10_000
 export const DEFAULT_ACTION_TIMEOUT_MS = 120_000
+export const DEFAULT_STARTUP_TIMEOUT_MS = 30_000
 
 export type RunNodeResult = {
   node_run_id: string
@@ -105,6 +108,16 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
   }
 }
 
+// 启动阶段的超时：spawn 可能永远不回来，不能让 runNode 无界等待（复审 P1 残留）。
+function withTimeout<T>(task: Promise<T>, timeoutMs: number, onTimeout: () => OrchError): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { reject(onTimeout()) }, timeoutMs)
+    timer.unref?.()
+  })
+  return Promise.race([task, expired]).finally(() => { if (timer) clearTimeout(timer) })
+}
+
 // 从 node_run 反查 run 绑定的工作流版本，再取该节点定义里的工具清单
 function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
   const row = deps.db.raw.prepare(
@@ -143,13 +156,19 @@ async function runNodeActions(
     // spawn 回包失败时也可能已经在宿主建了会话；放进 try，外层 catch 至少能 markBlocked，
     // finally 再按 agentId 做有界释放，不能把节点留在 dispatched。
     try {
-      agent = await createExecutorAgent(deps.agents, deps.registry, {
-        nodeRunId: p.nodeRunId,
-        attempt: p.attempt,
-        input: p.input,
-        outputSchema: p.outputSchema,
-        toolPolicy: policy,
-      })
+      agent = await withTimeout(
+        createExecutorAgent(deps.agents, deps.registry, {
+          nodeRunId: p.nodeRunId,
+          attempt: p.attempt,
+          input: p.input,
+          outputSchema: p.outputSchema,
+          toolPolicy: policy,
+        }),
+        p.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
+        () => new OrchError('OPERATION_TIMEOUT', 'Agent 启动超过上限', {
+          nodeRunId: p.nodeRunId, attempt: p.attempt, startupTimeoutMs: p.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
+        }),
+      )
     } catch (err) {
       // spawn 回包失败时宿主可能已经建了会话，但我们拿不到 agentId：不能声称已停，
       // 也不能留在 dispatched。按规格落 startup_unknown，交给 sweep/人工核副作用。
@@ -305,20 +324,20 @@ async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRu
   if (!idleOk || !stateOk) return
   // 不能拿 0/0 绕过 ACK 滞后保护：按本 attempt 的持久确认位与已落账最大桥序号真实取值。
   // 若桥事件位仍领先确认位，dispose 会被 BRIDGE_ACK_LAG 拒绝，这正是我们要保留的语义。
-  const ack = deps.db.raw.prepare(
-    'SELECT last_persisted_ack_seq AS n FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
-  ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
-  const last = deps.db.raw.prepare(
-    'SELECT COALESCE(MAX(bridge_seq), 0) AS n FROM bridge_event_receipts WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
-  ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
   try {
+    const ack = deps.db.raw.prepare(
+      'SELECT last_persisted_ack_seq AS n FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+    ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
+    const last = deps.db.raw.prepare(
+      'SELECT COALESCE(MAX(bridge_seq), 0) AS n FROM bridge_event_receipts WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
+    ).get(nodeRunId, attempt, agentId) as { n: number } | undefined
     await deps.bridge.dispose({
       executorAgentId: agentId,
       serviceAckSeq: Number(ack?.n ?? 0),
       bridgeLastSeq: Number(last?.n ?? 0),
     })
   } catch {
-    // 释放失败不覆盖节点上的原始错误
+    // 清理是尽力而为：ACK 滞后、桥不可用或查询失败时保留会话，且不覆盖节点上的原始错误
   }
 }
 

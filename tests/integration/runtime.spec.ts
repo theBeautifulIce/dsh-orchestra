@@ -90,6 +90,24 @@ describe('生产路径跑通单节点', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('spawn 挂住：启动超时必须落 startup_unknown，不能永远停在 dispatched', async () => {
+    const { dir, orchestra, release, registry, bridge, runner } = await setup([])
+    const hanging: HostAgentFactory = { create: () => new Promise<never>(() => {}) }
+    const began = Date.now()
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents: hanging, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000, startupTimeoutMs: 50,
+      },
+    )).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
+    expect(Date.now() - began).toBeLessThan(1000)
+    expect(nodeRow(orchestra.db).status).toBe('startup_unknown')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('stop 未确认：节点不得先落 done，必须停在 blocked_post', async () => {
     const { dir, orchestra, release, registry, agents, runner } = await setup([{ tool: 'ro.echo' }])
     const base = fakeAgentBridge({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })

@@ -87,12 +87,62 @@ describe('AgentLifecycle 故障注入', () => {
     h.cleanup()
   })
 
-  it('B12 stop 失败后再次调用不重发取消/释放', async () => {
-    let disposeCalls = 0
+  it('B13 订阅挂住：动作超时必须打穿 subscribe，不能永远停在 started', async () => {
+    const calls: string[] = []
     const transport: BridgeTransport = {
       request: async (method) => {
+        calls.push(method)
+        if (method === 'executor.subscribe') return new Promise<never>(() => {}) as never
         if (method === 'executor.cancel') return 'interrupted' as never
         if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        return undefined as never
+      },
+      listen: () => { throw new Error('不该 listen') },
+    }
+    const h = harness(transport, undefined, 50)
+    const began = Date.now()
+    await expect(h.lifecycle.run(new AbortController().signal)).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
+    expect(Date.now() - began).toBeLessThan(1000)
+    await h.lifecycle.stop()
+    expect(calls).toContain('executor.cancel')
+    h.cleanup()
+  })
+
+  it('B14 发送挂住：动作超时必须打穿 send，仍要 cancel/dispose', async () => {
+    const calls: string[] = []
+    const transport: BridgeTransport = {
+      request: async (method) => {
+        calls.push(method)
+        if (method === 'executor.subscribe') return { subscribed: true, fromSeq: 0, lastSeq: 0 } as never
+        if (method === 'executor.send') return new Promise<never>(() => {}) as never
+        if (method === 'executor.cancel') return 'interrupted' as never
+        if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        return undefined as never
+      },
+      listen: (_params, signal) => (async function* () {
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      })(),
+    }
+    const h = harness(transport, undefined, 50)
+    const began = Date.now()
+    await expect(h.lifecycle.run(new AbortController().signal)).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
+    expect(Date.now() - began).toBeLessThan(1000)
+    await h.lifecycle.stop()
+    expect(calls).toContain('executor.cancel')
+    expect(calls).toContain('executor.dispose')
+    h.cleanup()
+  })
+
+  it('B12 stop 失败后再次调用不重发取消/释放', async () => {
+    let disposeCalls = 0
+    let cancelCalls = 0
+    let idleCalls = 0
+    const transport: BridgeTransport = {
+      request: async (method) => {
+        if (method === 'executor.cancel') { cancelCalls += 1; return 'interrupted' as never }
+        if (method === 'executor.whenIdle') { idleCalls += 1; return { idle: true, timedOut: false } as never }
         if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
         if (method === 'executor.dispose') { disposeCalls += 1; throw new Error('transient dispose failure') }
         return undefined as never
@@ -102,6 +152,8 @@ describe('AgentLifecycle 故障注入', () => {
     const h = harness(transport)
     await expect(h.lifecycle.stop()).rejects.toThrow('transient dispose failure')
     await expect(h.lifecycle.stop()).rejects.toThrow('transient dispose failure')
+    expect(cancelCalls).toBe(1)
+    expect(idleCalls).toBe(1)
     expect(disposeCalls).toBe(1)
     h.cleanup()
   })
