@@ -1,5 +1,9 @@
 # S2 独立审计 · 第 48 轮（R4 workflow_id + version 复合身份）
 
+门：G2
+
+候选提交：41a450f2fc6345345f7654ebe20daeebe58b37de
+
 - 候选：`41a450f2fc6345345f7654ebe20daeebe58b37de`（`feat(r4): scope workflow versions by workflow id`，父提交 `7776df8`）
 - 审计范围：G2 门 20 项必过、R4 对生产链路/证据/桥闭环的影响、G1/G2 证据字节一致性、预签态门记录
 - 审计克隆：`D:\aboutAI\dsh-orchestra\tmp\audit-s2-r48`（HEAD 同候选，`git status --porcelain` 为空）
