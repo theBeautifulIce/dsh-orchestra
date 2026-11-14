@@ -1231,3 +1231,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 测试 `tests/integration/sweep.spec.ts` 增 3 例：桥断挂起与幂等、startup_unknown 到点转未知态且不重复、断链节点整轮跳过（临时拆只追加触发器模拟库外破坏）。
 - 验证：typecheck 0；定向 12/12；全量 **52 files 716 passed | 1 skipped**。
 - 缺口：`bridgeMissing` 尚无生产运行时信号源；executor 失联、动作到期、回执过期三类扫描未接；启动锁仅由 SQLite `BEGIN IMMEDIATE` 提供，未加显式 advisory lock；证据待 S3 收口统一重生成。
+
+### 11.75 S3 Task 14：G3 故障注入与 61 条迁移用例（2026-11-14 19:43）
+
+- `scripts/fault-inject.ts` 增 `G-06`/`G-12`/`G-16`：工具结果丢失后同 callId 重试只重发结果、审批双击同 revision 只赢一笔、父 run 取消向子 run 传播且跳过不可逆节点。
+- 修 `injectQueued` 使用独立 `node_id=n2`，避免 014 的 `(run_id,node_id,attempt)` 唯一索引与种子 `nr1/n1` 撞车；G-03/G-04/G-07 同步修好。
+- 新增 `tests/integration/g3-faults.spec.ts` 6 例：G-01/G-02/G-04/G-06/G-12/G-16 各自调用 `runCase` 并断言恢复后的账本对账文本。
+- 新增 `tests/integration/migration-cases.spec.ts` 62 例：61 个 id 全覆盖、58 条状态规则逐条正例、错误触发/目标拒绝、M-01/M-58 建行规则、M-56 挂起闸、终态源无 allowTerminal 拒绝。
+- 验证：typecheck 0；G3 定向 68/68；全量待跑。
+- 缺口：`docs/gates/G3.md` 与 `GATE_SPECS.G3` 尚未落，等 Task 15 完成后按第 51 轮独立审计再签；六份 G3 证据尚未写盘。

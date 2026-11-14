@@ -26,11 +26,14 @@ import { bumpEpoch } from '../src/infra/db/open.ts'
 import { sweepNow, type RuntimeDeps } from '../src/service/commands/runtime.ts'
 import { startServer } from '../src/service/server.ts'
 import { ToolRegistry, ReadOnlyToolRunner, type HostRunner } from '../src/executor/tools.ts'
+import { EvidenceCollector } from '../src/executor/evidence-collector.ts'
+import { openDecision, resolveDecision } from '../src/service/commands/decisions.ts'
+import { propagateRunCancellation } from '../src/service/commands/subworkflow.ts'
 import { runNode } from '../src/executor/run-node.ts'
 import type { HostAgentFactory } from '../src/executor/session.ts'
 import type { Db } from '../src/infra/sqlite/driver.ts'
 
-export type InjectionCase = 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-07' | 'G-08' | 'G-09' | 'G-14' | 'G-15'
+export type InjectionCase = 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-06' | 'G-07' | 'G-08' | 'G-09' | 'G-12' | 'G-14' | 'G-15' | 'G-16'
   | 'ev-g2-01' | 'ev-g2-02' | 'ev-g2-03' | 'ev-g2-04' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
   | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11' | 'ev-g2-12' | 'ev-g2-13' | 'ev-g2-14' | 'ev-g2-15'
 
@@ -383,10 +386,10 @@ async function caseG15(): Promise<InjectionResult> {
 }
 
 // S2 注入前的统一夹具：一条 queued 的 agent 节点，跑完租约在 dispatched
-function injectQueued(db: Db, nodeRunId: string, now = '2026-11-13T03:00:00.000Z'): number {
+function injectQueued(db: Db, nodeRunId: string, now = '2026-11-13T03:00:00.000Z', nodeId = 'n2'): number {
   inTx(db, (tx) => {
     tx.run('INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation, rearm_generation, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [nodeRunId, 'r1', 'n1', 9, 'agent', 1, 'queued', 0, 0, 0, now, now])
+      [nodeRunId, 'r1', nodeId, 9, 'agent', 1, 'queued', 0, 0, 0, now, now])
   })
   inTx(db, (tx) => acquireLease(tx, TEST_SECRET, { nodeRunId, ownerEpoch: 1, leaseTtlMs: 30000, now }))
   const row = db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId) as { revision: number }
@@ -403,7 +406,7 @@ const strongReport = (nodeRunId: string, reportId: string, status: string) => ({
 const NODE_ROW = (db: Db, id: string) => db.raw.prepare('SELECT status, action_generation, attempt, fence_state, cancel_result, lease_expires_at FROM node_runs WHERE node_run_id = ?').get(id)
 
 async function caseG03(): Promise<InjectionResult> {
-  const catalog = catalogFor(['n1'])
+  const catalog = catalogFor(['n1', 'n2'])
   const { file, db } = freshLedger(); seed(db); bindRunVersion(db, catalog)
   const before = dumpState(file)
   injectQueued(db, 'nrun_g03')
@@ -426,7 +429,7 @@ async function caseG03(): Promise<InjectionResult> {
 }
 
 async function caseG04(): Promise<InjectionResult> {
-  const catalog = catalogFor(['n1'])
+  const catalog = catalogFor(['n1', 'n2'])
   const { file, db } = freshLedger(); seed(db); bindRunVersion(db, catalog)
   const before = dumpState(file)
   injectQueued(db, 'nrun_g04')
@@ -450,7 +453,89 @@ async function caseG04(): Promise<InjectionResult> {
   }
 }
 
-// G-05 走真实生产路径：工具在飞时取消，围栏只立一次，围栏期间的上报排队，宽限到点撤围栏并挑出队头
+// G-06：工具已执行、结果没回 Agent；Agent 用同一 callId 重试时只重发结果，不重复执行工具。
+async function caseG06(): Promise<InjectionResult> {
+  const { dir, file, db } = freshLedger(); seed(db)
+  const before = dumpState(file)
+  const registry = new ToolRegistry()
+  registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
+  let executions = 0
+  const host: HostRunner = {
+    readonlyAvailable: () => true,
+    run: async () => { executions += 1; return { exitCode: 0, stdout: 'ok\n', stderr: '' } },
+  }
+  const collector = new EvidenceCollector({
+    db, secret: TEST_SECRET, registry, runner: new ReadOnlyToolRunner(registry, host, dir),
+    policy: { allow: ['ro.echo'], deny: [], declaredPolicy: 'pure' }, allowedTools: ['ro.echo'],
+    nodeRunId: 'nr1', attempt: 1, executorAgentId: 'agent_1', nowAt: () => '2026-11-13T03:00:00.000Z',
+  })
+  const call = { callId: 'call_g06', tool: 'ro.echo', args: [], cwd: '.', timeoutMs: 1000 }
+  const first = await collector.collect(call)
+  // 第一次 toolResult 回送在网络上丢了；Agent 重连后用同一 callId 重试。
+  const second = await collector.collect(call)
+  const outbox = db.raw.prepare('SELECT status, result_json FROM bridge_tool_outbox WHERE node_run_id = ? AND attempt = ? AND call_id = ?')
+    .get('nr1', 1, 'call_g06') as { status: string; result_json: string }
+  db.raw.close()
+  return {
+    case: 'G-06',
+    params: { db: file, call_id: 'call_g06', tool: 'ro.echo', retry_after_lost_result: true },
+    before, after: dumpState(file),
+    reconcile: '宿主实际执行次数=' + String(executions)
+      + '；两次回传 exitCode=' + String(first.exitCode) + '/' + String(second.exitCode)
+      + '；outbox=' + outbox.status,
+  }
+}
+
+// G-12：人工审批双击；同一 revision 只有一笔能收口，另一笔必须冲突回滚。
+function caseG12(): InjectionResult {
+  const { file, db } = freshLedger(); seed(db)
+  const now = '2026-11-13T03:00:00.000Z'
+  const before = dumpState(file)
+  inTx(db, (tx) => openDecision(tx, {
+    decisionId: 'dec_g12', runId: 'r1', nodeRunId: null, kind: 'pre_execution', createdAt: now,
+  }))
+  const approve = () => inTx(db, (tx) => resolveDecision(tx, {
+    decisionId: 'dec_g12', revision: 1, resolution: 'approved', now,
+  }))
+  approve()
+  let code = ''
+  try { approve() } catch (err) {
+    code = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
+  }
+  const row = db.raw.prepare('SELECT status, revision, closed_reason FROM decisions WHERE decision_id = ?').get('dec_g12')
+  db.raw.close()
+  return {
+    case: 'G-12',
+    params: { db: file, decision_id: 'dec_g12', clicks: 2, same_revision: 1 },
+    before, after: dumpState(file),
+    reconcile: '第二次审批被拒码=' + code + '；决策行=' + JSON.stringify(row),
+  }
+}
+
+// G-16：父 run 取消时，子 run 里可补偿的进行中节点被取消，不可逆节点保留待核验。
+function caseG16(): InjectionResult {
+  const { file, db } = freshLedger(); seed(db)
+  const now = '2026-11-13T03:00:00.000Z'
+  inTx(db, (tx) => {
+    tx.run("INSERT INTO runs (run_id, task_id, status, revision, parent_run_id, root_run_id, subworkflow_depth, created_at, updated_at) VALUES ('r2', 't1', 'running', 1, 'r1', 'r1', 1, ?, ?)", [now, now])
+    tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('nr_g16a', 'r2', 'n2', 2, 'agent', 1, 'started', 1, 'compensable', ?, ?)", [now, now])
+    tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('nr_g16b', 'r2', 'n3', 3, 'agent', 1, 'started', 1, 'irreversible', ?, ?)", [now, now])
+  })
+  const before = dumpState(file)
+  const result = inTx(db, (tx) => propagateRunCancellation(tx, TEST_SECRET, {
+    runId: 'r1', cancelResult: 'interrupted', now, graceMs: 1000,
+  }))
+  const childRun = db.raw.prepare("SELECT cancel_result FROM runs WHERE run_id = 'r2'").get()
+  const nodes = db.raw.prepare("SELECT node_run_id, status, cancel_result FROM node_runs WHERE node_run_id IN ('nr_g16a','nr_g16b') ORDER BY node_run_id").all()
+  db.raw.close()
+  return {
+    case: 'G-16',
+    params: { db: file, parent_run_id: 'r1', child_run_id: 'r2', grace_ms: 1000 },
+    before, after: dumpState(file),
+    reconcile: '取消传播=' + JSON.stringify(result) + '；子 run=' + JSON.stringify(childRun) + '；子节点=' + JSON.stringify(nodes),
+  }
+}
+
 async function caseG05(): Promise<InjectionResult> {
   const dir = mkdtempSync(join(tmpdir(), 'orch-g05-'))
   const file = join(dir, 'orchestra.db')
@@ -1388,11 +1473,14 @@ export async function runCase(name: InjectionCase): Promise<InjectionResult> {
     case 'G-03': return caseG03()
     case 'G-04': return caseG04()
     case 'G-05': return caseG05()
+    case 'G-06': return caseG06()
     case 'G-07': return caseG07()
     case 'G-08': return caseG08()
     case 'G-09': return caseG09()
+    case 'G-12': return caseG12()
     case 'G-14': return caseG14()
     case 'G-15': return caseG15()
+    case 'G-16': return caseG16()
     case 'ev-g2-01': return caseEvG201()
     case 'ev-g2-05': return caseEvG205()
     case 'ev-g2-06': return caseEvG206()
