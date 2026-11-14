@@ -46,6 +46,10 @@ const PATCH_COLUMNS = new Set([
   'wait_deadline_at',
   'wait_deadline_boot_id',
   'wait_deadline_monotonic_ns',
+  // 取消事实：状态迁移与取消结果写在同一笔 CAS 里，不能再另起一条裸 UPDATE
+  'cancel_requested_at',
+  'cancel_result',
+  'fence_armed_at',
 ])
 
 export type TransitionRequest = {
@@ -54,6 +58,8 @@ export type TransitionRequest = {
   to: NodeStatus
   attempt: number
   now: string
+  // 调用方读到的 revision；给了就必须仍然一致，否则视为并发过期
+  expectedRevision?: number
   actionGeneration?: number
   // 重新武装类迁移必须带读到的旧 Gr，成功后同一笔 CAS 里 Gr+1
   rearmGeneration?: number
@@ -122,6 +128,10 @@ export function applyTransition(tx: Tx, req: TransitionRequest): void {
   ]
   const whereBinds: unknown[] = [req.nodeRunId, ...req.from, req.attempt]
   if (!req.allowHung) whereSql.push('hang_reason IS NULL')
+  if (req.expectedRevision !== undefined) {
+    whereSql.push('revision = ?')
+    whereBinds.push(req.expectedRevision)
+  }
   if (req.actionGeneration !== undefined) {
     whereSql.push('action_generation = ?')
     whereBinds.push(req.actionGeneration)

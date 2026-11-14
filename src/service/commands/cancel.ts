@@ -52,12 +52,19 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   }
   // 还没派发就取消：直接作废，不进围栏、不产生新 attempt（审计 N-08）
   if (row.status === 'queued' || row.status === 'leased') {
-    runCas(
-      tx,
-      "UPDATE node_runs SET status = 'superseded', cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN ('queued', 'leased')",
-      [params.now, params.cancelResult, params.now, params.nodeRunId, params.attempt, params.revision],
-      { rows: 1, what: 'cancel-before-dispatch' },
-    )
+    applyTransition(tx, {
+      nodeRunId: params.nodeRunId,
+      from: ['queued', 'leased'],
+      to: 'superseded',
+      attempt: params.attempt,
+      now: params.now,
+      expectedRevision: params.revision,
+      allowHung: true,
+      patch: {
+        cancel_requested_at: params.now,
+        cancel_result: params.cancelResult,
+      },
+    })
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_before_dispatch', {
       cancel_result: params.cancelResult,
       from: row.status,
@@ -74,12 +81,30 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       ? deadlineFromSample(params.clock, params.graceMs)
       : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + params.graceMs }
     const graceUntil = new Date(grace.wallClockMs).toISOString()
-    runCas(
-      tx,
-      'UPDATE node_runs SET status = ?, fence_state = ?, fence_armed_at = ?, fence_grace_until = ?, fence_grace_boot_id = ?, fence_grace_monotonic_ns = ?, cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
-      ['timing_out', 'armed', params.now, graceUntil, grace.bootId, grace.monotonicNs, params.now, 'interrupted', params.now, params.nodeRunId, params.attempt, params.revision, ...CANCELABLE],
-      { rows: 1, what: 'cancel-interrupted' },
-    )
+    applyTransition(tx, {
+      nodeRunId: params.nodeRunId,
+      from: CANCELABLE,
+      to: 'timing_out',
+      attempt: params.attempt,
+      now: params.now,
+      expectedRevision: params.revision,
+      allowHung: true,
+      context: {
+        hasToolCall: false,
+        cancelResult: 'interrupted',
+        hangReason: null,
+        sideEffectVerifiedNone: false,
+      },
+      patch: {
+        fence_state: 'armed',
+        fence_armed_at: params.now,
+        fence_grace_until: graceUntil,
+        fence_grace_boot_id: grace.bootId,
+        fence_grace_monotonic_ns: grace.monotonicNs,
+        cancel_requested_at: params.now,
+        cancel_result: 'interrupted',
+      },
+    })
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'fence_armed', {
       cancel_result: 'interrupted',
       grace_until: graceUntil,
@@ -104,12 +129,30 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline, fence_pending: true })
       return { cancel_result: 'not_interruptible', next_status: row.status, fence_state: 'armed', reason: 'fence_pending' }
     }
-    runCas(
-      tx,
-      'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, revision = revision + 1, rearm_generation = rearm_generation + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND rearm_generation = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
-      ['stopping', params.now, 'not_interruptible', deadline, extended.bootId, extended.monotonicNs, params.now, params.nodeRunId, params.attempt, params.revision, row.rearm_generation, ...CANCELABLE],
-      { rows: 1, what: 'cancel-not-interruptible' },
-    )
+    applyTransition(tx, {
+      nodeRunId: params.nodeRunId,
+      from: CANCELABLE,
+      to: 'stopping',
+      attempt: params.attempt,
+      now: params.now,
+      expectedRevision: params.revision,
+      allowHung: true,
+      bumpRearm: true,
+      rearmGeneration: row.rearm_generation,
+      context: {
+        hasToolCall: false,
+        cancelResult: 'not_interruptible',
+        hangReason: null,
+        sideEffectVerifiedNone: false,
+      },
+      patch: {
+        cancel_requested_at: params.now,
+        cancel_result: 'not_interruptible',
+        deadline_at: deadline,
+        deadline_boot_id: extended.bootId,
+        deadline_monotonic_ns: extended.monotonicNs,
+      },
+    })
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline })
     return { cancel_result: 'not_interruptible', next_status: 'stopping', fence_state: null, reason: 'not_interruptible' }
   }
@@ -146,12 +189,27 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_unknown', { fence_pending: true })
     return { cancel_result: 'unknown', next_status: row.status, fence_state: 'armed', reason: 'fence_pending' }
   }
-  runCas(
-    tx,
-    'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, rearm_generation = rearm_generation + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND rearm_generation = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
-    ['stopping', params.now, 'unknown', params.now, params.nodeRunId, params.attempt, params.revision, row.rearm_generation, ...CANCELABLE],
-    { rows: 1, what: 'cancel-unknown' },
-  )
+  applyTransition(tx, {
+    nodeRunId: params.nodeRunId,
+    from: CANCELABLE,
+    to: 'stopping',
+    attempt: params.attempt,
+    now: params.now,
+    expectedRevision: params.revision,
+    allowHung: true,
+    bumpRearm: true,
+    rearmGeneration: row.rearm_generation,
+    context: {
+      hasToolCall: false,
+      cancelResult: 'unknown',
+      hangReason: null,
+      sideEffectVerifiedNone: false,
+    },
+    patch: {
+      cancel_requested_at: params.now,
+      cancel_result: 'unknown',
+    },
+  })
   appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_unknown', {})
   return { cancel_result: 'unknown', next_status: 'stopping', fence_state: null, reason: 'unknown' }
 }

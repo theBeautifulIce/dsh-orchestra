@@ -88,6 +88,7 @@ export type TransitionTrigger =
   | 'abandon-ack-rejected'
   | 'confirm-stopped'
   | 'pre-approval'
+  | 'cancel-before-dispatch'
   | 'approval-granted'
   | 'approval-rejected'
   | 'post-verification'
@@ -157,11 +158,11 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-20', from: ['started'], to: ['waiting'], trigger: 'wait-entered' },
   { id: 'M-21', from: ['waiting'], to: ['dispatched'], trigger: 'wait-event' },
   { id: 'M-22', from: ['waiting'], to: ['timeout'], trigger: 'wait-timeout' },
-  { id: 'M-23', from: ['started'], to: ['timing_out'], trigger: 'action-timeout-interrupted', requires: (c) => c.cancelResult === 'interrupted' },
+  { id: 'M-23', from: ['dispatched', 'started', 'waiting', 'verifying', 'stopping', 'timing_out'], to: ['timing_out'], trigger: 'action-timeout-interrupted', requires: (c) => c.cancelResult === 'interrupted' },
   { id: 'M-24', from: ['timing_out'], to: ['timeout'], trigger: 'timing-out-pure' },
   { id: 'M-25', from: ['timing_out'], to: ['indeterminate_side_effect'], trigger: 'timing-out-unknown' },
   { id: 'M-26', from: ['timing_out'], to: ['stopping'], trigger: 'timing-out-still-running' },
-  { id: 'M-27', from: ['dispatched', 'started'], to: ['stopping'], trigger: 'cannot-stop', requires: (c) => c.cancelResult === 'not_interruptible' || c.cancelResult === 'unknown' },
+  { id: 'M-27', from: ['dispatched', 'started', 'waiting', 'verifying', 'stopping', 'timing_out'], to: ['stopping'], trigger: 'cannot-stop', requires: (c) => c.cancelResult === 'not_interruptible' || c.cancelResult === 'unknown' },
   { id: 'M-28', from: ['dispatched', 'started'], to: ['timeout'], trigger: 'interrupted-no-tool', requires: (c) => !c.hasToolCall && c.cancelResult === 'interrupted' },
   { id: 'M-29', from: ['dispatched', 'started'], to: ['done', 'failed'], trigger: 'already-stopped-verifiable', requires: (c) => c.cancelResult === 'already_stopped' },
   { id: 'M-30', from: ['dispatched', 'started'], to: ['indeterminate_side_effect'], trigger: 'already-stopped-unknown', requires: (c) => c.cancelResult === 'already_stopped' },
@@ -194,6 +195,8 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-59', from: ['startup_unknown', 'indeterminate_side_effect'], to: ['done', 'failed'], trigger: 'uphold-report', allowHung: true },
   { id: 'M-60', from: ['startup_unknown', 'indeterminate_side_effect'], to: ['superseded', 'failed'], trigger: 'uphold-decision', allowHung: true },
   { id: 'M-61', from: ['startup_unknown'], to: ['stopping'], trigger: 'confirm-started-with-tool', requires: (c) => c.hasToolCall },
+  // 未派发就取消：不立围栏、不产生新 attempt，直接作废；补上此前只在取消 CAS 里放行的缺口
+  { id: 'M-62', from: ['queued', 'leased'], to: ['superseded'], trigger: 'cancel-before-dispatch' },
 ]
 
 // 唯一迁移表：canTransition / ALLOWED_TRANSITIONS 都从 TRANSITIONS 派生，避免两套表分叉。
@@ -261,7 +264,7 @@ export const MIGRATION_CASE_IDS = [
   'M-31', 'M-32', 'M-33', 'M-34', 'M-35', 'M-36', 'M-37', 'M-38', 'M-39', 'M-40',
   'M-41', 'M-42', 'M-43', 'M-44', 'M-45', 'M-46', 'M-47', 'M-48', 'M-49', 'M-50',
   'M-51', 'M-52', 'M-53', 'M-54', 'M-55', 'M-56', 'M-57', 'M-58', 'M-59', 'M-60',
-  'M-61',
+  'M-61', 'M-62',
 ] as const
 
 export function allows(rule: TransitionRule, ctx: TransitionContext): boolean {
