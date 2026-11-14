@@ -1046,3 +1046,29 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 证据重生成：5 份 G2 证据与 `G1/G-14` 按新事件序列/迁移 010 重生成；另发现 `G1/ev-migrate` 指向的 `tests/integration/migrate.spec.ts` 在 R5-B 已变，G1 表哈希一并更新。
 - 验证：typecheck 0；6 文件桥闭环 **70 passed**；全量 41 文件 **607 passed | 1 skipped**；build 成功（ESM 149.00kB / gzip 37.18kB、d.ts 14.00kB）；gate 定向 183 passed | 1 skipped。
 - 状态：G2 仍绑旧审计，pre-sign gate-check 预期失败；本轮候选只为第 46 轮 S1/S2 复审，审计 pass 后再按 G1→G2 重签。
+
+### 11.58 第 46 轮 S1 PASS / S2 FAIL 与 G2-03 证据时钟修复（2026-11-14 17:51，待第 47 轮复审）
+
+- S1 对 `9cefb87` 判 G1 **PASS**（13/13，P0/P1/P2=0），全量连跑 5 次、桥闭环 4 次均稳定；G2 交叉核查另提两条 P2：G2.md 桥闭环 68→70、ev-g2-16 的 B10 落点漏 `bridge-ledger.spec.ts`。
+- S2 对同候选判 G2 **FAIL**（P0=0/P1=1/P2=3）：P1 是 `ev-g2-03` 演示“迟到上报被接受”（accepted:true），与 G2-03“租约过期迟到上报被拒”相反；根因是 `ServerDeps.now` 已存在但 `scripts/fault-inject.ts` 的 `bootHttp()` 未注入时钟，租约与上报实际只差约 5ms。
+- 修复提交 `c17a0c7 fix(r5e): drive lease expiry from server clock and align G2 evidence`（4 files，+17/−13，已推）：
+  - `HttpBootOpts` 新增 `now?: () => string`，`bootHttp()` 条件式传给 `startServer`。
+  - `caseEvG203` 用可变服务端时钟从 `EV_NOW` 推到 `+5000ms`，租约 TTL 1000ms 后上报；重生成后 `HTTP=409 LEASE_EXPIRED`、`report_applied=0`、节点仍 `dispatched`。
+  - `docs/gates/evidence/G2/ev-g2-03.md` LF SHA-256=`5929f803fadbbeabe0a9f9b5b0b65d2d52b429017eaceab56388f165d83d29be`。
+  - `docs/gates/G2.md` 修 70 项与真实测试路径；`ev-g2-03`/`ev-g2-16` 两处哈希同步；`ev-g2-16` 收窄“真实工具进程”表述并补 B10 的 `bridge-ledger.spec.ts` 落点，新 LF SHA-256=`4414fae1c349b9e3acadaebc9c63a3e63968565705561e02651c23755537e278`。
+- 验证：typecheck 0；全量 41 文件 **607 passed | 1 skipped**；build ESM 149.00kB / gzip 37.18kB、d.ts 14.00kB；gate 定向 183 passed | 1 skipped；`check-evidence-repro.ts` 提交后 25/25 全绿。
+- 已派 `s1-audit-r47`（G1）与 `s2-audit-r47`（G2），clone `tmp/audit-s1-r47`、`tmp/audit-s2-r47`，候选均 `c17a0c7`；要求全量 3 次、桥闭环 2/4 次、证据复现、build，报告写 round47，不改主树、不签门。
+- 状态：G1/G2 正式门仍绑旧候选；两份 round47 报告都 PASS 后，先提交报告，再按 G1→G2 重签并双门 gate-check exit 0。
+
+### 11.59 第 47 轮双审计 PASS 与 G1/G2 重签（2026-11-14 18:04）
+
+- `s1-audit-r47` 对 `c17a0c7` 判 G1 **pass**：13/13，P0/P1/P2=0；全量连跑 3 次 607 passed | 1 skipped，桥闭环 2 次 70 passed，证据复现 25/25，build 0；报告 `docs/audits/S1-independent-audit-round47.md`，LF SHA-256=`5941e387099e8f86b4f9990e61ca225fb966df25e3706610895c67593cae6d4d`。
+- `s2-audit-r47` 对同候选判 G2 **pass**：20/20，P0/P1/P2=0；全量 3 次 607，桥闭环 4 次 70，必过路径 124 tests，证据复现 25/25，20 份 G2 证据哈希全一致；报告 `docs/audits/S2-independent-audit-round47.md`。
+- 报告已提交 `abcb4f4 docs(audit): record round47 independent audit passes` 并推送。
+- G1 重签：`docs/gates/G1.md` 的 `audit_round=47`、`audit_report=docs/audits/S1-independent-audit-round47.md`，提交 `0b0d924` 后跑 `node --no-warnings scripts/sign-gate.ts docs/gates/G1.md`，再提交 `854bbf9`。artifact_hash=`a9c19a59e88807f402f7f3c185744a7bbb02f0b4c4ab1b3118029f3b76606b6b`，candidate=`5c1f4c7249df…`，13 份证据。
+- G2 重签：同法改 `audit_round=47`、`audit_report=docs/audits/S2-independent-audit-round47.md`，提交 `ff7676a` 后签名并提交 `f6bddb4`。artifact_hash=`7e9e1c316464…`，candidate=`669b5abc610f…`，20 份证据；`previous_artifact_hash` 取自已提交的 G1。
+- `node --no-warnings scripts/gate-check.ts docs/gates/G1.md` → exit 0（13 项必过、13 份证据哈希复核）；G2 → exit 0（20 项必过、20 份证据哈希复核）。
+- 签后复跑：`pnpm test` 41 files **607 passed | 1 skipped**，exit 0；`pnpm typecheck` exit 0；`pnpm build` exit 0（ESM 149.00kB / gzip 37.18kB）；`check-evidence-repro.ts` 25/25 exit 0。
+- 说明：sign-gate 在候选清单里会探测历史已删除测试路径，stderr 出现若干 `fatal: path ... does not exist`，但退出码 0，随后门检查与全量均通过；不是签名失败。
+- 当前正式门：G1 audit_round=47、G2 audit_round=47，双门 exit 0。
+- 遗留：R3 链头 DELETE/同事务严格 seq/prev_hash、工具真实耗时；R4 workflow_id+version 复合身份；P2-04 审计证据引用；S3 九节点与状态机未开。
