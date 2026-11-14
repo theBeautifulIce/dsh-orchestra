@@ -201,6 +201,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/executor/agent-lifecycle.ts` | 单节点 Agent 生命周期：订阅/监听/指令/toolResult/结构化报告/取消复核 |
 | `src/infra/sqlite/migrations/006_tool_executions_tool_seq.sql` | 工具执行唯一性：`tool_executions` 主键 `node_run_id+attempt+tool_seq`，`execution_id NOT NULL UNIQUE` |
 | `src/infra/sqlite/migrations/011_workflow_version_identity.sql` | 工作流版本复合身份：`workflow_versions` 主键改 `(workflow_id, version)`，旧数据归 default |
+| `src/infra/sqlite/migrations/012_node_run_chain_guard.sql` | 节点事件链数据库级守卫：事件接链头、链头只 +1、首条对应、链头禁删 |
 | `src/infra/sqlite/migrations/008_bridge_event_receipts.sql` | 桥事件收据与按 `(node_run_id, attempt, executor_agent_id)` 隔离的持久确认游标 |
 | `src/infra/sqlite/migrations/009_bridge_tool_outbox.sql` | 工具调用 outbox：pending/completed/failed，防重复执行与结果丢失 |
 | `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |

@@ -1,6 +1,7 @@
 // 账本唯一写入口：events 追加 + node_run_events 链追加、读取与校验（服务内部用，桥与面板不许直连）
 import { type Tx } from '../sqlite/driver.ts'
 import { chainHash, ZERO_HASH, verifyChain, type ChainBreak, type ChainRow } from '../../core/hash-chain.ts'
+import { OrchError } from '../../core/errors.ts'
 import { eventId } from '../../core/ids.ts'
 
 export type EventInput = {
@@ -43,11 +44,18 @@ export function appendNodeRunEvent(tx: Tx, secret: string, nodeRunIdValue: strin
     'SELECT seq, hash FROM node_run_events WHERE node_run_id = ? ORDER BY seq DESC LIMIT 1', [nodeRunIdValue])
   // 链头是「这条链记到哪了」的权威：序号与上一条哈希都从链头取。
   // 这样链被截断过之后再追加，序号不会倒退、缺口也不会被新事件盖住。
-  // 链头没有（老库、或链头被人删了）就退回事件行本身，行为跟以前一样。
-  const seq = head ? head.last_seq + 1 : (last?.seq ?? 0) + 1
-  const prev = head ? head.last_hash : (last?.hash ?? ZERO_HASH)
-  // 计数在落库前取：插完再数就把新事件算两遍了
-  const eventCount = head ? head.event_count + 1 : chainRowCount(tx, nodeRunIdValue) + 1
+  // 链头没有但账本里已经有事件：这是被删过链头的坏账，不能再凭事件行猜着往下写，
+  // 否则链头缺失会被新事件顺手补上，verifyLedger 的缺口就永远查不出来。
+  if (!head && last) {
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '链头缺失但账本里已有事件，不能继续追加', {
+      node_run_id: nodeRunIdValue,
+      last_seq: last.seq,
+    })
+  }
+  const seq = head ? head.last_seq + 1 : 1
+  const prev = head ? head.last_hash : ZERO_HASH
+  // 计数在落库前取：插完再数就把新事件算两遍了；新链从 1 开始
+  const eventCount = head ? head.event_count + 1 : 1
   // 哈希算在落库后的 payload 文本上：校验端拿到的是字符串，两边必须同一份材料（规格 12.1 I2）
   const payloadText = JSON.stringify(payload)
   const body = { node_run_id: nodeRunIdValue, seq, type, payload: payloadText }
@@ -55,19 +63,19 @@ export function appendNodeRunEvent(tx: Tx, secret: string, nodeRunIdValue: strin
   const now = new Date().toISOString()
   tx.run('INSERT INTO node_run_events (node_run_id, seq, type, prev_hash, hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     [nodeRunIdValue, seq, type, prev, hash, payloadText, now])
-  // 链头与事件同一笔事务落：链头落后于事件，校验端就会报缺口
-  tx.run(
-    'INSERT INTO node_run_chain_heads (node_run_id, last_seq, last_hash, event_count, updated_at) VALUES (?, ?, ?, ?, ?) '
-    + 'ON CONFLICT(node_run_id) DO UPDATE SET last_seq = excluded.last_seq, last_hash = excluded.last_hash, '
-    + 'event_count = excluded.event_count, updated_at = excluded.updated_at',
-    [nodeRunIdValue, seq, hash, eventCount, now])
+  // 链头与事件同一笔事务落：链头落后于事件，校验端就会报缺口。
+  // 新增与推进分开写：SQLite 的 UPSERT 在冲突时也会先触发 BEFORE INSERT，
+  // 会被「新链头必须恰好对应首条事件」误拦，所以这里按有无链头走 INSERT / UPDATE。
+  if (head) {
+    tx.run(
+      'UPDATE node_run_chain_heads SET last_seq = ?, last_hash = ?, event_count = ?, updated_at = ? WHERE node_run_id = ?',
+      [seq, hash, eventCount, now, nodeRunIdValue])
+  } else {
+    tx.run(
+      'INSERT INTO node_run_chain_heads (node_run_id, last_seq, last_hash, event_count, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [nodeRunIdValue, seq, hash, eventCount, now])
+  }
   return { seq, hash }
-}
-
-// 链头缺失时的兜底计数：只有老库或链头被删才会走到这里
-function chainRowCount(tx: Tx, nodeRunIdValue: string): number {
-  const row = tx.get<{ n: number }>('SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = ?', [nodeRunIdValue])
-  return Number(row?.n ?? 0)
 }
 
 export function readChain(tx: Tx, nodeRunIdValue: string): ChainRow[] {

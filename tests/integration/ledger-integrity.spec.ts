@@ -67,6 +67,59 @@ describe('账本只追加保护', () => {
     expect(out.seq).toBe(3)
     expect(verifyLedger(db, SECRET).ok).toBe(true)
   })
+
+  it('直接 DELETE 链头 → 触发器拒绝', () => {
+    const db = freshDb()
+    seedChain(db)
+    expect(() => db.raw.prepare("DELETE FROM node_run_chain_heads WHERE node_run_id = 'nr1'").run()).toThrow(/只由追加维护/)
+  })
+
+  it('直接 UPDATE 链头跳号 → 触发器拒绝', () => {
+    const db = freshDb()
+    seedChain(db)
+    expect(() => db.raw.prepare("UPDATE node_run_chain_heads SET last_seq = 4, event_count = 4 WHERE node_run_id = 'nr1'").run())
+      .toThrow(/链头序号必须逐条递增/)
+  })
+
+  it('直接 UPDATE 链头到没有对应事件的位置 → 触发器拒绝', () => {
+    const db = freshDb()
+    seedChain(db)
+    expect(() => db.raw.prepare("UPDATE node_run_chain_heads SET last_seq = 3, last_hash = ?, event_count = 3 WHERE node_run_id = 'nr1'")
+      .run('f'.repeat(64))).toThrow(/链头更新缺少对应事件/)
+  })
+
+  it('直接 INSERT 跳号事件 → 触发器拒绝', () => {
+    const db = freshDb()
+    seedChain(db)
+    const tail = db.raw.prepare("SELECT hash FROM node_run_events WHERE node_run_id = 'nr1' ORDER BY seq DESC LIMIT 1").get() as { hash: string }
+    expect(() => db.raw.prepare("INSERT INTO node_run_events (node_run_id, seq, type, prev_hash, hash, payload, created_at) VALUES ('nr1', 5, 'jump', ?, ?, '{}', ?)")
+      .run(tail.hash, 'e'.repeat(64), NOW)).toThrow(/必须接在链头之后/)
+  })
+
+  it('链头缺失但已有事件 → appendNodeRunEvent 拒绝，不再凭事件行补写', () => {
+    const db = freshDb()
+    seedChain(db)
+    db.raw.exec('DROP TRIGGER trg_node_run_chain_heads_no_delete')
+    db.raw.exec('DELETE FROM node_run_chain_heads')
+    expect(() => withTx(db, (tx) => appendNodeRunEvent(tx, SECRET, 'nr1', 'tool_started', { tool: 'echo' })))
+      .toThrow(/链头缺失但账本里已有事件/)
+    expect(verifyLedger(db, SECRET).ok).toBe(false)
+  })
+
+  it('新链首条事件从 seq=1 与零哈希开始，链头只记一条', () => {
+    const db = freshDb()
+    seedNodeRun(db, 'nr2', 'queued')
+    const out = withTx(db, (tx) => appendNodeRunEvent(tx, SECRET, 'nr2', 'started', {}))
+    expect(out.seq).toBe(1)
+    const head = withTx(db, (tx) => readChainHead(tx, 'nr2'))
+    expect(head).toMatchObject({ last_seq: 1, event_count: 1, last_hash: out.hash })
+  })
+
+  it('直接 INSERT 新链头但没有对应首条事件 → 触发器拒绝', () => {
+    const db = freshDb()
+    expect(() => db.raw.prepare("INSERT INTO node_run_chain_heads (node_run_id, last_seq, last_hash, event_count, updated_at) VALUES ('ghost', 1, ?, 1, ?)")
+      .run('a'.repeat(64), NOW)).toThrow(/缺少对应的首条事件/)
+  })
 })
 
 describe('链头投影', () => {
@@ -83,6 +136,8 @@ describe('链头投影', () => {
   it('链头表被清空 → 校验报链头记录缺失（说明账本和链头对不上）', () => {
     const db = freshDb()
     seedChain(db)
+    // 012 起链头不许直接删；模拟绕过应用改库，先卸掉链头删除触发器
+    db.raw.exec('DROP TRIGGER trg_node_run_chain_heads_no_delete')
     db.raw.exec('DELETE FROM node_run_chain_heads')
     const out = verifyLedger(db, SECRET)
     expect(out.ok).toBe(false)

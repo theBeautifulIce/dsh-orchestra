@@ -1099,3 +1099,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 双门 gate-check 均 exit 0：G1 13 项必过、13 份证据；G2 20 项必过、20 份证据。签后全量 **42 files 612 passed | 1 skipped**。
 - 遗留（P2，未阻断）：S1 六条——hydrate 不交叉校验行键与快照、旧库内嵌 workflow_id 升级边界、workflow_id/version 未限控制字符与首尾空白、011 数据升级缺正式回归测试、契约测试手写 workflow_id、run-node 未复核 run 绑定哈希；S2 两条——ev-g2-16 计数、G2-15 措辞。
 - 下一步：R3（012 链头触发器 + `appendNodeRunEvent` 严格化 + 测试/证据），或先补 011 正式迁移回归与 workflow_id 输入约束；R4 已闭合。
+
+### 11.62 R3 链头数据库级保护（2026-11-14 18:30）
+
+- 迁移 `012_node_run_chain_guard.sql` 加四道触发器：事件 INSERT 必须接链头（`seq=last_seq+1`、`prev_hash=last_hash`；无链头则 `seq=1`、零哈希）；链头 INSERT 必须恰好对应 seq=1 的首条事件；链头 UPDATE 只能 `+1` 且必须对上新事件与旧哈希；链头 DELETE 直接拒绝。
+- `src/infra/db/ledger.ts` 的 `appendNodeRunEvent`：链头缺失但已有事件时抛 `SCHEMA_VERSION_UNSUPPORTED`，不再凭事件行补写；链头写入由 UPSERT 改为按有无链头分别 INSERT / UPDATE——SQLite 的 UPSERT 冲突时也会先触发 BEFORE INSERT，被新链头守卫误拦（首条后第二次追加即失败），分开写后守卫只拦真正的越权写入。
+- 测试 `tests/integration/ledger-integrity.spec.ts` 增 7 例：DELETE 链头、UPDATE 跳号、UPDATE 到无事件、INSERT 跳号事件、链头缺失仍追加、新链首条、无首条事件直接插链头；原「清空链头」用例改为先卸删除触发器再删，验证 `verifyLedger` 报「链头记录缺失」。
+- 证据：G-14 的 `schema_migrations` 增加 12，重生成后 LF SHA-256=`afb074b7fe5a087fb62d9f720503a672e21c02e266fca458c6166eeebe8ae18c`，G1.md 表与 artifact 已同步。
+- 验证：typecheck 0；全量 **42 files 619 passed | 1 skipped**；build ESM 152.57kB / gzip 37.94kB、d.ts 14.30kB。
+- 下一步：提交候选、跑证据复现，派第 49 轮 S1/S2 审计并重签双门；再补 R4 的 011 升级回归与 workflow_id 输入约束。
