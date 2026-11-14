@@ -1349,6 +1349,20 @@ function cellFailStatement(cell: AuditCell): boolean {
   return visibleFailStatement(cell.text, { bareConclusion: 'any', bareVerdict: 'never' })
 }
 
+// 攻击/用例矩阵里的“拒 + 被拒文案”不是本轮否决：第 36 轮报告的攻击表写
+// “G2-05 未通过 | 拒 | sign exit 1…”，整行拼接会把它当成当前必过项失败。
+// 只豁免同时满足三点的行：表头是攻击/用例/场景、结论列是拒绝态、首格是攻击编号。
+function isRejectedAttackRow(row: AuditCell[]): boolean {
+  if (row.length === 0) return false
+  const headerText = row.map((cell) => cell.header).join(' ')
+  if (!/攻击|attack|用例|case|场景|scenario/i.test(headerText)) return false
+  // 攻击矩阵常把“拒”写在「期望」列，而不是「结果」列；两列都认。
+  const rejected = row.some((cell) => /期望|expected|预期|结果|结论|判定/i.test(cell.header)
+    && /^(?:拒|拒绝|已拒|拦下|拦截|blocked|rejected|denied)$/i.test(cell.text.trim()))
+  if (!rejected) return false
+  return /^(?:[A-Za-z]{1,4}[-_]?\d+[a-z]?|\d+)$/.test((row[0]?.text ?? '').trim())
+}
+
 // 散文行与表格单元格分层：散文按整句判，单元格按片段判。
 function splitProseAndCells(visible: string[], cells: (AuditCell | null)[]): { prose: string[]; tableCells: AuditCell[] } {
   const prose: string[] = []
@@ -1396,14 +1410,18 @@ function hiddenCommentFailure(text: string): boolean {
   // 围栏代码里的注释是示例，不是正文，先掩掉再扫。
   const masked = maskFencedAuditCode(text)
   const comment = /<!--([\s\S]*?)-->/g
+  const bodies: string[] = []
   let match: RegExpExecArray | null
   while ((match = comment.exec(masked)) !== null) {
-    const body = decodeHtmlEntitiesForInspection(match[1] ?? '')
-    const hasConclusion = /(?:结论|結論|判定|审计意见|审计結論|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))/i.test(body)
-    const hasFailure = /(?:\b(?:fail(?:ed|ure|s)?|reject(?:ed|s)?|den(?:y|ied|ies))\b|不通过|未通过|没通过|否决|驳回|失败|不合格)/i.test(body)
-    if (hasConclusion && hasFailure) return true
+    bodies.push(decodeHtmlEntitiesForInspection(match[1] ?? ''))
   }
-  return false
+  // 多条注释要合起来看：把“结论词”和“fail”拆到两条注释里同样是隐藏判定
+  // （S1/S2 第三十八轮 P2）。只写“必过项 G1-01 未通过”、不写结论词的注释也拦。
+  const all = bodies.join('\n')
+  const hasConclusion = /(?:结论|結論|判定|审计意见|审计結論|最终判定|最终结论|最終結論|(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?))/i.test(all)
+  const hasFailure = /(?:\b(?:fail(?:ed|ure|s)?|reject(?:ed|s)?|den(?:y|ied|ies))\b|不通过|未通过|没通过|否决|驳回|失败|不合格)/i.test(all)
+  const hasMustPass = /(?:必过项|必過項|must[- ]?pass|G\d+-\d+)/i.test(all)
+  return hasFailure && (hasConclusion || hasMustPass)
 }
 
 function hiddenDefinitionFailure(text: string): boolean {
@@ -1557,7 +1575,9 @@ function splitTableRowCells(line: string): string[] {
 
 function isTableDelimiterRow(line: string): boolean {
   const cells = splitTableRowCells(line)
-  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+  // GFM 的分隔行只要求每格至少一个连字符；markdown-it 对 `| - | - | - |` 同样渲染成表格。
+  // 只认三个以上会让这种写法绕过源码数格，溢出列又被渲染器丢掉（S1/S2 第三十八轮 P1）。
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell.trim()))
 }
 
 function rawTableOverflowIssues(text: string): string[] {
@@ -1633,12 +1653,14 @@ export function proseVerdictClashes(
       else rows.set(key, [cell])
     }
     for (const [key, row] of rows) {
-      if (historical.has(key)) continue
+      if (historical.has(key) || isRejectedAttackRow(row)) continue
       // 同一行内去掉分隔符再拼一次：否定词与必过项 id 被拆到相邻格时，逐格判各自都干净。
-      // 行内只要点名了必过项且拼接后出现失败谓词，就按矛盾拒（S1 第三十七轮 P0）。
+      // 行内点名了必过项、且失败词被单元格边界切开时，按矛盾拒（S1 第三十七轮 P0）。
       const joined = row.map((cell) => cell.text).join('')
       const hit = requiredItems.filter((id) => joined.includes(id))
-      const joinedFail = visibleFailStatement(joined, { bareConclusion: 'any' }) || splitFailureAcrossCells(row)
+      // 只把“失败词被单元格边界切开”当作跨格矛盾；整行再跑一遍失败扫描会把
+      // 要求列里的领域词（例如「无裸 blocked」）和正常的「通过」拼成假否决（S2 第三十八轮 P2）。
+      const joinedFail = splitFailureAcrossCells(row)
       if (joinedFail && hit.length > 0) {
         clashes.push('审计报告表格把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict))
       } else if (joinedFail && row.some((cell) => isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text))) {
@@ -1647,7 +1669,10 @@ export function proseVerdictClashes(
       for (const cell of row) {
         const conclusionCell = isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text)
         if (hit.length === 0 && !conclusionCell) continue
-        if (cellFailStatement(cell) || visibleFailStatement(cell.text, { bareConclusion: 'any' })) {
+        // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。
+        const cellFails = cellFailStatement(cell)
+          || (!conclusionCell && hit.length > 0 && cellStrongFail(foldForVerdict(cell.text)))
+        if (cellFails) {
           clashes.push(hit.length > 0
             ? '审计报告表格把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict)
             : '审计报告表格结论与裁决 ' + String(verdict) + ' 冲突：' + cell.text.slice(0, 60))

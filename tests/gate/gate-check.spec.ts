@@ -1514,9 +1514,55 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
     expect(proseVerdictClashes(md, 'pass', items).join('\n')).toMatch(/超过表头/)
   })
 
+  it('A8b：单连字符分隔行的溢出列同样拒绝', () => {
+    const md = head + [
+      '| 编号 | 说明 | 结果 |',
+      '| - | - | - |',
+      '| G2-11 | 迁移空库可重复 | pass | 未通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'pass', items).join('\n')).toMatch(/超过表头/)
+  })
+
   it('A9：HTML 注释里的失败裁决按隐藏判定拒绝', () => {
     const md = head + '\n<!-- 结论：fail；必过项 G2-11 未通过 -->\n\n结论：pass。\n'
     expect(proseVerdictClashes(md, 'pass', items)).toContain('正文藏着看不见的判定')
+  })
+
+  it('A9b：结论词与失败词拆到两条注释仍拒绝', () => {
+    const md = head + '\n<!-- 结论： -->\n<!-- fail -->\n\n结论：pass。\n'
+    expect(proseVerdictClashes(md, 'pass', items)).toContain('正文藏着看不见的判定')
+  })
+
+  it('A9c：注释只写必过项未通过、不写结论词也拒绝', () => {
+    const md = head + '\n<!-- 必过项 G2-11 未通过 -->\n\n结论：pass。\n'
+    expect(proseVerdictClashes(md, 'pass', items)).toContain('正文藏着看不见的判定')
+  })
+
+  it('攻击矩阵里的“拒 + 被拒文案”不误伤', () => {
+    const md = head + [
+      '| 攻击 | 描述 | 结果 | 证据 |',
+      '| --- | --- | --- | --- |',
+      '| A8b | 散文行把某个必过项写成未通过 | 拒 | sign exit 1：“正文把必过项 G2-11 写成未通过，裁决却是 pass” |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'pass', items)).toEqual([])
+  })
+
+  it('必过项要求列里的领域弱词不误伤', () => {
+    const md = head + [
+      '| 必过项 | 要求 | 结论 |',
+      '| --- | --- | --- |',
+      '| G2-11 | 无裸 blocked | 通过 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(md, 'pass', items)).toEqual([])
   })
 
   it('历史表用中文数字轮次也不误伤，未来轮次仍拒绝', () => {
