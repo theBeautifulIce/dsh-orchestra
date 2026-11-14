@@ -10,6 +10,7 @@ import { WorkflowCatalog } from './service/workflows.ts'
 import { createRun } from './service/runs.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { resolveDecision } from './service/commands/decisions.ts'
+import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
 import { closeRun } from './service/commands/run-close.ts'
@@ -137,22 +138,38 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       operationId: b.operationId,
       now: b.now,
     }),
-    resolveDecision: (b) => inTx(db, (tx) => resolveDecision(tx, {
-      decisionId: b.decisionId,
-      revision: b.revision,
-      resolution: b.resolution,
-      payload: b.payload,
-      actor: b.actor,
-      evidenceProducers: b.evidenceProducers,
-      confirm: b.confirm,
-      now: b.now,
-    })),
+    resolveDecision: (b) => inTx(db, (tx) => {
+      const out = resolveDecision(tx, {
+        decisionId: b.decisionId,
+        revision: b.revision,
+        resolution: b.resolution,
+        payload: b.payload,
+        actor: b.actor,
+        evidenceProducers: b.evidenceProducers,
+        confirm: b.confirm,
+        now: b.now,
+      })
+      // 生产入口必须把审批结论落回节点：批准回 queued，拒绝/过期落 failed。
+      // 两步在同一事务里，不会出现“卡已 resolved、节点还卡在 blocked_pre”。
+      if (out.blockedNode && (out.closedReason === 'approved' || out.closedReason === 'rejected' || out.closedReason === 'expired_final')) {
+        resumeFromBlockedPre(tx, opts.secret, {
+          nodeRunId: out.blockedNode.nodeRunId,
+          attempt: out.blockedNode.attempt,
+          decisionId: out.decisionId,
+          approved: out.closedReason === 'approved',
+          contentHash: b.contentHash ?? null,
+          now: b.now,
+        })
+        if (out.closedReason !== 'approved') closeRun(tx, out.runId, b.now)
+      }
+      return out
+    }),
     confirmStart: (b) => confirmStartup(db, opts.secret, { ...b, clock }),
     dispatch: async (b) => {
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })
       }
-      return dispatchRun({ ...executorDeps!, executeNode: executeScheduled, executionLimits }, {
+      return dispatchRun({ ...executorDeps!, executeNode: executeScheduled, executionLimits, catalog }, {
         runId: b.runId,
         nodes: b.nodes,
         now: b.now,

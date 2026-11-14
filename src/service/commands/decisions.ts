@@ -133,6 +133,17 @@ export type ResolveDecisionRequest = {
   evidenceProducers?: readonly string[]
   // escalations 命中 confirm_required=1 时，必须显式带 confirm=true
   confirm?: boolean
+  // 审批绑定的内容哈希；卡上有哈希时由调用方带入审批往返，不匹配不放行。
+  contentHash?: string | null
+}
+
+export type DecisionResolution = {
+  decisionId: string
+  status: string
+  closedReason: string | null
+  runId: string
+  // 这张卡如果还压着一个 blocked_pre 节点，生产入口要在同一事务里恢复它
+  blockedNode: { nodeRunId: string; attempt: number } | null
 }
 
 /**
@@ -141,7 +152,7 @@ export type ResolveDecisionRequest = {
  * - confirm/continue/abandon/uphold 类结论只推进 revision，status 保持原活跃态。
  * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
  */
-export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
+export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): DecisionResolution {
   const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string }>(
     'SELECT status, payload_json, approver, confirm_required, run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
@@ -196,8 +207,25 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): void {
       resolvedBy: actor.id,
     },
   })
+  // 裁决卡收口后，先找回被它压住的节点；生产入口在同一事务里恢复：
+  // approved 回 queued，rejected/expired 落 failed。这里只返回事实，状态变更仍走迁移表。
+  const blocked = closing
+    ? tx.get<{ node_run_id: string; attempt: number }>(
+      "SELECT node_run_id, attempt FROM node_runs WHERE blocked_decision_id = ? AND status = 'blocked_pre'",
+      [req.decisionId],
+    )
+    : undefined
   // 裁决卡收口后，若所有节点都已到终态，run 也要在同一笔事务里收口。
   if (closing) closeRun(tx, current.run_id, req.now)
+  return {
+    decisionId: req.decisionId,
+    status: nextStatus,
+    closedReason,
+    runId: current.run_id,
+    blockedNode: blocked
+      ? { nodeRunId: blocked.node_run_id, attempt: Number(blocked.attempt) }
+      : null,
+  }
 }
 
 // 继续等 / 继续跟踪：只续一版，不改变 status

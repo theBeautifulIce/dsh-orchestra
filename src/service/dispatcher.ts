@@ -4,12 +4,22 @@
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
+import { acquireNodeRun } from './commands/runtime.ts'
+import { enterWaiting, type WaitKind, type WaitMatch } from './commands/wait.ts'
+import { startSubworkflowNode } from './commands/subworkflow.ts'
+import { loadNodeRun } from './commands/lease.ts'
+import { transitionNode } from './commands/node-state.ts'
+import type { WorkflowCatalog } from './workflows.ts'
 import { closeRun } from './commands/run-close.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
   input?: unknown
   outputSchema?: unknown
+  // 控制节点不是 agent：它们只进状态机，不建会话、不跑工具
+  control?:
+    | { kind: 'wait'; waitKind: WaitKind; match: WaitMatch; idempotencyKey: string; fromSeq?: number; maxWaitMs: number }
+    | { kind: 'subworkflow'; workflowId: string; workflowVersion: number | string; resumeFrom?: string | null }
 }
 
 export type DispatchParams = {
@@ -25,7 +35,7 @@ export type DispatchParams = {
 export type DispatchOutcome = {
   node_run_id: string
   node_id: string
-  status: 'done' | 'failed' | 'skipped'
+  status: 'done' | 'failed' | 'skipped' | 'waiting'
   reason?: string
   error_code?: string
   agent_id?: string
@@ -36,6 +46,8 @@ export type DispatchOutcome = {
 // 注入后 dispatcher 不再自己调 scheduler：一次节点执行只占一个名额。
 export type DispatchDeps = RunNodeDeps & {
   executeNode?: (p: RunNodeParams) => Promise<RunNodeResult>
+  // 控制节点（wait / subworkflow）要靠已加载的工作流目录固定子流程版本
+  catalog?: WorkflowCatalog
   // 生产装配从配置读出的执行时限；缺省时由 runNode 使用默认值。
   executionLimits?: Pick<RunNodeParams, 'actionTimeoutMs' | 'startupTimeoutMs' | 'verifyTimeoutMs'>
 }
@@ -59,14 +71,16 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
   return outcomes
 }
 
-async function dispatchOne(
-  deps: DispatchDeps,
+async function dispatchOne(  deps: DispatchDeps,
   p: DispatchParams,
   row: { node_run_id: string; node_id: string; seq: number; attempt: number },
 ): Promise<DispatchOutcome> {
   const spec = p.nodes[row.node_id]
   if (!spec) {
     return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'skipped', reason: 'no_node_spec' }
+  }
+  if (spec.control) {
+    return dispatchControlNode(deps, p, row, spec.control)
   }
   // 一个节点失败不拖垮同批别的节点：异常在这里收成一条 failed 结果
   try {
@@ -93,6 +107,89 @@ async function dispatchOne(
       reason: res.final_status === 'done' ? undefined : 'final_status_' + res.final_status,
       agent_id: res.agent_id,
       evidence_source: res.evidence?.source,
+    }
+  } catch (err) {
+    return {
+      node_run_id: row.node_run_id,
+      node_id: row.node_id,
+      status: 'failed',
+      reason: err instanceof Error ? err.message : String(err),
+      error_code: (err as { code?: string }).code ?? '',
+    }
+  }
+}
+
+// 控制节点只推进状态机：wait 进等待登记，subworkflow 建子运行并让父节点等待。
+// 它们与 agent 节点共用 acquire/started 这两步，避免出现绕过租约与 Ga 的第二条入口。
+async function dispatchControlNode(
+  deps: DispatchDeps,
+  p: DispatchParams,
+  row: { node_run_id: string; node_id: string; seq: number; attempt: number },
+  control: NonNullable<NodeSpec['control']>,
+): Promise<DispatchOutcome> {
+  try {
+    acquireNodeRun(deps.runtime, {
+      nodeRunId: row.node_run_id,
+      ownerEpoch: p.ownerEpoch ?? deps.db.epoch,
+      leaseTtlMs: p.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
+      now: p.now,
+    })
+    const now = p.now
+    if (control.kind === 'wait') {
+      inTx(deps.db, (tx) => {
+        const current = loadNodeRun(tx, row.node_run_id)
+        transitionNode(tx, deps.secret, {
+          nodeRunId: row.node_run_id,
+          from: 'dispatched',
+          to: 'started',
+          attempt: current.attempt,
+          revision: current.revision,
+          now,
+          reason: 'control_started',
+        })
+        enterWaiting(tx, deps.secret, {
+          nodeRunId: row.node_run_id,
+          attempt: current.attempt,
+          runId: current.run_id,
+          waitKind: control.waitKind,
+          match: control.match,
+          idempotencyKey: control.idempotencyKey,
+          fromSeq: control.fromSeq,
+          maxWaitMs: control.maxWaitMs,
+          now,
+          clock: deps.runtime.clock,
+        })
+      })
+      return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'waiting', reason: 'wait_registered' }
+    }
+    if (!deps.catalog) {
+      throw new Error('subworkflow 节点缺少工作流目录，不能固定子流程版本')
+    }
+    const child = inTx(deps.db, (tx) => {
+      const current = loadNodeRun(tx, row.node_run_id)
+      transitionNode(tx, deps.secret, {
+        nodeRunId: row.node_run_id,
+        from: 'dispatched',
+        to: 'started',
+        attempt: current.attempt,
+        revision: current.revision,
+        now,
+        reason: 'control_started',
+      })
+      return startSubworkflowNode(tx, deps.secret, deps.catalog!, {
+        nodeRunId: row.node_run_id,
+        attempt: current.attempt,
+        workflowId: control.workflowId,
+        workflowVersion: control.workflowVersion,
+        resumeFrom: control.resumeFrom ?? null,
+        now,
+      })
+    })
+    return {
+      node_run_id: row.node_run_id,
+      node_id: row.node_id,
+      status: 'waiting',
+      reason: 'child_run:' + child.run_id,
     }
   } catch (err) {
     return {

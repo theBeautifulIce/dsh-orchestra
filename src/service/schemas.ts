@@ -131,6 +131,23 @@ const nodeSpecSchema = z.looseObject({
   tools: z.array(toolSchema).max(LIMITS.toolsMaxCount),
   input: z.unknown().optional(),
   outputSchema: z.unknown().optional(),
+  // 控制节点：只带状态机所需的谓词/子流程版本，不建会话、不跑工具
+  control: z.discriminatedUnion('kind', [
+    z.looseObject({
+      kind: z.literal('wait'),
+      waitKind: z.enum(['event', 'timer']),
+      match: z.object({ type: z.string().min(1), path: z.string().optional(), equals: z.unknown().optional() }),
+      idempotencyKey: z.string().min(1).max(LIMITS.identifierMaxLength),
+      fromSeq: z.number().int().nonnegative().optional(),
+      maxWaitMs: z.number().int().positive(),
+    }),
+    z.looseObject({
+      kind: z.literal('subworkflow'),
+      workflowId: workflowIdentifier,
+      workflowVersion: z.union([workflowVersionString, z.number().int().nonnegative()]),
+      resumeFrom: z.string().nullable().optional(),
+    }),
+  ]).optional(),
 })
 
 // 通过条件：path 与 op 只做有界字符串，越界判定留给判定层（VERDICT_UNSUPPORTED）
@@ -204,6 +221,8 @@ export const resolveDecisionSchema = z.looseObject({
   }).optional(),
   evidenceProducers: z.array(identifier).max(64).optional(),
   confirm: z.boolean().optional(),
+  // 审批绑定的内容哈希：卡上有哈希时必须逐字匹配，否则不恢复节点
+  contentHash: z.string().min(1).max(128).optional(),
 })
 
 export const dispatchSchema = z.looseObject({

@@ -277,6 +277,27 @@ describe('起运行与裁决收口路由', () => {
     expect(b.data.replayed).toBe(true)
   })
 
+  it('decision.resolve 批准后同一事务把 blocked_pre 节点放回 queued', async () => {
+    const { endpoint: base, orchestra } = await boot()
+    withTx(orchestra.db, (tx) => {
+      tx.run(
+        "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, resume_state, blocked_decision_id, created_at, updated_at) " +
+          "VALUES ('nrun_blocked','r1','check2',2,'agent',1,'blocked_pre',0,'queued','d-block',?,?)",
+        [NOW, NOW],
+      )
+      openDecision(tx, {
+        decisionId: 'd-block', runId: 'r1', nodeRunId: 'nrun_blocked', kind: 'pre_execution', approver: 'human', payload: {},
+      })
+    })
+    const res = await post(base + '/v1/decisions/resolve', {
+      decisionId: 'd-block', revision: 1, resolution: 'approved',
+    })
+    expect(res.status).toBe(200)
+    const node = orchestra.db.raw.prepare('SELECT status, blocked_decision_id FROM node_runs WHERE node_run_id = ?').get('nrun_blocked') as { status: string; blocked_decision_id: string | null }
+    expect(node.status).toBe('queued')
+    expect(node.blocked_decision_id).toBeNull()
+  })
+
   it('decision.resolve 走批准人与 revision CAS', async () => {
     const { endpoint: base, orchestra } = await boot()
     withTx(orchestra.db, (tx) => openDecision(tx, {

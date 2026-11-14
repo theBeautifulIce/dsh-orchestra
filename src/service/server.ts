@@ -14,7 +14,7 @@ import type { CancelOutcome } from './commands/cancel.ts'
 import type { LoadWorkflowResult } from './workflows.ts'
 import type { CreateRunResult } from './runs.ts'
 import type { StartRunResult } from './commands/start-run.ts'
-import type { Resolution } from './commands/decisions.ts'
+import type { DecisionResolution, Resolution } from './commands/decisions.ts'
 import type { Actor } from './decision/approver.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
@@ -75,8 +75,9 @@ export type NodeCommands = {
     actor?: Actor
     evidenceProducers?: string[]
     confirm?: boolean
+    contentHash?: string
     now: string
-  }) => void
+  }) => DecisionResolution
   // 启动未知的人工确认：M-08/M-09/M-61 的生产入口
   confirmStart: (body: { nodeRunId: string; attempt: number; attested?: boolean; now: string; actor?: string }) => {
     trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'
@@ -216,6 +217,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         actor: { kind: 'human', id: actor },
         evidenceProducers: body.evidenceProducers,
         confirm: body.confirm,
+        contentHash: body.contentHash,
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), { decisionId: body.decisionId, revision: body.revision + 1 }))
