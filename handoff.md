@@ -813,4 +813,5 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 修复 `757b499`：`isBareFailureCell` 先剥前缀「本轮/本輪/当前/當前/本次/当期/當期/最终/最終/审计/審計/本报告/本報告」，失败词后可接 `[|：:（(]` 引导的限定/括号/理由；`cellFails` 增加 `bareFailure && (rejectedAttack || conclusionCell || hit.length > 0)`，确保攻击行备注格与必过项命中格的限定否决进入判定。
 - 新增用例「攻击行备注格的限定/括号/冒号否决仍拒绝，名词短语不误伤」：四种攻击载荷全部 exit 1；正控 `未通过项为空`、`失败项为空` 仍 exit 0。
 - 验证：`tsc --noEmit` 0；`pnpm test` 38 文件 **546 passed | 1 skipped**（gate 179 tests）；`pnpm build` 成功（CJS 0.29kB、ESM 110.17kB、d.ts 10.76kB）；改动 2 文件 +31/−4。提交 `757b499`「Reject qualified bare failure verdicts in attack-matrix remarks」。
+- 追加 `efb3302`「Cover adverbial prefixes before bare failure verdicts」：前缀最多连续剥 3 层，补 `暂/暫/尚/仍/并/並/也/还/還/均/都`，覆盖 `尚未通过`、`暂未通过`、`仍未通过`、`并未通过`、`本轮仍未通过`；全量仍 546 passed | 1 skipped。
 - 状态：`s1-audit-r40` / `s2-audit-r40` 仍跑在 `9c75ad1` 上，未覆盖本笔；G1/G2 未签。下一轮审计应绑本 handoff 提交后的新 HEAD，并把四类限定词载荷列为必测。
