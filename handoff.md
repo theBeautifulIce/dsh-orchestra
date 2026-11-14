@@ -503,6 +503,17 @@ S2 第九轮（docs/audits/S2-independent-audit-round9.md，27,906 字节）判 
 S2 第十轮（docs/audits/S2-independent-audit-round10.md，219 行）判 pass：P0=0 / P1=0 / P2=10。19 项必过与 19 份证据从 HEAD 0919589 按 LF 重算全对；ev-g2-15 两次 2434 字节、sha256 一致；临时 clone 把 G2 改到 round10 后可 sign-gate exit 0、gate-check exit 0。P2 未闭合：action_timeout 配置未接生产、lease_lost/action_timeout 缺执行期回归、跨重启仍是同库 hydrate、前序链只比字符串、remember 别名先写后查、围栏只按行首翻转、结论解析误杀/漏杀、done 后不释放租约、acquireLease 不校验 attempt、traceBindingGate 不校 tool/commandHash。
 
 S1 第六轮（docs/audits/S1-independent-audit-round6.md）判 fail：P0=0 / P1=1 / P2=6。P1-1 是 pass 结论后的破折号允许任意文本，阻塞词表缺重大/阻断/未收口/未解决；在克隆里“结论：pass — 重大 3”与“结论：pass（未收口）”都能让 sign-gate 与 gate-check exit 0（attack C artifact 373560a6bd64…，attack D artifact 929d83bfd289…）。P2：列表/引用/下一行结论、同义结论、围栏规则未入规范、G-08 缺 503/warning、审计报告未绑门与候选、正常清零写法被误杀。
+### 11.33 S2 第三十五轮与 S1 第三十轮整改、双门重签（2026-11-14 10:50）
+
+- 触发：S2 第三十五轮 fail（P0=0 / P1=1 / P2=1）。P1-1 是证据复现契约不成立：`scripts/fault-inject.ts` 八处 `leaseTtlMs: 600000` 与 `src/service/schemas.ts` 的 120000 上限冲突，重跑时节点卡在 queued，19 份 G2 证据只有 6 份能字节复现（ev-g2-09 直接 STALE_GENERATION）。P2-1 是正文与裁决的一致性检查可绕过（解析器返回 null 就整段跳过）。
+- 整改：八处夹具改 120000；25 份证据（G1 六份 + G2 十九份）重生成；`writeEvidence` 路径归一变通用（临时目录前缀 → `<tmp>/<basename>`）；`normalizeEvidence` 把「线上库 sha <hex>」归一成 `<db_sha>`（sqlite 页布局带随机盐，只保留「线上库未变：true」的结论句）；新增 `scripts/check-evidence-repro.ts`（25 案例各跑两遍，比两遍之间与 HEAD 字节）与 `tests/integration/evidence-repro.spec.ts`；新增导出 `proseVerdictClashes(text, verdict, requiredItems)`，三类背离（结论行不唯一 / 结论行与裁决相反 / 必过项写成未通过）一律拒；`verdictProblems` 加「必过项总数等于门规格项数」与「不许重复 id」（S1 第三十轮 P2-2）；G-14 断言跟实际迁移表走（P2-3）。
+- 候选：0e2274fff1a62ea0457cbeb804e2e887142af88e（提交标题 Fix evidence reproducibility and prose-verdict clashes），工作树干净。
+- 双门独立审计都 pass：S1 第三十一轮 13/13、P0/P1/P2 = 0/0/4（`docs/audits/S1-independent-audit-round31.md`）；S2 第三十六轮 19/19、0/0/3（`docs/audits/S2-independent-audit-round36.md`）。两路都在干净克隆里走通 sign-gate exit 0 与 gate-check exit 0。
+- 重签：G1 artifact audit_round=31 → artifact_hash=`53d08f5b856e…`、body_hash=`1c93f95e6e76…`；G2 audit_round=36 → artifact_hash=`0508d0949b06…`、body_hash=`d85d0826bced…`。两门 `gate-check` exit 0（13 项/13 份、19 项/19 份）。已推送 origin/main：f01581c..3205040。
+- 验证（实测）：`tsc --noEmit` exit 0；全量 37 文件 **524 passed | 1 skipped**，跳过的是「门记录没签时必须被拒绝（预签态）」——签完就该跳过，设计使然；`check-evidence-repro` 输出「证据复现成立：25 份」exit 0。
+- 审计留的待办（都不阻断签署，下一轮硬化一并收）：S2 第三十六轮 P2-1 是 `proseVerdictClashes` 只扫 prose、丢弃 `rendered.cells`，把判定写进 Markdown 表格单元仍能签过（A4/A5 实测放行），建议对 cells 调 `cellFailStatement` 并补回归；P2-2 告警文案未按结论分支；P2-3 `tests/integration/evidence-repro.spec.ts:8` 注释写「全量 35 份」实为 25 份。S1 第三十一轮的 P2-3 是 `candidateEntries` 对已删除路径刷 fatal 噪声（stderr 可见，不影响 exit code）。
+- 状态：G1/G2 已重签并提交，双门 exit 0、全量绿，S3 九节点与状态机可以开；上述四条 P2 作为 S3 第一批硬化项，动手前先补回归。
+
 
 本轮把 auditConclusionOf 从“tail 正则 + 阻塞词表”改成“唯一结论行 + 结构化尾巴”：
 - 全文只接受一行结论；第二行无论同向反向都返回 null；行内引用不算结论；建议行不再当结论。
