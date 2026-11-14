@@ -3,6 +3,7 @@ import { OrchError } from '../../core/errors.ts'
 import { appendNodeRunEvent, appendEvent } from '../../infra/db/ledger.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { applyTransition } from './nodes.ts'
+import { deadlineFromAnchors, deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 
 export type WaitKind = 'event' | 'timer'
 export type WaitState = 'active' | 'woken' | 'timed_out' | 'cancelled'
@@ -201,6 +202,7 @@ export function enterWaiting(tx: Tx, secret: string, req: {
   fromSeq?: number
   maxWaitMs: number
   now: string
+  clock?: ClockProvider
 }): EnterWaitingResult {
   if (!req.match.type) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '等待谓词缺少事件类型', { nodeRunId: req.nodeRunId })
   if (!Number.isInteger(req.maxWaitMs) || req.maxWaitMs <= 0) {
@@ -230,7 +232,10 @@ export function enterWaiting(tx: Tx, secret: string, req: {
       nodeRunId: keyTaken.node_run_id,
     })
   }
-  const deadline = new Date(Date.parse(req.now) + req.maxWaitMs).toISOString()
+  const waitDeadline = req.clock
+    ? deadlineFromSample(req.clock, req.maxWaitMs)
+    : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(req.now) + req.maxWaitMs }
+  const deadline = new Date(waitDeadline.wallClockMs).toISOString()
   applyTransition(tx, {
     nodeRunId: req.nodeRunId,
     from: ['started'],
@@ -245,6 +250,8 @@ export function enterWaiting(tx: Tx, secret: string, req: {
       executor_agent_id: null,
       wait_started_at: req.now,
       wait_deadline_at: deadline,
+      wait_deadline_boot_id: waitDeadline.bootId,
+      wait_deadline_monotonic_ns: waitDeadline.monotonicNs,
     },
   })
   tx.run(
@@ -296,18 +303,29 @@ export function markWakeStarvation(tx: Tx, secret: string, nodeRunId: string, no
 }
 
 /** max_wait/event_timeout 到点：waiting→timeout，等待钟清空，登记转 timed_out。 */
-export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: string): boolean {
+export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: string, clock?: ClockProvider): boolean {
   const row = tx.get<WaitRow>("SELECT * FROM wait_registrations WHERE node_run_id = ? AND state = 'active'", [nodeRunId])
   if (!row) return false
-  const node = tx.get<{ status: string; attempt: number; wait_deadline_at: string | null }>(
-    'SELECT status, attempt, wait_deadline_at FROM node_runs WHERE node_run_id = ?', [nodeRunId],
+  const node = tx.get<{ status: string; attempt: number; wait_deadline_at: string | null; wait_deadline_boot_id: string | null; wait_deadline_monotonic_ns: number | null }>(
+    'SELECT status, attempt, wait_deadline_at, wait_deadline_boot_id, wait_deadline_monotonic_ns FROM node_runs WHERE node_run_id = ?', [nodeRunId],
   )
   if (!node || node.status !== 'waiting') return false
-  if (node.wait_deadline_at === null || Date.parse(node.wait_deadline_at) > Date.parse(now)) return false
+  if (node.wait_deadline_at === null) return false
+  const anchored = deadlineFromAnchors({
+    deadlineAt: node.wait_deadline_at,
+    bootId: node.wait_deadline_boot_id,
+    monotonicNs: node.wait_deadline_monotonic_ns,
+  })
+  if (anchored && clock) {
+    const decision = clock.decide(anchored)
+    if (decision.kind !== 'expired') return false
+  } else if (Date.parse(node.wait_deadline_at) > Date.parse(now)) {
+    return false
+  }
   tx.run("UPDATE wait_registrations SET state = 'timed_out', updated_at = ? WHERE node_run_id = ? AND state = 'active'", [now, nodeRunId])
   applyTransition(tx, {
     nodeRunId, from: ['waiting'], to: 'timeout', attempt: node.attempt, now, bumpRearm: true,
-    patch: { wait_deadline_at: null },
+    patch: { wait_deadline_at: null, wait_deadline_boot_id: null, wait_deadline_monotonic_ns: null },
   })
   appendNodeRunEvent(tx, secret, nodeRunId, 'wait.event_timeout', {
     idempotency_key: row.idempotency_key,
@@ -317,14 +335,13 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
   return true
 }
 
-export function sweepWaitTimeouts(tx: Tx, secret: string, now: string): number {
+export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock?: ClockProvider): number {
   const rows = tx.all<{ node_run_id: string }>(
     "SELECT w.node_run_id FROM wait_registrations w JOIN node_runs n ON n.node_run_id = w.node_run_id " +
-      "WHERE w.state = 'active' AND n.status = 'waiting' AND n.wait_deadline_at IS NOT NULL AND n.wait_deadline_at <= ? ORDER BY w.registration_id",
-    [now],
+      "WHERE w.state = 'active' AND n.status = 'waiting' AND n.wait_deadline_at IS NOT NULL ORDER BY w.registration_id",
   )
   let timedOut = 0
-  for (const row of rows) if (timeoutWaiting(tx, secret, row.node_run_id, now)) timedOut++
+  for (const row of rows) if (timeoutWaiting(tx, secret, row.node_run_id, now, clock)) timedOut++
   return timedOut
 }
 

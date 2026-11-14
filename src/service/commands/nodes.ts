@@ -20,6 +20,10 @@ const PATCH_COLUMNS = new Set([
   'contradiction_decision_id',
   'startup_unknown_remaining_ns',
   'startup_unknown_deadline_at',
+  'startup_unknown_boot_id',
+  'startup_unknown_monotonic_ns',
+  'fence_grace_boot_id',
+  'fence_grace_monotonic_ns',
   'verify_remaining_ns',
   // 审批往返：blocked_pre 记回队目标与审批卡，同时收回旧租约
   'resume_state',
@@ -31,6 +35,8 @@ const PATCH_COLUMNS = new Set([
   // 等待节点：进入时收租约并挂 wait 钟，唤醒/超时时清钟
   'wait_started_at',
   'wait_deadline_at',
+  'wait_deadline_boot_id',
+  'wait_deadline_monotonic_ns',
 ])
 
 export type TransitionRequest = {

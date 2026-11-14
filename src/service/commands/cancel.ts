@@ -4,6 +4,7 @@ import { OrchError } from '../../core/errors.ts'
 import { runCas } from '../../infra/db/tx.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { isTerminal } from '../../core/state-machine.ts'
+import { deadlineFromAnchors, deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 import { loadNodeRun } from './lease.ts'
 
 export type CancelResult = 'interrupted' | 'not_interruptible' | 'already_stopped' | 'unknown'
@@ -18,6 +19,8 @@ export type CancelParams = {
   graceMs: number
   // 只在 interrupted 时用：动作截止时间往后延多久
   extendDeadlineMs?: number
+  // 半态钟：不传仍兼容旧调用；生产路径必须传，宽限判定不再只看墙钟
+  clock?: ClockProvider
 }
 
 export type CancelOutcome = {
@@ -66,11 +69,14 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     if (row.fence_state === 'armed') {
       return { cancel_result: 'interrupted', next_status: row.status, fence_state: 'armed', reason: 'fence_already_armed' }
     }
-    const graceUntil = new Date(Date.parse(params.now) + params.graceMs).toISOString()
+    const grace = params.clock
+      ? deadlineFromSample(params.clock, params.graceMs)
+      : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + params.graceMs }
+    const graceUntil = new Date(grace.wallClockMs).toISOString()
     runCas(
       tx,
-      'UPDATE node_runs SET status = ?, fence_state = ?, fence_armed_at = ?, fence_grace_until = ?, cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
-      ['timing_out', 'armed', params.now, graceUntil, params.now, 'interrupted', params.now, params.nodeRunId, params.attempt, params.revision, ...CANCELABLE],
+      'UPDATE node_runs SET status = ?, fence_state = ?, fence_armed_at = ?, fence_grace_until = ?, fence_grace_boot_id = ?, fence_grace_monotonic_ns = ?, cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
+      ['timing_out', 'armed', params.now, graceUntil, grace.bootId, grace.monotonicNs, params.now, 'interrupted', params.now, params.nodeRunId, params.attempt, params.revision, ...CANCELABLE],
       { rows: 1, what: 'cancel-interrupted' },
     )
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'fence_armed', {
@@ -82,13 +88,16 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   }
   if (params.cancelResult === 'not_interruptible') {
     // 动作停不下来：延长动作截止时间并进 stopping（规格 4.5 行 345）
-    const deadline = new Date(Date.parse(params.now) + (params.extendDeadlineMs ?? 0)).toISOString()
+    const extended = params.clock
+      ? deadlineFromSample(params.clock, params.extendDeadlineMs ?? 0)
+      : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + (params.extendDeadlineMs ?? 0) }
+    const deadline = new Date(extended.wallClockMs).toISOString()
     if (row.fence_state === 'armed') {
       // 围栏立着时改状态会留下“stopping 但仍 armed”的双主人：只记取消结果，等宽限到点由 sweep 撤围栏（审计 P0-4）
       runCas(
         tx,
-        "UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND fence_state = 'armed'",
-        [params.now, 'not_interruptible', deadline, params.now, params.nodeRunId, params.attempt, params.revision],
+        "UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND fence_state = 'armed'",
+        [params.now, 'not_interruptible', deadline, extended.bootId, extended.monotonicNs, params.now, params.nodeRunId, params.attempt, params.revision],
         { rows: 1, what: 'cancel-not-interruptible-fenced' },
       )
       appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline, fence_pending: true })
@@ -96,8 +105,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     }
     runCas(
       tx,
-      'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
-      ['stopping', params.now, 'not_interruptible', deadline, params.now, params.nodeRunId, params.attempt, params.revision, ...CANCELABLE],
+      'UPDATE node_runs SET status = ?, cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND status IN (' + CANCELABLE.map(() => '?').join(', ') + ')',
+      ['stopping', params.now, 'not_interruptible', deadline, extended.bootId, extended.monotonicNs, params.now, params.nodeRunId, params.attempt, params.revision, ...CANCELABLE],
       { rows: 1, what: 'cancel-not-interruptible' },
     )
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline })
@@ -153,18 +162,29 @@ export type FenceRow = {
   status: string
   fence_state: string | null
   fence_grace_until: string | null
+  fence_grace_boot_id?: string | null
+  fence_grace_monotonic_ns?: number | null
 }
 
 // 宽限到点仍没见停止：撤销围栏回 stopping（规格 4.5 行 346）
 // 返回是否这次真的撤销了（调用方据此决定要不要重放队头）
-export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now: string }): boolean {
+export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now: string; clock?: ClockProvider }): boolean {
   if (params.row.fence_state !== 'armed') return false
   // 宽限没到点不许撤销：任何调用方都不能提前把围栏撤了（规格 4.5 行 346）
   if (!params.row.fence_grace_until) return false
-  if (Date.parse(params.row.fence_grace_until) > Date.parse(params.now)) return false
+  const anchored = deadlineFromAnchors({
+    deadlineAt: params.row.fence_grace_until,
+    bootId: params.row.fence_grace_boot_id ?? null,
+    monotonicNs: params.row.fence_grace_monotonic_ns ?? null,
+  })
+  if (anchored && params.clock) {
+    if (params.clock.decide(anchored).kind !== 'expired') return false
+  } else if (Date.parse(params.row.fence_grace_until) > Date.parse(params.now)) {
+    return false
+  }
   // 撤销失败只说明这行已被别人改过：返回 false 让 sweep 继续下一条，不许整批回滚（审计 P0-4）
   const res = tx.run(
-    'UPDATE node_runs SET status = ?, fence_state = ?, fence_grace_until = NULL, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND status = ? AND attempt = ? AND revision = ?',
+    'UPDATE node_runs SET status = ?, fence_state = ?, fence_grace_until = NULL, fence_grace_boot_id = NULL, fence_grace_monotonic_ns = NULL, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND status = ? AND attempt = ? AND revision = ?',
     ['stopping', 'revoked', params.now, params.row.node_run_id, 'timing_out', params.row.attempt, params.row.revision],
   )
   if (res.changes !== 1) return false

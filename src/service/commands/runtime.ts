@@ -55,7 +55,7 @@ export function submitCancel(deps: RuntimeDeps, p: {
   graceMs: number
   extendDeadlineMs?: number
 }): CancelOutcome {
-  return withTx(deps.db, (tx) => applyCancel(tx, deps.secret, p))
+  return withTx(deps.db, (tx) => applyCancel(tx, deps.secret, { ...p, clock: deps.clock }))
 }
 
 export function sweepNow(deps: RuntimeDeps, now: string): SweepResult {

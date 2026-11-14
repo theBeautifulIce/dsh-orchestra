@@ -8,6 +8,7 @@ import { applyTransition } from './commands/nodes.ts'
 import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { isTerminal, type NodeStatus } from '../core/state-machine.ts'
 import type { ClockProvider, Deadline } from '../core/clock.ts'
+import { deadlineFromAnchors } from '../core/clock.ts'
 
 export type SweepParams = {
   now: string
@@ -51,16 +52,16 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     for (const row of tx.all<{ node_run_id: string }>('SELECT node_run_id FROM node_runs')) {
       if (chainBreakOf(secret, readChain(tx, row.node_run_id))) broken.add(row.node_run_id)
     }
-    const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken })
+    const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken, clock: params.clock })
     // 围栏宽限到点：撤围栏回 stopping，并把当前 attempt 的队头挑出来（规格 4.5 行 346）
     const fences = tx.all<FenceRow>(
-      'SELECT node_run_id, attempt, revision, status, fence_state, fence_grace_until FROM node_runs WHERE fence_state = ? AND fence_grace_until IS NOT NULL',
+      'SELECT node_run_id, attempt, revision, status, fence_state, fence_grace_until, fence_grace_boot_id, fence_grace_monotonic_ns FROM node_runs WHERE fence_state = ? AND fence_grace_until IS NOT NULL',
       ['armed'],
     )
     const revoked: string[] = []
     const heads: SweepResult['replay_heads'] = []
     for (const row of fences) {
-      if (!revokeFence(tx, secret, { row, now: params.now })) continue
+      if (!revokeFence(tx, secret, { row, now: params.now, clock: params.clock })) continue
       revoked.push(row.node_run_id)
       const head = pickReplayHead(tx, row.node_run_id, row.attempt)
       if (head) heads.push({ node_run_id: row.node_run_id, report_id: head.report_id, report_seq: head.report_seq })
@@ -93,13 +94,26 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
     // startup_unknown 按钟：到点转 indeterminate_side_effect，保留 uncertainty，不直接判终态
     const unknownExpired: string[] = []
-    const unknownRows = tx.all<{ node_run_id: string; attempt: number; status: string; hang_reason: string | null; startup_unknown_deadline_at: string | null }>(
-      'SELECT node_run_id, attempt, status, hang_reason, startup_unknown_deadline_at FROM node_runs WHERE status = ?',
+    const unknownRows = tx.all<{ node_run_id: string; attempt: number; status: string; hang_reason: string | null; startup_unknown_deadline_at: string | null; startup_unknown_boot_id: string | null; startup_unknown_monotonic_ns: number | null; startup_unknown_remaining_ns: number | null }>(
+      'SELECT node_run_id, attempt, status, hang_reason, startup_unknown_deadline_at, startup_unknown_boot_id, startup_unknown_monotonic_ns, startup_unknown_remaining_ns FROM node_runs WHERE status = ?',
       ['startup_unknown'],
     )
     for (const row of unknownRows) {
       if (broken.has(row.node_run_id) || row.hang_reason !== null) continue
-      if (!row.startup_unknown_deadline_at || Date.parse(row.startup_unknown_deadline_at) > Date.parse(params.now)) continue
+      if (!row.startup_unknown_deadline_at) continue
+      const anchored = deadlineFromAnchors({
+        deadlineAt: row.startup_unknown_deadline_at,
+        bootId: row.startup_unknown_boot_id,
+        monotonicNs: row.startup_unknown_monotonic_ns,
+      })
+      // 有锚点只看单调钟；旧行没有锚点才退回墙钟比较（升级兼容，不把新写入降级）
+      if (anchored && params.clock) {
+        const decision = params.clock.decide(anchored)
+        if (decision.kind === 'pending') continue
+        if (decision.kind === 'uncertain') continue
+      } else if (Date.parse(row.startup_unknown_deadline_at) > Date.parse(params.now)) {
+        continue
+      }
       try {
         applyTransition(tx, {
           nodeRunId: row.node_run_id,
@@ -108,7 +122,12 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
           attempt: row.attempt,
           now: params.now,
           bumpRearm: true,
-          patch: { startup_unknown_deadline_at: null, startup_unknown_remaining_ns: null },
+          patch: {
+            startup_unknown_deadline_at: null,
+            startup_unknown_remaining_ns: null,
+            startup_unknown_boot_id: null,
+            startup_unknown_monotonic_ns: null,
+          },
         })
         appendNodeRunEvent(tx, secret, row.node_run_id, 'recovery.startup_unknown_expired', {
           from: 'startup_unknown',

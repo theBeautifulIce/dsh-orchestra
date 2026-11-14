@@ -380,6 +380,7 @@ export type PropagateCancelParams = {
   now: string
   graceMs: number
   extendDeadlineMs?: number
+  clock?: import('../../core/clock.ts').ClockProvider
 }
 
 export type PropagateCancelResult = {
@@ -433,6 +434,7 @@ export function propagateRunCancellation(
         now: p.now,
         graceMs: p.graceMs,
         extendDeadlineMs: p.extendDeadlineMs,
+        clock: p.clock,
       })
       cancelledNodes.push(node.node_run_id)
     }

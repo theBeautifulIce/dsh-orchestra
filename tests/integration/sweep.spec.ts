@@ -223,6 +223,24 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(count()).toBe(1)
   })
 
+  it('startup_unknown 有单调锚点时：墙钟跳远不误判，单调钟到点才转 indeterminate', () => {
+    const db = setup()
+    const clock = new ScriptedClock('boot-u', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    withTx(db, (tx) => tx.run(
+      "UPDATE node_runs SET status='startup_unknown', startup_unknown_deadline_at=?, startup_unknown_boot_id=?, startup_unknown_monotonic_ns=?, startup_unknown_remaining_ns=? WHERE node_run_id='nr_sw'",
+      [NOW, 'boot-u', 120_000_000_000, 120_000],
+    ))
+    const wallJump = '2026-11-13T06:00:00.000Z'
+    const first = sweep(db, TEST_SECRET, { now: wallJump, clock })
+    expect(first.startup_unknown_expired).toEqual([])
+    expect(row(db).status).toBe('startup_unknown')
+    clock.advanceMs(121_000)
+    clock.setWallClockMs(clock.sample().wallClockMs + 121_000)
+    const second = sweep(db, TEST_SECRET, { now: wallJump, clock })
+    expect(second.startup_unknown_expired).toEqual(['nr_sw'])
+    expect(row(db).status).toBe('indeterminate_side_effect')
+  })
+
   it('startup_unknown 钟到点转 indeterminate，重复扫描不产生第二个终态', () => {
     const db = setup()
     withTx(db, (tx) => tx.run(

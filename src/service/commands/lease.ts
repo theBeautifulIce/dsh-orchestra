@@ -5,6 +5,7 @@ import type { Tx } from '../../infra/sqlite/driver.ts'
 import { runCas } from '../../infra/db/tx.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { applyTransition } from './nodes.ts'
+import { deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 
 export type NodeRunRow = {
   node_run_id: string
@@ -32,6 +33,8 @@ export type NodeRunRow = {
   contradiction_decision_id: string | null
   startup_unknown_deadline_at: string | null
   startup_unknown_remaining_ns: number | null
+  startup_unknown_boot_id: string | null
+  startup_unknown_monotonic_ns: number | null
 }
 
 export function loadNodeRun(tx: Tx, nodeRunId: string): NodeRunRow {
@@ -133,7 +136,7 @@ export function assertLeaseValid(row: NodeRunRow, now: string): void {
 }
 
 // 过期扫描：dispatched 或 started 的租约过期后先转 startup_unknown 或 stopping（规格 4.9 行 426）
-export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string; leaseTtlMs: number; skipNodeRunIds?: ReadonlySet<string> }): string[] {
+export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string; leaseTtlMs: number; skipNodeRunIds?: ReadonlySet<string>; clock?: ClockProvider; unknownWatchdogMs?: number }): string[] {
   const rows = tx.all<NodeRunRow>(
     'SELECT * FROM node_runs WHERE status IN (?, ?) AND lease_expires_at IS NOT NULL',
     ['dispatched', 'started'],
@@ -145,6 +148,10 @@ export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string
     if (Date.parse(row.lease_expires_at) > Date.parse(params.now)) continue
     // 跑过启动的先转 startup_unknown，没跑过的转 stopping，两边都要留痕
     const next = row.status === 'started' ? 'startup_unknown' : 'stopping'
+    // startup_unknown 的 watchdog 也落 boot/mono 锚点：恢复后只看单调钟，不看墙钟
+    const watchdog = next === 'startup_unknown' && params.clock
+      ? deadlineFromSample(params.clock, params.unknownWatchdogMs ?? 120_000)
+      : null
     try {
       applyTransition(tx, {
         nodeRunId: row.node_run_id,
@@ -152,7 +159,18 @@ export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string
         to: next,
         attempt: row.attempt,
         now: params.now,
-        patch: { lease_id: null, lease_expires_at: null },
+        patch: {
+          lease_id: null,
+          lease_expires_at: null,
+          ...(watchdog
+            ? {
+                startup_unknown_deadline_at: new Date(watchdog.wallClockMs).toISOString(),
+                startup_unknown_boot_id: watchdog.bootId,
+                startup_unknown_monotonic_ns: watchdog.monotonicNs,
+                startup_unknown_remaining_ns: params.unknownWatchdogMs ?? 120_000,
+              }
+            : {}),
+        },
       })
     } catch {
       // 并发扫描已经处理过这一行：跳过，不把整批扫描拖垮

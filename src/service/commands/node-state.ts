@@ -25,6 +25,9 @@ export type TransitionParams = {
   verifyTimeoutMs?: number
   // 判定锚点：墙钟只作展示，判定只读 boot_id 与单调纳秒（规格 3.4 行 171）
   verifyAnchor?: { bootId: string; monotonicNs: number; wallClockMs: number }
+  // startup_unknown 的 unknown_watchdog 预算与锚点；到点只转 indeterminate，不直接判终态
+  unknownWatchdogMs?: number
+  startupUnknownAnchor?: { bootId: string; monotonicNs: number; wallClockMs: number }
 }
 
 // verifying 的判定时限：规格 4.4 行 333 定的是 120 秒
@@ -85,6 +88,29 @@ export function transitionNode(tx: Tx, secret: string, params: TransitionParams)
     sets.push('verify_deadline_boot_id = NULL')
     sets.push('verify_deadline_monotonic_ns = NULL')
     sets.push('verify_remaining_ns = NULL')
+  }
+  if (params.to === 'startup_unknown') {
+    const budgetMs = params.unknownWatchdogMs ?? 120000
+    const anchor = params.startupUnknownAnchor
+    if (anchor) {
+      sets.push('startup_unknown_deadline_at = ?')
+      values.push(new Date(anchor.wallClockMs + budgetMs).toISOString())
+      sets.push('startup_unknown_boot_id = ?')
+      values.push(anchor.bootId)
+      sets.push('startup_unknown_monotonic_ns = ?')
+      values.push(anchor.monotonicNs + Math.round(budgetMs * 1e6))
+      sets.push('startup_unknown_remaining_ns = ?')
+      values.push(Math.round(budgetMs * 1e6))
+    } else {
+      // 没有锚点只留展示墙钟，判定列留空：扫描按不确定处理，不拿墙钟硬判
+      sets.push('startup_unknown_deadline_at = ?')
+      values.push(new Date(Date.parse(params.now) + budgetMs).toISOString())
+    }
+  } else if (params.from === 'startup_unknown') {
+    sets.push('startup_unknown_deadline_at = NULL')
+    sets.push('startup_unknown_boot_id = NULL')
+    sets.push('startup_unknown_monotonic_ns = NULL')
+    sets.push('startup_unknown_remaining_ns = NULL')
   }
   values.push(params.nodeRunId, params.from, params.attempt, params.revision)
   // 条件里必须带 revision 与 attempt；受影响行数必须恰为 1（总纲 §4.4）

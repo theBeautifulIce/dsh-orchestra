@@ -79,6 +79,32 @@ export function deadlineFromRow(row: DeadlineRow): Deadline | null {
   }
 }
 
+// 半态钟（startup_unknown / 围栏宽限 / 等待）同一口径：锚点不全就当没有判定依据。
+export type AnchoredDeadlineRow = {
+  deadlineAt: string | null
+  bootId: string | null
+  monotonicNs: number | null
+}
+
+export function deadlineFromAnchors(row: AnchoredDeadlineRow): Deadline | null {
+  if (!row.bootId || row.monotonicNs === null || !row.deadlineAt) return null
+  return {
+    bootId: row.bootId,
+    monotonicNs: Number(row.monotonicNs),
+    wallClockMs: Date.parse(row.deadlineAt),
+  }
+}
+
+// 写锚点用：同一采样同时落展示用墙钟与判定用单调纳秒。
+export function deadlineFromSample(clock: ClockProvider, afterMs: number): Deadline {
+  const sample = clock.sample()
+  return {
+    bootId: sample.bootId,
+    monotonicNs: sample.monotonicNs + Math.max(0, afterMs) * 1e6,
+    wallClockMs: sample.wallClockMs + Math.max(0, afterMs),
+  }
+}
+
 // 跨 boot 剩余预算
 export type PreviousClock = {
   bootId: BootId

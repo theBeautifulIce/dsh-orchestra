@@ -5,6 +5,7 @@ import {
   cancelWait, enterWaiting, markWakeStarvation, recordWaitEvent,
   sweepWaitTimeouts, timeoutWaiting, wakeOnEvent,
 } from '../../src/service/commands/wait.ts'
+import { ScriptedClock } from '../../src/core/clock.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'wait-secret'
@@ -126,6 +127,30 @@ describe('等待节点', () => {
     expect(node(db, 'n1')).toMatchObject({ status: 'timeout', wait_deadline_at: null, rearm_generation: 2 })
     expect((db.raw.prepare("SELECT state FROM wait_registrations WHERE node_run_id = 'n1'").get() as any).state).toBe('timed_out')
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'wait.event_timeout'")).toBe(1)
+  })
+
+  it('等待钟按单调锚点判：墙钟跳远不误超时，单调钟到点才转 timeout', () => {
+    const db = memoryDb()
+    seedNode(db, 'n1')
+    const clock = new ScriptedClock('boot-w', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    withTx(db, (tx) => {
+      enterWaiting(tx, SECRET, {
+        nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'timer', match: { type: 'never' },
+        idempotencyKey: 'wait-anchored', maxWaitMs: 1_000, now: NOW, clock,
+      })
+    })
+    expect(node(db, 'n1')).toMatchObject({
+      wait_deadline_boot_id: 'boot-w',
+      wait_deadline_monotonic_ns: 1_000_000_000,
+    })
+    const wallJump = new Date(Date.parse(NOW) + 3_600_000).toISOString()
+    withTx(db, (tx) => expect(timeoutWaiting(tx, SECRET, 'n1', wallJump, clock)).toBe(false))
+    clock.advanceMs(1_100)
+    clock.setWallClockMs(clock.sample().wallClockMs + 1_100)
+    withTx(db, (tx) => expect(timeoutWaiting(tx, SECRET, 'n1', wallJump, clock)).toBe(true))
+    expect(node(db, 'n1')).toMatchObject({
+      status: 'timeout', wait_deadline_boot_id: null, wait_deadline_monotonic_ns: null,
+    })
   })
 
   it('sweep 只挑到点的 waiting，可重入且第二次不再落 timeout', () => {

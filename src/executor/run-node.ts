@@ -36,6 +36,8 @@ export type RunNodeParams = {
   actionTimeoutMs?: number
   // 宿主建会话的上限；不传就用 30 秒。spawn 挂住时不能把节点永远留在 dispatched。
   startupTimeoutMs?: number
+  // startup_unknown 的 unknown_watchdog 预算；不传就用 120 秒
+  unknownWatchdogMs?: number
 }
 
 // 租约 30 秒、心跳 10 秒：与门记录 G2.md 的本批定值一致（第四轮审计 M4）
@@ -235,6 +237,8 @@ async function runNodeActions(
           transitionNode(tx, deps.secret, {
             nodeRunId: p.nodeRunId, from: 'dispatched', to: 'startup_unknown',
             attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'agent_spawn_unknown',
+            unknownWatchdogMs: p.unknownWatchdogMs,
+            startupUnknownAnchor: deps.runtime.clock?.sample(),
           })
         }
       })

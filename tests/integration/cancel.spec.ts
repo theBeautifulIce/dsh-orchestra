@@ -3,6 +3,7 @@ import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { acquireLease } from '../../src/service/commands/lease.ts'
 import { applyCancel, pickReplayHead, markOlderAttemptsStale, revokeFence, type CancelResult } from '../../src/service/commands/cancel.ts'
+import { ScriptedClock } from '../../src/core/clock.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
@@ -37,6 +38,27 @@ describe('取消四值与围栏', () => {
     expect(row.fence_armed_at).toBe(NOW)
     expect(row.fence_grace_until).toBe('2026-11-13T03:00:30.000Z')
     expect(events(db, 'fence_armed')).toBe(1)
+  })
+
+  it('围栏宽限按单调锚点判：墙钟跳远不撤围栏，单调钟到点才撤', () => {
+    const db = setup()
+    const clock = new ScriptedClock('boot-c', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const row = nodeRow(db)
+    withTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+      nodeRunId: 'nr_c', attempt: row.attempt, revision: row.revision, cancelResult: 'interrupted',
+      now: NOW, graceMs: 30_000, clock,
+    }))
+    const armed = nodeRow(db)
+    expect(armed).toMatchObject({ fence_grace_boot_id: 'boot-c', fence_grace_monotonic_ns: 30_000_000_000 })
+    const wallJump = '2026-11-13T06:00:00.000Z'
+    expect(withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row: armed, now: wallJump, clock }))).toBe(false)
+    clock.advanceMs(30_500)
+    clock.setWallClockMs(clock.sample().wallClockMs + 30_500)
+    expect(withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row: armed, now: wallJump, clock }))).toBe(true)
+    expect(nodeRow(db)).toMatchObject({
+      status: 'stopping', fence_state: 'revoked',
+      fence_grace_boot_id: null, fence_grace_monotonic_ns: null,
+    })
   })
 
   it('not_interruptible → stopping，fence 仍为 null，deadline 被延长', () => {
