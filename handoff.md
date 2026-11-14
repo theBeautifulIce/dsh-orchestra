@@ -1088,3 +1088,14 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 验证：typecheck 0；全量 42 文件 **612 passed | 1 skipped**；build 成功（ESM 152.60kB / gzip 37.89kB、d.ts 14.30kB）。
 - 状态：候选改动未提交，门记录仍绑第 47 轮候选；pre-sign gate-check 预期失败。下一步提交候选，派 S1/S2 第 48 轮审计，pass 后按 G1→G2 重签。
 - 遗留：R3 链头 DELETE/同事务严格 seq/prev_hash、工具真实耗时；P2-04 审计证据引用；S3 九节点与状态机未开。
+
+### 11.61 第 48 轮双审计 PASS 与 G1/G2 重签（2026-11-14 18:28）
+
+- `s1-audit-r48` 对 `41a450f` 判 G1 **PASS**：13/13，P0=0/P1=0/P2=6；全量 3 次 612 passed | 1 skipped，桥闭环 2 次 70，evidence-repro 25/25，build 0；报告 `docs/audits/S1-independent-audit-round48.md`，LF SHA-256=`ef14a8abc921a6364a66b786dd3f003acaab0e4d88a604f7e3e7dff0d4211007`。
+- `s2-audit-r48` 对同候选判 G2 **PASS**：20/20，P0=0/P1=0/P2=2；全量 3 次 612，桥闭环 4 次 70，必过路径 124 tests，R4 定向探针 29/29，G2 20/20 证据哈希一致；报告 `docs/audits/S2-independent-audit-round48.md`。
+- 两份报告已提交 `0a226a6`；S2 报告补了门/候选绑定行与 `audit-verdict` 结构化裁决，LF SHA-256 最终=`da7f2792bddc2a5153f85e1ed9f50096b65230138852d4f8b24610d03a9fbde8`。S2 报告原有 P2-1（ev-g2-16 计数 607→612）与 P2-2（G2-15 写清 workflow_id）仍留在报告里，未在签前改证据；G2-15 固定表文本由 gate-check 常量锁定，不能单独改。
+- G1 重签：`audit_round=48`、`audit_report=docs/audits/S1-independent-audit-round48.md`，提交未签版 `a902a72`，签后 `699d717`；artifact_hash=`6a6c010ed83d67ccb0953632dec46c85c9542d16bcd25a995b89ab14708df9d0`，candidate=`014d1fca3a07…`。
+- G2 重签：同法改 `audit_round=48`、`audit_report=docs/audits/S2-independent-audit-round48.md`，`previous_artifact_hash` 取已签 G1；中间因 S2 报告缺绑定行/裁决块、证据改动触发候选复用拒绝而回退，最终提交 `9af5fc5`；artifact_hash=`4481775c3a63…`，candidate=`d93fb55325c1…`。
+- 双门 gate-check 均 exit 0：G1 13 项必过、13 份证据；G2 20 项必过、20 份证据。签后全量 **42 files 612 passed | 1 skipped**。
+- 遗留（P2，未阻断）：S1 六条——hydrate 不交叉校验行键与快照、旧库内嵌 workflow_id 升级边界、workflow_id/version 未限控制字符与首尾空白、011 数据升级缺正式回归测试、契约测试手写 workflow_id、run-node 未复核 run 绑定哈希；S2 两条——ev-g2-16 计数、G2-15 措辞。
+- 下一步：R3（012 链头触发器 + `appendNodeRunEvent` 严格化 + 测试/证据），或先补 011 正式迁移回归与 workflow_id 输入约束；R4 已闭合。
