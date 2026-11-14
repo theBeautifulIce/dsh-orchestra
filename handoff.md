@@ -1192,5 +1192,18 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
   - `parallel.ts:assertRunCanTerminal` 同时调用子运行闸，父 run 不再能先于子 run 收口。
 - `runs.ts` 新建根 run 时写 `root_run_id = run_id`、`subworkflow_depth = 0`。
 - 测试 `tests/integration/subworkflow.spec.ts` 12 例：环、深度 2/3、菱形 DAG、策略取最大、非法 pin、pin 不存在、父节点非 started、运行前祖先环、pin 版本落库与幂等、库层深度、waiting 唤醒、取消传播与终态闸。
-- 验证：typecheck 0；定向 12/12；全量 **51 files 696 passed | 1 skipped**。
+- 验证：typecheck 0；定向 12/12；全量 **51 files 698 passed | 1 skipped**；提交 `257c133`。
 - 缺口：子流程节点尚未接进 `run-node` 执行器；有效副作用策略还没接到前置审批；子运行补偿逆序留给 Task 11；证据仍待 S3 收口统一重生成。
+
+### 11.72 S3 Task 11：补偿幂等与未验证副作用落账（2026-11-14 19:32）
+
+- `src/core/canonical.ts` 增 `compensationId(nodeRunId, attempt, descriptorVersion)`：canonical_json + SHA256，同组合必得同 id。
+- 迁移 `020_compensations.sql`：可执行补偿按 `compensation_id` 唯一；无可执行补偿 `compensation_id` 为 NULL，按 `(node_run_id, attempt)` 唯一标 `kind='none'`；状态 `running/applied/failed/unverified/skipped`。
+- `src/service/commands/compensation.ts`：
+  - `assertCompensationDescriptor` 缺工具、验证命令或 descriptorVersion 报 `COMPENSATION_UNEXECUTABLE`。
+  - `startCompensation` 同一幂等键只插一行、只发一条 `compensation.started`；同版本换工具/参数报 `OPERATION_ID_CONFLICT`。
+  - `settleCompensation`：applied 保留节点原状态；failed/unverified 落 `failed_with_unverified`，attempt 与 Gr 都不变，发 `compensation.failed`。
+  - `registerNoExecutableCompensation` 以 NULL compensation_id 幂等落账，再落 `failed_with_unverified`，不许落普通 `failed`。
+- 测试 `tests/integration/compensation.spec.ts` 9 例：同 id、非法描述符、重放一行一事件、换参数冲突、失败落账、applied 不改状态、终态不可改判、NULL 幂等、done 不被降级。
+- 验证：typecheck 0；定向 9/9；全量 **52 files 707 passed | 1 skipped**；build ESM 155.45kB / gzip 38.65kB、d.ts 14.30kB。
+- 缺口：补偿执行器尚未接进 `run-node`；`settleCompensation` 的调用方（取消/失败收口）未接；补偿证据的固定字段集与 artifacts 写盘仍待接；证据待 S3 收口统一重生成。

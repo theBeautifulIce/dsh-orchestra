@@ -27,3 +27,8 @@ export function sha256Hex(input: string | Buffer): string {
 export function hmacSha256Hex(secret: string | Buffer, input: string | Buffer): string {
   return createHmac('sha256', secret).update(input).digest('hex')
 }
+
+// 补偿幂等键：同一节点、同一 attempt、同一描述符版本必然得到同一个 id（规格 4.7 行 385）
+export function compensationId(nodeRunId: string, attempt: number, descriptorVersion: string): string {
+  return sha256Hex(canonicalJson({ node_run_id: nodeRunId, attempt, descriptor_version: descriptorVersion }))
+}
