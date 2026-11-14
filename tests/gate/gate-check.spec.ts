@@ -1598,12 +1598,36 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
       '结论：pass。',
       '',
     ].join('\n')
-    for (const remark of ['未通过（本轮）', '本轮未通过', '未通过：证据不足', '不通过（3 项待补）', '尚未通过', '暂未通过', '仍未通过', '并未通过', '本轮仍未通过', '未通过（3 项待补）', '未通过，待整改', '未通过 - 3 项', '未通过（见备注）', '未通过 —— 3 项', '未通过/待整改', '待整改', '已否决（本轮）', '未 通过', '待定', 'blocked', '该项未通过', '必过项 G1-01 未通过']) {
+    for (const remark of ['未通过（本轮）', '本轮未通过', '未通过：证据不足', '不通过（3 项待补）', '尚未通过', '暂未通过', '仍未通过', '并未通过', '本轮仍未通过', '未通过（3 项待补）', '未通过，待整改', '未通过 - 3 项', '未通过（见备注）', '未通过 —— 3 项', '未通过/待整改', '待整改', '已否决（本轮）', '未 通过', '待定', 'blocked', '该项未通过', '必过项 G1-01 未通过', '暂缓', '暂缓（本轮）', '本轮暂缓', '该门暂缓', '暫緩']) {
       expect(proseVerdictClashes(report(remark), 'pass', ['G1-01']).join('\n'), remark).toMatch(/G1-01/)
     }
     for (const remark of ['未通过项为空', '失败项为空']) {
       expect(proseVerdictClashes(report(remark), 'pass', ['G1-01']), remark).toEqual([])
     }
+  })
+
+  it('表格繁体否决与简体同口径，暂缓不被前缀剥离吞掉', () => {
+    const report = (remark: string) => head + [
+      '| 用例编号 | 必过项 | 期望 | 备注 |',
+      '| --- | --- | --- | --- |',
+      '| A1 | G1-01 | 拒 | ' + remark + ' |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    for (const remark of ['未通過', '未能通過', '本項未通過', '駁回', '否決', '暫緩', '暫緩（本輪）']) {
+      expect(proseVerdictClashes(report(remark), 'pass', ['G1-01']).join('\n'), remark).toMatch(/G1-01/)
+    }
+    const verdict = head + [
+      '| 必过项 | 结论 |',
+      '| --- | --- |',
+      '| G1-01 | 未通過 |',
+      '',
+      '结论：pass。',
+      '',
+    ].join('\n')
+    expect(proseVerdictClashes(verdict, 'pass', ['G1-01']).join('\n')).toMatch(/G1-01/)
+    expect(proseVerdictClashes(report('通过'), 'pass', ['G1-01'])).toEqual([])
   })
 
   it('攻击行结论列写已拒绝/被拒绝/已拒仍拒绝', () => {

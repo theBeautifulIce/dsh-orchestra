@@ -1267,6 +1267,15 @@ const CELL_FAIL_VERDICTS_STRONG = [
   'refused', 'vetoed', 'not pass', 'not passed', 'not successful', 'not succeeded',
   'not approved', 'no pass', 'unapproved', 'disapproved', 'unaccepted',
   'no approval', 'failed to pass', 'not recommend', 'recommend against',
+  // 繁體表格与简体走同一张表，避免正文拦得住、表格拦不住。
+  '未通過', '不通過', '沒通過', '不能通過', '未能通過', '沒有通過', '未得到通過',
+  '未獲通過', '未予通過', '通不過', '不是通過', '未達標', '不達標', '不批准', '未批准',
+  '不獲批准', '未獲批准', '不予批准', '不予通過', '未獲批', '未被批准', '未獲審批', '不獲審批',
+  '未通過驗收', '不通過驗收', '未通過收口', '被否決', '否決', '已否決', '被駁回', '駁回', '已駁回',
+  '被拒絕', '拒絕', '已拒絕', '被拒', '已拒', '不予採信', '不採信', '未完成整改', '整改未完成',
+  '未完成修復', '未整改', '未修復', '未收口', '未受理', '不予受理', '未接收', '不接收', '未接受',
+  '不予接受', '不接受', '不予放行', '不放行', '不予晉級', '不予准入', '不准入', '未准入', '失敗',
+  '退回', '已退回', '打回', '已打回', '被退回', '被打回',
 ]
 // 单元格弱裁决词：状态词，只有整格就是这个词才算数。
 // blocked / incomplete / red / on hold 在门正文表格里常常是领域词（节点状态、错误码）。
@@ -1277,6 +1286,10 @@ const CELL_FAIL_VERDICTS_WEAK = [
   '部分通过', '有条件通过', '附条件通过', '暂缓', '搁置', '待定', '待整改',
   '需整改', '待修复', '需修复', '未完成', '不足', '不够', '不完整',
   '未就绪', '悬而未决', '保留意见', '待观察', '存疑', '有疑',
+  // 繁體弱否决：表格与散文同一口径。
+  '部分通過', '有條件通過', '附條件通過', '暫緩', '擱置', '待整改', '需整改',
+  '待修復', '需修復', '未完成', '不足', '不夠', '不完整', '未就緒', '懸而未決',
+  '保留意見', '待觀察', '存疑', '有疑',
   'declined', 'turned down', 'unsatisfactory', 'inadequate', 'unacceptable',
   'noncompliant', 'unready', 'not ready',
 ]
@@ -1309,20 +1322,7 @@ function cellWeakFail(folded: string): boolean {
   return CELL_FAIL_VERDICTS_WEAK.includes(folded.toLowerCase())
 }
 
-// 整格只有一个失败裁决词（允许前缀限定、括号说明或冒号理由，允许尾随标点）：
-// 不管列名叫「结论」「备注」还是别的，它都不是描述性文字，攻击矩阵不能靠改列名把它豁免掉。
-// 「未通过项为空」「失败项为空」这类名词短语不算裸裁决。
-function isBareFailureCell(folded: string): boolean {
-  let text = folded.trim().replace(/[。；;，,、.!！?？]+$/g, '').trim().toLowerCase()
-  if (text === '') return false
-  for (let i = 0; i < 3; i += 1) {
-    const next = text.replace(
-      /^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|该审计|該審計|本报告|本報告|该项|本项|此项|此項|该门|該門|本门|本門|暂|暫|尚|仍|并|並|也|还|還|均|都)\s*/,
-      '',
-    )
-    if (next === text) break
-    text = next
-  }
+function matchesFailureWord(text: string): boolean {
   for (const word of [...CELL_FAIL_VERDICTS_STRONG, ...CELL_FAIL_VERDICTS_WEAK]) {
     const target = word.toLowerCase()
     if (text === target) return true
@@ -1332,6 +1332,26 @@ function isBareFailureCell(folded: string): boolean {
       .map((ch) => (/[\p{L}\p{N}]/u.test(ch) ? regexEscape(ch) : '\\|*'))
       .join('\\|*')
     if (new RegExp('^' + body + '(?:\\||$)').test(text)) return true
+  }
+  return false
+}
+
+// 整格只有一个失败裁决词（允许前缀限定、括号说明或冒号理由，允许尾随标点）：
+// 不管列名叫「结论」「备注」还是别的，它都不是描述性文字，攻击矩阵不能靠改列名把它豁免掉。
+// 「未通过项为空」「失败项为空」这类名词短语不算裸裁决。
+function isBareFailureCell(folded: string): boolean {
+  let text = folded.trim().replace(/[。；;，,、.!！?？]+$/g, '').trim().toLowerCase()
+  if (text === '') return false
+  // 先按原样匹配：暂缓、暫緩 这类本身就是完整弱否决词，不能被单字前缀「暂/暫」剥成「缓」。
+  if (matchesFailureWord(text)) return true
+  for (let i = 0; i < 3; i += 1) {
+    const next = text.replace(
+      /^(?:本轮|本輪|当前|當前|本次|当期|當期|最终|最終|审计|審計|该审计|該審計|本报告|本報告|该项|本项|此项|此項|本項|該項|该门|該門|本门|本門|暂|暫|尚|仍|并|並|也|还|還|均|都)\s*/,
+      '',
+    )
+    if (next === text) break
+    text = next
+    if (matchesFailureWord(text)) return true
   }
   return false
 }
