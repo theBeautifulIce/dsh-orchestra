@@ -146,6 +146,28 @@ R4 把工作流身份从「version 单键」改成「(workflow_id, version) 复�
 
 日志在克隆 `tmp-install.log`、`tmp-typecheck.log`、`tmp-test1..3.log`、`tmp-build.log`、`tmp-repro.log`、`tmp-bridge1..4.log`、`tmp-g2path.log`、`tmp-gatecheck-g1.log`、`tmp-b0607.log`；探针 `tmp/probe-r4.ts`、`tmp/verify-hashes.ts`、`tmp/verify-artifact.ts`。
 
+## 结构化裁决
+
+<!-- audit-verdict:begin -->
+```json
+{
+  "schema": "audit-verdict/1",
+  "gate": "G2",
+  "audit_round": 48,
+  "candidate_commit": "41a450f2fc6345345f7654ebe20daeebe58b37de",
+  "conclusion": "pass",
+  "p0": 0,
+  "p1": 0,
+  "p2": 2,
+  "must_pass_total": 20,
+  "must_pass_passed": 20,
+  "must_pass_ids": ["G2-01", "G2-02", "G2-03", "G2-04", "G2-05", "G2-06", "G2-07", "G-03", "G-04", "G-05", "G-07", "G2-08", "G2-09", "G2-10", "G2-11", "G2-12", "G2-13", "G2-14", "G2-15", "G2-16"],
+  "failed_items": [],
+  "notes": "R4 复合身份经迁移旧库、HTTP 双工作流同版本、单参歧义、NULL 行归 default 等探针验证；全量三次 612 passed | 1 skipped，桥闭环四次 70 passed，25/25 证据复现成立，G2 20/20 证据哈希一致。仅 2 条 P2 文档问题，无 P0/P1。"
+}
+```
+<!-- audit-verdict:end -->
+
 ## 剩余风险
 
 1. **重签顺序**：R4 必须重签 G1→G2；当前 artifact 的四个聚合字段与 `body_hash` 都是第 47 轮值。若先签 G2 会读到旧 G1 锚点。建议先落 P2 修正再签。
