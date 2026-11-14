@@ -146,6 +146,26 @@ describe('生产路径跑通单节点', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('run 绑定的定义哈希被换掉：执行期取工具授权前就拒，不 spawn', async () => {
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([])
+    withTx(orchestra.db, (tx) => tx.run("UPDATE runs SET workflow_definition_hash = ? WHERE run_id = 'r1'", ['f'.repeat(64)]))
+    let spawned = false
+    const watched: HostAgentFactory = {
+      create: async (params) => { spawned = true; return agents.create(params) },
+    }
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents: watched, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toMatchObject({ code: 'WORKFLOW_VERSION_IMMUTABLE' })
+    expect(spawned).toBe(false)
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('spawn 回包失败：节点落 startup_unknown，不能永远停在 dispatched', async () => {
     const { dir, orchestra, release, registry, bridge, runner } = await setup([])
     const badAgents: HostAgentFactory = {

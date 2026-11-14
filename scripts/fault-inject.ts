@@ -473,15 +473,16 @@ async function caseG05(): Promise<InjectionResult> {
   const bridge = fakeAgentClient({ agentId: 'agent_g05', steps: [{ tool: 'ro.echo' }], at: NOW })
   const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, bridge, runner } })
   const orchestra = service.orchestra
-  withTx(orchestra.db, (tx) => {
-    tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t_g05','取消注入','running',1,?,?)", [NOW, NOW])
-    tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, status, revision, created_at, updated_at) VALUES ('r_g05','t_g05','default',7,'running',1,?,?)", [NOW, NOW])
-    tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nrun_g05','r_g05','check',1,'agent',1,'queued',0,?,?)", [NOW, NOW])
-  })
   orchestra.catalog.load({
     workflow_version: '7',
     pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
     nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
+  })
+  const definitionHash = orchestra.catalog.definitionHash('default', '7')
+  withTx(orchestra.db, (tx) => {
+    tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t_g05','取消注入','running',1,?,?)", [NOW, NOW])
+    tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) VALUES ('r_g05','t_g05','default',7,?,'running',1,?,?)", [definitionHash, NOW, NOW])
+    tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nrun_g05','r_g05','check',1,'agent',1,'queued',0,?,?)", [NOW, NOW])
   })
   const before = dumpState(file)
   const runPromise = runNode(

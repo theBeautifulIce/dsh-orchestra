@@ -74,6 +74,19 @@ describe('账本只追加保护', () => {
     expect(() => db.raw.prepare("DELETE FROM node_run_chain_heads WHERE node_run_id = 'nr1'").run()).toThrow(/只由追加维护/)
   })
 
+  it('INSERT OR REPLACE 重置链头 → 触发器拒绝，不能绕过 DELETE 守卫', () => {
+    const db = freshDb()
+    seedChain(db)
+    const first = db.raw.prepare("SELECT hash FROM node_run_events WHERE node_run_id = 'nr1' AND seq = 1").get() as { hash: string }
+    // 这条载荷能通过 012 的首条事件校验；没有 013 时 REPLACE 会先删旧链头再插回去，
+    // 把 last_seq 从 2 重置成 1，DELETE 触发器根本看不到。
+    expect(() => db.raw.prepare(
+      "INSERT OR REPLACE INTO node_run_chain_heads (node_run_id, last_seq, last_hash, event_count, updated_at) VALUES ('nr1', 1, ?, 1, ?)",
+    ).run(first.hash, NOW)).toThrow(/不能重复插入或替换/)
+    const head = withTx(db, (tx) => readChainHead(tx, 'nr1'))
+    expect(head).toMatchObject({ last_seq: 2, event_count: 2 })
+  })
+
   it('直接 UPDATE 链头跳号 → 触发器拒绝', () => {
     const db = freshDb()
     seedChain(db)

@@ -87,6 +87,11 @@ export function parseBody<S extends z.ZodType>(schema: S, body: unknown, label: 
 
 // 标识类字段：非空且有长度上限，防止超长串进库进日志
 const identifier = z.string().min(1).max(LIMITS.identifierMaxLength)
+// 工作流命名空间与版本号会进复合主键与事件：首尾空白、控制字符与路径分隔符都不收，
+// 否则 " a" 与 "a" 会在库里成为两个看起来一样的身份（第48轮 S1 P2）。
+const workflowIdentityPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
+const workflowIdentifier = z.string().min(1).max(LIMITS.identifierMaxLength).regex(workflowIdentityPattern, '只能由字母、数字与 . _ : - 组成，且不能以符号开头')
+const workflowVersionString = z.string().min(1).max(LIMITS.versionMaxLength).regex(workflowIdentityPattern, '版本号只能由字母、数字与 . _ : - 组成，且不能以符号开头')
 // report_id 会进账本事件、还要按列判重：字符集限死，引号与反斜杠这类会破坏 JSON 文本比对的字符不许进（第三十四轮审计 P1-1）
 const reportIdentifier = identifier.regex(
   /^[A-Za-z0-9._:-]+$/,
@@ -138,8 +143,8 @@ const passConditionSchema = z.looseObject({
 // 加载定义：定义哈希按整个 body 算，未知键必须原样保留，所以用 looseObject
 export const workflowLoadSchema = z.looseObject({
   // 工作流命名空间；省略即 default，旧客户端不需要改
-  workflow_id: z.string().min(1).max(LIMITS.identifierMaxLength).optional(),
-  workflow_version: z.union([z.string().min(1).max(LIMITS.versionMaxLength), z.number().int()])
+  workflow_id: workflowIdentifier.optional(),
+  workflow_version: z.union([workflowVersionString, z.number().int().nonnegative()])
     .transform((value) => String(value)),
   nodes: z.array(z.looseObject({
     node_id: identifier,
@@ -160,8 +165,8 @@ export const workflowLoadSchema = z.looseObject({
 export const createRunSchema = z.looseObject({
   taskTitle: z.string().min(1).max(LIMITS.titleMaxLength),
   // 两个工作流各有同版本号时必须带；省略按唯一版本或 default 解析
-  workflowId: z.string().min(1).max(LIMITS.identifierMaxLength).optional(),
-  workflowVersion: z.union([z.string().min(1).max(LIMITS.versionMaxLength), z.number().int()])
+  workflowId: workflowIdentifier.optional(),
+  workflowVersion: z.union([workflowVersionString, z.number().int().nonnegative()])
     .transform((value) => String(value)),
   nodeIds: z.array(identifier).max(LIMITS.nodeIdsMaxCount).optional(),
 })

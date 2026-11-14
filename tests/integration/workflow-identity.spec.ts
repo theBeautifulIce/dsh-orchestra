@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { WorkflowCatalog } from '../../src/service/workflows.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { WorkflowCatalog, definitionHashOf } from '../../src/service/workflows.ts'
 import { createRun } from '../../src/service/runs.ts'
 import { freshLedger } from '../fixtures/ledger.ts'
+import { openDb } from '../../src/infra/sqlite/driver.ts'
+import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import type { WorkflowDefinition } from '../../src/core/workflow-def.ts'
 
 const NOW = '2026-11-14T10:00:00.000Z'
@@ -60,5 +65,51 @@ describe('run 绑定 workflow_id + version 复合身份', () => {
     expect(out.workflow_id).toBe('default')
     const row = db.raw.prepare('SELECT workflow_id FROM runs WHERE run_id = ?').get(out.run_id) as { workflow_id: string }
     expect(row.workflow_id).toBe('default')
+  })
+
+  it('工作流身份只收有界标识：首尾空白、控制字符、空串都拒在落库之前', () => {
+    const { db } = freshLedger()
+    const catalog = new WorkflowCatalog('S2', db)
+    for (const bad of [' wf-a', 'wf-a ', 'wf\na', '', ':wf']) {
+      expect(() => catalog.load(def(bad, 'a'))).toThrow(/工作流身份不合法/)
+    }
+    expect(() => catalog.load({ ...def('wf-a', 'a'), workflow_version: '1\n' })).toThrow(/工作流身份不合法/)
+    expect(Number((db.raw.prepare('SELECT COUNT(*) AS n FROM workflow_versions').get() as { n: number }).n)).toBe(0)
+  })
+
+  it('hydrate 交叉校验行键与快照：行被改成 default 但快照仍是 wf-a 时拒绝', () => {
+    const { db } = freshLedger()
+    new WorkflowCatalog('S2', db).load(def('wf-a', 'a'))
+    db.raw.prepare("UPDATE workflow_versions SET workflow_id = 'default' WHERE workflow_id = 'wf-a'").run()
+    const broken = new WorkflowCatalog('S2', db)
+    expect(() => broken.hydrate()).toThrow(/行键与快照身份不一致/)
+  })
+
+  it('011 升级把旧表单键数据完整归入 default，hydrate 后哈希与内容不变', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orch-wf011-'))
+    try {
+      const db = openDb(join(dir, 'orchestra.db'))
+      const steps = loadSteps(defaultMigrationsDir())
+      applySteps(db, steps.filter((s) => s.version <= 10))
+      const legacy = { workflow_version: '7', nodes: [{ node_id: 'old', type: 'agent' as const }] }
+      const hash = definitionHashOf(legacy)
+      db.raw.prepare('INSERT INTO workflow_versions (version, content_hash, definition_json, created_at) VALUES (?, ?, ?, ?)')
+        .run('7', hash, JSON.stringify(legacy), NOW)
+      applySteps(db, loadSteps(defaultMigrationsDir()).filter((s) => s.version >= 11))
+
+      const row = db.raw.prepare('SELECT workflow_id, version, content_hash, definition_json FROM workflow_versions').get() as {
+        workflow_id: string; version: string; content_hash: string; definition_json: string
+      }
+      expect(row).toMatchObject({ workflow_id: 'default', version: '7', content_hash: hash })
+      expect(JSON.parse(row.definition_json)).toEqual(legacy)
+
+      const catalog = new WorkflowCatalog('S2', db)
+      expect(catalog.hydrate()).toBe(1)
+      expect(catalog.get('default', '7').nodes[0]!.node_id).toBe('old')
+      expect(catalog.definitionHash('default', '7')).toBe(hash)
+      db.raw.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

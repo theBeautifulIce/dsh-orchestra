@@ -22,6 +22,29 @@ export function workflowIdOf(def: WorkflowDefinition): string {
   return String(def.workflow_id ?? DEFAULT_WORKFLOW_ID)
 }
 
+// 命名空间与版本号会进主键、事件和日志：只收有界、无首尾空白的标识，
+// 避免 " a" 与 "a"、带换行的版本号在库里成为两条看起来一样的身份（第48轮 S1 P2）。
+const WORKFLOW_ID_MAX = 128
+const WORKFLOW_VERSION_MAX = 64
+const WORKFLOW_IDENTITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
+
+function assertIdentity(kind: 'workflow_id' | 'workflow_version', value: string, max: number): string {
+  const text = String(value)
+  if (text.length === 0 || text.length > max || !WORKFLOW_IDENTITY_PATTERN.test(text)) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '工作流身份不合法，只收字母、数字与 . _ : -', {
+      field: kind,
+      value: text,
+      max,
+    })
+  }
+  return text
+}
+
+function assertDefinitionIdentity(workflowId: string, version: string): void {
+  assertIdentity('workflow_id', workflowId, WORKFLOW_ID_MAX)
+  assertIdentity('workflow_version', version, WORKFLOW_VERSION_MAX)
+}
+
 function keyOf(workflowId: string, version: string): string {
   return `${workflowId}\u0000${version}`
 }
@@ -46,6 +69,19 @@ export class WorkflowCatalog {
       // 快照化：落库文本先还原成独立对象，校验、哈希、进目录都只认这份快照
       const snapshot = snapshotOf(JSON.parse(row.definition_json) as WorkflowDefinition)
       assertDefinitionAllowed(snapshot, this.phase)
+      // 行键与快照必须指向同一个身份：011 升级时旧定义可能内嵌过 workflow_id，
+      // 直接按 default 装回会把 wf-a 的定义挂到 default 名下，建 run 时再串到别的命名空间。
+      const snapshotId = workflowIdOf(snapshot)
+      const snapshotVersion = String(snapshot.workflow_version)
+      assertDefinitionIdentity(row.workflow_id, row.version)
+      if (snapshotId !== row.workflow_id || snapshotVersion !== row.version) {
+        throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '工作流定义的行键与快照身份不一致，库被改过', {
+          row_workflow_id: row.workflow_id,
+          row_version: row.version,
+          snapshot_workflow_id: snapshotId,
+          snapshot_version: snapshotVersion,
+        })
+      }
       if (definitionHashOf(snapshot) !== row.content_hash) {
         throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '工作流定义的落库哈希对不上，库被改过', {
           workflow_id: row.workflow_id,
@@ -64,6 +100,7 @@ export class WorkflowCatalog {
     assertDefinitionAllowed(snapshot, this.phase)
     const workflowId = workflowIdOf(snapshot)
     const key = String(snapshot.workflow_version)
+    assertDefinitionIdentity(workflowId, key)
     const hash = definitionHashOf(snapshot)
     // 同一 workflow 的同一版本号只能对应一份定义：reload 改写已建 run 的判定条件，就是绕过不可变模板（第五轮审计 P1-1）
     const persisted = this.db?.raw.prepare(

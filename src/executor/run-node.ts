@@ -142,8 +142,8 @@ function withTimeout<T>(task: Promise<T>, timeoutMs: number, onTimeout: () => Or
 // 从 node_run 反查 run 绑定的工作流版本，再取该节点定义里的工具清单
 function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
   const row = deps.db.raw.prepare(
-    'SELECT n.node_id AS node_id, r.workflow_id AS workflow_id, r.workflow_version AS workflow_version FROM node_runs n JOIN runs r ON r.run_id = n.run_id WHERE n.node_run_id = ?',
-  ).get(p.nodeRunId) as { node_id: string; workflow_id?: string | null; workflow_version?: number | null } | undefined
+    'SELECT n.node_id AS node_id, r.workflow_id AS workflow_id, r.workflow_version AS workflow_version, r.workflow_definition_hash AS workflow_definition_hash FROM node_runs n JOIN runs r ON r.run_id = n.run_id WHERE n.node_run_id = ?',
+  ).get(p.nodeRunId) as { node_id: string; workflow_id?: string | null; workflow_version?: number | null; workflow_definition_hash?: string | null } | undefined
   if (!row) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: p.nodeRunId })
   // 节点身份以账本为准：调用方传别的 nodeId 不许借到另一份工具授权
   if (row.node_id !== p.nodeId) {
@@ -152,8 +152,23 @@ function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
   if (row.workflow_version === null || row.workflow_version === undefined) {
     throw new OrchError('VERDICT_UNSUPPORTED', '这个 run 没有绑定工作流版本', { nodeRunId: p.nodeRunId })
   }
+  const workflowId = row.workflow_id ?? 'default'
+  if (row.workflow_definition_hash === null || row.workflow_definition_hash === undefined) {
+    throw new OrchError('VERDICT_UNSUPPORTED', '这个 run 没有绑定工作流定义哈希', { nodeRunId: p.nodeRunId })
+  }
+  // 与收口同一条口径：取工具授权前先复核 run 绑定的定义哈希，重启后同版本换内容不能改变可调用工具
+  const currentHash = deps.runtime.catalog.definitionHash(workflowId, row.workflow_version)
+  if (currentHash !== row.workflow_definition_hash) {
+    throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', 'run 绑定的工作流定义与当前版本不一致，执行期工具授权不许中途换', {
+      nodeRunId: p.nodeRunId,
+      workflow_id: workflowId,
+      workflow_version: String(row.workflow_version),
+      bound: row.workflow_definition_hash,
+      current: currentHash,
+    })
+  }
   // 旧 run 的 workflow_id 为空，归到 default 命名空间；新 run 必须按自己的 workflow_id 取工具授权
-  const def = deps.runtime.catalog.toolPolicyFor(row.workflow_id ?? 'default', row.workflow_version, row.node_id)
+  const def = deps.runtime.catalog.toolPolicyFor(workflowId, row.workflow_version, row.node_id)
   return { allow: def.allow, deny: def.deny, declaredPolicy: 'pure' }
 }
 
