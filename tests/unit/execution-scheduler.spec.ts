@@ -8,8 +8,6 @@ import {
   createExecutionSchedulerFromConfig,
   DEFAULT_EXECUTION_CONCURRENCY,
   DEFAULT_HUMAN_SLOTS,
-  type ExecutionScheduler,
-  type ExecutionTaskOptions,
 } from '../../src/service/execution-scheduler.ts'
 
 const delay = (ms: number): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
@@ -151,29 +149,37 @@ describe('执行调度器', () => {
 })
 
 describe('dispatcher 与调度器接线', () => {
-  it('dispatcher 把长任务交给调度器：调度器被调用，节点失败也收成结果', async () => {
-    const rows = [{ node_run_id: 'nr1', node_id: 'check', seq: 1, attempt: 1 }]
-    // 只假造 dispatcher 用到的那一次查表；runNode 查不到 node_run 会先抛 NOT_FOUND
+  it('dispatcher 只调注入的已调度执行函数，自己不再排一次队', async () => {
+    const rows = [
+      { node_run_id: 'nr1', node_id: 'check', seq: 1, attempt: 1 },
+      { node_run_id: 'nr2', node_id: 'check', seq: 2, attempt: 1 },
+    ]
+    // 只假造 dispatcher 用到的那一次查表
     const fakeDb = {
       raw: { prepare: () => ({ all: () => rows, get: () => undefined }) },
       epoch: 1,
     } as unknown as Db
-    const base = createExecutionScheduler({ concurrency: 1 })
-    let scheduled = 0
-    const spy = {
-      run: (fn: () => Promise<unknown> | unknown, opts?: ExecutionTaskOptions) => {
-        scheduled += 1
-        return base.run(fn, opts)
-      },
-    } as unknown as ExecutionScheduler
-    const outcome = await dispatchRun({ db: fakeDb, scheduler: spy } as unknown as DispatchDeps, {
-      runId: 'run1',
-      nodes: { check: { tools: [] } },
-      now: '2026-11-14T00:00:00.000Z',
-    })
-    expect(scheduled).toBe(1)
-    expect(outcome[0]?.status).toBe('failed')
-    expect(outcome[0]?.error_code).toBe('NOT_FOUND')
-    expect(base.inFlight).toBe(0)
+    const base = createExecutionScheduler({ concurrency: 2 })
+    let calls = 0
+    let inFlight = 0
+    let maxInFlight = 0
+    const executeNode = async () => {
+      calls += 1
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      inFlight -= 1
+      throw Object.assign(new Error('节点不存在'), { code: 'NOT_FOUND' })
+    }
+    const outcome = await dispatchRun(
+      { db: fakeDb, executeNode } as unknown as DispatchDeps,
+      { runId: 'run1', nodes: { check: { tools: [] } }, now: '2026-11-14T00:00:00.000Z' },
+    )
+    // 两个节点各执行一次，没有因为 dispatcher 自己再包一层而翻倍
+    expect(calls).toBe(2)
+    for (const row of outcome) {
+      expect(row.status).toBe('failed')
+      expect(row.error_code).toBe('NOT_FOUND')
+    }
   })
 })

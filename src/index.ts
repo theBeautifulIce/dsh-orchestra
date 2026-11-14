@@ -15,9 +15,12 @@ import {
 } from './service/commands/runtime.ts'
 import type { Phase } from './core/config.ts'
 import type { CancelResult } from './service/commands/cancel.ts'
-import { runNode, DEFAULT_LEASE_TTL_MS, type RunNodeDeps } from './executor/run-node.ts'
 import {
-  createExecutionScheduler, createExecutionSchedulerFromConfig, type ExecutionScheduler,
+  runNode, DEFAULT_LEASE_TTL_MS,
+  type RunNodeDeps, type RunNodeParams, type RunNodeResult,
+} from './executor/run-node.ts'
+import {
+  createExecutionScheduler, createExecutionSchedulerFromConfig, runThroughScheduler, type ExecutionScheduler,
 } from './service/execution-scheduler.ts'
 import { loadConfig } from './core/config.ts'
 import { SystemClock } from './core/clock.ts'
@@ -63,6 +66,21 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   // 生产时钟：墙钟与单调钟同时取样，漂移超过 2 秒就判不确定（规格 3.4 行 171）
   const clock = new SystemClock(randomUUID())
   const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
+  const executor = opts.executor
+  const executorDeps: RunNodeDeps | null = executor
+    ? { runtime, db, secret: opts.secret, ...executor }
+    : null
+  // 节点执行只有一个底层实现；调度只在装配层包一次（S2 第三十七轮 P0-01）。
+  const executeNode = async (p: RunNodeParams): Promise<RunNodeResult> => {
+    if (!executorDeps) {
+      throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑节点', { nodeRunId: p.nodeRunId })
+    }
+    return runNode(executorDeps, p)
+  }
+  // 两条入口（/v1/runs/dispatch 与 /v1/node-runs/run）共用这一个带闸函数：
+  // 不允许 dispatcher 自己再排一次，否则同一次执行会重复占两个并发名额。
+  const executeScheduled = (p: RunNodeParams): Promise<RunNodeResult> =>
+    runThroughScheduler(opts.scheduler, () => executeNode(p), { label: p.nodeId })
   const commands: NodeCommands = {
     acquireLease: (b) => acquireNodeRun(runtime, b),
     renewLease: (b) => renewNodeLease(runtime, b),
@@ -79,7 +97,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })
       }
-      return dispatchRun({ runtime, db, secret: opts.secret, ...opts.executor, scheduler: opts.scheduler }, {
+      return dispatchRun({ ...executorDeps!, executeNode: executeScheduled }, {
         runId: b.runId,
         nodes: b.nodes,
         now: b.now,
@@ -92,7 +110,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑节点', { nodeRunId: b.nodeRunId })
       }
-      return runNode({ runtime, db, secret: opts.secret, ...opts.executor }, {
+      return executeScheduled({
         nodeRunId: b.nodeRunId,
         nodeId: b.nodeId,
         attempt: b.attempt,
