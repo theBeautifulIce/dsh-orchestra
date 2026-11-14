@@ -172,6 +172,40 @@ export const createRunSchema = z.looseObject({
 })
 
 // 派发：run 标识、节点规格表、租约三元组
+export const startRunSchema = z.looseObject({
+  taskTitle: z.string().min(1).max(LIMITS.titleMaxLength),
+  workflowId: workflowIdentifier.optional(),
+  workflowVersion: z.union([workflowVersionString, z.number().int().nonnegative()])
+    .transform((value) => String(value)),
+  nodeIds: z.array(identifier).max(LIMITS.nodeIdsMaxCount).optional(),
+  autonomy: z.enum(['autonomous', 'assisted', 'supervised']).optional(),
+  escalations: z.array(z.looseObject({
+    kind: z.enum(['node_type', 'action_category', 'workflow_version_publish']),
+    value: z.string().min(1).max(LIMITS.identifierMaxLength),
+  })).max(64).optional(),
+  operationId: identifier,
+})
+
+export const RESOLUTIONS = [
+  'approved', 'rejected', 'expired', 'confirm_applied', 'confirm_not_applied',
+  'confirm_started', 'confirm_not_started', 'continue_tracking', 'continue_wait',
+  'abandon', 'uphold_report', 'uphold_decision',
+] as const
+
+export const resolveDecisionSchema = z.looseObject({
+  decisionId: identifier,
+  revision: z.number().int().positive(),
+  resolution: z.enum(RESOLUTIONS),
+  payload: z.record(z.string(), z.unknown()).optional(),
+  actor: z.looseObject({
+    kind: z.enum(['human', 'agent']),
+    id: identifier,
+    capabilities: z.array(identifier).optional(),
+  }).optional(),
+  evidenceProducers: z.array(identifier).max(64).optional(),
+  confirm: z.boolean().optional(),
+})
+
 export const dispatchSchema = z.looseObject({
   runId: identifier,
   nodes: z.record(identifier, nodeSpecSchema),
@@ -223,6 +257,11 @@ export const reportSchema = z.looseObject({
   }),
   expectedStatus: z.string().min(1).max(LIMITS.statusMaxLength),
   generation: z.number().int().nonnegative(),
+  decision: z.looseObject({
+    decisionId: identifier,
+    revision: z.number().int().positive(),
+    resolution: z.enum(['confirm_applied', 'confirm_not_applied', 'uphold_report', 'uphold_decision']),
+  }).optional(),
 })
 
 // 生产执行入口：工具清单必须合法，租约三元组可选

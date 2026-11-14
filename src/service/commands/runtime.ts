@@ -40,6 +40,7 @@ export function submitReport(deps: RuntimeDeps, p: {
   report: Report
   expectedStatus: string
   generation: number
+  decision?: { decisionId: string; revision: number; resolution: 'confirm_applied' | 'confirm_not_applied' | 'uphold_report' | 'uphold_decision' }
   now: string
 }): ApplyResult {
   // 判定条件由 applyReport 自己按 run 绑定的工作流版本取，命令层不再经手（审计 M5）

@@ -7,12 +7,15 @@ import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import {
   cancelSchema, createRunSchema, dispatchSchema, ledgerEventSchema, leaseSchema, parseBody,
-  renewSchema, reportSchema, runNodeSchema, workflowLoadSchema,
+  renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, workflowLoadSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
 import type { LoadWorkflowResult } from './workflows.ts'
 import type { CreateRunResult } from './runs.ts'
+import type { StartRunResult } from './commands/start-run.ts'
+import type { Resolution } from './commands/decisions.ts'
+import type { Actor } from './decision/approver.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
 import type { ToolPolicy } from '../executor/session.ts'
@@ -41,7 +44,9 @@ export type NodeCommands = {
   // 续租：动作比租约长时把租约往后推；判定留在服务端，路由层只搬字段（规格 4.3 行 309-310）
   renewLease: (body: { nodeRunId: string; leaseTtlMs: number; now: string }) => { expires_at: string }
   report: (body: {
-    nodeRunId: string; attempt: number; report: unknown; expectedStatus: string; generation: number; now: string
+    nodeRunId: string; attempt: number; report: unknown; expectedStatus: string; generation: number
+    decision?: { decisionId: string; revision: number; resolution: 'confirm_applied' | 'confirm_not_applied' | 'uphold_report' | 'uphold_decision' }
+    now: string
   }) => ApplyResult
   cancel: (body: {
     nodeRunId: string; attempt: number; revision: number; cancelResult: string; now: string
@@ -50,6 +55,28 @@ export type NodeCommands = {
   loadWorkflow: (body: unknown) => LoadWorkflowResult
   // 建 run 与节点：定义加载后由服务层建行，不许靠手写 INSERT 起节点（审计 F-01）
   createRun: (body: { taskTitle: string; workflowId?: string; workflowVersion: string; nodeIds?: string[]; now: string }) => CreateRunResult
+  // 起运行：固定版本、operation_id 幂等、自治档位与升级规则；HTTP 只搬字段
+  startRun: (body: {
+    taskTitle: string
+    workflowId?: string
+    workflowVersion: string
+    nodeIds?: string[]
+    autonomy?: 'autonomous' | 'assisted' | 'supervised'
+    escalations?: { kind: 'node_type' | 'action_category' | 'workflow_version_publish'; value: string }[]
+    operationId: string
+    now: string
+  }) => StartRunResult
+  // 裁决收口：批准人、confirm_required 与 revision 都由服务层判
+  resolveDecision: (body: {
+    decisionId: string
+    revision: number
+    resolution: Resolution
+    payload?: Record<string, unknown>
+    actor?: Actor
+    evidenceProducers?: string[]
+    confirm?: boolean
+    now: string
+  }) => void
   // 派发：把 run 下排队中的节点交给生产执行器跑
   dispatch: (body: {
     runId: string
@@ -160,6 +187,36 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
+    if (req.method === 'POST' && url.pathname === '/v1/runs/start' && deps.commands) {
+      const body = parseBody(startRunSchema, await readJsonBody(req), '起运行')
+      const out = await queue.run(() => deps.commands!.startRun({
+        taskTitle: body.taskTitle,
+        workflowId: body.workflowId,
+        workflowVersion: body.workflowVersion,
+        nodeIds: body.nodeIds,
+        autonomy: body.autonomy,
+        escalations: body.escalations,
+        operationId: body.operationId,
+        now: requestNow,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/decisions/resolve' && deps.commands) {
+      const body = parseBody(resolveDecisionSchema, await readJsonBody(req), '裁决收口')
+      await queue.run(() => deps.commands!.resolveDecision({
+        decisionId: body.decisionId,
+        revision: body.revision,
+        resolution: body.resolution,
+        payload: body.payload,
+        actor: body.actor,
+        evidenceProducers: body.evidenceProducers,
+        confirm: body.confirm,
+        now: requestNow,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { decisionId: body.decisionId, revision: body.revision + 1 }))
+      return
+    }
     if (req.method === 'POST' && url.pathname === '/v1/runs' && deps.commands) {
       const body = parseBody(createRunSchema, await readJsonBody(req), '创建 run')
       const out = await queue.run(() => deps.commands!.createRun({
@@ -210,7 +267,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const out = await queue.run(() => deps.commands!.report({
         nodeRunId: body.nodeRunId, attempt: body.attempt,
         report: body.report, expectedStatus: body.expectedStatus,
-        generation: body.generation, now: requestNow,
+        generation: body.generation, decision: body.decision, now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return

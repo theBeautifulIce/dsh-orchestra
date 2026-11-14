@@ -8,6 +8,8 @@ import { acquireDbLock } from './infra/lock.ts'
 import { nullLogger, type Logger } from './infra/logger.ts'
 import { WorkflowCatalog } from './service/workflows.ts'
 import { createRun } from './service/runs.ts'
+import { startRun } from './service/commands/start-run.ts'
+import { resolveDecision } from './service/commands/decisions.ts'
 import { dispatchRun } from './service/dispatcher.ts'
 import { closeRun } from './service/commands/run-close.ts'
 import { inTx } from './infra/db/tx.ts'
@@ -124,6 +126,26 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       nodeIds: b.nodeIds,
       now: b.now,
     }),
+    startRun: (b) => startRun(db, catalog, {
+      taskTitle: b.taskTitle,
+      workflowId: b.workflowId,
+      workflowVersion: b.workflowVersion,
+      nodeIds: b.nodeIds,
+      autonomy: b.autonomy,
+      escalations: b.escalations,
+      operationId: b.operationId,
+      now: b.now,
+    }),
+    resolveDecision: (b) => inTx(db, (tx) => resolveDecision(tx, {
+      decisionId: b.decisionId,
+      revision: b.revision,
+      resolution: b.resolution,
+      payload: b.payload,
+      actor: b.actor,
+      evidenceProducers: b.evidenceProducers,
+      confirm: b.confirm,
+      now: b.now,
+    })),
     dispatch: async (b) => {
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })

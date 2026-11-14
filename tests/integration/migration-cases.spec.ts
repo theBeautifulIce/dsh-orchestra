@@ -1,5 +1,6 @@
 // M-01…M-61 逐条用例：每条规则都有正例，终态源、挂起源、错误触发与错误目标都被拒。
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import {
   CREATION_RULES, HANG_GUARD, MIGRATION_CASE_IDS, TERMINAL_STATUSES, TRANSITIONS,
   allows, findTransition, type TransitionContext, type TransitionRule,
@@ -30,6 +31,21 @@ describe('M-01…M-61 迁移用例', () => {
     ]
     expect(new Set(ids).size).toBe(61)
     expect([...ids].sort()).toEqual([...MIGRATION_CASE_IDS].sort())
+  })
+
+  it('迁移表本身被改动时固定清单必须失败', () => {
+    // 只遍历 TRANSITIONS 自己时，把来源改掉测试也会跟着改；这里固定整表指纹。
+    const canonical = JSON.stringify(TRANSITIONS.map((rule) => ({
+      id: rule.id, from: rule.from, to: rule.to, trigger: rule.trigger,
+      allowHung: rule.allowHung === true, allowTerminal: rule.allowTerminal === true,
+      hasRequires: typeof rule.requires === 'function',
+    })))
+    expect(createHash('sha256').update(canonical).digest('hex'))
+      .toBe('327e92cdd66d3deed963ff7827d9d033fd2e04cf0780e98d85b9dbf8dfa2ae45')
+    expect(TRANSITIONS).toHaveLength(58)
+    expect(TRANSITIONS.reduce((n, rule) => n + rule.from.length, 0)).toBe(112)
+    expect(TRANSITIONS.reduce((n, rule) => n + rule.to.length, 0)).toBe(72)
+    expect(TRANSITIONS.filter((rule) => rule.requires).length).toBe(10)
   })
 
   for (const rule of TRANSITIONS) {

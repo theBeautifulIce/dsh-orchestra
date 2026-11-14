@@ -9,6 +9,7 @@ import { startServer } from '../../src/service/server.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../../src/executor/tools.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { bindRunVersion } from '../fixtures/ledger.ts'
+import { openDecision } from '../../src/service/commands/decisions.ts'
 import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
 
 const SECRET = 'routes-secret'
@@ -258,5 +259,36 @@ describe('入参校验：每条命令一套 Zod Schema', () => {
     expect(res.status).not.toBe(400)
     const body = await res.json() as any
     expect(body.error.code).toBe('EVIDENCE_SOURCE_UNAVAILABLE')
+  })
+})
+
+describe('起运行与裁决收口路由', () => {
+  it('start-run 固定版本并支持 operation_id 幂等重放', async () => {
+    const { endpoint: base } = await boot()
+    await post(base + '/v1/workflows/load', { workflow_version: '1', nodes: [{ node_id: 'check', type: 'agent' }] })
+    const first = await post(base + '/v1/runs/start', { taskTitle: '起运行', workflowVersion: '1', operationId: 'op-1' })
+    expect(first.status).toBe(200)
+    const a = await first.json() as any
+    expect(a.data.run_id).toBeTruthy()
+    expect(a.data.replayed).toBe(false)
+    const second = await post(base + '/v1/runs/start', { taskTitle: '起运行', workflowVersion: '1', operationId: 'op-1' })
+    const b = await second.json() as any
+    expect(b.data.run_id).toBe(a.data.run_id)
+    expect(b.data.replayed).toBe(true)
+  })
+
+  it('decision.resolve 走批准人与 revision CAS', async () => {
+    const { endpoint: base, orchestra } = await boot()
+    withTx(orchestra.db, (tx) => openDecision(tx, {
+      decisionId: 'd-route', runId: 'r1', nodeRunId: null, kind: 'pre_execution', approver: 'human', payload: {},
+    }))
+    const ok = await post(base + '/v1/decisions/resolve', {
+      decisionId: 'd-route', revision: 1, resolution: 'approved', actor: { kind: 'human', id: 'human:test' },
+    })
+    expect(ok.status).toBe(200)
+    const stale = await post(base + '/v1/decisions/resolve', {
+      decisionId: 'd-route', revision: 1, resolution: 'approved', actor: { kind: 'human', id: 'human:test' },
+    })
+    expect(stale.status).toBe(409)
   })
 })
