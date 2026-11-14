@@ -835,3 +835,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - S2 其余：调度探针 24/24（默认 maxWaiting=1000、第 1002 个拒、maxWaiting=2 第 4 个拒、drain 两分支、重复 close 同 Promise、失败释放名额）；真实 HTTP 16/16（双入口 maxActive=2、异常 503 归零、close 后拒新、在跑 200 收尾、锁释放）；tsc/全量/build/证据复现 25 份全 0；独立临时门六项哈希全匹配（candidate `c2ba727a…`、change_scope `c7759fb5…`、evidence_index `9c477151…`、invariants `6f75465b…`、artifact `289473a7…`、body `73c28961…`）。
 - 正式 G1/G2 仍预签态：artifact/body 自洽，candidate/change_scope（G1 还含 evidence_index）与 HEAD 不一致，`gate-check` 两门 exit 1「候选提交之后候选文件又被改过」；未签。
 - 结论：第四十轮两路 fail 均因候选停在 `9c75ad1`。限定词、格内拆词、期望列、主语前缀这批修复已进 `4154c0e`，需在新候选上重跑 S1/S2 第四十一轮；不得用本轮 fail 报告重签。
+
+### 11.42 第四十一轮 S2：攻击行结论格被描述格豁免（2026-11-14 13:24，HEAD f3a39ac）
+
+- 触发：S2 第四十一轮在 `4bce930` 上判 **fail**（P0=0 / P1=1 / P2=1，19/19 必过实测通过），报告 `D:/aboutAI/_audit-r41-s2/docs/audits/S2-independent-audit-round41.md`，克隆 HEAD `70ff8f4`。P1：攻击行结论格写 `G2-11 已拒绝：证据不足`、`G2-11 被拒绝`、`已拒（本轮）` 时，`isAttackDescriptionCell` 把正文里的 `被拒|已拒` 当描述标记，且整格 `continue` 排在结论列判定之前，`proseVerdictClashes` 返回空；普通表/正文仍能拦住。
+- 修复 `f3a39ac`：`isAttackDescriptionCell` 的正文标记收窄为 `被拒文案|拒绝文案|驳回文案|被拒载荷|已拒载荷|被拒原因|拒绝原因|拦截|拦下|攻击载荷|载荷|输入|尝试|样例|样本|应被拒|期望拒绝|被 blocked|blocked by`，不再单凭 `被拒/已拒`；逐格跳过改为 `!conclusionCell && isAttackDescriptionCell(cell)`，结论列永不被描述格豁免。强否决表补 `被拒`、`已拒`。
+- P2 修复：`isRejectedAttackRow` 的期望格接受 `期望拒绝`、`已拒绝`、`拒绝（本轮）`、`禁止通过` 等限定写法，避免合法攻击矩阵因期望格不精确而被误判。
+- 新增用例：结论列 `G2-11 已拒绝：证据不足`、`G2-11 被拒绝`、`已拒（本轮）` 必须命中；期望列七种写法 + `被拒文案：未通过` 必须不误伤。全量 38 文件 **548 passed | 1 skipped**（gate 181 tests），build 成功，证据复现 25 份一致。
+- S2 其余：调度探针 7/7、HTTP 探针 2/2、定向并发 14 passed；默认 maxWaiting=1000、第 1002 个拒、maxWaiting=2 第 4 个拒、drain 两分支、重复 close 同 Promise、异常 503 归零、close 后拒新且锁释放；G2 19 份证据哈希 19/19、四项自哈希/锚点全中；正式门预签态 exit 1 属预期。
+- S1 第四十一轮仍在跑，绑 `4bce930`，未覆盖 `f3a39ac`；须在新候选上派第四十二轮。
