@@ -1309,6 +1309,14 @@ function cellWeakFail(folded: string): boolean {
   return CELL_FAIL_VERDICTS_WEAK.includes(folded.toLowerCase())
 }
 
+// 整格只有一个失败裁决词（允许尾随标点）：不管列名叫「结论」「备注」还是别的，
+// 它都不是描述性文字，攻击矩阵不能靠改列名把它豁免掉。
+function isBareFailureCell(folded: string): boolean {
+  const text = folded.trim().replace(/[。；;，,、.!！?？]+$/g, '').trim().toLowerCase()
+  if (text === '') return false
+  return [...CELL_FAIL_VERDICTS_STRONG, ...CELL_FAIL_VERDICTS_WEAK].some((word) => text === word.toLowerCase())
+}
+
 // 失败词被拆到相邻单元格：逐格都干净，拼起来才是“未通过”。
 // 只认跨过单元格边界的那部分，整词落在单格里的仍交给 cellFailStatement，
 // 避免把“未通过项为空”这类正常说明当成否决（S1 第三十七轮 P0）。
@@ -1673,7 +1681,9 @@ export function proseVerdictClashes(
         const conclusionCell = isVerdictColumn(cell.header) || CELL_CONCLUSION_MARKER_RE.test(cell.text)
         if (hit.length === 0 && !conclusionCell) continue
         // 攻击行的描述/证据格可以引用失败文案；但结论列不能被整行豁免。
-        if (rejectedAttack && !conclusionCell) continue
+        // 列名可以改，「备注」里只写「未通过」这种裸否决仍要判。
+        const bareFailure = isBareFailureCell(foldForVerdict(cell.text))
+        if (rejectedAttack && !conclusionCell && !bareFailure) continue
         // 非结论列只认格首/边界上的强否决词；「无裸 blocked」这类要求描述里的领域弱词不判。
         const cellFails = cellFailStatement(cell)
           || (!conclusionCell && hit.length > 0 && cellStrongFail(foldForVerdict(cell.text)))
