@@ -1126,3 +1126,11 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 证据：`G-14` 更新为 13 步迁移，`ev-g2-16` 计数改 42/624，G2-15 文案改「同一工作流的同一版本」；G-05 注入补齐 `workflow_definition_hash` 绑定。全量 **42 files 624 passed | 1 skipped**、typecheck 0、build ESM 154.88kB / gzip 38.52kB、evidence-repro 25/25。
 - 预签：`docs/gates/G1.md`、`G2.md` 的证据索引、candidate、artifact/body 自锚已重算，`audit_round` 仍 49，门检查停在审计锚点，属第 50 轮正式审计前的预期态。候选提交 `c5e0014`。
 - 下一步：派 S1/S2 第 50 轮审计；双 PASS 后提交报告并按 G1→G2 正式重签，双门 exit 0。
+
+### 11.65 第 50 轮双审计 PASS 与 G1/G2 重签（2026-11-14 19:05）
+
+- `s1-audit-r50` 对 `bad3326` 判 G1 **PASS**：13/13，P0/P1/P2=0/0/2；全量 3 次 42 files / **624 passed | 1 skipped**，桥闭环 2 次 71 passed，typecheck/build/evidence-repro 均 0；报告 LF SHA-256=`355a1a582b5584c0c4e0d96be69a651b013021b837b396079642d4c4782996f9`。P2：预签态 artifact 仍指第 49 轮；011 升级时旧 definition_json 内嵌非 default workflow_id 会被 hydrate 拒启动（fail-closed）。
+- `s2-audit-r50` 对同候选判 G2 **PASS**：20/20，P0/P1/P2=0/0/1；全量 3 次 624/1、桥闭环 4 次 **71**、必过路径 125 tests、证据复现 25/25、20 份 G2 证据哈希一致；报告 LF SHA-256=`b386173930739945624a358f80e5b94365dc462281dc627796898905d9520de7`。P2：`ev-g2-16` 桥闭环计数仍写 70，`runtime.spec.ts` 新增用例后实际 71。
+- 报告已提交 `5f9f8e9`；G1 绑定第 50 轮后提交 `2eb7377`，artifact_hash=`1c0903777d79bf86ed0ebc6ff54349965dbd4778e429b155b494fba2b7875b97`，body_hash=`e3b7a0ddcb1ca23d2d0da7d8b42c8d02dbe2a24a6a0c61aca7d32e4b214ba22f`；G2 绑定后提交 `abffd35`，artifact_hash=`c5b4564a40669b44179dd10e01059f6ec92b5816cf2cf15e86046055501f4d5a`，body_hash=`daec42cc20f3d5ee5a57b959502d9dbd9a9ec5072bfe906c383e66bf10132a4a`。
+- 双门 `gate-check` 均 exit 0（G1 13/13、G2 20/20 证据复核）；签后全量 3 次 **624 passed | 1 skipped**、build ESM 154.88kB / gzip 38.52kB、evidence-repro 25/25。
+- 下一轮 P2：把 `ev-g2-16` 桥闭环计数改 71、必过路径 125（改了要重新生成证据并重签）；补 P2-04；再开 S3 九节点与状态机。
