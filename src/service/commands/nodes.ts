@@ -2,6 +2,7 @@
 import { OrchError } from '../../core/errors.ts'
 import type { NodeStatus } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
+import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 
 export type TransitionPatch = Readonly<Record<string, string | number | null>>
 
@@ -13,6 +14,11 @@ const PATCH_COLUMNS = new Set([
   'contradiction_decision_id',
   'startup_unknown_remaining_ns',
   'verify_remaining_ns',
+  // 审批往返：blocked_pre 记回队目标与审批卡，同时收回旧租约
+  'resume_state',
+  'blocked_decision_id',
+  'lease_id',
+  'lease_expires_at',
 ])
 
 export type TransitionRequest = {
@@ -106,4 +112,186 @@ export function createNodeRun(tx: Tx, req: CreateNodeRunRequest): void {
       newNodeRunId: req.newNodeRunId,
     })
   }
+}
+
+// ── 审批往返（S3 Task 6，M-39/M-40/M-41）────────────────────────────────
+
+type ApprovalDecisionRow = {
+  decision_id: string
+  node_run_id: string | null
+  kind: string
+  status: string
+  closed_reason: string | null
+  content_hash: string | null
+  expires_at: string | null
+}
+
+function loadApprovalDecision(tx: Tx, decisionId: string): ApprovalDecisionRow {
+  const decision = tx.get<ApprovalDecisionRow>(
+    'SELECT decision_id, node_run_id, kind, status, closed_reason, content_hash, expires_at FROM decisions WHERE decision_id = ?',
+    [decisionId],
+  )
+  if (!decision) throw new OrchError('DECISION_REQUIRED', '审批卡不存在', { decisionId })
+  if (!['pre_execution', 'audit_result'].includes(decision.kind)) {
+    throw new OrchError('DECISION_REQUIRED', '这张卡不是审批卡', { decisionId, kind: decision.kind })
+  }
+  return decision
+}
+
+export type EnterBlockedPreRequest = {
+  nodeRunId: string
+  attempt: number
+  decisionId: string
+  actionGeneration: number
+  now: string
+}
+
+/**
+ * 进入 blocked_pre：只从 queued / leased 进，收掉旧租约，记 resume_state='queued'。
+ * 审批卡必须已经存在且挂在本节点上；节点迁移交给调用方。
+ */
+export function enterBlockedPre(tx: Tx, secret: string, req: EnterBlockedPreRequest): void {
+  const row = tx.get<{ status: NodeStatus; attempt: number; action_generation: number }>(
+    'SELECT status, attempt, action_generation FROM node_runs WHERE node_run_id = ?',
+    [req.nodeRunId],
+  )
+  if (!row) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: req.nodeRunId })
+  if (row.status !== 'queued' && row.status !== 'leased') {
+    throw new OrchError('STALE_GENERATION', '只有 queued / leased 能进 blocked_pre', {
+      nodeRunId: req.nodeRunId,
+      status: row.status,
+    })
+  }
+  const decision = loadApprovalDecision(tx, req.decisionId)
+  if (decision.node_run_id !== req.nodeRunId) {
+    throw new OrchError('DECISION_REQUIRED', '审批卡没有挂在这个节点上', {
+      decisionId: req.decisionId,
+      nodeRunId: req.nodeRunId,
+    })
+  }
+  if (!['pending', 'acknowledged', 'blocked_for_human'].includes(decision.status)) {
+    throw new OrchError('DECISION_REQUIRED', '审批卡已经收口，不能再次阻塞', {
+      decisionId: req.decisionId,
+      status: decision.status,
+    })
+  }
+  const fromStatus = row.status
+  applyTransition(tx, {
+    nodeRunId: req.nodeRunId,
+    from: [fromStatus],
+    to: 'blocked_pre',
+    attempt: req.attempt,
+    actionGeneration: req.actionGeneration,
+    now: req.now,
+    patch: {
+      resume_state: 'queued',
+      blocked_decision_id: req.decisionId,
+      // 进审批前收回执行租约，批准后重新排队再拿新租约，不复用旧租约。
+      lease_id: null,
+      lease_expires_at: null,
+    },
+  })
+  appendNodeRunEvent(tx, secret, req.nodeRunId, 'status_changed', {
+    from: fromStatus,
+    to: 'blocked_pre',
+    decision_id: req.decisionId,
+    resume_state: 'queued',
+  })
+}
+
+export type ResumeFromBlockedPreRequest = {
+  nodeRunId: string
+  attempt: number
+  decisionId: string
+  approved: boolean
+  now: string
+  // 审批绑定的内容哈希；卡上记录了哈希时必须逐字相等。
+  contentHash?: string | null
+}
+
+/**
+ * 审批结论落地：
+ * - 批准：回 queued，attempt 不变，必须先确认旧租约已收回；
+ * - 拒绝 / 超时：落 failed，审批卡 id 留在节点上备查；
+ * - 内容哈希不一致或卡已过期，拒绝放行。
+ */
+export function resumeFromBlockedPre(tx: Tx, secret: string, req: ResumeFromBlockedPreRequest): void {
+  const row = tx.get<{
+    status: NodeStatus
+    attempt: number
+    lease_id: string | null
+    blocked_decision_id: string | null
+  }>(
+    'SELECT status, attempt, lease_id, blocked_decision_id FROM node_runs WHERE node_run_id = ?',
+    [req.nodeRunId],
+  )
+  if (!row) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: req.nodeRunId })
+  if (row.status !== 'blocked_pre') {
+    throw new OrchError('STALE_GENERATION', '节点不在 blocked_pre', {
+      nodeRunId: req.nodeRunId,
+      status: row.status,
+    })
+  }
+  if (row.lease_id !== null) {
+    throw new OrchError('STALE_GENERATION', 'blocked_pre 不能带着旧租约重新排队', {
+      nodeRunId: req.nodeRunId,
+      leaseId: row.lease_id,
+    })
+  }
+  if (row.blocked_decision_id !== req.decisionId) {
+    throw new OrchError('DECISION_REQUIRED', '审批卡与节点当前阻塞卡不一致', {
+      nodeRunId: req.nodeRunId,
+      expected: row.blocked_decision_id,
+      actual: req.decisionId,
+    })
+  }
+  const decision = loadApprovalDecision(tx, req.decisionId)
+  if (req.approved && decision.expires_at && Date.parse(req.now) >= Date.parse(decision.expires_at)) {
+    throw new OrchError('CONFIRMATION_EXPIRED', '审批卡已过期，默认动作走 failed', {
+      decisionId: req.decisionId,
+      expiresAt: decision.expires_at,
+      now: req.now,
+    })
+  }
+  if (decision.content_hash !== null && (req.contentHash ?? null) !== decision.content_hash) {
+    throw new OrchError('CONFIRMATION_MISMATCH', '审批绑定的内容已变化，批准失效', {
+      decisionId: req.decisionId,
+    })
+  }
+  const expectedReason = req.approved ? 'approved' : 'rejected'
+  const allowedReasons = req.approved ? ['approved'] : ['rejected', 'expired_final']
+  if (decision.status !== 'resolved' || !allowedReasons.includes(decision.closed_reason ?? '')) {
+    throw new OrchError('DECISION_REQUIRED', '审批卡还没有对应的收口结论', {
+      decisionId: req.decisionId,
+      status: decision.status,
+      closedReason: decision.closed_reason,
+      expected: expectedReason,
+    })
+  }
+  if (req.approved) {
+    applyTransition(tx, {
+      nodeRunId: req.nodeRunId,
+      from: ['blocked_pre'],
+      to: 'queued',
+      attempt: req.attempt,
+      now: req.now,
+      patch: { resume_state: null, blocked_decision_id: null },
+    })
+  } else {
+    applyTransition(tx, {
+      nodeRunId: req.nodeRunId,
+      from: ['blocked_pre'],
+      to: 'failed',
+      attempt: req.attempt,
+      now: req.now,
+      patch: { resume_state: null },
+    })
+  }
+  appendNodeRunEvent(tx, secret, req.nodeRunId, 'status_changed', {
+    from: 'blocked_pre',
+    to: req.approved ? 'queued' : 'failed',
+    decision_id: req.decisionId,
+    resolution: req.approved ? 'approved' : 'rejected',
+    attempt: req.attempt,
+  })
 }

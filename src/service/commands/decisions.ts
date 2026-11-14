@@ -23,6 +23,9 @@ export type DecisionDraft = {
   kind: DecisionKind
   payload?: Record<string, unknown>
   createdAt?: string
+  // I6：审批绑定内容哈希与有效期；内容变或过期，审批不得放行。
+  contentHash?: string | null
+  expiresAt?: string | null
 }
 
 export function activeDecision(tx: Tx, runId: string, kind: DecisionKind, nodeRunId: string | null): { decision_id: string } | undefined {
@@ -47,17 +50,39 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
     })
   }
   tx.run(
-    'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, created_at) ' +
-      "VALUES (?, ?, ?, ?, 'pending', 1, ?, ?)",
+    'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, created_at) ' +
+      "VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?)",
     [
       draft.decisionId,
       draft.runId,
       draft.nodeRunId,
       draft.kind,
       JSON.stringify(draft.payload ?? {}),
+      draft.contentHash ?? null,
+      draft.expiresAt ?? null,
       draft.createdAt ?? new Date().toISOString(),
     ],
   )
+}
+
+/**
+ * 不可逆动作在派发前必须有前置审批（规格 5.6）：
+ * - 非 irreversible 不开卡；
+ * - 已有活跃 pre_execution 卡时复用，不重复开第二张；
+ * - 只写 decision 行，节点迁移交给调用方。
+ */
+export function ensurePreExecutionDecision(
+  tx: Tx,
+  draft: DecisionDraft & { policy: 'pure' | 'compensable' | 'irreversible' },
+): string | null {
+  if (draft.policy !== 'irreversible') return null
+  if (draft.kind !== 'pre_execution') {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '不可逆前置审批必须是 pre_execution 卡', { kind: draft.kind })
+  }
+  const existing = activeDecision(tx, draft.runId, 'pre_execution', draft.nodeRunId)
+  if (existing) return existing.decision_id
+  openDecision(tx, draft)
+  return draft.decisionId
 }
 
 export type Resolution =
