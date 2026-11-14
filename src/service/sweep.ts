@@ -329,12 +329,12 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     const finishedChildren = tx.all<{ run_id: string; parent_node_run_id: string }>(
       'SELECT r.run_id, r.parent_node_run_id FROM runs r JOIN node_runs n ON n.node_run_id = r.parent_node_run_id '
       + "WHERE r.parent_node_run_id IS NOT NULL AND n.status = 'waiting' AND r.status IN "
-      + "('done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded', 'cancelled')",
+      + "('succeeded', 'succeeded_with_unverified', 'done', 'failed', 'failed_with_unverified', 'timeout', 'abandoned_unverified', 'orphaned', 'superseded', 'cancelled')",
     )
     for (const child of finishedChildren) {
       try {
         const out = finishSubworkflowChild(tx, secret, { childRunId: child.run_id, now: params.now })
-        if (out.status === 'queued') subworkflowFinished.push(out.parentNodeRunId)
+        if (out.status === 'done') subworkflowFinished.push(out.parentNodeRunId)
       } catch {
         // 并发已推进这个父节点：跳过，不把整轮扫描拖垮
       }

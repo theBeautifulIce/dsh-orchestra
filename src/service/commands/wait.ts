@@ -135,11 +135,11 @@ function scanRegistration(tx: Tx, secret: string, registration: WaitRegistration
     applyTransition(tx, {
       nodeRunId: registration.nodeRunId,
       from: ['waiting'],
-      to: 'queued',
+      to: 'done',
       attempt: currentAttempt(tx, registration.nodeRunId),
       now,
-      bumpRearm: true,
-      // 唤醒重新排队：旧租约和旧 executor 绑定一律不许复用（M-63）
+      // 控制节点没有可恢复的宿主实例：等待条件满足即完成（M-63）
+      context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true, controlCompletion: true },
       patch: {
         lease_id: null,
         lease_expires_at: null,

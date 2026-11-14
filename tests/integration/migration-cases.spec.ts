@@ -19,6 +19,7 @@ function contextFor(rule: TransitionRule): TransitionContext {
             : null,
     hangReason: rule.allowHung ? 'report_contradicted' : null,
     sideEffectVerifiedNone: rule.id === 'M-18',
+    controlCompletion: rule.id === 'M-63',
   }
 }
 
@@ -41,11 +42,11 @@ describe('M-01…M-63 迁移用例', () => {
       hasRequires: typeof rule.requires === 'function',
     })))
     expect(createHash('sha256').update(canonical).digest('hex'))
-      .toBe('48fecb63f273bec2463724a1c27bdfb06e6509f0cf89c6fa1d405423e0094d4d')
+      .toBe('9ea3f9fb81cad3bd0d2e15de8a2a663b56d104b46501ced6eef49becc2a2754b')
     expect(TRANSITIONS).toHaveLength(60)
     expect(TRANSITIONS.reduce((n, rule) => n + rule.from.length, 0)).toBe(124)
     expect(TRANSITIONS.reduce((n, rule) => n + rule.to.length, 0)).toBe(73)
-    expect(TRANSITIONS.filter((rule) => rule.requires).length).toBe(10)
+    expect(TRANSITIONS.filter((rule) => rule.requires).length).toBe(11)
   })
 
   for (const rule of TRANSITIONS) {
@@ -71,6 +72,7 @@ describe('M-01…M-63 迁移用例', () => {
         hasToolCall: rule.id === 'M-06' || rule.id === 'M-07' || rule.id === 'M-28',
         cancelResult: null,
         sideEffectVerifiedNone: rule.id === 'M-19',
+        controlCompletion: false,
       }
       expect(allows(rule, bad), `${rule.id} 应被 requires 拒绝`).toBe(false)
     }

@@ -60,8 +60,8 @@ describe('等待节点', () => {
       expect(result.registration.matchedEventSeq).toBe(1)
     })
     expect(node(db, 'n1')).toMatchObject({
-      status: 'queued', lease_id: null, lease_expires_at: null, executor_session_id: null,
-      executor_agent_id: null, wait_deadline_at: null, rearm_generation: 2,
+      status: 'done', lease_id: null, lease_expires_at: null, executor_session_id: null,
+      executor_agent_id: null, wait_deadline_at: null, rearm_generation: 1,
     })
     expect(count(db, "SELECT COUNT(*) AS n FROM wait_registrations WHERE state = 'woken'")).toBe(1)
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'n1' AND type = 'wait.woken'")).toBe(1)
@@ -88,7 +88,7 @@ describe('等待节点', () => {
     })
     expect(count(db, 'SELECT COUNT(*) AS n FROM wait_event_inbox')).toBe(1)
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'n1' AND type = 'wait.woken'")).toBe(1)
-    expect(node(db, 'n1').status).toBe('queued')
+    expect(node(db, 'n1').status).toBe('done')
   })
 
   it('谓词不命中不唤醒，cursor 推进后不回扫旧事件', () => {

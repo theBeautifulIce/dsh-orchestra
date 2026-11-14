@@ -71,7 +71,7 @@ export type TransitionTrigger =
   | 'verify-timeout-fail-on-timeout'
   | 'wait-entered'
   | 'wait-event'
-  | 'wait-rearmed'
+  | 'wait-completed'
   | 'wait-timeout'
   | 'action-timeout-interrupted'
   | 'timing-out-pure'
@@ -118,6 +118,7 @@ export type TransitionContext = {
   cancelResult: CancelResult | null
   hangReason: 'report_contradicted' | null
   sideEffectVerifiedNone: boolean
+  controlCompletion?: boolean
 }
 
 export type TransitionRule = {
@@ -158,8 +159,8 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-19', from: ['verifying'], to: ['failed_with_unverified'], trigger: 'verify-timeout-fail-on-timeout', requires: (c) => !c.sideEffectVerifiedNone },
   { id: 'M-20', from: ['started'], to: ['waiting'], trigger: 'wait-entered' },
   { id: 'M-21', from: ['waiting'], to: ['dispatched'], trigger: 'wait-event' },
-  // 等待唤醒或子流程收口后重新排队：旧租约/旧 executor 已释放，不能再以 dispatched 悬空
-  { id: 'M-63', from: ['waiting'], to: ['queued'], trigger: 'wait-rearmed' },
+  // 等待/子流程这类控制节点没有可恢复的宿主执行实例：控制条件满足即完成，不能再排队重派
+  { id: 'M-63', from: ['waiting'], to: ['done'], trigger: 'wait-completed', requires: (c) => c.controlCompletion === true },
   { id: 'M-22', from: ['waiting'], to: ['timeout'], trigger: 'wait-timeout' },
   { id: 'M-23', from: ['dispatched', 'started', 'waiting', 'verifying', 'stopping', 'timing_out'], to: ['timing_out'], trigger: 'action-timeout-interrupted', requires: (c) => c.cancelResult === 'interrupted' },
   { id: 'M-24', from: ['timing_out'], to: ['timeout'], trigger: 'timing-out-pure' },

@@ -325,7 +325,11 @@ export function startSubworkflowNode(
   return child
 }
 
-const RUN_TERMINAL = ['done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded', 'cancelled'] as const
+const RUN_TERMINAL = [
+  'succeeded', 'succeeded_with_unverified',
+  'done', 'failed', 'failed_with_unverified', 'timeout',
+  'abandoned_unverified', 'orphaned', 'superseded', 'cancelled',
+] as const
 
 function isRunTerminal(status: string): boolean {
   return (RUN_TERMINAL as readonly string[]).includes(status)
@@ -350,7 +354,7 @@ export function finishSubworkflowChild(
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '子运行没有父节点，不能唤醒', { childRunId: p.childRunId })
   }
   const node = loadNodeRun(tx, child.parent_node_run_id)
-  if (node.status === 'dispatched' || node.status === 'queued') {
+  if (node.status === 'done') {
     return { parentNodeRunId: node.node_run_id, status: node.status }
   }
   if (node.status !== 'waiting') {
@@ -362,16 +366,18 @@ export function finishSubworkflowChild(
   applyTransition(tx, {
     nodeRunId: node.node_run_id,
     from: ['waiting'],
-    to: 'queued',
+    to: 'done',
     attempt: node.attempt,
     now: p.now,
+    // 子流程父节点也是控制节点：子运行终态即完成，不再排队重派（M-63）
+    context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true, controlCompletion: true },
     patch: { wait_started_at: null, lease_id: null, lease_expires_at: null },
   })
   appendNodeRunEvent(tx, secret, node.node_run_id, 'subworkflow.finished', {
     child_run_id: p.childRunId,
     child_status: child.status,
   })
-  return { parentNodeRunId: node.node_run_id, status: 'queued' }
+  return { parentNodeRunId: node.node_run_id, status: 'done' }
 }
 
 export type PropagateCancelParams = {
@@ -412,7 +418,7 @@ export function propagateRunCancellation(
     [p.runId],
   )
   for (const node of ownNodes) {
-    if (['dispatched', 'started', 'waiting', 'verifying'].includes(node.status) === false) continue
+    if (['queued', 'leased', 'dispatched', 'started', 'waiting', 'verifying'].includes(node.status) === false) continue
     if (node.side_effect_policy === 'irreversible') {
       skippedIrreversible.push(node.node_run_id)
       continue

@@ -27,6 +27,7 @@ function baseContext(rule: TransitionRule): TransitionContext {
   if (rule.id === 'M-27') ctx.cancelResult = 'not_interruptible'
   if (rule.id === 'M-29' || rule.id === 'M-30') ctx.cancelResult = 'already_stopped'
   if (rule.id === 'M-61') ctx.hasToolCall = true
+  if (rule.id === 'M-63') ctx.controlCompletion = true
   return ctx
 }
 
