@@ -1,4 +1,5 @@
 // src/index.ts —— DSH 插件入口 + 生产装配（规格 12.5 行 1088-1092）
+import { existsSync } from 'node:fs'
 import { OrchError } from './core/errors.ts'
 import { openDb, type Db } from './infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from './infra/db/migrate.ts'
@@ -227,17 +228,15 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   }
 }
 
-// 执行时限：配置缺失或读不动时返回空对象，由 runNode 使用默认值，不让配置文件挡住启动。
+// 执行时限：配置文件不存在时返回空对象沿用默认值；文件存在但非法时必须报错，不能静默吞掉配置错误。
 function executionLimitsFromConfig(configPath: string | undefined): Pick<RunNodeParams, 'actionTimeoutMs' | 'startupTimeoutMs' | 'verifyTimeoutMs'> {
-  try {
-    const cfg = loadConfig(configPath ?? 'orchestra.config.json')
-    return {
-      actionTimeoutMs: cfg.execution.action_timeout_ms,
-      startupTimeoutMs: cfg.execution.startup_timeout_ms,
-      verifyTimeoutMs: cfg.execution.verify_timeout_ms,
-    }
-  } catch {
-    return {}
+  const path = configPath ?? 'orchestra.config.json'
+  if (!existsSync(path)) return {}
+  const cfg = loadConfig(path)
+  return {
+    actionTimeoutMs: cfg.execution.action_timeout_ms,
+    startupTimeoutMs: cfg.execution.startup_timeout_ms,
+    verifyTimeoutMs: cfg.execution.verify_timeout_ms,
   }
 }
 

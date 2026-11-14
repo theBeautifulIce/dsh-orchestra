@@ -12,6 +12,8 @@ import type { ToolPolicy } from './session.ts'
 import type { ToolRegistry, ReadOnlyToolRunner } from './tools.ts'
 import type { ExecutorAgent } from './session.ts'
 
+const DEFAULT_STOP_RPC_TIMEOUT_MS = 2_000
+
 export type AgentReportEnvelope = {
   report: unknown
   evidence: unknown | null
@@ -31,6 +33,8 @@ export type AgentLifecycleDeps = {
   instruction: string
   timeoutMs: number
   idleTimeoutMs: number
+  // 收口 RPC 的单次上限：cancel/state/dispose 由宿主实现，编排层不能无限等。
+  stopRpcTimeoutMs?: number
   nowAt: () => string
   clock?: ClockProvider
   spillDir: string
@@ -208,6 +212,23 @@ export class AgentLifecycle {
     })
   }
 
+  // 单次收口 RPC 必须有上限；宿主 cancel/state/dispose 挂住时不能把执行槽一起拖死。
+  private async bounded<T>(task: Promise<T>, method: string): Promise<T> {
+    const timeoutMs = this.deps.stopRpcTimeoutMs ?? DEFAULT_STOP_RPC_TIMEOUT_MS
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new OrchError('OPERATION_TIMEOUT', `Agent 停止确认超时：${method}`, {
+        nodeRunId: this.deps.nodeRunId, attempt: this.deps.attempt, method, timeoutMs,
+      })), timeoutMs)
+      timer.unref?.()
+    })
+    try {
+      return await Promise.race([task, expired])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   // 先停止监听，再取消会话；interrupted 不当作已停止，必须 whenIdle+state 复核。
   private async stopInternal(): Promise<void> {
     this.controller.abort(new OrchError('SERVICE_UNAVAILABLE', '节点收口，停止监听', {}))
@@ -216,19 +237,22 @@ export class AgentLifecycle {
       this.running = null
     }
     try {
-      await this.deps.client.cancel({ executorAgentId: this.agentId, attempt: this.deps.attempt })
+      await this.bounded(this.deps.client.cancel({ executorAgentId: this.agentId, attempt: this.deps.attempt }), 'cancel')
     } catch {
       // 取消失败不掩盖真正的失败原因；下面仍要复核状态
     }
     let idle: { idle: boolean; timedOut: boolean } | null = null
     try {
-      idle = await this.deps.client.whenIdle({ executorAgentId: this.agentId, timeoutMs: this.deps.idleTimeoutMs })
+      idle = await this.bounded(
+        this.deps.client.whenIdle({ executorAgentId: this.agentId, timeoutMs: this.deps.idleTimeoutMs }),
+        'whenIdle',
+      )
     } catch {
       idle = null
     }
     let state: { state: string; toolCallSeq: number; hasToolCall: boolean } | null = null
     try {
-      state = await this.deps.client.state({ executorAgentId: this.agentId })
+      state = await this.bounded(this.deps.client.state({ executorAgentId: this.agentId }), 'state')
     } catch {
       state = null
     }
@@ -242,11 +266,11 @@ export class AgentLifecycle {
       })
     }
     // 服务端确认位没追平桥事件位时，dispose 会拒绝；这是有意的，不能提前放掉宿主。
-    await this.deps.client.dispose({
+    await this.bounded(this.deps.client.dispose({
       executorAgentId: this.agentId,
       serviceAckSeq: this.ledger.cursor(),
       bridgeLastSeq: this.buffer.lastSeq,
-    })
+    }), 'dispose')
     this.buffer.cleanupSpill()
   }
 

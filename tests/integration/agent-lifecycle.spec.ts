@@ -188,6 +188,28 @@ describe('AgentLifecycle 故障注入', () => {
     h.cleanup()
   })
 
+  it('B16 收口 cancel 挂住：单次 RPC 有上限，仍要用真实状态完成确认', async () => {
+    let disposeCalls = 0
+    const transport: BridgeTransport = {
+      request: async (method) => {
+        if (method === 'executor.cancel') return new Promise<never>(() => {}) as never
+        if (method === 'executor.whenIdle') return { idle: true, timedOut: false } as never
+        if (method === 'executor.state') return { state: 'idle', toolCallSeq: 0, hasToolCall: false } as never
+        if (method === 'executor.dispose') { disposeCalls += 1; return undefined as never }
+        return undefined as never
+      },
+      listen: () => { throw new Error('不该 listen') },
+    }
+    const h = harness(transport)
+    const began = Date.now()
+    await h.lifecycle.stop()
+    const elapsed = Date.now() - began
+    expect(elapsed).toBeGreaterThanOrEqual(1_900)
+    expect(elapsed).toBeLessThan(4_000)
+    expect(disposeCalls).toBe(1)
+    h.cleanup()
+  })
+
   it('B07 工具执行中取消：未确认停止就不放行', async () => {
     const calls: string[] = []
     const transport: BridgeTransport = {

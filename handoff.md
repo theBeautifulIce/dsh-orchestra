@@ -975,3 +975,13 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - P2-1 同步收口：`createOrchestra` 新增 `executionLimitsFromConfig()`，把 `execution.action_timeout_ms`、`startup_timeout_ms`、`verify_timeout_ms` 注入 `runNode` 与 `dispatcher` 的节点参数；配置缺失时仍用 `runNode` 默认值。
 - 验证：`pnpm typecheck` 0；全量 40 文件 **595 passed | 1 skipped**；`pnpm build` 成功（ESM 143.84kB / gzip 36.05kB、d.ts 13.63kB）。
 - 遗留：`startup_unknown` 仍无自动推进；spawn catch 对确定性错误的分类偏宽；B06 仍是事务级重放，B07 外部取消通道仍未接生产。G1/G2 仍绑 `caae193`。
+
+### 11.51 3b8c980 复审 stop RPC 无界 P1 收口（2026-11-14 17:05，整改候选）
+
+- 独立复审 `r5c-reaudit` 在 `3b8c980` 上 verdict **FAIL**：P0=0，P1=1，P2=3。已闭合 report 未处理拒绝、B13/B14/B15、runtime spawn 断言、executionLimits 注入；新 P1 在 stop 路径：`cancel`/`whenIdle`/`state`/`dispose` 都是无界 `await`，`cancel` 永不回包时 `stop()` 永久挂起，节点停在 `started`，心跳继续续租，Agent 不释放。探针 `PROBE9_STOP {"outcome":"HANG","status":"started"}`。
+- `AgentLifecycle` 增加 `stopRpcTimeoutMs`（默认 2s）与 `bounded()`，四个收口 RPC 各自限时；超时抛 `OPERATION_TIMEOUT`，后续状态复核不通过仍落 `LEASE_EXPIRED`。B16 覆盖 cancel 挂住：2s 上限后继续用 whenIdle/state 完成确认并 dispose。
+- `runNode` 记录 `stopFailure`，stop 失败导致的收口错误归因为 `agent_stop_unconfirmed`，不再误写成 `action_timeout`/`agent_execution_failed`；runtime 新增「state RPC 挂住：限时落 blocked_post，report_applied=0」。
+- P2 分类收口：spawn 明确返回 4xx 类 `OrchError` 时落 `blocked_pre`（`agent_spawn_rejected`）并跳过外层 markBlocked，只有超时/传输错误才落 `startup_unknown`；超时后底层 spawn 晚到的会话用 `bestEffortReleaseAgent` 兜底释放。新增 runtime 回归。
+- P2 配置收口：`executionLimitsFromConfig()` 改为文件不存在才回退默认值；文件存在但非法时 `loadConfig` 抛错，不再静默吞配置错误。
+- 验证：`pnpm typecheck` 0；全量 40 文件 **598 passed | 1 skipped**；`pnpm build` 成功（ESM 145.59kB / gzip 36.45kB、d.ts 13.63kB）。
+- 遗留：`startup_unknown` 仍无自动推进（sweep 只扫 `dispatched`/`started` 的租约过期）；B06 仍是事务级重放，B07 外部取消通道仍未接生产。G1/G2 仍绑 `caae193`。

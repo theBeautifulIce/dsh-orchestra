@@ -108,6 +108,11 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
   }
 }
 
+// 宿主明确拒绝与“结果未知”必须分开：4xx 类 OrchError 没有副作用，只有超时/传输错误才落 startup_unknown。
+function isDeterministicSpawnFailure(err: unknown): boolean {
+  return err instanceof OrchError && err.code !== 'OPERATION_TIMEOUT' && err.code !== 'SERVICE_UNAVAILABLE'
+}
+
 // 启动阶段的超时：spawn 可能永远不回来，不能让 runNode 无界等待（复审 P1 残留）。
 function withTimeout<T>(task: Promise<T>, timeoutMs: number, onTimeout: () => OrchError): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -152,24 +157,44 @@ async function runNodeActions(
   let evidence: StrongEvidence | null = null
   let failed: unknown = null
   let spawnUnknown = false
+  let spawnRejected = false
+  let stopFailure: unknown = null
   try {
     // spawn 回包失败时也可能已经在宿主建了会话；放进 try，外层 catch 至少能 markBlocked，
     // finally 再按 agentId 做有界释放，不能把节点留在 dispatched。
+    let spawnTask: Promise<Awaited<ReturnType<typeof createExecutorAgent>>> | null = null
     try {
+      spawnTask = createExecutorAgent(deps.agents, deps.registry, {
+        nodeRunId: p.nodeRunId,
+        attempt: p.attempt,
+        input: p.input,
+        outputSchema: p.outputSchema,
+        toolPolicy: policy,
+      })
       agent = await withTimeout(
-        createExecutorAgent(deps.agents, deps.registry, {
-          nodeRunId: p.nodeRunId,
-          attempt: p.attempt,
-          input: p.input,
-          outputSchema: p.outputSchema,
-          toolPolicy: policy,
-        }),
+        spawnTask,
         p.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
         () => new OrchError('OPERATION_TIMEOUT', 'Agent 启动超过上限', {
           nodeRunId: p.nodeRunId, attempt: p.attempt, startupTimeoutMs: p.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
         }),
       )
     } catch (err) {
+      // 宿主明确拒绝（4xx 类错误）：没有副作用，落 blocked_pre，不冒充“启动结果未知”。
+      // 超时/传输错误才可能是“会话已建但回包丢了”，落 startup_unknown 交人工核。
+      if (isDeterministicSpawnFailure(err)) {
+        withTx(deps.db, (tx) => {
+          const row = loadNodeRun(tx, p.nodeRunId)
+          if (row.status === 'dispatched') {
+            transitionNode(tx, deps.secret, {
+              nodeRunId: p.nodeRunId, from: 'dispatched', to: 'blocked_pre',
+              attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'agent_spawn_rejected',
+              verifyHuman: { reason: 'agent_spawn_rejected', missing: [] },
+            })
+          }
+        })
+        spawnRejected = true
+        throw err
+      }
       // spawn 回包失败时宿主可能已经建了会话，但我们拿不到 agentId：不能声称已停，
       // 也不能留在 dispatched。按规格落 startup_unknown，交给 sweep/人工核副作用。
       withTx(deps.db, (tx) => {
@@ -182,6 +207,13 @@ async function runNodeActions(
         }
       })
       spawnUnknown = true
+      // 超时后底层 spawn 仍可能晚到；晚到的会话必须被释放，不能变成无人认领的孤儿。
+      if (spawnTask) {
+        void spawnTask.then(
+          (late) => bestEffortReleaseAgent(deps, late.agentId, p.nodeRunId, p.attempt),
+          () => undefined,
+        )
+      }
       throw err
     }
     const created = agent
@@ -216,8 +248,13 @@ async function runNodeActions(
     evidence = (envelope.evidence as StrongEvidence | null) ?? null
     // 停止确认必须在任何状态收口之前：stop 失败时节点还在 started，能落 blocked_post；
     // 若先 submitReport 到 done，done 没有出边，stop 失败就只能留下“账本 done、Agent 未停”的矛盾。
-    await lifecycle.stop()
-    stopped = true
+    try {
+      await lifecycle.stop()
+      stopped = true
+    } catch (stopErr) {
+      stopFailure = stopErr
+      throw stopErr
+    }
 
     // 续租失败过：动作已经失去合法租约，不许再进 verifying 收口（第五轮审计 P2-1）
     if (leaseState.lost) {
@@ -275,8 +312,10 @@ async function runNodeActions(
   } catch (err) {
     failed = err
     // spawn 结果未知已经落 startup_unknown；再走 blocked_post 会把“副作用未知”误写成“已确认阻断”。
-    if (!spawnUnknown) {
-      const reason = err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
+    if (!spawnUnknown && !spawnRejected) {
+      const reason = stopFailure !== null
+        ? 'agent_stop_unconfirmed'
+        : err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
       markBlocked(deps, p, reason, nowAt())
     }
     throw err
