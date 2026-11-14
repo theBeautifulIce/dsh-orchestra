@@ -796,3 +796,12 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 其余复核：S2 的调度背压/停机 24 项、真实 HTTP 并发/close 16 项全 pass（默认 maxWaiting=1000；第 1002 个拒；maxWaiting=2 第 4 个拒；drain 两分支；同 Promise；失败释放名额；双入口 maxActive=2；异常 503 后归零；close 后拒新、在跑 200 收尾、锁释放）。A8b/A8c/A8dash3、A9b/A9c 均 exit 1；历史行、round36 形攻击矩阵、「无裸 blocked」、干净 pass、围栏内表格不误伤；G2 证据 19 份 LF sha256 与五项哈希一致。
 - 尚留 P2：round38 fail 报告被 `hiddenCommentFailure` 误判、Agent Bridge 未接生产、工具 started/finished 同刻、围栏/注释内表格屏蔽、配置非法回落默认调度器。
 - 状态：S1 第三十九轮尚未回；G1/G2 仍绑旧候选，`2cd6a62` 未签。S1 回后合并结论，在新候选上重派 S1/S2 第四十轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
+
+### 11.38 第三十九轮 S1 同源 P1 与第四十轮候选（2026-11-14 12:56，HEAD 48d4fb3）
+
+- 触发：S1 第三十九轮在 `920a5dd` 上判 **fail**（P0=0 / P1=1 / P2=4），报告 `D:/aboutAI/_audit-r39-s1/docs/audits/S1-independent-audit-round39.md`，克隆提交 `b675ec4`。P1 与 S2 同源但攻击面不同：表头含「用例」、期望格为「拒」的攻击行，把必过项 `G1-01` 的「未通过」写进备注格；`isRejectedAttackRow` 整行 `continue`，`bodyConclusionOf` 也不认非结论列，实测 sign-gate exit 0、gate-check exit 0（临时门 artifact `90a7273f…`、body `db23a6d3…`）。对照：只把「拒」改成「不成立」，同一行 sign-gate exit 1，确认放行由整行豁免直接造成。
+- S1 同时确认上一轮两条 P1 已修：1/2/3 连字符分隔行的第 4 格溢出都被 sign-gate 与 gate-check 拒；A6/A7/A9 变体全拒；合法 pass 与中文数字历史表未误伤；六项哈希独立重算一致；并发 15/15、maxActive=2。
+- 覆盖：`2cd6a62` 的 `isBareFailureCell` 正是针对该载荷——攻击行可以豁免描述格，但备注格里整格只写「未通过」仍按否决判。新增 S1 精确回归 `S1 第三十九轮 P1：攻击行备注格藏 G1-01 未通过仍拒绝`（`tests/gate/gate-check.spec.ts`，表头 `用例编号/必过项/期望/备注`，行 `A1 | G1-01 | 拒 | 未通过`）。
+- 验证（实测）：`tsc --noEmit` 0；全量 38 文件 **545 passed | 1 skipped**；`pnpm build` 通过；`check-evidence-repro` 25 份字节一致。
+- S1 P2（不阻断）：①正文行内代码/旧样本里同写 id 与否定词仍会被当本轮判否（误杀，不是绕过）；②`gate-check` 传绝对路径会误报「门记录不在 HEAD 里」，应 normalize 成仓库相对路径；③无结论词、无必过项 id 的隐藏注释不触发扫描；④`sign-gate` 枚举已删除的旧测试路径会向 stderr 打 `fatal: path ... does not exist` 噪声。
+- 状态：两路第三十九轮都 fail 在同一攻击矩阵整行豁免；修复已落在 `2cd6a62`，精确回归在 `48d4fb3`。G1/G2 仍绑旧候选，`48d4fb3` 未签；下一步在 `48d4fb3` 上重派 S1/S2 第四十轮独立审计，两份 pass 后按 G1→G2 重签、双门 exit 0，再开 S3。任务书余项：R3 链头同事务/工具单调耗时、R4 workflow_id+version 与 Schema、R5 Agent Bridge 生产生命周期（单独提交设计）、P2-04 审计证据引用与跨版本审计。
