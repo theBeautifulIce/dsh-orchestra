@@ -9,6 +9,8 @@ import { nullLogger, type Logger } from './infra/logger.ts'
 import { WorkflowCatalog } from './service/workflows.ts'
 import { createRun } from './service/runs.ts'
 import { dispatchRun } from './service/dispatcher.ts'
+import { closeRun } from './service/commands/run-close.ts'
+import { inTx } from './infra/db/tx.ts'
 import type { NodeCommands, ServerDeps } from './service/server.ts'
 import { startServer } from './service/server.ts'
 import {
@@ -139,7 +141,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑节点', { nodeRunId: b.nodeRunId })
       }
-      return executeScheduled({
+      const out = await executeScheduled({
         nodeRunId: b.nodeRunId,
         nodeId: b.nodeId,
         attempt: b.attempt,
@@ -152,6 +154,10 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         leaseRenewIntervalMs: b.leaseRenewIntervalMs,
         ...executionLimits,
       })
+      // 单节点入口也要收口：run 下所有节点都终态且无活跃 decision 时写运行终态。
+      const row = db.raw.prepare('SELECT run_id FROM node_runs WHERE node_run_id = ?').get(b.nodeRunId) as { run_id?: string } | undefined
+      if (row?.run_id) inTx(db, (tx) => { closeRun(tx, row.run_id!, b.now) })
+      return out
     },
   }
   return {

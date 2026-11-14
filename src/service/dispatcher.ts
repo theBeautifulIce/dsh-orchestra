@@ -3,6 +3,8 @@
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
+import { inTx } from '../infra/db/tx.ts'
+import { closeRun } from './commands/run-close.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
@@ -45,11 +47,15 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
   ).all(p.runId) as { node_run_id: string; node_id: string; seq: number; attempt: number }[]
   // 装配层给了执行函数，它已经带并发闸：同批节点可以一起排，谁先拿到名额谁先跑。
   // 没给执行函数（老装配/单测）时保持原来的串行次序，不凭空放并发。
-  if (deps.executeNode) {
-    return await Promise.all(rows.map((row) => dispatchOne(deps, p, row)))
-  }
-  const outcomes: DispatchOutcome[] = []
-  for (const row of rows) outcomes.push(await dispatchOne(deps, p, row))
+  const outcomes = deps.executeNode
+    ? await Promise.all(rows.map((row) => dispatchOne(deps, p, row)))
+    : await (async () => {
+        const out: DispatchOutcome[] = []
+        for (const row of rows) out.push(await dispatchOne(deps, p, row))
+        return out
+      })()
+  // 这一轮跑完后收口 run：所有子节点都已终态才写，未满足条件保持原状。
+  inTx(deps.db, (tx) => { closeRun(tx, p.runId, p.now) })
   return outcomes
 }
 

@@ -201,8 +201,8 @@ describe('dispatcher 与调度器接线', () => {
     ]
     // 只假造 dispatcher 用到的那一次查表
     const fakeDb = {
-      raw: { prepare: () => ({ all: () => rows, get: () => undefined }) },
-      epoch: 1,
+      raw: { prepare: () => ({ all: () => rows, get: () => undefined }), exec: () => {} },
+      epoch: 0,
     } as unknown as Db
     const base = createExecutionScheduler({ concurrency: 2 })
     let calls = 0

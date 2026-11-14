@@ -223,6 +223,21 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(count()).toBe(1)
   })
 
+  it('桥恢复：按 resume_state 回原态并 Gr+1，不把 unknown 续成满额', () => {
+    const db = setup()
+    const clock = new ScriptedClock('boot-b', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status='paused_bridge_missing', resume_state='startup_unknown', startup_unknown_remaining_ns=5000, rearm_generation=3 WHERE node_run_id='nr_sw'")
+    })
+    const out = sweep(db, TEST_SECRET, { now: NOW, clock, bridgeRestored: ['nr_sw'] })
+    expect(out.bridge_restored).toEqual(['nr_sw'])
+    expect(row(db)).toMatchObject({
+      status: 'startup_unknown', resume_state: null, rearm_generation: 4,
+      startup_unknown_remaining_ns: null,
+      startup_unknown_monotonic_ns: 5_000_000_000,
+    })
+  })
+
   it('startup_unknown 有单调锚点时：墙钟跳远不误判，单调钟到点才转 indeterminate', () => {
     const db = setup()
     const clock = new ScriptedClock('boot-u', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })

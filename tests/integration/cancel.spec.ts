@@ -140,6 +140,8 @@ describe('围栏撤销与排队重放', () => {
     expect(row.status).toBe('stopping')
     expect(row.fence_state).toBe('revoked')
     expect(row.fence_grace_until).toBeNull()
+    expect(row.rearm_generation).toBe(before.rearm_generation + 1)
+    expect(row.deadline_at).toBe('2026-11-13T03:01:30.000Z')
     expect(events(db, 'fence_revoked')).toBe(1)
   })
 

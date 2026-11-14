@@ -22,9 +22,18 @@ const PATCH_COLUMNS = new Set([
   'startup_unknown_deadline_at',
   'startup_unknown_boot_id',
   'startup_unknown_monotonic_ns',
+  'fence_state',
+  'fence_grace_until',
   'fence_grace_boot_id',
   'fence_grace_monotonic_ns',
+  'deadline_at',
+  'deadline_boot_id',
+  'deadline_monotonic_ns',
   'verify_remaining_ns',
+  'verify_started_at',
+  'verify_deadline_at',
+  'verify_deadline_boot_id',
+  'verify_deadline_monotonic_ns',
   // 审批往返：blocked_pre 记回队目标与审批卡，同时收回旧租约
   'resume_state',
   'blocked_decision_id',
@@ -46,6 +55,8 @@ export type TransitionRequest = {
   attempt: number
   now: string
   actionGeneration?: number
+  // 重新武装类迁移必须带读到的旧 Gr，成功后同一笔 CAS 里 Gr+1
+  rearmGeneration?: number
   patch?: TransitionPatch
   // 只有写 hang_reason 的规则可以越过 hang_reason IS NULL 的普通出口闸门
   allowHung?: boolean
@@ -94,6 +105,10 @@ export function applyTransition(tx: Tx, req: TransitionRequest): void {
   if (req.actionGeneration !== undefined) {
     whereSql.push('action_generation = ?')
     whereBinds.push(req.actionGeneration)
+  }
+  if (req.rearmGeneration !== undefined) {
+    whereSql.push('rearm_generation = ?')
+    whereBinds.push(req.rearmGeneration)
   }
   const values: unknown[] = [req.to, req.now, ...columns.map((column) => patch[column])]
   const res = tx.run(

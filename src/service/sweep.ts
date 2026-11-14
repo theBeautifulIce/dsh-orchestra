@@ -6,15 +6,17 @@ import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts
 import { transitionNode } from './commands/node-state.ts'
 import { applyTransition } from './commands/nodes.ts'
 import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
-import { isTerminal, type NodeStatus } from '../core/state-machine.ts'
+import { canTransition, isTerminal, type NodeStatus } from '../core/state-machine.ts'
 import type { ClockProvider, Deadline } from '../core/clock.ts'
-import { deadlineFromAnchors } from '../core/clock.ts'
+import { deadlineFromAnchors, deadlineFromSample } from '../core/clock.ts'
 
 export type SweepParams = {
   now: string
   clock?: ClockProvider
   // 运行时观察到的桥断节点：只有拿到显式信号才挂起，不猜
   bridgeMissing?: readonly string[]
+  // 桥恢复信号：按 resume_state 逐态重入，重挂剩余预算，不把未知态续成满额
+  bridgeRestored?: readonly string[]
 }
 
 export type SweepResult = {
@@ -32,6 +34,8 @@ export type SweepResult = {
   startup_unknown_expired: string[]
   // 显式桥断信号置 paused_bridge_missing
   bridge_paused: string[]
+  // 显式桥恢复信号按 resume_state 重入
+  bridge_restored: string[]
   scanned_at: string
 }
 
@@ -55,7 +59,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken, clock: params.clock })
     // 围栏宽限到点：撤围栏回 stopping，并把当前 attempt 的队头挑出来（规格 4.5 行 346）
     const fences = tx.all<FenceRow>(
-      'SELECT node_run_id, attempt, revision, status, fence_state, fence_grace_until, fence_grace_boot_id, fence_grace_monotonic_ns FROM node_runs WHERE fence_state = ? AND fence_grace_until IS NOT NULL',
+      'SELECT node_run_id, attempt, revision, status, rearm_generation, fence_state, fence_grace_until, fence_grace_boot_id, fence_grace_monotonic_ns FROM node_runs WHERE fence_state = ? AND fence_grace_until IS NOT NULL',
       ['armed'],
     )
     const revoked: string[] = []
@@ -170,6 +174,62 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       }
     }
 
+    // 显式桥恢复信号：按 resume_state 回到六态之一；startup_unknown/verifying 按剩余预算重挂，不续满额
+    const bridgeRestored: string[] = []
+    for (const nodeRunId of new Set(params.bridgeRestored ?? [])) {
+      const row = tx.get<{
+        attempt: number; status: string; resume_state: string | null; rearm_generation: number
+        startup_unknown_remaining_ns: number | null; verify_remaining_ns: number | null
+      }>(
+        'SELECT attempt, status, resume_state, rearm_generation, startup_unknown_remaining_ns, verify_remaining_ns FROM node_runs WHERE node_run_id = ?',
+        [nodeRunId],
+      )
+      if (!row || row.status !== 'paused_bridge_missing' || !row.resume_state) continue
+      const target = row.resume_state as NodeStatus
+      if (!canTransition('paused_bridge_missing', target)) continue
+      const patch: Record<string, string | number | null> = { resume_state: null }
+      if (target === 'startup_unknown') {
+        const remaining = row.startup_unknown_remaining_ns ?? 120_000
+        const d = params.clock
+          ? deadlineFromSample(params.clock, remaining)
+          : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + remaining }
+        patch.startup_unknown_deadline_at = new Date(d.wallClockMs).toISOString()
+        patch.startup_unknown_boot_id = d.bootId
+        patch.startup_unknown_monotonic_ns = d.monotonicNs
+        patch.startup_unknown_remaining_ns = null
+      }
+      if (target === 'verifying') {
+        const remaining = row.verify_remaining_ns ?? 0
+        const d = params.clock
+          ? deadlineFromSample(params.clock, remaining)
+          : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + remaining }
+        patch.verify_started_at = params.now
+        patch.verify_deadline_at = new Date(d.wallClockMs).toISOString()
+        patch.verify_deadline_boot_id = d.bootId
+        patch.verify_deadline_monotonic_ns = d.monotonicNs
+        patch.verify_remaining_ns = null
+      }
+      try {
+        applyTransition(tx, {
+          nodeRunId,
+          from: ['paused_bridge_missing'],
+          to: target,
+          attempt: row.attempt,
+          now: params.now,
+          bumpRearm: true,
+          rearmGeneration: row.rearm_generation,
+          patch,
+        })
+        appendNodeRunEvent(tx, secret, nodeRunId, 'recovery.bridge_restored', {
+          resume_state: target,
+          rearm_generation: row.rearm_generation + 1,
+        })
+        bridgeRestored.push(nodeRunId)
+      } catch {
+        // 并发已改这一行：跳过
+      }
+    }
+
     return {
       lease_expired: leaseExpired,
       fence_revoked: revoked,
@@ -179,6 +239,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       chain_broken: [...broken],
       startup_unknown_expired: unknownExpired,
       bridge_paused: bridgePaused,
+      bridge_restored: bridgeRestored,
       scanned_at: params.now,
     }
   })

@@ -6,6 +6,7 @@ import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { isTerminal } from '../../core/state-machine.ts'
 import { deadlineFromAnchors, deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 import { loadNodeRun } from './lease.ts'
+import { applyTransition } from './nodes.ts'
 
 export type CancelResult = 'interrupted' | 'not_interruptible' | 'already_stopped' | 'unknown'
 
@@ -160,6 +161,7 @@ export type FenceRow = {
   attempt: number
   revision: number
   status: string
+  rearm_generation: number
   fence_state: string | null
   fence_grace_until: string | null
   fence_grace_boot_id?: string | null
@@ -168,7 +170,7 @@ export type FenceRow = {
 
 // 宽限到点仍没见停止：撤销围栏回 stopping（规格 4.5 行 346）
 // 返回是否这次真的撤销了（调用方据此决定要不要重放队头）
-export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now: string; clock?: ClockProvider }): boolean {
+export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now: string; clock?: ClockProvider; rearmActionDeadlineMs?: number }): boolean {
   if (params.row.fence_state !== 'armed') return false
   // 宽限没到点不许撤销：任何调用方都不能提前把围栏撤了（规格 4.5 行 346）
   if (!params.row.fence_grace_until) return false
@@ -183,12 +185,37 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
     return false
   }
   // 撤销失败只说明这行已被别人改过：返回 false 让 sweep 继续下一条，不许整批回滚（审计 P0-4）
-  const res = tx.run(
-    'UPDATE node_runs SET status = ?, fence_state = ?, fence_grace_until = NULL, fence_grace_boot_id = NULL, fence_grace_monotonic_ns = NULL, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND status = ? AND attempt = ? AND revision = ?',
-    ['stopping', 'revoked', params.now, params.row.node_run_id, 'timing_out', params.row.attempt, params.row.revision],
-  )
-  if (res.changes !== 1) return false
-  appendNodeRunEvent(tx, secret, params.row.node_run_id, 'fence_revoked', { reason: 'grace_expired' })
+  // 撤围栏同时重新武装 action_deadline，并在同一笔 CAS 里 Gr+1；旧定时器与旧执行器手里的 Gr 立刻失效。
+  const rearm = params.clock
+    ? deadlineFromSample(params.clock, params.rearmActionDeadlineMs ?? 30_000)
+    : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + (params.rearmActionDeadlineMs ?? 30_000) }
+  try {
+    applyTransition(tx, {
+      nodeRunId: params.row.node_run_id,
+      from: ['timing_out'],
+      to: 'stopping',
+      attempt: params.row.attempt,
+      now: params.now,
+      bumpRearm: true,
+      rearmGeneration: params.row.rearm_generation,
+      patch: {
+        fence_state: 'revoked',
+        fence_grace_until: null,
+        fence_grace_boot_id: null,
+        fence_grace_monotonic_ns: null,
+        deadline_at: new Date(rearm.wallClockMs).toISOString(),
+        deadline_boot_id: rearm.bootId,
+        deadline_monotonic_ns: rearm.monotonicNs,
+      },
+    })
+  } catch {
+    return false
+  }
+  appendNodeRunEvent(tx, secret, params.row.node_run_id, 'fence_revoked', {
+    reason: 'grace_expired',
+    transition_reason: 'whenIdle_timeout',
+    rearm_generation: params.row.rearm_generation + 1,
+  })
   return true
 }
 
