@@ -135,6 +135,15 @@ describe('结构化审计裁决：与门记录对账', () => {
     expect(problems.join('\n')).toMatch(/G2-02/)
   })
 
+  it('must_pass_ids 重复列同一项把总数抬高要拦（S1 第三十轮 P2-2）', () => {
+    const problems = verdictProblems(
+      { ...base, must_pass_total: 3, must_pass_passed: 3, must_pass_ids: ['G2-01', 'G2-02', 'G2-01'] } as AuditVerdict,
+      ctx,
+    )
+    expect(problems.join('\n')).toMatch(/重复/)
+    expect(problems.join('\n')).toMatch(/门规格的必过项数/)
+  })
+
   it('must_pass_ids 混进规格外的项要拦（不是只比条数）', () => {
     const problems = verdictProblems(
       { ...base, must_pass_total: 3, must_pass_passed: 3, must_pass_ids: ['G2-01', 'G2-02', 'G2-99'] } as AuditVerdict,

@@ -68,6 +68,9 @@ function normalizeEvidence(text: string, shared?: EvidenceMaps, normalizeRevisio
   }
   // 运行时刻（租约到期、工具开始、验收截止）也是环境噪声，统一写 <ts> 才谈得上重跑同字节。
   let out = text.replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, '<ts>')
+  // 库文件的 sha 取决于 sqlite 页布局与随机盐，同一场景重跑也不会一样；它只是「前后是否一致」的证据载体，
+  // 归一成 <db_sha>，结论句（线上库未变：true）仍逐字保留（S1 第三十轮 P2-3）。
+  out = out.replace(/线上库 sha [0-9a-f]+/g, '线上库 sha <db_sha>')
   // 续租次数取决于调度抖动，revision 每跑一次都可能不同；它不是行为事实，
   // 写进证据会把“同一场景重跑同字节”变成偶然（S2 第二十六轮 P1-1）。
   if (normalizeRevision) out = out.replace(/"revision":\d+/g, '"revision":<n>')
@@ -82,7 +85,17 @@ export function writeEvidence(dir: string, result: InjectionResult): void {
   const shared: EvidenceMaps = { ids: new Map(), entity: new Map(), entityCount: new Map() }
   // 只有 ev-g2-14 的续租次数会随并发抖动；其余证据保持原字节，避免无谓改锚。
   const norm = (value: string): string => normalizeEvidence(value, shared, result.case === 'ev-g2-14')
-  const params = norm(JSON.stringify(result.params, (key, value) => (key === 'db' ? '<tmp>/orchestra.db' : value)))
+  // 临时目录里的一切绝对路径都要归一：G-15 会把备份目录写进参数，路径自带随机后缀，不归一就重跑不出同字节（S1 第三十轮 P2-3）
+  const tmpRoot = tmpdir().replace(/[\\/]+$/, '')
+  const scrubPath = (value: unknown): unknown => {
+    if (typeof value !== 'string') return value
+    const trimmed = value.replace(/[\\/]+$/, '')
+    if (trimmed === tmpRoot) return '<tmp>'
+    if (!trimmed.startsWith(tmpRoot)) return value
+    const rest = trimmed.slice(tmpRoot.length).replace(/^[\\/]+/, '').split(/[\\/]/)
+    return '<tmp>/' + (rest[rest.length - 1] ?? '')
+  }
+  const params = norm(JSON.stringify(result.params, (key, value) => scrubPath(value)))
   writeFileSync(join(dir, result.case + '.md'),
     '# ' + result.case + '\n\n- 参数：' + params + '\n'
     + '\n## 注入前账本片段\n\n```\n' + norm(result.before) + '\n```\n'
@@ -474,7 +487,7 @@ async function caseG05(): Promise<InjectionResult> {
     {
       nodeRunId: 'nrun_g05', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
       tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
-      now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      now: NOW, ownerEpoch: 1, leaseTtlMs: 120000,
     },
   )
   // 等工具真的起飞
@@ -709,7 +722,7 @@ async function caseEvG205(): Promise<InjectionResult> {
   await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
   const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '终态证据门', workflowVersion: '1', now: EV_NOW }, secret)
   const nodeRunId = created.body?.data?.nodes?.[0]?.node_run_id ?? ''
-  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const gen = Number(leased.body?.data?.action_generation ?? 0)
   const started = await postJson(boot.endpoint, '/v1/node-runs/report', {
     nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
@@ -750,7 +763,7 @@ async function caseEvG206(): Promise<InjectionResult> {
   await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
   const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '阻塞凭据门', workflowVersion: '1', now: EV_NOW }, secret)
   const nodeRunId = created.body?.data?.nodes?.[0]?.node_run_id ?? ''
-  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const gen = Number(leased.body?.data?.action_generation ?? 0)
   await postJson(boot.endpoint, '/v1/node-runs/report', {
     nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
@@ -862,7 +875,7 @@ async function caseEvG209(): Promise<InjectionResult> {
   const startNode = async (title: string, tag: string): Promise<{ nodeRunId: string; generation: number }> => {
     const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: title, workflowVersion: '9', now: EV_NOW }, secret)
     const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
-    const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+    const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
     const generation = Number(leased.body?.data?.action_generation ?? 0)
     await postJson(boot.endpoint, '/v1/node-runs/report', {
       nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation, now: EV_NOW,
@@ -947,7 +960,7 @@ async function caseEvG210(): Promise<InjectionResult> {
   const loaded = await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
   const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '报告入口证据门', workflowVersion: '1', now: EV_NOW }, secret)
   const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
-  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const gen = Number(leased.body?.data?.action_generation ?? 0)
   await postJson(boot.endpoint, '/v1/node-runs/report', {
     nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
@@ -1009,7 +1022,7 @@ async function caseEvG202(): Promise<InjectionResult> {
   await postJson(boot.endpoint, '/v1/workflows/load', EV_DEF, secret)
   const created = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '重复上报只落一次', workflowVersion: '1', now: EV_NOW }, secret)
   const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
-  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const leased = await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const gen = Number(leased.body?.data?.action_generation ?? 0)
   const body = {
     nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
@@ -1096,7 +1109,7 @@ async function caseEvG204(): Promise<InjectionResult> {
   // 节点二：派发后取消——只立一次围栏，attempt 同样不涨
   const created2 = await postJson(boot.endpoint, '/v1/runs', { taskTitle: '派发后取消只立一次围栏', workflowVersion: '1', now: EV_NOW }, secret)
   const nodeRunId2 = String(created2.body?.data?.nodes?.[0]?.node_run_id ?? '')
-  await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId: nodeRunId2, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId: nodeRunId2, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const rev2 = Number((boot.db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId2) as { revision: number }).revision)
   const cancelled2 = await postJson(boot.endpoint, '/v1/node-runs/cancel', {
     nodeRunId: nodeRunId2, attempt: 1, revision: rev2, cancelResult: 'interrupted', now: EV_NOW, graceMs: 1000,
@@ -1309,7 +1322,7 @@ async function caseEvG215(): Promise<InjectionResult> {
   const loaded = await postJson(first.endpoint, '/v1/workflows/load', EV_DEF, secret)
   const created = await postJson(first.endpoint, '/v1/runs', { taskTitle: '跨重启定义绑定', workflowVersion: '1', now: EV_NOW }, secret)
   const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
-  const leased = await postJson(first.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 600000, now: EV_NOW }, secret)
+  const leased = await postJson(first.endpoint, '/v1/node-runs/lease', { nodeRunId, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const gen = Number(leased.body?.data?.action_generation ?? 0)
   await postJson(first.endpoint, '/v1/node-runs/report', {
     nodeRunId, attempt: 1, expectedStatus: 'dispatched', generation: gen, now: EV_NOW,
@@ -1389,6 +1402,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const name = (idx >= 0 ? process.argv[idx + 1] : 'G-01') as InjectionCase
   const out = await runCase(name)
   const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11', 'ev-g2-12', 'ev-g2-13', 'ev-g2-14', 'ev-g2-15'].includes(name) ? 'G2' : 'G1'
-  writeEvidence(join(process.cwd(), 'docs/gates/evidence/' + gate), out)
+  // --out 只是给复现守卫用的：把证据写到临时目录，别把工作树弄脏（S2 第三十五轮 P1-1）
+  const outIdx = process.argv.indexOf('--out')
+  const evidenceRoot = outIdx >= 0 ? process.argv[outIdx + 1]! : join(process.cwd(), 'docs/gates/evidence')
+  writeEvidence(join(evidenceRoot, gate), out)
   console.log(JSON.stringify(out, null, 2))
 }

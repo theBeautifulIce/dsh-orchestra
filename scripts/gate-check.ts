@@ -1438,6 +1438,38 @@ export function auditConclusionOf(text: string): 'pass' | 'fail' | null {
   return verdict
 }
 
+// 裁决块写 pass 时正文不能同时唱反调（S2 第三十五轮 P2-1）：
+// 以前只在 auditConclusionOf 返回非 null 时才比对，正文写成「两行结论」或「某项未通过」时
+// 该函数返回 null，一致性检查被静默跳过，改正文就能签过门。这里独立扫三类背离：
+// 结论行不唯一、结论行与裁决相反、必过项在正文里被写成未通过。
+export function proseVerdictClashes(text: string, verdict: 'pass' | 'fail', requiredItems: string[]): string[] {
+  const clashes: string[] = []
+  if (hiddenDefinitionFailure(text)) return ['正文藏着看不见的判定']
+  const rendered = renderedAuditWithCells(text)
+  if (rendered === null) return ['正文渲染失败，无法核对结论']
+  const visible = rendered.lines.map(stripHistoricalAuditSentence)
+  const { prose } = splitProseAndCells(visible, rendered.cells)
+  const strictLead = /^(?:审计)?(?:结论|結論|判定|审计意见|最终判定|最终结论|最終結論)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail|通过|不通过)/i
+  const englishLead = /^(?:audit\s+)?(?:conclusions?|verdict|outcomes?|results?)\s*[：:—–-]\s*(?:\*\*)?\s*(pass|fail)\b/i
+  const bareLead = /^(?:pass|fail|通过|不通过)$/i
+  const seen: ('pass' | 'fail')[] = []
+  for (const line of prose) {
+    const raw = strictLead.exec(line)?.[1] ?? englishLead.exec(line)?.[1] ?? (bareLead.test(line.trim()) ? line.trim() : undefined)
+    if (raw === undefined) continue
+    seen.push(/^(?:pass|通过)$/i.test(raw) ? 'pass' : 'fail')
+  }
+  if (seen.length > 1) clashes.push('正文出现 ' + String(seen.length) + ' 条结论行（' + seen.join('、') + '），结论必须唯一')
+  else if (seen.length === 1 && seen[0] !== verdict) clashes.push('正文结论行是 ' + String(seen[0]) + '，裁决是 ' + verdict)
+  for (const line of prose) {
+    const hit = requiredItems.filter((id) => line.includes(id))
+    if (hit.length === 0) continue
+    if (lineFailure(line) || visibleFailStatement(line, { bareConclusion: 'any' })) {
+      clashes.push('正文把必过项 ' + hit.join('、') + ' 写成未通过，裁决却是 ' + String(verdict))
+    }
+  }
+  return clashes
+}
+
 // 门记录正文顶部的结论行必须与 GateArtifact 的 conclusion 一致：
 // 防止 artifact 写 pass、人读正文却看到 fail（S1 第十七轮 P2-1）。
 export function bodyConclusionOf(text: string): 'pass' | 'fail' | null {
@@ -2100,10 +2132,11 @@ function checkAuditAnchor(artifact: Record<string, unknown>, spec: GateSpec, roo
       requiredItems: spec.items,
     })
     if (problems.length > 0) throw new Error('审计报告的结构化裁决不通过：' + problems.join('；'))
-    // 裁决与正文自述不能互相打脸：正文写 fail、裁决写 pass 时，两处都得对得上才签（第三十四轮 P2-1）
-    const prose = auditConclusionOf(text)
-    if (prose && prose !== parsed.verdict.conclusion) {
-      throw new Error('审计报告正文结论与结构化裁决不符：正文=' + prose + '，裁决=' + parsed.verdict.conclusion)
+    // 裁决与正文自述不能互相打脸（第三十四轮 P2-1 / 第三十五轮 P2-1）：
+    // 正文写 fail 要拦，正文写多行结论或把必过项写成未通过同样要拦——这些情况以前返回 null 就被跳过了。
+    const clashes = proseVerdictClashes(text, parsed.verdict.conclusion, spec.items)
+    if (clashes.length > 0) {
+      throw new Error('审计报告正文与结构化裁决不一致：' + clashes.join('；') + '（' + report + '）')
     }
   } else if (spec.requireVerdict) {
     throw new Error('审计报告缺少结构化裁决块（' + VERDICT_BEGIN + ' … ' + VERDICT_END + '），这道门要求机器可判的结论: ' + report)

@@ -165,6 +165,14 @@ export function verdictProblems(v: AuditVerdict, ctx: VerdictContext): string[] 
   if (v.must_pass_total !== v.must_pass_ids.length) {
     problems.push('must_pass_total（' + String(v.must_pass_total) + '）与 must_pass_ids 的条数（' + String(v.must_pass_ids.length) + '）不符')
   }
+  // 条数对得上也可能是把某项列两遍再把 total 抬高（S1 第三十轮 P2-2）：总数必须等于这道门的规格项数，且不能重复
+  const duplicated = v.must_pass_ids.filter((id, i) => v.must_pass_ids.indexOf(id) !== i)
+  if (duplicated.length > 0) {
+    problems.push('must_pass_ids 里有重复项：' + Array.from(new Set(duplicated)).join(','))
+  }
+  if (v.must_pass_total !== ctx.requiredItems.length) {
+    problems.push('must_pass_total（' + String(v.must_pass_total) + '）与门规格的必过项数（' + String(ctx.requiredItems.length) + '）不符')
+  }
   if (v.failed_items.length > 0) problems.push('failed_items 不为空：' + v.failed_items.join(','))
   const covered = new Set(v.must_pass_ids)
   const missing = ctx.requiredItems.filter((id) => !covered.has(id))

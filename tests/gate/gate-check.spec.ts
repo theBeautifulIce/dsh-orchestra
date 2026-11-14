@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
-import { auditBindingOf, auditConclusionOf, bodyConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, verifyGateRecord } from '../../scripts/gate-check.ts'
+import { auditBindingOf, auditConclusionOf, bodyConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, proseVerdictClashes, verifyGateRecord } from '../../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
@@ -1383,5 +1383,29 @@ describe('审计报告表格按单元格语义判结论（第四轮整改 F4）'
     const md = table(['G2-06 | passed | 正常收口']) + '\n本报告不通过。\n'
     expect(auditConclusionOf(md)).toBeNull()
     expect(bodyConclusionOf(md)).toBe('fail')
+  })
+})
+
+
+// 裁决块写 pass 时正文不能同时唱反调（S2 第三十五轮 P2-1）：以前这两种写法让 auditConclusionOf 返回 null，
+// 一致性检查被静默跳过，改正文就能签过门。
+describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () => {
+  const items = ['G2-01', 'G2-02', 'G2-11']
+  const head = ['# 报告', '', '门：G2', '', '候选提交：' + 'a'.repeat(40), ''].join('\n')
+
+  it('两行结论即使同向也拒绝', () => {
+    const clashes = proseVerdictClashes(head + '\n结论：pass\n\n结论：fail\n', 'pass', items)
+    expect(clashes.join('\n')).toMatch(/结论必须唯一/)
+  })
+
+  it('必过项在正文里被写成未通过要拒绝', () => {
+    const clashes = proseVerdictClashes(head + '\n本报告复核 G2-11，G2-11 未通过。\n', 'pass', items)
+    expect(clashes.join('\n')).toMatch(/G2-11/)
+    expect(clashes.join('\n')).toMatch(/未通过/)
+  })
+
+  it('只讲历史轮次失败、结论唯一的通过报告不误伤（阳性对照）', () => {
+    const md = head + '\n上一轮 P1-1 未通过，本轮已修好；必过项逐项核对通过。\n\n结论：pass。\n'
+    expect(proseVerdictClashes(md, 'pass', items)).toEqual([])
   })
 })
