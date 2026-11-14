@@ -141,6 +141,16 @@ export class BridgeClient {
     return this.transport.listen(params, signal)
   }
 
+  // 工具结果由宿主执行后回传；这只结束 Agent 的这次 tool.call，不改变账本状态
+  async toolResult(params: {
+    executorAgentId: string
+    attempt: number
+    callId: string
+    result: { exitCode: number; stdout: string; stderr: string }
+  }): Promise<void> {
+    await this.transport.request('executor.toolResult', params)
+  }
+
   // 订阅态给上层看：围栏里判断「要不要等」时用
   isSubscribed(executorAgentId: string): boolean {
     return this.subscribed.has(executorAgentId)
@@ -404,6 +414,8 @@ export class BridgeEventBuffer {
     return null
   }
 
+  get agentId(): string { return this.opts.agentId }
+  get attempt(): number { return this.opts.attempt ?? 0 }
   get lastSeq(): number { return this.lastReceivedSeqValue }
   get lastReceivedSeq(): number { return this.lastReceivedSeqValue }
   get lastContiguousSeq(): number { return this.lastContiguousSeqValue }

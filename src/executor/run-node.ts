@@ -1,7 +1,8 @@
 // src/executor/run-node.ts —— 单节点执行主链（规格 5.2 行 442-449）
 // 生产路径的顺序固定：租约 → 建执行器 → 上报 started → 只读工具出强证据 → 核命令哈希 → 进 verifying → 上报 done。
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { OrchError } from '../core/errors.ts'
-import { toolExecutionId } from '../core/ids.ts'
 import type { Report } from '../core/report.ts'
 import type { Db } from '../infra/sqlite/driver.ts'
 import { withTx } from '../infra/sqlite/driver.ts'
@@ -9,8 +10,10 @@ import { transitionNode, DEFAULT_VERIFY_TIMEOUT_MS } from '../service/commands/n
 import { appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { loadNodeRun } from '../service/commands/lease.ts'
 import { acquireNodeRun, renewNodeLease, submitReport, type RuntimeDeps } from '../service/commands/runtime.ts'
-import { checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
-import { assertCommandHash, assertToolsAuthorized, commandHashOf, resolveInside, type ReadOnlyToolRunner, type StrongEvidence, type ToolRegistry } from './tools.ts'
+import { buildInstruction, checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
+import { assertToolsAuthorized, type ReadOnlyToolRunner, type StrongEvidence, type ToolRegistry } from './tools.ts'
+import type { BridgeClient } from './bridge.ts'
+import { AgentLifecycle } from './agent-lifecycle.ts'
 import { canTransition } from '../core/state-machine.ts'
 import type { ClockProvider } from '../core/clock.ts'
 
@@ -52,6 +55,10 @@ export type RunNodeDeps = {
   registry: ToolRegistry
   agents: HostAgentFactory
   runner: ReadOnlyToolRunner
+  // 生产路径必须走桥：spawn 由 agents 负责，事件流、工具回传、取消/释放都由这里持有
+  bridge: BridgeClient
+  // 未确认事件的落盘目录；同 node_run+agent+attempt 的文件前缀彼此隔离
+  spillDir?: string
 }
 
 export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunNodeResult> {
@@ -115,7 +122,7 @@ function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
   return { allow: def.allow, deny: def.deny, declaredPolicy: 'pure' }
 }
 
-// 动作主体：建执行器、跑工具、收口。拆成独立函数，心跳定时器才能在所有出口都被清掉
+// 动作主体：建执行器 → 事件驱动工具 → 等结构化报告 → 收口。心跳定时器在所有出口都被清掉。
 async function runNodeActions(
   deps: RunNodeDeps,
   p: RunNodeParams,
@@ -141,163 +148,131 @@ async function runNodeActions(
     })
   })
 
-  let evidence: StrongEvidence | null = null
   const actionTimeoutMs = p.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
-  const actionStartNs = deps.runtime.clock?.sample().monotonicNs ?? null
-  const actionStartMs = Date.now()
-  const elapsedMs = (): number => actionStartNs === null
-    ? Date.now() - actionStartMs
-    : (deps.runtime.clock!.sample().monotonicNs - actionStartNs) / 1e6
-  // 每个工具都留一条轨迹：第一份失败证据不能被后面的成功覆盖（审计 P0-3）
-  // 轨迹同时带上这次执行的唯一身份：同名工具在同一次 attempt 里跑两次也不许混成一条（评审《第二次意见.md》P1）
-  const trace: { tool: string; toolSeq: number; executionId: string; exitCode: number; stdoutHash: string; stderrHash: string; commandHash: string }[] = []
-  // tool_seq 从 1 起按调用次序排；同一 attempt 已有痕迹时从最大序号续，重入也不撞主键
-  let toolSeq = nextToolSeq(deps, p)
+  let lifecycle: AgentLifecycle | null = null
+  let evidence: StrongEvidence | null = null
+  let failed: unknown = null
   try {
-    for (const tool of p.tools) {
-      // 动作总时限真的参与执行：剩余额度用光就停，并按动作超时收口（第五轮审计 P2-1）
-      const remaining = actionTimeoutMs - elapsedMs()
-      if (remaining <= 0) {
-        markBlocked(deps, p, 'action_timeout', nowAt())
-        throw new OrchError('OPERATION_TIMEOUT', '动作超过总时限，节点停在这里', { nodeRunId: p.nodeRunId, actionTimeoutMs })
-      }
-      // 身份在工具起飞前就定下来：tool_started、tool_finished 与证据回执都绑同一个 execution_id
-      const seq = toolSeq
-      const executionId = toolExecutionId()
-      toolSeq += 1
-      // 工具起飞前先把时刻和事件写下去：取消要能证明「工具在飞」（证据 G-05）
-      withTx(deps.db, (tx) => {
-        tx.run('UPDATE node_runs SET tool_start_at = ?, updated_at = ? WHERE node_run_id = ?', [nowAt(), nowAt(), p.nodeRunId])
-        appendNodeRunEvent(tx, deps.secret, p.nodeRunId, 'tool_started', {
-          tool: tool.command,
-          attempt: p.attempt,
-          tool_seq: seq,
-          execution_id: executionId,
-        })
-      })
-      const out = await deps.runner.runTool({
-        command: tool.command,
-        args: tool.args,
-        cwd: tool.cwd,
-        // 单条工具也不许超过动作总时限的剩余额度
-        timeoutMs: Math.min(tool.timeoutMs, Math.ceil(remaining)),
-        workspaceRoot: deps.runner.root,
-      })
-      // 落库前必须核对命令哈希，核不上就不许当证据（规格 7.2 行 588）
-      const descriptor = deps.registry.require(tool.command)
-      // 期望哈希必须与 runner 实际执行的 argv 同源：请求里的 args 不覆盖注册表参数，也不能拿来算哈希
-      const args = descriptor.command.args
-      // 期望哈希用执行器实际解析过的绝对 cwd，和 runner 落证据时同一口径
-      assertCommandHash(out.evidence, commandHashOf(descriptor.command.bin, args, resolveInside(deps.runner.root, tool.cwd), deps.runner.root))
-      evidence = out.evidence
-      trace.push({
-        tool: tool.command,
-        toolSeq: seq,
-        executionId,
-        exitCode: out.evidence.exitCode,
-        stdoutHash: out.evidence.stdoutHash,
-        stderrHash: out.evidence.stderrHash,
-        commandHash: out.evidence.commandHash,
-      })
-      // 工具执行痕迹落库：收口时拿它核对「这条 done 报告的证据是不是真跑出来的」（审计 R3-03）
-      // 痕迹行带上 tool_seq 与 execution_id：同名工具在同一次 attempt 里跑几次都不会撞主键
-      withTx(deps.db, (tx) => {
-        tx.run(
-          'INSERT INTO tool_executions (node_run_id, attempt, tool_seq, tool, execution_id, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [
-            p.nodeRunId,
-            p.attempt,
-            seq,
-            tool.command,
-            executionId,
-            out.evidence.exitCode,
-            out.evidence.stdoutHash ?? null,
-            out.evidence.stderrHash ?? null,
-            out.evidence.commandHash ?? null,
-            nowAt(),
-            nowAt(),
-          ],
-        )
-        appendNodeRunEvent(tx, deps.secret, p.nodeRunId, 'tool_finished', {
-          tool: tool.command,
-          attempt: p.attempt,
-          tool_seq: seq,
-          execution_id: executionId,
-          exit_code: out.evidence.exitCode,
-          stdout_hash: out.evidence.stdoutHash ?? null,
-          stderr_hash: out.evidence.stderrHash ?? null,
-          command_hash: out.evidence.commandHash ?? null,
-        })
-      })
-      if (out.evidence.exitCode !== 0) break
+    lifecycle = new AgentLifecycle({
+      db: deps.db,
+      secret: deps.secret,
+      client: deps.bridge,
+      registry: deps.registry,
+      runner: deps.runner,
+      policy,
+      allowedTools: p.tools.map((tool) => tool.command),
+      nodeRunId: p.nodeRunId,
+      attempt: p.attempt,
+      agent,
+      instruction: nodeInstruction(p, agent),
+      timeoutMs: actionTimeoutMs,
+      idleTimeoutMs: 5_000,
+      nowAt,
+      spillDir: deps.spillDir ?? join(tmpdir(), 'dsh-orchestra-bridge'),
+    })
+    const envelope = await lifecycle.run(new AbortController().signal)
+    const trace = lifecycle.trace
+    evidence = (envelope.evidence as StrongEvidence | null) ?? null
+
+    // 续租失败过：动作已经失去合法租约，不许再进 verifying 收口（第五轮审计 P2-1）
+    if (leaseState.lost) {
+      markBlocked(deps, p, 'lease_lost', nowAt())
+      throw new OrchError('LEASE_EXPIRED', '执行期续租失败，节点按租约丢失收口', { nodeRunId: p.nodeRunId, reason: leaseState.lost })
     }
-  } catch (err) {
-    // 执行器抛错也要把节点落到可被人看见的位置，不许留在 verifying 死等
-    markBlocked(deps, p, 'tool_execution_failed', nowAt())
-    throw err
-  }
 
-  // 续租失败过：动作已经失去合法租约，不许再进 verifying 收口（第五轮审计 P2-1）
-  if (leaseState.lost) {
-    markBlocked(deps, p, 'lease_lost', nowAt())
-    throw new OrchError('LEASE_EXPIRED', '执行期续租失败，节点按租约丢失收口', { nodeRunId: p.nodeRunId, reason: leaseState.lost })
-  }
+    // 系统级判失败：任一工具 exitCode≠0 就中断后续工具，节点不许落 done（审计 R3-01）
+    const failedTool = trace.find((t) => t.exitCode !== 0)
+    if (failedTool) {
+      markBlocked(deps, p, 'tool_execution_failed', nowAt())
+      throw new OrchError('VERDICT_POLICY_UNMET', '节点没过判定条件：工具 exitCode 不是 0，收口被拒', {
+        nodeRunId: p.nodeRunId,
+        tool: failedTool.tool,
+        exit_code: failedTool.exitCode,
+      })
+    }
 
-  // 系统级判失败：任一工具 exitCode≠0 就中断后续工具，节点不许落 done（审计 R3-01）
-  const failedTool = trace.find((t) => t.exitCode !== 0)
-  if (failedTool) {
-    // 工具失败就不许收口：节点落 blocked_post，异常抛出去让调用方看见（审计 R3-01）
-    markBlocked(deps, p, 'tool_execution_failed', nowAt())
-    throw new OrchError('VERDICT_POLICY_UNMET', '节点没过判定条件：工具 exitCode 不是 0，收口被拒', {
-      nodeRunId: p.nodeRunId,
-      tool: failedTool.tool,
-      exit_code: failedTool.exitCode,
+    // Agent 的报告只提供 output；evidence 必须来自宿主执行器，evidence_trace 由宿主回填
+    const report = reportFromAgent(p, envelope.report, evidence, trace)
+    withTx(deps.db, (tx) => {
+      const row = loadNodeRun(tx, p.nodeRunId)
+      transitionNode(tx, deps.secret, {
+        nodeRunId: p.nodeRunId,
+        from: 'started',
+        to: 'verifying',
+        attempt: row.attempt,
+        revision: row.revision,
+        now: nowAt(),
+        reason: 'work_submitted',
+        verifyTimeoutMs: p.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+        // 判定锚点：墙钟只作展示，判定只读 boot_id 与单调纳秒（规格 3.4 行 171）
+        verifyAnchor: deps.runtime.clock ? anchorOf(deps.runtime.clock, nowAt()) : undefined,
+      })
     })
-  }
 
-  withTx(deps.db, (tx) => {
-    const row = loadNodeRun(tx, p.nodeRunId)
-    transitionNode(tx, deps.secret, {
+    const applied = submitReport(deps.runtime, {
       nodeRunId: p.nodeRunId,
-      from: 'started',
-      to: 'verifying',
-      attempt: row.attempt,
-      revision: row.revision,
+      attempt: p.attempt,
+      report,
+      expectedStatus: 'verifying',
+      generation,
       now: nowAt(),
-      reason: 'work_submitted',
-      verifyTimeoutMs: p.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
-      // 判定锚点：墙钟只作展示，判定只读 boot_id 与单调纳秒（规格 3.4 行 171）
-      verifyAnchor: deps.runtime.clock ? anchorOf(deps.runtime.clock, nowAt()) : undefined,
     })
-  })
-
-  const applied = submitReport(deps.runtime, {
-    nodeRunId: p.nodeRunId,
-    attempt: p.attempt,
-    report: reportOf(p, 'done', evidence, { evidence_trace: trace }),
-    expectedStatus: 'verifying',
-    generation,
-    now: nowAt(),
-  })
-  if (!applied.accepted) {
-    // 收口被拒：转 blocked_post 并留 verify_human，等人补证据或判失败，不许留 verifying 死等
-    markBlocked(deps, p, applied.reason ?? 'verdict_unmet', nowAt())
-    throw new OrchError('VERDICT_POLICY_UNMET', '节点没过判定条件，收口被拒', {
-      nodeRunId: p.nodeRunId,
-      reason: applied.reason,
-      registry_state: applied.registry_state,
-    })
+    if (!applied.accepted) {
+      // 收口被拒：转 blocked_post 并留 verify_human，等人补证据或判失败，不许留 verifying 死等
+      markBlocked(deps, p, applied.reason ?? 'verdict_unmet', nowAt())
+      throw new OrchError('VERDICT_POLICY_UNMET', '节点没过判定条件，收口被拒', {
+        nodeRunId: p.nodeRunId,
+        reason: applied.reason,
+        registry_state: applied.registry_state,
+      })
+    }
+    return { node_run_id: p.nodeRunId, final_status: applied.next_status ?? 'unknown', evidence, agent_id: agent.agentId }
+  } catch (err) {
+    failed = err
+    const reason = err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
+    markBlocked(deps, p, reason, nowAt())
+    throw err
+  } finally {
+    if (lifecycle) {
+      try {
+        await lifecycle.stop()
+      } catch (stopErr) {
+        if (failed === null) {
+          markBlocked(deps, p, 'agent_stop_unconfirmed', nowAt())
+          throw stopErr
+        }
+      }
+    }
   }
-  return { node_run_id: p.nodeRunId, final_status: applied.next_status ?? 'unknown', evidence, agent_id: agent.agentId }
 }
 
-// 同一 attempt 里下一个工具序号：正常路径从 1 起；这一 attempt 已经有痕迹时从最大序号续，
-// 同一节点重入执行也不会撞 (node_run_id, attempt, tool_seq) 主键
-function nextToolSeq(deps: RunNodeDeps, p: RunNodeParams): number {
-  const row = deps.db.raw.prepare(
-    'SELECT MAX(tool_seq) AS max_seq FROM tool_executions WHERE node_run_id = ? AND attempt = ?',
-  ).get(p.nodeRunId, p.attempt) as { max_seq: number | null } | undefined
-  return (row?.max_seq ?? 0) + 1
+// 发给 Agent 的任务文本只描述节点与输出约束；完成与否仍由服务端收口。
+function nodeInstruction(p: RunNodeParams, agent: { tools: { name: string }[] }): string {
+  return [
+    buildInstruction({ nodeId: p.nodeId, outputSchema: p.outputSchema }),
+    '可用只读工具：' + agent.tools.map((t) => t.name).join(', '),
+    '节点输入：' + JSON.stringify(p.input ?? null),
+  ].join('\n')
+}
+
+// Agent 的 report 只许是结构化 done；evidence 与 trace 由宿主覆盖，Agent 自报不算数。
+function reportFromAgent(
+  p: RunNodeParams,
+  raw: unknown,
+  evidence: StrongEvidence | null,
+  trace: { tool: string; toolSeq: number; executionId: string; exitCode: number; stdoutHash: string; stderrHash: string; commandHash: string }[],
+): Report {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'Agent 报告必须是结构化对象', {})
+  }
+  const report = raw as Record<string, unknown>
+  if (report.status !== 'done') {
+    throw new OrchError('VERDICT_POLICY_UNMET', 'Agent 没有提交 done 报告，节点不收口', { status: report.status })
+  }
+  const output = report.output !== null && typeof report.output === 'object' && !Array.isArray(report.output)
+    ? { ...(report.output as Record<string, unknown>), evidence_trace: trace }
+    : { evidence_trace: trace }
+  return reportOf(p, 'done', evidence, output)
 }
 
 // 执行期时刻：以调用方给的时刻为基准，按单调钟往前推；墙钟跳变不该影响租约与时长判断（规格 3.4 行 171）

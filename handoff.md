@@ -919,3 +919,16 @@ S2 第二十七轮（`docs/audits/S2-independent-audit-round27.md`，绑 G2 / e7
 - 聚焦复审 `7cba5ca` verdict **PASS**：P0=0、P1=0；P2-1 错误码契约、P2-2 末尾半行、P2-4 哈希前像、P2-5 signal 必填均实测成立。复审克隆 `tmp/audit-r5b-r3`，定向 45 passed，全量 574（扣探针）| 1 skipped，主仓前后干净。
 - 复审 P2 补全：`tests/unit/bridge-buffer.spec.ts` 增加 `err.code === 'SCHEMA_VERSION_UNSUPPORTED'` 断言；设计 §5.2 写明 `lastPersistedAckSeq > 0` 必须同时注入 `lookupPersisted(seq)`，缺回调拒绝构造。
 - 状态：R5-B 库层、迁移层、测试层收口完成；R5-C 可以开工，接 `runNode()` 时必须注入真实 `lookupPersisted`。
+
+### 11.46 R5-C 生产生命周期接线（2026-11-14 16:20，R5-C 候选）
+
+- `RunNodeDeps` 增加必填 `bridge: BridgeClient` 与可选 `spillDir`；`runNodeActions()` 不再直接遍历 `p.tools` 执行，改为 `AgentLifecycle` 驱动：订阅 → 监听 → send 指令 → 宿主执行 `tool.call` → `toolResult` 回传 → 等结构化 report → 服务端 `submitReport()`。Agent 的自然语言与自报证据都不改账本。
+- 新增迁移 `009_bridge_tool_outbox.sql`：`bridge_tool_outbox` 以 `(node_run_id, attempt, executor_agent_id, call_id)` 为主键，状态 `pending/completed/failed`；先插 pending 再执行工具，完成后写 completed，pending/failed 不盲目重跑，completed 幂等重发。
+- 新增 `EvidenceCollector`：工具请求重新过 `registry.require` 与 `assertToolsAuthorized`，记录宿主真实 `startedAt/finishedAt`、`tool_started`、`tool_executions`、`tool_finished`，并回填 `execution_id/tool_seq/commandHash`；`traceEntries` 与 `lastEvidence` 只来自宿主执行。
+- 新增 `BridgeConsumer`：`receive()` 入缓冲，缺口用 `fillGap()` 整页补，`drain()` 从 `ledger.cursor()+1` 连续落账，先 `ingest()` 再 `onEvent()` 最后 `ack()`；流提前结束且未 abort 时报 `SERVICE_UNAVAILABLE`。
+- 新增 `AgentLifecycle`：`run()` 订阅后从持久游标 `listen`、发 `buildInstruction()` 指令、等 `{kind:'report'}`；报告事件不能在自己的 `onEvent` 里等 ACK（会自我等待），改为后台 `flush(5000)` 追平确认位后再 resolve。`stop()` 先 abort，再 `cancel → whenIdle → state → dispose`；`interrupted` 不当作已停止，未确认停止抛 `LEASE_EXPIRED`。
+- 测试替身 `tests/fixtures/agent-bridge.ts` 按脚本发 `tool.call`，等 `toolResult` 再继续；每次 `listen` 用独立 `call_<listenIndex>_<n>`，取消不全局中止，避免并发节点串结果。
+- 同步改造 `runtime.spec.ts`、`routes.spec.ts`、`execution-concurrency.spec.ts`、`production-path.spec.ts` 与 `scripts/fault-inject.ts`，生产执行路径全部注入桥；`runNode` 不再回退到预定义工具直跑。
+- 修掉 Node 26 strip-only 不支持的 TypeScript 参数属性：`AgentLifecycle`、`EvidenceCollector`、`BridgeConsumer`、`BridgeLedger` 改为显式字段赋值，否则证据复现脚本在 `node` 直跑时报 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`。
+- 验证：`pnpm typecheck` 0；全量 39 文件 **574 passed | 1 skipped**；`pnpm build` 成功（ESM 136.90kB）；迁移 009 使 G-14 证据漂移，已重生成 `docs/gates/evidence/G1/G-14.md`（表数 18→20、schema_migrations 含 9）。
+- 遗留：R5-D 故障注入 B01–B10、pending outbox 崩溃恢复、`buffer_limit_bytes` 计入 pending、R5-E 第 45 轮独立审计与 G1→G2 重签；R3 链头删除/单调耗时、R4 workflow 复合身份仍分开提交。

@@ -1,0 +1,225 @@
+// src/executor/agent-lifecycle.ts —— Agent 会话的生命周期：订阅、事件落账、工具回传、最终结构化输出。
+// 自然语言输出不能直接改账本；这里只收集 Agent 的报告，状态变更仍走 submitReport()/applyReport()。
+import { OrchError } from '../core/errors.ts'
+import type { BridgeClient, BridgeEvent, BridgeEventBuffer } from './bridge.ts'
+import { BridgeEventBuffer as BufferImpl } from './bridge.ts'
+import { BridgeConsumer } from './bridge-consumer.ts'
+import { BridgeLedger } from './bridge-ledger.ts'
+import { EvidenceCollector, type ToolTraceEntry } from './evidence-collector.ts'
+import type { Db } from '../infra/sqlite/driver.ts'
+import type { ToolPolicy } from './session.ts'
+import type { ToolRegistry, ReadOnlyToolRunner } from './tools.ts'
+import type { ExecutorAgent } from './session.ts'
+
+export type AgentReportEnvelope = {
+  report: unknown
+  evidence: unknown | null
+}
+
+export type AgentLifecycleDeps = {
+  db: Db
+  secret: string
+  client: BridgeClient
+  registry: ToolRegistry
+  runner: ReadOnlyToolRunner
+  policy: ToolPolicy
+  allowedTools: string[]
+  nodeRunId: string
+  attempt: number
+  agent: ExecutorAgent
+  instruction: string
+  timeoutMs: number
+  idleTimeoutMs: number
+  nowAt: () => string
+  spillDir: string
+}
+
+type ReportWaiter = {
+  resolve: (value: AgentReportEnvelope) => void
+  reject: (reason: unknown) => void
+}
+
+// 一个节点对应一个 Agent 会话：事件流只消费本 attempt，工具调用只走宿主执行器。
+export class AgentLifecycle {
+  private readonly ledger: BridgeLedger
+  private readonly collector: EvidenceCollector
+  private readonly buffer: BridgeEventBuffer
+  private readonly consumer: BridgeConsumer
+  private readonly deps: AgentLifecycleDeps
+  private readonly controller = new AbortController()
+  private waiter: ReportWaiter | null = null
+  private reportSeen = false
+  private running: Promise<void> | null = null
+
+  constructor(deps: AgentLifecycleDeps) {
+    this.deps = deps
+    const key = { nodeRunId: deps.nodeRunId, attempt: deps.attempt, executorAgentId: deps.agent.agentId }
+    this.ledger = new BridgeLedger(deps.db, deps.secret, key)
+    this.collector = new EvidenceCollector({
+      db: deps.db,
+      secret: deps.secret,
+      registry: deps.registry,
+      runner: deps.runner,
+      policy: deps.policy,
+      allowedTools: deps.allowedTools,
+      nodeRunId: deps.nodeRunId,
+      attempt: deps.attempt,
+      executorAgentId: deps.agent.agentId,
+      nowAt: deps.nowAt,
+    })
+    const cursor = this.ledger.cursor()
+    this.buffer = new BufferImpl({
+      agentId: deps.agent.agentId,
+      attempt: deps.attempt,
+      nodeRunId: deps.nodeRunId,
+      spillDir: deps.spillDir,
+      limitBytes: 4 * 1024 * 1024,
+      highWaterBytes: 2 * 1024 * 1024,
+    }, {
+      lastPersistedAckSeq: cursor,
+      lookupPersisted: (seq) => this.ledger.lookup(seq),
+    })
+    this.consumer = new BridgeConsumer(deps.client, this.buffer, this.ledger, (ev) => this.onEvent(ev))
+  }
+
+  get trace(): ToolTraceEntry[] {
+    return this.collector.traceEntries
+  }
+
+  get lastEvidence(): unknown | null {
+    return this.collector.lastEvidence
+  }
+
+  get agentId(): string {
+    return this.deps.agent.agentId
+  }
+
+  get cursor(): number {
+    return this.ledger.cursor()
+  }
+
+  get lastSeq(): number {
+    return this.buffer.lastSeq
+  }
+
+  // 启动事件流并发出任务；只有收到结构化 report 才收口，自然语言文本不触发完成。
+  async run(signal: AbortSignal): Promise<AgentReportEnvelope> {
+    const timeout = setTimeout(() => {
+      this.controller.abort(new OrchError('OPERATION_TIMEOUT', 'Agent 生命周期超过节点动作上限', {
+        nodeRunId: this.deps.nodeRunId, attempt: this.deps.attempt, timeoutMs: this.deps.timeoutMs,
+      }))
+    }, this.deps.timeoutMs)
+    const onAbort = (): void => { this.controller.abort(signal.reason) }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+    try {
+      const fromSeq = this.ledger.cursor()
+      const subscribed = await this.deps.client.subscribe({
+        executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq,
+      })
+      if (!subscribed.subscribed) {
+        throw new OrchError('BRIDGE_NOT_SUBSCRIBED', 'Agent 订阅未确认，不能开始执行', { agentId: this.agentId })
+      }
+      const stream = this.deps.client.listen(
+        { executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq },
+        this.controller.signal,
+      )
+      const report = new Promise<AgentReportEnvelope>((resolve, reject) => {
+        this.waiter = { resolve, reject }
+      })
+      this.running = this.consumer.run(stream, this.controller.signal).catch((err) => {
+        if (!this.reportSeen) this.waiter?.reject(err)
+      })
+      await this.deps.client.send({
+        executorAgentId: this.agentId,
+        attempt: this.deps.attempt,
+        instruction: this.deps.instruction,
+        attemptId: this.deps.nodeRunId + ':' + String(this.deps.attempt),
+      })
+      return await report
+    } catch (err) {
+      if (this.controller.signal.aborted && this.controller.signal.reason instanceof OrchError) {
+        throw this.controller.signal.reason
+      }
+      throw err
+    } finally {
+      clearTimeout(timeout)
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  // 让消费器把收到的最后一条追平到持久确认位；追不平就按未完成处理。
+  async flush(timeoutMs: number): Promise<boolean> {
+    return this.consumer.waitPersisted(this.buffer.lastSeq, timeoutMs)
+  }
+
+  // 先停止监听，再取消会话；interrupted 不当作已停止，必须 whenIdle+state 复核。
+  async stop(): Promise<void> {
+    this.controller.abort(new OrchError('SERVICE_UNAVAILABLE', '节点收口，停止监听', {}))
+    if (this.running) {
+      await this.running.catch(() => undefined)
+      this.running = null
+    }
+    try {
+      await this.deps.client.cancel({ executorAgentId: this.agentId, attempt: this.deps.attempt })
+    } catch {
+      // 取消失败不掩盖真正的失败原因；下面仍要复核状态
+    }
+    let idle: { idle: boolean; timedOut: boolean } | null = null
+    try {
+      idle = await this.deps.client.whenIdle({ executorAgentId: this.agentId, timeoutMs: this.deps.idleTimeoutMs })
+    } catch {
+      idle = null
+    }
+    let state: { state: string; toolCallSeq: number; hasToolCall: boolean } | null = null
+    try {
+      state = await this.deps.client.state({ executorAgentId: this.agentId })
+    } catch {
+      state = null
+    }
+    if (!idle?.idle && state?.state !== 'unloaded' && state?.state !== 'deleted') {
+      throw new OrchError('LEASE_EXPIRED', 'Agent 未确认停止，不能推断副作用不存在', {
+        agentId: this.agentId, idle, state,
+      })
+    }
+    // 服务端确认位没追平桥事件位时，dispose 会拒绝；这是有意的，不能提前放掉宿主。
+    await this.deps.client.dispose({
+      executorAgentId: this.agentId,
+      serviceAckSeq: this.ledger.cursor(),
+      bridgeLastSeq: this.buffer.lastSeq,
+    })
+  }
+
+  private async onEvent(ev: BridgeEvent): Promise<void> {
+    const payload = ev.payload as Record<string, unknown> | null
+    if (ev.type === 'tool.call') {
+      const result = await this.collector.collect(payload)
+      await this.deps.client.toolResult({
+        executorAgentId: this.agentId,
+        attempt: this.deps.attempt,
+        callId: result.callId,
+        result: { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr },
+      })
+      return
+    }
+    if (!this.reportSeen && isReportEnvelope(payload)) {
+      this.reportSeen = true
+      const report = payload.report
+      // 不能在这里 await flush：本条事件的 ACK 要等 onEvent 返回后由消费器推进，
+      // 在 onEvent 里等确认位会自我等待到超时。交给后台追平，run() 仍等确认后再收口。
+      void this.flush(5_000).then((persisted) => {
+        if (persisted) this.waiter?.resolve({ report, evidence: this.collector.lastEvidence })
+        else this.waiter?.reject(new OrchError('SERVICE_UNAVAILABLE', 'Agent 报告未落账，不能收口', {
+          lastSeq: this.buffer.lastSeq, cursor: this.ledger.cursor(),
+        }))
+      }, (err: unknown) => { this.waiter?.reject(err) })
+    }
+  }
+}
+
+function isReportEnvelope(payload: Record<string, unknown> | null): payload is { report: unknown } {
+  if (!payload || typeof payload !== 'object') return false
+  if (payload.kind !== 'report') return false
+  const report = payload.report
+  return report !== null && typeof report === 'object' && !Array.isArray(report)
+}

@@ -22,11 +22,15 @@ type CursorRow = { last_persisted_ack_seq: number }
 type ReceiptRow = { payload_hash: string; ledger_seq: number }
 
 export class BridgeLedger {
-  constructor(
-    private readonly db: Db,
-    private readonly secret: string,
-    private readonly key: BridgeLedgerKey,
-  ) {}
+  private readonly db: Db
+  private readonly secret: string
+  private readonly key: BridgeLedgerKey
+
+  constructor(db: Db, secret: string, key: BridgeLedgerKey) {
+    this.db = db
+    this.secret = secret
+    this.key = key
+  }
 
   // 重启后唯一可信的恢复点；没有记录就是 0
   cursor(): number {
@@ -34,6 +38,17 @@ export class BridgeLedger {
       'SELECT last_persisted_ack_seq FROM bridge_stream_cursors WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
     ).get(this.key.nodeRunId, this.key.attempt, this.key.executorAgentId) as CursorRow | undefined
     return Number(row?.last_persisted_ack_seq ?? 0)
+  }
+
+  // 重启后按桥序号回查已落账事件；只认本 attempt/agent 的 receipt，旧 attempt 不串读
+  lookup(seq: number): BridgeEvent | undefined {
+    const row = this.db.raw.prepare(
+      'SELECT e.payload AS payload FROM bridge_event_receipts r '
+      + 'JOIN node_run_events e ON e.node_run_id = r.node_run_id AND e.seq = r.ledger_seq '
+      + 'WHERE r.node_run_id = ? AND r.attempt = ? AND r.executor_agent_id = ? AND r.bridge_seq = ?',
+    ).get(this.key.nodeRunId, this.key.attempt, this.key.executorAgentId, seq) as { payload: string } | undefined
+    if (!row) return undefined
+    return JSON.parse(row.payload) as BridgeEvent
   }
 
   // 只接收连续序号；同 seq 同 payload 幂等，不同 payload 直接协议冲突

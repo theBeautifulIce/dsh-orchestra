@@ -12,6 +12,7 @@ import { WriteQueue } from '../src/service/write-queue.ts'
 import { createLogger } from '../src/infra/logger.ts'
 import { backup, restore, sha256File, verifyBackup } from '../src/infra/backup.ts'
 import { bindRunVersion, catalogFor, eventSeqs, freshLedger, seed, TEST_SECRET } from '../tests/fixtures/ledger.ts'
+import { fakeAgentClient } from '../tests/fixtures/agent-bridge.ts'
 import { inTx } from '../src/infra/db/tx.ts'
 import { acquireLease, loadNodeRun } from '../src/service/commands/lease.ts'
 import { applyReport } from '../src/service/commands/apply-report.ts'
@@ -469,7 +470,8 @@ async function caseG05(): Promise<InjectionResult> {
   }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_g05', sessionId: 'sess_g05' }) }
   const runner = new ReadOnlyToolRunner(registry, host, dir)
-  const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, runner } })
+  const bridge = fakeAgentClient({ agentId: 'agent_g05', steps: [{ tool: 'ro.echo' }], at: NOW })
+  const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, bridge, runner } })
   const orchestra = service.orchestra
   withTx(orchestra.db, (tx) => {
     tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t_g05','取消注入','running',1,?,?)", [NOW, NOW])
@@ -483,7 +485,7 @@ async function caseG05(): Promise<InjectionResult> {
   })
   const before = dumpState(file)
   const runPromise = runNode(
-    { runtime: orchestra.runtime, db: orchestra.db, secret, registry, agents, runner },
+    { runtime: orchestra.runtime, db: orchestra.db, secret, registry, agents, bridge, runner },
     {
       nodeRunId: 'nrun_g05', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
       tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
@@ -614,7 +616,12 @@ async function bootHttp(secret: string, opts?: HttpBootOpts): Promise<HttpBoot> 
   }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_ev', sessionId: 'sess_ev' }) }
   const runner = new ReadOnlyToolRunner(registry, host, dir)
-  const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, runner } })
+  const bridge = fakeAgentClient({
+    agentId: 'agent_ev',
+    steps: [{ tool: opts?.failingTool ? 'ro.fail' : 'ro.echo' }],
+    at: '2026-11-13T03:00:00.000Z',
+  })
+  const service = await openServiceOrchestra({ dbFile: file, secret, phase: 'S2', executor: { registry, agents, bridge, runner } })
   const orchestra = service.orchestra
   const log = createLogger({ write: (line) => { opts?.logSink?.push(line) } })
   const append = opts?.holdAppend

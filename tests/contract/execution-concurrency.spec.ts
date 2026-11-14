@@ -10,6 +10,7 @@ import { createExecutionScheduler, type ExecutionScheduler } from '../../src/ser
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../../src/executor/tools.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { bindRunVersion } from '../fixtures/ledger.ts'
+import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
 
 const SECRET = 'concurrency-secret'
 const NOW = '2026-11-14T03:00:00.000Z'
@@ -47,10 +48,11 @@ it('双入口共用一个并发上限：6 个节点同时提交，最多只跑 2
     },
   }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_1', sessionId: 'sess_1' }) }
+  const bridge = fakeAgentClient({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })
   const scheduler: ExecutionScheduler = createExecutionScheduler({ concurrency: 2 })
   const service = await openServiceOrchestra({
     dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S2',
-    executor: { registry, agents, runner: new ReadOnlyToolRunner(registry, host, dir) },
+    executor: { registry, agents, bridge, runner: new ReadOnlyToolRunner(registry, host, dir) },
     scheduler,
   })
   const orchestra = service.orchestra

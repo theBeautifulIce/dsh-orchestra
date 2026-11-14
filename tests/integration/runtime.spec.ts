@@ -11,10 +11,11 @@ import { ReadOnlyToolRunner, type HostRunner } from '../../src/executor/tools.ts
 import { runNode } from '../../src/executor/run-node.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { sweepNow } from '../../src/service/commands/runtime.ts'
+import { fakeAgentClient, type AgentToolStep } from '../fixtures/agent-bridge.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
-async function setup() {
+async function setup(steps: AgentToolStep[] = []) {
   const dir = mkdtempSync(join(tmpdir(), 'orch-runtime-'))
   const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 's3cr3t-runtime', phase: 'S2' })
   const orchestra = service.orchestra
@@ -40,16 +41,17 @@ async function setup() {
   const agents: HostAgentFactory = {
     create: async () => ({ agentId: 'agent_1', sessionId: 'sess_1' }),
   }
-  return { dir, orchestra, release: service.release, registry, agents, runner: new ReadOnlyToolRunner(registry, host, dir) }
+  const bridge = fakeAgentClient({ agentId: 'agent_1', steps, at: NOW })
+  return { dir, orchestra, release: service.release, registry, agents, bridge, runner: new ReadOnlyToolRunner(registry, host, dir) }
 }
 
 const nodeRow = (db: any) => db.raw.prepare("SELECT * FROM node_runs WHERE node_run_id='nrun_1'").get() as any
 
 describe('生产路径跑通单节点', () => {
   it('queued → dispatched → started → verifying → done，落强证据', async () => {
-    const { dir, orchestra, release, registry, agents, runner } = await setup()
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
     const out = await runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         // 请求里的 args 只是形状字段，执行与哈希都必须以注册表定义为准（第七轮审计 P2）
@@ -68,10 +70,38 @@ describe('生产路径跑通单节点', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('调用方传别的 nodeId 借不到另一份工具授权', async () => {
-    const { dir, orchestra, release, registry, agents, runner } = await setup()
+  it('Agent 只报 done、没有宿主工具证据：不许收口', async () => {
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup()
     await expect(runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [], now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toMatchObject({ code: 'VERDICT_POLICY_UNMET' })
+    expect(nodeRow(orchestra.db).status).toBe('blocked_post')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('Agent 请求不在本次节点工具清单里的工具：拒绝执行并阻断', async () => {
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
+      {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [], now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      },
+    )).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(nodeRow(orchestra.db).status).toBe('blocked_post')
+    await release()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('调用方传别的 nodeId 借不到另一份工具授权', async () => {
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup()
+    await expect(runNode(
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
       {
         nodeRunId: 'nrun_1', nodeId: 'other', attempt: 1, input: {}, outputSchema: {},
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
@@ -84,13 +114,13 @@ describe('生产路径跑通单节点', () => {
   })
 
   it('判定条件不满足：exitCode 不是 0 就不许 done', async () => {
-    const { dir, orchestra, release, registry, agents } = await setup()
+    const { dir, orchestra, release, registry, agents, bridge } = await setup([{ tool: 'ro.echo' }])
     const badRunner = new ReadOnlyToolRunner(registry, {
       readonlyAvailable: () => true,
       run: async () => ({ exitCode: 3, stdout: '', stderr: 'boom' }),
     }, dir)
     await expect(runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner: badRunner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner: badRunner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
@@ -106,9 +136,9 @@ describe('生产路径跑通单节点', () => {
   })
 
   it('进 verifying 挂判定时钟，收口离开半态后清钟', async () => {
-    const { dir, orchestra, release, registry, agents, runner } = await setup()
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
     await runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
@@ -125,9 +155,9 @@ describe('生产路径跑通单节点', () => {
   })
 
   it('工具起飞前先落 tool_start_at 与 tool_started 事件', async () => {
-    const { dir, orchestra, release, registry, agents, runner } = await setup()
+    const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
     await runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
@@ -142,7 +172,7 @@ describe('生产路径跑通单节点', () => {
   })
 
   it('长动作：心跳把租约续上，2.5 秒时的扫描不判过期', async () => {
-    const { dir, orchestra, release, registry, agents } = await setup()
+    const { dir, orchestra, release, registry, agents, bridge } = await setup([{ tool: 'ro.echo' }])
     const slowRunner = new ReadOnlyToolRunner(registry, {
       readonlyAvailable: () => true,
       run: async () => {
@@ -151,7 +181,7 @@ describe('生产路径跑通单节点', () => {
       },
     }, dir)
     const running = runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner: slowRunner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner: slowRunner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
@@ -171,7 +201,7 @@ describe('生产路径跑通单节点', () => {
   })
 
   it('多工具：第一份失败即停，不会被后面的成功覆盖', async () => {
-    const { dir, orchestra, release, registry, agents } = await setup()
+    const { dir, orchestra, release, registry, agents, bridge } = await setup([{ tool: 'ro.fail' }, { tool: 'ro.ok' }])
     registry.register({ name: 'ro.fail', capability: 'read_only', command: { bin: 'fail', args: [] } })
     registry.register({ name: 'ro.ok', capability: 'read_only', command: { bin: 'ok', args: [] } })
     let calls = 0
@@ -183,7 +213,7 @@ describe('生产路径跑通单节点', () => {
       },
     }, dir)
     await expect(runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         tools: [
@@ -203,7 +233,7 @@ describe('生产路径跑通单节点', () => {
   })
 
   it('同名工具跑两次：两次都留痕、tool_seq 为 1 与 2、节点不被错误阻塞（第二次意见 P1）', async () => {
-    const { dir, orchestra, release, registry, agents } = await setup()
+    const { dir, orchestra, release, registry, agents, bridge } = await setup([{ tool: 'ro.echo' }, { tool: 'ro.echo' }])
     let calls = 0
     const runner = new ReadOnlyToolRunner(registry, {
       readonlyAvailable: () => true,
@@ -213,7 +243,7 @@ describe('生产路径跑通单节点', () => {
       },
     }, dir)
     const out = await runNode(
-      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, runner },
+      { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, agents, bridge, runner },
       {
         nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         // 同一个工具在同一次节点执行里调两次：以前第二次会撞 (node_run_id, attempt, tool) 主键，

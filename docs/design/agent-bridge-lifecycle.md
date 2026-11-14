@@ -1,6 +1,6 @@
 # Agent Bridge 生产生命周期设计（R5-A）
 
-状态：协议已拍板，R5-B 已实施并完成独立审计 P1/P2 整改，待复审；R5-C 起才接 `runNode()`。G1/G2 仍绑第 44 轮候选 `caae193`，R5-B 已改变 candidate，正式签署待第 45 轮重签。
+状态：协议已拍板；R5-B 已完成独立审计 P1/P2 整改并通过聚焦复审；R5-C 已接 `runNode()`，待 R5-D 故障注入与 R5-E 第 45 轮审计。G1/G2 仍绑第 44 轮候选 `caae193`，R5-B/C 已改变 candidate，正式签署待第 45 轮重签。
 
 ## 1. 范围
 
@@ -190,7 +190,7 @@ CREATE TABLE bridge_event_receipts (
 );
 ```
 
-`bridge_tool_outbox` 属于 R5-C 工具闭环，另开迁移 009，不塞进 008；在 009 落地前，R5-C 的 outbox 只存在于设计。
+`bridge_tool_outbox` 属于 R5-C 工具闭环，已由迁移 009 落地，不塞进 008；迁移 009 随 R5-C 候选提交。
 
 008 已随 `34548b6` 推送，按“不修改已发布迁移”的约束不再改它；`CHECK`/外键如需数据库兜底，放到后续 010 重建表时补，当前由 `BridgeLedger` 在写入前校验 attempt、seq 与游标。
 
@@ -274,7 +274,7 @@ B03、B06、B07 必须做成真实进程/事务级故障注入，不用只测内
 
 1. **R5-A（本文件）**：设计评审，不改 `run-node.ts`。
 2. **R5-B**：迁移 008、三游标 Buffer、receipt 幂等、B03/B04/B05；只做事件接收、排序、持久化与恢复，不接 `runNode()`。
-3. **R5-C**：AgentLifecycle + BridgeConsumer + EvidenceCollector 接入 `runNode()`，取消/释放闭环，B01/B02/B06/B07/B08/B09/B10。
+3. **R5-C（已实施）**：AgentLifecycle + BridgeConsumer + EvidenceCollector 接入 `runNode()`，取消/释放闭环；B01/B02/B06/B07/B08/B09/B10 留 R5-D 做故障注入。
 4. **R5-D**：生产生命周期集成测试、崩溃恢复演练、真实 HTTP 双入口并发复核。
 5. **R5-E**：第 45 轮独立审计，新增 Bridge 生产闭环必过项；两份 pass 后按 G1→G2 重签。
 

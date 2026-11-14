@@ -196,8 +196,12 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/service/commands/apply-report.ts` | 报告落账唯一入口（幂等、重放、attempt 校验、decision_required 拒收；按 execution_id 核对工具痕迹） |
 | `src/executor/bridge.ts` | 桥 RPC 客户端、`BridgeEventSource.listen` 事件流、三游标 `BridgeEventBuffer`、断号重取 |
 | `src/executor/bridge-ledger.ts` | 桥事件落账唯一入口：事务内校验跳号、receipt 幂等/冲突、推进 `bridge_stream_cursors` |
+| `src/executor/bridge-consumer.ts` | 事件流消费：缺口整页补、先落账再 ACK、报告确认位追平 |
+| `src/executor/evidence-collector.ts` | 宿主工具证据：重过注册表/策略、outbox 去重、真实起止时间与 `tool_*` 事件 |
+| `src/executor/agent-lifecycle.ts` | 单节点 Agent 生命周期：订阅/监听/指令/toolResult/结构化报告/取消复核 |
 | `src/infra/sqlite/migrations/006_tool_executions_tool_seq.sql` | 工具执行唯一性：`tool_executions` 主键 `node_run_id+attempt+tool_seq`，`execution_id NOT NULL UNIQUE` |
 | `src/infra/sqlite/migrations/008_bridge_event_receipts.sql` | 桥事件收据与按 `(node_run_id, attempt, executor_agent_id)` 隔离的持久确认游标 |
+| `src/infra/sqlite/migrations/009_bridge_tool_outbox.sql` | 工具调用 outbox：pending/completed/failed，防重复执行与结果丢失 |
 | `src/infra/sqlite/migrations/007_node_run_events_append_only.sql` | `node_run_events` 只追加触发器（UPDATE / DELETE 被数据库挡下） |
 | `src/index.ts` | 装配入口（`openServiceOrchestra`：acquireDbLock → bumpEpoch → openServiceDb → createOrchestra） |
 | `src/service/sweep.ts` | 围栏与过期扫描（逐行事务，回收 verifying 超时） |

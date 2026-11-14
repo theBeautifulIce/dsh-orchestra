@@ -7,6 +7,7 @@ import { openServiceOrchestra } from '../../src/index.ts'
 import { startServer } from '../../src/service/server.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../../src/executor/tools.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
+import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
 
 const SECRET = 'prod-path-secret'
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -26,11 +27,12 @@ async function boot() {
   registry.register({ name: 'ro.fail', capability: 'read_only', command: { bin: 'fail', args: [] } })
   const host: HostRunner = { readonlyAvailable: () => true, run: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '' }) }
   const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_prod', sessionId: 'sess_prod' }) }
+  const bridge = fakeAgentClient({ agentId: 'agent_prod', steps: [{ tool: 'ro.echo' }], at: NOW })
   const service = await openServiceOrchestra({
     dbFile: join(dir, 'orchestra.db'),
     secret: SECRET,
     phase: 'S2',
-    executor: { registry, agents, runner: new ReadOnlyToolRunner(registry, host, dir) },
+    executor: { registry, agents, bridge, runner: new ReadOnlyToolRunner(registry, host, dir) },
   })
   const orchestra = service.orchestra
   const svc = await startServer({
