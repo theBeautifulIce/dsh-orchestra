@@ -32,6 +32,7 @@
 - `tests/integration/clock-recovery.spec.ts` 负向路径缺事件计数断言。
 - `revokeFence` 缺钟时抛 TypeError、wait 缺钟静默 false，口径不一（两者都 fail-closed，类型层已必填）。
 - 终态词表重复（P3）。
+- `codebasemap.md` 的清单待补 `src/service/clock-recovery.ts` 与审计台账/审计报告的最新描述（它在候选清单里，改它要连着走一轮重签）。
 
 ### 接手先做什么
 
