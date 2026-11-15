@@ -1,7 +1,7 @@
 # S3 独立审计报告 · G3 第 11 轮
 
 门：G3
-候选提交：dfc9a6349603d46c6e7fd189baaecd43e08d6222
+候选提交：082d9adba149dc983b51bcee0cab6be655fdf099
 审计日期：2026-11-15
 审计方式：独立审计；未签门、未改生产代码
 
@@ -11,7 +11,7 @@
   "schema": "audit-verdict/1",
   "gate": "G3",
   "audit_round": 11,
-  "candidate_commit": "dfc9a6349603d46c6e7fd189baaecd43e08d6222",
+  "candidate_commit": "082d9adba149dc983b51bcee0cab6be655fdf099",
   "conclusion": "pass",
   "p0": 0,
   "p1": 0,
@@ -33,7 +33,7 @@ P0 = 0，P1 = 0，P2 = 4；必过项 20/20 通过，failed_items 为空。
 
 ## 2. 候选与审前状态
 
-- 候选 `dfc9a6349603d46c6e7fd189baaecd43e08d6222`，工作树干净，`origin/main` 同步。
+- 候选 `082d9adba149dc983b51bcee0cab6be655fdf099`，工作树干净，`origin/main` 同步。
 - 本轮新增迁移 `024_wait_inbox_scope.sql`；`run.terminal` 增加 `outcome`；`/v1/runs/cancel` 返回 `terminalStatus/outcome`。
 - G3 的注入证据：G-06/G-12/G-16 由 `scripts/check-evidence-repro.ts` 以摘要方式复现，G-01/G-02/G-04 直接引用 G1/G2 的逐字节证据文件（脚本有静态一致性检查）。
 

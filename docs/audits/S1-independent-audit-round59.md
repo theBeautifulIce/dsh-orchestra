@@ -1,7 +1,7 @@
 # S1 独立审计报告 · G1 第 59 轮
 
 门：G1
-候选提交：dfc9a6349603d46c6e7fd189baaecd43e08d6222
+候选提交：082d9adba149dc983b51bcee0cab6be655fdf099
 审计日期：2026-11-15
 审计方式：独立审计；未签门、未改生产代码
 
@@ -11,7 +11,7 @@
   "schema": "audit-verdict/1",
   "gate": "G1",
   "audit_round": 59,
-  "candidate_commit": "dfc9a6349603d46c6e7fd189baaecd43e08d6222",
+  "candidate_commit": "082d9adba149dc983b51bcee0cab6be655fdf099",
   "conclusion": "pass",
   "p0": 0,
   "p1": 0,
@@ -33,7 +33,7 @@ P0 = 0，P1 = 0，P2 = 6；必过项 13/13 通过，failed_items 为空。
 
 ## 2. 候选与审前状态
 
-- 候选 `dfc9a6349603d46c6e7fd189baaecd43e08d6222`，`main` 与 `origin/main` 一致，工作树干净。
+- 候选 `082d9adba149dc983b51bcee0cab6be655fdf099`，`main` 与 `origin/main` 一致，工作树干净。
 - 相对上一轮通过审计的 `837b0c6`，生产改动集中在 `src/service/`（dispatcher、subworkflow、decisions、sweep、nodes、apply-report、cancel、run-close、wait、workflows、schemas）、`src/executor/`（bridge-ledger、bridge-consumer）、`src/core/workflow-def.ts`、`src/index.ts`，新增迁移 `024_wait_inbox_scope.sql`。
 - 迁移 024 用重建表方式把 `wait_event_inbox` 的幂等键改成 `(run_id, idempotency_key)`；`inbox_seq` 原样搬运，AUTOINCREMENT 与索引重建在同一事务内。空库与半程中断两条路径均复跑通过。
 

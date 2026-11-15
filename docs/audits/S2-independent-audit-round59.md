@@ -1,7 +1,7 @@
 # S2 独立审计报告 · G2 第 59 轮
 
 门：G2
-候选提交：dfc9a6349603d46c6e7fd189baaecd43e08d6222
+候选提交：082d9adba149dc983b51bcee0cab6be655fdf099
 审计日期：2026-11-15
 审计方式：独立审计；未签门、未改生产代码
 
@@ -11,7 +11,7 @@
   "schema": "audit-verdict/1",
   "gate": "G2",
   "audit_round": 59,
-  "candidate_commit": "dfc9a6349603d46c6e7fd189baaecd43e08d6222",
+  "candidate_commit": "082d9adba149dc983b51bcee0cab6be655fdf099",
   "conclusion": "pass",
   "p0": 0,
   "p1": 0,
@@ -33,7 +33,7 @@ P0 = 0，P1 = 0，P2 = 4；必过项 20/20 通过，failed_items 为空。
 
 ## 2. 候选与审前状态
 
-- 候选 `dfc9a6349603d46c6e7fd189baaecd43e08d6222`，工作树干净，`origin/main` 同步。
+- 候选 `082d9adba149dc983b51bcee0cab6be655fdf099`，工作树干净，`origin/main` 同步。
 - 本轮改动里与 G2 直接相关的是：`DispatchDeps` 拆出可选执行器、控制节点失败收口 `failControlDispatch`、`control` 分支 `failQueuedNode`、`parallel/decision` 明确拒绝、`run.terminal` 增加 `outcome`、`cancelRun` 返回 `terminalStatus/outcome`、桥 `markHandled` 逐条推进与回查重放。
 - 单节点 queued→终态路径、证据门、租约与围栏、写者锁均未改动语义。
 
