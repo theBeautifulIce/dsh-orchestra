@@ -39,7 +39,18 @@ export type DispatchOutcome = {
   error_code?: string
   agent_id?: string
   evidence_source?: string
+  /** 节点被并发流程接管时的当前状态：返回 skipped 而不是 failed（S1/S2 round60 P2） */
+  current_status?: string
 }
+
+/**
+ * 派发期失败收口的结果。不要用布尔值：调用方必须能区分
+ * 「已经收成 failed」「被别人接管了」「收口本身写库失败」三种情况。
+ */
+export type DispatchSettlement =
+  | { kind: 'applied' }
+  | { kind: 'already_moved'; currentStatus: string }
+  | { kind: 'storage_error'; error: unknown }
 
 // 派发依赖 = 账本/运行时 + 执行器（可选）。
 // 控制节点（wait / subworkflow）不需要宿主执行器：没装配执行器的进程也能推进它们；
@@ -101,14 +112,7 @@ async function dispatchOne(
     const code = 'PAYLOAD_SCHEMA_INVALID'
     // 服务层也要保持状态一致：返回 failed 就必须把 queued 节点收成 failed 并留事件，
     // 不能只靠 HTTP 层拦请求——commands.dispatch 是可直接调用的服务接口（审计 P2-1）。
-    const settled = failQueuedNode(deps, p, row, reason, code)
-    return {
-      node_run_id: row.node_run_id,
-      node_id: row.node_id,
-      status: 'failed',
-      reason: settled ? reason : reason + '（节点已被并发流程接管，未覆盖其状态）',
-      error_code: code,
-    }
+    return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code)
   }
   let control: ControlNodeConfig | null
   try {
@@ -117,14 +121,7 @@ async function dispatchOne(
     // 配置解析失败是这一行的确定性错误：留在 queued 会让 run 永远收不了口，直接按失败收口
     const reason = err instanceof Error ? err.message : String(err)
     const code = (err as { code?: string }).code ?? ''
-    failQueuedNode(deps, p, row, reason, code)
-    return {
-      node_run_id: row.node_run_id,
-      node_id: row.node_id,
-      status: 'failed',
-      reason,
-      error_code: code,
-    }
+    return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code)
   }
   if (control) {
     return dispatchControlNode(deps, p, row, control)
@@ -148,14 +145,12 @@ async function dispatchOne(
       // 直接调 dispatchRun 且没装执行器：与配置类错误一致，把 queued 收成 failed 并留事件，
       // 不能只返回失败让节点永远排队（S2 第 59 轮 P2-3）。
       const reason = '执行器没有装配，不能跑 agent 节点'
-      failQueuedNode(deps, p, row, reason, 'EVIDENCE_SOURCE_UNAVAILABLE')
-      return {
-        node_run_id: row.node_run_id,
-        node_id: row.node_id,
-        status: 'failed',
+      return outcomeForSettlement(
+        failQueuedNode(deps, p, row, reason, 'EVIDENCE_SOURCE_UNAVAILABLE'),
+        row,
         reason,
-        error_code: 'EVIDENCE_SOURCE_UNAVAILABLE',
-      }
+        'EVIDENCE_SOURCE_UNAVAILABLE',
+      )
     }
     const res = deps.executeNode
       ? await deps.executeNode(params)
@@ -193,15 +188,15 @@ type RunBinding = {
  * 派发前的确定性失败：把还留在 queued 的节点收成 failed。
  * 留成 queued 会让 run 永远等一个不会执行的节点（维护扫描也不碰 queued）。
  */
-function failQueuedNode(
-  deps: DispatchDeps,
+export function failQueuedNode(
+  deps: Pick<DispatchDeps, 'db' | 'secret'>,
   p: DispatchParams,
   row: { node_run_id: string; attempt: number },
   reason: string,
   code: string,
-): boolean {
+): DispatchSettlement {
   try {
-    return inTx(deps.db, (tx) => {
+    return inTx(deps.db, (tx): DispatchSettlement => {
       applyTransition(tx, {
         nodeRunId: row.node_run_id,
         from: ['queued'],
@@ -217,11 +212,54 @@ function failQueuedNode(
         reason,
         error_code: code,
       })
-      return true
+      return { kind: 'applied' }
     })
+  } catch (err) {
+    // 先分清「被别人接管」和「写库失败」：前者不能覆盖，后者必须让调用方看见
+    const current = currentStatusOf(deps, row.node_run_id)
+    if (current !== null && current !== 'queued') return { kind: 'already_moved', currentStatus: current }
+    return { kind: 'storage_error', error: err }
+  }
+}
+
+/** 把收口结果翻译成派发结果：applied→failed，already_moved→skipped，storage_error→显式失败 */
+export function outcomeForSettlement(
+  settlement: DispatchSettlement,
+  row: { node_run_id: string; node_id: string },
+  reason: string,
+  code: string,
+): DispatchOutcome {
+  if (settlement.kind === 'applied') {
+    return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'failed', reason, error_code: code }
+  }
+  if (settlement.kind === 'already_moved') {
+    return {
+      node_run_id: row.node_run_id,
+      node_id: row.node_id,
+      status: 'skipped',
+      reason: reason + '（节点已被并发流程接管，当前状态 ' + settlement.currentStatus + '）',
+      error_code: code,
+      current_status: settlement.currentStatus,
+    }
+  }
+  const detail = settlement.error instanceof Error ? settlement.error.message : String(settlement.error)
+  return {
+    node_run_id: row.node_run_id,
+    node_id: row.node_id,
+    status: 'failed',
+    reason: '收口失败：' + reason + '（' + detail + '）',
+    error_code: 'DISPATCH_SETTLE_FAILED',
+  }
+}
+
+function currentStatusOf(deps: Pick<DispatchDeps, 'db'>, nodeRunId: string): string | null {
+  try {
+    const row = deps.db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get(nodeRunId) as
+      | { status: string }
+      | undefined
+    return row?.status ?? null
   } catch {
-    // 并发已把这一行改走：保持原状，不覆盖别人的结论
-    return false
+    return null
   }
 }
 
@@ -419,14 +457,7 @@ async function dispatchControlNode(
     // 初始化失败必须把已经拿到的租约与 dispatched 状态一起收干净：
     // 只返回 failed 而不改库，会留下“API 说失败、节点还 dispatched 且持租约”的分叉，
     // closeRun 也永远等不到终态（审计 P2-2）。
-    const settled = failControlDispatch(deps, p, row, reason, code)
-    return {
-      node_run_id: row.node_run_id,
-      node_id: row.node_id,
-      status: 'failed',
-      reason: settled ? reason : reason + '（状态收口失败，已留给维护扫描）',
-      error_code: code,
-    }
+    return outcomeForSettlement(failControlDispatch(deps, p, row, reason, code), row, reason, code)
   }
 }
 
@@ -440,11 +471,13 @@ export function failControlDispatch(
   row: { node_run_id: string; node_id: string; attempt: number },
   reason: string,
   code: string,
-): boolean {
+): DispatchSettlement {
   try {
-    return inTx(deps.db, (tx) => {
+    return inTx(deps.db, (tx): DispatchSettlement => {
       const current = loadNodeRun(tx, row.node_run_id)
-      if (!['leased', 'dispatched', 'started'].includes(current.status)) return false
+      if (!['leased', 'dispatched', 'started'].includes(current.status)) {
+        return { kind: 'already_moved', currentStatus: current.status }
+      }
       applyTransition(tx, {
         nodeRunId: row.node_run_id,
         from: ['leased', 'dispatched', 'started'],
@@ -468,10 +501,13 @@ export function failControlDispatch(
         context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true },
       })
       appendNodeRunEvent(tx, deps.secret, row.node_run_id, 'dispatch.failed', { reason, error_code: code })
-      return true
+      return { kind: 'applied' }
     })
-  } catch {
-    // 并发已把这一行改走：不覆盖别人的结论，留给维护扫描
-    return false
+  } catch (err) {
+    const current = currentStatusOf(deps, row.node_run_id)
+    if (current !== null && !['leased', 'dispatched', 'started'].includes(current)) {
+      return { kind: 'already_moved', currentStatus: current }
+    }
+    return { kind: 'storage_error', error: err }
   }
 }

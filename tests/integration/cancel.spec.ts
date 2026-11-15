@@ -4,6 +4,7 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { acquireLease } from '../../src/service/commands/lease.ts'
 import { applyCancel, pickReplayHead, markOlderAttemptsStale, revokeFence, type CancelResult } from '../../src/service/commands/cancel.ts'
 import { ScriptedClock } from '../../src/core/clock.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
@@ -21,7 +22,7 @@ const events = (db: any, type: string) => (db.raw.prepare("SELECT COUNT(*) AS n 
 
 function cancel(db: any, result: CancelResult, over: { graceMs?: number; extendDeadlineMs?: number; now?: string } = {}) {
   const row = nodeRow(db)
-  return withTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+  return withTx(db, (tx) => applyCancel(tx, TEST_SECRET, { clock: TEST_CLOCK,
     nodeRunId: 'nr_c', attempt: row.attempt, revision: row.revision, cancelResult: result,
     now: over.now ?? NOW, graceMs: over.graceMs ?? 30000, extendDeadlineMs: over.extendDeadlineMs,
   }))
@@ -116,7 +117,7 @@ describe('取消边界（审计 N-08 / P0-4）', () => {
     withTx(db, (tx) => {
       tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_c', 'r1', 'n_c', 5, 'agent', 2, 'queued', 10, ?, ?)", [NOW, NOW])
     })
-    const out = withTx(db, (tx) => applyCancel(tx, TEST_SECRET, { nodeRunId: 'nr_c', attempt: 2, revision: 10, cancelResult: 'unknown', now: NOW, graceMs: 30000 }))
+    const out = withTx(db, (tx) => applyCancel(tx, TEST_SECRET, { clock: TEST_CLOCK, nodeRunId: 'nr_c', attempt: 2, revision: 10, cancelResult: 'unknown', now: NOW, graceMs: 30000 }))
     expect(out.next_status).toBe('superseded')
     expect(out.reason).toBe('cancelled_before_dispatch')
     expect(nodeRow(db).status).toBe('superseded')

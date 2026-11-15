@@ -8,6 +8,7 @@ import {
 import { ScriptedClock } from '../../src/core/clock.ts'
 import { sweep } from '../../src/service/sweep.ts'
 import { applyCancel } from '../../src/service/commands/cancel.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'wait-secret'
@@ -221,7 +222,7 @@ describe('等待节点', () => {
     })
     const before = node(db, 'n1')
     withTx(db, (tx) => {
-      const out = applyCancel(tx, SECRET, {
+      const out = applyCancel(tx, SECRET, { clock: TEST_CLOCK,
         nodeRunId: 'n1', attempt: before.attempt, revision: before.revision,
         cancelResult: 'interrupted', now: NOW, graceMs: 5_000,
       })

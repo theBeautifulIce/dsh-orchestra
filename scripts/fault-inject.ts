@@ -18,6 +18,9 @@ import { acquireLease, loadNodeRun } from '../src/service/commands/lease.ts'
 import { applyReport } from '../src/service/commands/apply-report.ts'
 import { applyCancel } from '../src/service/commands/cancel.ts'
 import { MonotonicClock, deadlineFromRow, ScriptedClock } from '../src/core/clock.ts'
+
+// 注入脚本也要单调时钟：取消的宽限/延期必须带锚点，否则扫描端一律判不确定
+const injectClock = (nowIso: string) => new ScriptedClock('boot_inject', { wallClockMs: Date.parse(nowIso), monotonicNs: 0 })
 import { rearmDeadline, transitionNode } from '../src/service/commands/node-state.ts'
 import { sweep } from '../src/service/sweep.ts'
 import { openServiceOrchestra } from '../src/index.ts'
@@ -526,7 +529,7 @@ function caseG16(): InjectionResult {
   })
   const before = dumpState(file)
   const result = inTx(db, (tx) => propagateRunCancellation(tx, TEST_SECRET, {
-    runId: 'r1', cancelResult: 'interrupted', now, graceMs: 1000,
+    runId: 'r1', cancelResult: 'interrupted', now, graceMs: 1000, clock: injectClock(now),
   }))
   const childRun = db.raw.prepare("SELECT cancel_result FROM runs WHERE run_id = 'r2'").get()
   const nodes = db.raw.prepare("SELECT node_run_id, status, cancel_result FROM node_runs WHERE node_run_id IN ('nr_g16a','nr_g16b') ORDER BY node_run_id").all()
@@ -587,11 +590,11 @@ async function caseG05(): Promise<InjectionResult> {
   const inFlight = orchestra.db.raw.prepare("SELECT status, tool_start_at FROM node_runs WHERE node_run_id = 'nrun_g05'").get() as { status: string; tool_start_at: string }
   const rev1 = Number((orchestra.db.raw.prepare("SELECT revision FROM node_runs WHERE node_run_id = 'nrun_g05'").get() as { revision: number }).revision)
   const first = inTx(orchestra.db, (tx) => applyCancel(tx, secret, {
-    nodeRunId: 'nrun_g05', attempt: 1, revision: rev1, cancelResult: 'interrupted', now: NOW, graceMs: 30000,
+    nodeRunId: 'nrun_g05', attempt: 1, revision: rev1, cancelResult: 'interrupted', now: NOW, graceMs: 30000, clock: injectClock(NOW),
   }))
   const rev2 = Number((orchestra.db.raw.prepare("SELECT revision FROM node_runs WHERE node_run_id = 'nrun_g05'").get() as { revision: number }).revision)
   const second = inTx(orchestra.db, (tx) => applyCancel(tx, secret, {
-    nodeRunId: 'nrun_g05', attempt: 1, revision: rev2, cancelResult: 'interrupted', now: NOW, graceMs: 30000,
+    nodeRunId: 'nrun_g05', attempt: 1, revision: rev2, cancelResult: 'interrupted', now: NOW, graceMs: 30000, clock: injectClock(NOW),
   }))
   // 围栏还立着的时候来的上报：进登记排队
   const late = inTx(orchestra.db, (tx) => applyReport(tx, secret, {
@@ -1202,7 +1205,7 @@ async function caseEvG204(): Promise<InjectionResult> {
   const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
   const rev1 = Number((boot.db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId) as { revision: number }).revision)
   const cancelled = await postJson(boot.endpoint, '/v1/node-runs/cancel', {
-    nodeRunId, attempt: 1, revision: rev1, cancelResult: 'not_interruptible', now: EV_NOW, graceMs: 1000,
+    nodeRunId, attempt: 1, revision: rev1, cancelResult: 'not_interruptible', now: EV_NOW, graceMs: 1000, clock: injectClock(EV_NOW),
   }, secret)
   // 取消后还想按新 attempt 上报：按 attempt 不符被拒，不许新起一轮
   const lateNewAttempt = await postJson(boot.endpoint, '/v1/node-runs/report', {
@@ -1215,7 +1218,7 @@ async function caseEvG204(): Promise<InjectionResult> {
   await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId: nodeRunId2, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const rev2 = Number((boot.db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId2) as { revision: number }).revision)
   const cancelled2 = await postJson(boot.endpoint, '/v1/node-runs/cancel', {
-    nodeRunId: nodeRunId2, attempt: 1, revision: rev2, cancelResult: 'interrupted', now: EV_NOW, graceMs: 1000,
+    nodeRunId: nodeRunId2, attempt: 1, revision: rev2, cancelResult: 'interrupted', now: EV_NOW, graceMs: 1000, clock: injectClock(EV_NOW),
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision, action_generation, fence_state, cancel_result FROM node_runs ORDER BY node_run_id ASC').all()
   const armed = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'fence_armed'").get() as { n: number }

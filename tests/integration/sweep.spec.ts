@@ -7,6 +7,7 @@ import { applyReport } from '../../src/service/commands/apply-report.ts'
 import { sweep } from '../../src/service/sweep.ts'
 import { ScriptedClock } from '../../src/core/clock.ts'
 import { transitionNode } from '../../src/service/commands/node-state.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const GRACE = '2026-11-13T03:00:30.000Z'
@@ -59,7 +60,7 @@ const evCount = (db: any, type: string, id = 'nr_sw') =>
 
 function cancel(db: any, result: 'interrupted' | 'not_interruptible' | 'already_stopped' | 'unknown', now = NOW, id = 'nr_sw') {
   const r = row(db, id)
-  return withTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+  return withTx(db, (tx) => applyCancel(tx, TEST_SECRET, { clock: TEST_CLOCK,
     nodeRunId: id, attempt: r.attempt, revision: r.revision, cancelResult: result, now, graceMs: 30000,
   }))
 }

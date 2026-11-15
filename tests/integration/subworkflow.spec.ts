@@ -10,6 +10,7 @@ import {
 import { assertRunCanTerminal } from '../../src/service/commands/parallel.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
 import { applyCancel } from '../../src/service/commands/cancel.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'subworkflow-secret'
@@ -339,7 +340,7 @@ describe('节点级取消后子运行的未核实事实', () => {
       })
       // 节点级取消：父节点直接 superseded（控制节点没有执行实例）
       const parent = tx.get<{ attempt: number; revision: number }>('SELECT attempt, revision FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!
-      applyCancel(tx, SECRET, {
+      applyCancel(tx, SECRET, { clock: TEST_CLOCK,
         nodeRunId: 'nr-parent', attempt: parent.attempt, revision: parent.revision,
         cancelResult: 'interrupted', now: NOW, graceMs: 1000,
       })

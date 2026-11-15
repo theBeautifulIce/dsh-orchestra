@@ -9,7 +9,8 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../../src/executor/tools.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { definitionHashOf } from '../../src/service/workflows.ts'
-import { failControlDispatch } from '../../src/service/dispatcher.ts'
+import { failControlDispatch, outcomeForSettlement } from '../../src/service/dispatcher.ts'
+import { failQueuedNode as failQueuedNodeForTest } from '../../src/service/dispatcher.ts'
 import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
 
 const SECRET = 'control-dispatch-secret'
@@ -159,7 +160,7 @@ describe('子流程控制节点', () => {
         '模拟初始化失败',
         'SERVICE_UNAVAILABLE',
       )
-      expect(settled).toBe(false)
+      expect(settled).toEqual({ kind: 'already_moved', currentStatus: 'waiting' })
       const node = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr_s'").get() as { status: string }
       expect(node.status).toBe('waiting')
       const events = service.orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nr_s' AND type = 'dispatch.failed'").get() as { n: number }
@@ -437,6 +438,90 @@ describe('派发失败的副作用事实（S3 round11 P2-1）', () => {
       expect(node).toEqual({ status: 'failed', side_effect_policy: 'pure', side_effect_verified_none: 1 })
       const run = service.orchestra.db.raw.prepare("SELECT status FROM runs WHERE run_id = 'r4'").get() as { status: string }
       expect(run.status).toBe('failed')
+    } finally {
+      await service.release()
+    }
+  })
+})
+
+describe('派发结果尊重收口结果（S1/S2 round60 P2）', () => {
+  it('三种收口结果映射到三种派发结果', () => {
+    const base = { node_run_id: 'nr', node_id: 'n' }
+    expect(outcomeForSettlement({ kind: 'applied' }, base, 'boom', 'X')).toMatchObject({ status: 'failed', reason: 'boom' })
+    expect(outcomeForSettlement({ kind: 'already_moved', currentStatus: 'waiting' }, base, 'boom', 'X')).toMatchObject({
+      status: 'skipped',
+      current_status: 'waiting',
+    })
+    expect(outcomeForSettlement({ kind: 'storage_error', error: new Error('db down') }, base, 'boom', 'X')).toMatchObject({
+      status: 'failed',
+      error_code: 'DISPATCH_SETTLE_FAILED',
+    })
+  })
+
+  it('节点已被接管时，收口返回 already_moved 而不是假装成功', async () => {
+    const service = await boot()
+    try {
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("UPDATE node_runs SET status = 'waiting', revision = revision + 1 WHERE node_run_id = 'nr_s'")
+      })
+      const settlement = failQueuedNodeForTest(
+        { db: service.orchestra.db, secret: SECRET },
+        { now: NOW, runId: 'r1', nodes: {} },
+        { node_run_id: 'nr_s', attempt: 1 },
+        '模拟失败',
+        'X',
+      )
+      expect(settlement).toEqual({ kind: 'already_moved', currentStatus: 'waiting' })
+      const events = service.orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nr_s' AND type = 'dispatch.failed'").get() as { n: number }
+      expect(events.n).toBe(0)
+    } finally {
+      await service.release()
+    }
+  })
+
+  it('写库失败不能被当成并发接管', () => {
+    const broken = { raw: { prepare: () => { throw new Error('db down') } } }
+    const settlement = failQueuedNodeForTest(
+      { db: broken as never, secret: SECRET },
+      { now: NOW, runId: 'r1', nodes: {} },
+      { node_run_id: 'nr_x', attempt: 1 },
+      '模拟失败',
+      'X',
+    )
+    expect(settlement.kind).toBe('storage_error')
+  })
+})
+
+describe('混合工作流在无执行器时整批拒绝（契约）', () => {
+  it('同时含 agent 与 wait：HTTP 入口拒绝，wait 节点也留在 queued', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orch-mixed-'))
+    dirs.push(dir)
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S3' })
+    try {
+      const def = {
+        workflow_id: 'wf_mixed',
+        workflow_version: '1',
+        nodes: [
+          { node_id: 'a_one', type: 'agent' as const },
+          { node_id: 'w_one', type: 'wait' as const, wait: { wait_kind: 'event' as const, match: { type: 'x' }, max_wait_ms: 1000 } },
+        ],
+      }
+      service.orchestra.catalog.load(def)
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t3','混合','running',1,?,?)", [NOW, NOW])
+        tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) VALUES ('r3','t3','wf_mixed',1,?,'running',1,?,?)", [definitionHashOf(def), NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr3a','r3','a_one',1,'agent',1,'queued',0,?,?)", [NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr3w','r3','w_one',2,'wait',1,'queued',0,?,?)", [NOW, NOW])
+      })
+      await expect(service.orchestra.commands.dispatch({
+        runId: 'r3',
+        now: NOW,
+        ownerEpoch: service.orchestra.db.epoch,
+        leaseTtlMs: 60_000,
+        nodes: { a_one: { tools: [] }, w_one: { tools: [] } },
+      })).rejects.toMatchObject({ code: 'EVIDENCE_SOURCE_UNAVAILABLE' })
+      const wait = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr3w'").get() as { status: string }
+      expect(wait.status).toBe('queued')
     } finally {
       await service.release()
     }

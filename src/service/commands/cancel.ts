@@ -116,9 +116,15 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     if (row.fence_state === 'armed') {
       return { cancel_result: 'interrupted', next_status: row.status, fence_state: 'armed', reason: 'fence_already_armed' }
     }
-    const grace = params.clock
-      ? deadlineFromSample(params.clock, params.graceMs)
-      : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + params.graceMs }
+    // 没有单调时钟就不写 deadline：墙钟算出来的宽限期在扫描端一律判不确定，
+    // 写下去等于给自己留一个永远不会被处理的「已取消」节点（S3 round12 P2-3）。
+    if (!params.clock) {
+      throw new OrchError('SERVICE_UNAVAILABLE', '取消宽限期需要单调时钟，缺少时不登记时限', {
+        nodeRunId: params.nodeRunId,
+        operation: 'cancel_grace',
+      })
+    }
+    const grace = deadlineFromSample(params.clock, params.graceMs)
     const graceUntil = new Date(grace.wallClockMs).toISOString()
     applyTransition(tx, {
       nodeRunId: params.nodeRunId,
@@ -153,9 +159,13 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   }
   if (params.cancelResult === 'not_interruptible') {
     // 动作停不下来：延长动作截止时间并进 stopping（规格 4.5 行 345）
-    const extended = params.clock
-      ? deadlineFromSample(params.clock, params.extendDeadlineMs ?? 0)
-      : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + (params.extendDeadlineMs ?? 0) }
+    if (!params.clock) {
+      throw new OrchError('SERVICE_UNAVAILABLE', '动作延期需要单调时钟，缺少时不登记时限', {
+        nodeRunId: params.nodeRunId,
+        operation: 'cancel_extend',
+      })
+    }
+    const extended = deadlineFromSample(params.clock, params.extendDeadlineMs ?? 0)
     const deadline = new Date(extended.wallClockMs).toISOString()
     if (row.fence_state === 'armed') {
       // 围栏立着时改状态会留下“stopping 但仍 armed”的双主人：只记取消结果，等宽限到点由 sweep 撤围栏（审计 P0-4）

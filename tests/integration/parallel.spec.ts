@@ -7,6 +7,7 @@ import {
   type ParallelChild, type ParallelGroup,
 } from '../../src/service/commands/parallel.ts'
 import { applyCancel } from '../../src/service/commands/cancel.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'parallel-secret'
@@ -125,7 +126,7 @@ describe('运行 settling 派生与取消闸', () => {
   it('applyCancel 对不可逆子节点直接拒，状态和账本都不动', () => {
     const db = memoryDb()
     const before = node(db, 'nr1')
-    expect(() => withTx(db, (tx) => applyCancel(tx, SECRET, {
+    expect(() => withTx(db, (tx) => applyCancel(tx, SECRET, { clock: TEST_CLOCK,
       nodeRunId: 'nr1', attempt: 1, revision: 1, cancelResult: 'interrupted', now: NOW, graceMs: 30000,
     }))).toThrowError(/不可逆子节点/)
     expect(node(db, 'nr1')).toMatchObject({ status: before.status, revision: before.revision, cancel_result: null })
@@ -134,7 +135,7 @@ describe('运行 settling 派生与取消闸', () => {
   it('可补偿子节点仍可取消：interrupted 进 timing_out 并立围栏', () => {
     const db = memoryDb()
     withTx(db, (tx) => {
-      const outcome = applyCancel(tx, SECRET, {
+      const outcome = applyCancel(tx, SECRET, { clock: TEST_CLOCK,
         nodeRunId: 'nr2', attempt: 1, revision: 1, cancelResult: 'interrupted', now: NOW, graceMs: 30000,
       })
       expect(outcome).toMatchObject({ cancel_result: 'interrupted', next_status: 'timing_out', fence_state: 'armed' })

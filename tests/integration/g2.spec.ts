@@ -9,6 +9,7 @@ import { inTx } from '../../src/infra/db/tx.ts'
 import { bindRunVersion, catalogFor, freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import type { Db } from '../../src/infra/sqlite/driver.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const HASH_A = 'a'.repeat(64)
@@ -107,7 +108,7 @@ describe('G2 门必过项', () => {
     const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_04'); lease(db, 'nrun_g2_04')
     const revision = Number(rowOf(db, 'nrun_g2_04').revision)
-    const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+    const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, { clock: TEST_CLOCK,
       nodeRunId: 'nrun_g2_04', attempt: 1, revision, cancelResult: 'interrupted', now: NOW, graceMs: 30000,
     }))
     expect(outcome.next_status).toBe('timing_out')
@@ -213,7 +214,7 @@ describe('G2 门必过项', () => {
     const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_09'); lease(db, 'nrun_g2_09')
     const revision = Number(rowOf(db, 'nrun_g2_09').revision)
-    const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+    const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, { clock: TEST_CLOCK,
       nodeRunId: 'nrun_g2_09', attempt: 1, revision, cancelResult: 'interrupted', now: NOW, graceMs: 30000,
     }))
     expect(outcome.fence_state).toBe('armed')
@@ -252,7 +253,7 @@ describe('G2 门必过项', () => {
     const { db } = freshLedger(); seedV(db)
     seedQueued(db, 'nrun_g2_11'); lease(db, 'nrun_g2_11')
     db.raw.prepare("UPDATE node_runs SET status = 'done', revision = revision + 1 WHERE node_run_id = 'nrun_g2_11'").run()
-    const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+    const outcome = inTx(db, (tx) => applyCancel(tx, TEST_SECRET, { clock: TEST_CLOCK,
       nodeRunId: 'nrun_g2_11', attempt: 1, revision: Number(rowOf(db, 'nrun_g2_11').revision), cancelResult: 'interrupted', now: NOW, graceMs: 30000,
     }))
     expect(outcome.next_status).toBe('done')
