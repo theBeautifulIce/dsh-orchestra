@@ -21,7 +21,7 @@ export type CancelParams = {
   graceMs: number
   // 只在 interrupted 时用：动作截止时间往后延多久
   extendDeadlineMs?: number
-  // 半态钟：不传仍兼容旧调用；生产路径必须传，宽限判定不再只看墙钟
+  // 半态钟：登记宽限/延期时限时必须提供；缺失时直接拒绝，不写无法判定的 deadline
   clock?: ClockProvider
 }
 

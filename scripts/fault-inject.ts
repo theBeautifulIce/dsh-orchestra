@@ -1205,7 +1205,7 @@ async function caseEvG204(): Promise<InjectionResult> {
   const nodeRunId = String(created.body?.data?.nodes?.[0]?.node_run_id ?? '')
   const rev1 = Number((boot.db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId) as { revision: number }).revision)
   const cancelled = await postJson(boot.endpoint, '/v1/node-runs/cancel', {
-    nodeRunId, attempt: 1, revision: rev1, cancelResult: 'not_interruptible', now: EV_NOW, graceMs: 1000, clock: injectClock(EV_NOW),
+    nodeRunId, attempt: 1, revision: rev1, cancelResult: 'not_interruptible', now: EV_NOW, graceMs: 1000,
   }, secret)
   // 取消后还想按新 attempt 上报：按 attempt 不符被拒，不许新起一轮
   const lateNewAttempt = await postJson(boot.endpoint, '/v1/node-runs/report', {

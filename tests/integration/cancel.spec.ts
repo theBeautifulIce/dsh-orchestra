@@ -230,3 +230,17 @@ describe('终态与重复取消（审计 F-07 / P12）', () => {
     expect(head).toEqual({ report_id: 'r1', report_seq: 3 })
   })
 })
+
+describe('取消时限必须带单调钟（S1 round61 P2-2）', () => {
+  it('interrupted 缺 clock：明确拒绝，不写无法判定的宽限期', () => {
+    const { db } = freshLedger(); seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_c', 'r1', 'n_c', 5, 'agent', 2, 'started', 10, ?, ?)", [NOW, NOW])
+    })
+    const row = nodeRow(db)
+    expect(() => withTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
+      nodeRunId: 'nr_c', attempt: row.attempt, revision: row.revision, cancelResult: 'interrupted', now: NOW, graceMs: 30_000,
+    }))).toThrowError(/单调时钟/)
+    expect(nodeRow(db)).toMatchObject({ status: 'started', revision: row.revision })
+  })
+})

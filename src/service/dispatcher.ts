@@ -247,7 +247,7 @@ export function outcomeForSettlement(
     node_run_id: row.node_run_id,
     node_id: row.node_id,
     status: 'failed',
-    reason: '收口失败：' + reason + '（' + detail + '）',
+    reason: '收口失败，节点状态保持不变：' + reason + '（' + detail + '）',
     error_code: 'DISPATCH_SETTLE_FAILED',
   }
 }
