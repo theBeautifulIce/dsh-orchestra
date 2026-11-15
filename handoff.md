@@ -6,37 +6,37 @@
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 16:10，HEAD `08075c4`，真独立 r63 已重签）
+## 0.1 最新接手续接（2026-11-15 16:55，HEAD `420ba77`，r64 批次已签已推）
 
 ### 当前进度
 
 - `origin/main` = `e2c6cf4`（G3 签名），代码候选 `b71296e`；工作树干净。
-- **三门通过**：G1 13/13（`afd422b4…`）、G2 20/20（`f7244189…`）、G3 20/20（`287b3ad9…`）。
-- 审计：S1 r63 / S2 r63 / S3 r15 三人独立复核全部 pass，P0/P1=0，P2 分别 2/3/6（`docs/audits/*round63*.md`、`*round15*.md`）；限流期间的 r62 代跑记录已被本轮真独立复核取代。S3 四个探针确认跨重启时钟 P1 闭合。
-- 全量：**64 files / 911 passed | 1 skipped**；build ESM `lib/index.js` 289.92 kB / gzip 69.99 kB、d.ts 18.94 kB；证据 **28/28**。
+- **三门通过**：G1 13/13（`827313ae…`）、G2 20/20（`e1456246…`）、G3 20/20（`030718f7…`）。
+- 审计：S1 r64 / S2 r64 / S3 r16 三人独立复核全部 pass，P0/P1=0，P2 分别 2/3/3。S3 四个探针确认 fail-closed 语义与跨 boot 换算协作正常。
+- 全量：**64 files / 911 passed | 1 skipped**；build ESM `lib/index.js` 289.25 kB / gzip 69.85 kB、d.ts 18.94 kB；证据 **28/28**。
 - 推送走 `git -c http.proxy=http://127.0.0.1:7078 push origin main`。
 
-### 本批改了什么
+### 本批改了什么（r64）
 
 | 改动 | 说明 |
 | --- | --- |
-| 跨重启时钟恢复（P1） | 新增 `src/service/clock-recovery.ts`：sweep 读取前把旧 boot 的 action deadline、取消宽限、wait 计时换算成当前时钟的锚点。action/wait 停机计入预算，取消宽限停机不累计（重启后给满额）；写 `deadline.reanchored` 事件，重复调用幂等。含真实关库重开用例 |
-| DISPATCH_SETTLE_FAILED | 登记进 `PROPOSED_ERROR_CODES`（派发结果级，重试前先查状态）；`DispatchOutcome` 增 `settlement` 与 `persisted_status` |
-| G-05 死参清理 | fault-inject 的取消 HTTP 体不再带 clock |
-| 证据 | 64 files / 911 passed / 289.92 kB / 18.94 kB 按实跑更新 |
+| 时钟判定 fail-closed | `revokeFence` 与 wait 超时：缺钟或无锚点一律不自动推进；同 boot 单调钟到点才动；取消/扫描/等待的 `clock` 参数全部必填 |
+| G-05 注入同一只钟 | 取消与扫描共用一只钟并推进 31s，围栏锚点与判定同一 boot；证据已重生成 |
+| 候选枚举静音 | `gate-check` 的 `git show` 不再把不存在路径的 fatal 噪声打到 stderr |
+| 证据 | 911 passed / 289.25 kB / 69.85 kB 按实跑更新 |
 
 ### 已知 P2（下一批）
 
-- `revokeFence` 无时钟/无锚点仍走墙钟兜底（跨 boot 的推进已由 clock-recovery 负责，同 boot 无钟仍可能误撤）。
-- clock-recovery 的剩余预算用墙钟差值估算，漂移场景靠事件里的 `remaining_ms` 复核。
-- `storage_error` 的重试契约仍需宿主按 `persisted_status` 处理。
+- `clock-recovery` 的剩余预算用墙钟差值估算，漂移场景靠事件里的 `remaining_ms` 复核。
+- `storage_error` 的 `persisted_status` 在读库失败时为 unknown，重试契约仍需宿主处理。
+- `tests/integration/clock-recovery.spec.ts` 负向路径缺事件计数断言。
 - 终态词表重复（P3）。
 
 ### 接手先做什么
 
 1. `git log --oneline -5` 确认 `origin/main` 是 `e2c6cf4`，`git status` 干净。
 2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 911 passed、289.92 kB、28/28、三门 exit 0。
-3. 改代码前记住：任何候选文件改动都会作废三份报告与三门签名；P2 攒批后统一审计（r63/r63/r15）再重签。
+3. 改代码前记住：任何候选文件改动都会作废三份报告与三门签名；P2 攒批后统一审计（r65/r65/r17）再重签。
 4. 下一轮继续三人独立执行；P2 清单见 `docs/audits/S3-independent-audit-round15.md` 第 5 节。
 
 ### 本轮改了什么（对应 round11 审计）
