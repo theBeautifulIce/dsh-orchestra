@@ -6,40 +6,40 @@
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 17:45，HEAD `57d45d2`，r64 批次已签已推）
+## 0.1 最新接手续接（2026-11-15 19:15，HEAD `b9990fd`，r65 批次已签已推）
 
 ### 当前进度
 
-- `origin/main` = `57d45d2`（G3 对齐后重签），代码候选 `4ade819`；工作树干净。
-- **三门通过**：G1 13/13（`827313ae…`）、G2 20/20（`e1456246…`）、G3 20/20（`ee1c251c…`）。
-- 审计：S1 r64 / S2 r64 / S3 r16 三人独立复核全部 pass，P0/P1=0，P2 分别 2/3/3。S3 四个探针确认 fail-closed 语义与跨 boot 换算协作正常。
-- 全量：**64 files / 911 passed | 1 skipped**；build ESM `lib/index.js` 289.25 kB / gzip 69.85 kB、d.ts 18.94 kB；证据 **28/28**。
+- `origin/main` = `b9990fd`（G3 签名），代码候选 `d248f3b`；工作树干净。
+- **三门通过**：G1 13/13（`bfd0f388…`）、G2 20/20（`315e29c6…`）、G3 20/20（`028284e2…`）。
+- 审计：S1 r65 / S2 r65 / S3 r17 三人独立复核全部 pass，P0/P1=0，P2 分别 4/4/3。S3 四组探针（8/8、5/5、9/9、5/5）确认评审四个 P1/P2 边界真闭合。
+- 全量：**64 files / 913 passed | 1 skipped**；build ESM `lib/index.js` 291.43 kB / gzip 70.30 kB、d.ts 23.27 kB；证据 **28/28**。
 - 推送走 `git -c http.proxy=http://127.0.0.1:7078 push origin main`。
 
-### 本批改了什么（r64）
+### 本批改了什么（评审 P1/P2 修复）
 
 | 改动 | 说明 |
 | --- | --- |
-| 时钟判定 fail-closed | `revokeFence` 与 wait 超时：缺钟或无锚点一律不自动推进；同 boot 单调钟到点才动；取消/扫描/等待的 `clock` 参数全部必填 |
-| G-05 注入同一只钟 | 取消与扫描共用一只钟并推进 31s，围栏锚点与判定同一 boot；证据已重生成 |
-| 候选枚举静音 | `gate-check` 的 `git show` 不再把不存在路径的 fatal 噪声打到 stderr |
-| 证据 | 911 passed / 289.25 kB / 69.85 kB 按实跑更新 |
+| 坏链隔离（P1） | `reanchorInTx` 接受断链集合，坏链节点不动锚点不写事件；围栏扫描也跳过，坏账本不许被恢复动作往前推 |
+| startup_unknown 换算（P1） | watchdog 纳入恢复矩阵，冻结剩余量优先；换算后到点转 `indeterminate_side_effect`，不再静默卡死 |
+| 墙钟确认窗口（P1） | 跨 boot 剩余量只能从墙钟估算；估出「已到期」不直接超时，给 30s 确认窗口并落 `timer_uncertain`，墙钟前跳不误杀 |
+| 围栏预算不放大（P2） | 重锚时推进 `fence_armed_at`，多次重启拿新 pair 算剩余，不复活过期围栏 |
+| 派发错误码收窄 | `DispatchOutcome.error_code` 收窄为 `DispatchOutcomeErrorCode` 联合类型 |
+| 证据与地图 | G-05 / ev-g2-14 重生成；计数 913 / 291.43 kB；`codebasemap` 补 clock-recovery 条目 |
 
-### 已知 P2（下一批）
+### 已知 P2（下一批，按优先序）
 
-- `clock-recovery` 的剩余预算用墙钟差值估算，漂移场景靠事件里的 `remaining_ms` 复核。
-- `storage_error` 的 `persisted_status` 在读库失败时为 unknown，重试契约仍需宿主处理。
-- `tests/integration/clock-recovery.spec.ts` 负向路径缺事件计数断言。
-- `revokeFence` 缺钟时抛 TypeError、wait 缺钟静默 false，口径不一（两者都 fail-closed，类型层已必填）。
-- 终态词表重复（P3）。
-- `codebasemap.md` 的清单待补 `src/service/clock-recovery.ts` 与审计台账/审计报告的最新描述（它在候选清单里，改它要连着走一轮重签）。
+1. **墙钟回拨放大预算**：`remainingAfterRestart` 缺 `deadlineAt - armedAt` 上界（有 armedAt 的通道要夹紧）；只放大不假超时。
+2. `CLOCK_RECOVERY_CONFIRM_MS` 写死 30s，应进配置或文档。
+3. `timer_uncertain` 已落账但未反馈给 author/run 面板；断链跳过未单独计数。
+4. `storage_error` 的 `persisted_status` 读库失败时为 unknown，重试契约需宿主处理。
+5. test-only 时钟必填残留 1 处；终态词表重复（P3）。
 
 ### 接手先做什么
 
-1. `git log --oneline -5` 确认 `origin/main` 是 `57d45d2`，`git status` 干净。
-2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 911 passed、289.25 kB / 69.85 kB、28/28、三门 exit 0。
-3. 改代码前记住：任何候选文件改动都会作废三份报告与三门签名；P2 攒批后统一审计（r65/r65/r17）再重签。
-4. 下一轮继续三人独立执行；P2 清单见 `docs/audits/S3-independent-audit-round16.md` 第 5 节。
+1. `git log --oneline -5` 确认 `origin/main` 是 `b9990fd`，`git status` 干净。
+2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 913 passed、291.43 kB / 70.30 kB、28/28、三门 exit 0。
+3. 改代码前记住：任何候选文件改动（含 `codebasemap.md`）都会作废三份报告与三门签名；P2 攒批后统一审计（r66/r66/r18）再重签。
 
 ### 本轮改了什么（对应 round11 审计）
 
