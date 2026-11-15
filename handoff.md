@@ -1,19 +1,19 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-15 10:55。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-15 11:25。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 10:55，HEAD `c02e6c6`，已 push）
+## 0.1 最新接手续接（2026-11-15 11:25，HEAD `b64ee43`，已 push）
 
 ### 当前进度
 
-- 工作树干净，HEAD `c02e6c6` 与 `origin/main` 一致（已推送）。这一轮在 `078d9e3` 之后又补了三个调度边界问题（静态复核提出）。
+- 工作树干净，HEAD `b64ee43` 与 `origin/main` 一致（已推送）。`c02e6c6` 之后又补了三个边界问题（第二轮静态复核提出）。
 - 最近一次**通过审计的候选仍是 `837b0c6`**（S1 r58 / S2 r58 / S3 r10 均 pass，P0/P1=0，856 passed | 1 skipped）。`6fc6f6c` 之后的所有改动 —— 包括 `078d9e3` 与 `c02e6c6` —— **都还没有独立审计报告**。
-- 当前全量：typecheck exit 0；**63 files / 894 passed | 1 skipped**；build ESM `lib/index.js` 283.36 kB / gzip 68.45 kB、`lib/index.d.ts` 18.45 kB；证据复现 **28/28**（G1/G2 逐字节 + G3 注入摘要）。
-- 独立 subagent 两轮验证均通过：上一轮四条断言（请求体不能替换控制目标、未核实不伪装成功、决策超时进扫描、显式 ruleId），本轮五条断言（初始化失败收干净、无执行器派发控制节点、哈希空值 fail closed、取消 outcome、G3 自动复现）。
+- 当前全量：typecheck exit 0；**63 files / 898 passed | 1 skipped**；build ESM `lib/index.js` 284.16 kB / gzip 68.68 kB、`lib/index.d.ts` 18.50 kB；证据复现 **28/28**（G1/G2 逐字节 + G3 注入摘要 + G3 引用一致性）。
+- 独立 subagent 三轮验证均通过：四条断言（控制目标不可替换、未核实不伪装成功、决策超时进扫描、显式 ruleId）、五条断言（初始化失败收干净、无执行器派发、哈希 fail closed、取消 outcome、G3 复现）、本轮四条断言（control 分支落库、节点类型边界、取消 HTTP 契约、G3 摘要变异）。
 - `pnpm gate` 仍失败（G1/G2 报告绑定旧候选、G3 重签链断、GateArtifact 仍全零），这是预期的“待重签”状态，不是代码回退。
 
 ### 本轮改了什么（对应 round11 审计）
@@ -26,6 +26,10 @@
 - P2-3 哈希空值 fail closed：控制节点派发与 `createSubworkflowRun` 都要求 `workflow_definition_hash` 非空。
 - 取消终态语义：`run.terminal` 增加 `outcome`（忽略取消意图的业务结果）与 failed/unverified 节点清单；`cancelled` 只表示停止意图生效。
 - G3 证据进自动复现：`check-evidence-repro` 对 G-06/G-12/G-16 重跑两遍、稳定化随机执行号后比对 `repro-sha256` 摘要；缺摘要即失败。
+- 请求体 `control` 也落库：该分支改调 `failQueuedNode`，节点收成 failed + `dispatch.failed` 事件；并发已接管时不覆盖、不重复写。
+- 节点类型边界：执行器要求收紧到 `node_type='agent'`；`parallel` / `decision` 明确拒绝（`SCHEMA_VERSION_UNSUPPORTED`）并持久化失败，不再落进 `runNode`。
+- 取消对外契约：`/v1/runs/cancel` 返回 `terminalStatus` 与 `outcome`，调用方不翻事件也能拿到“停止意图 + 业务结果”。
+- G3 引用一致性：脚本静态校验 G3 引用的 G1/G2 证据确实在逐字节清单里（G3 没有重复副本）。
 - P2：显式 `ruleId` 堵住 M-64 被 M-48 绕过；`transitionNode` 拒绝控制节点；桥处理位逐条推进 + 已落账未处理事件可回查重放；`wait_event_inbox` 幂等键改 `(run_id, idempotency_key)`（迁移 024）；取消统一走 `cancelDecision`、`blocked_post` 返回 `cancellation_pending`、终态 run 不写取消列；派发期确定性错误把 queued 节点收成 failed。
 
 ### 破坏性变更（升级前必看）
@@ -36,23 +40,23 @@
 
 ### 接手先做什么
 
-1. `git status` 确认干净，`git log --oneline -5` 确认 HEAD 是 `c02e6c6`。
-2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`，确认 894 passed | 1 skipped、build 283.36 kB、证据 28/28。
-3. 在 `c02e6c6` 上派 S1 r59 / S2 r59 / S3 r11 独立审计；报告必须含唯一的 `门：Gx` 行、`候选提交：<40位>` 行与结构化 verdict 块，P0/P1 必须为 0。
+1. `git status` 确认干净，`git log --oneline -5` 确认 HEAD 是 `b64ee43`。
+2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`，确认 898 passed | 1 skipped、build 284.16 kB、证据 28/28。
+3. 在 `b64ee43` 上派 S1 r59 / S2 r59 / S3 r11 独立审计；报告必须含唯一的 `门：Gx` 行、`候选提交：<40位>` 行与结构化 verdict 块，P0/P1 必须为 0。
 4. 提交审计报告后，更新 G1/G2/G3 的 `audit_round` 与 `audit_report`，按 G1→G2→G3 顺序跑 `sign-gate`，每次签完先提交；三门 `gate-check` 都 exit 0 后再跑一次全量 test，最后 push。
-5. G2-16 的历史计数仍写在 624/70；重签时统一为本轮实际数字（63 files / 894 passed）。
+5. G2-16 的历史计数仍写在 624/70；重签时统一为本轮实际数字（63 files / 898 passed）。
 6. 清 `tmp/` 与 `D:\aboutAI` 根目录下的过程文件，正式测试只放 `tests/<分类>/`。
 
 ### 已修与仍待处理
 
-- 已修（本轮）：P1-1/P1-2/P1-3、六项 P2、节点级取消后未核实事实回填、控制节点初始化失败收口、无执行器派发控制节点、哈希空值 fail closed、取消 outcome 字段、G3 证据自动复现。
+- 已修（本轮）：P1-1/P1-2/P1-3、六项 P2、节点级取消后未核实事实回填、控制节点初始化失败收口、无执行器派发控制节点、哈希空值 fail closed、取消 outcome 字段、G3 证据自动复现、control 分支落库、节点类型边界、取消 HTTP 契约、G3 引用一致性。
 - 仍待处理（不阻断重签，接手可做）：
   - `parallel` / `decision` 节点仍无执行实现，`CONTROL_KINDS` 里按非控制节点处理，遇到它们只会走 agent 分支后失败。
   - 老的 `workflow_id` / 定义哈希缺失的 run（手工塞库或旧数据）现在**不能派发控制节点、也不能起子流程**（fail closed）；如需兼容要写数据迁移回填哈希。
   - `assertSubworkflowClosure` 只在“引用的版本都已加载”时做发布期校验；缺版本的强校验在派发期。
   - 别名版本（`'1'` 与 `'01'`）在 `workflow_versions` 里仍是两行，尚未合并。
-- 门检查固定项仍为 M-65；`docs/gates/evidence/G3/full-suite.md` 已更新为 894 / 283.36 / 68.45。
-- 破坏性变更补充：无执行器时只有 agent 节点的 run 会拿到 `EVIDENCE_SOURCE_UNAVAILABLE`（节点留 queued）；控制节点不再受影响。
+- 门检查固定项仍为 M-65；`docs/gates/evidence/G3/full-suite.md` 已更新为 898 / 284.16 / 68.68。
+- 破坏性变更补充：无执行器时只有 agent 节点的 run 会拿到 `EVIDENCE_SOURCE_UNAVAILABLE`（节点留 queued）；`parallel` / `decision` 节点派发会明确失败并落 failed（目前没有执行实现）。请求体带 `control` 现在会把节点收成 failed（不再只返回错误）。
 
 ---
 
