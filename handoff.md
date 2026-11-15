@@ -23,7 +23,7 @@
 | 派发结果尊重收口 | `failQueuedNode` / `failControlDispatch` 返回 `DispatchSettlement`（applied / already_moved / storage_error）；四个调用点统一经 `outcomeForSettlement`：接管返回 `skipped` + `current_status`，写库失败返回 `DISPATCH_SETTLE_FAILED` 且理由写明「节点状态保持不变」 |
 | 混合工作流契约 | 明确「无执行器整批拒绝」：只要有 queued agent，wait/subworkflow 也不推进；契约测试固定该行为 |
 | 取消时限硬化 | `interrupted` 宽限与 `not_interruptible` 延期缺单调时钟时抛 `SERVICE_UNAVAILABLE`，不写无法判定的 deadline；测试与 fault-inject 统一注入 `ScriptedClock` |
-| 证据 | `ev-g2-16` 606/76 与 `full-suite` 906 / 286.05 kB / 69.15 kB 均按实跑重生成；`G2.md` 桥闭环 70→76 |
+| 证据 | `ev-g2-16` 906/76 与 `full-suite` 906 / 286.05 kB / 69.15 kB 均按实跑重生成；`G2.md` 桥闭环 70→76 |
 
 ### 已知 P2（下一批）
 
