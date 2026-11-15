@@ -27,6 +27,14 @@ const G3_DIGEST_CASES: { name: string; source: 'G1' | 'G2' }[] = [
   { name: 'G-16', source: 'G1' },
 ]
 
+// G3 的另外三份注入证据不是副本，直接引用 G1/G2 的文件（见 docs/gates/G3.md 的 evidenceMap）。
+// 这里做静态一致性：引用的文件必须真的在逐字节复现清单里，否则 G3 会借一份没人校验的文件过关。
+const G3_REFERENCED: { gate: 'G1' | 'G2'; name: string }[] = [
+  { gate: 'G1', name: 'G-01' },
+  { gate: 'G1', name: 'G-02' },
+  { gate: 'G2', name: 'G-04' },
+]
+
 const DIGEST_RE = /<!-- repro-sha256: ([0-9a-f]{64}) -->/
 
 const normalize = (text: string): string => text.replace(/\r\n/g, '\n')
@@ -50,6 +58,12 @@ const second = mkdtempSync(join(tmpdir(), 'evidence-repro-b-'))
 const problems: string[] = []
 let checked = 0
 try {
+  // 先证明 G3 引用的 G1/G2 证据确实在逐字节清单里（防止以后把引用改成没人校验的副本）
+  for (const ref of G3_REFERENCED) {
+    const name = ref.gate + '/' + ref.name
+    const covered = Object.entries(CASES).some(([gate, names]) => gate === ref.gate && names.includes(ref.name))
+    if (!covered) problems.push('docs/gates/evidence/' + name + '.md：G3 引用了这份证据，但它不在逐字节复现清单里')
+  }
   for (const [gate, cases] of Object.entries(CASES)) {
     for (const name of cases) {
       runCase(name, first)

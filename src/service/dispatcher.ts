@@ -97,12 +97,17 @@ async function dispatchOne(
   // 控制节点配置只能来自已签名的工作流定义：请求体里带 control 一律拒绝，
   // 否则派发方可以把一个已发布的 subworkflow 节点改指到别的工作流版本。
   if ((spec as { control?: unknown }).control !== undefined) {
+    const reason = '控制节点配置必须写在已签名的工作流定义里，请求体不能指定'
+    const code = 'PAYLOAD_SCHEMA_INVALID'
+    // 服务层也要保持状态一致：返回 failed 就必须把 queued 节点收成 failed 并留事件，
+    // 不能只靠 HTTP 层拦请求——commands.dispatch 是可直接调用的服务接口（审计 P2-1）。
+    const settled = failQueuedNode(deps, p, row, reason, code)
     return {
       node_run_id: row.node_run_id,
       node_id: row.node_id,
       status: 'failed',
-      reason: '控制节点配置必须写在已签名的工作流定义里，请求体不能指定',
-      error_code: 'PAYLOAD_SCHEMA_INVALID',
+      reason: settled ? reason : reason + '（节点已被并发流程接管，未覆盖其状态）',
+      error_code: code,
     }
   }
   let control: ControlNodeConfig | null
@@ -187,9 +192,9 @@ function failQueuedNode(
   row: { node_run_id: string; attempt: number },
   reason: string,
   code: string,
-): void {
+): boolean {
   try {
-    inTx(deps.db, (tx) => {
+    return inTx(deps.db, (tx) => {
       applyTransition(tx, {
         nodeRunId: row.node_run_id,
         from: ['queued'],
@@ -204,9 +209,11 @@ function failQueuedNode(
         reason,
         error_code: code,
       })
+      return true
     })
   } catch {
     // 并发已把这一行改走：保持原状，不覆盖别人的结论
+    return false
   }
 }
 
@@ -216,8 +223,6 @@ const CONTROL_KINDS: Record<string, 'wait' | 'subworkflow' | null> = {
   wait: 'wait',
   subworkflow: 'subworkflow',
   agent: null,
-  parallel: null,
-  decision: null,
 }
 
 /**
@@ -238,7 +243,12 @@ function resolveControlConfig(
   const nodeType = node.node_type
   const kind = CONTROL_KINDS[nodeType]
   if (kind === undefined) {
-    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '未知节点类型，不能派发', {
+    // parallel / decision 目前只有状态机与用例，没有生产派发实现：
+    // 明确拒绝并持久化失败，不能悄悄落进 agent 执行路径。
+    const message = nodeType === 'parallel' || nodeType === 'decision'
+      ? nodeType + ' 节点还没有执行实现，不能派发'
+      : '未知节点类型，不能派发'
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', message, {
       nodeRunId: row.node_run_id,
       nodeType,
     })

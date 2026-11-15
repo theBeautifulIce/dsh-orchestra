@@ -203,13 +203,28 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       // 终态 run 不再接受取消写入；还压着人工裁决的 run 明确返回 cancellation_pending。
       // 纯控制节点取消后立即终态；若还有执行器节点在围栏里，sweep 后续再收口。
       if (out.runStatus !== 'already_stopped') closeRun(tx, b.runId, b.now)
-      return out
+      // 对外契约：runStatus 是请求层的取消进展，terminalStatus/outcome 是库里的实际结果。
+      // 只给 cancelled 会让调用方以为“取消成功=业务成功”，所以把业务结果一并返回（审计 P2-3）。
+      const statusRow = tx.get<{ status: string }>('SELECT status FROM runs WHERE run_id = ?', [b.runId])
+      const terminalEvent = tx.get<{ payload: string }>(
+        "SELECT payload_redacted AS payload FROM events WHERE type = 'run.terminal' AND run_id = ? ORDER BY seq DESC LIMIT 1",
+        [b.runId],
+      )
+      let outcome: string | null = null
+      if (terminalEvent) {
+        try {
+          outcome = (JSON.parse(terminalEvent.payload) as { outcome?: string }).outcome ?? null
+        } catch {
+          outcome = null
+        }
+      }
+      return { ...out, terminalStatus: statusRow?.status ?? out.runStatus, outcome }
     }),
     dispatch: async (b) => {
       // 控制节点（wait / subworkflow）不需要宿主执行器：只跑它们的工作流在无执行器进程里也能推进。
-      // 真正要跑 agent 的 run 仍明确拒绝，不把“没装执行器”拖到节点里再失败。
+      // 只有 agent 节点必须要有执行器；parallel / decision 没有执行实现，交给 dispatcher 明确拒绝。
       const agentNodes = db.raw.prepare(
-        "SELECT COUNT(*) AS n FROM node_runs WHERE run_id = ? AND status = 'queued' AND node_type NOT IN ('wait', 'subworkflow')",
+        "SELECT COUNT(*) AS n FROM node_runs WHERE run_id = ? AND status = 'queued' AND node_type = 'agent'",
       ).get(b.runId) as { n: number }
       if (Number(agentNodes.n) > 0 && !executorDeps) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发 agent 节点', { runId: b.runId })

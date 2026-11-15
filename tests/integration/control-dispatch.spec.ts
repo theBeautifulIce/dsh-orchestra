@@ -9,6 +9,7 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../../src/executor/tools.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { definitionHashOf } from '../../src/service/workflows.ts'
+import { failControlDispatch } from '../../src/service/dispatcher.ts'
 import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
 
 const SECRET = 'control-dispatch-secret'
@@ -108,6 +109,13 @@ describe('控制节点的生产派发', () => {
       expect(out.find((item) => item.node_run_id === 'nr_s')).toMatchObject({ status: 'failed', error_code: 'PAYLOAD_SCHEMA_INVALID' })
       const children = service.orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM runs WHERE parent_run_id = 'r1'").get() as { n: number }
       expect(children.n).toBe(0)
+      // 返回 failed 就必须把库里的 queued 节点一起收成 failed，并留一条可追溯事件
+      const node = service.orchestra.db.raw.prepare("SELECT status, lease_id FROM node_runs WHERE node_run_id = 'nr_s'").get() as { status: string; lease_id: string | null }
+      expect(node).toEqual({ status: 'failed', lease_id: null })
+      const events = service.orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nr_s' AND type = 'dispatch.failed'").get() as { n: number }
+      expect(events.n).toBe(1)
+      // 同一 run 里还有别的 queued 节点（wait_one）时 run 本来就不该收口；
+      // 这里只断言被拒的节点已经离开 queued，收口由下一条单节点用例证明。
     } finally {
       await service.release()
     }
@@ -132,6 +140,30 @@ describe('子流程控制节点', () => {
       expect(parent).toEqual({ status: 'waiting', lease_id: null })
       const child = service.orchestra.db.raw.prepare("SELECT parent_node_run_id, workflow_id, workflow_version, status FROM runs WHERE parent_node_run_id = 'nr_s'").get() as { parent_node_run_id: string; workflow_id: string; workflow_version: number; status: string }
       expect(child).toMatchObject({ parent_node_run_id: 'nr_s', workflow_id: 'child', workflow_version: 1, status: 'running' })
+    } finally {
+      await service.release()
+    }
+  })
+
+  it('节点已被并发流程接管：失败收口不覆盖新状态，也不重复写事件', async () => {
+    const service = await boot()
+    try {
+      // 并发流程已经把它推进到 waiting（例如另一次派发完成了等待登记）
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("UPDATE node_runs SET status = 'waiting', revision = revision + 1 WHERE node_run_id = 'nr_s'")
+      })
+      const settled = failControlDispatch(
+        { db: service.orchestra.db, secret: SECRET },
+        { now: NOW },
+        { node_run_id: 'nr_s', node_id: 'sub_one', attempt: 1 },
+        '模拟初始化失败',
+        'SERVICE_UNAVAILABLE',
+      )
+      expect(settled).toBe(false)
+      const node = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr_s'").get() as { status: string }
+      expect(node.status).toBe('waiting')
+      const events = service.orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nr_s' AND type = 'dispatch.failed'").get() as { n: number }
+      expect(events.n).toBe(0)
     } finally {
       await service.release()
     }
@@ -182,6 +214,32 @@ describe('控制节点类型边界', () => {
       expect(registrations.n).toBe(0)
       const node = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr_w'").get() as { status: string }
       expect(node.status).toBe('failed')
+    } finally {
+      await service.release()
+    }
+  })
+})
+
+describe('单节点 run：被拒的派发不阻塞收口', () => {
+  it('只有一个 subworkflow 节点且请求体带 control：节点 failed，run 收口', async () => {
+    const service = await boot()
+    try {
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) VALUES ('r6','t1','wf',1,?,'running',1,?,?)", [definitionHashOf(ROOT_DEF), NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr6','r6','sub_one',1,'subworkflow',1,'queued',0,?,?)", [NOW, NOW])
+      })
+      const out = await service.orchestra.commands.dispatch({
+        runId: 'r6',
+        now: NOW,
+        ownerEpoch: service.orchestra.db.epoch,
+        leaseTtlMs: 60_000,
+        nodes: { sub_one: { tools: [], control: { kind: 'subworkflow' } } as never },
+      })
+      expect(out[0]).toMatchObject({ node_run_id: 'nr6', status: 'failed', error_code: 'PAYLOAD_SCHEMA_INVALID' })
+      const node = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr6'").get() as { status: string }
+      expect(node.status).toBe('failed')
+      const run = service.orchestra.db.raw.prepare("SELECT status FROM runs WHERE run_id = 'r6'").get() as { status: string }
+      expect(run.status).not.toBe('running')
     } finally {
       await service.release()
     }
@@ -329,6 +387,31 @@ describe('控制节点初始化失败必须收干净（审计 P2-2）', () => {
       expect(run.status).not.toBe('running')
       const event = service.orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nr7' AND type = 'dispatch.failed'").get() as { n: number }
       expect(event.n).toBe(1)
+    } finally {
+      await service.release()
+    }
+  })
+})
+
+describe('没有执行实现的节点类型必须明确拒绝', () => {
+  it('parallel 节点：拒绝派发、节点落 failed，不悄悄走 agent 路径', async () => {
+    const service = await boot()
+    try {
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('r5','t1','running',1,?,?)", [NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr5','r5','p_one',1,'parallel',1,'queued',0,?,?)", [NOW, NOW])
+      })
+      const out = await service.orchestra.commands.dispatch({
+        runId: 'r5',
+        now: NOW,
+        ownerEpoch: service.orchestra.db.epoch,
+        leaseTtlMs: 60_000,
+        nodes: { p_one: { tools: [] } },
+      })
+      expect(out[0]).toMatchObject({ node_run_id: 'nr5', status: 'failed', error_code: 'SCHEMA_VERSION_UNSUPPORTED' })
+      expect(out[0]!.reason).toMatch(/还没有执行实现/)
+      const node = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr5'").get() as { status: string }
+      expect(node.status).toBe('failed')
     } finally {
       await service.release()
     }

@@ -390,3 +390,26 @@ describe('起运行与裁决收口路由', () => {
     expect(child.cancel_result).toBe('interrupted')
   })
 })
+
+describe('取消运行的对外契约：停止意图与业务结果分开', () => {
+  it('cancelRun 返回 terminalStatus 与 outcome，调用方不必再翻事件', async () => {
+    const { endpoint, orchestra } = await boot(false)
+    // queued 节点的副作用尚未发生：标成 pure 后取消即作废，run 能立即收口
+    withTx(orchestra.db, (tx) => {
+      tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = 'nrun_1'")
+    })
+    const cancel = await post(endpoint + '/v1/runs/cancel', {
+      runId: 'r1',
+      cancelResult: 'interrupted',
+      graceMs: 1000,
+    })
+    expect(cancel.status).toBe(200)
+    const body = await cancel.json() as any
+    expect(body.data).toMatchObject({
+      runStatus: 'cancelled',
+      terminalStatus: 'cancelled',
+      // 唯一节点被取消后作废，没有失败也没有未核实副作用
+      outcome: 'succeeded',
+    })
+  })
+})
