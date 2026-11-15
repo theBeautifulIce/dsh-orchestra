@@ -1,17 +1,17 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-15 11:40。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-15 17:45。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 16:55，HEAD `420ba77`，r64 批次已签已推）
+## 0.1 最新接手续接（2026-11-15 17:45，HEAD `57d45d2`，r64 批次已签已推）
 
 ### 当前进度
 
-- `origin/main` = `e2c6cf4`（G3 签名），代码候选 `b71296e`；工作树干净。
-- **三门通过**：G1 13/13（`827313ae…`）、G2 20/20（`e1456246…`）、G3 20/20（`030718f7…`）。
+- `origin/main` = `57d45d2`（G3 对齐后重签），代码候选 `4ade819`；工作树干净。
+- **三门通过**：G1 13/13（`827313ae…`）、G2 20/20（`e1456246…`）、G3 20/20（`ee1c251c…`）。
 - 审计：S1 r64 / S2 r64 / S3 r16 三人独立复核全部 pass，P0/P1=0，P2 分别 2/3/3。S3 四个探针确认 fail-closed 语义与跨 boot 换算协作正常。
 - 全量：**64 files / 911 passed | 1 skipped**；build ESM `lib/index.js` 289.25 kB / gzip 69.85 kB、d.ts 18.94 kB；证据 **28/28**。
 - 推送走 `git -c http.proxy=http://127.0.0.1:7078 push origin main`。
@@ -30,14 +30,15 @@
 - `clock-recovery` 的剩余预算用墙钟差值估算，漂移场景靠事件里的 `remaining_ms` 复核。
 - `storage_error` 的 `persisted_status` 在读库失败时为 unknown，重试契约仍需宿主处理。
 - `tests/integration/clock-recovery.spec.ts` 负向路径缺事件计数断言。
+- `revokeFence` 缺钟时抛 TypeError、wait 缺钟静默 false，口径不一（两者都 fail-closed，类型层已必填）。
 - 终态词表重复（P3）。
 
 ### 接手先做什么
 
-1. `git log --oneline -5` 确认 `origin/main` 是 `e2c6cf4`，`git status` 干净。
-2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 911 passed、289.92 kB、28/28、三门 exit 0。
+1. `git log --oneline -5` 确认 `origin/main` 是 `57d45d2`，`git status` 干净。
+2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 911 passed、289.25 kB / 69.85 kB、28/28、三门 exit 0。
 3. 改代码前记住：任何候选文件改动都会作废三份报告与三门签名；P2 攒批后统一审计（r65/r65/r17）再重签。
-4. 下一轮继续三人独立执行；P2 清单见 `docs/audits/S3-independent-audit-round15.md` 第 5 节。
+4. 下一轮继续三人独立执行；P2 清单见 `docs/audits/S3-independent-audit-round16.md` 第 5 节。
 
 ### 本轮改了什么（对应 round11 审计）
 
