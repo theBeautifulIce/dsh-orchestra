@@ -1,20 +1,49 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-15 11:25。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-15 12:10。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 11:25，HEAD `b64ee43`，已 push）
+## 0.1 最新接手续接（2026-11-15 12:10，HEAD `a0a54d3`，三门已签）
 
 ### 当前进度
 
-- 工作树干净，HEAD `b64ee43` 与 `origin/main` 一致（已推送）。`c02e6c6` 之后又补了三个边界问题（第二轮静态复核提出）。
-- 最近一次**通过审计的候选仍是 `837b0c6`**（S1 r58 / S2 r58 / S3 r10 均 pass，P0/P1=0，856 passed | 1 skipped）。`6fc6f6c` 之后的所有改动 —— 包括 `078d9e3` 与 `c02e6c6` —— **都还没有独立审计报告**。
-- 当前全量：typecheck exit 0；**63 files / 898 passed | 1 skipped**；build ESM `lib/index.js` 284.16 kB / gzip 68.68 kB、`lib/index.d.ts` 18.50 kB；证据复现 **28/28**（G1/G2 逐字节 + G3 注入摘要 + G3 引用一致性）。
-- 独立 subagent 三轮验证均通过：四条断言（控制目标不可替换、未核实不伪装成功、决策超时进扫描、显式 ruleId）、五条断言（初始化失败收干净、无执行器派发、哈希 fail closed、取消 outcome、G3 复现）、本轮四条断言（control 分支落库、节点类型边界、取消 HTTP 契约、G3 摘要变异）。
-- `pnpm gate` 仍失败（G1/G2 报告绑定旧候选、G3 重签链断、GateArtifact 仍全零），这是预期的“待重签”状态，不是代码回退。
+- 工作树干净，HEAD 是签署链末提交 `a0a54d3`（G3 签名）。代码候选冻结在 `082d9ad`，审计报告绑定同一提交。
+- **三门全部通过**：`pnpm gate` → G1 13/13（artifact `ba42e81e…`）、G2 20/20（`baad22ee…`）、G3 20/20（`78921c42…`），三份 `artifact_hash` 与前序门链完整。
+- 独立审计（同一候选 `082d9ad`）：
+  - S1 round59 → G1 pass，13/13，P0=0/P1=0/P2=6（`docs/audits/S1-independent-audit-round59.md`）；
+  - S2 round59 → G2 pass，20/20，P0=0/P1=0/P2=4（`docs/audits/S2-independent-audit-round59.md`）；
+  - S3 round11 → G3 pass，20/20，P0=0/P1=0/P2=4（`docs/audits/S3-independent-audit-round11.md`）。
+- 全量：typecheck exit 0；**63 files / 898 passed | 1 skipped**；build ESM `lib/index.js` 284.16 kB / gzip 68.68 kB；证据复现 **28/28**。
+- 签署顺序与链：G1（`c2f0771`）→ G2（`4dd2309`）→ G3（`a0a54d3`）；每次签完先提交，G2/G3 的 `previous_artifact_hash` 指向前一门在 HEAD 里的 artifact。
+
+### 本轮治理改动
+
+- `scripts/gate-check.ts`：G1/G2 的候选范围补 `docs/gates/G3.md` 排除项（S1 P2-1）。之前 G3 门记录一变，G1/G2 的候选哈希就失效，重签链永远闭合不了。
+- `docs/gates/G3.md`：补齐 `## 证据文件与哈希`、`## 失败项`、`## 例外`、`## 回滚` 四节，并把不变量表头改成解析器认识的「不变量」，才能按 G1/G2 同一套规则签署。
+- 三份审计报告均含唯一 `门：Gx`、`候选提交：082d9ad…` 与结构化 verdict 块。
+
+### 已知 P2（不阻断签署，下一轮清）
+
+| 来源 | 项 | 位置 |
+| --- | --- | --- |
+| S1 P2-2 | `wait_registrations.idempotency_key` 仍是全表唯一（派发器按 run:node:attempt 派生，不受影响） | `018_wait_registrations.sql:24` |
+| S1 P2-4 | `cancelRun` 返回类型注释写「未收口时为 null」，实际恒为字符串 | `src/service/server.ts:99-110` |
+| S1 P2-5 / S3 P2-4 | `applyTransition` 在 `actual === to` 时跳过显式规则校验 | `src/service/commands/nodes.ts:139-152` |
+| S3 P2-1 | 派发失败收口把节点留在 compensable，run 终态显示未核实（节点其实没执行） | `src/service/dispatcher.ts:189-235` |
+| S3 P2-2 | 父 run 缺定义哈希时不能起子流程（老数据需回填） | `src/service/commands/subworkflow.ts:239-255` |
+| S2 P2-1 | `ev-g2-16` 辅助计数仍写 70/624，实际 76/898 | `docs/gates/evidence/G2/ev-g2-16.md` |
+| S2 P2-2 / S3 P2-3 | 无时钟注入时回退墙钟；生产恒注入 | `src/service/sweep.ts:275-277` |
+| S2 P2-3 | 直接调 dispatchRun 且未装执行器时，agent 节点失败但留 queued | `src/service/dispatcher.ts:126-140` |
+
+### 接手先做什么
+
+1. `git status` 干净，`git log --oneline -5` 确认签署链完整（… → `082d9ad` → 审计报告 → G1/G2/G3 签名）。
+2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`、`pnpm gate`，确认为 898 passed、284.16 kB、28/28、三门 exit 0。
+3. 要改代码就先想清代价：任何候选文件改动都会让三份审计报告与三门签名作废，需要重新审计 + 从 G1 重签。P2 清理建议攒成一批，一次改完再走完整链。
+4. 不再需要重跑审计的纯文档改动（`docs/audits`、`docs/reviews`、`handoff.md`、三门门记录）不影响候选哈希，可以直接提交。
 
 ### 本轮改了什么（对应 round11 审计）
 
