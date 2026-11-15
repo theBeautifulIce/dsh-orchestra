@@ -168,7 +168,8 @@ export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string
                 startup_unknown_deadline_at: new Date(watchdog.wallClockMs).toISOString(),
                 startup_unknown_boot_id: watchdog.bootId,
                 startup_unknown_monotonic_ns: watchdog.monotonicNs,
-                startup_unknown_remaining_ns: params.unknownWatchdogMs ?? 120_000,
+                // 单位是纳秒（与 node-state.ts 一致）：ms 直接入列会让 clock-recovery 误判 0.12ms 到期（S2 r65 P1-1）
+                startup_unknown_remaining_ns: Math.round((params.unknownWatchdogMs ?? 120_000) * 1e6),
               }
             : {}),
         },

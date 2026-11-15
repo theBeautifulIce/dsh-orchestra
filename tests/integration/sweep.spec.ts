@@ -244,7 +244,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     const db = setup()
     const clock = new ScriptedClock('boot-b', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
     withTx(db, (tx) => {
-      tx.run("UPDATE node_runs SET status='paused_bridge_missing', resume_state='startup_unknown', startup_unknown_remaining_ns=5000, rearm_generation=3 WHERE node_run_id='nr_sw'")
+      tx.run("UPDATE node_runs SET status='paused_bridge_missing', resume_state='startup_unknown', startup_unknown_remaining_ns=5000000000, rearm_generation=3 WHERE node_run_id='nr_sw'")
     })
     const out = sweep(db, TEST_SECRET, { now: NOW, clock, bridgeRestored: ['nr_sw'] })
     expect(out.bridge_restored).toEqual(['nr_sw'])

@@ -38,12 +38,20 @@ export function remainingAfterRestart(
 ): { remainingMs: number; trusted: boolean } {
   const now = Date.parse(nowIso)
   const at = Date.parse(row.deadlineAt)
-  if (channel === 'startup_unknown' && row.frozenRemainingMs != null) {
-    return { remainingMs: Math.max(0, row.frozenRemainingMs), trusted: true }
-  }
   if (Number.isNaN(at) || Number.isNaN(now)) return { remainingMs: 0, trusted: false }
+  const wallRemaining = Math.max(0, at - now)
+  if (channel === 'startup_unknown' && row.frozenRemainingMs != null) {
+    // 冻结量与墙钟剩余取小：反复重启不许让 120s watchdog 无限滑动（S2 r65 P2-2）
+    return { remainingMs: Math.max(0, Math.min(row.frozenRemainingMs, wallRemaining)), trusted: true }
+  }
+  if (row.armedAt) {
+    const armedMs = Date.parse(row.armedAt)
+    // 回拨会把墙钟剩余吹大：用 deadline-armed 的原始预算夹紧（S2 r65 P2-3 / S3 r17 P2-2）
+    const budgetMs = Number.isNaN(armedMs) ? wallRemaining : Math.max(0, at - armedMs)
+    return { remainingMs: Math.min(wallRemaining, budgetMs), trusted: false }
+  }
   // 跨 boot 的墙钟差值只能当估算：前跳可能把没到期的计时器算成已到期。
-  return { remainingMs: Math.max(0, at - now), trusted: false }
+  return { remainingMs: wallRemaining, trusted: false }
 }
 
 const TERMINAL = "'done','failed','failed_with_unverified','succeeded','succeeded_with_unverified','superseded','cancelled','orphaned'"

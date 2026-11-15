@@ -88,7 +88,7 @@ describe('跨服务实例的截止锚点恢复（S3 round13 P1）', () => {
     const { db } = freshLedger()
     seed(db)
     withTx(db, (tx) => {
-      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, startup_unknown_deadline_at, startup_unknown_boot_id, startup_unknown_monotonic_ns, startup_unknown_remaining_ns, created_at, updated_at) VALUES ('nr_un','r1','n_un',5,'agent',1,'startup_unknown',0,?, 'boot_a', 120000000000, 120000000000, ?, ?)", [NOW, NOW, NOW])
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, startup_unknown_deadline_at, startup_unknown_boot_id, startup_unknown_monotonic_ns, startup_unknown_remaining_ns, created_at, updated_at) VALUES ('nr_un','r1','n_un',5,'agent',1,'startup_unknown',0,?, 'boot_a', 120000000000, 120000000000, ?, ?)", ['2026-11-13T03:02:00.000Z', NOW, NOW])
     })
     const clock = new ScriptedClock('boot_b', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
     sweep(db, TEST_SECRET, { now: NOW, clock })
@@ -125,6 +125,32 @@ describe('跨服务实例的截止锚点恢复（S3 round13 P1）', () => {
     expect(out.fence_revoked).not.toContain('nr_bad')
     // 好链的 nr_bad2 照常换算
     expect(row(db, 'nr_bad2').deadline_boot_id).toBe('boot_b')
+  })
+
+  it('墙钟回拨：围栏预算用 deadline-armed 夹紧，不被吹大', () => {
+    const { db } = freshLedger()
+    seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, fence_state, fence_armed_at, fence_grace_until, fence_grace_boot_id, fence_grace_monotonic_ns, cancel_requested_at, created_at, updated_at) VALUES ('nr_fen','r1','n_fen',3,'agent',1,'timing_out',0,'armed',?,?, 'boot_a', 30000000000, ?, ?, ?)", [NOW, '2026-11-13T03:00:30.000Z', NOW, NOW, NOW])
+    })
+    // 重启时墙钟回拨 1 小时：墙钟剩余 3630s，但原始预算只有 30s
+    const clock = new ScriptedClock('boot_b', { wallClockMs: Date.parse('2026-11-13T02:00:00.000Z'), monotonicNs: 0 })
+    sweep(db, TEST_SECRET, { now: '2026-11-13T02:00:00.000Z', clock })
+    const after = row(db, 'nr_fen')
+    expect(Date.parse(after.fence_grace_until) - Date.parse(after.fence_armed_at)).toBe(30_000)
+  })
+
+  it('startup_unknown：反复重启不放大 watchdog 预算', () => {
+    const { db } = freshLedger()
+    seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, startup_unknown_deadline_at, startup_unknown_boot_id, startup_unknown_monotonic_ns, startup_unknown_remaining_ns, created_at, updated_at) VALUES ('nr_un','r1','n_un',5,'agent',1,'startup_unknown',0,?, 'boot_a', 120000000000, 120000000000, ?, ?)", ['2026-11-13T03:02:00.000Z', NOW, NOW])
+    })
+    const b = new ScriptedClock('boot_b', { wallClockMs: Date.parse('2026-11-13T03:00:10.000Z'), monotonicNs: 0 })
+    sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:10.000Z', clock: b })
+    const afterB = row(db, 'nr_un')
+    // 墙钟已走 10s：剩余 110s 而不是再给满 120s
+    expect(Date.parse(afterB.startup_unknown_deadline_at) - Date.parse('2026-11-13T03:00:10.000Z')).toBe(110_000)
   })
 
   it('重复扫描幂等：不重复写 deadline.reanchored', () => {

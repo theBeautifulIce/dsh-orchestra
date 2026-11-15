@@ -121,6 +121,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       ['verifying'],
     )
     for (const row of verifying) {
+      if (broken.has(row.node_run_id)) continue
       const deadline = verifyDeadline(row)
       // 没有判定锚点就没有判定依据：按不确定处理，不拿墙钟硬比（规格 3.4 行 171）
       if (!deadline || !params.clock) {
@@ -218,6 +219,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     // 显式桥恢复信号：按 resume_state 回到六态之一；startup_unknown/verifying 按剩余预算重挂，不续满额
     const bridgeRestored: string[] = []
     for (const nodeRunId of new Set(params.bridgeRestored ?? [])) {
+      if (broken.has(nodeRunId)) continue
       const row = tx.get<{
         attempt: number; status: string; resume_state: string | null; rearm_generation: number
         startup_unknown_remaining_ns: number | null; verify_remaining_ns: number | null
@@ -230,7 +232,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       if (!canTransition('paused_bridge_missing', target)) continue
       const patch: Record<string, string | number | null> = { resume_state: null }
       if (target === 'startup_unknown') {
-        const remaining = row.startup_unknown_remaining_ns ?? 120_000
+        // remaining_ns 是纳秒（node-state 写入）：换算成毫秒再重挂
+        const remaining = (row.startup_unknown_remaining_ns ?? 120_000 * 1e6) / 1e6
         const d = params.clock
           ? deadlineFromSample(params.clock, remaining)
           : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + remaining }
@@ -241,7 +244,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       }
       if (target === 'verifying') {
         // 断线期间没记下剩余量，恢复时不能按 0 立即到期，给完整一轮判定窗口。
-        const remaining = row.verify_remaining_ns ?? 120_000
+        // remaining_ns 是纳秒：换算成毫秒再重挂
+        const remaining = (row.verify_remaining_ns ?? 120_000 * 1e6) / 1e6
         const d = params.clock
           ? deadlineFromSample(params.clock, remaining)
           : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + remaining }
