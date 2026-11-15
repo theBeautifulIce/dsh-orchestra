@@ -2,6 +2,7 @@
 // 评审 P1：agent 执行是长时间任务，不许占着写队列的名额；并发闸由装配层统一注入。
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
+import type { AnyOrchErrorCode } from '../core/errors.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
 import { acquireNodeRun, type RuntimeDeps } from './commands/runtime.ts'
@@ -31,12 +32,16 @@ export type DispatchParams = {
   leaseRenewIntervalMs?: number
 }
 
+/** 派发结果错误码：DISPATCH_SETTLE_FAILED 是派发结果级（非顶层 OrchError），其余复用 OrchErrorCode */
+export type DispatchOutcomeErrorCode = 'DISPATCH_SETTLE_FAILED' | AnyOrchErrorCode | ''
+
 export type DispatchOutcome = {
   node_run_id: string
   node_id: string
   status: 'done' | 'failed' | 'skipped' | 'waiting'
   reason?: string
-  error_code?: string
+  /** 派发结果级错误码：含派发专属 DISPATCH_SETTLE_FAILED 与顶层 OrchErrorCode（S3 r64 P2） */
+  error_code?: DispatchOutcomeErrorCode
   agent_id?: string
   evidence_source?: string
   /** 节点被并发流程接管时的当前状态：返回 skipped 而不是 failed（S1/S2 round60 P2） */
@@ -116,7 +121,7 @@ async function dispatchOne(
     const code = 'PAYLOAD_SCHEMA_INVALID'
     // 服务层也要保持状态一致：返回 failed 就必须把 queued 节点收成 failed 并留事件，
     // 不能只靠 HTTP 层拦请求——commands.dispatch 是可直接调用的服务接口（审计 P2-1）。
-    return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code)
+    return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
   }
   let control: ControlNodeConfig | null
   try {
@@ -125,7 +130,7 @@ async function dispatchOne(
     // 配置解析失败是这一行的确定性错误：留在 queued 会让 run 永远收不了口，直接按失败收口
     const reason = err instanceof Error ? err.message : String(err)
     const code = (err as { code?: string }).code ?? ''
-    return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code)
+    return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
   }
   if (control) {
     return dispatchControlNode(deps, p, row, control)
@@ -173,7 +178,7 @@ async function dispatchOne(
       node_id: row.node_id,
       status: 'failed',
       reason: err instanceof Error ? err.message : String(err),
-      error_code: (err as { code?: string }).code ?? '',
+      error_code: ((err as { code?: string }).code ?? '') as DispatchOutcomeErrorCode,
     }
   }
 }
@@ -231,7 +236,7 @@ export function outcomeForSettlement(
   settlement: DispatchSettlement,
   row: { node_run_id: string; node_id: string },
   reason: string,
-  code: string,
+  code: DispatchOutcomeErrorCode,
 ): DispatchOutcome {
   if (settlement.kind === 'applied') {
     return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'failed', reason, error_code: code, settlement: 'applied' }
@@ -464,7 +469,7 @@ async function dispatchControlNode(
     // 初始化失败必须把已经拿到的租约与 dispatched 状态一起收干净：
     // 只返回 failed 而不改库，会留下“API 说失败、节点还 dispatched 且持租约”的分叉，
     // closeRun 也永远等不到终态（审计 P2-2）。
-    return outcomeForSettlement(failControlDispatch(deps, p, row, reason, code), row, reason, code)
+    return outcomeForSettlement(failControlDispatch(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
   }
 }
 

@@ -447,12 +447,12 @@ describe('派发失败的副作用事实（S3 round11 P2-1）', () => {
 describe('派发结果尊重收口结果（S1/S2 round60 P2）', () => {
   it('三种收口结果映射到三种派发结果', () => {
     const base = { node_run_id: 'nr', node_id: 'n' }
-    expect(outcomeForSettlement({ kind: 'applied' }, base, 'boom', 'X')).toMatchObject({ status: 'failed', reason: 'boom' })
-    expect(outcomeForSettlement({ kind: 'already_moved', currentStatus: 'waiting' }, base, 'boom', 'X')).toMatchObject({
+    expect(outcomeForSettlement({ kind: 'applied' }, base, 'boom', '')).toMatchObject({ status: 'failed', reason: 'boom' })
+    expect(outcomeForSettlement({ kind: 'already_moved', currentStatus: 'waiting' }, base, 'boom', '')).toMatchObject({
       status: 'skipped',
       current_status: 'waiting',
     })
-    expect(outcomeForSettlement({ kind: 'storage_error', error: new Error('db down'), persistedStatus: 'queued' }, base, 'boom', 'X')).toMatchObject({
+    expect(outcomeForSettlement({ kind: 'storage_error', error: new Error('db down'), persistedStatus: 'queued' }, base, 'boom', '')).toMatchObject({
       status: 'failed',
       error_code: 'DISPATCH_SETTLE_FAILED',
       settlement: 'storage_error',

@@ -1,7 +1,7 @@
 // src/service/sweep.ts —— 维护扫描（规格 4.9 行 426-429）
 import type { Db, Tx } from '../infra/sqlite/driver.ts'
 import { inTx } from '../infra/db/tx.ts'
-import { reanchorInTx } from './clock-recovery.ts'
+import { reanchorInTx, type ReanchorReport } from './clock-recovery.ts'
 import { sweepExpiredLeases } from './commands/lease.ts'
 import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts'
 import { transitionNode } from './commands/node-state.ts'
@@ -64,6 +64,8 @@ export type SweepResult = {
   decisions_blocked: number
   decisions_expired: number
   decisions_released_nodes: string[]
+  // 换算不出来的截止锚点：保留原数据、已落 timer_uncertain，宿主可查
+  deadline_uncertain: string[]
   // 本轮扫描把“所有节点已终态”的运行推进到 run 终态
   runs_closed: string[]
   scanned_at: string
@@ -88,7 +90,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
     // 先把上个 boot 写下的锚点换算到当前时钟：不换算的话 decide() 只会返回 uncertain，
     // fence / wait / 动作截止会永久停住（规格 4.4 行 342）。
-    if (params.clock) reanchorInTx(tx, secret, params.clock, params.now, { reanchored: [], expired: [], uncertain: [] })
+    const reanchor: ReanchorReport = { reanchored: [], expired: [], uncertain: [] }
+    if (params.clock) reanchorInTx(tx, secret, params.clock, params.now, reanchor, broken)
     // wait 到点与租约、围栏同轮处理：同一个扫描入口，不靠外部再记得调一次
     const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, broken)
     const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken, clock: params.clock })
@@ -100,6 +103,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     const revoked: string[] = []
     const heads: SweepResult['replay_heads'] = []
     for (const row of fences) {
+      // 断链节点整轮跳过：恢复动作不许把坏账本再往前推（S2/S3 r64 P1-1）
+      if (broken.has(row.node_run_id)) continue
       if (!revokeFence(tx, secret, { row, now: params.now, clock: params.clock })) continue
       revoked.push(row.node_run_id)
       const head = pickReplayHead(tx, row.node_run_id, row.attempt)
@@ -364,6 +369,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
 
     return {
+      deadline_uncertain: reanchor.uncertain,
       lease_expired: leaseExpired,
       fence_revoked: revoked,
       verify_timed_out: timedOut,
