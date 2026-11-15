@@ -15,7 +15,7 @@
   "conclusion": "pass",
   "p0": 0,
   "p1": 0,
-  "p2": 1,
+  "p2": 2,
   "must_pass_total": 20,
   "must_pass_passed": 20,
   "must_pass_ids": [
@@ -50,7 +50,7 @@
 
 结论：pass
 
-P0 = 0，P1 = 0，P2 = 1；必过项 20/20。
+P0 = 0，P1 = 0，P2 = 2；必过项 20/20。
 
 ## 2. 实测
 
@@ -85,8 +85,9 @@ P0 = 0，P1 = 0，P2 = 1；必过项 20/20。
 
 | 编号 | 位置 | 说明 |
 | --- | --- | --- |
-| P2-1 | `tests/integration/clock-recovery.spec.ts` | 确认窗口常量 30s 与用例耦合，测试带重言式检查 |
+| P2-1 | `src/service/clock-recovery.ts:153` | 重锚保留原始冻结量不递减落库，墙钟回拨时 `min(frozen, wall)` 把剩余拉回满额（有界不超原预算，只延长不假超时） |
+| P2-2 | `docs/gates/G3.md` | 门记录审计起始绑 d248f3b，属批次预期 |
 
 ## 6. 结论
 
-P1 与两条 P2 全部修正，20 项全过，1 条 P2 不影响重签。
+P1 与两条 P2 全部修正，20 项全过，2 条 P2 不影响重签。
