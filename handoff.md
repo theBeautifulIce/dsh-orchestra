@@ -6,13 +6,13 @@
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 15:50，HEAD `e2c6cf4`，已签已推）
+## 0.1 最新接手续接（2026-11-15 16:10，HEAD `08075c4`，真独立 r63 已重签）
 
 ### 当前进度
 
 - `origin/main` = `e2c6cf4`（G3 签名），代码候选 `b71296e`；工作树干净。
-- **三门通过**：G1 13/13（`3af76737…`）、G2 20/20（`99b2a13f…`）、G3 20/20（`c8ca601a…`）。
-- 审计：S1 r62 / S2 r62 / S3 r14 全部 pass，P0/P1=0；**本轮子代理撞 429 限流，验证由执行体代跑并在报告里注明**（明天 09:39 限流恢复）。
+- **三门通过**：G1 13/13（`afd422b4…`）、G2 20/20（`f7244189…`）、G3 20/20（`287b3ad9…`）。
+- 审计：S1 r63 / S2 r63 / S3 r15 三人独立复核全部 pass，P0/P1=0，P2 分别 2/3/6（`docs/audits/*round63*.md`、`*round15*.md`）；限流期间的 r62 代跑记录已被本轮真独立复核取代。S3 四个探针确认跨重启时钟 P1 闭合。
 - 全量：**64 files / 911 passed | 1 skipped**；build ESM `lib/index.js` 289.92 kB / gzip 69.99 kB、d.ts 18.94 kB；证据 **28/28**。
 - 推送走 `git -c http.proxy=http://127.0.0.1:7078 push origin main`。
 
@@ -37,7 +37,7 @@
 1. `git log --oneline -5` 确认 `origin/main` 是 `e2c6cf4`，`git status` 干净。
 2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 911 passed、289.92 kB、28/28、三门 exit 0。
 3. 改代码前记住：任何候选文件改动都会作废三份报告与三门签名；P2 攒批后统一审计（r63/r63/r15）再重签。
-4. 独立审计子代理限流到 2026-11-16 09:39 恢复；下一轮审计优先恢复三人独立执行。
+4. 下一轮继续三人独立执行；P2 清单见 `docs/audits/S3-independent-audit-round15.md` 第 5 节。
 
 ### 本轮改了什么（对应 round11 审计）
 
