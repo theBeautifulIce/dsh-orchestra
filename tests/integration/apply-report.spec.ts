@@ -761,7 +761,7 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
   it('报告冲突卡不参与按时间自动升级/过期', () => {
     const db = setup()
     const { decisionId } = hang(db)
-    withTx(db, (tx) => escalateDecisions(tx, { now: '2026-11-20T00:00:00.000Z' }))
+    withTx(db, (tx) => escalateDecisions(tx, 'escalate-secret', { now: '2026-11-20T00:00:00.000Z' }))
     const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
     expect(card.status).toBe('pending')
     expect(card.closed_reason).toBeNull()

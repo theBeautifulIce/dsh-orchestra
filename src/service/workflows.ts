@@ -4,7 +4,7 @@ import { OrchError } from '../core/errors.ts'
 import type { Phase } from '../core/config.ts'
 import { deepFreeze } from '../core/freeze.ts'
 import { mergePassConditions, type PassCondition } from '../core/policy.ts'
-import { assertDefinitionAllowed, type WorkflowDefinition, type WorkflowNodeDef } from '../core/workflow-def.ts'
+import { assertDefinitionAllowed, SUBWORKFLOW_MAX_DEPTH, type WorkflowDefinition, type WorkflowNodeDef } from '../core/workflow-def.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 
 // 旧版本号没有工作流命名空间：读旧库、旧 run、旧 API 全部归到这个默认空间
@@ -142,7 +142,45 @@ export class WorkflowCatalog {
       }
     }
     this.remember(workflowId, key, snapshot)
+    // 发布期能查的先查：闭包内子流程都已加载时，环与深度在这里就报，不留到派发。
+    // 子流程尚未发布的合法顺序（先父后子）交给派发期的强校验，不在这里误拒。
+    this.assertSubworkflowClosure(workflowId, key)
     return summarize(workflowId, snapshot)
+  }
+
+  /**
+   * 只在“引用的版本都已经加载”时做环/深度校验：
+   * 缺版本说明这个子流程还没发布，此时无法判断整图，强校验放在派发路径（assertSubworkflowGraphFor）。
+   */
+  private assertSubworkflowClosure(workflowId: string, version: string): void {
+    const stack = new Set<string>()
+    const walk = (id: string, ver: string, depth: number): void => {
+      let def: WorkflowDefinition
+      try {
+        def = this.internal(id, ver)
+      } catch {
+        return
+      }
+      const key = keyOf(id, ver)
+      if (stack.has(key)) {
+        throw new OrchError('SUBWORKFLOW_CYCLE', '子流程引用成环', { workflowId: id, pinnedVersion: Number(ver) })
+      }
+      if (depth > SUBWORKFLOW_MAX_DEPTH) {
+        throw new OrchError('SUBWORKFLOW_DEPTH_EXCEEDED', '子流程深度超过 max_depth=2', {
+          workflowId: id,
+          pinnedVersion: Number(ver),
+          depth,
+          maxDepth: SUBWORKFLOW_MAX_DEPTH,
+        })
+      }
+      stack.add(key)
+      for (const node of def.nodes) {
+        if (node.type !== 'subworkflow' || !node.subworkflow) continue
+        walk(node.subworkflow.workflow_id, String(node.subworkflow.pinned_version), depth + 1)
+      }
+      stack.delete(key)
+    }
+    walk(workflowId, version, 0)
   }
 
   // 两参：按 (workflow_id, version) 精确取；单参：向后兼容，要求这个版本号在所有工作流里唯一

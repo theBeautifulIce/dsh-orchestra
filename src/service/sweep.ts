@@ -9,7 +9,7 @@ import { applyReport } from './commands/apply-report.ts'
 import { sweepWaitTimeouts } from './commands/wait.ts'
 import { finishSubworkflowChild } from './commands/subworkflow.ts'
 import { closeRun } from './commands/run-close.ts'
-import { activeDecision, openDecision } from './commands/decisions.ts'
+import { activeDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import type { Report } from '../core/report.ts'
 import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
@@ -59,6 +59,10 @@ export type SweepResult = {
   receipts_expired: number
   // 子 run 已收口但父节点还挂在 waiting/timing_out/stopping：由维护扫描推进父节点
   subworkflow_finished: string[]
+  // 决策卡超时：2 小时升级、24 小时按默认动作过期；过期后连带放掉 blocked_pre 节点
+  decisions_blocked: number
+  decisions_expired: number
+  decisions_released_nodes: string[]
   // 本轮扫描把“所有节点已终态”的运行推进到 run 终态
   runs_closed: string[]
   scanned_at: string
@@ -331,7 +335,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     const subworkflowFinished: string[] = []
     const finishedChildren = tx.all<{ run_id: string; parent_run_id: string | null; parent_node_run_id: string }>(
       'SELECT r.run_id, r.parent_run_id, r.parent_node_run_id FROM runs r JOIN node_runs n ON n.node_run_id = r.parent_node_run_id '
-      + "WHERE r.parent_node_run_id IS NOT NULL AND n.status IN ('waiting', 'timing_out', 'stopping') AND r.status IN "
+      // 父节点已取消/超时的也要看：子 run 后收口时要把未核实事实回填，不能让父 run 冒充干净成功
+      + "WHERE r.parent_node_run_id IS NOT NULL AND n.status IN ('waiting', 'timing_out', 'stopping', 'superseded', 'timeout', 'failed', 'failed_with_unverified') AND r.status IN "
       + "('succeeded', 'succeeded_with_unverified', 'done', 'failed', 'failed_with_unverified', 'timeout', 'abandoned_unverified', 'orphaned', 'superseded', 'cancelled')",
     )
     for (const child of finishedChildren) {
@@ -345,6 +350,9 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
 
     const receipts = sweepInboxReceipts(tx, params.now)
+    // 决策超时：2h 升级、24h 按默认动作过期。必须进维护扫描，
+    // 否则服务每两秒扫一次租约/Wait，却永远不处理挂在人身上的卡（审计 P1-3）。
+    const decisions = sweepDecisions(tx, secret, { now: params.now })
     // 控制节点链路不依赖宿主再发一次空 dispatch：每轮扫描对“节点全终态”的 run 统一收口。
     const runsClosed: string[] = []
     for (const row of tx.all<{ run_id: string }>("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id")) {
@@ -367,6 +375,9 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       operations_timed_out: receipts.timedOut,
       receipts_expired: receipts.expired,
       subworkflow_finished: subworkflowFinished,
+      decisions_blocked: decisions.blocked,
+      decisions_expired: decisions.expired,
+      decisions_released_nodes: decisions.releasedNodes,
       runs_closed: runsClosed,
       scanned_at: params.now,
     }

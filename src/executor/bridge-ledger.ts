@@ -15,7 +15,10 @@ export type BridgeLedgerKey = {
 export type BridgeIngestResult = {
   appended: boolean
   ledgerSeq: number | null
-  ackSeq: number
+  // 本次事件在桥上的序号：消费器只按它推进处理位
+  eventSeq: number
+  // 当前已落账位：只用于观测，绝不拿来当处理位
+  persistedCursor: number
 }
 
 type CursorRow = { last_persisted_ack_seq: number }
@@ -49,7 +52,8 @@ export class BridgeLedger {
     return Number(row?.last_handled_seq ?? 0)
   }
 
-  // 只允许在已落账范围内向前推进，且必须单独成事务提交。
+  // 只允许逐条推进：处理位必须正好是已处理位 + 1。
+  // 允许跳跃会让“漏处理一条但游标已过”成为静默事实（G3 r11 P2-2）。
   markHandled(seq: number): void {
     withTx(this.db, (tx) => {
       const row = tx.get<HandledRow>(
@@ -62,6 +66,9 @@ export class BridgeLedger {
         throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '处理位不能越过已落账位', { seq, persisted })
       }
       if (seq <= handled) return
+      if (seq !== handled + 1) {
+        throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '处理游标必须逐条推进', { seq, handled })
+      }
       tx.run(
         'UPDATE bridge_stream_cursors SET last_handled_seq = ?, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ?',
         [seq, new Date().toISOString(), this.key.nodeRunId, this.key.attempt, this.key.executorAgentId],
@@ -109,7 +116,7 @@ export class BridgeLedger {
         if (receipt.payload_hash !== payloadHash) {
           throw proposedError('BRIDGE_SEQ_CONFLICT', '同一桥序号出现了不同 payload，按协议冲突拒绝', { seq: ev.seq })
         }
-        return { appended: false, ledgerSeq: Number(receipt.ledger_seq), ackSeq }
+        return { appended: false, ledgerSeq: Number(receipt.ledger_seq), eventSeq: ev.seq, persistedCursor: ackSeq }
       }
       if (ev.seq !== ackSeq + 1) {
         throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '桥事件序号不连续，先补洞再落账', {
@@ -128,7 +135,7 @@ export class BridgeLedger {
         + 'ON CONFLICT(node_run_id, attempt, executor_agent_id) DO UPDATE SET last_persisted_ack_seq = excluded.last_persisted_ack_seq, updated_at = excluded.updated_at',
         [this.key.nodeRunId, this.key.attempt, this.key.executorAgentId, ev.seq, now],
       )
-      return { appended: true, ledgerSeq: appended.seq, ackSeq: ev.seq }
+      return { appended: true, ledgerSeq: appended.seq, eventSeq: ev.seq, persistedCursor: ev.seq }
     })
   }
 }

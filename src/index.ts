@@ -200,8 +200,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         now: b.now,
         clock,
       })
-      // 纯控制节点取消后立即终态；若还有执行器节点在围栏里，sweep 后续再收口
-      closeRun(tx, b.runId, b.now)
+      // 终态 run 不再接受取消写入；还压着人工裁决的 run 明确返回 cancellation_pending。
+      // 纯控制节点取消后立即终态；若还有执行器节点在围栏里，sweep 后续再收口。
+      if (out.runStatus !== 'already_stopped') closeRun(tx, b.runId, b.now)
       return out
     }),
     dispatch: async (b) => {

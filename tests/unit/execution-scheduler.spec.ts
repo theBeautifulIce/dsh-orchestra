@@ -215,9 +215,15 @@ describe('dispatcher 与调度器接线', () => {
       { node_run_id: 'nr1', node_id: 'check', seq: 1, attempt: 1 },
       { node_run_id: 'nr2', node_id: 'check', seq: 2, attempt: 1 },
     ]
-    // 只假造 dispatcher 用到的那一次查表
+    // 只假造 dispatcher 用到的那几次查表：节点行要能被认出是 agent 节点
     const fakeDb = {
-      raw: { prepare: () => ({ all: () => rows, get: () => undefined }), exec: () => {} },
+      raw: {
+        prepare: () => ({
+          all: () => rows,
+          get: (id: string) => (id === 'nr1' || id === 'nr2' ? { node_type: 'agent' } : undefined),
+        }),
+        exec: () => {},
+      },
       epoch: 0,
     } as unknown as Db
     const base = createExecutionScheduler({ concurrency: 2 })

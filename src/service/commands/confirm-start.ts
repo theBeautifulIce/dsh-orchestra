@@ -40,16 +40,20 @@ export function confirmStartup(
       [p.nodeRunId],
     ))
     const trigger = hasTool ? 'confirm-started-with-tool' : p.attested ? 'confirm-started-attested' : 'confirm-started'
+    // 三条出口共用同一对状态：必须显式点名走哪条，不能让无守卫的 M-08 替带条件的 M-61 放行
+    const ruleId = hasTool ? 'M-61' : p.attested ? 'M-09' : 'M-08'
     const actionDeadlineMs = p.actionDeadlineMs ?? 30_000
     const deadline = p.clock ? deadlineFromSample(p.clock, actionDeadlineMs) : null
     applyTransition(tx, {
       nodeRunId: p.nodeRunId,
       from: ['startup_unknown'],
       to: 'stopping',
+      ruleId,
       attempt: p.attempt,
       now: p.now,
       bumpRearm: true,
       rearmGeneration: row.rearm_generation,
+      context: { hasToolCall: hasTool, cancelResult: null, hangReason: null, sideEffectVerifiedNone: false },
       patch: {
         startup_unknown_deadline_at: null,
         startup_unknown_boot_id: null,

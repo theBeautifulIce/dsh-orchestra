@@ -78,15 +78,20 @@ export class BridgeConsumer {
 
   // 从「已处理位」之后取连续事件：落账与 onEvent 都成功后才推进处理位。
   // 只落账不处理就推进，会让 onEvent 抛错后重连跳过该事件。
+  // 账本里已落账但还没处理的事件（重启、旧 ACK 顺序留下的 persisted > handled）
+  // 从 receipt 回查后照常处理，不能因为“不再走缓冲”就被永久跳过。
   async drain(): Promise<void> {
     for (;;) {
       const next = this.ledger.handled() + 1
-      const ev = this.buffer.takeFrom(next).find((candidate) => candidate.seq === next)
+      const buffered = this.buffer.takeFrom(next).find((candidate) => candidate.seq === next)
+      const ev = buffered ?? this.ledger.lookup(next)
       if (!ev) return
       const ingested = this.ledger.ingest(ev)
       await this.onEvent(ev, ingested.ledgerSeq)
-      this.ledger.markHandled(ingested.ackSeq)
-      this.buffer.ack(ingested.ackSeq, this.ledger.handled())
+      // 处理位只按这条事件的桥序号推进；不能用当前落账游标代替
+      this.ledger.markHandled(ingested.eventSeq)
+      // 缓冲里的连续位只在事件确实来自缓冲时推进；回查重放不占缓冲的位
+      if (buffered) this.buffer.ack(ingested.eventSeq, this.ledger.handled())
     }
   }
 

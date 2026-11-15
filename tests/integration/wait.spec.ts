@@ -239,3 +239,30 @@ describe('等待节点', () => {
     expect(count(db, "SELECT COUNT(*) AS n FROM wait_event_inbox WHERE idempotency_key = 'late-1'")).toBe(1)
   })
 })
+
+describe('等待事件幂等键按 run 作用域（G3 r11 P2-6）', () => {
+  it('两个 run 用同一个幂等键：事件各自进各自的 inbox，不互相吞掉', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('r2', 't1', 'running', 1, ?, ?)", [NOW, NOW])
+      const first = recordWaitEvent(tx, { runId: 'r1', eventType: 'build.finished', idempotencyKey: 'shared-key', now: NOW })
+      const second = recordWaitEvent(tx, { runId: 'r2', eventType: 'build.finished', idempotencyKey: 'shared-key', now: NOW })
+      expect(second).not.toBe(first)
+    })
+    const rows = db.raw.prepare('SELECT run_id, idempotency_key FROM wait_event_inbox ORDER BY inbox_seq').all() as { run_id: string; idempotency_key: string }[]
+    expect(rows).toEqual([
+      { run_id: 'r1', idempotency_key: 'shared-key' },
+      { run_id: 'r2', idempotency_key: 'shared-key' },
+    ])
+  })
+
+  it('同一 run 重复投递同一个键：仍然只留一条', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      const first = recordWaitEvent(tx, { runId: 'r1', eventType: 'build.finished', idempotencyKey: 'k1', now: NOW })
+      const again = recordWaitEvent(tx, { runId: 'r1', eventType: 'build.finished', idempotencyKey: 'k1', now: NOW })
+      expect(again).toBe(first)
+    })
+    expect(count(db, 'SELECT COUNT(*) AS n FROM wait_event_inbox')).toBe(1)
+  })
+})

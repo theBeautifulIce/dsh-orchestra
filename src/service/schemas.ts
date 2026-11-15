@@ -126,28 +126,12 @@ export const toolSchema = z.object({
   timeoutMs: z.number().int().min(LIMITS.toolTimeoutMsMin).max(LIMITS.toolTimeoutMsMax),
 })
 
-// 一个节点的执行规格：工具清单有上限，input/outputSchema 由执行器自己解释
+// 一个节点的执行规格：工具清单有上限，input/outputSchema 由执行器自己解释。
+// 控制节点配置不在这里：wait/subworkflow 的执行参数只能来自已签名的工作流定义（审计 P1-1）。
 const nodeSpecSchema = z.looseObject({
   tools: z.array(toolSchema).max(LIMITS.toolsMaxCount),
   input: z.unknown().optional(),
   outputSchema: z.unknown().optional(),
-  // 控制节点：只带状态机所需的谓词/子流程版本，不建会话、不跑工具
-  control: z.discriminatedUnion('kind', [
-    z.looseObject({
-      kind: z.literal('wait'),
-      waitKind: z.enum(['event', 'timer']),
-      match: z.object({ type: z.string().min(1), path: z.string().optional(), equals: z.unknown().optional() }),
-      idempotencyKey: z.string().min(1).max(LIMITS.identifierMaxLength),
-      fromSeq: z.number().int().nonnegative().optional(),
-      maxWaitMs: z.number().int().positive(),
-    }),
-    z.looseObject({
-      kind: z.literal('subworkflow'),
-      workflowId: workflowIdentifier,
-      workflowVersion: z.union([workflowVersionString, z.number().int().nonnegative()]),
-      resumeFrom: z.string().nullable().optional(),
-    }),
-  ]).optional(),
 })
 
 // 通过条件：path 与 op 只做有界字符串，越界判定留给判定层（VERDICT_UNSUPPORTED）
@@ -173,6 +157,22 @@ export const workflowLoadSchema = z.looseObject({
     }).optional(),
     pass_conditions: z.array(passConditionSchema).max(LIMITS.passConditionsMaxCount).optional(),
     required_hashes: z.array(z.string().min(1).max(LIMITS.identifierMaxLength)).max(LIMITS.requiredHashesMaxCount).optional(),
+    // 控制节点配置属于定义内容，随定义一起被哈希固定
+    wait: z.looseObject({
+      wait_kind: z.enum(['event', 'timer']),
+      match: z.looseObject({
+        type: z.string().min(1).max(LIMITS.statusMaxLength),
+        path: z.string().max(LIMITS.pathMaxLength).optional(),
+        equals: z.unknown().optional(),
+      }),
+      max_wait_ms: z.number().int().positive(),
+      from_seq: z.number().int().nonnegative().optional(),
+    }).optional(),
+    subworkflow: z.looseObject({
+      workflow_id: workflowIdentifier,
+      pinned_version: z.number().int().positive(),
+      resume_from: z.string().nullable().optional(),
+    }).optional(),
   })).max(LIMITS.nodesMaxCount),
   pass_conditions: z.array(passConditionSchema).max(LIMITS.passConditionsMaxCount).optional(),
   required_hashes: z.array(z.string().min(1).max(LIMITS.identifierMaxLength)).max(LIMITS.requiredHashesMaxCount).optional(),
@@ -236,6 +236,16 @@ export const dispatchSchema = z.looseObject({
   if (message) ctx.addIssue({ code: 'custom', path: ['leaseRenewIntervalMs'], message })
   if (Object.keys(value.nodes).length > LIMITS.nodesMaxCount) {
     ctx.addIssue({ code: 'custom', path: ['nodes'], message: '节点数超过上限 ' + String(LIMITS.nodesMaxCount) })
+  }
+  // 控制节点类型必须在派发时由定义决定：请求体带 control 就是试图替换已签名目标，直接拒。
+  for (const [nodeId, spec] of Object.entries(value.nodes)) {
+    if ((spec as Record<string, unknown>).control !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['nodes', nodeId, 'control'],
+        message: '控制节点配置只能写在已签名的工作流定义里（wait / subworkflow 字段），请求体不能指定',
+      })
+    }
   }
 })
 

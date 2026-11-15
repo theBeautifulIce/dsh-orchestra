@@ -2,8 +2,9 @@
 import { OrchError } from '../../core/errors.ts'
 import type { DecisionKind } from '../../core/state-machine.ts'
 import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
-import { appendEvent } from '../../infra/db/ledger.ts'
+import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { closeRun } from './run-close.ts'
+import { applyTransition } from './nodes.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 
@@ -248,39 +249,169 @@ export function timeoutDisposition(autonomy: string): DecisionTimeoutDisposition
   return autonomy === 'supervised' ? 'hold_for_human' : 'default_action'
 }
 
+const ACTIVE_STATUS_LIST = ['pending', 'acknowledged', 'blocked_for_human'] as const
+
+// run 终态：这些 run 上的卡不再被维护扫描改写
+const RUN_TERMINAL_STATUSES = [
+  'succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled', 'done',
+] as const
+
+export type CancelDecisionParams = {
+  decisionId: string
+  now: string
+  // cancelled：因为 run/节点被取消而关闭；expired_final：真正超时
+  reason: 'cancelled' | 'expired_final'
+  resolvedBy?: string | null
+}
+
 /**
- * 超时升级：活跃且非 report_contradicted 的卡，满 2 小时升 blocked_for_human，满 24 小时 expired。
- * supervised 档只升级不自动收口；report_contradicted 不参与升级，避免把“报告与人裁决冲突”自动关掉。
+ * 关闭一张活跃裁决卡：revision CAS、resolved_by、decision.resolved 事件三件套齐活。
+ * 以前取消路径直接 UPDATE，既没 CAS 也没事件，还把“取消”记成 expired_final（G3 r11 P2）。
  */
-export function escalateDecisions(tx: Tx, opts: EscalateOptions): { blocked: number; expired: number } {
+export function cancelDecision(tx: Tx, secret: string, p: CancelDecisionParams): { changed: boolean; revision: number | null } {
+  const current = tx.get<{ status: string; revision: number; run_id: string }>(
+    'SELECT status, revision, run_id FROM decisions WHERE decision_id = ?',
+    [p.decisionId],
+  )
+  if (!current) return { changed: false, revision: null }
+  if (!(ACTIVE_STATUS_LIST as readonly string[]).includes(current.status)) {
+    return { changed: false, revision: current.revision }
+  }
+  const res = tx.run(
+    'UPDATE decisions SET status = ?, revision = revision + 1, closed_reason = ?, decided_at = ?, resolved_by = COALESCE(?, resolved_by) '
+    + `WHERE decision_id = ? AND revision = ? AND status IN ${ACTIVE_STATUSES}`,
+    ['resolved', p.reason, p.now, p.resolvedBy ?? 'system:cancel', p.decisionId, current.revision],
+  )
+  if (res.changes !== 1) return { changed: false, revision: null }
+  appendEvent(tx, {
+    type: 'decision.resolved',
+    payload: {
+      decisionId: p.decisionId,
+      revision: current.revision + 1,
+      resolution: p.reason === 'cancelled' ? 'cancelled' : 'expired',
+      status: 'resolved',
+      resolvedBy: p.resolvedBy ?? 'system:cancel',
+    },
+  })
+  return { changed: true, revision: current.revision + 1 }
+}
+export type SweepDecisionsOptions = EscalateOptions & {
+  // 自动过期后要尝试收口对应 run
+  closeRunAfter?: boolean
+}
+
+export type SweepDecisionsOutcome = {
+  blocked: number
+  expired: number
+  // 被超时收口的裁决卡放掉的 blocked_pre 节点
+  releasedNodes: string[]
+  closedRuns: string[]
+}
+
+/**
+ * 维护扫描里的决策超时：满 2 小时升 blocked_for_human，满 24 小时按默认动作过期。
+ * 与单个受理入口共用同一套 CAS 与事件语义；supervised 只升级不自动收口，
+ * report_contradicted 一律留给人裁决（规格 3.6）。
+ */
+export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptions): SweepDecisionsOutcome {
   const nowMs = Date.parse(opts.now)
   const blockedAfterMs = opts.blockedAfterMs ?? 2 * 60 * 60 * 1000
   const expireAfterMs = opts.expireAfterMs ?? 24 * 60 * 60 * 1000
-  const rows = tx.all<{ decision_id: string; status: string; revision: number; created_at: string; autonomy: string }>(
-    'SELECT d.decision_id, d.status, d.revision, d.created_at, COALESCE(t.autonomy, \'autonomous\') AS autonomy ' +
-      'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id ' +
-      "WHERE d.kind <> 'report_contradicted' " +
-      `AND d.status IN ${ACTIVE_STATUSES}`,
+  const rows = tx.all<{
+    decision_id: string
+    run_id: string
+    status: string
+    revision: number
+    created_at: string
+    autonomy: string
+    run_status: string | null
+    node_status: string | null
+  }>(
+    'SELECT d.decision_id, d.run_id, d.status, d.revision, d.created_at, '
+      + 'COALESCE(t.autonomy, \'autonomous\') AS autonomy, r.status AS run_status, n.status AS node_status '
+      + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
+      + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
+      + "WHERE d.kind <> 'report_contradicted' "
+      + `AND d.status IN ${ACTIVE_STATUSES}`,
   )
-  let blocked = 0
-  let expired = 0
+  const out: SweepDecisionsOutcome = { blocked: 0, expired: 0, releasedNodes: [], closedRuns: [] }
   for (const row of rows) {
+    // run 已终态：这张卡不再有业务含义，不自动改写也不尝试收口
+    if (row.run_status !== null && (RUN_TERMINAL_STATUSES as readonly string[]).includes(row.run_status)) continue
     const age = nowMs - Date.parse(row.created_at)
-    if (age >= expireAfterMs && timeoutDisposition(row.autonomy) === 'default_action') {
-      tx.run(
-        "UPDATE decisions SET status = 'resolved', closed_reason = 'expired_final', revision = revision + 1, decided_at = ? " +
-          'WHERE decision_id = ? AND revision = ?',
-        [opts.now, row.decision_id, row.revision],
-      )
-      expired += 1
-    } else if (age >= blockedAfterMs && row.status !== 'blocked_for_human') {
-      tx.run(
-        "UPDATE decisions SET status = 'blocked_for_human', revision = revision + 1 WHERE decision_id = ? AND revision = ?",
+    // blocked_post 压在人工核验上：证据门只能由人关，自动过期会留下“卡没了、节点还卡着”的死角
+    const holdForHuman = timeoutDisposition(row.autonomy) === 'hold_for_human' || row.node_status === 'blocked_post'
+    if (age >= expireAfterMs && !holdForHuman) {
+      const closed = cancelDecision(tx, secret, { decisionId: row.decision_id, now: opts.now, reason: 'expired_final' })
+      // 并发的人工裁决抢先改了 revision：本轮不算自动处理成功
+      if (!closed.changed) continue
+      out.expired += 1
+      const released = releaseBlockedPreNode(tx, secret, { decisionId: row.decision_id, now: opts.now })
+      if (released) out.releasedNodes.push(released)
+      if (opts.closeRunAfter !== false) {
+        if (closeRun(tx, row.run_id, opts.now)) out.closedRuns.push(row.run_id)
+      }
+      continue
+    }
+    if (age >= blockedAfterMs && row.status !== 'blocked_for_human') {
+      const res = tx.run(
+        "UPDATE decisions SET status = 'blocked_for_human', revision = revision + 1 WHERE decision_id = ? AND revision = ? AND status IN ('pending', 'acknowledged')",
         [row.decision_id, row.revision],
       )
-      blocked += 1
+      if (res.changes !== 1) continue
+      appendEvent(tx, {
+        type: 'decision.blocked',
+        payload: {
+          decisionId: row.decision_id,
+          revision: row.revision + 1,
+          reason: 'timeout_escalated',
+          blockedAfterMs,
+        },
+      })
+      out.blocked += 1
     }
   }
-  return { blocked, expired }
+  return out
+}
+
+// 自动过期后，压在卡上的 blocked_pre 节点必须一起放掉：否则 run 永远等一个已经关掉的卡。
+function releaseBlockedPreNode(tx: Tx, secret: string, p: { decisionId: string; now: string }): string | null {
+  const node = tx.get<{ node_run_id: string; attempt: number }>(
+    "SELECT node_run_id, attempt FROM node_runs WHERE blocked_decision_id = ? AND status = 'blocked_pre'",
+    [p.decisionId],
+  )
+  if (!node) return null
+  try {
+    applyTransition(tx, {
+      nodeRunId: node.node_run_id,
+      from: ['blocked_pre'],
+      to: 'failed',
+      ruleId: 'M-41',
+      attempt: node.attempt,
+      now: p.now,
+      patch: {
+        resume_state: null,
+        blocked_decision_id: null,
+        lease_id: null,
+        lease_expires_at: null,
+        executor_session_id: null,
+        executor_agent_id: null,
+      },
+    })
+  } catch {
+    return null
+  }
+  appendNodeRunEvent(tx, secret, node.node_run_id, 'decision.expired', {
+    decision_id: p.decisionId,
+    from: 'blocked_pre',
+    to: 'failed',
+  })
+  return node.node_run_id
+}
+
+/** 兼容入口：只关心升级/过期条数的调用方用它。secret 必须是真密钥——事件哈希链要用它验。 */
+export function escalateDecisions(tx: Tx, secret: string, opts: EscalateOptions): { blocked: number; expired: number } {
+  const out = sweepDecisions(tx, secret, { ...opts, closeRunAfter: false })
+  return { blocked: out.blocked, expired: out.expired }
 }
 

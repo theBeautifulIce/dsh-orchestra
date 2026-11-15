@@ -1,6 +1,6 @@
 // src/service/commands/nodes.ts —— 单条 CAS 迁移执行器（S3 Task 2，规格 4.3/4.4）
 import { OrchError } from '../../core/errors.ts'
-import { canTransition, TRANSITIONS, type NodeStatus, type TransitionContext } from '../../core/state-machine.ts'
+import { canTransition, TERMINAL_STATUSES, TRANSITIONS, type NodeStatus, type TransitionContext, type TransitionRule } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { uuidv7 } from '../../core/ids.ts'
@@ -50,7 +50,41 @@ const PATCH_COLUMNS = new Set([
   'cancel_requested_at',
   'cancel_result',
   'fence_armed_at',
+  // 控制节点的副作用事实：子流程收口时按子运行实际节点重算，不能靠请求或默认值
+  'side_effect_policy',
+  'side_effect_verified_none',
 ])
+
+function assertExplicitRule(rule: TransitionRule, req: TransitionRequest, from: NodeStatus): void {
+  if (!rule.from.includes(from) || !rule.to.includes(req.to)) {
+    throw new OrchError('STALE_GENERATION', '显式规则与来源/目标不匹配', {
+      nodeRunId: req.nodeRunId,
+      ruleId: rule.id,
+      from,
+      to: req.to,
+    })
+  }
+  if ((TERMINAL_STATUSES as readonly string[]).includes(from) && !rule.allowTerminal) {
+    throw new OrchError('STALE_GENERATION', '终态源没有这条显式出边', { ruleId: rule.id, from, to: req.to })
+  }
+  if (rule.requires) {
+    const ctx = req.context
+    const satisfied = ctx !== undefined && rule.requires({
+      ...ctx,
+      status: from,
+      target: req.to,
+      trigger: rule.trigger,
+    })
+    if (!satisfied) {
+      throw new OrchError('STALE_GENERATION', '这条显式规则的前提不成立', {
+        nodeRunId: req.nodeRunId,
+        ruleId: rule.id,
+        from,
+        to: req.to,
+      })
+    }
+  }
+}
 
 export type TransitionRequest = {
   nodeRunId: string
@@ -58,6 +92,9 @@ export type TransitionRequest = {
   to: NodeStatus
   attempt: number
   now: string
+  // 显式规则：同一对 from/to 有多条规则时，必须说清这次走哪一条，
+  // 否则守卫更松的那条会把守卫更严的那条绕过去（G3 round11 P1-1：M-64 曾被 M-48 放行）。
+  ruleId?: `M-${string}`
   // 调用方读到的 revision；给了就必须仍然一致，否则视为并发过期
   expectedRevision?: number
   actionGeneration?: number
@@ -81,32 +118,66 @@ export function applyTransition(tx: Tx, req: TransitionRequest): void {
   if (req.from.length === 0) {
     throw new OrchError('STALE_GENERATION', '迁移缺少来源状态', { nodeRunId: req.nodeRunId })
   }
-  // 状态对必须来自唯一迁移表；同状态写只用于挂起/清挂起，不改变状态。
-  for (const from of req.from) {
-    if (from === req.to) continue
-    if (!canTransition(from, req.to)) {
+  const explicitRule = req.ruleId === undefined
+    ? undefined
+    : TRANSITIONS.find((rule) => rule.id === req.ruleId)
+  if (req.ruleId !== undefined && !explicitRule) {
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '显式规则不在迁移表里', { ruleId: req.ruleId })
+  }
+  // 只校验这一行“实际处在”的来源状态：from 是候选集合，把集合里其它状态也拉进
+  // 判定会把跨状态的规则混在一起，误报成多规则歧义（例如 timing_out→stopping 的 M-26 与 M-27）。
+  const current = tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', [req.nodeRunId])
+  if (!current) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: req.nodeRunId })
+  const actual = current.status as NodeStatus
+  if (!req.from.includes(actual)) {
+    throw new OrchError('STALE_GENERATION', '节点当前状态不在来源集合里', {
+      nodeRunId: req.nodeRunId,
+      status: actual,
+      from: req.from,
+    })
+  }
+  if (actual !== req.to) {
+    if (!canTransition(actual, req.to)) {
       throw new OrchError('STALE_GENERATION', '这条迁移不在合法迁移表里', {
         nodeRunId: req.nodeRunId,
-        from,
+        from: actual,
         to: req.to,
       })
     }
-    // 只有 requires 边时，必须拿到上下文并真正满足前提；不能凭“表里有这条边”放行。
-    const candidates = TRANSITIONS.filter((rule) => rule.from.includes(from) && rule.to.includes(req.to))
-    if (candidates.length > 0 && candidates.every((rule) => rule.requires !== undefined)) {
-      const ctx = req.context
-      const satisfied = ctx !== undefined && candidates.some((rule) => rule.requires?.({
-        ...ctx,
-        status: from,
-        target: req.to,
-        trigger: rule.trigger,
-      }) === true)
-      if (!satisfied) {
-        throw new OrchError('STALE_GENERATION', '这条迁移的前提不成立', {
+    if (explicitRule) {
+      assertExplicitRule(explicitRule, req, actual)
+    } else {
+      const candidates = TRANSITIONS.filter((rule) =>
+        rule.from.includes(actual)
+        && rule.to.includes(req.to)
+        && (!(TERMINAL_STATUSES as readonly string[]).includes(actual) || rule.allowTerminal))
+      const guarded = candidates.filter((rule) => rule.requires !== undefined)
+      const unguarded = candidates.filter((rule) => rule.requires === undefined)
+      // 同一对状态既有带守卫的规则又有裸规则：没有显式 ruleId 就无法区分业务触发，一律拒绝。
+      if (guarded.length > 0 && unguarded.length > 0) {
+        throw new OrchError('STALE_GENERATION', '同一对状态有多条规则，必须显式给出 ruleId', {
           nodeRunId: req.nodeRunId,
-          from,
+          from: actual,
           to: req.to,
+          candidates: candidates.map((rule) => rule.id),
         })
+      }
+      // 只有 requires 边时，必须拿到上下文并真正满足前提；不能凭“表里有这条边”放行。
+      if (guarded.length > 0) {
+        const ctx = req.context
+        const satisfied = ctx !== undefined && guarded.some((rule) => rule.requires?.({
+          ...ctx,
+          status: actual,
+          target: req.to,
+          trigger: rule.trigger,
+        }) === true)
+        if (!satisfied) {
+          throw new OrchError('STALE_GENERATION', '这条迁移的前提不成立', {
+            nodeRunId: req.nodeRunId,
+            from: actual,
+            to: req.to,
+          })
+        }
       }
     }
   }

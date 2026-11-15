@@ -3,22 +3,35 @@ import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { WorkflowCatalog } from '../../src/service/workflows.ts'
 import {
-  assertNoOpenChildRuns, assertSubworkflowGraph, createSubworkflowRun, finishSubworkflowChild,
+  assertNoOpenChildRuns, assertSubworkflowGraph, collectSubworkflowEdges, createSubworkflowRun, finishSubworkflowChild,
   propagateRunCancellation, startSubworkflowNode, SUBWORKFLOW_MAX_DEPTH,
   type SubworkflowEdge,
 } from '../../src/service/commands/subworkflow.ts'
 import { assertRunCanTerminal } from '../../src/service/commands/parallel.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
+import { applyCancel } from '../../src/service/commands/cancel.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'subworkflow-secret'
 
-function memoryDb(): Db {
+const ROOT_DEF = {
+  workflow_id: 'root',
+  workflow_version: '1',
+  nodes: [
+    { node_id: 'sub', type: 'subworkflow' as const, subworkflow: { workflow_id: 'child', pinned_version: 2 } },
+  ],
+}
+
+function memoryDb(parentWorkflow: { workflow_id: string; workflow_version: string; hash?: string; depth?: number } = ROOT_DEF): Db {
   const db = openDb(':memory:')
   applySteps(db, loadSteps(defaultMigrationsDir()))
   withTx(db, (tx) => {
     tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t1', '子流程', 'running', 1, ?, ?)", [NOW, NOW])
-    tx.run("INSERT INTO runs (run_id, task_id, status, revision, root_run_id, subworkflow_depth, created_at, updated_at) VALUES ('r1', 't1', 'running', 1, 'r1', 0, ?, ?)", [NOW, NOW])
+    tx.run(
+      "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, root_run_id, subworkflow_depth, created_at, updated_at) "
+      + 'VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)',
+      ['r1', 't1', parentWorkflow.workflow_id, parentWorkflow.workflow_version, parentWorkflow.hash ?? null, 'running', 'r1', parentWorkflow.depth ?? 0, NOW, NOW],
+    )
     tx.run(
       "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, created_at, updated_at) "
       + "VALUES ('nr-parent', 'r1', 'sub', 1, 'subworkflow', 'started', 1, ?, ?)", [NOW, NOW],
@@ -29,11 +42,14 @@ function memoryDb(): Db {
 
 function catalog(): WorkflowCatalog {
   const c = new WorkflowCatalog('S3')
-  c.load({ workflow_id: 'root', workflow_version: '1', nodes: [{ node_id: 'sub', type: 'subworkflow' }] })
+  c.load(ROOT_DEF)
   c.load({ workflow_id: 'child', workflow_version: '1', nodes: [{ node_id: 'a', type: 'agent' }] })
   c.load({ workflow_id: 'child', workflow_version: '2', nodes: [{ node_id: 'b', type: 'agent' }] })
-  c.load({ workflow_id: 'grand', workflow_version: '1', nodes: [{ node_id: 'g', type: 'subworkflow' }] })
-  c.load({ workflow_id: 'great', workflow_version: '1', nodes: [{ node_id: 'x', type: 'agent' }] })
+  c.load({
+    workflow_id: 'missing',
+    workflow_version: '1',
+    nodes: [{ node_id: 'sub', type: 'subworkflow', subworkflow: { workflow_id: 'ghost', pinned_version: 1 } }],
+  })
   return c
 }
 
@@ -90,10 +106,18 @@ describe('子流程图校验', () => {
     expect(() => assertSubworkflowGraph({ workflowId: 'a', pinnedVersion: 0 }, new Map()))
       .toThrowError(/pin 一个正整数版本/)
   })
+
+  it('边表从已加载定义里读，不来自请求：缺失的 pin 版本直接拒', () => {
+    const c = catalog()
+    const edges = collectSubworkflowEdges(c, { workflowId: 'child', pinnedVersion: 2 })
+    expect(edges.get('child@2')?.children).toEqual([])
+    expect(() => collectSubworkflowEdges(c, { workflowId: 'ghost', pinnedVersion: 1 }))
+      .toThrowError(/版本不存在或未发布/)
+  })
 })
 
 describe('子运行 pin、深度与唤醒', () => {
-  it('按 pin 建子运行，重复调用返回同一个子运行，换版本按冲突拒', () => {
+  it('按定义 pin 建子运行，重复调用返回同一个子运行，换版本按冲突拒', () => {
     const db = memoryDb()
     const c = catalog()
     let childId = ''
@@ -110,9 +134,10 @@ describe('子运行 pin、深度与唤醒', () => {
       })
       expect(again.run_id).toBe(childId)
       expect(again.created).toBe(false)
+      // 请求体想换到 child@1：定义里 pin 的是 2，这里必须拒
       expect(() => createSubworkflowRun(tx, c, {
         parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'child', workflowVersion: 1, now: NOW,
-      })).toThrowError(/已经起了别的 pin 版本/)
+      })).toThrowError(/请求体不能替换目标/)
     })
     const row = db.raw.prepare('SELECT * FROM runs WHERE run_id = ?').get(childId) as any
     expect(row.workflow_id).toBe('child')
@@ -122,40 +147,28 @@ describe('子运行 pin、深度与唤醒', () => {
     expect(row.root_run_id).toBe('r1')
     expect(row.subworkflow_depth).toBe(1)
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM node_runs WHERE run_id = ?').get(childId)).toEqual({ n: 1 })
+    // 子节点的副作用等级显式落库，不依赖 DDL 默认值
+    expect(db.raw.prepare('SELECT side_effect_policy FROM node_runs WHERE run_id = ?').get(childId)).toEqual({ side_effect_policy: 'compensable' })
   })
 
-  it('深度超过 2 在库层也被拒，不靠调用方自觉', () => {
-    const db = memoryDb()
+  it('定义里 pin 的子流程版本没发布：按 WORKFLOW_SUBWORKFLOW_VERSION_MISSING 拒，不退回最新', () => {
+    const db = memoryDb({ workflow_id: 'missing', workflow_version: '1' })
     const c = catalog()
     withTx(db, (tx) => {
-      const child = createSubworkflowRun(tx, c, {
-        parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'child', workflowVersion: 1, now: NOW,
-      })
-      const grandNode = tx.get<{ node_run_id: string }>(
-        "SELECT node_run_id FROM node_runs WHERE run_id = ? AND node_type = 'agent'", [child.run_id],
-      )!
-      tx.run("UPDATE node_runs SET node_type = 'subworkflow', status = 'started' WHERE node_run_id = ?", [grandNode.node_run_id])
-      const grand = createSubworkflowRun(tx, c, {
-        parentRunId: child.run_id, parentNodeRunId: grandNode.node_run_id, workflowId: 'grand', workflowVersion: 1, now: NOW,
-      })
-      expect(grand.depth).toBe(2)
-      const greatNode = tx.get<{ node_run_id: string }>(
-        "SELECT node_run_id FROM node_runs WHERE run_id = ? AND node_type = 'subworkflow'", [grand.run_id],
-      )!
-      tx.run("UPDATE node_runs SET status = 'started' WHERE node_run_id = ?", [greatNode.node_run_id])
       expect(() => createSubworkflowRun(tx, c, {
-        parentRunId: grand.run_id, parentNodeRunId: greatNode.node_run_id, workflowId: 'great', workflowVersion: 1, now: NOW,
-      })).toThrowError(/深度超过/)
+        parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'ghost', workflowVersion: 1, now: NOW,
+      })).toThrowError(/版本不存在或未发布/)
     })
   })
 
-  it('引用的 pin 版本不存在时按 WORKFLOW_SUBWORKFLOW_VERSION_MISSING 拒，不退回最新', () => {
-    const db = memoryDb()
+  it('父 run 已经到深度上限：再起子流程直接拒', () => {
+    const db = memoryDb(ROOT_DEF)
     const c = catalog()
     withTx(db, (tx) => {
+      tx.run("UPDATE runs SET subworkflow_depth = 2 WHERE run_id = 'r1'")
       expect(() => createSubworkflowRun(tx, c, {
-        parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'child', workflowVersion: 99, now: NOW,
-      })).toThrowError(/版本不存在或未发布/)
+        parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'child', workflowVersion: 2, now: NOW,
+      })).toThrowError(/深度超过/)
     })
   })
 
@@ -165,20 +178,18 @@ describe('子运行 pin、深度与唤醒', () => {
     withTx(db, (tx) => {
       tx.run("UPDATE node_runs SET status = 'queued' WHERE node_run_id = 'nr-parent'")
       expect(() => createSubworkflowRun(tx, c, {
-        parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'child', workflowVersion: 1, now: NOW,
+        parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'child', workflowVersion: 2, now: NOW,
       })).toThrowError(/只有 started/)
     })
   })
 
-  it('运行前按祖先链判环：父 run 已是 child@1，再挂 child@1 直接拒', () => {
-    const db = memoryDb()
+  it('自引用的定义在发布期就被拒：环不留到派发', () => {
     const c = catalog()
-    withTx(db, (tx) => {
-      tx.run("UPDATE runs SET workflow_id = 'child', workflow_version = 1 WHERE run_id = 'r1'")
-      expect(() => createSubworkflowRun(tx, c, {
-        parentRunId: 'r1', parentNodeRunId: 'nr-parent', workflowId: 'child', workflowVersion: 1, now: NOW,
-      })).toThrowError(/子流程引用成环/)
-    })
+    expect(() => c.load({
+      workflow_id: 'loop',
+      workflow_version: '1',
+      nodes: [{ node_id: 'sub', type: 'subworkflow', subworkflow: { workflow_id: 'loop', pinned_version: 1 } }],
+    })).toThrowError(/子流程引用成环/)
   })
 
   it('started 父节点进 waiting，子运行终态后才能唤醒为 done', () => {
@@ -186,7 +197,7 @@ describe('子运行 pin、深度与唤醒', () => {
     const c = catalog()
     withTx(db, (tx) => {
       const child = startSubworkflowNode(tx, SECRET, c, {
-        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
       })
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!.status).toBe('waiting')
       expect(() => finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW }))
@@ -206,12 +217,13 @@ describe('子运行 pin、深度与唤醒', () => {
     const c = catalog()
     withTx(db, (tx) => {
       const child = startSubworkflowNode(tx, SECRET, c, {
-        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
       })
       tx.run("UPDATE runs SET status = 'failed_with_unverified' WHERE run_id = ?", [child.run_id])
       const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
       expect(out.status).toBe('failed')
-      expect(closeRun(tx, 'r1', NOW)).toBe('failed')
+      // 子流程带未核实事实：父 run 不能收成普通 failed
+      expect(closeRun(tx, 'r1', NOW)).toBe('failed_with_unverified')
     })
   })
 
@@ -220,12 +232,12 @@ describe('子运行 pin、深度与唤醒', () => {
     const c = catalog()
     withTx(db, (tx) => {
       const child = startSubworkflowNode(tx, SECRET, c, {
-        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
       })
       tx.run("UPDATE runs SET status = 'cancelled' WHERE run_id = ?", [child.run_id])
       const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
       expect(out.status).toBe('failed')
-      expect(closeRun(tx, 'r1', NOW)).toBe('failed')
+      expect(closeRun(tx, 'r1', NOW)).toBe('failed_with_unverified')
     })
   })
 
@@ -234,7 +246,7 @@ describe('子运行 pin、深度与唤醒', () => {
     const c = catalog()
     withTx(db, (tx) => {
       const child = startSubworkflowNode(tx, SECRET, c, {
-        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
       })
       tx.run("UPDATE runs SET status = 'cancelled', cancel_requested_at = ? WHERE run_id = ?", [NOW, child.run_id])
       tx.run("UPDATE runs SET cancel_requested_at = ?, cancel_result = 'interrupted' WHERE run_id = 'r1'", [NOW])
@@ -245,18 +257,152 @@ describe('子运行 pin、深度与唤醒', () => {
   })
 })
 
+describe('子流程副作用向父流程传播', () => {
+  function seedChild(db: Db, c: WorkflowCatalog, patch: { runStatus: string; nodeStatus: string; policy: string; verifiedNone: number }) {
+    return withTx(db, (tx) => {
+      const child = startSubworkflowNode(tx, SECRET, c, {
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
+      })
+      tx.run('UPDATE runs SET status = ? WHERE run_id = ?', [patch.runStatus, child.run_id])
+      tx.run('UPDATE node_runs SET status = ?, side_effect_policy = ?, side_effect_verified_none = ? WHERE run_id = ?', [
+        patch.nodeStatus, patch.policy, patch.verifiedNone, child.run_id,
+      ])
+      return child.run_id
+    })
+  }
+
+  it('子流程全部 pure 且成功：父 run 是普通 succeeded', () => {
+    const db = memoryDb()
+    const c = catalog()
+    const childId = seedChild(db, c, { runStatus: 'succeeded', nodeStatus: 'done', policy: 'pure', verifiedNone: 1 })
+    withTx(db, (tx) => {
+      expect(finishSubworkflowChild(tx, SECRET, { childRunId: childId, now: NOW }).status).toBe('done')
+      const parent = tx.get<{ side_effect_policy: string; side_effect_verified_none: number }>(
+        'SELECT side_effect_policy, side_effect_verified_none FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
+      )!
+      expect(parent).toEqual({ side_effect_policy: 'pure', side_effect_verified_none: 1 })
+      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded')
+    })
+  })
+
+  it('子流程有未核实副作用：父 run 不得成为普通 succeeded', () => {
+    const db = memoryDb()
+    const c = catalog()
+    const childId = seedChild(db, c, { runStatus: 'succeeded_with_unverified', nodeStatus: 'done', policy: 'compensable', verifiedNone: 0 })
+    withTx(db, (tx) => {
+      expect(finishSubworkflowChild(tx, SECRET, { childRunId: childId, now: NOW }).status).toBe('done')
+      const parent = tx.get<{ side_effect_policy: string; side_effect_verified_none: number }>(
+        'SELECT side_effect_policy, side_effect_verified_none FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
+      )!
+      expect(parent.side_effect_policy).toBe('compensable')
+      expect(parent.side_effect_verified_none).toBe(0)
+      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded_with_unverified')
+    })
+  })
+
+  it('子流程含 irreversible 且未核实：父节点保留不可逆等级，父 run 落未核实', () => {
+    const db = memoryDb()
+    const c = catalog()
+    const childId = seedChild(db, c, { runStatus: 'succeeded_with_unverified', nodeStatus: 'done', policy: 'irreversible', verifiedNone: 0 })
+    withTx(db, (tx) => {
+      expect(finishSubworkflowChild(tx, SECRET, { childRunId: childId, now: NOW }).status).toBe('done')
+      const parent = tx.get<{ side_effect_policy: string }>(
+        'SELECT side_effect_policy FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
+      )!
+      expect(parent.side_effect_policy).toBe('irreversible')
+      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded_with_unverified')
+    })
+  })
+
+  it('子流程失败：父节点按真实结果落 failed，不被吞成成功', () => {
+    const db = memoryDb()
+    const c = catalog()
+    const childId = seedChild(db, c, { runStatus: 'failed', nodeStatus: 'failed', policy: 'compensable', verifiedNone: 0 })
+    withTx(db, (tx) => {
+      expect(finishSubworkflowChild(tx, SECRET, { childRunId: childId, now: NOW }).status).toBe('failed')
+      expect(closeRun(tx, 'r1', NOW)).toBe('failed_with_unverified')
+    })
+  })
+})
+
+describe('节点级取消后子运行的未核实事实', () => {
+  it('父节点已被取消、子 run 后收口为未核实：父 run 不得变成普通 succeeded', () => {
+    const db = memoryDb()
+    const c = catalog()
+    withTx(db, (tx) => {
+      const child = startSubworkflowNode(tx, SECRET, c, {
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
+      })
+      // 节点级取消：父节点直接 superseded（控制节点没有执行实例）
+      const parent = tx.get<{ attempt: number; revision: number }>('SELECT attempt, revision FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!
+      applyCancel(tx, SECRET, {
+        nodeRunId: 'nr-parent', attempt: parent.attempt, revision: parent.revision,
+        cancelResult: 'interrupted', now: NOW, graceMs: 1000,
+      })
+      expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!.status).toBe('superseded')
+
+      // 子 run 之后才收口，且带未核实副作用
+      tx.run("UPDATE runs SET status = 'succeeded_with_unverified' WHERE run_id = ?", [child.run_id])
+      tx.run("UPDATE node_runs SET status = 'done', side_effect_policy = 'irreversible', side_effect_verified_none = 0 WHERE run_id = ?", [child.run_id])
+      const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
+      expect(out.status).toBe('superseded')
+      const parentRow = tx.get<{ side_effect_policy: string; side_effect_verified_none: number }>(
+        'SELECT side_effect_policy, side_effect_verified_none FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
+      )!
+      expect(parentRow).toEqual({ side_effect_policy: 'irreversible', side_effect_verified_none: 0 })
+      // 父 run 没有取消请求：终态必须继承子运行的未核实，而不是普通 succeeded
+      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded_with_unverified')
+    })
+  })
+})
+
 describe('父取消传播与终态闸', () => {
-  it('取消压在审批卡上的节点：决定卡一起过期，节点 failed，run 能落 cancelled', () => {
+  it('取消压在审批卡上的节点：裁决卡按 cancelled 收口并留事件，节点 failed 且清租约', () => {
     const db = memoryDb()
     withTx(db, (tx) => {
-      tx.run("UPDATE node_runs SET status = 'blocked_pre', blocked_decision_id = 'd1' WHERE node_run_id = 'nr-parent'")
+      tx.run("UPDATE node_runs SET status = 'blocked_pre', blocked_decision_id = 'd1', lease_id = 'lease_x', lease_expires_at = ?, executor_session_id = 's1', executor_agent_id = 'a1' WHERE node_run_id = 'nr-parent'", [NOW])
       tx.run("INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, created_at) VALUES ('d1', 'r1', 'nr-parent', 'pre_execution', 'pending', 1, '{}', ?)", [NOW])
       const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
       expect(out.cancelledNodes).toContain('nr-parent')
+      expect(out.runStatus).toBe('cancelled')
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!.status).toBe('failed')
-      expect(tx.get<{ status: string; closed_reason: string }>('SELECT status, closed_reason FROM decisions WHERE decision_id = ?', ['d1']))
-        .toMatchObject({ status: 'resolved', closed_reason: 'expired_final' })
+      const node = tx.get<{ lease_id: string | null; executor_session_id: string | null; blocked_decision_id: string | null }>(
+        'SELECT lease_id, executor_session_id, blocked_decision_id FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
+      )!
+      expect(node).toEqual({ lease_id: null, executor_session_id: null, blocked_decision_id: null })
+      expect(tx.get<{ status: string; closed_reason: string; resolved_by: string | null }>(
+        'SELECT status, closed_reason, resolved_by FROM decisions WHERE decision_id = ?', ['d1'],
+      )).toEqual({ status: 'resolved', closed_reason: 'cancelled', resolved_by: 'system:cancel' })
       expect(closeRun(tx, 'r1', NOW)).toBe('cancelled')
+    })
+  })
+
+  it('blocked_post 压在人工核验上：不替人清证据门，run 进 cancellation_pending', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status = 'blocked_post' WHERE node_run_id = 'nr-parent'")
+      tx.run("INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, created_at) VALUES ('d2', 'r1', 'nr-parent', 'verify_human', 'pending', 1, '{}', ?)", [NOW])
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      expect(out.pendingHumanDecisions).toEqual(['d2'])
+      expect(out.runStatus).toBe('cancellation_pending')
+      expect(out.cancelledNodes).toEqual([])
+      expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!.status).toBe('blocked_post')
+      expect(tx.get<{ status: string }>('SELECT status FROM decisions WHERE decision_id = ?', ['d2'])!.status).toBe('pending')
+      expect(closeRun(tx, 'r1', NOW)).toBeNull()
+    })
+  })
+
+  it('已终态 run 再取消：不写取消列，返回 already_stopped', () => {
+    const db = memoryDb()
+    withTx(db, (tx) => {
+      tx.run("UPDATE runs SET status = 'succeeded', ended_at = ? WHERE run_id = 'r1'", [NOW])
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      expect(out.runStatus).toBe('already_stopped')
+      expect(out.cancelledNodes).toEqual([])
+      const row = tx.get<{ status: string; cancel_requested_at: string | null }>(
+        'SELECT status, cancel_requested_at FROM runs WHERE run_id = ?', ['r1'],
+      )!
+      expect(row).toEqual({ status: 'succeeded', cancel_requested_at: null })
     })
   })
 
@@ -279,17 +425,18 @@ describe('父取消传播与终态闸', () => {
     let childId = ''
     withTx(db, (tx) => {
       const child = startSubworkflowNode(tx, SECRET, c, {
-        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 1, now: NOW,
+        nodeRunId: 'nr-parent', attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
       })
       childId = child.run_id
       tx.run("UPDATE node_runs SET status = 'started', side_effect_policy = 'compensable' WHERE run_id = ?", [childId])
-      tx.run("UPDATE node_runs SET side_effect_policy = 'irreversible' WHERE run_id = ? AND node_id = 'a'", [childId])
+      tx.run("UPDATE node_runs SET side_effect_policy = 'irreversible' WHERE run_id = ? AND node_id = 'b'", [childId])
       const out = propagateRunCancellation(tx, SECRET, {
         runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000,
       })
       expect(out.cancelledRuns).toEqual([childId])
       expect(out.cancelledNodes).toEqual(['nr-parent'])
       expect(out.skippedIrreversible.length).toBe(1)
+      expect(out.runStatus).toBe('cancelling')
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE run_id = ?', [childId])!.status).toBe('started')
       expect(() => assertNoOpenChildRuns(tx, 'r1')).toThrowError(/未收口的子运行/)
       expect(() => assertRunCanTerminal(tx, 'r1')).toThrowError(/未收口的子运行/)

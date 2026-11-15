@@ -98,7 +98,13 @@ export type NodeCommands = {
   // 运行级取消：父取消必须向子 run 传播，不可逆节点跳过
   cancelRun: (body: {
     runId: string; cancelResult: string; graceMs: number; extendDeadlineMs?: number; now: string
-  }) => { cancelledRuns: string[]; cancelledNodes: string[]; skippedIrreversible: string[] }
+  }) => {
+    cancelledRuns: string[]
+    cancelledNodes: string[]
+    skippedIrreversible: string[]
+    pendingHumanDecisions: string[]
+    runStatus: string
+  }
   // 派发：把 run 下排队中的节点交给生产执行器跑
   dispatch: (body: {
     runId: string

@@ -333,7 +333,7 @@ describe('AgentLifecycle 故障注入', () => {
     const h = harness(transport, (db) => {
       const ledger = new BridgeLedger(db, TEST_SECRET, { nodeRunId: 'nr1', attempt: 1, executorAgentId: 'agent_1' })
       const ingested = ledger.ingest(ev(1, 'step', { kind: 'step' }))
-      ledger.markHandled(ingested.ackSeq)
+      ledger.markHandled(ingested.eventSeq)
     })
     const envelope = await h.lifecycle.run(new AbortController().signal)
     expect(envelope.report).toMatchObject({ status: 'done' })

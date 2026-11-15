@@ -67,18 +67,10 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     })
     return { cancel_result: params.cancelResult, next_status: 'superseded', fence_state: null, reason: 'cancelled_before_dispatch' }
   }
-  // 不可逆子节点不许取消：已发生的副作用不能靠取消掩盖，只能走核实/补偿
-  if (row.side_effect_policy === 'irreversible') {
-    throw new OrchError('FORBIDDEN', '不可逆子节点不许取消', {
-      nodeRunId: params.nodeRunId,
-      attempt: params.attempt,
-      status: row.status,
-      sideEffectPolicy: row.side_effect_policy,
-    })
-  }
   // 纯控制节点（wait/subworkflow）没有宿主执行实例：取消即收口，
-  // 不能先立围栏再等一个永远不会回来的执行器。
-  if (row.status === 'waiting' && row.side_effect_policy === 'pure') {
+  // 不能先立围栏再等一个永远不会回来的执行器。判据是 node_type，不是副作用等级：
+  // 子流程父节点可能代表不可逆子图，但它本身仍然不是一个可取消的执行实例。
+  if (row.status === 'waiting' && (row.node_type === 'wait' || row.node_type === 'subworkflow')) {
     cancelWait(tx, params.nodeRunId, params.now)
     applyTransition(tx, {
       nodeRunId: params.nodeRunId,
@@ -109,6 +101,15 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       to: 'superseded',
     })
     return { cancel_result: params.cancelResult, next_status: 'superseded', fence_state: null, reason: 'control_node_cancelled' }
+  }
+  // 不可逆执行节点不许取消：已发生的副作用不能靠取消掩盖，只能走核实/补偿
+  if (row.side_effect_policy === 'irreversible') {
+    throw new OrchError('FORBIDDEN', '不可逆子节点不许取消', {
+      nodeRunId: params.nodeRunId,
+      attempt: params.attempt,
+      status: row.status,
+      sideEffectPolicy: row.side_effect_policy,
+    })
   }
   if (params.cancelResult === 'interrupted') {
     // 围栏已经立着：第二次取消不许再立一次（G-05 要求一次取消只arm一次）
@@ -290,6 +291,8 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
       nodeRunId: params.row.node_run_id,
       from: ['timing_out'],
       to: 'stopping',
+      // 宽限到点撤围栏固定走 M-26；不带 ruleId 会被 M-27 的守卫口径混进来
+      ruleId: 'M-26',
       attempt: params.row.attempt,
       now: params.now,
       bumpRearm: true,

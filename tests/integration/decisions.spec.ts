@@ -113,19 +113,19 @@ describe('八种 decision 与活跃唯一性', () => {
       tx.run("UPDATE decisions SET status = 'blocked_for_human' WHERE decision_id = 'd2'")
     })
     withTx(db, (tx) => {
-      expect(escalateDecisions(tx, { now: '2026-11-14T01:00:00.000Z' })).toEqual({ blocked: 0, expired: 0 })
+      expect(escalateDecisions(tx, 'escalate-secret', { now: '2026-11-14T01:00:00.000Z' })).toEqual({ blocked: 0, expired: 0 })
     })
     expect(row(db, 'd1').status).toBe('pending')
 
     withTx(db, (tx) => {
-      expect(escalateDecisions(tx, { now: '2026-11-14T02:00:00.000Z' })).toEqual({ blocked: 1, expired: 0 })
+      expect(escalateDecisions(tx, 'escalate-secret', { now: '2026-11-14T02:00:00.000Z' })).toEqual({ blocked: 1, expired: 0 })
     })
     expect(row(db, 'd1').status).toBe('blocked_for_human')
     expect(row(db, 'd1').revision).toBe(2)
     expect(row(db, 'd2').status).toBe('blocked_for_human')
 
     withTx(db, (tx) => {
-      expect(escalateDecisions(tx, { now: '2026-11-15T00:00:00.000Z' })).toEqual({ blocked: 0, expired: 1 })
+      expect(escalateDecisions(tx, 'escalate-secret', { now: '2026-11-15T00:00:00.000Z' })).toEqual({ blocked: 0, expired: 1 })
     })
     expect(row(db, 'd1').status).toBe('resolved')
     expect(row(db, 'd1').closed_reason).toBe('expired_final')

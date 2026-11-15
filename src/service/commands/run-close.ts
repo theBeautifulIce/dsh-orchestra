@@ -65,6 +65,20 @@ export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null
     [terminalStatus, now, now, runId],
   )
   if (res.changes !== 1) return null
-  appendEvent(tx, { type: 'run.terminal', runId, payload: { status: terminalStatus, cancel_result: run.cancel_result } })
+  // cancelled 只说明“按要求停了”，不说明副作用都已核实：
+  // 把失败与未核实节点一并写进终态事件，调用方不必再去翻节点账本才能发现风险。
+  appendEvent(tx, {
+    type: 'run.terminal',
+    runId,
+    payload: {
+      status: terminalStatus,
+      cancel_result: run.cancel_result,
+      cancel_requested: run.cancel_requested_at !== null,
+      failed_nodes: nodes.filter((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status)).map((node) => node.node_run_id),
+      unverified_nodes: nodes.filter(unverified).map((node) => node.node_run_id),
+      orphaned_nodes: nodes.filter((node) => node.status === 'orphaned' && !node.replacement_node_run_id).map((node) => node.node_run_id),
+      superseded_nodes: nodes.filter((node) => node.status === 'superseded').map((node) => node.node_run_id),
+    },
+  })
   return terminalStatus
 }

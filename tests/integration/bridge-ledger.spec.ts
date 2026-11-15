@@ -53,7 +53,8 @@ describe('R5-B 桥事件落账', () => {
     ledger.ingest(ev(1))
     const dup = ledger.ingest(ev(1))
     expect(dup.appended).toBe(false)
-    expect(dup.ackSeq).toBe(1)
+    expect(dup.eventSeq).toBe(1)
+    expect(dup.persistedCursor).toBe(1)
     expect(() => ledger.ingest(ev(1, { seq: 1, changed: true }))).toThrowError(/协议冲突/)
     expect(ledger.cursor()).toBe(1)
     expect(count(db, 'SELECT COUNT(*) AS n FROM bridge_event_receipts')).toBe(1)
@@ -189,5 +190,59 @@ describe('R5-B 桥事件落账', () => {
     expect(ledger.cursor()).toBe(1)
     expect(ledger.handled()).toBe(1)
     expect(count(db, 'SELECT COUNT(*) AS n FROM bridge_event_receipts')).toBe(1)
+  })
+})
+
+describe('处理游标必须逐条推进（G3 r11 P2-2）', () => {
+  it('persisted=3、handled=0 时直接跳到 3：拒绝，避免漏处理的事件被静默跳过', () => {
+    const { dir, db } = freshLedger()
+    dirs.push(dir)
+    dbs.push(db)
+    seed(db)
+    const ledger = ledgerFor(db)
+    ledger.ingest(ev(1))
+    ledger.ingest(ev(2))
+    ledger.ingest(ev(3))
+    expect(() => ledger.markHandled(3)).toThrowError(/逐条推进/)
+    expect(ledger.handled()).toBe(0)
+    // 逐条推进才是合法路径
+    ledger.markHandled(1)
+    ledger.markHandled(2)
+    ledger.markHandled(3)
+    expect(ledger.handled()).toBe(3)
+  })
+
+  it('重复事件回执带的是事件自己的序号与当前落账位，两者不能混用', () => {
+    const { dir, db } = freshLedger()
+    dirs.push(dir)
+    dbs.push(db)
+    seed(db)
+    const ledger = ledgerFor(db)
+    ledger.ingest(ev(1))
+    ledger.ingest(ev(2))
+    const dup = ledger.ingest(ev(1))
+    expect(dup).toMatchObject({ appended: false, eventSeq: 1, persistedCursor: 2 })
+  })
+
+  it('消费器按事件序号推进：重放旧事件不会把处理位推到落账位', async () => {
+    const { dir, db } = freshLedger()
+    dirs.push(dir)
+    dbs.push(db)
+    seed(db)
+    const ledger = ledgerFor(db)
+    ledger.ingest(ev(1))
+    ledger.ingest(ev(2))
+    // 模拟旧 ACK 顺序留下的历史：落账到 2，处理位还是 0
+    const buf = new BridgeEventBuffer(
+      { limitBytes: 8192, highWaterBytes: 4096, spillDir: dir, agentId: 'a1' },
+      // 重放从处理位开始，不从落账位开始
+      { lastPersistedAckSeq: ledger.handled(), lookupPersisted: (seq) => ledger.lookup(seq) },
+    )
+    const consumer = new BridgeConsumer({} as never, buf, ledger, async () => {})
+    // 已落账未处理的两条会被逐条补处理：markHandled 只接受 handled+1，跳过任何一条都会抛
+    await consumer.receive(ev(1))
+    expect(ledger.handled()).toBe(2)
+    await consumer.receive(ev(2))
+    expect(ledger.handled()).toBe(2)
   })
 })

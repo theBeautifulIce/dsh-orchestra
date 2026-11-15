@@ -244,6 +244,8 @@ function upholdDecision(
     nodeRunId: params.nodeRunId,
     from: [row.status as NodeStatus],
     to: 'superseded',
+    // 人维持原裁决 → 旧行作废，固定走 M-60；不能落到无守卫的 M-06
+    ruleId: 'M-60',
     attempt: params.attempt,
     now: params.now,
     allowHung: true,
@@ -366,6 +368,14 @@ export function applyReport(
   const reportSeq = existing ? existing.report_seq : nextReportSeq(tx, params.nodeRunId)
   // 第三步：status + attempt + generation 三样 CAS（含租约校验）
   const row: NodeRunRow = loadNodeRun(tx, params.nodeRunId)
+  // 控制节点没有宿主执行实例：任何执行器上报都不该落到它们身上。
+  // 否则 waiting→failed 可以借 M-48 这条无守卫规则绕开 controlCompletion（G3 r11 P1-1）。
+  if (row.node_type === 'wait' || row.node_type === 'subworkflow') {
+    return rejectReport(tx, secret, {
+      nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq,
+      reason: 'control_node_report_not_allowed', now: params.now,
+    })
+  }
   // 报告自己写的 attempt 必须和请求一致：执行器报 999、请求报 1 不许被当成同一笔（审计 N-07）
   if (report.attempt !== params.attempt) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'attempt_mismatch', now: params.now })
@@ -491,6 +501,9 @@ export function applyReport(
       nodeRunId: params.nodeRunId,
       from: [row.status as NodeStatus],
       to: report.status as NodeStatus,
+      // 迟到报告的两条出口各自有明确规则：startup_unknown 走 M-11，indeterminate 走 M-59。
+      // 不写死就会撞上同一对状态的通用失败边（M-48），把“维持报告”变成普通失败。
+      ruleId: row.status === 'startup_unknown' ? 'M-11' : 'M-59',
       attempt: params.attempt,
       now: params.now,
       allowHung: true,

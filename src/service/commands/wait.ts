@@ -104,11 +104,15 @@ export function recordWaitEvent(tx: Tx, input: {
 }): number {
   if (!input.eventType) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '等待事件缺少 type', { runId: input.runId })
   if (input.idempotencyKey) {
+    // 幂等键按 run 作用域唯一：不同 run 用同一个键时，事件必须各自进各自的 inbox
     tx.run(
-      'INSERT INTO wait_event_inbox (run_id, event_type, payload_json, idempotency_key, received_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (idempotency_key) DO NOTHING',
+      'INSERT INTO wait_event_inbox (run_id, event_type, payload_json, idempotency_key, received_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (run_id, idempotency_key) DO NOTHING',
       [input.runId, input.eventType, JSON.stringify(input.payload ?? {}), input.idempotencyKey, input.now],
     )
-    const row = tx.get<{ inbox_seq: number }>('SELECT inbox_seq FROM wait_event_inbox WHERE idempotency_key = ?', [input.idempotencyKey])
+    const row = tx.get<{ inbox_seq: number }>(
+      'SELECT inbox_seq FROM wait_event_inbox WHERE run_id = ? AND idempotency_key = ?',
+      [input.runId, input.idempotencyKey],
+    )
     return row!.inbox_seq
   }
   const res = tx.run(
