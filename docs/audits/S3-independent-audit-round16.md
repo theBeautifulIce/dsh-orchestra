@@ -15,7 +15,7 @@
   "conclusion": "pass",
   "p0": 0,
   "p1": 0,
-  "p2": 3,
+  "p2": 2,
   "must_pass_total": 20,
   "must_pass_passed": 20,
   "must_pass_ids": [
@@ -50,7 +50,7 @@
 
 结论：pass
 
-P0 = 0，P1 = 0，P2 = 3；必过项 20/20。
+P0 = 0，P1 = 0，P2 = 2；必过项 20/20。
 
 ## 2. 实测
 
@@ -85,10 +85,17 @@ P0 = 0，P1 = 0，P2 = 3；必过项 20/20。
 
 | 编号 | 位置 | 说明 |
 | --- | --- | --- |
-| P2-1 | `src/service/clock-recovery.ts` | 剩余预算估算靠墙钟差值 |
-| P2-2 | `tests/integration/clock-recovery.spec.ts` | 负向路径缺事件计数断言 |
-| P2-3 | `src/service/dispatcher.ts` | `storage_error` 的 `persisted_status` 读库失败时为 unknown |
+| P2-1 | `docs/gates/G3.md` | 门记录在批次进行中仍绑旧候选，属预期 |
+| P2-2 | `src/service/commands/cancel.ts` | `revokeFence` 缺钟时抛 TypeError（整轮回滚），与 wait 缺钟静默 false 口径不一；两者都 fail-closed，类型层已必填、生产不可达 |
+
+## 5.1 观察（不计 P2）
+
+| 位置 | 说明 |
+| --- | --- |
+| `src/service/clock-recovery.ts` | 剩余预算估算靠墙钟差值 |
+| `tests/integration/clock-recovery.spec.ts` | 负向路径缺事件计数断言 |
+| `src/service/dispatcher.ts` | `storage_error` 的 `persisted_status` 读库失败时为 unknown |
 
 ## 6. 结论
 
-fail-closed 语义成立，20 项全过，3 条 P2 不影响重签。
+fail-closed 语义成立，20 项全过，2 条 P2 不影响重签。
