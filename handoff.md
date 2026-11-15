@@ -6,74 +6,39 @@
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 11:40，HEAD `a8691ff`，P2 批次待重审）
-
-> **重要：当前 HEAD 不是已签署状态。** 已签的完整链停在 `f566156`（候选 `082d9ad`，三门 exit 0），
-> 之后 `a8691ff` 是 P2 批量修复，**尚未重审、未重签、未推送**。推送网络仍不稳定（schannel / 502）。
-
-### 两段状态
-
-| 提交 | 内容 | 门状态 |
-| --- | --- | --- |
-| `f566156` | 三份 round59/59/11 审计 + G1→G2→G3 签名 | 三门 exit 0，已签 |
-| `a8691ff` | P2 批次：同状态规则校验、零副作用收口、无执行器直调、扫描时钟 fail-closed、取消契约 null、ev-g2-16 计数 | 未审未签，`pnpm gate` 红（预期） |
-
-### P2 批次改了什么
-
-- `applyTransition`：显式 `ruleId` 在同状态写时也校验来源/目标与前提；不带 `ruleId` 的挂起补丁不受影响。
-- `failControlDispatch` / `failQueuedNode`：节点标 `pure` + `verified_none=1`，run 不再误报 `failed_with_unverified`。
-- `dispatchRun` 未装执行器且直接调用：agent 节点收成 failed 并留事件（与 HTTP 入口口径一致）。
-- `sweep` 动作时限：没有锚点或没有时钟一律判不确定，不回退墙钟；用例改成锚点驱动。
-- `/v1/runs/cancel` 的 `terminalStatus`：run 未到终态时为 `null`。
-- `docs/gates/evidence/G2/ev-g2-16.md`：桥闭环 76 / 全量 898（现为 901）计数更新。
-- 回归新增 4 条：同状态规则、零副作用收口、锚点时限。
-
-### 恢复网络后要做的（顺序不能变）
-
-1. `git push origin f566156:main` —— 先把已签署检查点推上去（远端当前还是 `723efe7`）。
-2. 在 `a8691ff` 上重派 S1 r60 / S2 r60 / S3 r12，报告绑定 `a8691ff`。
-3. 更新三门 `audit_round` / `audit_report`，按 G1→G2→G3 重签；每次签完提交。
-4. `pnpm gate` 三门 exit 0 后 `git push origin main`。
-5. 复核：`git log --oneline origin/main -3` 末提交应为 G3 签名提交。
-
-
+## 0.1 最新接手续接（2026-11-15 12:05，HEAD `6ed4499`，三门已签并推送）
 
 ### 当前进度
 
-- 工作树干净，HEAD 是签署链末提交 `a0a54d3`（G3 签名）。代码候选冻结在 `082d9ad`，审计报告绑定同一提交。
-- **三门全部通过**：`pnpm gate` → G1 13/13（artifact `ba42e81e…`）、G2 20/20（`baad22ee…`）、G3 20/20（`78921c42…`），三份 `artifact_hash` 与前序门链完整。
-- 独立审计（同一候选 `082d9ad`）：
-  - S1 round59 → G1 pass，13/13，P0=0/P1=0/P2=6（`docs/audits/S1-independent-audit-round59.md`）；
-  - S2 round59 → G2 pass，20/20，P0=0/P1=0/P2=4（`docs/audits/S2-independent-audit-round59.md`）；
-  - S3 round11 → G3 pass，20/20，P0=0/P1=0/P2=4（`docs/audits/S3-independent-audit-round11.md`）。
-- 全量：typecheck exit 0；**63 files / 898 passed | 1 skipped**；build ESM `lib/index.js` 284.16 kB / gzip 68.68 kB；证据复现 **28/28**。
-- 签署顺序与链：G1（`c2f0771`）→ G2（`4dd2309`）→ G3（`a0a54d3`）；每次签完先提交，G2/G3 的 `previous_artifact_hash` 指向前一门在 HEAD 里的 artifact。
+- `origin/main` = `6ed4499`，工作树干净。代码候选 `a8691ff`（P2 批次），审计报告与三门签名都绑在它上面。
+- **三门全部通过**：`pnpm gate` → G1 13/13（`f148c425…`）、G2 20/20（`d824127c…`）、G3 20/20（`96941ee5…`）。
+- 独立复审：S1 r60 / S2 r60 / S3 r12 全部 pass，P0/P1=0，P2 分别 6/6/4（`docs/audits/*round60*.md`、`*round12*.md`）。
+- 全量：**63 files / 901 passed | 1 skipped**；build ESM `lib/index.js` 284.70 kB / gzip 68.77 kB；证据 28/28。
+- 推送走本地代理 `127.0.0.1:7078`；`git` 的 `http.proxy` 未写进配置，命令里临时指定即可。
 
-### 本轮治理改动
+### 本轮 P2 批次已收口
 
-- `scripts/gate-check.ts`：G1/G2 的候选范围补 `docs/gates/G3.md` 排除项（S1 P2-1）。之前 G3 门记录一变，G1/G2 的候选哈希就失效，重签链永远闭合不了。
-- `docs/gates/G3.md`：补齐 `## 证据文件与哈希`、`## 失败项`、`## 例外`、`## 回滚` 四节，并把不变量表头改成解析器认识的「不变量」，才能按 G1/G2 同一套规则签署。
-- 三份审计报告均含唯一 `门：Gx`、`候选提交：082d9ad…` 与结构化 verdict 块。
+`applyTransition` 同状态显式规则校验、派发失败标 `pure/verified_none=1`、`dispatchRun` 无执行器收口、扫描动作时限 fail-closed、`cancelRun` 的 `terminalStatus` 未终态返回 null、`ev-g2-16` 计数更新，新增 4 条回归。
 
-### 已知 P2（不阻断签署，下一轮清）
+### 剩余 P2（下一批一起改，改完再走一轮审计+重签）
 
-| 来源 | 项 | 位置 |
+| 编号 | 位置 | 说明 |
 | --- | --- | --- |
-| S1 P2-2 | `wait_registrations.idempotency_key` 仍是全表唯一（派发器按 run:node:attempt 派生，不受影响） | `018_wait_registrations.sql:24` |
-| S1 P2-4 | `cancelRun` 返回类型注释写「未收口时为 null」，实际恒为字符串 | `src/service/server.ts:99-110` |
-| S1 P2-5 / S3 P2-4 | `applyTransition` 在 `actual === to` 时跳过显式规则校验 | `src/service/commands/nodes.ts:139-152` |
-| S3 P2-1 | 派发失败收口把节点留在 compensable，run 终态显示未核实（节点其实没执行） | `src/service/dispatcher.ts:189-235` |
-| S3 P2-2 | 父 run 缺定义哈希时不能起子流程（老数据需回填） | `src/service/commands/subworkflow.ts:239-255` |
-| S2 P2-1 | `ev-g2-16` 辅助计数仍写 70/624，实际 76/898 | `docs/gates/evidence/G2/ev-g2-16.md` |
-| S2 P2-2 / S3 P2-3 | 无时钟注入时回退墙钟；生产恒注入 | `src/service/sweep.ts:275-277` |
-| S2 P2-3 | 直接调 dispatchRun 且未装执行器时，agent 节点失败但留 queued | `src/service/dispatcher.ts:126-140` |
+| P2-1 | `docs/gates/evidence/G2/ev-g2-16.md:54` | 全量计数写 898，实际 901 |
+| P2-2 | `src/index.ts:73`、`run-close.ts:8` | 终态词表两处字面量重复 |
+| P2-3 | `src/service/commands/cancel.ts` | 取消 rearm 仍用墙钟兜底，与扫描口径不齐 |
+| P2-4 | `tests/integration/control-dispatch.spec.ts` | 缺 `pure/verified_none=1` 与并发接管的直接回归 |
+| P2-5 | `src/service/dispatcher.ts:147` | 无执行器分支未区分并发接管 |
+| P2-6 | `handoff.md`、`G3/full-suite.md` | 计数仍写 898 / 284.16 kB |
+| P2-7 | `018_wait_registrations.sql:24` | `wait_registrations.idempotency_key` 仍是全表唯一 |
+| P2-8 | `src/service/commands/subworkflow.ts:239` | 父 run 缺定义哈希时不能起子流程（老数据需回填） |
 
 ### 接手先做什么
 
-1. `git status` 干净，`git log --oneline -5` 确认签署链完整（… → `082d9ad` → 审计报告 → G1/G2/G3 签名）。
-2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`、`pnpm gate`，确认为 898 passed、284.16 kB、28/28、三门 exit 0。
-3. 要改代码就先想清代价：任何候选文件改动都会让三份审计报告与三门签名作废，需要重新审计 + 从 G1 重签。P2 清理建议攒成一批，一次改完再走完整链。
-4. 不再需要重跑审计的纯文档改动（`docs/audits`、`docs/reviews`、`handoff.md`、三门门记录）不影响候选哈希，可以直接提交。
+1. `git log --oneline -5` 确认 `origin/main` 是 `6ed4499`，`git status` 干净。
+2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`、`pnpm gate`，确认 901 passed、284.70 kB、28/28、三门 exit 0。
+3. 改代码前先看清：任何候选文件改动都会让三份报告与三门签名作废。按约定把 P2 攒成一批，改完统一审计（r61/r61/r13）再重签。
+4. 纯文档改动（`docs/audits`、`docs/reviews`、`handoff.md`、三门门记录）不影响候选哈希，可直接提交。
 
 ### 本轮改了什么（对应 round11 审计）
 
