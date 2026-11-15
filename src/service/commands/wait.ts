@@ -207,7 +207,7 @@ export function enterWaiting(tx: Tx, secret: string, req: {
   fromSeq?: number
   maxWaitMs: number
   now: string
-  clock?: ClockProvider
+  clock: ClockProvider
 }): EnterWaitingResult {
   if (!req.match.type) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '等待谓词缺少事件类型', { nodeRunId: req.nodeRunId })
   if (!Number.isInteger(req.maxWaitMs) || req.maxWaitMs <= 0) {
@@ -314,7 +314,7 @@ export function markWakeStarvation(tx: Tx, secret: string, nodeRunId: string, no
 }
 
 /** max_wait/event_timeout 到点：waiting→timeout，等待钟清空，登记转 timed_out。 */
-export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: string, clock?: ClockProvider): boolean {
+export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: string, clock: ClockProvider): boolean {
   const row = tx.get<WaitRow>("SELECT * FROM wait_registrations WHERE node_run_id = ? AND state = 'active'", [nodeRunId])
   if (!row) return false
   const node = tx.get<{ status: string; attempt: number; run_id: string; wait_deadline_at: string | null; wait_deadline_boot_id: string | null; wait_deadline_monotonic_ns: number | null }>(
@@ -330,7 +330,8 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
   if (anchored && clock) {
     const decision = clock.decide(anchored)
     if (decision.kind !== 'expired') return false
-  } else if (Date.parse(node.wait_deadline_at) > Date.parse(now)) {
+  } else {
+    // 无锚点或无时钟不自动判到点：墙钟只作展示（规格 3.4、S3 r63 P2-2）
     return false
   }
   tx.run("UPDATE wait_registrations SET state = 'timed_out', updated_at = ? WHERE node_run_id = ? AND state = 'active'", [now, nodeRunId])
@@ -347,7 +348,7 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
   return true
 }
 
-export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock?: ClockProvider, skipNodeRunIds?: ReadonlySet<string>): number {
+export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock: ClockProvider, skipNodeRunIds?: ReadonlySet<string>): number {
   const rows = tx.all<{ node_run_id: string }>(
     "SELECT w.node_run_id FROM wait_registrations w JOIN node_runs n ON n.node_run_id = w.node_run_id " +
       "WHERE w.state = 'active' AND n.status = 'waiting' AND n.wait_deadline_at IS NOT NULL ORDER BY w.registration_id",

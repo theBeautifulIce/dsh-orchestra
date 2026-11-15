@@ -56,6 +56,7 @@ describe('等待节点', () => {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'event',
         match: { type: 'approval.approved', path: 'requestId', equals: 'q1' },
         idempotencyKey: 'wait-1', maxWaitMs: 60_000, now: NOW,
+        clock: TEST_CLOCK,
       })
       expect(result.woken).toBe(true)
       expect(result.registration.state).toBe('woken')
@@ -77,6 +78,7 @@ describe('等待节点', () => {
       enterWaiting(tx, SECRET, {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'event',
         match: { type: 'build.done' }, idempotencyKey: 'wait-1', maxWaitMs: 60_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     withTx(db, (tx) => {
@@ -103,6 +105,7 @@ describe('等待节点', () => {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'event',
         match: { type: 'build.done', path: 'ok', equals: true },
         idempotencyKey: 'wait-1', maxWaitMs: 60_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     expect(node(db, 'n1').status).toBe('waiting')
@@ -118,6 +121,7 @@ describe('等待节点', () => {
       enterWaiting(tx, SECRET, {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'event',
         match: { type: 'never' }, idempotencyKey: 'wait-1', maxWaitMs: 1_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     withTx(db, (tx) => markWakeStarvation(tx, SECRET, 'n1', NOW))
@@ -125,9 +129,11 @@ describe('等待节点', () => {
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'wait.wake_dispatch_starvation'")).toBe(1)
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'wait.event_timeout'")).toBe(0)
 
-    expect(() => withTx(db, (tx) => expect(timeoutWaiting(tx, SECRET, 'n1', NOW)).toBe(false))).not.toThrow()
+    expect(() => withTx(db, (tx) => expect(timeoutWaiting(tx, SECRET, 'n1', NOW, TEST_CLOCK)).toBe(false))).not.toThrow()
     const at = new Date(Date.parse(NOW) + 1_001).toISOString()
-    withTx(db, (tx) => expect(timeoutWaiting(tx, SECRET, 'n1', at)).toBe(true))
+    TEST_CLOCK.advanceMs(1_100)
+    TEST_CLOCK.setWallClockMs(TEST_CLOCK.sample().wallClockMs + 1_100)
+    withTx(db, (tx) => expect(timeoutWaiting(tx, SECRET, 'n1', at, TEST_CLOCK)).toBe(true))
     expect(node(db, 'n1')).toMatchObject({ status: 'timeout', wait_deadline_at: null, rearm_generation: 2 })
     expect((db.raw.prepare("SELECT state FROM wait_registrations WHERE node_run_id = 'n1'").get() as any).state).toBe('timed_out')
     expect(count(db, "SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'wait.event_timeout'")).toBe(1)
@@ -166,15 +172,20 @@ describe('等待节点', () => {
       enterWaiting(tx, SECRET, {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'timer', match: { type: 'never' },
         idempotencyKey: 'wait-1', maxWaitMs: 1_000, now: NOW,
+        clock: TEST_CLOCK,
       })
       enterWaiting(tx, SECRET, {
         nodeRunId: 'n2', attempt: 1, runId: 'r1', waitKind: 'timer', match: { type: 'never' },
         idempotencyKey: 'wait-2', maxWaitMs: 10_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     const at = new Date(Date.parse(NOW) + 2_000).toISOString()
-    withTx(db, (tx) => expect(sweepWaitTimeouts(tx, SECRET, at)).toBe(1))
-    withTx(db, (tx) => expect(sweepWaitTimeouts(tx, SECRET, at)).toBe(0))
+    // 到点判定只认单调钟：推 2 秒后 1s 的 timer 到点、10s 的还没到
+    TEST_CLOCK.advanceMs(2_000)
+    TEST_CLOCK.setWallClockMs(TEST_CLOCK.sample().wallClockMs + 2_000)
+    withTx(db, (tx) => expect(sweepWaitTimeouts(tx, SECRET, at, TEST_CLOCK)).toBe(1))
+    withTx(db, (tx) => expect(sweepWaitTimeouts(tx, SECRET, at, TEST_CLOCK)).toBe(0))
     expect(node(db, 'n1').status).toBe('timeout')
     expect(node(db, 'n2').status).toBe('waiting')
   })
@@ -186,13 +197,16 @@ describe('等待节点', () => {
       enterWaiting(tx, SECRET, {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'timer', match: { type: 'never' },
         idempotencyKey: 'wait-1', maxWaitMs: 1_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     const at = new Date(Date.parse(NOW) + 2_000).toISOString()
-    const result = sweep(db, SECRET, { now: at })
+    TEST_CLOCK.advanceMs(2_000)
+    TEST_CLOCK.setWallClockMs(TEST_CLOCK.sample().wallClockMs + 2_000)
+    const result = sweep(db, SECRET, { now: at , clock: TEST_CLOCK})
     expect(result.wait_timed_out).toBe(1)
     expect(node(db, 'n1').status).toBe('timeout')
-    expect(sweep(db, SECRET, { now: at }).wait_timed_out).toBe(0)
+    expect(sweep(db, SECRET, { now: at , clock: TEST_CLOCK}).wait_timed_out).toBe(0)
   })
 
   it('组结束撤等待登记，节点状态由调用方负责', () => {
@@ -202,6 +216,7 @@ describe('等待节点', () => {
       enterWaiting(tx, SECRET, {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'event', match: { type: 'x' },
         idempotencyKey: 'wait-1', maxWaitMs: 60_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     withTx(db, (tx) => expect(cancelWait(tx, 'n1', NOW)).toBe(true))
@@ -218,6 +233,7 @@ describe('等待节点', () => {
         nodeRunId: 'n1', attempt: 1, runId: 'r1', waitKind: 'event',
         match: { type: 'approval.approved', path: 'requestId', equals: 'q1' },
         idempotencyKey: 'wait-cancel', maxWaitMs: 60_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     const before = node(db, 'n1')

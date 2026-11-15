@@ -589,12 +589,14 @@ async function caseG05(): Promise<InjectionResult> {
   await toolInFlight
   const inFlight = orchestra.db.raw.prepare("SELECT status, tool_start_at FROM node_runs WHERE node_run_id = 'nrun_g05'").get() as { status: string; tool_start_at: string }
   const rev1 = Number((orchestra.db.raw.prepare("SELECT revision FROM node_runs WHERE node_run_id = 'nrun_g05'").get() as { revision: number }).revision)
+  // 同一只钟贯穿取消与扫描：围栏锚点与判定必须同一 boot，否则 decide 判不确定（规格 3.4）
+  const g05Clock = injectClock(NOW)
   const first = inTx(orchestra.db, (tx) => applyCancel(tx, secret, {
-    nodeRunId: 'nrun_g05', attempt: 1, revision: rev1, cancelResult: 'interrupted', now: NOW, graceMs: 30000, clock: injectClock(NOW),
+    nodeRunId: 'nrun_g05', attempt: 1, revision: rev1, cancelResult: 'interrupted', now: NOW, graceMs: 30000, clock: g05Clock,
   }))
   const rev2 = Number((orchestra.db.raw.prepare("SELECT revision FROM node_runs WHERE node_run_id = 'nrun_g05'").get() as { revision: number }).revision)
   const second = inTx(orchestra.db, (tx) => applyCancel(tx, secret, {
-    nodeRunId: 'nrun_g05', attempt: 1, revision: rev2, cancelResult: 'interrupted', now: NOW, graceMs: 30000, clock: injectClock(NOW),
+    nodeRunId: 'nrun_g05', attempt: 1, revision: rev2, cancelResult: 'interrupted', now: NOW, graceMs: 30000, clock: g05Clock,
   }))
   // 围栏还立着的时候来的上报：进登记排队
   const late = inTx(orchestra.db, (tx) => applyReport(tx, secret, {
@@ -613,7 +615,9 @@ async function caseG05(): Promise<InjectionResult> {
     runErr = (err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))
   }
   // 宽限到点：撤围栏回 stopping，并把排队上报的队头挑出来
-  const swept = sweep(orchestra.db, secret, { now: '2026-11-13T03:00:30.000Z' })
+  g05Clock.advanceMs(31_000)
+  g05Clock.setWallClockMs(g05Clock.sample().wallClockMs + 31_000)
+  const swept = sweep(orchestra.db, secret, { now: '2026-11-13T03:00:31.000Z' , clock: g05Clock})
   const armed = (orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nrun_g05' AND type = 'fence_armed'").get() as { n: number }).n
   const toolEvents = (orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nrun_g05' AND type = 'tool_started'").get() as { n: number }).n
   const row = orchestra.db.raw.prepare("SELECT status, fence_state, cancel_result, tool_start_at FROM node_runs WHERE node_run_id = 'nrun_g05'").get()

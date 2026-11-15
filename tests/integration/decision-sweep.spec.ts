@@ -5,6 +5,7 @@ import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/
 import { cancelDecision, openDecision, resolveDecision, sweepDecisions } from '../../src/service/commands/decisions.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
 import { sweep } from '../../src/service/sweep.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const SECRET = 'decision-sweep-secret'
 const T0 = '2026-11-14T00:00:00.000Z'
@@ -121,7 +122,7 @@ describe('决策超时扫描', () => {
 
   it('维护扫描真的会跑决策超时：sweep() 一轮后卡已升级', () => {
     const db = memoryDb()
-    const out = sweep(db, SECRET, { now: H2 })
+    const out = sweep(db, SECRET, { now: H2 , clock: TEST_CLOCK})
     expect(out.decisions_blocked).toBe(1)
     expect(decision(db).status).toBe('blocked_for_human')
   })
@@ -129,7 +130,7 @@ describe('决策超时扫描', () => {
   it('到期后 run 只有在这笔扫描里才能收口：先 closeRun 无卡可收，扫描后能收', () => {
     const db = memoryDb()
     expect(withTx(db, (tx) => closeRun(tx, 'r1', H24))).toBeNull()
-    sweep(db, SECRET, { now: H24 })
+    sweep(db, SECRET, { now: H24 , clock: TEST_CLOCK})
     const run = db.raw.prepare('SELECT status FROM runs WHERE run_id = ?').get('r1') as { status: string }
     expect(run.status).toBe('failed')
   })

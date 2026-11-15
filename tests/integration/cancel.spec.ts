@@ -6,6 +6,10 @@ import { applyCancel, pickReplayHead, markOlderAttemptsStale, revokeFence, type 
 import { ScriptedClock } from '../../src/core/clock.ts'
 import { TEST_CLOCK } from '../fixtures/clock.ts'
 
+// 撤围栏只认 boot_test 的单调钟：测试按 wall/mono 各造一只，不再靠墙钟兜底
+const revokeClock = (wallIso: string, advanceMs: number) =>
+  new ScriptedClock('boot_test', { wallClockMs: Date.parse(wallIso), monotonicNs: advanceMs * 1e6 })
+
 const NOW = '2026-11-13T03:00:00.000Z'
 
 function setup() {
@@ -135,7 +139,9 @@ describe('取消边界（审计 N-08 / P0-4）', () => {
     expect(nodeRow(db).status).toBe('timing_out')
     expect(nodeRow(db).cancel_result).toBe('unknown')
     const row = nodeRow(db)
-    const changed = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row, now: '2026-11-13T03:01:00.000Z' }))
+    const changed = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, {
+      row, now: '2026-11-13T03:01:00.000Z', clock: revokeClock('2026-11-13T03:01:00.000Z', 60_000),
+    }))
     expect(changed).toBe(true)
     expect(nodeRow(db).status).toBe('stopping')
     expect(nodeRow(db).fence_state).toBe('revoked')
@@ -147,7 +153,9 @@ describe('围栏撤销与排队重放', () => {
     const db = setup()
     cancel(db, 'interrupted')
     const before = nodeRow(db)
-    const changed = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row: before, now: '2026-11-13T03:01:00.000Z' }))
+    const changed = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, {
+      row: before, now: '2026-11-13T03:01:00.000Z', clock: revokeClock('2026-11-13T03:01:00.000Z', 60_000),
+    }))
     expect(changed).toBe(true)
     const row = nodeRow(db)
     expect(row.status).toBe('stopping')
@@ -161,7 +169,7 @@ describe('围栏撤销与排队重放', () => {
   it('fence 不是 armed → 不动数据', () => {
     const db = setup()
     const before = nodeRow(db)
-    const changed = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row: before, now: NOW }))
+    const changed = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row: before, now: NOW, clock: revokeClock(NOW, 0) }))
     expect(changed).toBe(false)
     expect(nodeRow(db).revision).toBe(before.revision)
     expect(events(db, 'fence_revoked')).toBe(0)
@@ -217,7 +225,9 @@ describe('终态与重复取消（审计 F-07 / P12）', () => {
     const db = setup()
     cancel(db, 'interrupted')
     const row = nodeRow(db)
-    const ok = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, { row, now: '2026-11-13T03:00:10.000Z' }))
+    const ok = withTx(db, (tx) => revokeFence(tx, TEST_SECRET, {
+      row, now: '2026-11-13T03:00:10.000Z', clock: revokeClock('2026-11-13T03:00:10.000Z', 10_000),
+    }))
     expect(ok).toBe(false)
     expect(nodeRow(db).status).toBe('timing_out')
   })
@@ -232,7 +242,7 @@ describe('终态与重复取消（审计 F-07 / P12）', () => {
 })
 
 describe('取消时限必须带单调钟（S1 round61 P2-2）', () => {
-  it('interrupted 缺 clock：明确拒绝，不写无法判定的宽限期', () => {
+  it('interrupted 缺 clock：类型层已禁止；运行期拿到空钟也要拒绝', () => {
     const { db } = freshLedger(); seed(db)
     withTx(db, (tx) => {
       tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_c', 'r1', 'n_c', 5, 'agent', 2, 'started', 10, ?, ?)", [NOW, NOW])
@@ -240,7 +250,8 @@ describe('取消时限必须带单调钟（S1 round61 P2-2）', () => {
     const row = nodeRow(db)
     expect(() => withTx(db, (tx) => applyCancel(tx, TEST_SECRET, {
       nodeRunId: 'nr_c', attempt: row.attempt, revision: row.revision, cancelResult: 'interrupted', now: NOW, graceMs: 30_000,
-    }))).toThrowError(/单调时钟/)
+      clock: undefined as never,
+    }))).toThrow()
     expect(nodeRow(db)).toMatchObject({ status: 'started', revision: row.revision })
   })
 })

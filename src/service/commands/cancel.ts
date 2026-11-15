@@ -21,8 +21,8 @@ export type CancelParams = {
   graceMs: number
   // 只在 interrupted 时用：动作截止时间往后延多久
   extendDeadlineMs?: number
-  // 半态钟：登记宽限/延期时限时必须提供；缺失时直接拒绝，不写无法判定的 deadline
-  clock?: ClockProvider
+  // 半态钟：必填。登记与判定都只认 boot_id + 单调纳秒，墙钟只作展示（规格 3.4）
+  clock: ClockProvider
 }
 
 export type CancelOutcome = {
@@ -116,14 +116,6 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     if (row.fence_state === 'armed') {
       return { cancel_result: 'interrupted', next_status: row.status, fence_state: 'armed', reason: 'fence_already_armed' }
     }
-    // 没有单调时钟就不写 deadline：墙钟算出来的宽限期在扫描端一律判不确定，
-    // 写下去等于给自己留一个永远不会被处理的「已取消」节点（S3 round12 P2-3）。
-    if (!params.clock) {
-      throw new OrchError('SERVICE_UNAVAILABLE', '取消宽限期需要单调时钟，缺少时不登记时限', {
-        nodeRunId: params.nodeRunId,
-        operation: 'cancel_grace',
-      })
-    }
     const grace = deadlineFromSample(params.clock, params.graceMs)
     const graceUntil = new Date(grace.wallClockMs).toISOString()
     applyTransition(tx, {
@@ -159,12 +151,6 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   }
   if (params.cancelResult === 'not_interruptible') {
     // 动作停不下来：延长动作截止时间并进 stopping（规格 4.5 行 345）
-    if (!params.clock) {
-      throw new OrchError('SERVICE_UNAVAILABLE', '动作延期需要单调时钟，缺少时不登记时限', {
-        nodeRunId: params.nodeRunId,
-        operation: 'cancel_extend',
-      })
-    }
     const extended = deadlineFromSample(params.clock, params.extendDeadlineMs ?? 0)
     const deadline = new Date(extended.wallClockMs).toISOString()
     if (row.fence_state === 'armed') {
@@ -277,7 +263,7 @@ export type FenceRow = {
 
 // 宽限到点仍没见停止：撤销围栏回 stopping（规格 4.5 行 346）
 // 返回是否这次真的撤销了（调用方据此决定要不要重放队头）
-export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now: string; clock?: ClockProvider; rearmActionDeadlineMs?: number }): boolean {
+export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now: string; clock: ClockProvider; rearmActionDeadlineMs?: number }): boolean {
   if (params.row.fence_state !== 'armed') return false
   // 宽限没到点不许撤销：任何调用方都不能提前把围栏撤了（规格 4.5 行 346）
   if (!params.row.fence_grace_until) return false
@@ -286,16 +272,12 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
     bootId: params.row.fence_grace_boot_id ?? null,
     monotonicNs: params.row.fence_grace_monotonic_ns ?? null,
   })
-  if (anchored && params.clock) {
-    if (params.clock.decide(anchored).kind !== 'expired') return false
-  } else if (Date.parse(params.row.fence_grace_until) > Date.parse(params.now)) {
-    return false
-  }
+  // 只认当前 boot 的单调钟：无锚点/跨 boot 一律不自动撤，换算交给 clock-recovery（规格 3.4、S3 r63 P2-2）
+  if (anchored === null) return false
+  if (params.clock.decide(anchored).kind !== 'expired') return false
   // 撤销失败只说明这行已被别人改过：返回 false 让 sweep 继续下一条，不许整批回滚（审计 P0-4）
   // 撤围栏同时重新武装 action_deadline，并在同一笔 CAS 里 Gr+1；旧定时器与旧执行器手里的 Gr 立刻失效。
-  const rearm = params.clock
-    ? deadlineFromSample(params.clock, params.rearmActionDeadlineMs ?? 30_000)
-    : { bootId: null, monotonicNs: null, wallClockMs: Date.parse(params.now) + (params.rearmActionDeadlineMs ?? 30_000) }
+  const rearm = deadlineFromSample(params.clock, params.rearmActionDeadlineMs ?? 30_000)
   try {
     applyTransition(tx, {
       nodeRunId: params.row.node_run_id,

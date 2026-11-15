@@ -17,7 +17,7 @@ export type RuntimeDeps = {
   phase: Phase
   catalog: WorkflowCatalog
   // 判定用的时钟：生产用系统时钟，测试与注入脚本用可编排时钟（规格 3.4 行 171）
-  clock?: ClockProvider
+  clock: ClockProvider
 }
 
 export type AcquireNodeRunResult = { lease_id: string; expires_at: string; action_generation: number }

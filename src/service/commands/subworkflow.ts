@@ -681,7 +681,7 @@ export type PropagateCancelParams = {
   now: string
   graceMs: number
   extendDeadlineMs?: number
-  clock?: import('../../core/clock.ts').ClockProvider
+  clock: import('../../core/clock.ts').ClockProvider
 }
 
 export type PropagateCancelResult = {

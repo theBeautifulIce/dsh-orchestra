@@ -3,6 +3,7 @@ import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { CLOCK_DRIFT_TOLERANCE_MS, MonotonicClock, remainingAcrossBoot } from '../../src/core/clock.ts'
 import { sweep } from '../../src/service/sweep.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
@@ -72,9 +73,9 @@ describe('维护扫描可重入', () => {
     withTx(db, (tx) => {
       tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, lease_id, lease_expires_at, created_at, updated_at) VALUES ('nr_s', 'r1', 'n_s', 7, 'agent', 1, 'dispatched', 3, 'lease_x', ?, ?, ?)", [NOW, NOW, NOW])
     })
-    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:10:00.000Z' })
+    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:10:00.000Z' , clock: TEST_CLOCK})
     expect(first.lease_expired).toEqual(['nr_s'])
-    const third = sweep(db, TEST_SECRET, { now: '2026-11-13T03:20:00.000Z' })
+    const third = sweep(db, TEST_SECRET, { now: '2026-11-13T03:20:00.000Z' , clock: TEST_CLOCK})
     expect(third.lease_expired).toEqual([])
     const row = db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id='nr_s'").get() as { status: string }
     expect(row.status).toBe('stopping')

@@ -367,7 +367,7 @@ describe('父取消传播与终态闸', () => {
     withTx(db, (tx) => {
       tx.run("UPDATE node_runs SET status = 'blocked_pre', blocked_decision_id = 'd1', lease_id = 'lease_x', lease_expires_at = ?, executor_session_id = 's1', executor_agent_id = 'a1' WHERE node_run_id = 'nr-parent'", [NOW])
       tx.run("INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, created_at) VALUES ('d1', 'r1', 'nr-parent', 'pre_execution', 'pending', 1, '{}', ?)", [NOW])
-      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 , clock: TEST_CLOCK})
       expect(out.cancelledNodes).toContain('nr-parent')
       expect(out.runStatus).toBe('cancelled')
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!.status).toBe('failed')
@@ -387,7 +387,7 @@ describe('父取消传播与终态闸', () => {
     withTx(db, (tx) => {
       tx.run("UPDATE node_runs SET status = 'blocked_post' WHERE node_run_id = 'nr-parent'")
       tx.run("INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, created_at) VALUES ('d2', 'r1', 'nr-parent', 'verify_human', 'pending', 1, '{}', ?)", [NOW])
-      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 , clock: TEST_CLOCK})
       expect(out.pendingHumanDecisions).toEqual(['d2'])
       expect(out.runStatus).toBe('cancellation_pending')
       expect(out.cancelledNodes).toEqual([])
@@ -401,7 +401,7 @@ describe('父取消传播与终态闸', () => {
     const db = memoryDb()
     withTx(db, (tx) => {
       tx.run("UPDATE runs SET status = 'succeeded', ended_at = ? WHERE run_id = 'r1'", [NOW])
-      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 , clock: TEST_CLOCK})
       expect(out.runStatus).toBe('already_stopped')
       expect(out.cancelledNodes).toEqual([])
       const row = tx.get<{ status: string; cancel_requested_at: string | null }>(
@@ -416,7 +416,7 @@ describe('父取消传播与终态闸', () => {
     withTx(db, (tx) => {
       tx.run("UPDATE node_runs SET status = 'done' WHERE node_run_id = 'nr-parent'")
       tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('nr-irr', 'r1', 'irr', 2, 'agent', 1, 'queued', 1, 'irreversible', ?, ?)", [NOW, NOW])
-      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 })
+      const out = propagateRunCancellation(tx, SECRET, { runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000 , clock: TEST_CLOCK})
       expect(out.cancelledNodes).toContain('nr-irr')
       expect(out.skippedIrreversible).not.toContain('nr-irr')
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-irr'])!.status).toBe('superseded')
@@ -437,6 +437,7 @@ describe('父取消传播与终态闸', () => {
       tx.run("UPDATE node_runs SET side_effect_policy = 'irreversible' WHERE run_id = ? AND node_id = 'b'", [childId])
       const out = propagateRunCancellation(tx, SECRET, {
         runId: 'r1', cancelResult: 'interrupted', now: NOW, graceMs: 5000,
+        clock: TEST_CLOCK,
       })
       expect(out.cancelledRuns).toEqual([childId])
       expect(out.cancelledNodes).toEqual(['nr-parent'])

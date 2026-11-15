@@ -21,7 +21,7 @@ import { deadlineFromAnchors, deadlineFromSample } from '../core/clock.ts'
 
 export type SweepParams = {
   now: string
-  clock?: ClockProvider
+  clock: ClockProvider
   // 运行时观察到的桥断节点：只有拿到显式信号才挂起，不猜
   bridgeMissing?: readonly string[]
   // 桥恢复信号：按 resume_state 逐态重入，重挂剩余预算，不把未知态续成满额

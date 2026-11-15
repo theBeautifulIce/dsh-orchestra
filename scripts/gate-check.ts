@@ -352,7 +352,8 @@ export function assertClean(root: string): void {
 
 function contentAt(root: string, ref: string, path: string): Buffer | null {
   try {
-    return git(root, ['show', ref + ':' + path])
+    // git show 对批内新增又删除的路径会打 fatal 噪声；这些路径按 ADDED_THEN_DELETED 处理，stderr 不必外泄（S1 r63 P2-1）
+    return execFileSync('git', ['show', ref + ':' + path], { cwd: root, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 })
   } catch {
     return null
   }

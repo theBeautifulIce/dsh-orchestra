@@ -12,6 +12,7 @@ import { bindRunVersion } from '../fixtures/ledger.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
 import { enterWaiting } from '../../src/service/commands/wait.ts'
 import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
+import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const SECRET = 'routes-secret'
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -354,6 +355,7 @@ describe('起运行与裁决收口路由', () => {
         nodeRunId: 'nrun_wait', attempt: 1, runId: 'r1', waitKind: 'event',
         match: { type: 'build.done', path: 'buildId', equals: 'b1' },
         idempotencyKey: 'wait-route-1', maxWaitMs: 60_000, now: NOW,
+        clock: TEST_CLOCK,
       })
     })
     const res = await post(base + '/v1/wait/events', {

@@ -81,7 +81,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
       tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('r1', 't1', 'running', 1, ?, ?)", [NOW, NOW])
       tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('nr_done', 'r1', 'n_done', 1, 'agent', 1, 'done', 2, 'pure', ?, ?)", [NOW, NOW])
     })
-    const result = sweep(db, TEST_SECRET, { now: NOW })
+    const result = sweep(db, TEST_SECRET, { now: NOW , clock: TEST_CLOCK})
     expect(result.runs_closed).toContain('r1')
     expect((db.raw.prepare("SELECT status FROM runs WHERE run_id='r1'").get() as { status: string }).status).toBe('succeeded')
   })
@@ -99,13 +99,15 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(row(db).fence_state).toBe('armed')
 
     // 宽限没到点：不许提前撤围栏
-    const early = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:10.000Z' })
+    tick(TEST_CLOCK, 10_000)
+    const early = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:10.000Z' , clock: TEST_CLOCK})
     expect(early.fence_revoked).toEqual([])
     expect(row(db).status).toBe('timing_out')
     expect(row(db).fence_state).toBe('armed')
 
     // 宽限到点：撤围栏回 stopping
-    const late = sweep(db, TEST_SECRET, { now: GRACE })
+    tick(TEST_CLOCK, 21_000)
+    const late = sweep(db, TEST_SECRET, { now: GRACE , clock: TEST_CLOCK})
     expect(late.fence_revoked).toEqual(['nr_sw'])
     expect(row(db).status).toBe('stopping')
     expect(row(db).fence_state).toBe('revoked')
@@ -122,7 +124,8 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(rejected.reason).toBe('fence_armed')
     expect(rejected.registry_state).toBe('rejected')
 
-    const out = sweep(db, TEST_SECRET, { now: GRACE })
+    tick(TEST_CLOCK, 31_000)
+    const out = sweep(db, TEST_SECRET, { now: GRACE , clock: TEST_CLOCK})
     expect(out.replay_heads.map((h) => h.report_id)).toEqual(['rep_late_nr_sw'])
     expect(out.replay_heads[0]?.node_run_id).toBe('nr_sw')
   })
@@ -133,9 +136,10 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     withTx(db, (tx) => applyReport(tx, TEST_SECRET, {
       nodeRunId: 'nr_sw', attempt: 2, report: lateReport(), expectedStatus: 'verifying', generation: 1, now: NOW,
     }, CATALOG))
-    const first = sweep(db, TEST_SECRET, { now: GRACE })
+    tick(TEST_CLOCK, 31_000)
+    const first = sweep(db, TEST_SECRET, { now: GRACE , clock: TEST_CLOCK})
     expect(first.fence_revoked).toEqual(['nr_sw'])
-    const second = sweep(db, TEST_SECRET, { now: GRACE })
+    const second = sweep(db, TEST_SECRET, { now: GRACE , clock: TEST_CLOCK})
     expect(second.lease_expired).toEqual([])
     expect(second.fence_revoked).toEqual([])
     expect(second.verify_timed_out).toEqual([])
@@ -149,13 +153,13 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
       tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, lease_expires_at, created_at, updated_at) VALUES ('nr_st', 'r1', 'n_st', 6, 'agent', 1, 'started', 3, ?, ?, ?)", ['2026-11-13T02:59:00.000Z', NOW, NOW])
       tx.run("UPDATE node_runs SET lease_expires_at = ? WHERE node_run_id = 'nr_sw'", ['2026-11-13T02:59:00.000Z'])
     })
-    const out = sweep(db, TEST_SECRET, { now: NOW })
+    const out = sweep(db, TEST_SECRET, { now: NOW , clock: TEST_CLOCK})
     expect(out.lease_expired.sort()).toEqual(['nr_st', 'nr_sw'])
     expect(row(db, 'nr_sw').status).toBe('stopping')
     expect(row(db, 'nr_st').status).toBe('startup_unknown')
     expect(evCount(db, 'lease_expired', 'nr_sw')).toBe(1)
     // 再跑一次不重复记
-    const again = sweep(db, TEST_SECRET, { now: NOW })
+    const again = sweep(db, TEST_SECRET, { now: NOW , clock: TEST_CLOCK})
     expect(again.lease_expired).toEqual([])
   })
 
@@ -225,13 +229,13 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
 
   it('桥断信号：置 paused_bridge_missing 并记 resume_state，重复扫描不追加事件', () => {
     const db = setup()
-    const first = sweep(db, TEST_SECRET, { now: NOW, bridgeMissing: ['nr_sw'] })
+    const first = sweep(db, TEST_SECRET, { now: NOW, bridgeMissing: ['nr_sw'] , clock: TEST_CLOCK})
     expect(first.bridge_paused).toEqual(['nr_sw'])
     expect(row(db).status).toBe('paused_bridge_missing')
     expect(row(db).resume_state).toBe('dispatched')
     const count = () => (db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nr_sw' AND type='recovery.bridge_missing'").get() as { n: number }).n
     expect(count()).toBe(1)
-    const second = sweep(db, TEST_SECRET, { now: NOW, bridgeMissing: ['nr_sw'] })
+    const second = sweep(db, TEST_SECRET, { now: NOW, bridgeMissing: ['nr_sw'] , clock: TEST_CLOCK})
     expect(second.bridge_paused).toEqual([])
     expect(count()).toBe(1)
   })
@@ -290,10 +294,10 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
       "UPDATE node_runs SET status='startup_unknown', startup_unknown_deadline_at=? WHERE node_run_id='nr_sw'",
       [NOW],
     ))
-    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:01.000Z' })
+    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:01.000Z' , clock: TEST_CLOCK})
     expect(first.startup_unknown_expired).toEqual(['nr_sw'])
     expect(row(db).status).toBe('indeterminate_side_effect')
-    const second = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:02.000Z' })
+    const second = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:02.000Z' , clock: TEST_CLOCK})
     expect(second.startup_unknown_expired).toEqual([])
     expect(row(db).status).toBe('indeterminate_side_effect')
     const count = (db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nr_sw' AND type='recovery.startup_unknown_expired'").get() as { n: number }).n
@@ -308,7 +312,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
       const ev = tx.get<{ seq: number }>("SELECT seq FROM node_run_events WHERE node_run_id='nr_sw' ORDER BY seq DESC LIMIT 1")
       tx.run("UPDATE node_run_events SET payload='{\"tampered\":true}' WHERE node_run_id='nr_sw' AND seq=?", [ev!.seq])
     })
-    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:01.000Z', bridgeMissing: ['nr_sw'] })
+    const out = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:01.000Z', bridgeMissing: ['nr_sw'] , clock: TEST_CLOCK})
     expect(out.chain_broken).toContain('nr_sw')
     expect(out.bridge_paused).toEqual([])
     expect(row(db).status).toBe('dispatched')
@@ -338,11 +342,11 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
 
   it('显式执行器失联信号：执行器手上的节点置 orphaned，重复扫描不重复迁移', () => {
     const db = setup()
-    const first = sweep(db, TEST_SECRET, { now: NOW, executorLost: ['nr_sw'] })
+    const first = sweep(db, TEST_SECRET, { now: NOW, executorLost: ['nr_sw'] , clock: TEST_CLOCK})
     expect(first.executor_orphaned).toEqual(['nr_sw'])
     expect(row(db).status).toBe('orphaned')
     expect(evCount(db, 'recovery.executor_lost')).toBe(1)
-    const second = sweep(db, TEST_SECRET, { now: NOW, executorLost: ['nr_sw'] })
+    const second = sweep(db, TEST_SECRET, { now: NOW, executorLost: ['nr_sw'] , clock: TEST_CLOCK})
     expect(second.executor_orphaned).toEqual([])
   })
 
@@ -358,7 +362,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
         ['2026-11-01T00:00:00.000Z', '2026-11-01T00:00:01.000Z'],
       )
     })
-    const out = sweep(db, TEST_SECRET, { now: NOW })
+    const out = sweep(db, TEST_SECRET, { now: NOW , clock: TEST_CLOCK})
     expect(out.operations_timed_out).toBe(1)
     expect(out.receipts_expired).toBe(1)
     const inflight = db.raw.prepare("SELECT status, receipt_json FROM inbox WHERE operation_id='op_inflight'").get() as { status: string; receipt_json: string }
@@ -379,7 +383,7 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
         [NOW, NOW],
       )
     })
-    const out = sweep(db, TEST_SECRET, { now: NOW })
+    const out = sweep(db, TEST_SECRET, { now: NOW , clock: TEST_CLOCK})
     expect(out.subworkflow_finished).toContain('nr_sw')
     expect(row(db).status).toBe('done')
     expect((db.raw.prepare("SELECT status FROM runs WHERE run_id='r1'").get() as { status: string }).status).toBe('succeeded')
