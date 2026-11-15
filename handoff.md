@@ -6,36 +6,39 @@
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 12:55，HEAD `079b611`，待重审重签）
+## 0.1 最新接手续接（2026-11-15 13:10，HEAD `4ec4c97`，已签已推）
 
-> **远端仍是已签署的 `1397aa5`（签署链末 `6ed4499`，候选 `a8691ff`）。**
-> 本地 `079b611` 是 round60 复核后的收尾批次，**未审、未签、未推送**；推送前必须完成 r61/r61/r13 审计并重签。
+### 当前进度
 
-### 本地批次改了什么
+- `origin/main` = `4ec4c97`（G3 签名），代码候选 `079b611`；工作树干净。
+- **三门通过**：`pnpm gate` → G1 13/13（`dd19c8b0…`）、G2 20/20（`e8ea1fac…`）、G3 20/20（`1bd3ac16…`）。
+- 独立终审：S1 r61 / S2 r61 / S3 r13 全部 pass，P0/P1=0，P2 分别 6/3/4。
+- 全量：**63 files / 906 passed | 1 skipped**；build ESM `lib/index.js` 286.05 kB / gzip 69.15 kB、d.ts 18.65 kB；证据 **28/28**。
+- 推送命令：`git -c http.proxy=http://127.0.0.1:7078 push origin main`（代理 7078）。
+
+### 本批改了什么
 
 | 改动 | 说明 |
 | --- | --- |
-| 派发结果尊重收口 | `failQueuedNode` / `failControlDispatch` 返回 `DispatchSettlement`（applied / already_moved / storage_error）；四类调用点统一经 `outcomeForSettlement`：接管返回 `skipped` + `current_status`，写库失败返回 `DISPATCH_SETTLE_FAILED` |
-| 混合工作流契约 | 明确「无执行器整批拒绝」：只要有 queued agent，wait/subworkflow 也不推进；已加契约测试 |
-| 取消时限硬化 | `interrupted` 宽限与 `not_interruptible` 延期缺单调时钟时明确报错（含回归）；撤围栏/重挂仍保留旧兼容，待与扫描统一 |
-| 证据数字 | 按实跑更新为 906 passed / 286.05 kB / 69.15 kB；G2 桥闭环 76 项；fault-inject 不再把 clock 塞进 HTTP 体 |
+| 派发结果尊重收口 | `failQueuedNode` / `failControlDispatch` 返回 `DispatchSettlement`（applied / already_moved / storage_error）；四个调用点统一经 `outcomeForSettlement`：接管返回 `skipped` + `current_status`，写库失败返回 `DISPATCH_SETTLE_FAILED` 且理由写明「节点状态保持不变」 |
+| 混合工作流契约 | 明确「无执行器整批拒绝」：只要有 queued agent，wait/subworkflow 也不推进；契约测试固定该行为 |
+| 取消时限硬化 | `interrupted` 宽限与 `not_interruptible` 延期缺单调时钟时抛 `SERVICE_UNAVAILABLE`，不写无法判定的 deadline；测试与 fault-inject 统一注入 `ScriptedClock` |
+| 证据 | `ev-g2-16` 606/76 与 `full-suite` 906 / 286.05 kB / 69.15 kB 均按实跑重生成；`G2.md` 桥闭环 70→76 |
 
-### 验证
+### 已知 P2（下一批）
 
-`pnpm typecheck` 0；`pnpm test` **63 files / 906 passed | 1 skipped**；`pnpm build` ESM 286.05 kB / gzip 69.15 kB；证据 **28/28**。`pnpm gate` 因候选已变而红（报告仍绑 `a8691ff`），属预期。
-
-### 恢复流程（顺序固定）
-
-1. 在 `079b611` 上派 S1 r61 / S2 r61 / S3 r13，报告绑定 `079b611`，并把「批次进行中门记录未重签」按 P2 记录（前几轮口径）。
-2. 更新三门 `audit_round` 与 `audit_report`，按 G1→G2→G3 重签，每次签完提交。
-3. `pnpm gate` 三门 exit 0 后 `git push origin main`（代理 `127.0.0.1:7078`）。
-4. 复核 `git log --oneline origin/main -3`。
-
-### 已知 P2（下一批再动）
-
-- `revokeFence` 的撤围栏/重挂仍保留墙钟兜底，与扫描 fail-closed 口径不一致。
+- `revokeFence` 的撤围栏/重挂仍保留墙钟兜底，与扫描 fail-closed 口径不一致（改它会牵动 5 条既有用例，单独一批处理）。
 - `wait_registrations.idempotency_key` 仍是全表唯一（派发键含 run，暂无功能性影响）。
-- 终态词表在 `index.ts` 与 `run-close.ts` 重复（属 P3，等状态模型调整时抽取）。
+- `DISPATCH_SETTLE_FAILED` 未登记进规格/提案码表。
+- `scripts/fault-inject.ts:1221` 的 HTTP 体仍带 clock（死参数）。
+- `storage_error` 后节点仍是 queued，本批只把失败显式化。
+- 终态词表在 `index.ts` 与 `run-close.ts` 重复（P3，等状态模型调整时抽取）。
+
+### 接手先做什么
+
+1. `git log --oneline -5` 确认 `origin/main` 是 `4ec4c97`，`git status` 干净。
+2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 906 passed、286.05 kB、28/28、三门 exit 0。
+3. 改代码前记住：任何候选文件改动都会让三份报告与三门签名作废；P2 攒批后统一审计（r62/r62/r14）再重签。
 
 ### 本轮改了什么（对应 round11 审计）
 
