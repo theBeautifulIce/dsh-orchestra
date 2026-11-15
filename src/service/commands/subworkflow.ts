@@ -235,7 +235,16 @@ function assertDeclaredSubworkflowRef(
       cause: err instanceof Error ? err.message : String(err),
     })
   }
-  if (parent.workflow_definition_hash && definitionHashOf(def) !== parent.workflow_definition_hash) {
+  // 子流程目标必须是“签名定义说过”的目标：父 run 没有定义哈希时无从校验，一律拒
+  if (!parent.workflow_definition_hash) {
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '父 run 没有绑定定义哈希，不能起子流程', {
+      parentRunId: parent.run_id,
+      parentNodeRunId: node.node_run_id,
+      workflowId: parent.workflow_id,
+      workflowVersion: parent.workflow_version,
+    })
+  }
+  if (definitionHashOf(def) !== parent.workflow_definition_hash) {
     throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '父 run 绑定的定义哈希与目录不一致，不能起子流程', {
       workflowId: parent.workflow_id,
       workflowVersion: parent.workflow_version,

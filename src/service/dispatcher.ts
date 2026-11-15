@@ -4,7 +4,8 @@
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
-import { acquireNodeRun } from './commands/runtime.ts'
+import { acquireNodeRun, type RuntimeDeps } from './commands/runtime.ts'
+import type { Db } from '../infra/sqlite/driver.ts'
 import { enterWaiting, type WaitKind, type WaitMatch } from './commands/wait.ts'
 import { startSubworkflowNode } from './commands/subworkflow.ts'
 import { loadNodeRun } from './commands/lease.ts'
@@ -40,10 +41,17 @@ export type DispatchOutcome = {
   evidence_source?: string
 }
 
-// 派发依赖 = 执行器那套 + 装配层注入的「已经过调度」的执行函数。
-// 注入后 dispatcher 不再自己调 scheduler：一次节点执行只占一个名额。
-export type DispatchDeps = RunNodeDeps & {
+// 派发依赖 = 账本/运行时 + 执行器（可选）。
+// 控制节点（wait / subworkflow）不需要宿主执行器：没装配执行器的进程也能推进它们；
+// agent 节点才必须要有执行器，缺了就在派发前明确拒绝，不留下 dispatched 半截状态。
+export type DispatchDeps = {
+  db: Db
+  secret: string
+  runtime: RuntimeDeps
+  // 装配层注入的「已经过调度」的执行函数；注入后 dispatcher 不再自己排一次队
   executeNode?: (p: RunNodeParams) => Promise<RunNodeResult>
+  // 老装配（没有 scheduler）可以直接给完整执行器依赖，由 dispatcher 自己调 runNode
+  executor?: RunNodeDeps
   // 控制节点（wait / subworkflow）要靠已加载的工作流目录固定子流程版本
   catalog?: WorkflowCatalog
   // 生产装配从配置读出的执行时限；缺省时由 runNode 使用默认值。
@@ -133,7 +141,13 @@ async function dispatchOne(
     }
     const res = deps.executeNode
       ? await deps.executeNode(params)
-      : await runNode(deps, params)
+      : deps.executor
+        ? await runNode(deps.executor, params)
+        : (() => {
+            throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑 agent 节点', {
+              nodeRunId: row.node_run_id,
+            })
+          })()
     return {
       node_run_id: row.node_run_id,
       node_id: row.node_id,
@@ -247,8 +261,18 @@ function resolveControlConfig(
       nodeRunId: row.node_run_id,
     })
   }
+  // 控制节点的执行配置完全依赖签名定义：哈希为空说明这个 run 没有可校验的定义身份，
+  // 不能靠“老数据兼容”把闸门静默放开，一律 fail closed。
+  if (!run!.workflow_definition_hash) {
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'run 没有绑定定义哈希，控制节点不能派发', {
+      runId: p.runId,
+      nodeRunId: row.node_run_id,
+      workflow_id: run!.workflow_id,
+      workflow_version: run!.workflow_version,
+    })
+  }
   const def = deps.catalog.get(run!.workflow_id!, run!.workflow_version!)
-  if (run!.workflow_definition_hash && definitionHashOf(def) !== run!.workflow_definition_hash) {
+  if (definitionHashOf(def) !== run!.workflow_definition_hash) {
     throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', 'run 绑定的定义哈希与目录不一致，不能派发', {
       runId: p.runId,
       workflow_id: run!.workflow_id,
@@ -372,12 +396,60 @@ async function dispatchControlNode(
       reason: 'child_run:' + child.run_id,
     }
   } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    const code = (err as { code?: string }).code ?? ''
+    // 初始化失败必须把已经拿到的租约与 dispatched 状态一起收干净：
+    // 只返回 failed 而不改库，会留下“API 说失败、节点还 dispatched 且持租约”的分叉，
+    // closeRun 也永远等不到终态（审计 P2-2）。
+    const settled = failControlDispatch(deps, p, row, reason, code)
     return {
       node_run_id: row.node_run_id,
       node_id: row.node_id,
       status: 'failed',
-      reason: err instanceof Error ? err.message : String(err),
-      error_code: (err as { code?: string }).code ?? '',
+      reason: settled ? reason : reason + '（状态收口失败，已留给维护扫描）',
+      error_code: code,
     }
+  }
+}
+
+/**
+ * 控制节点初始化失败的收口：按当前 revision 做 CAS，清租约与执行器绑定，落 dispatch.failed 事件。
+ * 返回是否真的把这一行收成终态；并发已改走的行不覆盖别人的结论。
+ */
+export function failControlDispatch(
+  deps: Pick<DispatchDeps, 'db' | 'secret'>,
+  p: { now: string },
+  row: { node_run_id: string; node_id: string; attempt: number },
+  reason: string,
+  code: string,
+): boolean {
+  try {
+    return inTx(deps.db, (tx) => {
+      const current = loadNodeRun(tx, row.node_run_id)
+      if (!['leased', 'dispatched', 'started'].includes(current.status)) return false
+      applyTransition(tx, {
+        nodeRunId: row.node_run_id,
+        from: ['leased', 'dispatched', 'started'],
+        to: 'failed',
+        // 派发期初始化失败走 liveness 的失败边，显式点名，不借控制节点出口
+        ruleId: 'M-48',
+        attempt: current.attempt,
+        expectedRevision: current.revision,
+        now: p.now,
+        patch: {
+          lease_id: null,
+          lease_expires_at: null,
+          executor_session_id: null,
+          executor_agent_id: null,
+          wait_started_at: null,
+        },
+        context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true },
+      })
+      appendNodeRunEvent(tx, deps.secret, row.node_run_id, 'dispatch.failed', { reason, error_code: code })
+      return true
+    })
+  } catch {
+    // 并发已把这一行改走：不覆盖别人的结论，留给维护扫描
+    return false
   }
 }

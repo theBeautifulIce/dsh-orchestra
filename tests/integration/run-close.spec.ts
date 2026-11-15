@@ -66,6 +66,23 @@ describe('运行终态收口', () => {
     expect(runStatus(db)).toBe('cancelled')
   })
 
+  it('取消优先落 cancelled，但 run.terminal 的 outcome 仍暴露失败与未核实事实', () => {
+    const db = setup()
+    setNode(db, { status: 'failed', side_effect_policy: 'compensable', side_effect_verified_none: 0 })
+    withTx(db, (tx) => tx.run(
+      "UPDATE runs SET cancel_requested_at = ?, cancel_result = 'interrupted' WHERE run_id = 'r1'",
+      [NOW],
+    ))
+    expect(withTx(db, (tx) => closeRun(tx, 'r1', NOW))).toBe('cancelled')
+    const payload = JSON.parse((db.raw.prepare("SELECT payload_redacted AS payload FROM events WHERE type='run.terminal'").get() as { payload: string }).payload) as {
+      status: string; outcome: string; failed_nodes: string[]; unverified_nodes: string[]
+    }
+    expect(payload.status).toBe('cancelled')
+    expect(payload.outcome).toBe('failed_with_unverified')
+    expect(payload.failed_nodes).toEqual(['nr1'])
+    expect(payload.unverified_nodes).toEqual(['nr1'])
+  })
+
   it('幂等：已终态再调返回 null，不追加事件', () => {
     const db = setup()
     setNode(db, { status: 'done', side_effect_policy: 'pure' })

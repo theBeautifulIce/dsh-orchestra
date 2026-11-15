@@ -19,7 +19,10 @@ type NodeRow = {
 /**
  * 一轮执行结束后收口 run：
  * - 先按账本重算 settling / pending，再检查未终态节点、活跃 decision 与子 run；
- * - 终态优先级严格按 §4.8：失败/超时 > 未替换 orphaned > 未验证副作用 > succeeded。
+ * - 业务结果优先级严格按 §4.8：失败/超时 > 未替换 orphaned > 未验证副作用 > succeeded；
+ * - `cancelled` 只表示“停止意图已生效”，不代表副作用都已核实：
+ *   run.terminal 事件同时写 outcome（业务结果，忽略取消意图）与 failed/unverified 节点清单，
+ *   调用方判定业务成败要看 outcome，不能只看 runs.status。
  * - 已有终态或条件未满足时返回 null，不写半截。
  */
 export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null {
@@ -53,12 +56,13 @@ export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null
   const failed = nodes.some((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status))
   const orphaned = nodes.some((node) => node.status === 'orphaned' && !node.replacement_node_run_id)
   const hasUnverified = nodes.some(unverified)
-  let terminalStatus: RunTerminal
-  if (run.cancel_requested_at) terminalStatus = 'cancelled'
-  else if (failed) terminalStatus = nodes.some((node) => node.status === 'failed_with_unverified') || hasUnverified ? 'failed_with_unverified' : 'failed'
-  else if (orphaned) terminalStatus = 'orphaned'
-  else if (hasUnverified) terminalStatus = 'succeeded_with_unverified'
-  else terminalStatus = 'succeeded'
+  // 业务结果：不看取消意图，只按节点事实算，供调用方与面板区分“停了”和“成了/败了”
+  const outcome: RunTerminal = failed
+    ? (nodes.some((node) => node.status === 'failed_with_unverified') || hasUnverified ? 'failed_with_unverified' : 'failed')
+    : orphaned ? 'orphaned'
+      : hasUnverified ? 'succeeded_with_unverified'
+        : 'succeeded'
+  const terminalStatus: RunTerminal = run.cancel_requested_at ? 'cancelled' : outcome
 
   const res = tx.run(
     "UPDATE runs SET status = ?, ended_at = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND status NOT IN ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')",
@@ -72,6 +76,8 @@ export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null
     runId,
     payload: {
       status: terminalStatus,
+      // cancelled 下的真实业务结果：这是唯一能区分“取消时已经失败了”的字段
+      outcome,
       cancel_result: run.cancel_result,
       cancel_requested: run.cancel_requested_at !== null,
       failed_nodes: nodes.filter((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status)).map((node) => node.node_run_id),

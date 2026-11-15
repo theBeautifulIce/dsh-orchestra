@@ -221,3 +221,116 @@ describe('控制节点不接受执行器上报', () => {
     }
   })
 })
+
+describe('无执行器时控制节点仍可推进（审计 P2-1）', () => {
+  it('只有 wait 节点的 run：不装执行器也能派发并登记等待', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orch-noexec-'))
+    dirs.push(dir)
+    const def = {
+      workflow_id: 'wf_ctl',
+      workflow_version: '1',
+      nodes: [{
+        node_id: 'wait_only',
+        type: 'wait' as const,
+        wait: { wait_kind: 'event' as const, match: { type: 'build.finished' }, max_wait_ms: 60_000 },
+      }],
+    }
+    const service = await openServiceOrchestra({
+      dbFile: join(dir, 'orchestra.db'),
+      secret: SECRET,
+      phase: 'S3',
+    })
+    try {
+      service.orchestra.catalog.load(def)
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t9','无执行器','running',1,?,?)", [NOW, NOW])
+        tx.run(
+          "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) VALUES ('r9','t9','wf_ctl',1,?,'running',1,?,?)",
+          [definitionHashOf(def), NOW, NOW],
+        )
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr9','r9','wait_only',1,'wait',1,'queued',0,?,?)", [NOW, NOW])
+      })
+      const out = await service.orchestra.commands.dispatch({
+        runId: 'r9',
+        now: NOW,
+        ownerEpoch: service.orchestra.db.epoch,
+        leaseTtlMs: 60_000,
+        nodes: { wait_only: { tools: [] } },
+      })
+      expect(out[0]).toMatchObject({ node_run_id: 'nr9', status: 'waiting', reason: 'wait_registered' })
+      const registration = service.orchestra.db.raw.prepare("SELECT state FROM wait_registrations WHERE node_run_id = 'nr9'").get() as { state: string }
+      expect(registration.state).toBe('active')
+    } finally {
+      await service.release()
+    }
+  })
+
+  it('只有 agent 节点的 run：没有执行器时明确拒绝，不留下半截状态', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orch-noexec-agent-'))
+    dirs.push(dir)
+    const service = await openServiceOrchestra({
+      dbFile: join(dir, 'orchestra.db'),
+      secret: SECRET,
+      phase: 'S3',
+    })
+    try {
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t8','无执行器 agent','running',1,?,?)", [NOW, NOW])
+        tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('r8','t8','running',1,?,?)", [NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr8','r8','agent_one',1,'agent',1,'queued',0,?,?)", [NOW, NOW])
+      })
+      await expect(service.orchestra.commands.dispatch({
+        runId: 'r8',
+        now: NOW,
+        ownerEpoch: service.orchestra.db.epoch,
+        leaseTtlMs: 60_000,
+        nodes: { agent_one: { tools: [] } },
+      })).rejects.toMatchObject({ code: 'EVIDENCE_SOURCE_UNAVAILABLE' })
+      const node = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr8'").get() as { status: string }
+      expect(node.status).toBe('queued')
+    } finally {
+      await service.release()
+    }
+  })
+})
+
+describe('控制节点初始化失败必须收干净（审计 P2-2）', () => {
+  it('引用的子流程版本未发布：节点落 failed、租约清空、run 能收口', async () => {
+    const service = await boot()
+    try {
+      const broken = {
+        workflow_id: 'wf_broken',
+        workflow_version: '1',
+        nodes: [{
+          node_id: 'sub_broken',
+          type: 'subworkflow' as const,
+          subworkflow: { workflow_id: 'ghost', pinned_version: 1 },
+        }],
+      }
+      service.orchestra.catalog.load(broken)
+      withTx(service.orchestra.db, (tx) => {
+        tx.run(
+          "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) VALUES ('r7','t1','wf_broken',1,?,'running',1,?,?)",
+          [definitionHashOf(broken), NOW, NOW],
+        )
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr7','r7','sub_broken',1,'subworkflow',1,'queued',0,?,?)", [NOW, NOW])
+      })
+      const out = await service.orchestra.commands.dispatch({
+        runId: 'r7',
+        now: NOW,
+        ownerEpoch: service.orchestra.db.epoch,
+        leaseTtlMs: 60_000,
+        nodes: { sub_broken: { tools: [] } },
+      })
+      expect(out[0]).toMatchObject({ node_run_id: 'nr7', status: 'failed', error_code: 'WORKFLOW_SUBWORKFLOW_VERSION_MISSING' })
+      const node = service.orchestra.db.raw.prepare("SELECT status, lease_id, lease_expires_at FROM node_runs WHERE node_run_id = 'nr7'").get() as { status: string; lease_id: string | null; lease_expires_at: string | null }
+      expect(node).toEqual({ status: 'failed', lease_id: null, lease_expires_at: null })
+      const run = service.orchestra.db.raw.prepare("SELECT status FROM runs WHERE run_id = 'r7'").get() as { status: string }
+      expect(run.status).not.toBe('running')
+      const event = service.orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id = 'nr7' AND type = 'dispatch.failed'").get() as { n: number }
+      expect(event.n).toBe(1)
+    } finally {
+      await service.release()
+    }
+  })
+})

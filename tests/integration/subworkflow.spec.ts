@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
-import { WorkflowCatalog } from '../../src/service/workflows.ts'
+import { WorkflowCatalog, definitionHashOf } from '../../src/service/workflows.ts'
 import {
   assertNoOpenChildRuns, assertSubworkflowGraph, collectSubworkflowEdges, createSubworkflowRun, finishSubworkflowChild,
   propagateRunCancellation, startSubworkflowNode, SUBWORKFLOW_MAX_DEPTH,
@@ -14,6 +14,12 @@ import { applyCancel } from '../../src/service/commands/cancel.ts'
 const NOW = '2026-11-14T12:00:00.000Z'
 const SECRET = 'subworkflow-secret'
 
+const MISSING_DEF = {
+  workflow_id: 'missing',
+  workflow_version: '1',
+  nodes: [{ node_id: 'sub', type: 'subworkflow' as const, subworkflow: { workflow_id: 'ghost', pinned_version: 1 } }],
+}
+
 const ROOT_DEF = {
   workflow_id: 'root',
   workflow_version: '1',
@@ -23,6 +29,8 @@ const ROOT_DEF = {
 }
 
 function memoryDb(parentWorkflow: { workflow_id: string; workflow_version: string; hash?: string; depth?: number } = ROOT_DEF): Db {
+  // 定义哈希是控制节点的必需身份：没绑哈希的 run 一律拒，测试也不再留空
+  const parentHash = parentWorkflow.hash ?? definitionHashOf(parentWorkflow as never)
   const db = openDb(':memory:')
   applySteps(db, loadSteps(defaultMigrationsDir()))
   withTx(db, (tx) => {
@@ -30,7 +38,7 @@ function memoryDb(parentWorkflow: { workflow_id: string; workflow_version: strin
     tx.run(
       "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, root_run_id, subworkflow_depth, created_at, updated_at) "
       + 'VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)',
-      ['r1', 't1', parentWorkflow.workflow_id, parentWorkflow.workflow_version, parentWorkflow.hash ?? null, 'running', 'r1', parentWorkflow.depth ?? 0, NOW, NOW],
+      ['r1', 't1', parentWorkflow.workflow_id, parentWorkflow.workflow_version, parentHash, 'running', 'r1', parentWorkflow.depth ?? 0, NOW, NOW],
     )
     tx.run(
       "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, created_at, updated_at) "
@@ -45,11 +53,7 @@ function catalog(): WorkflowCatalog {
   c.load(ROOT_DEF)
   c.load({ workflow_id: 'child', workflow_version: '1', nodes: [{ node_id: 'a', type: 'agent' }] })
   c.load({ workflow_id: 'child', workflow_version: '2', nodes: [{ node_id: 'b', type: 'agent' }] })
-  c.load({
-    workflow_id: 'missing',
-    workflow_version: '1',
-    nodes: [{ node_id: 'sub', type: 'subworkflow', subworkflow: { workflow_id: 'ghost', pinned_version: 1 } }],
-  })
+  c.load(MISSING_DEF)
   return c
 }
 
@@ -152,7 +156,7 @@ describe('子运行 pin、深度与唤醒', () => {
   })
 
   it('定义里 pin 的子流程版本没发布：按 WORKFLOW_SUBWORKFLOW_VERSION_MISSING 拒，不退回最新', () => {
-    const db = memoryDb({ workflow_id: 'missing', workflow_version: '1' })
+    const db = memoryDb({ ...MISSING_DEF, hash: definitionHashOf(MISSING_DEF) })
     const c = catalog()
     withTx(db, (tx) => {
       expect(() => createSubworkflowRun(tx, c, {

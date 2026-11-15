@@ -206,10 +206,22 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       return out
     }),
     dispatch: async (b) => {
-      if (!opts.executor) {
-        throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发节点', { runId: b.runId })
+      // 控制节点（wait / subworkflow）不需要宿主执行器：只跑它们的工作流在无执行器进程里也能推进。
+      // 真正要跑 agent 的 run 仍明确拒绝，不把“没装执行器”拖到节点里再失败。
+      const agentNodes = db.raw.prepare(
+        "SELECT COUNT(*) AS n FROM node_runs WHERE run_id = ? AND status = 'queued' AND node_type NOT IN ('wait', 'subworkflow')",
+      ).get(b.runId) as { n: number }
+      if (Number(agentNodes.n) > 0 && !executorDeps) {
+        throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能派发 agent 节点', { runId: b.runId })
       }
-      return dispatchRun({ ...executorDeps!, executeNode: executeScheduled, executionLimits, catalog }, {
+      return dispatchRun({
+        db,
+        secret: opts.secret,
+        runtime,
+        ...(executorDeps ? { executor: executorDeps, executeNode: executeScheduled } : {}),
+        executionLimits,
+        catalog,
+      }, {
         runId: b.runId,
         nodes: b.nodes,
         now: b.now,
