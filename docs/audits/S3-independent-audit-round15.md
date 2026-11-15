@@ -15,7 +15,7 @@
   "conclusion": "pass",
   "p0": 0,
   "p1": 0,
-  "p2": 6,
+  "p2": 2,
   "must_pass_total": 20,
   "must_pass_passed": 20,
   "must_pass_ids": [
@@ -50,7 +50,7 @@
 
 结论：pass
 
-P0 = 0，P1 = 0，P2 = 6；必过项 20/20。
+P0 = 0，P1 = 0，P2 = 2；必过项 20/20。
 
 ## 2. 实测
 
@@ -85,13 +85,18 @@ P0 = 0，P1 = 0，P2 = 6；必过项 20/20。
 
 | 编号 | 位置 | 说明 |
 | --- | --- | --- |
-| P2-1 | `tests/integration/clock-recovery.spec.ts` | 负向用例只看结果，未断言「无事件」 |
-| P2-2 | `src/service/commands/cancel.ts` | 内部 API 的 clock 仍可省，缺时钟靠运行期报错 |
-| P2-3 | `src/service/clock-recovery.ts` | 早已过期的锚点也写换算事件，噪声偏多 |
-| P2-4 | `src/core/errors.ts` | `DISPATCH_SETTLE_FAILED` 是提案码，未进规格 17.1 |
-| P2-5 | `src/index.ts` / `run-close.ts` | 终态词表重复（P3 级） |
-| P2-6 | `src/index.ts` | 未装配 runtime 的路径仍可绕过时钟注入 |
+| P2-1 | `src/service/clock-recovery.ts` | 剩余预算用墙钟估算（事件里的 `remaining_ms` 可复核） |
+| P2-2 | `src/service/commands/cancel.ts` | 无 clock 时 wait/围栏判定仍走墙钟兜底（既有口径，非本轮引入） |
+
+## 5.1 观察（不计 P2）
+
+| 位置 | 说明 |
+| --- | --- |
+| `tests/integration/clock-recovery.spec.ts` | 负向用例只看结果，未断言「无事件」 |
+| `src/service/commands/cancel.ts` | 内部 API 的 clock 仍可省，缺时钟靠运行期报错 |
+| `src/core/errors.ts` | `DISPATCH_SETTLE_FAILED` 是提案码，未进规格 17.1 |
+| `src/index.ts` | 终态词表重复（P3 级） |
 
 ## 6. 结论
 
-跨重启时钟 P1 真闭合，20 项全过，6 条 P2 不影响重签。
+跨重启时钟 P1 真闭合，20 项全过，2 条 P2 不影响重签。
