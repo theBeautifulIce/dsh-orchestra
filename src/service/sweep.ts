@@ -1,6 +1,7 @@
 // src/service/sweep.ts —— 维护扫描（规格 4.9 行 426-429）
 import type { Db, Tx } from '../infra/sqlite/driver.ts'
 import { inTx } from '../infra/db/tx.ts'
+import { reanchorInTx } from './clock-recovery.ts'
 import { sweepExpiredLeases } from './commands/lease.ts'
 import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts'
 import { transitionNode } from './commands/node-state.ts'
@@ -85,6 +86,9 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     for (const row of tx.all<{ node_run_id: string }>('SELECT node_run_id FROM node_runs')) {
       if (chainBreakOf(secret, readChain(tx, row.node_run_id))) broken.add(row.node_run_id)
     }
+    // 先把上个 boot 写下的锚点换算到当前时钟：不换算的话 decide() 只会返回 uncertain，
+    // fence / wait / 动作截止会永久停住（规格 4.4 行 342）。
+    if (params.clock) reanchorInTx(tx, secret, params.clock, params.now, { reanchored: [], expired: [], uncertain: [] })
     // wait 到点与租约、围栏同轮处理：同一个扫描入口，不靠外部再记得调一次
     const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, broken)
     const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken, clock: params.clock })

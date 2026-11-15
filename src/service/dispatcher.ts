@@ -41,6 +41,10 @@ export type DispatchOutcome = {
   evidence_source?: string
   /** 节点被并发流程接管时的当前状态：返回 skipped 而不是 failed（S1/S2 round60 P2） */
   current_status?: string
+  /** 收口结果类别：storage_error 时调用方必须查状态后再决定能否重派 */
+  settlement?: 'applied' | 'already_moved' | 'storage_error'
+  /** storage_error 时节点在库里的真实状态；查不到写 unknown（S2/S3 round61 P2） */
+  persisted_status?: string
 }
 
 /**
@@ -50,7 +54,7 @@ export type DispatchOutcome = {
 export type DispatchSettlement =
   | { kind: 'applied' }
   | { kind: 'already_moved'; currentStatus: string }
-  | { kind: 'storage_error'; error: unknown }
+  | { kind: 'storage_error'; error: unknown; persistedStatus?: string }
 
 // 派发依赖 = 账本/运行时 + 执行器（可选）。
 // 控制节点（wait / subworkflow）不需要宿主执行器：没装配执行器的进程也能推进它们；
@@ -218,7 +222,7 @@ export function failQueuedNode(
     // 先分清「被别人接管」和「写库失败」：前者不能覆盖，后者必须让调用方看见
     const current = currentStatusOf(deps, row.node_run_id)
     if (current !== null && current !== 'queued') return { kind: 'already_moved', currentStatus: current }
-    return { kind: 'storage_error', error: err }
+    return { kind: 'storage_error', error: err, persistedStatus: current === null ? 'unknown' : current }
   }
 }
 
@@ -230,7 +234,7 @@ export function outcomeForSettlement(
   code: string,
 ): DispatchOutcome {
   if (settlement.kind === 'applied') {
-    return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'failed', reason, error_code: code }
+    return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'failed', reason, error_code: code, settlement: 'applied' }
   }
   if (settlement.kind === 'already_moved') {
     return {
@@ -240,6 +244,7 @@ export function outcomeForSettlement(
       reason: reason + '（节点已被并发流程接管，当前状态 ' + settlement.currentStatus + '）',
       error_code: code,
       current_status: settlement.currentStatus,
+      settlement: 'already_moved',
     }
   }
   const detail = settlement.error instanceof Error ? settlement.error.message : String(settlement.error)
@@ -247,8 +252,10 @@ export function outcomeForSettlement(
     node_run_id: row.node_run_id,
     node_id: row.node_id,
     status: 'failed',
-    reason: '收口失败，节点状态保持不变：' + reason + '（' + detail + '）',
+    reason: '收口失败，节点状态保持不变：' + reason + '（' + detail + '）。重派前先查节点状态',
     error_code: 'DISPATCH_SETTLE_FAILED',
+    settlement: 'storage_error',
+    persisted_status: settlement.persistedStatus ?? 'unknown',
   }
 }
 
@@ -508,6 +515,6 @@ export function failControlDispatch(
     if (current !== null && !['leased', 'dispatched', 'started'].includes(current)) {
       return { kind: 'already_moved', currentStatus: current }
     }
-    return { kind: 'storage_error', error: err }
+    return { kind: 'storage_error', error: err, persistedStatus: current === null ? 'unknown' : current }
   }
 }

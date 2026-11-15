@@ -1218,7 +1218,7 @@ async function caseEvG204(): Promise<InjectionResult> {
   await postJson(boot.endpoint, '/v1/node-runs/lease', { nodeRunId: nodeRunId2, ownerEpoch: 1, leaseTtlMs: 120000, now: EV_NOW }, secret)
   const rev2 = Number((boot.db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id = ?').get(nodeRunId2) as { revision: number }).revision)
   const cancelled2 = await postJson(boot.endpoint, '/v1/node-runs/cancel', {
-    nodeRunId: nodeRunId2, attempt: 1, revision: rev2, cancelResult: 'interrupted', now: EV_NOW, graceMs: 1000, clock: injectClock(EV_NOW),
+    nodeRunId: nodeRunId2, attempt: 1, revision: rev2, cancelResult: 'interrupted', now: EV_NOW, graceMs: 1000,
   }, secret)
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision, action_generation, fence_state, cancel_result FROM node_runs ORDER BY node_run_id ASC').all()
   const armed = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'fence_armed'").get() as { n: number }

@@ -91,6 +91,9 @@ export type OrchErrorCode = keyof typeof ERROR_STATUS
 
 /** S2 提案码：尚未进规格 17.1，统一从 proposedError 出，details 带 proposed=true。 */
 export const PROPOSED_ERROR_CODES = {
+  // 派发结果级错误码（不是顶层 OrchError）：收口事务失败、节点状态未确认。
+  // 可重试，但重试前必须先查节点当前状态；不能据此认定节点已持久化为 failed。
+  DISPATCH_SETTLE_FAILED: 503,
   LEASE_EXPIRED: 409,
   BRIDGE_ACK_LAG: 409,
   BRIDGE_SEQ_CONFLICT: 409,

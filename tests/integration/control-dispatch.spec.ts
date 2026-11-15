@@ -452,9 +452,11 @@ describe('派发结果尊重收口结果（S1/S2 round60 P2）', () => {
       status: 'skipped',
       current_status: 'waiting',
     })
-    expect(outcomeForSettlement({ kind: 'storage_error', error: new Error('db down') }, base, 'boom', 'X')).toMatchObject({
+    expect(outcomeForSettlement({ kind: 'storage_error', error: new Error('db down'), persistedStatus: 'queued' }, base, 'boom', 'X')).toMatchObject({
       status: 'failed',
       error_code: 'DISPATCH_SETTLE_FAILED',
+      settlement: 'storage_error',
+      persisted_status: 'queued',
     })
   })
 
