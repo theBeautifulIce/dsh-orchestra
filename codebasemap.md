@@ -165,10 +165,10 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | 文件 | 行数/大小 | 内容 |
 | --- | --- | --- |
 | `docs/orchestra-design-draft.md` | 670 行 / 215KB | **规则条文唯一权威**：第一段（桥/生命周期/控制面）、第二段（17 条硬规则）、第三段（九节点图 §3.0–§3.5）、历史修订清单 §3.4–§3.4j |
-| `docs/orchestra-audit-ledger.md` | 84 行 / 18KB | 逐轮审计台账：§一 逐轮记录（1–20 轮）、§二 几件能算出来的事、§三 收敛判据、§四 统计口径、§五 当前进度与续跑指引 |
+| `docs/orchestra-audit-ledger.md` | 227 行 | 设计稿逐轮审计台账：§一 逐轮记录（1–25 轮，第 25 轮 pass）、§二 几件能算出来的事、§三 收敛判据、§四 统计口径、§五 当前进度与续跑指引 |
 | `docs/requirements.md` | 约 330 行 / 19KB | 原始需求（R1–R23 主人原话表）、需求分解 F1–F13 / N1–N7、拍板口径 §3.1–§3.7、验收标准 |
 | `docs/design-notes.md` | 约 300 行 / 28KB | 设计思路：16 条决策（问题→决策→理由→被否方案→代价）、五个坑族、参考项目学了什么、风险清单 |
-| `docs/audits/` | 每轮一份报告 + 一份整改对照表 | 独立审计报告（S1 / S2 第一至第四轮，最新 `S2-independent-audit-round4.md`）与整改对照表（`S2-round2-response.md`、`S2-round3-response.md`、`S2-round4-response.md`）：放行依据是审计报告本身，对照表只是实现者自证 |
+| `docs/audits/` | 代码三门独立审计报告 | S1 / S2 / S3 各轮（最新 `S1-independent-audit-round64.md`、`S2-independent-audit-round64.md`、`S3-independent-audit-round16.md`）：每份含裁决 JSON（`audit-verdict/1`）、必过项表、P2 清单；门记录与签署见 `docs/gates/` |
 
 **查法**：
 - 「某条规则写在哪一行」 → 直接读设计稿（`orchestra-design-draft.md`），行号见下方 §四。
@@ -187,6 +187,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/service/commands/runtime.ts` | 运行时装配（只把 catalog 交给 applyReport，命令层不自取 policy） |
 | `src/service/runs.ts` | 生产装配：createRun 按 `(workflow_id, version)` 建 task/run/node_runs，写复合身份与事件 |
 | `src/service/dispatcher.ts` | 生产装配：dispatchRun 拾 queued 节点走 runNode |
+| `src/service/clock-recovery.ts` | 跨实例锚点恢复：sweep 读取前把上个 boot 的 action deadline / 取消宽限 / wait 计时 / startup_unknown 换算成当前时钟的锚点；坏链节点跳过，不可信的「已到期」给确认窗口并落 timer_uncertain，幂等 |
 | `src/executor/tools.ts` | 工具注册表与授权（`assertToolsAuthorized`：deny 优先、必须注册、必须落在 allow 集） |
 | `src/core/audit-verdict.ts` | 结构化审计裁决（`AUDIT_VERDICT_SCHEMA` / `parseAuditVerdict` / `validateAuditVerdict` / `verdictProblems`）：门放行的权威输入，词法解析降为第二道防线 |
 | `src/core/freeze.ts` | `deepFreeze`：目录里的工作流定义冻结，外部拿到过引用也改不动 |
