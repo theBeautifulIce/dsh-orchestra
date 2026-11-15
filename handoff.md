@@ -1,12 +1,42 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-15 12:10。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-15 11:40。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 12:10，HEAD `a0a54d3`，三门已签）
+## 0.1 最新接手续接（2026-11-15 11:40，HEAD `a8691ff`，P2 批次待重审）
+
+> **重要：当前 HEAD 不是已签署状态。** 已签的完整链停在 `f566156`（候选 `082d9ad`，三门 exit 0），
+> 之后 `a8691ff` 是 P2 批量修复，**尚未重审、未重签、未推送**。推送网络仍不稳定（schannel / 502）。
+
+### 两段状态
+
+| 提交 | 内容 | 门状态 |
+| --- | --- | --- |
+| `f566156` | 三份 round59/59/11 审计 + G1→G2→G3 签名 | 三门 exit 0，已签 |
+| `a8691ff` | P2 批次：同状态规则校验、零副作用收口、无执行器直调、扫描时钟 fail-closed、取消契约 null、ev-g2-16 计数 | 未审未签，`pnpm gate` 红（预期） |
+
+### P2 批次改了什么
+
+- `applyTransition`：显式 `ruleId` 在同状态写时也校验来源/目标与前提；不带 `ruleId` 的挂起补丁不受影响。
+- `failControlDispatch` / `failQueuedNode`：节点标 `pure` + `verified_none=1`，run 不再误报 `failed_with_unverified`。
+- `dispatchRun` 未装执行器且直接调用：agent 节点收成 failed 并留事件（与 HTTP 入口口径一致）。
+- `sweep` 动作时限：没有锚点或没有时钟一律判不确定，不回退墙钟；用例改成锚点驱动。
+- `/v1/runs/cancel` 的 `terminalStatus`：run 未到终态时为 `null`。
+- `docs/gates/evidence/G2/ev-g2-16.md`：桥闭环 76 / 全量 898（现为 901）计数更新。
+- 回归新增 4 条：同状态规则、零副作用收口、锚点时限。
+
+### 恢复网络后要做的（顺序不能变）
+
+1. `git push origin f566156:main` —— 先把已签署检查点推上去（远端当前还是 `723efe7`）。
+2. 在 `a8691ff` 上重派 S1 r60 / S2 r60 / S3 r12，报告绑定 `a8691ff`。
+3. 更新三门 `audit_round` / `audit_report`，按 G1→G2→G3 重签；每次签完提交。
+4. `pnpm gate` 三门 exit 0 后 `git push origin main`。
+5. 复核：`git log --oneline origin/main -3` 末提交应为 G3 签名提交。
+
+
 
 ### 当前进度
 
