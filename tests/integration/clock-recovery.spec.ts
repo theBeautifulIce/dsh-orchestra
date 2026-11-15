@@ -64,6 +64,18 @@ describe('跨服务实例的截止锚点恢复（S3 round13 P1）', () => {
     expect(events(db, 'nr_wait', 'deadline.reanchored')).toBe(1)
   })
 
+  it('重复扫描幂等：不重复写 deadline.reanchored，也不误动已换算的锚点', () => {
+    const { db } = freshLedger()
+    seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, deadline_at, deadline_boot_id, deadline_monotonic_ns, created_at, updated_at) VALUES ('nr_act','r1','n_act',2,'agent',1,'stopping',0,?, 'boot_a', 1000000000, ?, ?)", [NOW, NOW, NOW])
+    })
+    const clock = new ScriptedClock('boot_b', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    sweep(db, TEST_SECRET, { now: LATER, clock })
+    sweep(db, TEST_SECRET, { now: LATER, clock })
+    expect(events(db, 'nr_act', 'deadline.reanchored')).toBe(1)
+  })
+
   it('真实关库重开：新实例的扫描能推进旧实例留下的围栏', () => {
     const { file, db } = freshLedger()
     seed(db)
