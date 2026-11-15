@@ -106,7 +106,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
     requireVerdict: true,
     // handoff 是活文档，每次收尾都会改；它进候选范围会让门哈希随一次文档更新失效（审计 F-02）
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: null,
     gateFile: 'docs/gates/G1.md',
   },
@@ -194,7 +194,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: '4f3ada7',
     requireVerdict: true,
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: 'G1',
     gateFile: 'docs/gates/G2.md',
   },
