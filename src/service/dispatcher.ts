@@ -144,15 +144,22 @@ async function dispatchOne(
       leaseRenewIntervalMs: p.leaseRenewIntervalMs,
       ...deps.executionLimits,
     }
+    if (!deps.executeNode && !deps.executor) {
+      // 直接调 dispatchRun 且没装执行器：与配置类错误一致，把 queued 收成 failed 并留事件，
+      // 不能只返回失败让节点永远排队（S2 第 59 轮 P2-3）。
+      const reason = '执行器没有装配，不能跑 agent 节点'
+      failQueuedNode(deps, p, row, reason, 'EVIDENCE_SOURCE_UNAVAILABLE')
+      return {
+        node_run_id: row.node_run_id,
+        node_id: row.node_id,
+        status: 'failed',
+        reason,
+        error_code: 'EVIDENCE_SOURCE_UNAVAILABLE',
+      }
+    }
     const res = deps.executeNode
       ? await deps.executeNode(params)
-      : deps.executor
-        ? await runNode(deps.executor, params)
-        : (() => {
-            throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑 agent 节点', {
-              nodeRunId: row.node_run_id,
-            })
-          })()
+      : await runNode(deps.executor!, params)
     return {
       node_run_id: row.node_run_id,
       node_id: row.node_id,
@@ -204,6 +211,7 @@ function failQueuedNode(
         attempt: row.attempt,
         now: p.now,
         context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true },
+        patch: { side_effect_policy: 'pure', side_effect_verified_none: 1 },
       })
       appendNodeRunEvent(tx, deps.secret, row.node_run_id, 'dispatch.failed', {
         reason,
@@ -452,6 +460,10 @@ export function failControlDispatch(
           executor_session_id: null,
           executor_agent_id: null,
           wait_started_at: null,
+          // 控制节点在派发期没有执行任何工具：副作用事实是「零副作用、无需核实」，
+          // 不能让 run 终态误报成 failed_with_unverified（S3 第 11 轮 P2-1）。
+          side_effect_policy: 'pure',
+          side_effect_verified_none: 1,
         },
         context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true },
       })

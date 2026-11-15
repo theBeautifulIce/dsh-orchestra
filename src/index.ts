@@ -69,6 +69,9 @@ export type Orchestra = {
 }
 
 // 只有走完取锁与 epoch 自增的启动链才许可建装配：单写者是启动前提，不是可选装饰（第五轮审计 P1-3）
+// run 终态集合：取消接口只在这些状态下回报 terminalStatus（S1 第 59 轮 P2-4）
+const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
+
 const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
 // 生产装配：一个进程一个写者，迁移在打开时跑完，命令统一走 runtime
 // 外部只能走 openServiceOrchestra；直接调用拿不到凭证（第五轮审计 P1-3）
@@ -218,7 +221,8 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
           outcome = null
         }
       }
-      return { ...out, terminalStatus: statusRow?.status ?? out.runStatus, outcome }
+      const terminalStatus = statusRow && RUN_TERMINAL.has(statusRow.status) ? statusRow.status : null
+      return { ...out, terminalStatus, outcome }
     }),
     dispatch: async (b) => {
       // 控制节点（wait / subworkflow）不需要宿主执行器：只跑它们的工作流在无执行器进程里也能推进。

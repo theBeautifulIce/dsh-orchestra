@@ -417,3 +417,28 @@ describe('没有执行实现的节点类型必须明确拒绝', () => {
     }
   })
 })
+
+describe('派发失败的副作用事实（S3 round11 P2-1）', () => {
+  it('被拒的 queued 节点标成零副作用：run 收口为普通 failed，不冒充未核实', async () => {
+    const service = await boot()
+    try {
+      withTx(service.orchestra.db, (tx) => {
+        tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) VALUES ('r4','t1','wf',1,?,'running',1,?,?)", [definitionHashOf(ROOT_DEF), NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr4','r4','sub_one',1,'subworkflow',1,'queued',0,?,?)", [NOW, NOW])
+      })
+      await service.orchestra.commands.dispatch({
+        runId: 'r4',
+        now: NOW,
+        ownerEpoch: service.orchestra.db.epoch,
+        leaseTtlMs: 60_000,
+        nodes: { sub_one: { tools: [], control: { kind: 'subworkflow' } } as never },
+      })
+      const node = service.orchestra.db.raw.prepare("SELECT status, side_effect_policy, side_effect_verified_none FROM node_runs WHERE node_run_id = 'nr4'").get() as { status: string; side_effect_policy: string; side_effect_verified_none: number }
+      expect(node).toEqual({ status: 'failed', side_effect_policy: 'pure', side_effect_verified_none: 1 })
+      const run = service.orchestra.db.raw.prepare("SELECT status FROM runs WHERE run_id = 'r4'").get() as { status: string }
+      expect(run.status).toBe('failed')
+    } finally {
+      await service.release()
+    }
+  })
+})

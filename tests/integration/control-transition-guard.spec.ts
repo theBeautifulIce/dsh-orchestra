@@ -83,6 +83,25 @@ describe('控制节点迁移守卫', () => {
   })
 })
 
+describe('同状态写也必须校验显式规则', () => {
+  it('stopping → stopping 带不匹配的 ruleId：拒绝，规则不能形同虚设', () => {
+    const db = memoryDb('stopping')
+    expect(() => withTx(db, (tx) => applyTransition(tx, {
+      nodeRunId: 'nr1', from: ['stopping'], to: 'stopping', ruleId: 'M-48', attempt: 1, now: NOW,
+      context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true },
+    }))).toThrowError(/显式规则与来源\/目标不匹配/)
+    expect((db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id = ?').get('nr1') as { status: string }).status).toBe('stopping')
+  })
+
+  it('同状态写不写 ruleId 仍然允许（挂起/清挂起补丁不受影响）', () => {
+    const db = memoryDb('stopping')
+    withTx(db, (tx) => applyTransition(tx, {
+      nodeRunId: 'nr1', from: ['stopping'], to: 'stopping', attempt: 1, now: NOW, patch: { hang_reason: 'action_overrun' },
+    }))
+    expect((db.raw.prepare('SELECT hang_reason FROM node_runs WHERE node_run_id = ?').get('nr1') as { hang_reason: string }).hang_reason).toBe('action_overrun')
+  })
+})
+
 describe('控制节点不能走执行器迁移入口', () => {
   it('transitionNode 对 wait/subworkflow 节点直接拒绝', async () => {
     const { transitionNode } = await import('../../src/service/commands/node-state.ts')

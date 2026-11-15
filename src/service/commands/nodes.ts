@@ -136,6 +136,9 @@ export function applyTransition(tx: Tx, req: TransitionRequest): void {
       from: req.from,
     })
   }
+  // 显式规则必须与这一行真实来源/目标一致，且前提成立——同状态写也不例外，
+  // 否则 `stopping→stopping + ruleId=M-48` 这类写法会让显式规则形同虚设（S3 第 11 轮 P2-4）。
+  if (explicitRule) assertExplicitRule(explicitRule, req, actual)
   if (actual !== req.to) {
     if (!canTransition(actual, req.to)) {
       throw new OrchError('STALE_GENERATION', '这条迁移不在合法迁移表里', {
@@ -144,9 +147,7 @@ export function applyTransition(tx: Tx, req: TransitionRequest): void {
         to: req.to,
       })
     }
-    if (explicitRule) {
-      assertExplicitRule(explicitRule, req, actual)
-    } else {
+    if (!explicitRule) {
       const candidates = TRANSITIONS.filter((rule) =>
         rule.from.includes(actual)
         && rule.to.includes(req.to)

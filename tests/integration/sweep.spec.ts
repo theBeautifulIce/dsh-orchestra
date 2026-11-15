@@ -316,15 +316,20 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
   it('动作时限到点：只开 action_overrun 卡并挂起节点，不替人改状态；重复扫描不重复开卡', () => {
     const db = setup()
     cancel(db, 'not_interruptible')
+    // 时限只认 boot_id + 单调纳秒：没有锚点就判不确定，绝不用墙钟兜底（S2 第 59 轮 P2-2）
+    const clock = new ScriptedClock('boot_sw', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    tick(clock, 10_000)
     withTx(db, (tx) => tx.run(
-      "UPDATE node_runs SET deadline_at=?, deadline_boot_id=NULL, deadline_monotonic_ns=NULL WHERE node_run_id='nr_sw'",
-      ['2026-11-13T03:00:10.000Z'],
+      "UPDATE node_runs SET deadline_at=?, deadline_boot_id=?, deadline_monotonic_ns=? WHERE node_run_id='nr_sw'",
+      ['2026-11-13T03:00:10.000Z', 'boot_sw', 10_000_000_000],
     ))
-    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:11.000Z' })
+    tick(clock, 1000)
+    const first = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:11.000Z', clock })
     expect(first.action_overrun).toEqual(['nr_sw'])
     expect(row(db).status).toBe('stopping')
     expect(row(db).hang_reason).toBe('action_overrun')
-    const second = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:12.000Z' })
+    tick(clock, 1000)
+    const second = sweep(db, TEST_SECRET, { now: '2026-11-13T03:00:12.000Z', clock })
     expect(second.action_overrun).toEqual([])
     const count = (db.raw.prepare("SELECT COUNT(*) AS n FROM decisions WHERE node_run_id='nr_sw' AND kind='action_overrun'").get() as { n: number }).n
     expect(count).toBe(1)

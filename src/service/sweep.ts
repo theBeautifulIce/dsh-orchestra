@@ -276,9 +276,9 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
         bootId: row.deadline_boot_id,
         monotonicNs: row.deadline_monotonic_ns,
       })
-      const expired = anchored && params.clock
-        ? params.clock.decide(anchored).kind === 'expired'
-        : Date.parse(row.deadline_at) <= Date.parse(params.now)
+      // 没有单调钟就判「不确定」，不回退墙钟：墙钟跳变会把长动作误判成超时（S2 第 59 轮 P2-2）。
+      const expired = anchored !== null && params.clock !== undefined
+        && params.clock.decide(anchored).kind === 'expired'
       if (!expired) continue
       if (activeDecision(tx, row.run_id, 'action_overrun', row.node_run_id)) continue
       const decisionId = 'dec_' + uuidv7()

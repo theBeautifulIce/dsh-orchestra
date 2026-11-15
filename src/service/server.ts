@@ -104,8 +104,8 @@ export type NodeCommands = {
     skippedIrreversible: string[]
     pendingHumanDecisions: string[]
     runStatus: string
-    // 取消后的库内终态与业务结果（run.terminal.outcome）；未收口时为 null
-    terminalStatus: string
+    // 取消后的库内终态与业务结果（run.terminal.outcome）；run 还没到终态时两者都是 null
+    terminalStatus: string | null
     outcome: string | null
   }
   // 派发：把 run 下排队中的节点交给生产执行器跑
