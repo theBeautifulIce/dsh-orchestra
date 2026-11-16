@@ -1,4 +1,5 @@
 // src/service/commands/subworkflow.ts —— 子流程 pin 版本、深度/环检测、子运行与取消传播（S3 Task 10）
+import { assertWorkflowUsable } from './workflows.ts'
 import { OrchError } from '../../core/errors.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from '../workflows.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
@@ -324,6 +325,8 @@ export function createSubworkflowRun(
     })
   }
 
+  // 子流程引用同样过归属闸：不能借引用 task_local 工作流绕过 owner 限制
+  assertWorkflowUsable(tx, p.workflowId, (parent as { task_id?: string }).task_id ?? null)
   const pinned = Number(p.workflowVersion)
   if (!Number.isInteger(pinned) || pinned < 1) {
     throw new OrchError('WORKFLOW_SUBWORKFLOW_VERSION_MISSING', '子流程必须 pin 一个正整数版本', {

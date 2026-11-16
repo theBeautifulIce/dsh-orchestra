@@ -40,11 +40,11 @@ describe('G4：版本固定与并发发布', () => {
     bootstrap(db)
     // 两个调用方都以为自己是第一：同 revision、不同 operation_id，第二个必须失败
     const first = withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-a', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '2dc9186f-37c7-705f-82be-b703c36a20c6', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(first.version).toBe('1')
     expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-b', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '0aecf828-f595-760d-8aad-c4577b2b5aa9', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx)))).toBe('WORKFLOW_DRAFT_NOT_OPEN')
     const versions = db.raw.prepare("SELECT version FROM workflow_versions WHERE workflow_id = 'wf1'").all() as { version: string }[]
     expect(versions.map((v) => v.version)).toEqual(['1'])
@@ -57,7 +57,7 @@ describe('G4：版本固定与并发发布', () => {
     bootstrap(db)
     // 起 run 前先发布 v1，run 记住 v1；之后发布 v2，run 仍按 v1 解释
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-v1', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '61a6f7d5-95fe-79c5-8f31-b9e389272242', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     withTx(db, (tx) => tx.run(
       "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) "
@@ -72,7 +72,7 @@ describe('G4：版本固定与并发发布', () => {
       actor: 'human:me', now: NOW,
     }))
     const second = withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: reopened.revision + 1, baseVersion: 1, operationId: 'op-v2', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: reopened.revision + 1, baseVersion: 1, operationId: '07ea2259-9ce5-74f8-8faf-f1289e3e2cf1', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(second.version).toBe('2')
     expect(second.based_on_version).toBe('1')
@@ -88,7 +88,7 @@ describe('G4：版本固定与并发发布', () => {
     const { db } = freshLedger()
     bootstrap(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-x', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '6855f1df-1155-7427-8817-ca07265346a2', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     // 草稿 revision 仍是 1，但已消费：先报 DRAFT_NOT_OPEN
     expect(codeOf(() => withTx(db, (tx) => publishDraft(tx, {
@@ -104,11 +104,11 @@ describe('G4：版本固定与并发发布', () => {
     const { db } = freshLedger()
     bootstrap(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '2b6a1165-5922-7bfd-814b-5b6d48eac59d', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     const reopened = withTx(db, (tx) => openDraft(tx, { workflowId: 'wf1', baseVersion: 1, actor: 'human:me', now: NOW }))
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: reopened.revision, baseVersion: 1, operationId: 'op-2', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: reopened.revision, baseVersion: 1, operationId: 'c3fe93d4-8f92-755b-8b26-4c7a2be92b41', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     const rows = db.raw.prepare('SELECT version, based_on_version FROM workflow_versions WHERE workflow_id = ? ORDER BY version').all('wf1') as
       { version: string; based_on_version: string | null }[]
@@ -123,7 +123,7 @@ describe('G4：版本固定与并发发布', () => {
     const { db } = freshLedger()
     bootstrap(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-imm', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'e5666f49-b24e-74b2-8cf8-1c2304ebe16f', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(() => withTx(db, (tx) => tx.run("UPDATE workflow_versions SET publish_note = '改写' WHERE workflow_id = 'wf1'")))
       .toThrowError(/不可修改/)
@@ -145,17 +145,17 @@ describe('G4：发布后同进程立即可起 run（审计 P1-1）', () => {
       const commands = service.orchestra.commands
       const created = commands.createWorkflow!({
         workflowId: 'wf1', name: '发布流程', definition: doc(), actor: 'human:me', now: NOW,
-        operationId: 'op-e2e-create',
+        operationId: 'b0f63807-0534-716b-81d0-b452ce91577c',
       } as never)
       expect((created as { revision: number }).revision).toBe(1)
       const published = commands.publishWorkflow!({
         workflowId: 'wf1', revision: 1, baseVersion: 0, note: '首次发布', actor: 'human:me', now: NOW,
-        operationId: 'op-e2e-publish',
+        operationId: 'ae99238a-fd70-792c-8e51-319798508b20',
       } as never) as { version: string; definition_hash: string }
       expect(published.version).toBe('1')
 
       const run = commands.startRun!({
-        taskTitle: '跑起来', workflowId: 'wf1', workflowVersion: '1', operationId: 'op-e2e-run', now: NOW,
+        taskTitle: '跑起来', workflowId: 'wf1', workflowVersion: '1', operationId: '535f5623-7bc9-76c1-8406-1a8c503311fd', now: NOW,
       }) as { run_id: string; workflow_version: string }
       expect(run.run_id).toBeTruthy()
       expect(String(run.workflow_version)).toBe('1')
@@ -196,15 +196,15 @@ describe('G4：执行拓扑进定义（审计 P1-3）', () => {
     try {
       const commands = service.orchestra.commands
       commands.createWorkflow!({
-        workflowId: 'wf_dep', name: '发布流程', actor: 'human:me', now: NOW, operationId: 'op-dep-c',
+        workflowId: 'wf_dep', name: '发布流程', actor: 'human:me', now: NOW, operationId: 'a3864b74-2372-76e3-85a5-ffbdd9101059',
         definition: edgeDoc([{ from: 't', to: 'a' }, { from: 'a', to: 'b' }]),
       } as never)
       commands.publishWorkflow!({
         workflowId: 'wf_dep', revision: 1, baseVersion: 0, note: '首次发布', actor: 'human:me', now: NOW,
-        operationId: 'op-dep-p',
+        operationId: '70d74c6b-3048-7185-8565-6d04a05f2fbb',
       } as never)
       const run = commands.startRun!({
-        taskTitle: '依赖顺序', workflowId: 'wf_dep', workflowVersion: '1', operationId: 'op-dep-r', now: NOW,
+        taskTitle: '依赖顺序', workflowId: 'wf_dep', workflowVersion: '1', operationId: '95175081-289b-706f-8a3b-e799abfcee9b', now: NOW,
       }) as { run_id: string }
       const outcomes = await dispatchRun(
         { db: service.orchestra.db, secret: 'g4-dep', catalog: service.orchestra.catalog } as never,

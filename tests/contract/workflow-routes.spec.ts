@@ -59,21 +59,21 @@ describe('工作流命令 HTTP 入口', () => {
   it('create → publish → 重放：版本只出一个，回执标记 replayed', async () => {
     const base = await boot()
     const created = await post(base + '/v1/workflows', {
-      operation_id: 'op-create-1', workflow_id: 'wf1', name: '发布流程', definition: doc,
+      operation_id: '422ec715-445d-7537-8b4c-56c2a732005f', workflow_id: 'wf1', name: '发布流程', definition: doc,
     })
     expect(created.status).toBe(200)
     const createdBody = await created.json() as any
     expect(createdBody.data).toMatchObject({ workflow_id: 'wf1', revision: 1, replayed: false })
 
     const published = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-1', workflow_id: 'wf1', revision: 1, base_version: 0, publish_note: '首次发布',
+      operation_id: 'eb1db924-210b-7303-8894-dfc43fc7e922', workflow_id: 'wf1', revision: 1, base_version: 0, publish_note: '首次发布',
     })
     expect(published.status).toBe(200)
     const publishedBody = await published.json() as any
     expect(publishedBody.data).toMatchObject({ version: '1', replayed: false })
 
     const replay = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-1', workflow_id: 'wf1', revision: 1, base_version: 0, publish_note: '首次发布',
+      operation_id: 'eb1db924-210b-7303-8894-dfc43fc7e922', workflow_id: 'wf1', revision: 1, base_version: 0, publish_note: '首次发布',
     })
     expect(replay.status).toBe(200)
     const replayBody = await replay.json() as any
@@ -88,14 +88,14 @@ describe('工作流命令 HTTP 入口', () => {
   it('publish_note 必填；S2 阶段发布被拒（workflow_publish 从 S4 起）', async () => {
     const base = await boot('S2')
     await post(base + '/v1/workflows', {
-      operation_id: 'op-create-3', workflow_id: 'wf3', name: '发布流程', definition: doc,
+      operation_id: '3fa50663-2dc0-7a50-804e-99b6b859e300', workflow_id: 'wf3', name: '发布流程', definition: doc,
     })
     const noNote = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-3', workflow_id: 'wf3', revision: 1, base_version: 0,
+      operation_id: '71e71ea3-12df-775e-8a77-1e0bff94e141', workflow_id: 'wf3', revision: 1, base_version: 0,
     })
     expect(noNote.status).toBe(400)
     const gated = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-4', workflow_id: 'wf3', revision: 1, base_version: 0, publish_note: '首次发布',
+      operation_id: 'af1e9539-db57-7ad9-86a2-72376e6d37bd', workflow_id: 'wf3', revision: 1, base_version: 0, publish_note: '首次发布',
     })
     expect(gated.status).toBe(403)
     const body = await gated.json() as any
@@ -105,7 +105,7 @@ describe('工作流命令 HTTP 入口', () => {
   it('发布层不通过：422 + 未注册节点清单', async () => {
     const base = await boot()
     await post(base + '/v1/workflows', {
-      operation_id: 'op-create-2', workflow_id: 'wf2', name: '带分支',
+      operation_id: 'fbfd1831-cb33-738b-870a-08cb30c62889', workflow_id: 'wf2', name: '带分支',
       definition: {
         name: '带分支',
         nodes: [
@@ -116,7 +116,7 @@ describe('工作流命令 HTTP 入口', () => {
       },
     })
     const res = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-2', workflow_id: 'wf2', revision: 1, base_version: 0, publish_note: '首次发布',
+      operation_id: '34f4ad55-e36d-7bb8-89f6-f59331c7a196', workflow_id: 'wf2', revision: 1, base_version: 0, publish_note: '首次发布',
     })
     expect(res.status).toBe(422)
     const body = await res.json() as any

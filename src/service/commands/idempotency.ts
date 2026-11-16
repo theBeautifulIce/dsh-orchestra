@@ -23,6 +23,21 @@ type InboxRow = {
   receipt_expired_at: string | null
 }
 
+/**
+ * operation_id 是全局命令身份：协议规定 UUIDv7（规格 3.7），不是示例口径。
+ * 小写带连字符，版本位 7，variant 位 [89ab]。
+ */
+export const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+export function assertOperationId(value: unknown): string {
+  if (typeof value !== 'string' || !UUID_V7_RE.test(value)) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'operation_id 必须是 UUIDv7（小写带连字符）', {
+      operation_id: typeof value === 'string' ? value : null,
+    })
+  }
+  return value
+}
+
 /** 同一份请求算同一个哈希：canonical_json 是回执口径的唯一序列化方式 */
 export const requestHashOf = (kind: string, payload: unknown): string => sha256Hex(canonicalJson({ kind, payload }))
 

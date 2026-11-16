@@ -205,20 +205,20 @@ describe('发布幂等与回执（Task 9）', () => {
     const { db } = freshLedger()
     create(db)
     const first = withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '2b6a1165-5922-7bfd-814b-5b6d48eac59d', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(first.replayed).toBe(false)
     expect(first.version).toBe('1')
 
     const replay = withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '2b6a1165-5922-7bfd-814b-5b6d48eac59d', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(replay.replayed).toBe(true)
     expect(replay.version).toBe('1')
 
     const count = db.raw.prepare("SELECT COUNT(*) AS n FROM workflow_versions WHERE workflow_id = 'wf1'").get() as { n: number }
     expect(Number(count.n)).toBe(1)
-    const row = db.raw.prepare("SELECT status, receipt_json FROM inbox WHERE operation_id = 'op-1'").get() as { status: string; receipt_json: string }
+    const row = db.raw.prepare("SELECT status, receipt_json FROM inbox WHERE operation_id = '2b6a1165-5922-7bfd-814b-5b6d48eac59d'").get() as { status: string; receipt_json: string }
     expect(row.status).toBe('applied')
     expect(JSON.parse(row.receipt_json).result.version).toBe('1')
     const applied = db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'command.applied'").get() as { n: number }
@@ -230,10 +230,10 @@ describe('发布幂等与回执（Task 9）', () => {
     const { db } = freshLedger()
     create(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-2', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'c3fe93d4-8f92-755b-8b26-4c7a2be92b41', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 2, baseVersion: 1, operationId: 'op-2', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 2, baseVersion: 1, operationId: 'c3fe93d4-8f92-755b-8b26-4c7a2be92b41', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx)))).toBe('OPERATION_ID_CONFLICT')
     db.raw.close()
   })
@@ -247,9 +247,9 @@ describe('发布幂等与回执（Task 9）', () => {
       actor: 'human:me', now: NOW,
     }))
     expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 2, baseVersion: 0, operationId: 'op-3', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 2, baseVersion: 0, operationId: '9366fa2c-9bec-7b9a-80c9-27f9bbacc8b5', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx)))).toBe('WORKFLOW_VALIDATION_FAILED')
-    const row = db.raw.prepare("SELECT COUNT(*) AS n FROM inbox WHERE operation_id = 'op-3'").get() as { n: number }
+    const row = db.raw.prepare("SELECT COUNT(*) AS n FROM inbox WHERE operation_id = '9366fa2c-9bec-7b9a-80c9-27f9bbacc8b5'").get() as { n: number }
     expect(Number(row.n)).toBe(0)
     db.raw.close()
   })
@@ -257,7 +257,7 @@ describe('发布幂等与回执（Task 9）', () => {
 
 describe('四写命令统一幂等（规格 3.7）', () => {
   const createCmd = (db: Db, over: Record<string, unknown> = {}) => withTx(db, (tx) => createWorkflowCommand(tx, {
-    workflowId: 'wf1', name: '发布流程', definition: goodDoc(), operationId: 'op-c1', actor: 'human:me', now: NOW, ...over,
+    workflowId: 'wf1', name: '发布流程', definition: goodDoc(), operationId: '20e3a34a-8002-7f34-8eee-adb9bae660fa', actor: 'human:me', now: NOW, ...over,
   } as Parameters<typeof createWorkflowCommand>[1]))
 
   it('create 重放：同一个 operation_id 不重复建工作流', () => {
@@ -272,9 +272,9 @@ describe('四写命令统一幂等（规格 3.7）', () => {
   it('失败后用同一个 operation_id 重试能成功（inbox 行随事务回滚）', () => {
     const { db } = freshLedger()
     const bad = { name: '发布流程', nodes: [node('t', 'trigger')], edges: [] }
-    expect(codeOf(() => createCmd(db, { operationId: 'op-retry', definition: { ...bad, name: '别的名字' } })))
+    expect(codeOf(() => createCmd(db, { operationId: '5cf6f0bd-d9ff-729b-8262-18e7322f2e5a', definition: { ...bad, name: '别的名字' } })))
       .toBe('WORKFLOW_VALIDATION_FAILED')
-    const ok = createCmd(db, { operationId: 'op-retry', definition: bad })
+    const ok = createCmd(db, { operationId: '5cf6f0bd-d9ff-729b-8262-18e7322f2e5a', definition: bad })
     expect(ok.replayed).toBe(false)
     expect(ok.revision).toBe(1)
     db.raw.close()
@@ -284,24 +284,24 @@ describe('四写命令统一幂等（规格 3.7）', () => {
     const { db } = freshLedger()
     createCmd(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p1', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '432ff817-af14-7032-8f1c-be936d6ac560', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     const opened = withTx(db, (tx) => openDraftCommand(tx, {
-      workflowId: 'wf1', baseVersion: 1, operationId: 'op-o1', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', baseVersion: 1, operationId: '9ae08d54-821e-75ae-8729-1dea9addb6c2', actor: 'human:me', now: NOW,
     }))
     expect(opened.replayed).toBe(false)
     const again = withTx(db, (tx) => openDraftCommand(tx, {
-      workflowId: 'wf1', baseVersion: 1, operationId: 'op-o1', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', baseVersion: 1, operationId: '9ae08d54-821e-75ae-8729-1dea9addb6c2', actor: 'human:me', now: NOW,
     }))
     expect(again.replayed).toBe(true)
     expect(again.revision).toBe(opened.revision)
 
     const updated = withTx(db, (tx) => updateDraftCommand(tx, {
-      workflowId: 'wf1', revision: opened.revision, definition: goodDoc(), operationId: 'op-u1', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: opened.revision, definition: goodDoc(), operationId: '222bdb97-9a4b-7cde-86bf-4e57b95ed98a', actor: 'human:me', now: NOW,
     }))
     expect(updated.replayed).toBe(false)
     const updatedReplay = withTx(db, (tx) => updateDraftCommand(tx, {
-      workflowId: 'wf1', revision: opened.revision, definition: goodDoc(), operationId: 'op-u1', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: opened.revision, definition: goodDoc(), operationId: '222bdb97-9a4b-7cde-86bf-4e57b95ed98a', actor: 'human:me', now: NOW,
     }))
     expect(updatedReplay.replayed).toBe(true)
     expect(updatedReplay.revision).toBe(updated.revision)
@@ -312,7 +312,7 @@ describe('四写命令统一幂等（规格 3.7）', () => {
     const { db } = freshLedger()
     createCmd(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p2', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '787af932-e54f-7397-822c-5c76eff8a436', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(codeOf(() => withTx(db, (tx) => openDraft(tx, {
       workflowId: 'wf1', baseVersion: 0, actor: 'human:me', now: NOW,
@@ -324,15 +324,64 @@ describe('四写命令统一幂等（规格 3.7）', () => {
     const { db } = freshLedger()
     createCmd(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'a642027f-52c8-7ac8-826b-417d78ad5289', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     // 模拟 sweepInboxReceipts 的真实状态：清掉回执正文、只留过期标记
     withTx(db, (tx) => tx.run(
-      "UPDATE inbox SET receipt_json = NULL, receipt_expired_at = ? WHERE operation_id = 'op-old'",
+      "UPDATE inbox SET receipt_json = NULL, receipt_expired_at = ? WHERE operation_id = 'a642027f-52c8-7ac8-826b-417d78ad5289'",
       ['2026-11-16T15:00:00.000Z']))
     expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', note: '发布说明', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'a642027f-52c8-7ac8-826b-417d78ad5289', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx)))).toBe('OPERATION_EXPIRED')
+    db.raw.close()
+  })
+})
+
+describe('update.changed=false 与 task_local 归属（P2 收口）', () => {
+  it('内容没变：不递增 revision，返回 changed=false', () => {
+    const { db } = freshLedger()
+    create(db)
+    const first = withTx(db, (tx) => updateDraft(tx, {
+      workflowId: 'wf1', revision: 1, definition: goodDoc(), actor: 'human:me', now: NOW,
+    }))
+    expect(first.changed).toBe(false)
+    expect(first.revision).toBe(1)
+    const again = withTx(db, (tx) => updateDraft(tx, {
+      workflowId: 'wf1', revision: 1, definition: goodDoc(), actor: 'human:me', now: NOW,
+    }))
+    expect(again.changed).toBe(false)
+    // 真改动才 bump
+    const real = withTx(db, (tx) => updateDraft(tx, {
+      workflowId: 'wf1', revision: 1,
+      definition: { ...goodDoc('改过的名字'), name: '改过的名字' },
+      actor: 'human:me', now: NOW,
+    }))
+    expect(real.changed).toBe(true)
+    expect(real.revision).toBe(2)
+    db.raw.close()
+  })
+
+  it('task_local 工作流只许所属任务用：createRun 与引用都要过闸', async () => {
+    const { createRun } = await import('../../src/service/runs.ts')
+    const { WorkflowCatalog } = await import('../../src/service/workflows.ts')
+    const { db } = freshLedger()
+    const catalog = new WorkflowCatalog('S2', db)
+    create(db, { workflowId: 'wf_task', scope: 'task_local', ownerTaskId: 'task_1', definition: goodDoc('任务专属'), name: '任务专属' })
+    withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf_task', revision: 1, baseVersion: 0, note: '发布说明', operationId: '4f0b1a10-1111-7aaa-8bbb-000000000001', actor: 'human:me', now: NOW,
+    }, ctx))
+    catalog.hydrate()
+    // 不亮归属 / 亮错归属 → FORBIDDEN；亮对了 → 正常
+    expect(codeOf(() => createRun(db, catalog, {
+      taskTitle: 'x', workflowId: 'wf_task', workflowVersion: '1', now: NOW,
+    }))).toBe('FORBIDDEN')
+    expect(codeOf(() => createRun(db, catalog, {
+      taskTitle: 'x', workflowId: 'wf_task', workflowVersion: '1', ownerTaskId: 'task_2', now: NOW,
+    }))).toBe('FORBIDDEN')
+    const ok = createRun(db, catalog, {
+      taskTitle: 'x', workflowId: 'wf_task', workflowVersion: '1', ownerTaskId: 'task_1', now: NOW,
+    })
+    expect(ok.run_id).toBeTruthy()
     db.raw.close()
   })
 })

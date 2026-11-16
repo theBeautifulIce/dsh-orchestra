@@ -417,7 +417,7 @@ export const ledgerEventSchema = z.looseObject({}).superRefine((value, ctx) => {
 })
 
 // —— S4 工作流命令：四个写命令都强制 operation_id（规格 3.7），读命令不需要 ——
-const operationId = z.string().min(8).max(128)
+const operationId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, 'operation_id 必须是 UUIDv7')
 const workflowName = z.string().min(1).max(80)
 
 export const workflowCreateCommandSchema = z.object({

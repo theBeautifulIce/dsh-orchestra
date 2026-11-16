@@ -16,7 +16,7 @@ import {
   type WorkflowDoc,
 } from '../../core/workflow-doc.ts'
 import { definitionHashOf } from '../workflows.ts'
-import { requestHashOf, runIdempotentCommand } from './idempotency.ts'
+import { assertOperationId, requestHashOf, runIdempotentCommand } from './idempotency.ts'
 import type { WorkflowDefinition, WorkflowNodeDef } from '../../core/workflow-def.ts'
 
 export type WorkflowScope = 'reusable' | 'task_local'
@@ -81,7 +81,8 @@ const saveDraft = (tx: Tx, p: {
   }
 }
 
-const draftHash = (doc: WorkflowDoc): string => definitionHashOf(runtimeProjection('draft', '0', doc))
+// 草稿哈希盖整份文档：runtime 投影不含 name/scope，拿它当草稿指纹会把改名当成没改
+const draftHash = (doc: WorkflowDoc): string => requestHashOf('workflow.doc', doc)
 
 /** 把 S4 文档投影成运行面定义：trigger 只是图入口，不进运行面节点表 */
 export function runtimeProjection(workflowId: string, version: string, doc: WorkflowDoc): WorkflowDefinition {
@@ -120,6 +121,23 @@ export function runtimeProjection(workflowId: string, version: string, doc: Work
     .map((e) => ({ from: e.from, to: e.to }))
     .filter((e) => ids.has(e.from) && ids.has(e.to))
   return { workflow_id: workflowId, workflow_version: version, nodes, edges }
+}
+
+/**
+ * 任务专属工作流只允许所属任务使用（scope 语义）。
+ * reusable 不限；task_local 必须由调用方亮出 owner_task_id 且与登记一致。
+ */
+export function assertWorkflowUsable(tx: Tx, workflowId: string, ownerTaskId: string | null): void {
+  const row = tx.get<{ scope: string; owner_task_id: string | null }>(
+    'SELECT scope, owner_task_id FROM workflows WHERE workflow_id = ?', [workflowId],
+  )
+  if (row?.scope === 'task_local' && row.owner_task_id !== ownerTaskId) {
+    throw new OrchError('FORBIDDEN', '任务专属工作流只允许所属任务使用', {
+      workflow_id: workflowId,
+      owner_task_id: row.owner_task_id,
+      requested_by: ownerTaskId,
+    })
+  }
 }
 
 export type CreateWorkflowParams = {
@@ -232,7 +250,7 @@ export type UpdateDraftParams = {
   now: string
 }
 
-export function updateDraft(tx: Tx, p: UpdateDraftParams): { revision: number; validation: ValidationReport } {
+export function updateDraft(tx: Tx, p: UpdateDraftParams): { revision: number; changed: boolean; validation: ValidationReport } {
   const workflow = readWorkflow(tx, p.workflowId)
   if (!workflow) throw new OrchError('WORKFLOW_NOT_FOUND', '工作流不存在', { workflow_id: p.workflowId })
   const draft = readDraft(tx, p.workflowId)
@@ -243,7 +261,7 @@ export function updateDraft(tx: Tx, p: UpdateDraftParams): { revision: number; v
     throw new OrchError('WORKFLOW_REVISION_CONFLICT', '草稿 revision 已变', {
       workflow_id: p.workflowId,
       expected: p.revision,
-      actual: draft.revision,
+      current_revision: draft.revision,
     })
   }
   const saved = validateSaveLayer(p.definition)
@@ -257,6 +275,11 @@ export function updateDraft(tx: Tx, p: UpdateDraftParams): { revision: number; v
     })
   }
   const doc = saved.saved!
+  // 内容没变就别空转 revision：幂等协议照走（operation_id 回放），只是明确告诉调用方 changed=false
+  const nextHash = draftHash(doc)
+  if (draft.definition_hash === nextHash) {
+    return { revision: draft.revision, changed: false, validation: toReport(saved.hints.errors) }
+  }
   saveDraft(tx, {
     workflowId: p.workflowId,
     revision: p.revision + 1,
@@ -267,7 +290,7 @@ export function updateDraft(tx: Tx, p: UpdateDraftParams): { revision: number; v
     now: p.now,
     expectPreviousRevision: p.revision,
   })
-  return { revision: p.revision + 1, validation: toReport(saved.hints.errors) }
+  return { revision: p.revision + 1, changed: true, validation: toReport(saved.hints.errors) }
 }
 
 export type PublishParams = {
@@ -311,7 +334,7 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): Pub
     throw new OrchError('WORKFLOW_REVISION_CONFLICT', '草稿 revision 已变', {
       workflow_id: p.workflowId,
       expected: p.revision,
-      actual: draft.revision,
+      current_revision: draft.revision,
     })
   }
   const base = workflow.current_version === null ? 0 : Number(workflow.current_version)
@@ -369,6 +392,7 @@ export function createWorkflowCommand(
   tx: Tx,
   p: CreateWorkflowParams & { operationId: string },
 ): ReturnType<typeof createWorkflow> & { replayed: boolean } {
+  assertOperationId(p.operationId)
   const requestHash = requestHashOf('workflow.create', {
     workflow_id: p.workflowId,
     name: p.name,
@@ -386,6 +410,7 @@ export function openDraftCommand(
   tx: Tx,
   p: OpenDraftParams & { operationId: string },
 ): OpenDraftResult & { replayed: boolean } {
+  assertOperationId(p.operationId)
   const requestHash = requestHashOf('workflow.open_draft', {
     workflow_id: p.workflowId,
     base_version: p.baseVersion,
@@ -400,6 +425,7 @@ export function updateDraftCommand(
   tx: Tx,
   p: UpdateDraftParams & { operationId: string },
 ): ReturnType<typeof updateDraft> & { replayed: boolean } {
+  assertOperationId(p.operationId)
   const requestHash = requestHashOf('workflow.update', {
     workflow_id: p.workflowId,
     revision: p.revision,
@@ -417,6 +443,7 @@ export function publishWorkflowCommand(
   p: PublishParams & { operationId: string },
   ctx: PublishContext,
 ): PublishResult & { replayed: boolean } {
+  assertOperationId(p.operationId)
   const requestHash = requestHashOf('workflow.publish', {
     workflow_id: p.workflowId,
     revision: p.revision,
