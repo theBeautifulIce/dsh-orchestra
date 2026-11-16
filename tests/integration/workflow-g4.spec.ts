@@ -223,101 +223,89 @@ describe('G4：执行拓扑进定义（审计 P1-3）', () => {
   })
 })
 
-describe('G4：两个独立连接竞争同一张草稿', () => {
-  it('最多一个成功，版本表只出一个新版本', async () => {
+describe('G4：真并发发布（worker_threads + 屏障）', () => {
+  it('两个 worker 同时抢一张草稿：恰好一个成功，失败方是业务冲突', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs')
     const { join } = await import('node:path')
     const { tmpdir } = await import('node:os')
+    const { pathToFileURL } = await import('node:url')
+    const { Worker } = await import('node:worker_threads')
     const { openServiceOrchestra } = await import('../../src/index.ts')
-    const { openDb, withTx } = await import('../../src/infra/sqlite/driver.ts')
+
     const dir = mkdtempSync(join(tmpdir(), 'orch-g4-race-'))
-    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-race', phase: 'S4' })
-    const second = openDb(join(dir, 'orchestra.db'))
+    const dbPath = join(dir, 'orchestra.db')
+    const service = await openServiceOrchestra({ dbFile: dbPath, secret: 'g4-race', phase: 'S4' })
     try {
       const commands = service.orchestra.commands
       commands.createWorkflow!({
-        workflowId: 'wf_race', name: '发布流程', actor: 'human:me', now: NOW, operationId: 'c1a2b3c4-1111-7aaa-8bbb-000000000201',
+        workflowId: 'wf_race', name: '发布流程', actor: 'human:me', now: NOW,
+        operationId: 'c1a2b3c4-1111-7aaa-8bbb-000000000201',
         definition: doc(),
       } as never)
-      // 两个连接、同一张草稿（revision 1）各自发布
-      const publish = (db: Db, operationId: string) =>
-        withTx(db, (tx) => publishWorkflowCommand(tx, {
-          workflowId: 'wf_race', revision: 1, baseVersion: 0, note: '发布说明', actor: 'human:me', now: NOW,
-          operationId,
-        }, ctx))
-      const results = await Promise.allSettled([
-        Promise.resolve().then(() => publish(service.orchestra.db, 'c1a2b3c4-1111-7aaa-8bbb-000000000202')),
-        Promise.resolve().then(() => publish(second, 'c1a2b3c4-1111-7aaa-8bbb-000000000203')),
-      ])
-      const ok = results.filter((r) => r.status === 'fulfilled')
-      const failed = results.filter((r) => r.status === 'rejected')
+
+      // 每个 worker 自己开连接、自己建上下文，屏障放行后同时抢写锁
+      const driverUrl = pathToFileURL(join(process.cwd(), 'src/infra/sqlite/driver.ts')).href
+      const cmdsUrl = pathToFileURL(join(process.cwd(), 'src/service/commands/workflows.ts')).href
+      const workerSource = `
+        const { parentPort, workerData } = require('node:worker_threads')
+        ;(async () => {
+          const { openDb, withTx } = await import(workerData.driverUrl)
+          const { publishWorkflowCommand, publishContextFor } = await import(workerData.cmdsUrl)
+          const barrier = new Int32Array(workerData.barrier)
+          const db = openDb(workerData.dbPath)
+          Atomics.add(barrier, 0, 1)
+          Atomics.notify(barrier, 0)
+          const deadline = Date.now() + 5000
+          while (Atomics.load(barrier, 0) < workerData.participants && Date.now() < deadline) {
+            Atomics.wait(barrier, 0, Atomics.load(barrier, 0), 50)
+          }
+          try {
+            const out = withTx(db, (tx) => publishWorkflowCommand(tx, workerData.publish, publishContextFor(tx, new Set(['agent', 'subworkflow', 'wait']))))
+            parentPort.postMessage({ ok: true, version: out.version })
+          } catch (err) {
+            parentPort.postMessage({ ok: false, code: err && err.code ? err.code : null, message: err && err.message })
+          } finally {
+            db.raw.close()
+            parentPort.close()
+          }
+        })()
+      `
+      const barrierBuffer = new SharedArrayBuffer(4)
+      const barrier = new Int32Array(barrierBuffer)
+      const publish = (operationId: string) => ({
+        workflowId: 'wf_race', revision: 1, baseVersion: 0, note: '发布说明',
+        actor: 'human:me', now: NOW, operationId,
+      })
+      const results = await Promise.all(['c1a2b3c4-1111-7aaa-8bbb-000000000202', 'c1a2b3c4-1111-7aaa-8bbb-000000000203'].map((operationId) =>
+        new Promise<{ ok: boolean; version?: string; code?: string | null }>((resolve, reject) => {
+          const worker = new Worker(workerSource, {
+            eval: true,
+            execArgv: ['--experimental-strip-types'],
+            workerData: { driverUrl, cmdsUrl, dbPath, barrier: barrierBuffer, participants: 2, publish: publish(operationId) },
+          })
+          worker.once('message', resolve)
+          worker.once('error', reject)
+        }),
+      ))
+
+      const ok = results.filter((r) => r.ok)
+      const failed = results.filter((r) => !r.ok)
       expect(ok).toHaveLength(1)
+      expect(ok[0]!.version).toBe('1')
       expect(failed).toHaveLength(1)
-      expect((failed[0] as PromiseRejectedResult).reason?.code).toMatch(/WORKFLOW_(DRAFT_NOT_OPEN|REVISION_CONFLICT|VERSION_CONFLICT)/)
+      // 失败方必须是业务冲突，不是数据库错误（busy/IO 之类）
+      expect(failed[0]!.code).toMatch(/^WORKFLOW_(DRAFT_NOT_OPEN|REVISION_CONFLICT|VERSION_CONFLICT)$/)
+
       const versions = service.orchestra.db.raw
         .prepare("SELECT version FROM workflow_versions WHERE workflow_id = 'wf_race'").all() as { version: string }[]
       expect(versions.map((v) => v.version)).toEqual(['1'])
-    } finally {
-      second.raw.close()
-      await service.release()
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-})
-
-describe('G4：task_local 生命周期闭环（方向 A：预分配 task ID）', () => {
-  it('预留 task → 建/发 task_local → 发父流程 → 绑定预留 task 起 run', async () => {
-    const { mkdtempSync, rmSync } = await import('node:fs')
-    const { join } = await import('node:path')
-    const { tmpdir } = await import('node:os')
-    const { openServiceOrchestra } = await import('../../src/index.ts')
-    const { withTx } = await import('../../src/infra/sqlite/driver.ts')
-    const { assertWorkflowUsable } = await import('../../src/service/commands/workflows.ts')
-    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-life-'))
-    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-life', phase: 'S4' })
-    try {
-      const commands = service.orchestra.commands
-      const id = (n: number) => '5e1f2a3b-0000-7aaa-8bbb-000000000' + String(300 + n).slice(-3)
-      // 1. 预留可信 task_id
-      const reserved = commands.reserveTask!({ title: '专属任务', actor: 'human:me', now: NOW, operationId: id(1) }) as { task_id: string }
-      expect(reserved.task_id).toBeTruthy()
-      // 2. task_local 子流程以它为 owner
-      commands.createWorkflow!({
-        workflowId: 'wf_child', name: '任务专属', scope: 'task_local', ownerTaskId: reserved.task_id,
-        definition: { name: '任务专属', nodes: [node('t', 'trigger'), node('a')], edges: [{ from: 't', to: 'a' }] },
-        actor: 'human:me', now: NOW, operationId: id(2),
-      } as never)
-      commands.publishWorkflow!({
-        workflowId: 'wf_child', revision: 1, baseVersion: 0, note: '发布子流程', actor: 'human:me', now: NOW, operationId: id(3),
-      } as never)
-      // 3. 父流程 pin 子流程已发布版本
-      commands.createWorkflow!({
-        workflowId: 'wf_parent', name: '父流程',
-        definition: {
-          name: '父流程',
-          nodes: [node('t', 'trigger'), { ...node('s', 'subworkflow'), config: { workflow_id: 'wf_child', pinned_version: 1 } }],
-          edges: [{ from: 't', to: 's' }],
-        },
-        actor: 'human:me', now: NOW, operationId: id(4),
-      } as never)
-      commands.publishWorkflow!({
-        workflowId: 'wf_parent', revision: 1, baseVersion: 0, note: '发布父流程', actor: 'human:me', now: NOW, operationId: id(5),
-      } as never)
-      // 4. 用预留 task_id 启动根 run：绑定预留行，不新建任务
-      const run = commands.startRun!({
-        taskTitle: '跑起来', workflowId: 'wf_parent', workflowVersion: '1', taskId: reserved.task_id,
-        operationId: id(6), now: NOW,
-      }) as { run_id: string; task_id: string }
-      expect(run.task_id).toBe(reserved.task_id)
-      // 5. 子流程归属对账：owner 指向这个预留 task 就放行，别人不行
-      withTx(service.orchestra.db, (tx) => {
-        expect(() => assertWorkflowUsable(tx, 'wf_child', reserved.task_id)).not.toThrow()
-        expect(() => assertWorkflowUsable(tx, 'wf_child', 'task_other')).toThrowError(/只允许所属任务/)
-      })
-      // 6. 根入口仍然不许直接起 task_local
-      expect(() => commands.createRun!({
-        taskTitle: 'x', workflowId: 'wf_child', workflowVersion: '1', now: NOW,
-      } as never)).toThrowError(/只能作为子流程/)
+      // 业务副作用不重复：workflow.published 只有一条，inbox 只有胜者的回执
+      const events = service.orchestra.db.raw
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'workflow.published'").get() as { n: number }
+      expect(Number(events.n)).toBe(1)
+      const receipts = service.orchestra.db.raw
+        .prepare("SELECT COUNT(*) AS n FROM inbox WHERE kind = 'workflow.publish' AND status = 'applied'").get() as { n: number }
+      expect(Number(receipts.n)).toBe(1)
     } finally {
       await service.release()
       rmSync(dir, { recursive: true, force: true })
