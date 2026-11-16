@@ -93,6 +93,24 @@ export class WorkflowCatalog {
     return rows.length
   }
 
+  /**
+   * 发布事务提交后把新版本装进内存目录：同一进程立刻可起 run，不必等重启 hydrate（审计 P1-1）。
+   * 哈希对不上就拒：内存定义必须和库内版本一字不差。
+   */
+  adopt(def: WorkflowDefinition, expectedHash: string): void {
+    const snapshot = snapshotOf(def)
+    assertDefinitionAllowed(snapshot, this.phase)
+    const workflowId = workflowIdOf(snapshot)
+    const key = String(snapshot.workflow_version)
+    if (definitionHashOf(snapshot) !== expectedHash) {
+      throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '注册到目录的定义与库内哈希不一致', {
+        workflow_id: workflowId,
+        workflow_version: key,
+      })
+    }
+    this.remember(workflowId, key, snapshot)
+  }
+
   load(def: WorkflowDefinition): LoadWorkflowResult {
     // 快照化：canonical_json 走一遍再解析，拿到的是与调用方彻底断开的独立副本；
     // 调用方之后再改原对象（哪怕改嵌套的 tools.allow）也影响不到目录里的定义（第二次意见 P1 问题 A）

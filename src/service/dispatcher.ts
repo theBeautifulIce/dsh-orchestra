@@ -100,10 +100,40 @@ export type DispatchDeps = {
 }
 
 // 只派发排队中的节点：一个节点失败不拖垮同批别的节点
+// 依赖放行：定义里带了 edges 时，前置节点没到 done 的不派发（审计 P1-3）
+const SUCCESS_STATUS = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
+function readyToDispatch(db: DispatchDeps['db'], runId: string, nodeId: string, preds: ReadonlyMap<string, string[]>): boolean {
+  const waiting = (preds.get(nodeId) ?? []).filter((pred) => {
+    const row = db.raw.prepare('SELECT status FROM node_runs WHERE run_id = ? AND node_id = ?').get(runId, pred) as { status: string } | undefined
+    return !row || !SUCCESS_STATUS.has(row.status)
+  })
+  return waiting.length === 0
+}
+
 export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promise<DispatchOutcome[]> {
-  const rows = deps.db.raw.prepare(
+  const all = deps.db.raw.prepare(
     "SELECT node_run_id, node_id, seq, attempt FROM node_runs WHERE run_id = ? AND status = 'queued' ORDER BY seq ASC",
   ).all(p.runId) as { node_run_id: string; node_id: string; seq: number; attempt: number }[]
+  // 有执行拓扑就按拓扑放行；旧定义没有 edges，保持原来的全量派发
+  const preds = new Map<string, string[]>()
+  const runRow = deps.db.raw.prepare('SELECT workflow_id, workflow_version FROM runs WHERE run_id = ?').get(p.runId) as
+    { workflow_id: string; workflow_version: string } | undefined
+  // 目录里没有这个版本就退回全量派发：老装配/直接插行的 run 没有已发布定义，
+  // 依赖闸只在"定义带着拓扑"时才生效
+  let def: { edges?: Array<{ from: string; to: string }> } | undefined
+  if (runRow && deps.catalog) {
+    try {
+      def = deps.catalog.get(runRow.workflow_id, runRow.workflow_version)
+    } catch {
+      def = undefined
+    }
+  }
+  for (const edge of def?.edges ?? []) {
+    const list = preds.get(edge.to) ?? []
+    list.push(edge.from)
+    preds.set(edge.to, list)
+  }
+  const rows = all.filter((row) => readyToDispatch(deps.db, p.runId, row.node_id, preds))
   // 装配层给了执行函数，它已经带并发闸：同批节点可以一起排，谁先拿到名额谁先跑。
   // 没给执行函数（老装配/单测）时保持原来的串行次序，不凭空放并发。
   const outcomes = deps.executeNode

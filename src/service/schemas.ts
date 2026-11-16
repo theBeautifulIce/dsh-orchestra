@@ -419,7 +419,6 @@ export const ledgerEventSchema = z.looseObject({}).superRefine((value, ctx) => {
 // —— S4 工作流命令：四个写命令都强制 operation_id（规格 3.7），读命令不需要 ——
 const operationId = z.string().min(8).max(128)
 const workflowName = z.string().min(1).max(80)
-const isoNow = z.string().min(1)
 
 export const workflowCreateCommandSchema = z.object({
   operation_id: operationId,
@@ -428,14 +427,12 @@ export const workflowCreateCommandSchema = z.object({
   definition: z.unknown(),
   scope: z.enum(['reusable', 'task_local']).optional(),
   owner_task_id: z.string().min(1).max(128).nullable().optional(),
-  now: isoNow,
 })
 
 export const workflowOpenDraftCommandSchema = z.object({
   operation_id: operationId,
   workflow_id: identifier,
   base_version: z.number().int().nonnegative(),
-  now: isoNow,
 })
 
 export const workflowUpdateCommandSchema = z.object({
@@ -443,7 +440,6 @@ export const workflowUpdateCommandSchema = z.object({
   workflow_id: identifier,
   revision: z.number().int().positive(),
   definition: z.unknown(),
-  now: isoNow,
 })
 
 export const workflowPublishCommandSchema = z.object({
@@ -451,6 +447,5 @@ export const workflowPublishCommandSchema = z.object({
   workflow_id: identifier,
   revision: z.number().int().positive(),
   base_version: z.number().int().nonnegative(),
-  publish_note: z.string().min(1).max(500).optional(),
-  now: isoNow,
+  publish_note: z.string().min(1).max(500),
 })

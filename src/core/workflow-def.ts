@@ -46,6 +46,8 @@ export type WorkflowDefinition = {
   // 模板级必留哈希；不可逆节点的通过凭据（规格 4.7 行 380）
   required_hashes?: string[]
   nodes: WorkflowNodeDef[]
+  // 执行拓扑：B 必须等 A 时给一条 a→b。没有边 = 全部可并行（旧定义兼容）。
+  edges?: Array<{ from: string; to: string }>
 }
 
 // 节点类型对应的能力名

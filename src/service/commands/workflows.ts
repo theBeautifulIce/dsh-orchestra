@@ -113,7 +113,13 @@ export function runtimeProjection(workflowId: string, version: string, doc: Work
     }
     nodes.push(out)
   }
-  return { workflow_id: workflowId, workflow_version: version, nodes }
+  // 边也要进运行定义：definition_hash 必须覆盖真实拓扑，不能只 hash 节点数组（审计 P1-3）。
+  // 触发器不进运行面，碰到它的边要一并裁掉，否则前置判断会去等一个不存在的节点。
+  const ids = new Set(nodes.map((n) => n.node_id))
+  const edges = doc.edges
+    .map((e) => ({ from: e.from, to: e.to }))
+    .filter((e) => ids.has(e.from) && ids.has(e.to))
+  return { workflow_id: workflowId, workflow_version: version, nodes, edges }
 }
 
 export type CreateWorkflowParams = {
@@ -268,7 +274,8 @@ export type PublishParams = {
   workflowId: string
   revision: number
   baseVersion: number | null
-  note?: string | null
+  /** 发布说明必填 1–500 字（规格 3.8 / Task 8） */
+  note: string
   actor: string
   now: string
 }
@@ -278,10 +285,15 @@ export type PublishResult = {
   version: string
   definition_hash: string
   based_on_version: string | null
+  /** 运行面定义：发布后由装配层注册进 WorkflowCatalog，同一进程立即可起 run */
+  definition: WorkflowDefinition
 }
 
 /** 规格 6.2：步骤 2–9 同笔事务，任何一步失败整笔回滚 */
 export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): PublishResult {
+  if (typeof p.note !== 'string' || p.note.trim().length === 0 || p.note.length > 500) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', '发布说明必须是 1–500 字', { publish_note: p.note })
+  }
   const workflow = readWorkflow(tx, p.workflowId)
   if (!workflow) throw new OrchError('WORKFLOW_NOT_FOUND', '工作流不存在', { workflow_id: p.workflowId })
 
@@ -328,7 +340,7 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): Pub
   tx.run(
     'INSERT INTO workflow_versions (workflow_id, version, content_hash, definition_json, created_at, doc_json, published_by, based_on_version, publish_note) '
     + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [p.workflowId, version, definitionHash, JSON.stringify(runtime), p.now, JSON.stringify(doc), p.actor, basedOn, p.note ?? null],
+    [p.workflowId, version, definitionHash, JSON.stringify(runtime), p.now, JSON.stringify(doc), p.actor, basedOn, p.note],
   )
   // current_version 只许从 NULL 或 base 上调到 base+1，不许回退
   const bumped = tx.run(
@@ -349,7 +361,7 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): Pub
     type: 'workflow.published',
     payload: { workflow_id: p.workflowId, version, based_on_version: basedOn, definition_hash: definitionHash },
   })
-  return { workflow_id: p.workflowId, version, definition_hash: definitionHash, based_on_version: basedOn }
+  return { workflow_id: p.workflowId, version, definition_hash: definitionHash, based_on_version: basedOn, definition: runtime }
 }
 
 /** 四个写命令统一入口：业务与回执同笔，四个都强制 operation_id（规格 3.7） */

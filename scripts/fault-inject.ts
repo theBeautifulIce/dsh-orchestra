@@ -338,7 +338,7 @@ async function caseG10(): Promise<InjectionResult> {
     workflowId: 'wf1', name: '发布流程', definition: doc(), actor: 'human:g10', now: NOW,
   }))
   const v1 = inTx(db, (tx) => publishWorkflowCommand(tx, {
-    workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'g10-v1', actor: 'human:g10', now: NOW,
+    workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'g10-v1', note: '发布说明', actor: 'human:g10', now: NOW,
   }, ctxFor(tx)))
   inTx(db, (tx) => tx.run(
     "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) "
@@ -355,7 +355,7 @@ async function caseG10(): Promise<InjectionResult> {
     actor: 'human:g10', now: NOW,
   }))
   const v2 = inTx(db, (tx) => publishWorkflowCommand(tx, {
-    workflowId: 'wf1', revision: reopened.revision + 1, baseVersion: 1, operationId: 'g10-v2', actor: 'human:g10', now: NOW,
+    workflowId: 'wf1', revision: reopened.revision + 1, baseVersion: 1, operationId: 'g10-v2', note: '发布说明', actor: 'human:g10', now: NOW,
   }, ctxFor(tx)))
   inTx(db, (tx) => tx.run(
     "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) "

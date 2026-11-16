@@ -252,7 +252,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const out = await queue.run(() => deps.commands!.createWorkflow({
         workflowId: body.workflow_id, name: body.name, definition: body.definition,
         scope: body.scope, ownerTaskId: body.owner_task_id ?? null,
-        actor, now: body.now, operationId: body.operation_id,
+        actor, now: requestNow, operationId: body.operation_id,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
@@ -261,7 +261,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const body = parseBody(workflowOpenDraftCommandSchema, await readJsonBody(req), '打开草稿')
       const out = await queue.run(() => deps.commands!.openWorkflowDraft({
         workflowId: body.workflow_id, baseVersion: body.base_version,
-        actor, now: body.now, operationId: body.operation_id,
+        actor, now: requestNow, operationId: body.operation_id,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
@@ -270,7 +270,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const body = parseBody(workflowUpdateCommandSchema, await readJsonBody(req), '更新草稿')
       const out = await queue.run(() => deps.commands!.updateWorkflowDraft({
         workflowId: body.workflow_id, revision: body.revision, definition: body.definition,
-        actor, now: body.now, operationId: body.operation_id,
+        actor, now: requestNow, operationId: body.operation_id,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
@@ -279,7 +279,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const body = parseBody(workflowPublishCommandSchema, await readJsonBody(req), '发布工作流')
       const out = await queue.run(() => deps.commands!.publishWorkflow({
         workflowId: body.workflow_id, revision: body.revision, baseVersion: body.base_version,
-        note: body.publish_note ?? null, actor, now: body.now, operationId: body.operation_id,
+        note: body.publish_note ?? null, actor, now: requestNow, operationId: body.operation_id,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return

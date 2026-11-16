@@ -9,7 +9,7 @@ import { nullLogger, type Logger } from './infra/logger.ts'
 import { WorkflowCatalog } from './service/workflows.ts'
 import { createRun } from './service/runs.ts'
 import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
-import { NODE_CAPABILITY } from './core/workflow-def.ts'
+import { requireCapability } from './core/config.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { resolveDecision } from './service/commands/decisions.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
@@ -75,7 +75,8 @@ export type Orchestra = {
 // 只有走完取锁与 epoch 自增的启动链才许可建装配：单写者是启动前提，不是可选装饰（第五轮审计 P1-3）
 // run 终态集合：取消接口只在这些状态下回报 terminalStatus（S1 第 59 轮 P2-4）
 
-const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(Object.keys(NODE_CAPABILITY))
+// 生产派发真正实现了的节点类型：parallel / decision 只有状态机与测试，允许发布会让 run 起不来（审计 P1-4）
+const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'subworkflow', 'wait'])
 const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
 
 const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
@@ -147,10 +148,17 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       workflowId: b.workflowId, revision: b.revision, definition: b.definition,
       actor: b.actor, now: b.now, operationId: b.operationId,
     })),
-    publishWorkflow: (b) => inTx(db, (tx) => publishWorkflowCommand(tx, {
+    // 发布从 S4 起才许（规格 2.4）：闸门装在命令装配层，HTTP 与内部调用都绕不过
+    publishWorkflow: (b) => {
+      requireCapability(opts.phase, 'workflow_publish')
+      const out = inTx(db, (tx) => publishWorkflowCommand(tx, {
       workflowId: b.workflowId, revision: b.revision, baseVersion: b.baseVersion, note: b.note,
       actor: b.actor, now: b.now, operationId: b.operationId,
-    }, publishContextFor(tx, RUNTIME_NODE_TYPES))),
+    }, publishContextFor(tx, RUNTIME_NODE_TYPES)))
+      // 发布成功 = 当前进程立即可跑：目录同步注册，哈希不符会当场抛（审计 P1-1）
+      catalog.adopt(out.definition, out.definition_hash)
+      return out
+    },
     getWorkflow: (b) => inTx(db, (tx) => getWorkflowSummary(tx, b.workflowId)),
     listWorkflows: (b) => inTx(db, (tx) => listWorkflowSummaries(tx, { ownerTaskId: b.ownerTaskId })),
     createRun: (b) => createRun(db, catalog, {

@@ -16,12 +16,12 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) { try { rmSync(dir, { recursive: true, force: true }) } catch { /* 句柄晚释放 */ } }
 })
 
-async function boot() {
+async function boot(phase: 'S2' | 'S4' = 'S4') {
   const dir = mkdtempSync(join(tmpdir(), 'orch-wf-routes-'))
   dirs.push(dir)
-  const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S2' })
+  const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase })
   const svc = await startServer({
-    secret: SECRET, phase: 'S2', epoch: service.orchestra.db.epoch,
+    secret: SECRET, phase, epoch: service.orchestra.db.epoch,
     asOfSeq: () => 0,
     listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
@@ -59,21 +59,21 @@ describe('工作流命令 HTTP 入口', () => {
   it('create → publish → 重放：版本只出一个，回执标记 replayed', async () => {
     const base = await boot()
     const created = await post(base + '/v1/workflows', {
-      operation_id: 'op-create-1', workflow_id: 'wf1', name: '发布流程', definition: doc, now: NOW,
+      operation_id: 'op-create-1', workflow_id: 'wf1', name: '发布流程', definition: doc,
     })
     expect(created.status).toBe(200)
     const createdBody = await created.json() as any
     expect(createdBody.data).toMatchObject({ workflow_id: 'wf1', revision: 1, replayed: false })
 
     const published = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-1', workflow_id: 'wf1', revision: 1, base_version: 0, now: NOW,
+      operation_id: 'op-pub-1', workflow_id: 'wf1', revision: 1, base_version: 0, publish_note: '首次发布',
     })
     expect(published.status).toBe(200)
     const publishedBody = await published.json() as any
     expect(publishedBody.data).toMatchObject({ version: '1', replayed: false })
 
     const replay = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-1', workflow_id: 'wf1', revision: 1, base_version: 0, now: NOW,
+      operation_id: 'op-pub-1', workflow_id: 'wf1', revision: 1, base_version: 0, publish_note: '首次发布',
     })
     expect(replay.status).toBe(200)
     const replayBody = await replay.json() as any
@@ -83,6 +83,23 @@ describe('工作流命令 HTTP 入口', () => {
     const listBody = await list.json() as any
     expect(listBody.data.items).toHaveLength(1)
     expect(listBody.data.items[0]).toMatchObject({ workflow_id: 'wf1', current_version: '1' })
+  })
+
+  it('publish_note 必填；S2 阶段发布被拒（workflow_publish 从 S4 起）', async () => {
+    const base = await boot('S2')
+    await post(base + '/v1/workflows', {
+      operation_id: 'op-create-3', workflow_id: 'wf3', name: '发布流程', definition: doc,
+    })
+    const noNote = await post(base + '/v1/workflows/publish', {
+      operation_id: 'op-pub-3', workflow_id: 'wf3', revision: 1, base_version: 0,
+    })
+    expect(noNote.status).toBe(400)
+    const gated = await post(base + '/v1/workflows/publish', {
+      operation_id: 'op-pub-4', workflow_id: 'wf3', revision: 1, base_version: 0, publish_note: '首次发布',
+    })
+    expect(gated.status).toBe(403)
+    const body = await gated.json() as any
+    expect(body.error.code).toBe('FORBIDDEN')
   })
 
   it('发布层不通过：422 + 未注册节点清单', async () => {
@@ -97,10 +114,9 @@ describe('工作流命令 HTTP 入口', () => {
         ],
         edges: [{ from: 't', to: 'b' }],
       },
-      now: NOW,
     })
     const res = await post(base + '/v1/workflows/publish', {
-      operation_id: 'op-pub-2', workflow_id: 'wf2', revision: 1, base_version: 0, now: NOW,
+      operation_id: 'op-pub-2', workflow_id: 'wf2', revision: 1, base_version: 0, publish_note: '首次发布',
     })
     expect(res.status).toBe(422)
     const body = await res.json() as any

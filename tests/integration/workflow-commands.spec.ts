@@ -38,7 +38,7 @@ const create = (db: Db, over: Partial<Parameters<typeof createWorkflow>[1]> = {}
 
 const publish = (db: Db, over: Partial<Parameters<typeof publishDraft>[1]> = {}, context = ctx) =>
   withTx(db, (tx) => publishDraft(tx, {
-    workflowId: 'wf1', revision: over.revision ?? 1, baseVersion: over.baseVersion ?? 0, actor: 'human:me', now: NOW, ...over,
+    workflowId: 'wf1', revision: over.revision ?? 1, baseVersion: over.baseVersion ?? 0, note: '发布说明', actor: 'human:me', now: NOW, ...over,
   }, context))
 
 describe('workflow.create / update 保存层', () => {
@@ -205,13 +205,13 @@ describe('发布幂等与回执（Task 9）', () => {
     const { db } = freshLedger()
     create(db)
     const first = withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(first.replayed).toBe(false)
     expect(first.version).toBe('1')
 
     const replay = withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(replay.replayed).toBe(true)
     expect(replay.version).toBe('1')
@@ -230,10 +230,10 @@ describe('发布幂等与回执（Task 9）', () => {
     const { db } = freshLedger()
     create(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-2', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-2', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 2, baseVersion: 1, operationId: 'op-2', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 2, baseVersion: 1, operationId: 'op-2', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx)))).toBe('OPERATION_ID_CONFLICT')
     db.raw.close()
   })
@@ -247,7 +247,7 @@ describe('发布幂等与回执（Task 9）', () => {
       actor: 'human:me', now: NOW,
     }))
     expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 2, baseVersion: 0, operationId: 'op-3', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 2, baseVersion: 0, operationId: 'op-3', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx)))).toBe('WORKFLOW_VALIDATION_FAILED')
     const row = db.raw.prepare("SELECT COUNT(*) AS n FROM inbox WHERE operation_id = 'op-3'").get() as { n: number }
     expect(Number(row.n)).toBe(0)
@@ -284,7 +284,7 @@ describe('四写命令统一幂等（规格 3.7）', () => {
     const { db } = freshLedger()
     createCmd(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p1', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p1', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     const opened = withTx(db, (tx) => openDraftCommand(tx, {
       workflowId: 'wf1', baseVersion: 1, operationId: 'op-o1', actor: 'human:me', now: NOW,
@@ -312,7 +312,7 @@ describe('四写命令统一幂等（规格 3.7）', () => {
     const { db } = freshLedger()
     createCmd(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p2', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p2', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
     expect(codeOf(() => withTx(db, (tx) => openDraft(tx, {
       workflowId: 'wf1', baseVersion: 0, actor: 'human:me', now: NOW,
@@ -324,11 +324,14 @@ describe('四写命令统一幂等（规格 3.7）', () => {
     const { db } = freshLedger()
     createCmd(db)
     withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx))
-    withTx(db, (tx) => tx.run("UPDATE inbox SET receipt_expired_at = ? WHERE operation_id = 'op-old'", ['2026-11-16T15:00:00.000Z']))
+    // 模拟 sweepInboxReceipts 的真实状态：清掉回执正文、只留过期标记
+    withTx(db, (tx) => tx.run(
+      "UPDATE inbox SET receipt_json = NULL, receipt_expired_at = ? WHERE operation_id = 'op-old'",
+      ['2026-11-16T15:00:00.000Z']))
     expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
-      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', actor: 'human:me', now: NOW,
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', note: '发布说明', actor: 'human:me', now: NOW,
     }, ctx)))).toBe('OPERATION_EXPIRED')
     db.raw.close()
   })
