@@ -1,58 +1,51 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-16 11:22。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-16 12:05。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
 
-## 0.1 最新接手续接（2026-11-16 11:20，HEAD `2bf9c07`，本批待 r68 复核）
+## 0.1 最新接手续接（2026-11-16 12:05，HEAD `872e5b1`，r68/r69/r20 已签已推）
 
 ### 当前进度
 
-- `origin/main` 本批之前是 `ddcfec6`（r67 fail 记录）；r66 的签名提交仍是 `b992ec2`，代码候选 `5098847`。
-- r66 三份报告结构化 verdict 的 P2 数是 **S1 1 / S2 2 / S3 2**（此前 handoff 写成 1/2/1，与 S3 r18 的 `"p2": 2` 不符，已按报告订正）。
-- **S2 r67 判 fail**（候选 `93e1d88`，P0 0 / P1 2 / P2 3，必过项 20/20 未受影响）：
-  - P1-1a `finishedChildren` 没查子 run 自身的链，断链子 run 仍能推父节点、收口父 run；
-  - P1-1b `timeoutWaiting` 的 `closeRun` 没有断链闸。
-  - 整改已落 `d85b09d`：`taintedRuns`（断链/不确定节点所在 run）贯穿 `finishedChildren` / `sweepDecisions` / `runsClosed` / wait 超时，派发错误码补白名单。
-- **本批继续收口**（已提交 `2bf9c07`，下一轮审计的候选）：
-  - 断链的**执行侧旁路**：`acquireLease` 先验链，链断直接 `FORBIDDEN`（`reason: chain_broken`），不再往坏账本追加事件；
-  - 迁移 **026**：旧毫秒写进 `startup_unknown_remaining_ns` 的一次性修复，`recovery_unit_fixes` 逐行记账（修复/无法判断分开）；
-  - 派发结果补重试指令 `retryDirective()`：`never` / `after_reread` / `after_status_query`，宿主不必自己解释 `settlement`；
-  - 恢复不确定**可查可确认**：`GET /v1/recovery/uncertain`、`POST /v1/recovery/resolve`（按 M-50 落 `indeterminate_side_effect`，清标记与锚点）；
-  - **断链闸门统一**：`assertChainIntact()` 装在 `applyTransition` / `transitionNode` / `closeRun` 三处入口，覆盖上报主干、执行器迁移、等待唤醒与 run 收口（S3 r19 P1-1 / S2 r68 P1-1）；
-  - **旧单位迁移口径修正**：026 改成按数值量级识别（<1e6 按毫秒换算、1e6~1e9 只记账、≥1e9 不动），不再依赖「缺单调锚点」（S1 r67 P2-1）；桥恢复时立刻把新预算写成检查点，不再清空（S1 r67 P2-2）；
-  - 台账 **P1-2026-11-16-01** 修复：`confirm-start.ts` / `cancel.ts`（无围栏分支）写 deadline 锚点时**同笔写** `action_remaining_ns`；`refreshCheckpointsInTx` 不再要求检查点已非空（否则 NULL 永远补不上）；`rearmDeadline` 可带剩余量，不带就清空而不是沿用旧预算。
-- 全量：**70 files / 940 passed | 1 skipped**；build ESM `lib/index.js` 300.94 kB / gzip 72.62 kB、d.ts 24.43 kB。
-- **三门当前失效**（预期）：`dcee53d` 上跑过一轮 S1 r67（pass）/ S2 r68（fail）/ S3 r19（fail），本批按两份 fail 报告整改后候选已变，三份报告全部作废；需要在最终候选上重跑 S1 r68 / S2 r69 / S3 r20，再依 G1→G2→G3 重签。证据复现本身通过（**28/28**）。
-- 推送走 `git -c http.proxy=http://127.0.0.1:7078 push origin main`。
+- 代码候选 **`fd2173b`**；签名链 `4bc2ecd`（G1 r68）→ `fe1e201`（G2 r69）→ `872e5b1`（G3 r20）；r66 的旧签名是 `b992ec2`/`5098847`。
+- **三门通过**：G1 13/13（`d41bc2e50a22…`）、G2 20/20（`46a3393b456d…`）、G3 20/20（`d1ff6d8dbffc…`）；`pnpm gate` 三门 exit 0。
+- 审计：**S1 r68 / S2 r69 / S3 r20 三人独立复核全部 pass，P0/P1 = 0**，P2 分别 4 / 1 / 4。
+- 全量：**70 files / 940 passed | 1 skipped**；build ESM `lib/index.js` 300.94 kB / gzip 72.62 kB、d.ts 24.43 kB；证据复现 **28/28**。
+- 这一轮的完整链条：r67 判 fail（断链子 run 推父节点 + wait 收口无闸）→ `d85b09d` 整改 → 评审 P1/P2 收口（`2bf9c07`）→ 台账 P1-01（`91a8aa7`）→ 第一次复核 S1 r67 pass / S2 r68 fail / S3 r19 fail（链隔离只覆盖扫描）→ **统一断链闸门 `0fda6ab`** → P2 收尾 `fd2173b` → 第二次复核三门全 pass 并重签。
 
-### 本批改了什么（评审 P1/P2 收口）
+### 本批改了什么（评审与审计整改）
 
 | 改动 | 对应 |
 | --- | --- |
-| 子 run 污染判定 + wait 超时跳过集 + run 收口闸 | S2 r67 P1-1a / P1-1b |
-| `acquireLease` 验链，断链拒绝派发 | 评审 P1-1 的执行侧旁路 |
-| 迁移 026：旧 ms → ns，只修可识别行 | 评审 P2-2 |
-| `retryDirective()` 重试指令 | 评审 P2-3 |
-| `/v1/recovery/uncertain`、`/v1/recovery/resolve` | 评审 P2-4 |
-| 锚点与恢复检查点同笔写 + 刷新不再要求既有检查点 | 台账 P1-2026-11-16-01 |
-| 跨 boot 改为检查点驱动（无 30s 确认窗口、墙钟不参与判定） | 评审 P1-2（已在 `6bb4132`/`93e1d88` 完成） |
+| 子 run 污染判定 + wait 超时跳过集 + run 收口闸（`taintedRuns`） | S2 r67 P1-1a / P1-1b |
+| `assertChainIntact()` 装到 `applyTransition` / `transitionNode` / `closeRun` | S3 r19 P1-1、S2 r68 P1-1 |
+| `acquireLease` 先验链，断链拒绝派发（`FORBIDDEN` / `chain_broken`） | 评审 P1-1 执行侧旁路 |
+| 锚点与恢复检查点同笔写；刷新按锚点补检查点；桥恢复写回预算 | 台账 P1-2026-11-16-01、S1 r67 P2-2 |
+| 迁移 026：按量级识别旧毫秒（`<1e6` 换算、`1e6~1e9` 记账、`≥1e9` 不动） | 评审 P2-2、S1 r67 P2-1 |
+| `retryDirective()`：`never` / `after_reread` / `after_status_query` | 评审 P2-3 |
+| `GET /v1/recovery/uncertain`、`POST /v1/recovery/resolve`（M-50，含 `cancelWait`） | 评审 P2-4、S3 r19 P2-3 |
+| 跨 boot 改为检查点驱动（无 30s 确认窗口、墙钟不参与判定） | 评审 P1-2（`6bb4132`/`93e1d88`） |
 
-### 已知 P2（下一批）
+### 已知 P2（下一批，按三份报告原文）
 
-1. `timer_uncertain` / `recovery_uncertain` 只有 HTTP 查询，面板还没接（author/run 视图未展示）。
-2. 迁移 026 只覆盖 `startup_unknown_remaining_ns`；`action/wait/fence_remaining_ns` 是 025 之后的新列，没有旧数据需要迁移。
-3. `storage_error` 的 `persisted_status` 读库失败时仍为 `unknown`（已由 `retry` 指令兜住：`after_status_query`）。
-4. 终态词表重复（P3）。
+1. **整链/链尾被删检不出**（S3 r20 P2-1）：`assertChainIntact`、扫描断链集、`closeRun` 都只比对链体；链整条删除或只删尾部时链体仍自洽。建议三处改用「链体 + 链头」核对，`verifyLedger` 的缺口口径已现成。
+2. **`wakeOnEvent` 按 run 回滚**（S3 r20 P2-3）：断链 wait 节点命中事件时链闸抛错，把同笔投递整体回滚，同 run 其它 wait 也推进不了。建议在 `scanRegistration` 里按登记跳过断链节点（与 `sweep` 的 `skipNodeRunIds` 同口径）。
+3. **不确定态 + 断链并存时清不掉**（S3 r20 P2-4、S2 r69 P2-1）：`resolveRecoveryUncertain` 走 `applyTransition`，被链闸或 `hang_reason IS NULL` 闸门挡住。值班口径：先核账修链，再确认不确定态；后续可加「只清标记、不做迁移」的运维出口。
+4. **迁移 026 是原地改写**（S1 r68 P2-1）：任何应用过 `2bf9c07..7a1e48b` 区间旧 026 的库，升级会因校验和不符拒绝启动。**确认 `dcee53d` 曾被实际部署就要升 P1**；否则保留现版，后续改口径务必新开 027，不要再动 026。
+5. **026 的量级口径有两处边界**（S1 r68 P2-2、S2 r69 P3-1、S3 r20 P3-3）：`<1e6` 一律当毫秒，真纳秒小值会被放大成秒级（方向是延后到期）；`1e6..1e9` 模糊带里的旧毫秒大预算会被读成接近到期。升级后按 `recovery_unit_fixes` 抽查一次。
+6. **断链派发失败节点仍留 queued**（S1 r68 P2-4）：`acquireLease` 抛 `FORBIDDEN` 被 dispatcher 收成结果，库内状态不变；缺只读查询区分「派发失败」与「链断拒绝」。
+7. **面板未接恢复状态**：`timer_uncertain` / `recovery_uncertain` 只有 HTTP 查询，author/run 视图没展示（评审 P2-4 的后续）。
+8. **文档口径**：`审计要求.md` §8 写「939 passed」，实测与证据均为 940（S3 P3-2、S2 P3-2）。别为它单独动候选，下次改文档顺手改。
 
 ### 接手先做什么
 
-1. `git log --oneline -5` 确认 HEAD 是 `2bf9c07`（`origin/main` 视推送情况），`git status` 干净。
-2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`，确认 70 files / 940 passed | 1 skipped、300.94 kB / 72.62 kB、28/28。
-3. 三门重签前先让 S1/S2/S3 按 r68/r68/r19 复核本批候选；在 r68 报告落盘前 `pnpm gate` 必然失败，不是代码问题。
-4. 任何候选文件改动（含 `codebasemap.md`）都会作废三份报告与三门签名；P2 攒批后统一审计再重签。
+1. `git log --oneline -5` 确认 HEAD 是 `872e5b1`，`git status` 干净。
+2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`、`pnpm gate`，确认 70 files / 940 passed | 1 skipped、300.94 kB / 72.62 kB、28/28、三门 exit 0。
+3. **不要动候选文件**（含 `codebasemap.md`、`审计要求.md`）：任何一处改动都会作废三份报告与三门签名，下一批要重新走 S1 r69 / S2 r70 / S3 r21。
+4. 下一批优先做上面 P2 的第 1 项（整链缺失检出），它与断链隔离同一族，改完一起复核最省事。
 
 ### 本轮改了什么（对应 round11 审计）
 
