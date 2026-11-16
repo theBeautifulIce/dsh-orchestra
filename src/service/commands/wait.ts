@@ -316,7 +316,7 @@ export function markWakeStarvation(tx: Tx, secret: string, nodeRunId: string, no
 }
 
 /** max_wait/event_timeout 到点：waiting→timeout，等待钟清空，登记转 timed_out。 */
-export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: string, clock: ClockProvider): boolean {
+export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: string, clock: ClockProvider, skipRunIds?: ReadonlySet<string>): boolean {
   const row = tx.get<WaitRow>("SELECT * FROM wait_registrations WHERE node_run_id = ? AND state = 'active'", [nodeRunId])
   if (!row) return false
   const node = tx.get<{ status: string; attempt: number; run_id: string; wait_deadline_at: string | null; wait_deadline_boot_id: string | null; wait_deadline_monotonic_ns: number | null }>(
@@ -346,11 +346,12 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
     deadline_at: node.wait_deadline_at,
   })
   appendEvent(tx, { type: 'wait.event_timeout', runId: row.run_id, nodeRunId })
-  closeRun(tx, node.run_id, now)
+  // 含断链/不确定节点的 run 不收口：不让坏账本状态生成 run 终态（评审 P1-1）
+  if (!skipRunIds?.has(node.run_id)) closeRun(tx, node.run_id, now)
   return true
 }
 
-export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock: ClockProvider, skipNodeRunIds?: ReadonlySet<string>): number {
+export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock: ClockProvider, skipNodeRunIds?: ReadonlySet<string>, skipRunIds?: ReadonlySet<string>): number {
   const rows = tx.all<{ node_run_id: string }>(
     "SELECT w.node_run_id FROM wait_registrations w JOIN node_runs n ON n.node_run_id = w.node_run_id " +
       "WHERE w.state = 'active' AND n.status = 'waiting' AND n.wait_deadline_at IS NOT NULL ORDER BY w.registration_id",
@@ -358,7 +359,7 @@ export function sweepWaitTimeouts(tx: Tx, secret: string, now: string, clock: Cl
   let timedOut = 0
   for (const row of rows) {
     if (skipNodeRunIds?.has(row.node_run_id)) continue
-    if (timeoutWaiting(tx, secret, row.node_run_id, now, clock)) timedOut++
+    if (timeoutWaiting(tx, secret, row.node_run_id, now, clock, skipRunIds)) timedOut++
   }
   return timedOut
 }

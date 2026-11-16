@@ -95,6 +95,13 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       tx.all<{ node_run_id: string }>("SELECT node_run_id FROM node_runs WHERE recovery_uncertain IS NOT NULL").map((r) => r.node_run_id),
     )
     const skipNodes = new Set<string>([...broken, ...uncertainNodes])
+    // 含断链/不确定节点的 run：不按其中节点的状态收口（评审 P1-1）
+    const taintedRuns = new Set<string>(
+      tx.all<{ run_id: string }>(
+        `SELECT DISTINCT run_id FROM node_runs WHERE node_run_id IN (${[...skipNodes].map(() => '?').join(',') || "''"})`,
+        [...skipNodes],
+      ).map((r) => r.run_id),
+    )
     const reanchor: ReanchorReport = { reanchored: [], expired: [], uncertain: [] }
     if (params.clock) {
       // 服务存活时先把剩余预算按单调钟递减落库：重启后靠它续算，墙钟不参与判定
@@ -102,7 +109,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       reanchorInTx(tx, secret, params.clock, params.now, reanchor, skipNodes)
     }
     // wait 到点与租约、围栏同轮处理：同一个扫描入口，不靠外部再记得调一次
-    const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, skipNodes)
+    const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, skipNodes, taintedRuns)
     const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: skipNodes, clock: params.clock })
     // 围栏宽限到点：撤围栏回 stopping，并把当前 attempt 的队头挑出来（规格 4.5 行 346）
     const fences = tx.all<FenceRow>(
@@ -198,7 +205,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     // 显式桥断信号：只挂起，不猜副作用；resume_state 留给桥恢复时按原状态继续
     const bridgePaused: string[] = []
     for (const nodeRunId of new Set(params.bridgeMissing ?? [])) {
-      if (broken.has(nodeRunId)) continue
+      if (skipNodes.has(nodeRunId)) continue
       const row = tx.get<{ attempt: number; status: string; hang_reason: string | null }>(
         'SELECT attempt, status, hang_reason FROM node_runs WHERE node_run_id = ?',
         [nodeRunId],
@@ -292,7 +299,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       ['stopping'],
     )
     for (const row of actionRows) {
-      if (broken.has(row.node_run_id)) continue
+      if (skipNodes.has(row.node_run_id)) continue
       const anchored = deadlineFromAnchors({
         deadlineAt: row.deadline_at,
         bootId: row.deadline_boot_id,
@@ -327,7 +334,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     // 显式执行器失联信号：置 orphaned 候选，不替人判断副作用是否存在
     const executorOrphaned: string[] = []
     for (const nodeRunId of new Set(params.executorLost ?? [])) {
-      if (broken.has(nodeRunId)) continue
+      if (skipNodes.has(nodeRunId)) continue
       const row = tx.get<{ attempt: number; status: string; hang_reason: string | null }>(
         'SELECT attempt, status, hang_reason FROM node_runs WHERE node_run_id = ?',
         [nodeRunId],
@@ -361,16 +368,11 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       + "WHERE r.parent_node_run_id IS NOT NULL AND n.status IN ('waiting', 'timing_out', 'stopping', 'superseded', 'timeout', 'failed', 'failed_with_unverified') AND r.status IN "
       + "('succeeded', 'succeeded_with_unverified', 'done', 'failed', 'failed_with_unverified', 'timeout', 'abandoned_unverified', 'orphaned', 'superseded', 'cancelled')",
     )
-    // 含断链/不确定节点的 run：不按其中节点的状态收口（评审 P1-1）
-    const taintedRuns = new Set<string>(
-      tx.all<{ run_id: string }>(
-        `SELECT DISTINCT run_id FROM node_runs WHERE node_run_id IN (${[...skipNodes].map(() => '?').join(',') || "''"})`,
-        [...skipNodes],
-      ).map((r) => r.run_id),
-    )
     for (const child of finishedChildren) {
       // 父节点链已断：不推进父节点、不追加父节点事件
       if (skipNodes.has(child.parent_node_run_id)) continue
+      // 子 run 自己含断链节点：不拿它的状态推父节点，也不收口父 run
+      if (taintedRuns.has(child.run_id)) continue
       if (taintedRuns.has(child.parent_run_id ?? '')) continue
       try {
         const out = finishSubworkflowChild(tx, secret, { childRunId: child.run_id, now: params.now })

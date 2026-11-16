@@ -212,6 +212,39 @@ describe('跨服务实例的截止锚点恢复（评审 P1-2：检查点驱动�
     expect(out.decisions_released_nodes).not.toContain('nr_bp')
   })
 
+  it('断链子 run + 已完成子流程：不拿它的状态推父节点、不收口父 run', () => {
+    const { db } = freshLedger()
+    seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_parent','r1','n_parent',10,'control',1,'waiting',1,?,?)", [NOW, NOW])
+      tx.run("INSERT INTO runs (run_id, task_id, status, revision, parent_run_id, parent_node_run_id, root_run_id, subworkflow_depth, created_at, updated_at) VALUES ('r2','t1','succeeded',1,'r1','nr_parent','r2',1,?,?)", [NOW, NOW])
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nr_child','r2','n_child',1,'agent',1,'done',1,?,?)", [NOW, NOW])
+    })
+    breakChain(db, 'nr_child')
+    const clock = new ScriptedClock('boot_b', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const out = sweep(db, TEST_SECRET, { now: NOW, clock })
+    expect(out.chain_broken).toContain('nr_child')
+    expect(row(db, 'nr_parent').status).toBe('waiting')
+    expect(out.subworkflow_finished).not.toContain('nr_parent')
+    expect(out.runs_closed).not.toContain('r1')
+  })
+
+  it('wait 超时 + 断链节点：不收口 run、不写 run.terminal', () => {
+    const { db } = freshLedger()
+    seed(db)
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, wait_deadline_at, wait_deadline_boot_id, wait_deadline_monotonic_ns, wait_remaining_ns, created_at, updated_at) VALUES ('nr_w','r1','n_w',11,'wait',1,'waiting',0,?, 'boot_a', 1000000, 1000000, ?, ?)", [NOW, NOW, NOW])
+      tx.run("INSERT INTO wait_registrations (node_run_id, run_id, wait_kind, match_json, from_seq, cursor_seq, idempotency_key, state, queued_at, created_at, updated_at) VALUES ('nr_w','r1','timer','{}',0,0,'k_w','active',?,?,?)", [NOW, NOW, NOW])
+    })
+    breakChain(db, 'nr_w')
+    const clock = new ScriptedClock('boot_b', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const out = sweep(db, TEST_SECRET, { now: NOW, clock })
+    expect(out.chain_broken).toContain('nr_w')
+    expect(row(db, 'nr_w').status).toBe('waiting')
+    expect(out.wait_timed_out).toBe(0)
+    expect(out.runs_closed).not.toContain('r1')
+  })
+
   it('run 里含断链终态节点：不按它收口 run', () => {
     const { db } = freshLedger()
     seed(db)

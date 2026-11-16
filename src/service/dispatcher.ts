@@ -2,7 +2,7 @@
 // 评审 P1：agent 执行是长时间任务，不许占着写队列的名额；并发闸由装配层统一注入。
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
-import { ERROR_STATUS, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
+import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
 import { acquireNodeRun, type RuntimeDeps } from './commands/runtime.ts'
@@ -32,10 +32,10 @@ export type DispatchParams = {
 }
 
 /** 只认登记过的错误码：任意异常的 code 字符串不进联合类型（评审 P2-3） */
-const KNOWN_ERROR_CODES = new Set<string>(Object.keys(ERROR_STATUS))
+const KNOWN_ERROR_CODES = new Set<string>([...Object.keys(ERROR_STATUS), ...Object.keys(PROPOSED_ERROR_CODES)])
 function dispatchErrorCode(err: unknown): DispatchOutcomeErrorCode {
-  if (err instanceof OrchError) return err.code
-  const raw = (err as { code?: unknown } | null | undefined)?.code
+  const raw = err instanceof OrchError ? err.code : (err as { code?: unknown } | null | undefined)?.code
+  // 登记表之外的一律不进联合类型：宿主拿到的永远是登记过的码
   return typeof raw === 'string' && KNOWN_ERROR_CODES.has(raw) ? (raw as DispatchOutcomeErrorCode) : ''
 }
 
