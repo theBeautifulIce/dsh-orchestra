@@ -2,7 +2,7 @@
 // 评审 P1：agent 执行是长时间任务，不许占着写队列的名额；并发闸由装配层统一注入。
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
-import type { AnyOrchErrorCode } from '../core/errors.ts'
+import { ERROR_STATUS, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
 import { acquireNodeRun, type RuntimeDeps } from './commands/runtime.ts'
@@ -14,7 +14,6 @@ import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
 import { closeRun } from './commands/run-close.ts'
 import { applyTransition } from './commands/nodes.ts'
 import { appendNodeRunEvent } from '../infra/db/ledger.ts'
-import { OrchError } from '../core/errors.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
@@ -30,6 +29,14 @@ export type DispatchParams = {
   ownerEpoch?: number
   leaseTtlMs?: number
   leaseRenewIntervalMs?: number
+}
+
+/** 只认登记过的错误码：任意异常的 code 字符串不进联合类型（评审 P2-3） */
+const KNOWN_ERROR_CODES = new Set<string>(Object.keys(ERROR_STATUS))
+function dispatchErrorCode(err: unknown): DispatchOutcomeErrorCode {
+  if (err instanceof OrchError) return err.code
+  const raw = (err as { code?: unknown } | null | undefined)?.code
+  return typeof raw === 'string' && KNOWN_ERROR_CODES.has(raw) ? (raw as DispatchOutcomeErrorCode) : ''
 }
 
 /** 派发结果错误码：DISPATCH_SETTLE_FAILED 是派发结果级（非顶层 OrchError），其余复用 OrchErrorCode */
@@ -129,7 +136,7 @@ async function dispatchOne(
   } catch (err) {
     // 配置解析失败是这一行的确定性错误：留在 queued 会让 run 永远收不了口，直接按失败收口
     const reason = err instanceof Error ? err.message : String(err)
-    const code = (err as { code?: string }).code ?? ''
+    const code = dispatchErrorCode(err)
     return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
   }
   if (control) {
@@ -178,7 +185,7 @@ async function dispatchOne(
       node_id: row.node_id,
       status: 'failed',
       reason: err instanceof Error ? err.message : String(err),
-      error_code: ((err as { code?: string }).code ?? '') as DispatchOutcomeErrorCode,
+      error_code: dispatchErrorCode(err),
     }
   }
 }
@@ -465,7 +472,7 @@ async function dispatchControlNode(
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    const code = (err as { code?: string }).code ?? ''
+    const code = dispatchErrorCode(err)
     // 初始化失败必须把已经拿到的租约与 dispatched 状态一起收干净：
     // 只返回 failed 而不改库，会留下“API 说失败、节点还 dispatched 且持租约”的分叉，
     // closeRun 也永远等不到终态（审计 P2-2）。

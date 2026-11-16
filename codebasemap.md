@@ -187,7 +187,7 @@ AGENTS.md  README.md  README.zh.md  SECURITY_MODEL.md  CHANGELOG.md(85KB)
 | `src/service/commands/runtime.ts` | 运行时装配（只把 catalog 交给 applyReport，命令层不自取 policy） |
 | `src/service/runs.ts` | 生产装配：createRun 按 `(workflow_id, version)` 建 task/run/node_runs，写复合身份与事件 |
 | `src/service/dispatcher.ts` | 生产装配：dispatchRun 拾 queued 节点走 runNode |
-| `src/service/clock-recovery.ts` | 跨实例锚点恢复：sweep 读取前把上个 boot 的 action deadline / 取消宽限 / wait 计时 / startup_unknown 换算成当前时钟的锚点；坏链节点跳过，不可信的「已到期」给确认窗口并落 timer_uncertain，幂等 |
+| `src/service/clock-recovery.ts` | 跨实例锚点恢复（检查点驱动）：sweep 读取前把上个 boot 的 action deadline / 取消宽限 / wait 计时 / startup_unknown 换算成当前时钟的锚点；剩余量取「恢复检查点」（存活时按单调钟递减落库，停机不累计，墙钟不参与判定），检查点缺失则落 timer_uncertain + recovery_uncertain 不自动推进；坏链节点跳过，幂等 |
 | `src/executor/tools.ts` | 工具注册表与授权（`assertToolsAuthorized`：deny 优先、必须注册、必须落在 allow 集） |
 | `src/core/audit-verdict.ts` | 结构化审计裁决（`AUDIT_VERDICT_SCHEMA` / `parseAuditVerdict` / `validateAuditVerdict` / `verdictProblems`）：门放行的权威输入，词法解析降为第二道防线 |
 | `src/core/freeze.ts` | `deepFreeze`：目录里的工作流定义冻结，外部拿到过引用也改不动 |
