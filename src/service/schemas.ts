@@ -325,6 +325,13 @@ export const cancelSchema = z.looseObject({
   extendDeadlineMs: z.number().int().min(0).max(LIMITS.graceMsMax).optional(),
 })
 
+// 恢复不确定的确认：只有一种收口语义，revision 必须与读到的行一致（评审 P2-4）
+export const recoveryResolveSchema = z.looseObject({
+  nodeRunId: identifier,
+  revision: z.number().int().nonnegative(),
+  resolution: z.enum(['mark_indeterminate_side_effect']),
+})
+
 // 补偿：描述符必须能真正执行，参数只收字符串数组；收口状态只收三个终态
 export const compensateStartSchema = z.looseObject({
   nodeRunId: identifier,

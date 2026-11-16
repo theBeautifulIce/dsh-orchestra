@@ -1,43 +1,53 @@
 # dsh-orchestra 接手指引（handoff）
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-15 17:45。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 最后更新：2026-11-16 11:15。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
 
-## 0.1 最新接手续接（2026-11-15 20:40，HEAD `30dca9a`，r66 批次已签已推）
+## 0.1 最新接手续接（2026-11-16 11:15，HEAD `ddcfec6` + 本批未提交，r67 批次待复核）
 
 ### 当前进度
 
-- `origin/main` = `30dca9a`（G3 签名），代码候选 `5098847`；工作树干净。
-- **三门通过**：G1 13/13（`19130265…`）、G2 20/20（`c0039484…`）、G3 20/20（`d381611d…`）。
-- 审计：S1 r66 / S2 r66 / S3 r18 三人独立复核全部 pass，P0/P1=0，P2 分别 1/2/1。S2 r65 抓出的 `remaining_ns` 单位分裂 P1 已根治并经三方探针确认。
-- 全量：**64 files / 915 passed | 1 skipped**；build ESM `lib/index.js` 291.85 kB / gzip 70.39 kB、d.ts 23.27 kB；证据 **28/28**。
+- `origin/main` = `ddcfec6`（r67 fail 记录）；r66 的签名提交是 `b992ec2`，代码候选 `5098847`。
+- **S2 r67 判 fail**（候选 `93e1d88`，P0 0 / P1 2 / P2 3，必过项 20/20 未受影响）：
+  - P1-1a `finishedChildren` 没查子 run 自身的链，断链子 run 仍能推父节点、收口父 run；
+  - P1-1b `timeoutWaiting` 的 `closeRun` 没有断链闸。
+  - 整改已落 `d85b09d`：`taintedRuns`（断链/不确定节点所在 run）贯穿 `finishedChildren` / `sweepDecisions` / `runsClosed` / wait 超时，派发错误码补白名单。
+- **本批继续收口**（未提交，下一轮审计的候选内容）：
+  - 断链的**执行侧旁路**：`acquireLease` 先验链，链断直接 `FORBIDDEN`（`reason: chain_broken`），不再往坏账本追加事件；
+  - 迁移 **026**：旧毫秒写进 `startup_unknown_remaining_ns` 的一次性修复，`recovery_unit_fixes` 逐行记账（修复/无法判断分开）；
+  - 派发结果补 `retry` 指令：`never` / `after_reread` / `after_status_query`，宿主不必自己解释 `settlement`；
+  - 恢复不确定**可查可确认**：`GET /v1/recovery/uncertain`、`POST /v1/recovery/resolve`（按 M-50 落 `indeterminate_side_effect`，清标记与锚点）。
+- 全量：**68 files / 932 passed | 1 skipped**；build ESM `lib/index.js` 299.55 kB / gzip 72.31 kB、d.ts 24.43 kB。
+- **三门当前失效**：`pnpm gate` 需要干净树，且 `d85b09d` 改过 `docs/gates/evidence/G2/ev-g2-16.md` 与 `G3/full-suite.md`，`artifact_hash` 必须重算。下一轮按 S1 r68 / S2 r68 / S3 r19 复核后依 G1→G2→G3 重签。
 - 推送走 `git -c http.proxy=http://127.0.0.1:7078 push origin main`。
 
-### 本批改了什么（S2 r65 P1 修复）
+### 本批改了什么（评审 P1/P2 收口）
 
-| 改动 | 说明 |
+| 改动 | 对应 |
 | --- | --- |
-| remaining_ns 统一纳秒（P1） | lease.ts 写入补 `*1e6`，与 node-state.ts / 列名一致；sweep.ts 桥恢复读取时 `/1e6`。租约路径 watchdog 不再 0.12ms 爆 |
-| 回收预算夹紧 | 有 armedAt 的通道用 `deadline-armed` 上界（回拨不放大）；startup_unknown 冻结量与墙钟剩余取小（反复重启不滑动） |
-| 断链守卫补全 | verifying 超时块与 bridgeRestored 两处补 `broken.has()`，坏账本不被恢复动作推进 |
-| 回归 | 单位、回拨夹紧、watchdog 不滑动三条用例钉住 |
+| 子 run 污染判定 + wait 超时跳过集 + run 收口闸 | S2 r67 P1-1a / P1-1b |
+| `acquireLease` 验链，断链拒绝派发 | 评审 P1-1 的执行侧旁路 |
+| 迁移 026：旧 ms → ns，只修可识别行 | 评审 P2-2 |
+| `DispatchOutcome.retry` + `retryDirective()` | 评审 P2-3 |
+| `/v1/recovery/uncertain`、`/v1/recovery/resolve` | 评审 P2-4 |
+| 跨 boot 改为检查点驱动（无 30s 确认窗口、墙钟不参与判定） | 评审 P1-2（已在 `6bb4132`/`93e1d88` 完成） |
 
 ### 已知 P2（下一批）
 
-1. 修复前写入的旧 ms 值无迁移兜底，旧库需人工校正（新库无此问题）。
-2. `CLOCK_RECOVERY_CONFIRM_MS` 写死 30s 且与用例耦合。
-3. `timer_uncertain` 已落账但未进 author/run 面板；断链跳过未单独计数。
-4. `storage_error` 的 `persisted_status` 读库失败时为 unknown。
-5. 终态词表重复（P3）。
+1. `timer_uncertain` / `recovery_uncertain` 只有 HTTP 查询，面板还没接（author/run 视图未展示）。
+2. 迁移 026 只覆盖 `startup_unknown_remaining_ns`；`action/wait/fence_remaining_ns` 是 025 之后的新列，没有旧数据需要迁移。
+3. `storage_error` 的 `persisted_status` 读库失败时仍为 `unknown`（已由 `retry` 指令兜住：`after_status_query`）。
+4. 终态词表重复（P3）。
 
 ### 接手先做什么
 
-1. `git log --oneline -5` 确认 `origin/main` 是 `30dca9a`，`git status` 干净。
-2. 跑 typecheck / test / build / check-evidence-repro / `pnpm gate`，确认 915 passed、291.85 kB / 70.39 kB、28/28、三门 exit 0。
-3. 改代码前记住：任何候选文件改动（含 `codebasemap.md`）都会作废三份报告与三门签名；P2 攒批后统一审计（r67/r67/r19）再重签。
+1. `git log --oneline -5` 确认 `origin/main` 是 `ddcfec6`，`git status` 干净。
+2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`，确认 68 files / 932 passed | 1 skipped、299.55 kB / 72.31 kB、28/28。
+3. 三门重签前先让 S1/S2/S3 按 r68/r68/r19 复核本批候选；`pnpm gate` 在脏树上必然失败，不是代码问题。
+4. 任何候选文件改动（含 `codebasemap.md`）都会作废三份报告与三门签名；P2 攒批后统一审计再重签。
 
 ### 本轮改了什么（对应 round11 审计）
 

@@ -68,6 +68,20 @@ export type DispatchSettlement =
   | { kind: 'already_moved'; currentStatus: string }
   | { kind: 'storage_error'; error: unknown; persistedStatus?: string }
 
+/**
+ * 宿主要不要重派：由派发结果本身决定，不让每个集成方各自理解（评审 P2-3）。
+ * - never：节点已经落库或已被接管，重派只会盖掉事实；
+ * - after_reread：写库失败但库里状态读到了，先重读确认仍是 queued 再重派；
+ * - after_status_query：写库失败且状态未知，必须先独立查一次，绝不直接重派。
+ */
+export type DispatchRetry = 'never' | 'after_reread' | 'after_status_query'
+
+export function retryDirective(outcome: Pick<DispatchOutcome, 'settlement' | 'persisted_status'>): DispatchRetry {
+  if (outcome.settlement !== 'storage_error') return 'never'
+  const persisted = outcome.persisted_status
+  return persisted === undefined || persisted === 'unknown' ? 'after_status_query' : 'after_reread'
+}
+
 // 派发依赖 = 账本/运行时 + 执行器（可选）。
 // 控制节点（wait / subworkflow）不需要宿主执行器：没装配执行器的进程也能推进它们；
 // agent 节点才必须要有执行器，缺了就在派发前明确拒绝，不留下 dispatched 半截状态。

@@ -3,7 +3,7 @@ import { OrchError, proposedError } from '../../core/errors.ts'
 import { uuidv7 } from '../../core/ids.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { runCas } from '../../infra/db/tx.ts'
-import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { appendNodeRunEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { applyTransition } from './nodes.ts'
 import { deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
 
@@ -59,6 +59,14 @@ export type AcquireLeaseResult = {
 // queued → leased → dispatched 同一笔事务；每次派发 Ga 加一，首次为 1，不重置（规格 4.3 行 311）
 export function acquireLease(tx: Tx, secret: string, params: AcquireLeaseParams): AcquireLeaseResult {
   const row = loadNodeRun(tx, params.nodeRunId)
+  // 租约是进入执行链的唯一入口：链已断的节点不许再派发执行，
+  // 否则执行器会继续往坏账本上追加事件，把断链事实洗掉（评审 P1-1 的执行侧旁路）。
+  if (chainBreakOf(secret, readChain(tx, params.nodeRunId))) {
+    throw new OrchError('FORBIDDEN', '节点哈希链已断，拒绝派发，等人工核账', {
+      nodeRunId: params.nodeRunId,
+      reason: 'chain_broken',
+    })
+  }
   if (row.status !== 'queued') {
     throw new OrchError('STALE_GENERATION', '节点不在 queued，拿不到租约', {
       nodeRunId: params.nodeRunId,

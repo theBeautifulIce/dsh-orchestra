@@ -7,12 +7,14 @@ import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import {
   cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
-  ledgerEventSchema, leaseSchema, parseBody,
+  ledgerEventSchema, leaseSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
 import type { CompensationDescriptor } from './commands/compensation.ts'
+import type { RecoveryResolveResult } from './commands/recovery.ts'
+import type { RecoveryUncertainItem } from './queries/recovery.ts'
 import type { LoadWorkflowResult } from './workflows.ts'
 import type { CreateRunResult } from './runs.ts'
 import type { StartRunResult } from './commands/start-run.ts'
@@ -117,6 +119,11 @@ export type NodeCommands = {
     leaseTtlMs?: number
     leaseRenewIntervalMs?: number
   }) => Promise<DispatchOutcome[]>
+  // 恢复不确定的节点：可查、可确认（评审 P2-4）
+  listRecoveryUncertain: () => RecoveryUncertainItem[]
+  resolveRecoveryUncertain: (body: {
+    nodeRunId: string; revision: number; resolution: 'mark_indeterminate_side_effect'; now: string
+  }) => RecoveryResolveResult
   // 生产执行入口：路由只做形状校验，执行链在 runNode 里（审计 F-01）
   runNode: (body: {
     nodeRunId: string
@@ -209,6 +216,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const last = rows.length === 0 ? null : (rows[rows.length - 1] as { seq?: number }).seq
       const nextCursor = typeof last === 'number' ? encodeCursor(makeCursor('events', {}, String(last), '', deps.asOfSeq())) : null
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: rows, next_cursor: nextCursor }))
+      return
+    }
+    // 恢复不确定的节点：宿主面板查这里，确认后走 resolve（评审 P2-4）
+    if (req.method === 'GET' && url.pathname === '/v1/recovery/uncertain' && deps.commands) {
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: deps.commands.listRecoveryUncertain() }))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/recovery/resolve' && deps.commands) {
+      const body = parseBody(recoveryResolveSchema, await readJsonBody(req), '确认恢复不确定')
+      const out = await queue.run(() => deps.commands!.resolveRecoveryUncertain({ ...body, now: requestNow }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/workflows/load' && deps.commands) {

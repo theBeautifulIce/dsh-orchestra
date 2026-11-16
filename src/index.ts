@@ -17,6 +17,8 @@ import { closeRun } from './service/commands/run-close.ts'
 import { settleCompensation, startCompensation } from './service/commands/compensation.ts'
 import { wakeOnEvent } from './service/commands/wait.ts'
 import { propagateRunCancellation } from './service/commands/subworkflow.ts'
+import { resolveRecoveryUncertain } from './service/commands/recovery.ts'
+import { listRecoveryUncertain } from './service/queries/recovery.ts'
 import { inTx } from './infra/db/tx.ts'
 import type { NodeCommands, ServerDeps } from './service/server.ts'
 import { startServer } from './service/server.ts'
@@ -114,6 +116,8 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const executeScheduled = (p: RunNodeParams): Promise<RunNodeResult> =>
     runThroughScheduler(opts.scheduler, () => executeNode(p), { label: p.nodeId })
   const commands: NodeCommands = {
+    listRecoveryUncertain: () => listRecoveryUncertain(db),
+    resolveRecoveryUncertain: (b) => inTx(db, (tx) => resolveRecoveryUncertain(tx, opts.secret, b)),
     acquireLease: (b) => acquireNodeRun(runtime, b),
     renewLease: (b) => renewNodeLease(runtime, b),
     report: (b) => submitReport(runtime, b as Parameters<typeof submitReport>[1]),
