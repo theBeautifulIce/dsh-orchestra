@@ -63,7 +63,7 @@ P0 = 0，P1 = 1，P2 = 2；必过项 20/20（20 项功能证据都复现，卡�
 | 改动文件 | 生产代码 13 个（`src/index.ts`、`src/service/{sweep,dispatcher,server,schemas,clock-recovery}.ts`、`src/service/commands/{wait,cancel,confirm-start,lease,node-state,recovery}.ts`、`src/service/queries/recovery.ts`、`src/infra/sqlite/migrations/026_recovery_units.sql`）、测试 6 个、证据/台账/文档若干 |
 | 上一轮 | `docs/audits/S2-independent-audit-round67.md`（候选 `93e1d88`，P1×2 / P2×3） |
 | 必读文档 | `审计要求.md`（§2/§4/§5/§6/附录 A）、`scripts/gate-check.ts` 的 `GATE_SPECS.G2`、`GLOSSARY.md`、`docs/requirements.md`、`docs/design-notes.md`、`handoff.md` §0.1 |
-| 审计期间的环境变化 | 复核进行到一半时工作树出现 14 个未提交的生产代码修改（他人正在落的同类修复）；期间主线还前进了 `dcee53d` → `7a1e48b`，该提交只改 `AGENTS.md`，`src/` 与 `tests/` 与候选逐字节一致。为不把未提交改动算进候选，我取 `git archive dcee53d` 的原样副本到 `tmp/head-r68/` 重跑探针，本报告的定级以该副本为准，绑定仍为 `dcee53d` |
+| 审计期间的环境变化 | 复核进行到一半时工作树出现 14 个未提交的生产代码修改（他人正在落的同类修复）；期间主线还前进了 `dcee53d` → `7a1e48b`（只改 `AGENTS.md`），本报告定稿后又落了 `0fda6ab`（链闸修复，属新候选）与 `140dd18`（文档）。为不把未提交改动算进候选，我取 `git archive dcee53d` 的原样副本到 `tmp/head-r68/` 重跑探针，本报告的定级以该副本为准，绑定仍为 `dcee53d` |
 
 ## 3. 上一轮问题复核（逐条，不默认已修复）
 
@@ -109,7 +109,7 @@ P0 = 0，P1 = 1，P2 = 2；必过项 20/20（20 项功能证据都复现，卡�
 
 | 编号 | 位置 | 说明 | 影响与证据 |
 | --- | --- | --- | --- |
-| P2-1 | `src/service/clock-recovery.ts:95-98`；`src/service/commands/recovery.ts:61-72`；`src/service/sweep.ts:99-104`、`:392-395` | action 通道状态白名单手写，`timeout` 与 `abandoned_unverified` 不在排除之列；确认接口只走 M-50（来源集合是非终态） | 升级前遗留行（带上一 boot 的 `deadline_*`、`action_remaining_ns` 为空、节点已终态）首次扫描即被打标，此后确认接口回 `STALE_GENERATION`，该 run 也不再进维护扫描收口，停在 `running`。探针 A/B/F 复现。当前生产写路径已同笔写检查点，触发面限于遗留/外部行 | 
+| P2-1 | `src/service/clock-recovery.ts:95-98`；`src/service/commands/recovery.ts:61-72`；`src/service/sweep.ts:99-104`、`:392-395` | action 通道状态白名单手写，`timeout` 与 `abandoned_unverified` 不在排除之列；确认接口只走 M-50（来源集合是非终态） | 升级前遗留行（带上一 boot 的 `deadline_*`、`action_remaining_ns` 为空、节点已终态）首次扫描即被打标，此后确认接口回 `STALE_GENERATION`；若打标那一轮 run 还收不了口（例如同 run 仍有在途节点），后续扫描会把该 run 排除在收口之外，run 停在 `running`（打标当轮就能收口的 run 不受影响，`taintedRuns` 在扫描开始时计算）。探针 A/B/F 复现，S3 r19 的独立复现同样确认节点级不卡死、run 级取决于该条件。当前生产写路径已同笔写检查点，触发面限于遗留/外部行 | 
 | P2-2 | `src/service/commands/recovery.ts:49-72`；`src/service/commands/wait.ts:125-140` | 确认时只清通道锚点，未调 `cancelWait`；`scanRegistration` 先改登记再迁移，迁移抛错整笔回滚 | 等待通道确认后同 run 收到匹配事件，`POST /v1/wait/events` 整笔回滚（inbox 0 行），同 run 其它等待节点一并唤不醒。探针 D 复现；同一形态在「取消 waiting 的 agent 节点」路径上也存在（既有实现） |
 | P3-1 | `state-machine.ts:18-26`、`run-close.ts:41`、`clock-recovery.ts:96` | 终态词表三处各自维护 | 可读性与一致性风险，已在 `handoff.md` 的 P3 清单内 |
 

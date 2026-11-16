@@ -15,7 +15,7 @@
   "conclusion": "fail",
   "p0": 0,
   "p1": 1,
-  "p2": 2,
+  "p2": 3,
   "must_pass_total": 20,
   "must_pass_passed": 20,
   "must_pass_ids": [
@@ -43,7 +43,7 @@
   "failed_items": [
     "P1-1 断链隔离只落在维护扫描：报告上报与等待唤醒两条入口仍能把断链节点推进到终态，等待唤醒还能把含断链节点的 run 收口"
   ],
-  "notes": "r67 的 P1-1a/P1-1b 与台账 P1-2026-11-16-01 已修复并实测；本轮新证据显示执行侧/事件侧断链隔离仍不闭环（扫描内已闭环）。必过项 20/20 不受影响。"
+  "notes": "r67 的 P1-1a/P1-1b 与台账 P1-2026-11-16-01 已修复并实测；本轮新证据显示执行侧/事件侧断链隔离仍不闭环（扫描内已闭环）。不确定态的清除路径对非终态行成立，终态行与等待登记两处不完整，记为 P2-3。必过项 20/20 不受影响。"
 }
 ```
 <!-- audit-verdict:end -->
@@ -88,6 +88,8 @@
 
 写入点只有 `clock-recovery.ts:71-82`（检查点缺失），清除路径只有 `POST /v1/recovery/resolve` → `recovery.ts:35-80`：先验 `recovery_uncertain` 非空与 `revision`，再按通道把 `deadline/boot/monotonic/checkpoint` 四列与标记一起清空，最后走 M-50 落 `indeterminate_side_effect`，之后由 M-51/M-52/M-53 收口（`state-machine.ts:198-200`）。清空后同一通道的锚点已不存在，下一轮 `reanchorInTx` 不会再命中（探针与 `recovery-uncertain.spec.ts:88-92` 一致），`indeterminate_side_effect` 也不在 `closeRun` 的终态集合里（`run-close.ts:41`），因此只能靠裁决链收口，不是"永久钉死"。
 
+这个结论只对**非终态行**成立，两处边界不成立，合并记为 P2-3：①`clock-recovery.ts:95-98` 的状态白名单漏了 `timeout` 与 `abandoned_unverified`，这两类终态行一旦被打标，`resolve` 会因 M-50 只接受非终态而回 `STALE_GENERATION`，标记没有任何清除路径；②确认时不清 `wait_registrations`，残留的 `active` 登记会让该 run 之后每一次 `wakeOnEvent` 因 `waiting→done` 迁移失败而整笔回滚（inbox 0 行）。
+
 ### 2.4 对外副作用边界
 
 `PATCH_COLUMNS` 新增的 `action/wait/fence_remaining_ns`、`recovery_uncertain`、`recovery_uncertain_at` 只在 `applyTransition` 内部使用（`nodes.ts:16-31`、`:194`），路由层没有把列名透出成自由字段；`/v1/recovery/resolve` 的请求体只收 `nodeRunId`/`revision`/`resolution` 三键（`schemas.ts:330-334`）。
@@ -109,9 +111,9 @@
 证据（`tmp/` 临时探针，跑完已删）：
 
 ```text
-F 断链(扫描检出=true) 后报告: {"accepted":true,"next_status":"done","registry_state":"applied"}
+探针1 断链(扫描检出=true) 后报告: {"accepted":true,"next_status":"done","registry_state":"applied"}
   节点={"status":"done","action_generation":1} 事后仍断链=true
-D 断链 wait 唤醒: {"eventSeq":1,"woken":1} 节点=done run=succeeded_with_unverified
+探针2 断链 wait 唤醒: {"eventSeq":1,"woken":1} 节点=done run=succeeded_with_unverified
 ```
 
 ## 4. 可延期问题（P2 / P3）
@@ -120,6 +122,7 @@ D 断链 wait 唤醒: {"eventSeq":1,"woken":1} 节点=done run=succeeded_with_un
 | --- | --- | --- | --- |
 | P2-1 | P2 | `sweep.ts:88-90` | 断链检出只看"已有链"：整条链缺失或被删的节点进不了 `broken` 集，也不会被隔离；`verify_ledger` 已把"节点动过却没链"算成缺口，可作为补检口径（探针：该节点 `chain_broken=[]`，校验器报 gap） |
 | P2-2 | P2 | `recovery.ts:49-60` | 确认时只清 `recovery_uncertain` 对应通道的锚点，不清 `fence_state`；若通道是 `timing_out_grace`，会留下"围栏仍 armed、宽限为空"的行，之后报告入口的围栏闸会持续拒绝，只能走 M-52/M-53 收口。可达性低（围栏与检查点同笔写） |
+| P2-3 | P2 | `clock-recovery.ts:95-98`、`recovery.ts:49-72` | 不确定态的清除路径不完整，两个子情形：①状态白名单漏 `timeout`/`abandoned_unverified`，这两类终态行被打标后 `resolve` 恒回 `STALE_GENERATION`，标记无法清除、查询里永久挂着（§5 探针 5）；②确认只清锚点不清 `wait_registrations`，残留 `active` 登记使该 run 之后每次 `wakeOnEvent` 整笔回滚、inbox 落 0 行（§5 探针 6）。节点已终态/已按 M-50 落定，不构成节点级卡死，故按 P2；与 s2 r68 的 P2-1/P2-2 同源，不重复开记录 |
 | P3-1 | P3 | `clock-recovery.ts:173-176` | `clock.bootId` 以字符串拼接进 SQL；bootId 由内部生成、当前不可注入，仍建议改参数化，避免将来换成外部时钟时留口子 |
 | P3-2 | P3 | `clock-recovery.ts:159-177` | 每轮扫描对每一行有当前 boot 锚点的节点做一次同值 UPDATE（默认 2 秒一轮），节点多时有写放大；未证明成为瓶颈，先记录 |
 
@@ -142,6 +145,8 @@ D 断链 wait 唤醒: {"eventSeq":1,"woken":1} 节点=done run=succeeded_with_un
 | 同一 boot 两轮扫描的检查点 | 30s→20s→10s 单调递减，不滑动 |
 | 检查点缺失的等待节点 → 确认 → 再扫描 | 标记与锚点被清空，第二轮不再标回 |
 | 断链 + 新报告 / 断链 wait + 事件 | 两条入口都推进成功（P1-1 的证据） |
+| 探针 5：`timeout` 行带旧 boot 锚点 + 空检查点 | `sweep` 打标 `recovery_uncertain=action_deadline`；`resolve` 回 `STALE_GENERATION`；再扫仍是 `timeout` + 标记、`listRecoveryUncertain` 计数 1（`abandoned_unverified` 同）；`orphaned` 本就在排除列表里、不打标 |
+| 探针 6：等待节点被打标 → `resolve` → 同 run 再发事件 | `resolve`=OK、节点 `indeterminate_side_effect`，`wait_registrations` 仍 `active`；`wakeOnEvent` 抛 `STALE_GENERATION`、`wait_event_inbox` 0 行（整笔回滚） |
 
 ## 6. 阶段性结论
 

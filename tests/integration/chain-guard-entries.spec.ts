@@ -95,7 +95,7 @@ describe('断链节点的外部写入闸门', () => {
     setupNode(db, 'dispatched')
     breakChain(db, 'nr_x')
     expect(codeOf(() => withTx(db, (tx) => transitionNode(tx, TEST_SECRET, {
-      nodeRunId: 'nr_x', from: 'dispatched', to: 'started', attempt: 1, revision: 0, now: NOW,
+      nodeRunId: 'nr_x', from: 'dispatched', to: 'started', attempt: 1, revision: 0, now: NOW, reason: 'started',
     })))).toBe('FORBIDDEN')
     const row = db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr_x'").get() as { status: string }
     expect(row.status).toBe('dispatched')

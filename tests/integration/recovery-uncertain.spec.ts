@@ -18,6 +18,12 @@ function insertUncertainWait(db: Db): void {
       + "VALUES ('nr_u', 'r1', 'n_u', 9, 'agent', 1, 'waiting', 0, ?, ?, 'boot_a', 1000, NULL, ?, ?)",
       [NOW, '2026-11-16T03:02:00.000Z', NOW, NOW],
     )
+    // 活跃等待登记：确认不确定态时必须一起收掉（S3 r19 P2-3）
+    tx.run(
+      "INSERT INTO wait_registrations (node_run_id, run_id, wait_kind, match_json, from_seq, cursor_seq, idempotency_key, state, created_at, updated_at) "
+      + "VALUES ('nr_u', 'r1', 'event', ?, 0, 0, 'r1:n_u:1', 'active', ?, ?)",
+      [JSON.stringify({ type: 'evt_x' }), NOW, NOW],
+    )
   })
 }
 
@@ -84,12 +90,32 @@ describe('恢复不确定状态的宿主入口', () => {
     expect(after.recovery_uncertain).toBeNull()
     expect(after.wait_deadline_at).toBeNull()
     expect(eventCount(db, 'nr_u', 'recovery.confirmed')).toBe(1)
+    // 等待登记一起收掉：残留 active 登记会让后续 wakeOnEvent 整笔回滚（S3 r19 P2-3）
+    const reg = db.raw.prepare("SELECT state FROM wait_registrations WHERE node_run_id = 'nr_u'").get() as { state: string } | undefined
+    expect(reg?.state).toBe('cancelled')
 
     // 再扫一轮：标记已清、锚点已清，不会按同一通道重新标不确定
     const next = sweep(db, TEST_SECRET, { now: NOW, clock })
     expect(next.deadline_uncertain).not.toContain('nr_u')
     expect(nodeOf(db, 'nr_u').recovery_uncertain).toBeNull()
     expect(listRecoveryUncertain(db)).toHaveLength(0)
+    db.raw.close()
+  })
+
+  it('终态行不会被打成不确定（timeout / abandoned_unverified 不在换算范围）', () => {
+    const { db } = freshLedger()
+    seed(db)
+    withTx(db, (tx) => {
+      tx.run(
+        "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, deadline_at, deadline_boot_id, deadline_monotonic_ns, action_remaining_ns, created_at, updated_at) "
+        + "VALUES ('nr_t', 'r1', 'n_t', 11, 'agent', 1, 'timeout', 0, ?, 'boot_a', 1000, NULL, ?, ?)",
+        ['2026-11-16T03:02:00.000Z', NOW, NOW],
+      )
+    })
+    const clock = new ScriptedClock('boot_b', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+    const out = sweep(db, TEST_SECRET, { now: NOW, clock })
+    expect(out.deadline_uncertain).not.toContain('nr_t')
+    expect(nodeOf(db, 'nr_t').recovery_uncertain).toBeNull()
     db.raw.close()
   })
 

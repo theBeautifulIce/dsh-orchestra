@@ -7,6 +7,7 @@ import type { NodeStatus } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { applyTransition } from './nodes.ts'
+import { cancelWait } from './wait.ts'
 import { RECOVERY_CHANNEL_COLUMNS } from '../queries/recovery.ts'
 
 export type RecoveryResolution = 'mark_indeterminate_side_effect'
@@ -46,6 +47,8 @@ export function resolveRecoveryUncertain(tx: Tx, secret: string, req: RecoveryRe
       nodeRunId: req.nodeRunId, expected: req.revision, actual: row.revision,
     })
   }
+  // 等待登记必须一起收掉：残留 active 登记会让这个 run 之后每次 wakeOnEvent 整笔回滚（S3 r19 P2-3）
+  cancelWait(tx, req.nodeRunId, req.now)
   const cols = RECOVERY_CHANNEL_COLUMNS[row.recovery_uncertain]
   // 通道锚点一起清掉：留着的话下一次重启扫描还会按同一通道把它标回不确定
   const patch: Record<string, string | number | null> = {

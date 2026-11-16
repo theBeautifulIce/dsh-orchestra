@@ -93,7 +93,7 @@ export function reanchorInTx(
 
   // 动作截止
   const actions = tx.all<ChannelRow>(
-    "SELECT node_run_id, deadline_at, deadline_boot_id, action_remaining_ns AS checkpoint_ns FROM node_runs WHERE deadline_boot_id IS NOT NULL AND deadline_boot_id != ? AND deadline_at IS NOT NULL AND status NOT IN ('done','failed','failed_with_unverified','succeeded','succeeded_with_unverified','superseded','cancelled','orphaned')",
+    "SELECT node_run_id, deadline_at, deadline_boot_id, action_remaining_ns AS checkpoint_ns FROM node_runs WHERE deadline_boot_id IS NOT NULL AND deadline_boot_id != ? AND deadline_at IS NOT NULL AND status NOT IN ('done','failed','failed_with_unverified','succeeded','succeeded_with_unverified','superseded','cancelled','orphaned','timeout','abandoned_unverified')",
     [clock.bootId],
   )
   for (const row of actions) {
