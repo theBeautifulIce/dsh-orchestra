@@ -57,7 +57,7 @@ P0 = 0，P1 = 0，P2 = 1；必过项 20/20。
 
 | 项 | 值 |
 | --- | --- |
-| 主线 HEAD | `28717b62a2a0332d2fc4ec033f9893f193805f03`（审计开始时 HEAD 即候选；审计期间前进一个只含 `docs/audits` 的报告提交，候选范围不变） |
+| 主线 HEAD | 审计开始时 HEAD 即候选；审计期间只前进 `docs/audits` 报告提交（不含候选代码），候选范围不变 |
 | 本轮候选 / 本报告绑定提交 | `fd2173bb719068e94c3713e5b08703ea932dd08d`（工作树中只有本报告一处改动） |
 | 审计范围 | `git diff dcee53d..fd2173b`：40 个文件，823 插入 / 146 删除；含 `0fda6ab`（链闸）、`140dd18`（文档）、`fd2173b`（P2 收尾） |
 | 生产代码改动 | `src/infra/db/ledger.ts`（新增 `assertChainIntact`）、`src/service/commands/{nodes,node-state,run-close,recovery,wait,cancel,decisions,compensation,confirm-start,subworkflow,lease,apply-report}.ts`（链闸与 `secret` 透传）、`src/service/{sweep,clock-recovery,dispatcher}.ts`、`src/index.ts`、`src/infra/sqlite/migrations/026_recovery_units.sql`（识别口径改写） |
