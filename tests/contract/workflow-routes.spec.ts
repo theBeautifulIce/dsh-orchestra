@@ -102,6 +102,19 @@ describe('工作流命令 HTTP 入口', () => {
     expect(body.error.code).toBe('FORBIDDEN')
   })
 
+  it('task_local 必须带 owner；UUIDv4 的 operation_id 一律 400', async () => {
+    const base = await boot()
+    const noOwner = await post(base + '/v1/workflows', {
+      operation_id: '9b2f6f3a-0d5b-4f1c-8a2e-3f4d5e6a7b8c', workflow_id: 'wf_scope', name: '发布流程',
+      definition: doc, scope: 'task_local',
+    })
+    expect(noOwner.status).toBe(400)
+    const v4 = await post(base + '/v1/workflows', {
+      operation_id: '018f0c1a-2b3c-4d4e-8f5a-6b7c8d9e0f11', workflow_id: 'wf_v4', name: '发布流程', definition: doc,
+    })
+    expect(v4.status).toBe(400)
+  })
+
   it('发布层不通过：422 + 未注册节点清单', async () => {
     const base = await boot()
     await post(base + '/v1/workflows', {

@@ -338,6 +338,32 @@ describe('四写命令统一幂等（规格 3.7）', () => {
 })
 
 describe('update.changed=false 与 task_local 归属（P2 收口）', () => {
+  it('create 时 scope 与 owner 必须成对：task_local 无 owner / reusable 带 owner 都拒', () => {
+    const { db } = freshLedger()
+    expect(codeOf(() => create(db, { workflowId: 'wf_bad1', scope: 'task_local', ownerTaskId: null, definition: goodDoc('缺 owner'), name: '缺 owner' })))
+      .toBe('PAYLOAD_SCHEMA_INVALID')
+    expect(codeOf(() => create(db, { workflowId: 'wf_bad2', scope: 'reusable', ownerTaskId: 'task_9', definition: goodDoc('多余 owner'), name: '多余 owner' })))
+      .toBe('PAYLOAD_SCHEMA_INVALID')
+    db.raw.close()
+  })
+
+  it('旧格式草稿 hash 兼容：同内容 update 仍是 changed=false', async () => {
+    const { definitionHashOf } = await import('../../src/service/workflows.ts')
+    const { db } = freshLedger()
+    create(db)
+    // 模拟升级前落库的草稿：definition_hash 用旧算法（runtime 投影哈希）
+    withTx(db, (tx) => tx.run(
+      "UPDATE workflow_drafts SET definition_hash = ? WHERE workflow_id = 'wf1'",
+      [definitionHashOf({ workflow_id: 'draft', workflow_version: '0', nodes: [{ node_id: 'a', type: 'agent' }] })],
+    ))
+    const out = withTx(db, (tx) => updateDraft(tx, {
+      workflowId: 'wf1', revision: 1, definition: goodDoc(), actor: 'human:me', now: NOW,
+    }))
+    expect(out.changed).toBe(false)
+    expect(out.revision).toBe(1)
+    db.raw.close()
+  })
+
   it('内容没变：不递增 revision，返回 changed=false', () => {
     const { db } = freshLedger()
     create(db)
@@ -361,7 +387,7 @@ describe('update.changed=false 与 task_local 归属（P2 收口）', () => {
     db.raw.close()
   })
 
-  it('task_local 工作流只许所属任务用：createRun 与引用都要过闸', async () => {
+  it('task_local 不许当根工作流起；reusable 不受归属影响', async () => {
     const { createRun } = await import('../../src/service/runs.ts')
     const { WorkflowCatalog } = await import('../../src/service/workflows.ts')
     const { db } = freshLedger()
@@ -371,17 +397,13 @@ describe('update.changed=false 与 task_local 归属（P2 收口）', () => {
       workflowId: 'wf_task', revision: 1, baseVersion: 0, note: '发布说明', operationId: '4f0b1a10-1111-7aaa-8bbb-000000000001', actor: 'human:me', now: NOW,
     }, ctx))
     catalog.hydrate()
-    // 不亮归属 / 亮错归属 → FORBIDDEN；亮对了 → 正常
+    // 根入口一律不许起 task_local：只允许经子流程引用（owner 由父 run 的 task_id 对账）
     expect(codeOf(() => createRun(db, catalog, {
       taskTitle: 'x', workflowId: 'wf_task', workflowVersion: '1', now: NOW,
     }))).toBe('FORBIDDEN')
     expect(codeOf(() => createRun(db, catalog, {
-      taskTitle: 'x', workflowId: 'wf_task', workflowVersion: '1', ownerTaskId: 'task_2', now: NOW,
-    }))).toBe('FORBIDDEN')
-    const ok = createRun(db, catalog, {
       taskTitle: 'x', workflowId: 'wf_task', workflowVersion: '1', ownerTaskId: 'task_1', now: NOW,
-    })
-    expect(ok.run_id).toBeTruthy()
+    }))).toBe('FORBIDDEN')
     db.raw.close()
   })
 })

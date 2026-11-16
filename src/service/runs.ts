@@ -79,7 +79,12 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
   const definitionHash = definitionHashOf(def)
   const nodes: CreatedNodeRun[] = []
   withTx(db, (tx) => {
-    // task_local 工作流只许所属任务使用（scope 语义），建 run 是必经之路
+    // task_local 只能作为所属任务的子流程出现，不许当独立根工作流起（审计 P2-1：
+    // 客户端自报 task id 不是授权凭据，根入口拿不到可信的 owner 上下文）
+    const scopeRow = tx.get<{ scope: string }>('SELECT scope FROM workflows WHERE workflow_id = ?', [workflowId])
+    if (scopeRow?.scope === 'task_local') {
+      throw new OrchError('FORBIDDEN', '任务专属工作流只能作为子流程启动', { workflow_id: workflowId })
+    }
     assertWorkflowUsable(tx, workflowId, p.ownerTaskId ?? null)
     tx.run(
       'INSERT INTO tasks (task_id, title, workflow_id, workflow_version, status, revision, autonomy, escalations_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',

@@ -2,6 +2,7 @@
 // （评审《第二次意见.md》行 567-621：以前只查字段在不在，再 String()/Number() 硬转，
 //   字符串数字、NaN、Infinity 都能一路进服务层）
 import { z } from 'zod'
+import { UUID_V7_RE } from './commands/idempotency.ts'
 import { OrchError } from '../core/errors.ts'
 
 // 边界集中在这里，改一处就够。
@@ -417,7 +418,8 @@ export const ledgerEventSchema = z.looseObject({}).superRefine((value, ctx) => {
 })
 
 // —— S4 工作流命令：四个写命令都强制 operation_id（规格 3.7），读命令不需要 ——
-const operationId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, 'operation_id 必须是 UUIDv7')
+// 正则只在 idempotency.ts 定义一次：HTTP 与命令层共用同一套规则（审计 P3）
+const operationId = z.string().regex(UUID_V7_RE, 'operation_id 必须是 UUIDv7')
 const workflowName = z.string().min(1).max(80)
 
 export const workflowCreateCommandSchema = z.object({

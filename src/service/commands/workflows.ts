@@ -74,9 +74,11 @@ const saveDraft = (tx: Tx, p: {
     [p.revision, JSON.stringify(p.doc), p.actor, p.now, p.basedOnVersion, p.definitionHash, p.workflowId, p.expectPreviousRevision],
   )
   if (res.changes !== 1) {
+    const current = tx.get<{ revision: number }>('SELECT revision FROM workflow_drafts WHERE workflow_id = ?', [p.workflowId])
     throw new OrchError('WORKFLOW_REVISION_CONFLICT', '草稿 revision 不匹配或已被消费', {
       workflow_id: p.workflowId,
-      expected_revision: p.expectPreviousRevision,
+      expected: p.expectPreviousRevision,
+      current_revision: current?.revision ?? null,
     })
   }
 }
@@ -131,7 +133,9 @@ export function assertWorkflowUsable(tx: Tx, workflowId: string, ownerTaskId: st
   const row = tx.get<{ scope: string; owner_task_id: string | null }>(
     'SELECT scope, owner_task_id FROM workflows WHERE workflow_id = ?', [workflowId],
   )
-  if (row?.scope === 'task_local' && row.owner_task_id !== ownerTaskId) {
+  // fail-closed：owner 为空、调用方没亮、或两者不一致，都拒。null === null 不能算授权（审计 P1）
+  if (row?.scope === 'task_local'
+    && (!row.owner_task_id || !ownerTaskId || row.owner_task_id !== ownerTaskId)) {
     throw new OrchError('FORBIDDEN', '任务专属工作流只允许所属任务使用', {
       workflow_id: workflowId,
       owner_task_id: row.owner_task_id,
@@ -163,9 +167,18 @@ export function createWorkflow(tx: Tx, p: CreateWorkflowParams): { workflow_id: 
     })
   }
   const doc = saved.saved!
+  const scope = p.scope ?? doc.scope ?? 'reusable'
+  const ownerTaskId = p.ownerTaskId ?? null
+  // 归属必须成对出现：task_local 没有 owner 等于把限制挖空，reusable 带 owner 又说不清归属（审计 P1）
+  if (scope === 'task_local' && !ownerTaskId) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'task_local 工作流必须指定 owner_task_id', { workflow_id: p.workflowId })
+  }
+  if (scope === 'reusable' && ownerTaskId !== null) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'reusable 工作流不能指定 owner_task_id', { workflow_id: p.workflowId })
+  }
   tx.run(
     'INSERT INTO workflows (workflow_id, name, status, current_version, created_by, updated_by, created_at, updated_at, scope, owner_task_id) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)',
-    [p.workflowId, p.name, 'active', p.actor, p.actor, p.now, p.now, p.scope ?? doc.scope ?? 'reusable', p.ownerTaskId ?? null],
+    [p.workflowId, p.name, 'active', p.actor, p.actor, p.now, p.now, scope, ownerTaskId],
   )
   saveDraft(tx, {
     workflowId: p.workflowId,
@@ -275,9 +288,10 @@ export function updateDraft(tx: Tx, p: UpdateDraftParams): { revision: number; c
     })
   }
   const doc = saved.saved!
-  // 内容没变就别空转 revision：幂等协议照走（operation_id 回放），只是明确告诉调用方 changed=false
-  const nextHash = draftHash(doc)
-  if (draft.definition_hash === nextHash) {
+  // 内容没变就别空转 revision：幂等协议照走（operation_id 回放），只是明确告诉调用方 changed=false。
+  // 比对用「当前文档重算」而不是信 stored hash：旧版草稿的 definition_hash 是另一种算法（审计 P2-2）
+  const currentDoc = JSON.parse(draft.doc_json) as WorkflowDoc
+  if (draftHash(currentDoc) === draftHash(doc)) {
     return { revision: draft.revision, changed: false, validation: toReport(saved.hints.errors) }
   }
   saveDraft(tx, {
