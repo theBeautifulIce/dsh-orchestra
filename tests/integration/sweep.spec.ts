@@ -250,7 +250,8 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(out.bridge_restored).toEqual(['nr_sw'])
     expect(row(db)).toMatchObject({
       status: 'startup_unknown', resume_state: null, rearm_generation: 4,
-      startup_unknown_remaining_ns: null,
+      // 重挂后立刻把剩余预算写成检查点：紧接着再重启也有可信剩余（S1 r67 P2-2）
+      startup_unknown_remaining_ns: 5_000_000_000,
       startup_unknown_monotonic_ns: 5_000_000_000,
     })
   })
@@ -265,7 +266,8 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(out.bridge_restored).toEqual(['nr_sw'])
     expect(row(db)).toMatchObject({
       status: 'verifying', resume_state: null, rearm_generation: 4,
-      verify_remaining_ns: null,
+      // 没有剩余量时给完整判定窗口，并把窗口落成检查点
+      verify_remaining_ns: 120_000_000_000,
       verify_deadline_monotonic_ns: 120_000_000_000,
     })
   })

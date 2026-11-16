@@ -480,7 +480,7 @@ export function startSubworkflowNode(
   // 先按保守的 compensable 落库（不依赖 DDL 默认值），收口时再按子运行实际节点重算。
   // 这样节点级取消失败时也不会出现“父节点 pure + 子 run 未核实”的假成功。
   tx.run("UPDATE node_runs SET side_effect_policy = 'compensable' WHERE node_run_id = ?", [p.nodeRunId])
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: p.nodeRunId,
     from: ['started'],
     to: 'waiting',
@@ -587,7 +587,7 @@ export function finishSubworkflowChild(
   // 旧数据里父节点可能已经被取消围栏推进到 timing_out/stopping：为它补一个终态出口，
   // 不能因为取消路径和唤醒路径互斥而把父 run 永久悬空。
   if (node.status === 'timing_out') {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: node.node_run_id,
       from: ['timing_out'],
       to: 'timeout',
@@ -602,7 +602,7 @@ export function finishSubworkflowChild(
     return { parentNodeRunId: node.node_run_id, status: 'timeout' }
   }
   if (node.status === 'stopping') {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: node.node_run_id,
       from: ['stopping'],
       to: 'abandoned_unverified',
@@ -642,7 +642,7 @@ export function finishSubworkflowChild(
     : (aggregate.policy === 'pure' ? 'compensable' : aggregate.policy)
   const verifiedNone = childSucceeded && !childUnverified ? 1 : 0
   const ruleId = target === 'done' ? 'M-63' : target === 'failed' ? 'M-64' : 'M-65'
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: node.node_run_id,
     from: ['waiting'],
     to: target,
@@ -746,7 +746,7 @@ export function propagateRunCancellation(
       if (node.blocked_decision_id) {
         cancelDecision(tx, secret, { decisionId: node.blocked_decision_id, now: p.now, reason: 'cancelled' })
       }
-      applyTransition(tx, {
+      applyTransition(tx, secret, {
         nodeRunId: node.node_run_id,
         from: ['blocked_pre'],
         to: 'failed',

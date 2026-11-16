@@ -3,7 +3,7 @@ import { OrchError, proposedError } from '../../core/errors.ts'
 import { canTransition } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { runCas } from '../../infra/db/tx.ts'
-import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { appendNodeRunEvent, assertChainIntact } from '../../infra/db/ledger.ts'
 
 export type TransitionParams = {
   nodeRunId: string
@@ -36,6 +36,8 @@ export const DEFAULT_VERIFY_TIMEOUT_MS = 120000
 
 // 迁移必须合法，且 CAS 条件里带 revision 与 attempt
 export function transitionNode(tx: Tx, secret: string, params: TransitionParams): void {
+  // 断链闸门：transitionNode 走自己的 CAS，不经过 applyTransition，闸门必须两边都装（S2 r68 P1-1）
+  assertChainIntact(tx, secret, params.nodeRunId)
   // 控制节点没有宿主执行实例，只能走 applyTransition；这条入口是执行器/上报那条路径。
   // 不挡住的话，waiting→failed 可以借 M-48 绕过 controlCompletion（G3 r11 P1-1）。
   const node = tx.get<{ node_type: string }>('SELECT node_type FROM node_runs WHERE node_run_id = ?', [params.nodeRunId])

@@ -228,7 +228,7 @@ describe('子运行 pin、深度与唤醒', () => {
       const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
       expect(out.status).toBe('failed')
       // 子流程带未核实事实：父 run 不能收成普通 failed
-      expect(closeRun(tx, 'r1', NOW)).toBe('failed_with_unverified')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('failed_with_unverified')
     })
   })
 
@@ -242,7 +242,7 @@ describe('子运行 pin、深度与唤醒', () => {
       tx.run("UPDATE runs SET status = 'cancelled' WHERE run_id = ?", [child.run_id])
       const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
       expect(out.status).toBe('failed')
-      expect(closeRun(tx, 'r1', NOW)).toBe('failed_with_unverified')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('failed_with_unverified')
     })
   })
 
@@ -257,7 +257,7 @@ describe('子运行 pin、深度与唤醒', () => {
       tx.run("UPDATE runs SET cancel_requested_at = ?, cancel_result = 'interrupted' WHERE run_id = 'r1'", [NOW])
       const out = finishSubworkflowChild(tx, SECRET, { childRunId: child.run_id, now: NOW })
       expect(out.status).toBe('superseded')
-      expect(closeRun(tx, 'r1', NOW)).toBe('cancelled')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('cancelled')
     })
   })
 })
@@ -286,7 +286,7 @@ describe('子流程副作用向父流程传播', () => {
         'SELECT side_effect_policy, side_effect_verified_none FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
       )!
       expect(parent).toEqual({ side_effect_policy: 'pure', side_effect_verified_none: 1 })
-      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('succeeded')
     })
   })
 
@@ -301,7 +301,7 @@ describe('子流程副作用向父流程传播', () => {
       )!
       expect(parent.side_effect_policy).toBe('compensable')
       expect(parent.side_effect_verified_none).toBe(0)
-      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded_with_unverified')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('succeeded_with_unverified')
     })
   })
 
@@ -315,7 +315,7 @@ describe('子流程副作用向父流程传播', () => {
         'SELECT side_effect_policy FROM node_runs WHERE node_run_id = ?', ['nr-parent'],
       )!
       expect(parent.side_effect_policy).toBe('irreversible')
-      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded_with_unverified')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('succeeded_with_unverified')
     })
   })
 
@@ -325,7 +325,7 @@ describe('子流程副作用向父流程传播', () => {
     const childId = seedChild(db, c, { runStatus: 'failed', nodeStatus: 'failed', policy: 'compensable', verifiedNone: 0 })
     withTx(db, (tx) => {
       expect(finishSubworkflowChild(tx, SECRET, { childRunId: childId, now: NOW }).status).toBe('failed')
-      expect(closeRun(tx, 'r1', NOW)).toBe('failed_with_unverified')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('failed_with_unverified')
     })
   })
 })
@@ -356,7 +356,7 @@ describe('节点级取消后子运行的未核实事实', () => {
       )!
       expect(parentRow).toEqual({ side_effect_policy: 'irreversible', side_effect_verified_none: 0 })
       // 父 run 没有取消请求：终态必须继承子运行的未核实，而不是普通 succeeded
-      expect(closeRun(tx, 'r1', NOW)).toBe('succeeded_with_unverified')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('succeeded_with_unverified')
     })
   })
 })
@@ -378,7 +378,7 @@ describe('父取消传播与终态闸', () => {
       expect(tx.get<{ status: string; closed_reason: string; resolved_by: string | null }>(
         'SELECT status, closed_reason, resolved_by FROM decisions WHERE decision_id = ?', ['d1'],
       )).toEqual({ status: 'resolved', closed_reason: 'cancelled', resolved_by: 'system:cancel' })
-      expect(closeRun(tx, 'r1', NOW)).toBe('cancelled')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('cancelled')
     })
   })
 
@@ -393,7 +393,7 @@ describe('父取消传播与终态闸', () => {
       expect(out.cancelledNodes).toEqual([])
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-parent'])!.status).toBe('blocked_post')
       expect(tx.get<{ status: string }>('SELECT status FROM decisions WHERE decision_id = ?', ['d2'])!.status).toBe('pending')
-      expect(closeRun(tx, 'r1', NOW)).toBeNull()
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBeNull()
     })
   })
 
@@ -420,7 +420,7 @@ describe('父取消传播与终态闸', () => {
       expect(out.cancelledNodes).toContain('nr-irr')
       expect(out.skippedIrreversible).not.toContain('nr-irr')
       expect(tx.get<{ status: string }>('SELECT status FROM node_runs WHERE node_run_id = ?', ['nr-irr'])!.status).toBe('superseded')
-      expect(closeRun(tx, 'r1', NOW)).toBe('cancelled')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('cancelled')
     })
   })
 

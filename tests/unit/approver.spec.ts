@@ -5,6 +5,8 @@ import { openDecision, resolveDecision } from '../../src/service/commands/decisi
 import { assertApprover, defaultApprover, validateApprover } from '../../src/service/decision/approver.ts'
 import { inTx } from '../../src/infra/db/tx.ts'
 
+const SECRET = 'approver-secret'
+
 const NOW = '2026-11-13T03:00:00.000Z'
 
 describe('decision approver', () => {
@@ -36,7 +38,7 @@ describe('decision approver', () => {
       decisionId: 'dec_1', runId: 'r1', nodeRunId: null, kind: 'audit_result',
       approver: 'either', createdAt: NOW,
     }))
-    inTx(db, (tx) => resolveDecision(tx, {
+    inTx(db, (tx) => resolveDecision(tx, SECRET, {
       decisionId: 'dec_1', revision: 1, resolution: 'approved', now: NOW,
       actor: { kind: 'human', id: 'human_1' },
     }))

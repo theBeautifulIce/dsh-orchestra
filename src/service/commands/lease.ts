@@ -161,7 +161,7 @@ export function sweepExpiredLeases(tx: Tx, secret: string, params: { now: string
       ? deadlineFromSample(params.clock, params.unknownWatchdogMs ?? 120_000)
       : null
     try {
-      applyTransition(tx, {
+      applyTransition(tx, secret, {
         nodeRunId: row.node_run_id,
         from: [row.status as 'dispatched' | 'started'],
         to: next,

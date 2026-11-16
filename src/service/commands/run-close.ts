@@ -1,6 +1,6 @@
 // src/service/commands/run-close.ts —— 运行终态收口（规格 4.8 行 403）
 import type { Tx } from '../../infra/sqlite/driver.ts'
-import { appendEvent } from '../../infra/db/ledger.ts'
+import { appendEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
@@ -25,7 +25,7 @@ type NodeRow = {
  *   调用方判定业务成败要看 outcome，不能只看 runs.status。
  * - 已有终态或条件未满足时返回 null，不写半截。
  */
-export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null {
+export function closeRun(tx: Tx, secret: string, runId: string, now: string): RunTerminal | null {
   const run = tx.get<{ status: string; cancel_requested_at: string | null; cancel_result: string | null }>(
     'SELECT status, cancel_requested_at, cancel_result FROM runs WHERE run_id = ?',
     [runId],
@@ -49,6 +49,11 @@ export function closeRun(tx: Tx, runId: string, now: string): RunTerminal | null
     assertRunCanTerminal(tx, runId)
   } catch {
     return null
+  }
+  // 断链闸门：run 里只要有一个节点的链断了，就不按它的状态收口。
+  // 放在所有早退之后：只有真要收口时才做整链校验，不给每轮扫描加固定开销（S3 r19 P1-1）
+  for (const node of nodes) {
+    if (chainBreakOf(secret, readChain(tx, node.node_run_id))) return null
   }
 
   // stop_evidence 只证明执行停了，不证明副作用已核实；有副作用策略的节点必须 verified_none=1

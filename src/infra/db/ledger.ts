@@ -90,3 +90,19 @@ export function readChainHead(tx: Tx, nodeRunIdValue: string): ChainHead | undef
 export function chainBreakOf(secret: string, rows: ChainRow[]): ChainBreak | null {
   return verifyChain(secret, rows)
 }
+
+/**
+ * 断链闸门：任何要往这条链上追加事件的入口都先验链。
+ * 链断就是账本已经被改过，继续写只会把断链事实洗掉（S3 r19 P1-1 / S2 r68 P1-1）。
+ */
+export function assertChainIntact(tx: Tx, secret: string, nodeRunIdValue: string): void {
+  const brk = verifyChain(secret, readChain(tx, nodeRunIdValue))
+  if (brk) {
+    throw new OrchError('FORBIDDEN', '节点哈希链已断，拒绝写入，等人工核账', {
+      nodeRunId: nodeRunIdValue,
+      reason: 'chain_broken',
+      seq: brk.seq,
+      detail: brk.reason,
+    })
+  }
+}

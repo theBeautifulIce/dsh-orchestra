@@ -95,7 +95,7 @@ describe('决策超时扫描', () => {
     const db = memoryDb()
     // 人工先裁决（revision 1 → 2）
     withTx(db, (tx) => {
-      resolveDecision(tx, {
+      resolveDecision(tx, SECRET, {
         decisionId: 'd1', revision: 1, resolution: 'approved', now: H1,
         actor: { kind: 'human', id: 'human:test' },
         confirm: true,
@@ -129,7 +129,7 @@ describe('决策超时扫描', () => {
 
   it('到期后 run 只有在这笔扫描里才能收口：先 closeRun 无卡可收，扫描后能收', () => {
     const db = memoryDb()
-    expect(withTx(db, (tx) => closeRun(tx, 'r1', H24))).toBeNull()
+    expect(withTx(db, (tx) => closeRun(tx, SECRET, 'r1', H24))).toBeNull()
     sweep(db, SECRET, { now: H24 , clock: TEST_CLOCK})
     const run = db.raw.prepare('SELECT status FROM runs WHERE run_id = ?').get('r1') as { status: string }
     expect(run.status).toBe('failed')

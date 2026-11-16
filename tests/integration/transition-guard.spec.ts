@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { freshLedger, seed } from '../fixtures/ledger.ts'
+import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { applyTransition } from '../../src/service/commands/nodes.ts'
+
+const SECRET = TEST_SECRET
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
@@ -13,7 +15,7 @@ function setup() {
 }
 
 const move = (db: any, context?: { cancelResult: 'already_stopped' | null; hasToolCall: boolean; hangReason: null; sideEffectVerifiedNone: boolean }) =>
-  withTx(db, (tx) => applyTransition(tx, {
+  withTx(db, (tx) => applyTransition(tx, SECRET, {
     nodeRunId: 'nr1', from: ['dispatched'], to: 'done', attempt: 1, now: NOW, context,
   }))
 

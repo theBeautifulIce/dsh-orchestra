@@ -45,7 +45,7 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   // 还没派发就取消：直接作废，不进围栏、不产生新 attempt（审计 N-08）。
   // 这条必须先于不可逆检查：queued/leased 的不可逆节点尚未执行，作废不会掩盖已发生的副作用。
   if (row.status === 'queued' || row.status === 'leased') {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,
       from: ['queued', 'leased'],
       to: 'superseded',
@@ -72,7 +72,7 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   // 子流程父节点可能代表不可逆子图，但它本身仍然不是一个可取消的执行实例。
   if (row.status === 'waiting' && (row.node_type === 'wait' || row.node_type === 'subworkflow')) {
     cancelWait(tx, params.nodeRunId, params.now)
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,
       from: ['waiting'],
       to: 'superseded',
@@ -118,7 +118,7 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     }
     const grace = deadlineFromSample(params.clock, params.graceMs)
     const graceUntil = new Date(grace.wallClockMs).toISOString()
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,
       from: CANCELABLE,
       to: 'timing_out',
@@ -166,7 +166,7 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline, fence_pending: true })
       return { cancel_result: 'not_interruptible', next_status: row.status, fence_state: 'armed', reason: 'fence_pending' }
     }
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,
       from: CANCELABLE,
       to: 'stopping',
@@ -228,7 +228,7 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_unknown', { fence_pending: true })
     return { cancel_result: 'unknown', next_status: row.status, fence_state: 'armed', reason: 'fence_pending' }
   }
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: params.nodeRunId,
     from: CANCELABLE,
     to: 'stopping',
@@ -283,7 +283,7 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
   // 撤围栏同时重新武装 action_deadline，并在同一笔 CAS 里 Gr+1；旧定时器与旧执行器手里的 Gr 立刻失效。
   const rearm = deadlineFromSample(params.clock, params.rearmActionDeadlineMs ?? 30_000)
   try {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: params.row.node_run_id,
       from: ['timing_out'],
       to: 'stopping',

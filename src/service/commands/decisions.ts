@@ -153,7 +153,7 @@ export type DecisionResolution = {
  * - confirm/continue/abandon/uphold 类结论只推进 revision，status 保持原活跃态。
  * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
  */
-export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): DecisionResolution {
+export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
   const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string }>(
     'SELECT status, payload_json, approver, confirm_required, run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
@@ -217,7 +217,7 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): DecisionRe
     )
     : undefined
   // 裁决卡收口后，若所有节点都已到终态，run 也要在同一笔事务里收口。
-  if (closing) closeRun(tx, current.run_id, req.now)
+  if (closing) closeRun(tx, secret, current.run_id, req.now)
   return {
     decisionId: req.decisionId,
     status: nextStatus,
@@ -230,10 +230,10 @@ export function resolveDecision(tx: Tx, req: ResolveDecisionRequest): DecisionRe
 }
 
 // 继续等 / 继续跟踪：只续一版，不改变 status
-export function extendDecision(tx: Tx, req: Omit<ResolveDecisionRequest, 'resolution'> & {
+export function extendDecision(tx: Tx, secret: string, req: Omit<ResolveDecisionRequest, 'resolution'> & {
   resolution: 'continue_wait' | 'continue_tracking'
 }): void {
-  resolveDecision(tx, req)
+  resolveDecision(tx, secret, req)
 }
 
 export type EscalateOptions = {
@@ -357,7 +357,7 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       const released = releaseBlockedPreNode(tx, secret, { decisionId: row.decision_id, now: opts.now })
       if (released) out.releasedNodes.push(released)
       if (opts.closeRunAfter !== false && !opts.skipRunIds?.has(row.run_id)) {
-        if (closeRun(tx, row.run_id, opts.now)) out.closedRuns.push(row.run_id)
+        if (closeRun(tx, secret, row.run_id, opts.now)) out.closedRuns.push(row.run_id)
       }
       continue
     }
@@ -390,7 +390,7 @@ function releaseBlockedPreNode(tx: Tx, secret: string, p: { decisionId: string; 
   )
   if (!node) return null
   try {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: node.node_run_id,
       from: ['blocked_pre'],
       to: 'failed',

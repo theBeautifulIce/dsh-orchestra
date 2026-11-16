@@ -137,7 +137,7 @@ function scanRegistration(tx: Tx, secret: string, registration: WaitRegistration
       [row.inbox_seq, row.inbox_seq, row.payload_json, now, now, now, registration.nodeRunId],
     )
     if (res.changes !== 1) return false
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: registration.nodeRunId,
       from: ['waiting'],
       to: 'done',
@@ -243,7 +243,7 @@ export function enterWaiting(tx: Tx, secret: string, req: {
   const deadline = new Date(waitDeadline.wallClockMs).toISOString()
   // 等待节点是纯控制节点：等待本身不产生副作用，不能按默认补偿语义收成 unverified
   tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = ?", [req.nodeRunId])
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: req.nodeRunId,
     from: ['started'],
     to: 'waiting',
@@ -281,7 +281,7 @@ export function enterWaiting(tx: Tx, secret: string, req: {
   })
   const registration = getWaitRegistration(tx, req.nodeRunId)!
   const woken = scanRegistration(tx, secret, registration, req.now)
-  if (woken) closeRun(tx, req.runId, req.now)
+  if (woken) closeRun(tx, secret, req.runId, req.now)
   return { registration: getWaitRegistration(tx, req.nodeRunId)!, woken }
 }
 
@@ -296,7 +296,7 @@ export function wakeOnEvent(tx: Tx, secret: string, input: {
   const eventSeq = recordWaitEvent(tx, input)
   const woken = scanRun(tx, secret, input.runId, input.now)
   // 控制节点等待条件满足即完成：若本 run 已无未终态节点，同一事务内收口
-  closeRun(tx, input.runId, input.now)
+  closeRun(tx, secret, input.runId, input.now)
   return { eventSeq, woken }
 }
 
@@ -337,7 +337,7 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
     return false
   }
   tx.run("UPDATE wait_registrations SET state = 'timed_out', updated_at = ? WHERE node_run_id = ? AND state = 'active'", [now, nodeRunId])
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId, from: ['waiting'], to: 'timeout', attempt: node.attempt, now, bumpRearm: true,
     patch: { wait_deadline_at: null, wait_deadline_boot_id: null, wait_deadline_monotonic_ns: null },
   })
@@ -347,7 +347,7 @@ export function timeoutWaiting(tx: Tx, secret: string, nodeRunId: string, now: s
   })
   appendEvent(tx, { type: 'wait.event_timeout', runId: row.run_id, nodeRunId })
   // 含断链/不确定节点的 run 不收口：不让坏账本状态生成 run 终态（评审 P1-1）
-  if (!skipRunIds?.has(node.run_id)) closeRun(tx, node.run_id, now)
+  if (!skipRunIds?.has(node.run_id)) closeRun(tx, secret, node.run_id, now)
   return true
 }
 

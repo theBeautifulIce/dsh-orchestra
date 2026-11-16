@@ -44,7 +44,7 @@ export function confirmStartup(
     const ruleId = hasTool ? 'M-61' : p.attested ? 'M-09' : 'M-08'
     const actionDeadlineMs = p.actionDeadlineMs ?? 30_000
     const deadline = p.clock ? deadlineFromSample(p.clock, actionDeadlineMs) : null
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: p.nodeRunId,
       from: ['startup_unknown'],
       to: 'stopping',

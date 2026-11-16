@@ -498,7 +498,7 @@ function caseG12(): InjectionResult {
   inTx(db, (tx) => openDecision(tx, {
     decisionId: 'dec_g12', runId: 'r1', nodeRunId: null, kind: 'pre_execution', createdAt: now,
   }))
-  const approve = () => inTx(db, (tx) => resolveDecision(tx, {
+  const approve = () => inTx(db, (tx) => resolveDecision(tx, TEST_SECRET, {
     decisionId: 'dec_g12', revision: 1, resolution: 'approved', now,
     actor: { kind: 'human', id: 'human:g12' },
   }))

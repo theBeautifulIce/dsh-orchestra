@@ -30,13 +30,13 @@ function legacyDb(stepsCount = 25): { db: Db; steps: ReturnType<typeof loadSteps
     tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t1', '样本', 'running', 1, ?, ?)", [NOW, NOW])
     tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('r1', 't1', 'running', 1, ?, ?)", [NOW, NOW])
     const insert = "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, startup_unknown_deadline_at, startup_unknown_monotonic_ns, startup_unknown_remaining_ns, created_at, updated_at) VALUES (?, 'r1', ?, ?, 'agent', 'startup_unknown', 1, ?, ?, ?, ?, ?)"
-    // 旧代码写的毫秒值（120 秒写成 120000）
-    tx.run(insert, ['nr_legacy', 'n1', 1, NOW, null, 120000, NOW, NOW])
+    // 生产旧写入路径的真实形态：四列同写（锚点有值），值仍是毫秒（120 秒写成 120000）
+    tx.run(insert, ['nr_legacy', 'n1', 1, NOW, 1000, 120000, NOW, NOW])
     // 已是纳秒的正确行：不许再乘 1e6
-    tx.run(insert, ['nr_ns', 'n2', 2, NOW, null, 120_000_000_000, NOW, NOW])
-    // 带单调锚点的新行：即使数值很小（0.3ms）也不许动
-    tx.run(insert, ['nr_anchored', 'n3', 3, NOW, 1234, 300_000, NOW, NOW])
-    // 无法判断：0 与超出一天的值，保留原值只记账
+    tx.run(insert, ['nr_ns', 'n2', 2, NOW, 1000, 120_000_000_000, NOW, NOW])
+    // 模糊带（纳秒的 30ms 剩余）：不换算，只记账
+    tx.run(insert, ['nr_ambiguous', 'n3', 3, NOW, 1234, 30_000_000, NOW, NOW])
+    // 无法判断：0 与超大纳秒值
     tx.run(insert, ['nr_zero', 'n4', 4, NOW, null, 0, NOW, NOW])
     tx.run(insert, ['nr_huge', 'n5', 5, NOW, null, 999_999_999_999, NOW, NOW])
   })
@@ -54,7 +54,7 @@ describe('迁移 026：旧毫秒单位修复', () => {
     expect(applySteps(db, steps)).toEqual([26])
     expect(remainingOf(db, 'nr_legacy')).toBe(120000 * 1e6)
     expect(remainingOf(db, 'nr_ns')).toBe(120_000_000_000)
-    expect(remainingOf(db, 'nr_anchored')).toBe(300_000)
+    expect(remainingOf(db, 'nr_ambiguous')).toBe(30_000_000)
     expect(remainingOf(db, 'nr_zero')).toBe(0)
     expect(remainingOf(db, 'nr_huge')).toBe(999_999_999_999)
     db.raw.close()
@@ -68,8 +68,8 @@ describe('迁移 026：旧毫秒单位修复', () => {
     const fixed = rows.filter((r) => r.reason === 'legacy_ms_to_ns')
     const kept = rows.filter((r) => r.reason === 'unclassified_kept')
     expect(fixed.map((r) => [r.node_run_id, r.old_value, r.new_value])).toEqual([['nr_legacy', 120000, 120_000_000_000]])
-    // nr_ns 已是纳秒但缺锚点：无法判断来源，保留并记账；0 与超大值同理
-    expect(kept.map((r) => r.node_run_id).sort()).toEqual(['nr_huge', 'nr_ns', 'nr_zero'])
+    // 模糊带（nr_ambiguous）与 0（nr_zero）保留并记账；纳秒大值（nr_ns / nr_huge）不记账
+    expect(kept.map((r) => r.node_run_id).sort()).toEqual(['nr_ambiguous', 'nr_zero'])
     db.raw.close()
   })
 
@@ -80,7 +80,7 @@ describe('迁移 026：旧毫秒单位修复', () => {
     const changed = db.raw.exec(
       'UPDATE node_runs SET startup_unknown_remaining_ns = startup_unknown_remaining_ns * 1000000 '
       + 'WHERE startup_unknown_remaining_ns IS NOT NULL AND startup_unknown_remaining_ns > 0 '
-      + 'AND startup_unknown_remaining_ns <= 86400000 AND startup_unknown_monotonic_ns IS NULL',
+      + 'AND startup_unknown_remaining_ns < 1000000',
     )
     expect(changed).toBeUndefined()
     expect(remainingOf(db, 'nr_legacy')).toBe(120000 * 1e6)

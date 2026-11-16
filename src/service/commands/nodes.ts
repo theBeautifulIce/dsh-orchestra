@@ -2,7 +2,7 @@
 import { OrchError } from '../../core/errors.ts'
 import { canTransition, TERMINAL_STATUSES, TRANSITIONS, type NodeStatus, type TransitionContext, type TransitionRule } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
-import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { appendNodeRunEvent, assertChainIntact } from '../../infra/db/ledger.ts'
 import { uuidv7 } from '../../core/ids.ts'
 import {
   chooseBranch, evaluatePolicy,
@@ -120,10 +120,12 @@ export type TransitionRequest = {
  * - 条件含 node_run_id、from 集合、attempt，普通出口再带 hang_reason IS NULL；
  * - 受影响行数必须恰为 1，否则抛 STALE_GENERATION，由调用方事务整体回滚。
  */
-export function applyTransition(tx: Tx, req: TransitionRequest): void {
+export function applyTransition(tx: Tx, secret: string, req: TransitionRequest): void {
   if (req.from.length === 0) {
     throw new OrchError('STALE_GENERATION', '迁移缺少来源状态', { nodeRunId: req.nodeRunId })
   }
+  // 断链闸门：所有状态推进都从这里过，坏账本不许再追加事件（S3 r19 P1-1）
+  assertChainIntact(tx, secret, req.nodeRunId)
   const explicitRule = req.ruleId === undefined
     ? undefined
     : TRANSITIONS.find((rule) => rule.id === req.ruleId)
@@ -340,7 +342,7 @@ export function enterBlockedPre(tx: Tx, secret: string, req: EnterBlockedPreRequ
     })
   }
   const fromStatus = row.status
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: req.nodeRunId,
     from: [fromStatus],
     to: 'blocked_pre',
@@ -433,7 +435,7 @@ export function resumeFromBlockedPre(tx: Tx, secret: string, req: ResumeFromBloc
     })
   }
   if (req.approved) {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: req.nodeRunId,
       from: ['blocked_pre'],
       to: 'queued',
@@ -442,7 +444,7 @@ export function resumeFromBlockedPre(tx: Tx, secret: string, req: ResumeFromBloc
       patch: { resume_state: null, blocked_decision_id: null },
     })
   } else {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: req.nodeRunId,
       from: ['blocked_pre'],
       to: 'failed',
@@ -537,7 +539,7 @@ export function applyBranchRoute(tx: Tx, secret: string, req: ApplyBranchRouteRe
       [req.nodeRunId, from, req.attempt],
     )
     if (!exists) continue
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: req.nodeRunId,
       from: [from],
       to: 'blocked_post',

@@ -149,7 +149,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       now: b.now,
     }),
     resolveDecision: (b) => inTx(db, (tx) => {
-      const out = resolveDecision(tx, {
+      const out = resolveDecision(tx, opts.secret, {
         decisionId: b.decisionId,
         revision: b.revision,
         resolution: b.resolution,
@@ -171,7 +171,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
           contentHash: b.contentHash ?? null,
           now: b.now,
         })
-        if (out.closedReason !== 'approved') closeRun(tx, out.runId, b.now)
+        if (out.closedReason !== 'approved') closeRun(tx, opts.secret, out.runId, b.now)
       }
       return out
     }),
@@ -209,7 +209,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       })
       // 终态 run 不再接受取消写入；还压着人工裁决的 run 明确返回 cancellation_pending。
       // 纯控制节点取消后立即终态；若还有执行器节点在围栏里，sweep 后续再收口。
-      if (out.runStatus !== 'already_stopped') closeRun(tx, b.runId, b.now)
+      if (out.runStatus !== 'already_stopped') closeRun(tx, opts.secret, b.runId, b.now)
       // 对外契约：runStatus 是请求层的取消进展，terminalStatus/outcome 是库里的实际结果。
       // 只给 cancelled 会让调用方以为“取消成功=业务成功”，所以把业务结果一并返回（审计 P2-3）。
       const statusRow = tx.get<{ status: string }>('SELECT status FROM runs WHERE run_id = ?', [b.runId])
@@ -272,7 +272,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       })
       // 单节点入口也要收口：run 下所有节点都终态且无活跃 decision 时写运行终态。
       const row = db.raw.prepare('SELECT run_id FROM node_runs WHERE node_run_id = ?').get(b.nodeRunId) as { run_id?: string } | undefined
-      if (row?.run_id) inTx(db, (tx) => { closeRun(tx, row.run_id!, b.now) })
+      if (row?.run_id) inTx(db, (tx) => { closeRun(tx, opts.secret, row.run_id!, b.now) })
       return out
     },
   }

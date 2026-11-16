@@ -114,7 +114,7 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
         return out
       })()
   // 这一轮跑完后收口 run：所有子节点都已终态才写，未满足条件保持原状。
-  inTx(deps.db, (tx) => { closeRun(tx, p.runId, p.now) })
+  inTx(deps.db, (tx) => { closeRun(tx, deps.secret, p.runId, p.now) })
   return outcomes
 }
 
@@ -227,7 +227,7 @@ export function failQueuedNode(
 ): DispatchSettlement {
   try {
     return inTx(deps.db, (tx): DispatchSettlement => {
-      applyTransition(tx, {
+      applyTransition(tx, deps.secret, {
         nodeRunId: row.node_run_id,
         from: ['queued'],
         to: 'failed',
@@ -432,7 +432,7 @@ async function dispatchControlNode(
         tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = ?", [row.node_run_id])
         const current = loadNodeRun(tx, row.node_run_id)
         // 控制节点只走 applyTransition：transitionNode 是报告/执行器那条入口，不接受控制节点
-        applyTransition(tx, {
+        applyTransition(tx, deps.secret, {
           nodeRunId: row.node_run_id,
           from: ['dispatched'],
           to: 'started',
@@ -460,7 +460,7 @@ async function dispatchControlNode(
     }
     const child = inTx(deps.db, (tx) => {
       const current = loadNodeRun(tx, row.node_run_id)
-      applyTransition(tx, {
+      applyTransition(tx, deps.secret, {
         nodeRunId: row.node_run_id,
         from: ['dispatched'],
         to: 'started',
@@ -511,7 +511,7 @@ export function failControlDispatch(
       if (!['leased', 'dispatched', 'started'].includes(current.status)) {
         return { kind: 'already_moved', currentStatus: current.status }
       }
-      applyTransition(tx, {
+      applyTransition(tx, deps.secret, {
         nodeRunId: row.node_run_id,
         from: ['leased', 'dispatched', 'started'],
         to: 'failed',

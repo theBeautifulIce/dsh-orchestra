@@ -4,6 +4,8 @@ import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { applyTransition, createNodeRun } from '../../src/service/commands/nodes.ts'
 
+const SECRET = 'node-runs-secret'
+
 const NOW = '2026-11-14T12:00:00.000Z'
 
 function memoryDb(): Db {
@@ -40,7 +42,7 @@ describe('node_run 单条 CAS 迁移执行器', () => {
     const db = memoryDb()
     insertNode(db, 'nr1')
     withTx(db, (tx) => {
-      applyTransition(tx, {
+      applyTransition(tx, SECRET, {
         nodeRunId: 'nr1',
         from: ['queued'],
         to: 'leased',
@@ -58,14 +60,14 @@ describe('node_run 单条 CAS 迁移执行器', () => {
     const db = memoryDb()
     insertNode(db, 'nr1')
     expect(() => withTx(db, (tx) => {
-      applyTransition(tx, { nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 99, now: NOW })
+      applyTransition(tx, SECRET, { nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 99, now: NOW })
     })).toThrowError(/CAS 未命中/)
     expect(row(db, 'nr1').status).toBe('queued')
     expect(row(db, 'nr1').revision).toBe(1)
 
     expect(() => withTx(db, (tx) => {
       tx.run("UPDATE runs SET status = 'paused' WHERE run_id = 'r1'")
-      applyTransition(tx, { nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 99, now: NOW })
+      applyTransition(tx, SECRET, { nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 99, now: NOW })
     })).toThrowError(/CAS 未命中/)
     expect((db.raw.prepare("SELECT status FROM runs WHERE run_id = 'r1'").get() as any).status).toBe('running')
   })
@@ -77,12 +79,12 @@ describe('node_run 单条 CAS 迁移执行器', () => {
       tx.run("UPDATE node_runs SET hang_reason = 'report_contradicted' WHERE node_run_id = 'nr1'")
     })
     expect(() => withTx(db, (tx) => {
-      applyTransition(tx, { nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 1, now: NOW })
+      applyTransition(tx, SECRET, { nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 1, now: NOW })
     })).toThrowError(/CAS 未命中/)
     expect(row(db, 'nr1').status).toBe('queued')
 
     withTx(db, (tx) => {
-      applyTransition(tx, {
+      applyTransition(tx, SECRET, {
         nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 1, now: NOW,
         allowHung: true, patch: { hang_reason: null },
       })
@@ -95,7 +97,7 @@ describe('node_run 单条 CAS 迁移执行器', () => {
     const db = memoryDb()
     insertNode(db, 'nr1')
     expect(() => withTx(db, (tx) => {
-      applyTransition(tx, {
+      applyTransition(tx, SECRET, {
         nodeRunId: 'nr1', from: ['queued'], to: 'leased', attempt: 1, now: NOW,
         patch: { status: 'done' } as any,
       })

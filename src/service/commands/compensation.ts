@@ -117,7 +117,7 @@ function markUnverified(tx: Tx, secret: string, nodeRunId: string, attempt: numb
       status: node.status,
     })
   }
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId,
     from: [node.status as (typeof UNVERIFIED_FROM)[number]],
     to: 'failed_with_unverified',
@@ -171,7 +171,7 @@ export function settleCompensation(
     markUnverified(tx, secret, row.node_run_id, row.attempt, args.now, args.reason ?? `compensation_${args.state}`)
   }
   const owner = tx.get<{ run_id: string }>('SELECT run_id FROM node_runs WHERE node_run_id = ?', [row.node_run_id])
-  if (owner) closeRun(tx, owner.run_id, args.now)
+  if (owner) closeRun(tx, secret, owner.run_id, args.now)
   return true
 }
 

@@ -75,7 +75,7 @@ describe('审批往返与不可逆动作前置审批', () => {
     expect(blocked.blocked_decision_id).toBe('d1')
 
     withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
       resumeFromBlockedPre(tx, SECRET, {
         nodeRunId: 'nr1', attempt: 1, decisionId: 'd1', approved: true, now: NOW, contentHash: 'h1',
       })
@@ -100,7 +100,7 @@ describe('审批往返与不可逆动作前置审批', () => {
       enterBlockedPre(tx, SECRET, {
         nodeRunId: 'nr1', attempt: 1, decisionId: 'd1', actionGeneration: 3, now: NOW,
       })
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'rejected', actor: HUMAN, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'rejected', actor: HUMAN, now: NOW })
       resumeFromBlockedPre(tx, SECRET, {
         nodeRunId: 'nr1', attempt: 1, decisionId: 'd1', approved: false, now: NOW,
       })
@@ -119,7 +119,7 @@ describe('审批往返与不可逆动作前置审批', () => {
         nodeRunId: 'nr1', attempt: 1, decisionId: 'd1', actionGeneration: 3, now: NOW,
       })
       tx.run("UPDATE node_runs SET lease_id = 'lease-stale' WHERE node_run_id = 'nr1'")
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
     })
     expect(() => withTx(db, (tx) => {
       resumeFromBlockedPre(tx, SECRET, {
@@ -137,7 +137,7 @@ describe('审批往返与不可逆动作前置审批', () => {
       enterBlockedPre(tx, SECRET, {
         nodeRunId: 'nr1', attempt: 1, decisionId: 'd1', actionGeneration: 3, now: NOW,
       })
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
     })
     expect(() => withTx(db, (tx) => {
       resumeFromBlockedPre(tx, SECRET, {
@@ -155,7 +155,7 @@ describe('审批往返与不可逆动作前置审批', () => {
       enterBlockedPre(tx, SECRET, {
         nodeRunId: 'nr1', attempt: 1, decisionId: 'd1', actionGeneration: 3, now: NOW,
       })
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'expired', actor: HUMAN, now: LATER })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'expired', actor: HUMAN, now: LATER })
     })
     expect(() => withTx(db, (tx) => {
       resumeFromBlockedPre(tx, SECRET, {
@@ -200,10 +200,10 @@ describe('审批往返与不可逆动作前置审批', () => {
     insertNode(db, 'nr1')
     openApproval(db, 'd1', 'nr1')
     withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'approved', actor: HUMAN, now: NOW })
     })
     expect(() => withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'rejected', actor: HUMAN, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'rejected', actor: HUMAN, now: NOW })
     })).toThrowError(/CAS 未命中/)
     const decision = db.raw.prepare("SELECT status, closed_reason FROM decisions WHERE decision_id = 'd1'").get() as any
     expect(decision).toEqual({ status: 'resolved', closed_reason: 'approved' })

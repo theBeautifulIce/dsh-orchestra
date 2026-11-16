@@ -58,7 +58,7 @@ export function resolveRecoveryUncertain(tx: Tx, secret: string, req: RecoveryRe
     patch[cols.monotonic] = null
     patch[cols.checkpoint] = null
   }
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: req.nodeRunId,
     from: [row.status as NodeStatus],
     to: 'indeterminate_side_effect',

@@ -177,7 +177,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
         if (decision.kind === 'uncertain') continue
       }
       try {
-        applyTransition(tx, {
+        applyTransition(tx, secret, {
           nodeRunId: row.node_run_id,
           from: ['startup_unknown'],
           to: 'indeterminate_side_effect',
@@ -212,7 +212,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       )
       if (!row || recoverySkip(row)) continue
       try {
-        applyTransition(tx, {
+        applyTransition(tx, secret, {
           nodeRunId,
           from: [row.status as NodeStatus],
           to: 'paused_bridge_missing',
@@ -256,7 +256,8 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
         patch.startup_unknown_deadline_at = new Date(d.wallClockMs).toISOString()
         patch.startup_unknown_boot_id = d.bootId
         patch.startup_unknown_monotonic_ns = d.monotonicNs
-        patch.startup_unknown_remaining_ns = null
+        // 立刻把新预算写成检查点：只清空的话，紧接着再重启一次就没有可信剩余了（S1 r67 P2-2）
+        patch.startup_unknown_remaining_ns = Math.round(remaining * 1e6)
       }
       if (target === 'verifying') {
         // 断线期间没记下剩余量，恢复时不能按 0 立即到期，给完整一轮判定窗口。
@@ -269,10 +270,10 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
         patch.verify_deadline_at = new Date(d.wallClockMs).toISOString()
         patch.verify_deadline_boot_id = d.bootId
         patch.verify_deadline_monotonic_ns = d.monotonicNs
-        patch.verify_remaining_ns = null
+        patch.verify_remaining_ns = Math.round(remaining * 1e6)
       }
       try {
-        applyTransition(tx, {
+        applyTransition(tx, secret, {
           nodeRunId,
           from: ['paused_bridge_missing'],
           to: target,
@@ -341,7 +342,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       )
       if (!row || !EXECUTOR_BOUND.includes(row.status)) continue
       try {
-        applyTransition(tx, {
+        applyTransition(tx, secret, {
           nodeRunId,
           from: [row.status as NodeStatus],
           to: 'orphaned',
@@ -377,7 +378,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       try {
         const out = finishSubworkflowChild(tx, secret, { childRunId: child.run_id, now: params.now })
         if (out.status !== 'waiting') subworkflowFinished.push(out.parentNodeRunId)
-        if (child.parent_run_id) closeRun(tx, child.parent_run_id, params.now)
+        if (child.parent_run_id) closeRun(tx, secret, child.parent_run_id, params.now)
       } catch {
         // 并发已推进这个父节点：跳过，不把整轮扫描拖垮
       }
@@ -391,7 +392,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     const runsClosed: string[] = []
     for (const row of tx.all<{ run_id: string }>("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id")) {
       if (taintedRuns.has(row.run_id)) continue
-      if (closeRun(tx, row.run_id, params.now)) runsClosed.push(row.run_id)
+      if (closeRun(tx, secret, row.run_id, params.now)) runsClosed.push(row.run_id)
     }
 
     return {

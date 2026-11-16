@@ -8,6 +8,8 @@ import {
   resolveDecision,
 } from '../../src/service/commands/decisions.ts'
 
+const SECRET = 'decisions-secret'
+
 const NOW = '2026-11-14T12:00:00.000Z'
 
 function memoryDb(): Db {
@@ -51,7 +53,7 @@ describe('八种 decision 与活跃唯一性', () => {
     })).toThrowError(/已有活跃 decision/)
 
     withTx(db, (tx) => {
-      resolveDecision(tx, {
+      resolveDecision(tx, SECRET, {
         decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW,
         actor: { kind: 'human', id: 'human:test' },
       })
@@ -87,7 +89,7 @@ describe('八种 decision 与活跃唯一性', () => {
       openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: 'nr1', kind: 'pre_execution', createdAt: NOW })
     })
     expect(() => withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 99, resolution: 'rejected', actor: { kind: 'human', id: 'human:test' }, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 99, resolution: 'rejected', actor: { kind: 'human', id: 'human:test' }, now: NOW })
     })).toThrowError(/CAS 未命中/)
     expect(row(db, 'd1').status).toBe('pending')
   })
@@ -98,7 +100,7 @@ describe('八种 decision 与活跃唯一性', () => {
       openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: 'nr1', kind: 'action_overrun', createdAt: NOW })
     })
     withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'continue_wait', actor: { kind: 'human', id: 'human:test' }, now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'continue_wait', actor: { kind: 'human', id: 'human:test' }, now: NOW })
     })
     expect(row(db, 'd1').status).toBe('pending')
     expect(row(db, 'd1').revision).toBe(2)
@@ -146,13 +148,13 @@ describe('八种 decision 与活跃唯一性', () => {
     })
     expect(row(db, 'd1').confirm_required).toBe(1)
     expect(() => withTx(db, (tx) => {
-      resolveDecision(tx, {
+      resolveDecision(tx, SECRET, {
         decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW,
         actor: { kind: 'human', id: 'human:test' },
       })
     })).toThrowError(/必须显式确认/)
     withTx(db, (tx) => {
-      resolveDecision(tx, {
+      resolveDecision(tx, SECRET, {
         decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW,
         confirm: true, actor: { kind: 'human', id: 'human:test' },
       })
@@ -166,7 +168,7 @@ describe('八种 decision 与活跃唯一性', () => {
       openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: null, kind: 'audit_result', createdAt: NOW })
     })
     expect(() => withTx(db, (tx) => {
-      resolveDecision(tx, { decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW })
+      resolveDecision(tx, SECRET, { decisionId: 'd1', revision: 1, resolution: 'approved', now: NOW })
     })).toThrowError(/必须说明批准人/)
   })
 })

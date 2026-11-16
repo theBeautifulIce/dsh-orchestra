@@ -174,7 +174,7 @@ export function raiseReportContradiction(
       createdAt: args.now,
     })
   }
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: args.nodeRunId,
     from: [row.status as NodeStatus],
     to: row.status as NodeStatus,
@@ -232,7 +232,7 @@ function upholdDecision(
   reportSeq: number,
 ): ApplyResult {
   const decision = loadContradictionDecision(tx, params)
-  resolveDecision(tx, {
+  resolveDecision(tx, secret, {
     decisionId: decision.decision_id,
     revision: decision.revision,
     resolution: 'uphold_decision' satisfies Resolution,
@@ -240,7 +240,7 @@ function upholdDecision(
     actor: { kind: 'human', id: 'human:uphold' },
   })
   const newNodeRunId = 'nrun_' + uuidv7()
-  applyTransition(tx, {
+  applyTransition(tx, secret, {
     nodeRunId: params.nodeRunId,
     from: [row.status as NodeStatus],
     to: 'superseded',
@@ -411,7 +411,7 @@ export function applyReport(
       })
     }
     const decision = loadContradictionDecision(tx, params)
-    resolveDecision(tx, {
+    resolveDecision(tx, secret, {
       decisionId: decision.decision_id,
       revision: decision.revision,
       resolution: 'uphold_report',
@@ -497,7 +497,7 @@ export function applyReport(
     }
   }
   if (upholdReport) {
-    applyTransition(tx, {
+    applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,
       from: [row.status as NodeStatus],
       to: report.status as NodeStatus,
