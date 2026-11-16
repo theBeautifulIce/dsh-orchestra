@@ -321,12 +321,10 @@ async function caseG09(): Promise<InjectionResult> {
   }
 }
 
-// G-10：在途 run 时发布新版本——在途 run 仍按旧版本解释，新 run 才用新版本（规格 1070 行）
+// G-10：在途 run 时发布新版本——在途 run 仍按旧版本解释，新 run 才用新版本（规格 1070 行）。
+// 走真实生产装配（create/publish/startRun），不再手工插 runs 行（审计要求）。
 async function caseG10(): Promise<InjectionResult> {
-  const { file, db } = freshLedger()
-  seed(db)
-  const RUNTIME = new Set(Object.keys(NODE_CAPABILITY))
-  const ctxFor = (tx: Parameters<typeof publishContextFor>[0]) => publishContextFor(tx, RUNTIME)
+  const dir = mkdtempSync(join(tmpdir(), 'inject-g10-'))
   const NOW = '2026-11-16T19:00:00.000Z'
   const doc = (extra: unknown[] = []) => ({
     name: '发布流程',
@@ -334,40 +332,57 @@ async function caseG10(): Promise<InjectionResult> {
       { node_id: 'a', type: 'agent', title: '执行', position: { x: 1, y: 0 }, config: {} }, ...extra],
     edges: [{ from: 't', to: 'a' }, ...(extra.length > 0 ? [{ from: 'a', to: 'b' }] : [])],
   })
-  inTx(db, (tx) => createWorkflow(tx, {
-    workflowId: 'wf1', name: '发布流程', definition: doc(), actor: 'human:g10', now: NOW,
-  }))
-  const v1 = inTx(db, (tx) => publishWorkflowCommand(tx, {
-    workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: '912cd03c-50d2-7912-8564-52e7784cab9e', note: '发布说明', actor: 'human:g10', now: NOW,
-  }, ctxFor(tx)))
-  inTx(db, (tx) => tx.run(
-    "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) "
-    + "VALUES ('r_inflight', 't1', 'wf1', ?, ?, 'running', 0, ?, ?)", [v1.version, v1.definition_hash, NOW, NOW]))
-  const before = dumpEvents(file)
-  // 草稿改成加一个节点，再发 v2：等价于"回滚式"改动，旧 run 不许跟着变
-  const reopened = inTx(db, (tx) => {
-    tx.run("UPDATE workflow_drafts SET revision = revision + 1, published_version = NULL WHERE workflow_id = 'wf1'")
-    return tx.get<{ revision: number }>('SELECT revision FROM workflow_drafts WHERE workflow_id = ?', ['wf1'])!
-  })
-  inTx(db, (tx) => updateDraft(tx, {
-    workflowId: 'wf1', revision: reopened.revision,
-    definition: doc([{ node_id: 'b', type: 'agent', title: '追加', position: { x: 2, y: 0 }, config: {} }]),
-    actor: 'human:g10', now: NOW,
-  }))
-  const v2 = inTx(db, (tx) => publishWorkflowCommand(tx, {
-    workflowId: 'wf1', revision: reopened.revision + 1, baseVersion: 1, operationId: '7868a45b-9774-7fa1-8292-fa1c1d71d345', note: '发布说明', actor: 'human:g10', now: NOW,
-  }, ctxFor(tx)))
-  inTx(db, (tx) => tx.run(
-    "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) "
-    + "VALUES ('r_new', 't1', 'wf1', ?, ?, 'running', 0, ?, ?)", [v2.version, v2.definition_hash, NOW, NOW]))
-  const inFlight = db.raw.prepare("SELECT workflow_version, workflow_definition_hash FROM runs WHERE run_id = 'r_inflight'").get() as { workflow_version: string; workflow_definition_hash: string }
-  const fresh = db.raw.prepare("SELECT workflow_version, workflow_definition_hash FROM runs WHERE run_id = 'r_new'").get() as { workflow_version: string; workflow_definition_hash: string }
-  return {
-    case: 'G-10',
-    params: { db: file, scenario: '在途 run 时发布新版本', inFlightRun: 'r_inflight', newRun: 'r_new' },
-    before,
-    after: dumpEvents(file),
-    reconcile: '在途 run 仍记 v' + String(inFlight.workflow_version) + '（hash ' + inFlight.workflow_definition_hash.slice(0, 12) + '），新 run 记 v' + String(fresh.workflow_version) + '（hash ' + fresh.workflow_definition_hash.slice(0, 12) + '）；版本表 [1,2]；发布不影响在途 run',
+  const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g10-secret', phase: 'S4' })
+  try {
+    const commands = service.orchestra.commands
+    const db = service.orchestra.db
+    commands.createWorkflow!({
+      workflowId: 'wf1', name: '发布流程', definition: doc(), actor: 'human:g10', now: NOW,
+      operationId: 'b7d4d2f0-1111-7aaa-8bbb-000000000101',
+    } as never)
+    commands.publishWorkflow!({
+      workflowId: 'wf1', revision: 1, baseVersion: 0, note: '发布 v1', actor: 'human:g10', now: NOW,
+      operationId: 'b7d4d2f0-1111-7aaa-8bbb-000000000102',
+    } as never)
+    const inflight = commands.startRun!({
+      taskTitle: '在途任务', workflowId: 'wf1', workflowVersion: '1',
+      operationId: 'b7d4d2f0-1111-7aaa-8bbb-000000000103', now: NOW,
+    }) as { run_id: string }
+    const before = dumpEvents(join(dir, 'orchestra.db'))
+    // 草稿改图发 v2，再起新 run
+    const reopened = commands.openWorkflowDraft!({
+      workflowId: 'wf1', baseVersion: 1, actor: 'human:g10', now: NOW,
+      operationId: 'b7d4d2f0-1111-7aaa-8bbb-000000000104',
+    } as never) as { revision: number }
+    commands.updateWorkflowDraft!({
+      workflowId: 'wf1', revision: reopened.revision,
+      definition: doc([{ node_id: 'b', type: 'agent', title: '追加', position: { x: 2, y: 0 }, config: {} }]),
+      actor: 'human:g10', now: NOW,
+      operationId: 'b7d4d2f0-1111-7aaa-8bbb-000000000105',
+    } as never)
+    commands.publishWorkflow!({
+      workflowId: 'wf1', revision: reopened.revision + 1, baseVersion: 1, note: '发布 v2', actor: 'human:g10', now: NOW,
+      operationId: 'b7d4d2f0-1111-7aaa-8bbb-000000000106',
+    } as never)
+    const fresh = commands.startRun!({
+      taskTitle: '新任务', workflowId: 'wf1', workflowVersion: '2',
+      operationId: 'b7d4d2f0-1111-7aaa-8bbb-000000000107', now: NOW,
+    }) as { run_id: string }
+    const readRun = (id: string) => db.raw.prepare(
+      'SELECT workflow_version, workflow_definition_hash FROM runs WHERE run_id = ?').get(id) as
+      { workflow_version: string; workflow_definition_hash: string }
+    const inFlight = readRun(inflight.run_id)
+    const newRun = readRun(fresh.run_id)
+    return {
+      case: 'G-10',
+      params: { scenario: '在途 run 时发布新版本', path: 'create/publish/startRun 真实装配', inFlightRun: 'r_inflight', newRun: 'r_new' },
+      before,
+      after: dumpEvents(join(dir, 'orchestra.db')),
+      reconcile: '在途 run 仍记 v' + String(inFlight.workflow_version) + '（hash ' + inFlight.workflow_definition_hash.slice(0, 12) + '），新 run 记 v' + String(newRun.workflow_version) + '（hash ' + newRun.workflow_definition_hash.slice(0, 12) + '）；版本表 [1,2]；发布不影响在途 run',
+    }
+  } finally {
+    await service.release()
+    rmSync(dir, { recursive: true, force: true })
   }
 }
 

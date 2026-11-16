@@ -222,3 +222,45 @@ describe('G4：执行拓扑进定义（审计 P1-3）', () => {
     }
   })
 })
+
+describe('G4：两个独立连接竞争同一张草稿', () => {
+  it('最多一个成功，版本表只出一个新版本', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { openServiceOrchestra } = await import('../../src/index.ts')
+    const { openDb, withTx } = await import('../../src/infra/sqlite/driver.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-race-'))
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-race', phase: 'S4' })
+    const second = openDb(join(dir, 'orchestra.db'))
+    try {
+      const commands = service.orchestra.commands
+      commands.createWorkflow!({
+        workflowId: 'wf_race', name: '发布流程', actor: 'human:me', now: NOW, operationId: 'c1a2b3c4-1111-7aaa-8bbb-000000000201',
+        definition: doc(),
+      } as never)
+      // 两个连接、同一张草稿（revision 1）各自发布
+      const publish = (db: { raw: never } | never, operationId: string) =>
+        withTx(db as never, (tx: never) => publishWorkflowCommand(tx as never, {
+          workflowId: 'wf_race', revision: 1, baseVersion: 0, note: '发布说明', actor: 'human:me', now: NOW,
+          operationId,
+        } as never, ctx))
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => publish(service.orchestra.db, 'c1a2b3c4-1111-7aaa-8bbb-000000000202')),
+        Promise.resolve().then(() => publish(second, 'c1a2b3c4-1111-7aaa-8bbb-000000000203')),
+      ])
+      const ok = results.filter((r) => r.status === 'fulfilled')
+      const failed = results.filter((r) => r.status === 'rejected')
+      expect(ok).toHaveLength(1)
+      expect(failed).toHaveLength(1)
+      expect((failed[0] as PromiseRejectedResult).reason?.code).toMatch(/WORKFLOW_(DRAFT_NOT_OPEN|REVISION_CONFLICT|VERSION_CONFLICT)/)
+      const versions = service.orchestra.db.raw
+        .prepare("SELECT version FROM workflow_versions WHERE workflow_id = 'wf_race'").all() as { version: string }[]
+      expect(versions.map((v) => v.version)).toEqual(['1'])
+    } finally {
+      second.raw.close()
+      await service.release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
