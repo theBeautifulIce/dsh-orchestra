@@ -20,7 +20,7 @@ describe('保存层结构校验', () => {
   it('正常定义：无阻断项，且图语义没有提示', () => {
     const out = validateSaveLayer(doc())
     expect(out.report.errors).toEqual([])
-    expect(out.hints).toEqual([])
+    expect(out.hints.errors).toEqual([])
     expect(out.saved?.name).toBe('发布流水线')
   })
 
@@ -58,19 +58,19 @@ describe('保存层结构校验', () => {
   it('缺 trigger、有环、branch 缺 route：保存不阻断，只进 hints', () => {
     const noTrigger = validateSaveLayer(doc({ nodes: [node('a'), node('b')], edges: [{ from: 'a', to: 'b' }] }))
     expect(noTrigger.report.errors).toEqual([])
-    expect(noTrigger.hints.map((h) => h.code)).toContain('WORKFLOW_NO_TRIGGER')
+    expect(noTrigger.hints.errors.map((h) => h.code)).toContain('WORKFLOW_NO_TRIGGER')
 
     const cycle = validateSaveLayer(doc({ nodes: [node('start', 'trigger'), node('a'), node('b')], edges: [
       { from: 'start', to: 'a' }, { from: 'a', to: 'b' }, { from: 'b', to: 'a' },
     ] }))
     expect(cycle.report.errors).toEqual([])
-    expect(cycle.hints.map((h) => h.code)).toContain('WORKFLOW_GRAPH_CYCLE')
+    expect(cycle.hints.errors.map((h) => h.code)).toContain('WORKFLOW_GRAPH_CYCLE')
 
     const branch = validateSaveLayer(doc({ nodes: [node('start', 'trigger'), node('fork', 'branch'), node('x'), node('y')], edges: [
       { from: 'start', to: 'fork' }, { from: 'fork', to: 'x' }, { from: 'fork', to: 'y' },
     ] }))
     expect(branch.report.errors).toEqual([])
-    expect(branch.hints.map((h) => h.code)).toContain('WORKFLOW_BRANCH_ROUTE_INVALID')
+    expect(branch.hints.errors.map((h) => h.code)).toContain('WORKFLOW_BRANCH_ROUTE_INVALID')
   })
 
   it('超过 1 MiB 直接抛 413，不进 issue 列表', () => {

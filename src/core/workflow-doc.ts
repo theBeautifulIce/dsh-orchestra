@@ -19,6 +19,9 @@ export const WORKFLOW_NODE_TYPES = [
 ] as const
 export type WorkflowDocNodeType = (typeof WORKFLOW_NODE_TYPES)[number]
 
+/** 内建图结构节点：不依赖运行时能力注册，trigger 永远允许 */
+export const BUILTIN_GRAPH_TYPES: ReadonlySet<string> = new Set(['trigger'])
+
 /** trigger / branch / parallel 可以有多条出边；branch 必须带 route */
 const MULTI_OUT_DEGREE: ReadonlySet<WorkflowDocNodeType> = new Set(['branch', 'parallel'])
 
@@ -29,8 +32,10 @@ const PositionSchema = z.object({
   y: z.number().int().min(0).max(20000),
 })
 
+// priority 不在这里卡 0–999：越界属于图语义问题，要作为发布层 issue 返回，
+// 不能在解析阶段就把草稿判死（审计 P2-1）
 const RouteSchema = z.object({
-  priority: z.number().int().min(0).max(999).optional(),
+  priority: z.number().int().optional(),
   default: z.boolean().optional(),
 })
 
@@ -40,6 +45,8 @@ const NodeSchema = z.object({
   title: z.string(),
   position: PositionSchema,
   config: z.record(z.string(), z.unknown()).optional(),
+  // 规格 3.8 的节点契约：先原样保留，S4 不解释它的语义，但不能在保存时丢掉
+  contract: z.record(z.string(), z.unknown()).optional(),
 })
 
 const EdgeSchema = z.object({
@@ -49,8 +56,11 @@ const EdgeSchema = z.object({
 })
 
 export const WorkflowDocSchema = z.object({
+  // 文档格式版本：不写就按当前版本处理，写错也不阻断保存，交给发布层提示
+  schema_version: z.string().optional(),
   workflow_id: z.string().optional(),
   name: z.string(),
+  scope: z.enum(['reusable', 'task_local']).optional(),
   nodes: z.array(NodeSchema),
   edges: z.array(EdgeSchema),
 })
@@ -74,7 +84,7 @@ const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(
 export function validateSaveLayer(
   input: unknown,
   opts: { expectedName?: string } = {},
-): { saved: WorkflowDoc | null; report: ValidationReport; hints: ValidationIssue[] } {
+): { saved: WorkflowDoc | null; report: ValidationReport; hints: ValidationReport } {
   if (byteLength(input) > WORKFLOW_DOC_MAX_BYTES) {
     throw new OrchError('WORKFLOW_DEFINITION_TOO_LARGE', '定义超过 1 MiB，先拆小', {
       limit_bytes: WORKFLOW_DOC_MAX_BYTES,
@@ -88,7 +98,7 @@ export function validateSaveLayer(
       code: 'WORKFLOW_DEFINITION_INVALID',
       message: issue.message,
     }))
-    return { saved: null, report: report(issues), hints: [] }
+    return { saved: null, report: report(issues), hints: report([]) }
   }
 
   const doc = parsed.data
@@ -138,7 +148,7 @@ export function validateSaveLayer(
   for (const issue of validatePublishLayer(doc, { registeredNodeTypes: new Set(WORKFLOW_NODE_TYPES), publishedVersions: () => true })) {
     hints.push(issue)
   }
-  return { saved: doc, report: report(issues), hints }
+  return { saved: doc, report: report(issues), hints: report(hints) }
 }
 
 export type PublishContext = {
@@ -191,24 +201,44 @@ const branchIssues = (doc: WorkflowDoc): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
   for (const node of doc.nodes) {
     if (node.type !== 'branch') continue
-    const edges = doc.edges.filter((e) => e.from === node.node_id)
+    const edges = doc.edges
+      .map((edge, index) => ({ edge, index }))
+      .filter(({ edge }) => edge.from === node.node_id)
     const priorities = new Set<number>()
     let defaults = 0
-    for (const edge of edges) {
-      if (!edge.route) {
-        issues.push({ path: nodePath(doc, node.node_id), code: 'WORKFLOW_BRANCH_ROUTE_INVALID', message: 'branch 的每条出边都要带 route' })
+    for (const { edge, index } of edges) {
+      const at = pointer('/edges', index, 'route')
+      const route = edge.route
+      const hasPriority = route?.priority !== undefined
+      const isDefault = route?.default === true
+      if (!route) {
+        issues.push({ path: at, code: 'WORKFLOW_BRANCH_ROUTE_INVALID', message: 'branch 的每条出边都要带 route' })
         continue
       }
-      if (edge.route.default === true) defaults++
-      if (edge.route.priority !== undefined) {
-        if (priorities.has(edge.route.priority)) {
-          issues.push({ path: nodePath(doc, node.node_id), code: 'WORKFLOW_BRANCH_PRIORITY_DUPLICATE', message: '同一条 branch 的 priority 不许重复' })
-        }
-        priorities.add(edge.route.priority)
+      if (hasPriority && isDefault) {
+        issues.push({ path: at, code: 'WORKFLOW_BRANCH_ROUTE_INVALID', message: 'route 只能二选一：priority 或 default=true' })
+        continue
       }
-    }
-    if (defaults > 1) {
-      issues.push({ path: nodePath(doc, node.node_id), code: 'WORKFLOW_BRANCH_DEFAULT_DUPLICATE', message: '同一条 branch 只能有一个默认分支' })
+      if (!hasPriority && !isDefault) {
+        issues.push({ path: at, code: 'WORKFLOW_BRANCH_ROUTE_INVALID', message: 'route 必须给 priority(0–999) 或 default=true' })
+        continue
+      }
+      if (hasPriority) {
+        const priority = route!.priority!
+        if (priority < 0 || priority > 999) {
+          issues.push({ path: at, code: 'WORKFLOW_BRANCH_ROUTE_INVALID', message: 'priority 必须在 0–999' })
+          continue
+        }
+        if (priorities.has(priority)) {
+          issues.push({ path: at, code: 'WORKFLOW_BRANCH_PRIORITY_DUPLICATE', message: '同一条 branch 的 priority 不许重复' })
+        }
+        priorities.add(priority)
+        continue
+      }
+      defaults++
+      if (defaults > 1) {
+        issues.push({ path: at, code: 'WORKFLOW_BRANCH_DEFAULT_DUPLICATE', message: '同一条 branch 只能有一个默认分支' })
+      }
     }
   }
   return issues
@@ -343,6 +373,11 @@ const subworkflowIssues = (doc: WorkflowDoc, ctx: PublishContext): ValidationIss
   return issues
 }
 
+/** 命令层统一用它封顶：保存错误、保存提示、发布错误都走同一个 100 条规则（审计 P2-4） */
+export function toReport(issues: ValidationIssue[]): ValidationReport {
+  return report(issues)
+}
+
 /** 发布层：全部图语义问题一次列全，不阻断保存 */
 export function validatePublishLayer(doc: WorkflowDoc, ctx: PublishContext): ValidationIssue[] {
   const issues: ValidationIssue[] = []
@@ -359,6 +394,7 @@ export function validatePublishLayer(doc: WorkflowDoc, ctx: PublishContext): Val
     }
   }
   for (const node of doc.nodes) {
+    if (BUILTIN_GRAPH_TYPES.has(node.type)) continue
     if (!ctx.registeredNodeTypes.has(node.type)) {
       issues.push({ path: nodePath(doc, node.node_id), code: 'NODE_NOT_SUPPORTED', message: '节点类型未注册：' + node.type })
     }
