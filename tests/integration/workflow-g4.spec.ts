@@ -312,3 +312,57 @@ describe('G4：真并发发布（worker_threads + 屏障）', () => {
     }
   })
 })
+
+describe('G4：task_local 生命周期闭环（方向 A：预分配 task ID）', () => {
+  it('预留 task → 建/发 task_local → 发父流程 → 绑定预留 task 起 run', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { openServiceOrchestra } = await import('../../src/index.ts')
+    const { withTx } = await import('../../src/infra/sqlite/driver.ts')
+    const { assertWorkflowUsable } = await import('../../src/service/commands/workflows.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-life-'))
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-life', phase: 'S4' })
+    try {
+      const commands = service.orchestra.commands
+      const id = (n: number) => '5e1f2a3b-0000-7aaa-8bbb-000000000' + String(300 + n).slice(-3)
+      const reserved = commands.reserveTask!({ title: '专属任务', actor: 'human:me', now: NOW, operationId: id(1) }) as { task_id: string }
+      expect(reserved.task_id).toBeTruthy()
+      commands.createWorkflow!({
+        workflowId: 'wf_child', name: '任务专属', scope: 'task_local', ownerTaskId: reserved.task_id,
+        definition: { name: '任务专属', nodes: [node('t', 'trigger'), node('a')], edges: [{ from: 't', to: 'a' }] },
+        actor: 'human:me', now: NOW, operationId: id(2),
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_child', revision: 1, baseVersion: 0, note: '发布子流程', actor: 'human:me', now: NOW, operationId: id(3),
+      } as never)
+      commands.createWorkflow!({
+        workflowId: 'wf_parent', name: '父流程',
+        definition: {
+          name: '父流程',
+          nodes: [node('t', 'trigger'), { ...node('s', 'subworkflow'), config: { workflow_id: 'wf_child', pinned_version: 1 } }],
+          edges: [{ from: 't', to: 's' }],
+        },
+        actor: 'human:me', now: NOW, operationId: id(4),
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_parent', revision: 1, baseVersion: 0, note: '发布父流程', actor: 'human:me', now: NOW, operationId: id(5),
+      } as never)
+      const run = commands.startRun!({
+        taskTitle: '跑起来', workflowId: 'wf_parent', workflowVersion: '1', taskId: reserved.task_id,
+        operationId: id(6), now: NOW,
+      }) as { run_id: string; task_id: string }
+      expect(run.task_id).toBe(reserved.task_id)
+      withTx(service.orchestra.db, (tx) => {
+        expect(() => assertWorkflowUsable(tx, 'wf_child', reserved.task_id)).not.toThrow()
+        expect(() => assertWorkflowUsable(tx, 'wf_child', 'task_other')).toThrowError(/只允许所属任务/)
+      })
+      expect(() => commands.createRun!({
+        taskTitle: 'x', workflowId: 'wf_child', workflowVersion: '1', now: NOW,
+      } as never)).toThrowError(/只能作为子流程/)
+    } finally {
+      await service.release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
