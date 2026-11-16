@@ -165,7 +165,9 @@ export function refreshCheckpointsInTx(tx: Tx, clock: ClockProvider): void {
     for (const row of rows) {
       if (row.anchor == null) continue
       const remainingNs = Math.max(0, row.anchor - mono)
-      tx.run(`UPDATE node_runs SET ${column} = ? WHERE node_run_id = ? AND ${column} IS NOT NULL`, [remainingNs, row.node_run_id])
+      // 不要求检查点已经非空：老行/手工写入的行第一次扫描也该补上检查点，
+      // 只按「有锚点」判定（P1-2026-11-16-01：NULL 检查点曾被这条条件永久跳过）
+      tx.run(`UPDATE node_runs SET ${column} = ? WHERE node_run_id = ?`, [remainingNs, row.node_run_id])
     }
   }
   set('action_remaining_ns', 'deadline_monotonic_ns', 'deadline_at', "AND deadline_boot_id = '" + clock.bootId + "'")

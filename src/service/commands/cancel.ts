@@ -188,6 +188,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
         deadline_at: deadline,
         deadline_boot_id: extended.bootId,
         deadline_monotonic_ns: extended.monotonicNs,
+        // 与锚点同笔写检查点：否则重启后算不出剩余，节点会被标成不确定（P1-2026-11-16-01）
+        action_remaining_ns: Math.round((params.extendDeadlineMs ?? 0) * 1e6),
       },
     })
     appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline })

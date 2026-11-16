@@ -20,8 +20,9 @@
   - 断链的**执行侧旁路**：`acquireLease` 先验链，链断直接 `FORBIDDEN`（`reason: chain_broken`），不再往坏账本追加事件；
   - 迁移 **026**：旧毫秒写进 `startup_unknown_remaining_ns` 的一次性修复，`recovery_unit_fixes` 逐行记账（修复/无法判断分开）；
   - 派发结果补重试指令 `retryDirective()`：`never` / `after_reread` / `after_status_query`，宿主不必自己解释 `settlement`；
-  - 恢复不确定**可查可确认**：`GET /v1/recovery/uncertain`、`POST /v1/recovery/resolve`（按 M-50 落 `indeterminate_side_effect`，清标记与锚点）。
-- 全量：**68 files / 932 passed | 1 skipped**；build ESM `lib/index.js` 299.55 kB / gzip 72.31 kB、d.ts 24.43 kB。
+  - 恢复不确定**可查可确认**：`GET /v1/recovery/uncertain`、`POST /v1/recovery/resolve`（按 M-50 落 `indeterminate_side_effect`，清标记与锚点）；
+  - 台账 **P1-2026-11-16-01** 修复：`confirm-start.ts` / `cancel.ts`（无围栏分支）写 deadline 锚点时**同笔写** `action_remaining_ns`；`refreshCheckpointsInTx` 不再要求检查点已非空（否则 NULL 永远补不上）；`rearmDeadline` 可带剩余量，不带就清空而不是沿用旧预算。
+- 全量：**69 files / 935 passed | 1 skipped**；build ESM `lib/index.js` 299.67 kB / gzip 72.32 kB、d.ts 24.43 kB。
 - **三门当前失效**（预期）：报告绑定的候选是 `93e1d88`，之后的候选文件已改；`pnpm gate` 报「候选提交之后候选文件又被改过」。证据复现本身通过（**28/28**）。下一轮按 S1 r68 / S2 r68 / S3 r19 复核本批候选后，依 G1→G2→G3 重签（`artifact_hash` 全部重算）。
 - 推送走 `git -c http.proxy=http://127.0.0.1:7078 push origin main`。
 
@@ -34,6 +35,7 @@
 | 迁移 026：旧 ms → ns，只修可识别行 | 评审 P2-2 |
 | `retryDirective()` 重试指令 | 评审 P2-3 |
 | `/v1/recovery/uncertain`、`/v1/recovery/resolve` | 评审 P2-4 |
+| 锚点与恢复检查点同笔写 + 刷新不再要求既有检查点 | 台账 P1-2026-11-16-01 |
 | 跨 boot 改为检查点驱动（无 30s 确认窗口、墙钟不参与判定） | 评审 P1-2（已在 `6bb4132`/`93e1d88` 完成） |
 
 ### 已知 P2（下一批）
@@ -46,7 +48,7 @@
 ### 接手先做什么
 
 1. `git log --oneline -5` 确认 HEAD 是 `2bf9c07`（`origin/main` 视推送情况），`git status` 干净。
-2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`，确认 68 files / 932 passed | 1 skipped、299.55 kB / 72.31 kB、28/28。
+2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`，确认 69 files / 935 passed | 1 skipped、299.67 kB / 72.32 kB、28/28。
 3. 三门重签前先让 S1/S2/S3 按 r68/r68/r19 复核本批候选；在 r68 报告落盘前 `pnpm gate` 必然失败，不是代码问题。
 4. 任何候选文件改动（含 `codebasemap.md`）都会作废三份报告与三门签名；P2 攒批后统一审计再重签。
 

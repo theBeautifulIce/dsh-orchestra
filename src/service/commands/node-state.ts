@@ -164,11 +164,15 @@ export function rearmDeadline(tx: Tx, secret: string, params: {
   rearmGeneration: number
   now: string
   reason: string
+  /** 新预算的剩余毫秒；不给就把检查点清空（重启后按不确定处理，不拿旧预算冒充新预算） */
+  remainingMs?: number
 }): void {
   runCas(
     tx,
-    'UPDATE node_runs SET deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, rearm_generation = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ?',
-    [params.deadlineAt, params.deadlineBootId, params.deadlineMonotonicNs, params.rearmGeneration, params.now, params.nodeRunId, params.attempt, params.revision],
+    'UPDATE node_runs SET deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, rearm_generation = ?, action_remaining_ns = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ?',
+    [params.deadlineAt, params.deadlineBootId, params.deadlineMonotonicNs, params.rearmGeneration,
+      params.remainingMs == null ? null : Math.round(params.remainingMs * 1e6),
+      params.now, params.nodeRunId, params.attempt, params.revision],
     { rows: 1, what: 'rearmDeadline' },
   )
   appendNodeRunEvent(tx, secret, params.nodeRunId, 'deadline_rearmed', {

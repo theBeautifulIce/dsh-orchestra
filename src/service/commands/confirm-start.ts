@@ -64,6 +64,9 @@ export function confirmStartup(
               deadline_at: new Date(deadline.wallClockMs).toISOString(),
               deadline_boot_id: deadline.bootId,
               deadline_monotonic_ns: deadline.monotonicNs,
+              // 恢复检查点必须与锚点同笔落库：只写锚点的话重启时算不出可信剩余，
+              // 节点会被标成 timer_uncertain 停在 stopping（P1-2026-11-16-01）
+              action_remaining_ns: Math.round(actionDeadlineMs * 1e6),
             }
           : {}),
       },
