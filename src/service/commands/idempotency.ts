@@ -20,6 +20,7 @@ type InboxRow = {
   request_hash: string
   status: string
   receipt_json: string | null
+  receipt_expired_at: string | null
 }
 
 /** 同一份请求算同一个哈希：canonical_json 是回执口径的唯一序列化方式 */
@@ -31,7 +32,7 @@ export function runIdempotentCommand<T>(
   apply: () => T,
 ): { result: T; replayed: boolean } {
   const existing = tx.get<InboxRow>(
-    'SELECT operation_id, kind, request_hash, status, receipt_json FROM inbox WHERE operation_id = ?',
+    'SELECT operation_id, kind, request_hash, status, receipt_json, receipt_expired_at FROM inbox WHERE operation_id = ?',
     [p.operationId],
   )
   if (existing) {
@@ -42,6 +43,13 @@ export function runIdempotentCommand<T>(
       })
     }
     if (existing.status === 'applied' && existing.receipt_json) {
+      // 回执窗口（规格 3.7：7 天）过期后不再回放，按 OPERATION_EXPIRED 让调用方重新决策
+      if (existing.receipt_expired_at && new Date(existing.receipt_expired_at).getTime() <= new Date(p.now).getTime()) {
+        throw new OrchError('OPERATION_EXPIRED', '回执已过期，请用新的 operation_id 重新发起', {
+          operation_id: p.operationId,
+          receipt_expired_at: existing.receipt_expired_at,
+        })
+      }
       // 幂等重放：把上次的回执原样还回去，不重复产生业务副作用
       const receipt = JSON.parse(existing.receipt_json) as { result: T }
       return { result: receipt.result, replayed: true }

@@ -155,7 +155,7 @@ export function createWorkflow(tx: Tx, p: CreateWorkflowParams): { workflow_id: 
   return { workflow_id: p.workflowId, revision: 1, validation: toReport(saved.hints.errors) }
 }
 
-export type OpenDraftParams = { workflowId: string; actor: string; now: string }
+export type OpenDraftParams = { workflowId: string; baseVersion: number; actor: string; now: string }
 export type OpenDraftResult = {
   workflow_id: string
   revision: number
@@ -174,6 +174,14 @@ export function openDraft(tx: Tx, p: OpenDraftParams): OpenDraftResult {
     throw new OrchError('WORKFLOW_DRAFT_EXISTS', '已经有一张未发布的草稿', {
       workflow_id: p.workflowId,
       revision: draft.revision,
+    })
+  }
+  const base = workflow.current_version === null ? 0 : Number(workflow.current_version)
+  if (p.baseVersion !== base) {
+    throw new OrchError('WORKFLOW_VERSION_CONFLICT', 'base_version 与当前版本不一致', {
+      workflow_id: p.workflowId,
+      expected_base: p.baseVersion,
+      actual_base: base,
     })
   }
   if (!workflow.current_version) {
@@ -344,7 +352,54 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): Pub
   return { workflow_id: p.workflowId, version, definition_hash: definitionHash, based_on_version: basedOn }
 }
 
-/** 对外入口：发布带幂等与回执（规格 6.2 步骤 10），业务与回执同笔 */
+/** 四个写命令统一入口：业务与回执同笔，四个都强制 operation_id（规格 3.7） */
+export function createWorkflowCommand(
+  tx: Tx,
+  p: CreateWorkflowParams & { operationId: string },
+): ReturnType<typeof createWorkflow> & { replayed: boolean } {
+  const requestHash = requestHashOf('workflow.create', {
+    workflow_id: p.workflowId,
+    name: p.name,
+    definition: p.definition,
+    scope: p.scope ?? null,
+    owner_task_id: p.ownerTaskId ?? null,
+  })
+  const { result, replayed } = runIdempotentCommand(tx, {
+    kind: 'workflow.create', operationId: p.operationId, requestHash, now: p.now,
+  }, () => createWorkflow(tx, p))
+  return { ...result, replayed }
+}
+
+export function openDraftCommand(
+  tx: Tx,
+  p: OpenDraftParams & { operationId: string },
+): OpenDraftResult & { replayed: boolean } {
+  const requestHash = requestHashOf('workflow.open_draft', {
+    workflow_id: p.workflowId,
+    base_version: p.baseVersion,
+  })
+  const { result, replayed } = runIdempotentCommand(tx, {
+    kind: 'workflow.open_draft', operationId: p.operationId, requestHash, now: p.now,
+  }, () => openDraft(tx, p))
+  return { ...result, replayed }
+}
+
+export function updateDraftCommand(
+  tx: Tx,
+  p: UpdateDraftParams & { operationId: string },
+): ReturnType<typeof updateDraft> & { replayed: boolean } {
+  const requestHash = requestHashOf('workflow.update', {
+    workflow_id: p.workflowId,
+    revision: p.revision,
+    definition: p.definition,
+  })
+  const { result, replayed } = runIdempotentCommand(tx, {
+    kind: 'workflow.update', operationId: p.operationId, requestHash, now: p.now,
+  }, () => updateDraft(tx, p))
+  return { ...result, replayed }
+}
+
+/** 发布入口：业务与回执同笔（规格 6.2 步骤 10） */
 export function publishWorkflowCommand(
   tx: Tx,
   p: PublishParams & { operationId: string },
@@ -363,6 +418,16 @@ export function publishWorkflowCommand(
     now: p.now,
   }, () => publishDraft(tx, p, ctx))
   return { ...result, replayed }
+}
+
+/** 发布上下文：能力表取运行面节点类型，pin 校验与子流程递归都读已发布版本 */
+export function publishContextFor(tx: Tx, runtimeNodeTypes: ReadonlySet<string>): PublishContext {
+  return {
+    registeredNodeTypes: runtimeNodeTypes,
+    publishedVersions: (workflowId, version) =>
+      tx.get<{ n: number }>('SELECT 1 AS n FROM workflow_versions WHERE workflow_id = ? AND version = ?', [workflowId, String(version)]) !== undefined,
+    subworkflowOf: (workflowId, version) => readVersionDoc(tx, workflowId, String(version)),
+  }
 }
 
 export type WorkflowSummary = {

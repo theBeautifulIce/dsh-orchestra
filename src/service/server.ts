@@ -9,6 +9,7 @@ import {
   cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
   ledgerEventSchema, leaseSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
+  workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
@@ -41,6 +42,8 @@ export type ServerDeps = {
   commands?: NodeCommands
 }
 
+import type { CreateWorkflowParams, OpenDraftParams, PublishParams, UpdateDraftParams } from './commands/workflows.ts'
+
 export type NodeCommands = {
   acquireLease: (body: { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }) => {
     lease_id: string; expires_at: string; action_generation: number
@@ -57,6 +60,13 @@ export type NodeCommands = {
     graceMs: number; extendDeadlineMs?: number
   }) => CancelOutcome
   loadWorkflow: (body: unknown) => LoadWorkflowResult
+  // S4 工作流命令：四个写命令都强制 operation_id（规格 3.7），actor 由认证主体派生
+  createWorkflow: (body: CreateWorkflowParams & { operationId: string }) => unknown
+  openWorkflowDraft: (body: OpenDraftParams & { operationId: string }) => unknown
+  updateWorkflowDraft: (body: UpdateDraftParams & { operationId: string }) => unknown
+  publishWorkflow: (body: PublishParams & { operationId: string }) => unknown
+  getWorkflow: (body: { workflowId: string }) => unknown
+  listWorkflows: (body: { ownerTaskId?: string | null }) => unknown
   // 建 run 与节点：定义加载后由服务层建行，不许靠手写 INSERT 起节点（审计 F-01）
   createRun: (body: { taskTitle: string; workflowId?: string; workflowVersion: string; nodeIds?: string[]; now: string }) => CreateRunResult
   // 起运行：固定版本、operation_id 幂等、自治档位与升级规则；HTTP 只搬字段
@@ -234,6 +244,56 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const body = parseBody(workflowLoadSchema, await readJsonBody(req), '加载工作流')
       const out = await queue.run(() => deps.commands!.loadWorkflow(body))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    // —— S4 工作流命令：写命令一律要求 operation_id，actor 只取认证主体 ——
+    if (req.method === 'POST' && url.pathname === '/v1/workflows' && deps.commands) {
+      const body = parseBody(workflowCreateCommandSchema, await readJsonBody(req), '创建工作流')
+      const out = await queue.run(() => deps.commands!.createWorkflow({
+        workflowId: body.workflow_id, name: body.name, definition: body.definition,
+        scope: body.scope, ownerTaskId: body.owner_task_id ?? null,
+        actor, now: body.now, operationId: body.operation_id,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/workflows/open-draft' && deps.commands) {
+      const body = parseBody(workflowOpenDraftCommandSchema, await readJsonBody(req), '打开草稿')
+      const out = await queue.run(() => deps.commands!.openWorkflowDraft({
+        workflowId: body.workflow_id, baseVersion: body.base_version,
+        actor, now: body.now, operationId: body.operation_id,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/workflows/update' && deps.commands) {
+      const body = parseBody(workflowUpdateCommandSchema, await readJsonBody(req), '更新草稿')
+      const out = await queue.run(() => deps.commands!.updateWorkflowDraft({
+        workflowId: body.workflow_id, revision: body.revision, definition: body.definition,
+        actor, now: body.now, operationId: body.operation_id,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/workflows/publish' && deps.commands) {
+      const body = parseBody(workflowPublishCommandSchema, await readJsonBody(req), '发布工作流')
+      const out = await queue.run(() => deps.commands!.publishWorkflow({
+        workflowId: body.workflow_id, revision: body.revision, baseVersion: body.base_version,
+        note: body.publish_note ?? null, actor, now: body.now, operationId: body.operation_id,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/workflows/get' && deps.commands) {
+      const workflowId = url.searchParams.get('workflow_id') ?? ''
+      const out = deps.commands.getWorkflow({ workflowId })
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/workflows' && deps.commands) {
+      const owner = url.searchParams.get('owner_task_id')
+      const out = deps.commands.listWorkflows({ ownerTaskId: owner === null ? undefined : owner })
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: out }))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs/start' && deps.commands) {

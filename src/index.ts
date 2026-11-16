@@ -8,6 +8,8 @@ import { acquireDbLock } from './infra/lock.ts'
 import { nullLogger, type Logger } from './infra/logger.ts'
 import { WorkflowCatalog } from './service/workflows.ts'
 import { createRun } from './service/runs.ts'
+import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
+import { NODE_CAPABILITY } from './core/workflow-def.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { resolveDecision } from './service/commands/decisions.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
@@ -72,6 +74,8 @@ export type Orchestra = {
 
 // 只有走完取锁与 epoch 自增的启动链才许可建装配：单写者是启动前提，不是可选装饰（第五轮审计 P1-3）
 // run 终态集合：取消接口只在这些状态下回报 terminalStatus（S1 第 59 轮 P2-4）
+
+const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(Object.keys(NODE_CAPABILITY))
 const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
 
 const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
@@ -131,6 +135,24 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       return out
     },
     loadWorkflow: (body) => catalog.load(body as Parameters<WorkflowCatalog['load']>[0]),
+    // S4：四个写命令都收 operation_id，业务与回执同笔；actor 由路由层的认证主体传入
+    createWorkflow: (b) => inTx(db, (tx) => createWorkflowCommand(tx, {
+      workflowId: b.workflowId, name: b.name, definition: b.definition, scope: b.scope,
+      ownerTaskId: b.ownerTaskId, actor: b.actor, now: b.now, operationId: b.operationId,
+    })),
+    openWorkflowDraft: (b) => inTx(db, (tx) => openDraftCommand(tx, {
+      workflowId: b.workflowId, baseVersion: b.baseVersion, actor: b.actor, now: b.now, operationId: b.operationId,
+    })),
+    updateWorkflowDraft: (b) => inTx(db, (tx) => updateDraftCommand(tx, {
+      workflowId: b.workflowId, revision: b.revision, definition: b.definition,
+      actor: b.actor, now: b.now, operationId: b.operationId,
+    })),
+    publishWorkflow: (b) => inTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: b.workflowId, revision: b.revision, baseVersion: b.baseVersion, note: b.note,
+      actor: b.actor, now: b.now, operationId: b.operationId,
+    }, publishContextFor(tx, RUNTIME_NODE_TYPES))),
+    getWorkflow: (b) => inTx(db, (tx) => getWorkflowSummary(tx, b.workflowId)),
+    listWorkflows: (b) => inTx(db, (tx) => listWorkflowSummaries(tx, { ownerTaskId: b.ownerTaskId })),
     createRun: (b) => createRun(db, catalog, {
       taskTitle: b.taskTitle,
       workflowId: b.workflowId,

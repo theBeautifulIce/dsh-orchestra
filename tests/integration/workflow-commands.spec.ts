@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { freshLedger } from '../fixtures/ledger.ts'
 import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import {
-  createWorkflow, getWorkflow, listWorkflows, openDraft, publishDraft, publishWorkflowCommand, updateDraft,
+  createWorkflow, createWorkflowCommand, getWorkflow, listWorkflows, openDraft, openDraftCommand,
+  publishDraft, publishWorkflowCommand, updateDraft, updateDraftCommand,
 } from '../../src/service/commands/workflows.ts'
 import { OrchError } from '../../src/core/errors.ts'
 
@@ -122,7 +123,7 @@ describe('workflow.publish 事务', () => {
     publish(db)
     expect(codeOf(() => publish(db))).toBe('WORKFLOW_DRAFT_NOT_OPEN')
 
-    const reopened = withTx(db, (tx) => openDraft(tx, { workflowId: 'wf1', actor: 'human:me', now: NOW }))
+    const reopened = withTx(db, (tx) => openDraft(tx, { workflowId: 'wf1', baseVersion: 1, actor: 'human:me', now: NOW }))
     expect(reopened.revision).toBe(2)
     expect(reopened.based_on_version).toBe('1')
     const second = publish(db, { revision: 2, baseVersion: 1 })
@@ -137,7 +138,7 @@ describe('workflow.publish 事务', () => {
     const { db } = freshLedger()
     create(db)
     publish(db)
-    const reopened = withTx(db, (tx) => openDraft(tx, { workflowId: 'wf1', actor: 'human:me', now: NOW }))
+    const reopened = withTx(db, (tx) => openDraft(tx, { workflowId: 'wf1', baseVersion: 1, actor: 'human:me', now: NOW }))
     expect(codeOf(() => publish(db, { revision: reopened.revision, baseVersion: 0 }))).toBe('WORKFLOW_VERSION_CONFLICT')
     const count = db.raw.prepare("SELECT COUNT(*) AS n FROM workflow_versions WHERE workflow_id = 'wf1'").get() as { n: number }
     expect(Number(count.n)).toBe(1)
@@ -180,9 +181,9 @@ describe('workflow.publish 事务', () => {
 
   it('open_draft：不存在 / 从未发布 / 已有未消费草稿', () => {
     const { db } = freshLedger()
-    expect(codeOf(() => withTx(db, (tx) => openDraft(tx, { workflowId: 'nope', actor: 'a', now: NOW })))).toBe('WORKFLOW_NOT_FOUND')
+    expect(codeOf(() => withTx(db, (tx) => openDraft(tx, { workflowId: 'nope', baseVersion: 0, actor: 'a', now: NOW })))).toBe('WORKFLOW_NOT_FOUND')
     create(db)
-    expect(codeOf(() => withTx(db, (tx) => openDraft(tx, { workflowId: 'wf1', actor: 'a', now: NOW })))).toBe('WORKFLOW_DRAFT_EXISTS')
+    expect(codeOf(() => withTx(db, (tx) => openDraft(tx, { workflowId: 'wf1', baseVersion: 0, actor: 'a', now: NOW })))).toBe('WORKFLOW_DRAFT_EXISTS')
     db.raw.close()
   })
 
@@ -250,6 +251,85 @@ describe('发布幂等与回执（Task 9）', () => {
     }, ctx)))).toBe('WORKFLOW_VALIDATION_FAILED')
     const row = db.raw.prepare("SELECT COUNT(*) AS n FROM inbox WHERE operation_id = 'op-3'").get() as { n: number }
     expect(Number(row.n)).toBe(0)
+    db.raw.close()
+  })
+})
+
+describe('四写命令统一幂等（规格 3.7）', () => {
+  const createCmd = (db: Db, over: Record<string, unknown> = {}) => withTx(db, (tx) => createWorkflowCommand(tx, {
+    workflowId: 'wf1', name: '发布流程', definition: goodDoc(), operationId: 'op-c1', actor: 'human:me', now: NOW, ...over,
+  } as Parameters<typeof createWorkflowCommand>[1]))
+
+  it('create 重放：同一个 operation_id 不重复建工作流', () => {
+    const { db } = freshLedger()
+    expect(createCmd(db).replayed).toBe(false)
+    expect(createCmd(db).replayed).toBe(true)
+    const rows = db.raw.prepare('SELECT COUNT(*) AS n FROM workflows').get() as { n: number }
+    expect(Number(rows.n)).toBe(1)
+    db.raw.close()
+  })
+
+  it('失败后用同一个 operation_id 重试能成功（inbox 行随事务回滚）', () => {
+    const { db } = freshLedger()
+    const bad = { name: '发布流程', nodes: [node('t', 'trigger')], edges: [] }
+    expect(codeOf(() => createCmd(db, { operationId: 'op-retry', definition: { ...bad, name: '别的名字' } })))
+      .toBe('WORKFLOW_VALIDATION_FAILED')
+    const ok = createCmd(db, { operationId: 'op-retry', definition: bad })
+    expect(ok.replayed).toBe(false)
+    expect(ok.revision).toBe(1)
+    db.raw.close()
+  })
+
+  it('open_draft 与 update 也回放各自回执', () => {
+    const { db } = freshLedger()
+    createCmd(db)
+    withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p1', actor: 'human:me', now: NOW,
+    }, ctx))
+    const opened = withTx(db, (tx) => openDraftCommand(tx, {
+      workflowId: 'wf1', baseVersion: 1, operationId: 'op-o1', actor: 'human:me', now: NOW,
+    }))
+    expect(opened.replayed).toBe(false)
+    const again = withTx(db, (tx) => openDraftCommand(tx, {
+      workflowId: 'wf1', baseVersion: 1, operationId: 'op-o1', actor: 'human:me', now: NOW,
+    }))
+    expect(again.replayed).toBe(true)
+    expect(again.revision).toBe(opened.revision)
+
+    const updated = withTx(db, (tx) => updateDraftCommand(tx, {
+      workflowId: 'wf1', revision: opened.revision, definition: goodDoc(), operationId: 'op-u1', actor: 'human:me', now: NOW,
+    }))
+    expect(updated.replayed).toBe(false)
+    const updatedReplay = withTx(db, (tx) => updateDraftCommand(tx, {
+      workflowId: 'wf1', revision: opened.revision, definition: goodDoc(), operationId: 'op-u1', actor: 'human:me', now: NOW,
+    }))
+    expect(updatedReplay.replayed).toBe(true)
+    expect(updatedReplay.revision).toBe(updated.revision)
+    db.raw.close()
+  })
+
+  it('open_draft 的 base_version 不符：WORKFLOW_VERSION_CONFLICT', () => {
+    const { db } = freshLedger()
+    createCmd(db)
+    withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-p2', actor: 'human:me', now: NOW,
+    }, ctx))
+    expect(codeOf(() => withTx(db, (tx) => openDraft(tx, {
+      workflowId: 'wf1', baseVersion: 0, actor: 'human:me', now: NOW,
+    })))).toBe('WORKFLOW_VERSION_CONFLICT')
+    db.raw.close()
+  })
+
+  it('回执过期：OPERATION_EXPIRED，不再回放', () => {
+    const { db } = freshLedger()
+    createCmd(db)
+    withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', actor: 'human:me', now: NOW,
+    }, ctx))
+    withTx(db, (tx) => tx.run("UPDATE inbox SET receipt_expired_at = ? WHERE operation_id = 'op-old'", ['2026-11-16T15:00:00.000Z']))
+    expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-old', actor: 'human:me', now: NOW,
+    }, ctx)))).toBe('OPERATION_EXPIRED')
     db.raw.close()
   })
 })
