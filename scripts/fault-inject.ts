@@ -22,6 +22,8 @@ import { MonotonicClock, deadlineFromRow, ScriptedClock } from '../src/core/cloc
 // 注入脚本也要单调时钟：取消的宽限/延期必须带锚点，否则扫描端一律判不确定
 const injectClock = (nowIso: string) => new ScriptedClock('boot_inject', { wallClockMs: Date.parse(nowIso), monotonicNs: 0 })
 import { rearmDeadline, transitionNode } from '../src/service/commands/node-state.ts'
+import { createWorkflow, publishWorkflowCommand, publishContextFor, updateDraft } from '../src/service/commands/workflows.ts'
+import { NODE_CAPABILITY } from '../src/core/workflow-def.ts'
 import { sweep } from '../src/service/sweep.ts'
 import { openServiceOrchestra } from '../src/index.ts'
 import { acquireDbLock } from '../src/infra/lock.ts'
@@ -36,7 +38,7 @@ import { runNode } from '../src/executor/run-node.ts'
 import type { HostAgentFactory } from '../src/executor/session.ts'
 import type { Db } from '../src/infra/sqlite/driver.ts'
 
-export type InjectionCase = 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-06' | 'G-07' | 'G-08' | 'G-09' | 'G-12' | 'G-14' | 'G-15' | 'G-16'
+export type InjectionCase = 'G-10' | 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-06' | 'G-07' | 'G-08' | 'G-09' | 'G-12' | 'G-14' | 'G-15' | 'G-16'
   | 'ev-g2-01' | 'ev-g2-02' | 'ev-g2-03' | 'ev-g2-04' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
   | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11' | 'ev-g2-12' | 'ev-g2-13' | 'ev-g2-14' | 'ev-g2-15'
 
@@ -316,6 +318,56 @@ async function caseG09(): Promise<InjectionResult> {
     before,
     after: dumpEvents(file),
     reconcile: '重放拿到 seq=' + appended.join(',') + '；连续无断号：' + String(contiguous),
+  }
+}
+
+// G-10：在途 run 时发布新版本——在途 run 仍按旧版本解释，新 run 才用新版本（规格 1070 行）
+async function caseG10(): Promise<InjectionResult> {
+  const { file, db } = freshLedger()
+  seed(db)
+  const RUNTIME = new Set(Object.keys(NODE_CAPABILITY))
+  const ctxFor = (tx: Parameters<typeof publishContextFor>[0]) => publishContextFor(tx, RUNTIME)
+  const NOW = '2026-11-16T19:00:00.000Z'
+  const doc = (extra: unknown[] = []) => ({
+    name: '发布流程',
+    nodes: [{ node_id: 't', type: 'trigger', title: '入口', position: { x: 0, y: 0 }, config: {} },
+      { node_id: 'a', type: 'agent', title: '执行', position: { x: 1, y: 0 }, config: {} }, ...extra],
+    edges: [{ from: 't', to: 'a' }, ...(extra.length > 0 ? [{ from: 'a', to: 'b' }] : [])],
+  })
+  inTx(db, (tx) => createWorkflow(tx, {
+    workflowId: 'wf1', name: '发布流程', definition: doc(), actor: 'human:g10', now: NOW,
+  }))
+  const v1 = inTx(db, (tx) => publishWorkflowCommand(tx, {
+    workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'g10-v1', actor: 'human:g10', now: NOW,
+  }, ctxFor(tx)))
+  inTx(db, (tx) => tx.run(
+    "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) "
+    + "VALUES ('r_inflight', 't1', 'wf1', ?, ?, 'running', 0, ?, ?)", [v1.version, v1.definition_hash, NOW, NOW]))
+  const before = dumpEvents(file)
+  // 草稿改成加一个节点，再发 v2：等价于"回滚式"改动，旧 run 不许跟着变
+  const reopened = inTx(db, (tx) => {
+    tx.run("UPDATE workflow_drafts SET revision = revision + 1, published_version = NULL WHERE workflow_id = 'wf1'")
+    return tx.get<{ revision: number }>('SELECT revision FROM workflow_drafts WHERE workflow_id = ?', ['wf1'])!
+  })
+  inTx(db, (tx) => updateDraft(tx, {
+    workflowId: 'wf1', revision: reopened.revision,
+    definition: doc([{ node_id: 'b', type: 'agent', title: '追加', position: { x: 2, y: 0 }, config: {} }]),
+    actor: 'human:g10', now: NOW,
+  }))
+  const v2 = inTx(db, (tx) => publishWorkflowCommand(tx, {
+    workflowId: 'wf1', revision: reopened.revision + 1, baseVersion: 1, operationId: 'g10-v2', actor: 'human:g10', now: NOW,
+  }, ctxFor(tx)))
+  inTx(db, (tx) => tx.run(
+    "INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, created_at, updated_at) "
+    + "VALUES ('r_new', 't1', 'wf1', ?, ?, 'running', 0, ?, ?)", [v2.version, v2.definition_hash, NOW, NOW]))
+  const inFlight = db.raw.prepare("SELECT workflow_version, workflow_definition_hash FROM runs WHERE run_id = 'r_inflight'").get() as { workflow_version: string; workflow_definition_hash: string }
+  const fresh = db.raw.prepare("SELECT workflow_version, workflow_definition_hash FROM runs WHERE run_id = 'r_new'").get() as { workflow_version: string; workflow_definition_hash: string }
+  return {
+    case: 'G-10',
+    params: { db: file, scenario: '在途 run 时发布新版本', inFlightRun: 'r_inflight', newRun: 'r_new' },
+    before,
+    after: dumpEvents(file),
+    reconcile: '在途 run 仍记 v' + String(inFlight.workflow_version) + '（hash ' + inFlight.workflow_definition_hash.slice(0, 12) + '），新 run 记 v' + String(fresh.workflow_version) + '（hash ' + fresh.workflow_definition_hash.slice(0, 12) + '）；版本表 [1,2]；发布不影响在途 run',
   }
 }
 
@@ -1489,6 +1541,7 @@ export async function runCase(name: InjectionCase): Promise<InjectionResult> {
     case 'G-08': return caseG08()
     case 'G-09': return caseG09()
     case 'G-12': return caseG12()
+    case 'G-10': return caseG10()
     case 'G-14': return caseG14()
     case 'G-15': return caseG15()
     case 'G-16': return caseG16()
