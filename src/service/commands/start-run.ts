@@ -22,6 +22,8 @@ export type StartRunParams = {
   escalations?: readonly EscalationRule[]
   operationId: string
   nodeIds?: string[]
+  // 预留任务号（方向 A）：绑定到 reserveTask 生成的可信 task_id
+  taskId?: string
   now: string
 }
 
@@ -94,6 +96,7 @@ export function startRun(db: Db, catalog: WorkflowCatalog, p: StartRunParams): S
       workflowId: p.workflowId,
       workflowVersion: p.workflowVersion,
       nodeIds: p.nodeIds,
+      taskId: p.taskId,
       autonomy,
       escalations,
       operationId: p.operationId,

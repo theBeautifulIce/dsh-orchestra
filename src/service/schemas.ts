@@ -191,6 +191,8 @@ export const createRunSchema = z.looseObject({
 
 // 派发：run 标识、节点规格表、租约三元组
 export const startRunSchema = z.looseObject({
+  // 预留任务号：绑定 reserveTask 的可信 task_id
+  task_id: z.string().min(1).max(128).optional(),
   taskTitle: z.string().min(1).max(LIMITS.titleMaxLength),
   workflowId: workflowIdentifier.optional(),
   workflowVersion: z.union([workflowVersionString, z.number().int().nonnegative()])
@@ -422,13 +424,18 @@ export const ledgerEventSchema = z.looseObject({}).superRefine((value, ctx) => {
 const operationId = z.string().regex(UUID_V7_RE, 'operation_id 必须是 UUIDv7')
 const workflowName = z.string().min(1).max(80)
 
+export const taskReserveSchema = z.object({
+  operation_id: operationId,
+  title: z.string().min(1).max(200),
+})
+
 export const workflowCreateCommandSchema = z.object({
   operation_id: operationId,
   workflow_id: identifier,
   name: workflowName,
   definition: z.unknown(),
+  // owner_task_id 不接受客户端自报：task_local 的归属只能来自预留任务的可信上下文（审计 P1-2）
   scope: z.enum(['reusable', 'task_local']).optional(),
-  owner_task_id: z.string().min(1).max(128).nullable().optional(),
 })
 
 export const workflowOpenDraftCommandSchema = z.object({

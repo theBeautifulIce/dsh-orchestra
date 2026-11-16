@@ -7,7 +7,7 @@ import { bumpEpoch, openServiceDb } from './infra/db/open.ts'
 import { acquireDbLock } from './infra/lock.ts'
 import { nullLogger, type Logger } from './infra/logger.ts'
 import { WorkflowCatalog } from './service/workflows.ts'
-import { createRun } from './service/runs.ts'
+import { createRun, reserveTask } from './service/runs.ts'
 import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
 import { requireCapability } from './core/config.ts'
 import { startRun } from './service/commands/start-run.ts'
@@ -159,6 +159,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       catalog.adopt(out.definition, out.definition_hash)
       return out
     },
+    reserveTask: (b) => reserveTask(db, { title: b.title, actor: b.actor, now: b.now, operationId: b.operationId }),
     getWorkflow: (b) => inTx(db, (tx) => getWorkflowSummary(tx, b.workflowId)),
     listWorkflows: (b) => inTx(db, (tx) => listWorkflowSummaries(tx, { ownerTaskId: b.ownerTaskId })),
     createRun: (b) => createRun(db, catalog, {
@@ -169,6 +170,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       now: b.now,
     }),
     startRun: (b) => startRun(db, catalog, {
+      taskId: b.taskId,
       taskTitle: b.taskTitle,
       workflowId: b.workflowId,
       workflowVersion: b.workflowVersion,

@@ -240,11 +240,11 @@ describe('G4：两个独立连接竞争同一张草稿', () => {
         definition: doc(),
       } as never)
       // 两个连接、同一张草稿（revision 1）各自发布
-      const publish = (db: { raw: never } | never, operationId: string) =>
-        withTx(db as never, (tx: never) => publishWorkflowCommand(tx as never, {
+      const publish = (db: Db, operationId: string) =>
+        withTx(db, (tx) => publishWorkflowCommand(tx, {
           workflowId: 'wf_race', revision: 1, baseVersion: 0, note: '发布说明', actor: 'human:me', now: NOW,
           operationId,
-        } as never, ctx))
+        }, ctx))
       const results = await Promise.allSettled([
         Promise.resolve().then(() => publish(service.orchestra.db, 'c1a2b3c4-1111-7aaa-8bbb-000000000202')),
         Promise.resolve().then(() => publish(second, 'c1a2b3c4-1111-7aaa-8bbb-000000000203')),
@@ -259,6 +259,66 @@ describe('G4：两个独立连接竞争同一张草稿', () => {
       expect(versions.map((v) => v.version)).toEqual(['1'])
     } finally {
       second.raw.close()
+      await service.release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('G4：task_local 生命周期闭环（方向 A：预分配 task ID）', () => {
+  it('预留 task → 建/发 task_local → 发父流程 → 绑定预留 task 起 run', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { openServiceOrchestra } = await import('../../src/index.ts')
+    const { withTx } = await import('../../src/infra/sqlite/driver.ts')
+    const { assertWorkflowUsable } = await import('../../src/service/commands/workflows.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-life-'))
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-life', phase: 'S4' })
+    try {
+      const commands = service.orchestra.commands
+      const id = (n: number) => '5e1f2a3b-0000-7aaa-8bbb-000000000' + String(300 + n).slice(-3)
+      // 1. 预留可信 task_id
+      const reserved = commands.reserveTask!({ title: '专属任务', actor: 'human:me', now: NOW, operationId: id(1) }) as { task_id: string }
+      expect(reserved.task_id).toBeTruthy()
+      // 2. task_local 子流程以它为 owner
+      commands.createWorkflow!({
+        workflowId: 'wf_child', name: '任务专属', scope: 'task_local', ownerTaskId: reserved.task_id,
+        definition: { name: '任务专属', nodes: [node('t', 'trigger'), node('a')], edges: [{ from: 't', to: 'a' }] },
+        actor: 'human:me', now: NOW, operationId: id(2),
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_child', revision: 1, baseVersion: 0, note: '发布子流程', actor: 'human:me', now: NOW, operationId: id(3),
+      } as never)
+      // 3. 父流程 pin 子流程已发布版本
+      commands.createWorkflow!({
+        workflowId: 'wf_parent', name: '父流程',
+        definition: {
+          name: '父流程',
+          nodes: [node('t', 'trigger'), { ...node('s', 'subworkflow'), config: { workflow_id: 'wf_child', pinned_version: 1 } }],
+          edges: [{ from: 't', to: 's' }],
+        },
+        actor: 'human:me', now: NOW, operationId: id(4),
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_parent', revision: 1, baseVersion: 0, note: '发布父流程', actor: 'human:me', now: NOW, operationId: id(5),
+      } as never)
+      // 4. 用预留 task_id 启动根 run：绑定预留行，不新建任务
+      const run = commands.startRun!({
+        taskTitle: '跑起来', workflowId: 'wf_parent', workflowVersion: '1', taskId: reserved.task_id,
+        operationId: id(6), now: NOW,
+      }) as { run_id: string; task_id: string }
+      expect(run.task_id).toBe(reserved.task_id)
+      // 5. 子流程归属对账：owner 指向这个预留 task 就放行，别人不行
+      withTx(service.orchestra.db, (tx) => {
+        expect(() => assertWorkflowUsable(tx, 'wf_child', reserved.task_id)).not.toThrow()
+        expect(() => assertWorkflowUsable(tx, 'wf_child', 'task_other')).toThrowError(/只允许所属任务/)
+      })
+      // 6. 根入口仍然不许直接起 task_local
+      expect(() => commands.createRun!({
+        taskTitle: 'x', workflowId: 'wf_child', workflowVersion: '1', now: NOW,
+      } as never)).toThrowError(/只能作为子流程/)
+    } finally {
       await service.release()
       rmSync(dir, { recursive: true, force: true })
     }

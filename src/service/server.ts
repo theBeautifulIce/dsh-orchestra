@@ -9,7 +9,7 @@ import {
   cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
   ledgerEventSchema, leaseSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
-  workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
+  taskReserveSchema, workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
@@ -65,12 +65,14 @@ export type NodeCommands = {
   openWorkflowDraft: (body: OpenDraftParams & { operationId: string }) => unknown
   updateWorkflowDraft: (body: UpdateDraftParams & { operationId: string }) => unknown
   publishWorkflow: (body: PublishParams & { operationId: string }) => unknown
+  reserveTask: (body: { title: string; actor: string; now: string; operationId: string }) => unknown
   getWorkflow: (body: { workflowId: string }) => unknown
   listWorkflows: (body: { ownerTaskId?: string | null }) => unknown
   // 建 run 与节点：定义加载后由服务层建行，不许靠手写 INSERT 起节点（审计 F-01）
   createRun: (body: { taskTitle: string; workflowId?: string; workflowVersion: string; nodeIds?: string[]; now: string }) => CreateRunResult
   // 起运行：固定版本、operation_id 幂等、自治档位与升级规则；HTTP 只搬字段
   startRun: (body: {
+    taskId?: string
     taskTitle: string
     workflowId?: string
     workflowVersion: string
@@ -247,11 +249,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     // —— S4 工作流命令：写命令一律要求 operation_id，actor 只取认证主体 ——
+    if (req.method === 'POST' && url.pathname === '/v1/tasks/reserve' && deps.commands) {
+      const body = parseBody(taskReserveSchema, await readJsonBody(req), '预留任务')
+      const out = await queue.run(() => deps.commands!.reserveTask({
+        title: body.title, actor, now: requestNow, operationId: body.operation_id,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
     if (req.method === 'POST' && url.pathname === '/v1/workflows' && deps.commands) {
       const body = parseBody(workflowCreateCommandSchema, await readJsonBody(req), '创建工作流')
       const out = await queue.run(() => deps.commands!.createWorkflow({
         workflowId: body.workflow_id, name: body.name, definition: body.definition,
-        scope: body.scope, ownerTaskId: body.owner_task_id ?? null,
+        scope: body.scope,
         actor, now: requestNow, operationId: body.operation_id,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))

@@ -102,13 +102,20 @@ describe('工作流命令 HTTP 入口', () => {
     expect(body.error.code).toBe('FORBIDDEN')
   })
 
-  it('task_local 必须带 owner；UUIDv4 的 operation_id 一律 400', async () => {
+  it('HTTP 建 task_local 必失败：owner 不接受自报；UUIDv4 一律 400', async () => {
     const base = await boot()
+    // 合法 UUIDv7 + 缺 owner：到 createWorkflow 才被拒，证明的是 owner 约束而不是 id 格式
     const noOwner = await post(base + '/v1/workflows', {
-      operation_id: '9b2f6f3a-0d5b-4f1c-8a2e-3f4d5e6a7b8c', workflow_id: 'wf_scope', name: '发布流程',
+      operation_id: '3f2c9a7e-5b41-7c8d-9e0f-1a2b3c4d5e6f', workflow_id: 'wf_scope', name: '发布流程',
       definition: doc, scope: 'task_local',
     })
-    expect(noOwner.status).toBe(400)
+    expect(noOwner.status).toBe(422)
+    // 即使在 body 里塞 owner_task_id 也不会被采信（schema 已删除该字段）
+    const selfClaimed = await post(base + '/v1/workflows', {
+      operation_id: '4a3d8b6f-6c52-7d9e-8f1a-2b3c4d5e6f70', workflow_id: 'wf_scope2', name: '发布流程',
+      definition: doc, scope: 'task_local', owner_task_id: 'task_1',
+    })
+    expect(selfClaimed.status).toBe(422)
     const v4 = await post(base + '/v1/workflows', {
       operation_id: '018f0c1a-2b3c-4d4e-8f5a-6b7c8d9e0f11', workflow_id: 'wf_v4', name: '发布流程', definition: doc,
     })

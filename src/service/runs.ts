@@ -6,6 +6,7 @@ import { withTx } from '../infra/sqlite/driver.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from './workflows.ts'
 import { assertWorkflowUsable } from './commands/workflows.ts'
+import { requestHashOf, runIdempotentCommand } from './commands/idempotency.ts'
 
 export type Autonomy = 'autonomous' | 'assisted' | 'supervised'
 export const AUTONOMY_LEVELS: readonly Autonomy[] = ['autonomous', 'assisted', 'supervised']
@@ -24,6 +25,8 @@ export type CreateRunParams = {
   operationId?: string
   // 任务专属工作流的归属声明：用 task_local 工作流时必须与登记的 owner 一致
   ownerTaskId?: string | null
+  // 预留任务号：方向 A——先由服务端生成可信 task_id，再以它为 owner 建 task_local 工作流
+  taskId?: string
   now: string
 }
 
@@ -42,6 +45,26 @@ export type CreateRunResult = {
   workflow_version: string
   autonomy: Autonomy
   nodes: CreatedNodeRun[]
+}
+
+/** 预留任务号（方向 A）：服务端生成可信 task_id，后续 task_local 工作流以它为 owner */
+export function reserveTask(db: Db, p: { taskId?: string; title: string; actor: string; now: string; operationId: string }): { task_id: string } {
+  return withTx(db, (tx) => {
+    const requestHash = requestHashOf('task.reserve', { title: p.title, task_id: p.taskId ?? null })
+    return runIdempotentCommand(tx, {
+      kind: 'task.reserve', operationId: p.operationId, requestHash, now: p.now,
+    }, () => {
+      const taskIdValue = p.taskId ?? newTaskId()
+      const exists = tx.get<{ task_id: string }>('SELECT task_id FROM tasks WHERE task_id = ?', [taskIdValue])
+      if (exists) throw new OrchError('OPERATION_ID_CONFLICT', '任务号已存在', { task_id: taskIdValue })
+      tx.run(
+        "INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES (?, ?, 'reserved', 0, ?, ?)",
+        [taskIdValue, p.title, p.now, p.now],
+      )
+      appendEvent(tx, { type: 'task.reserved', payload: { task_id: taskIdValue, title: p.title } })
+      return { task_id: taskIdValue }
+    }).result
+  })
 }
 
 // 定义没加载过就拒：没有定义的 run 跑起来只会瞎猜
@@ -72,7 +95,20 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
       workflow_version: p.workflowVersion,
     })
   }
-  const taskIdValue = newTaskId()
+  // 绑定预留任务：预留阶段就存在的 task_id 是可信身份，task_local 的 owner 指向它
+  let taskIdValue = newTaskId()
+  if (p.taskId !== undefined) {
+    const reserved = db.raw.prepare('SELECT task_id, status, current_run_id FROM tasks WHERE task_id = ?').get(p.taskId) as
+      { task_id: string; status: string; current_run_id: string | null } | undefined
+    if (!reserved) throw new OrchError('NOT_FOUND', '预留任务不存在', { task_id: p.taskId })
+    if (reserved.status !== 'reserved' || reserved.current_run_id !== null) {
+      throw new OrchError('STALE_GENERATION', '预留任务已被占用或不在可绑定状态', {
+        task_id: p.taskId,
+        status: reserved.status,
+      })
+    }
+    taskIdValue = p.taskId
+  }
   const runIdValue = newRunId()
   const workflowId = workflowIdOf(def)
   const version = String(def.workflow_version)
@@ -86,10 +122,18 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
       throw new OrchError('FORBIDDEN', '任务专属工作流只能作为子流程启动', { workflow_id: workflowId })
     }
     assertWorkflowUsable(tx, workflowId, p.ownerTaskId ?? null)
-    tx.run(
-      'INSERT INTO tasks (task_id, title, workflow_id, workflow_version, status, revision, autonomy, escalations_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',
-      [taskIdValue, p.taskTitle, workflowId, version, 'running', autonomy, JSON.stringify(escalations), p.now, p.now],
-    )
+    if (p.taskId !== undefined) {
+      // 预留任务行已存在：绑定 run，不新建任务
+      tx.run(
+        'UPDATE tasks SET title = ?, workflow_id = ?, workflow_version = ?, status = ?, autonomy = ?, escalations_json = ?, current_run_id = ?, updated_at = ? WHERE task_id = ?',
+        [p.taskTitle, workflowId, version, 'running', autonomy, JSON.stringify(escalations), runIdValue, p.now, taskIdValue],
+      )
+    } else {
+      tx.run(
+        'INSERT INTO tasks (task_id, title, workflow_id, workflow_version, status, revision, autonomy, escalations_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',
+        [taskIdValue, p.taskTitle, workflowId, version, 'running', autonomy, JSON.stringify(escalations), p.now, p.now],
+      )
+    }
     tx.run(
       'INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, started_at, created_at, updated_at, root_run_id, subworkflow_depth) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0)',
       [runIdValue, taskIdValue, workflowId, version, definitionHash, 'running', p.now, p.now, p.now, runIdValue],
