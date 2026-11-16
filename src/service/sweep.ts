@@ -1,7 +1,7 @@
 // src/service/sweep.ts —— 维护扫描（规格 4.9 行 426-429）
 import type { Db, Tx } from '../infra/sqlite/driver.ts'
 import { inTx } from '../infra/db/tx.ts'
-import { reanchorInTx, type ReanchorReport } from './clock-recovery.ts'
+import { reanchorInTx, refreshCheckpointsInTx, type ReanchorReport } from './clock-recovery.ts'
 import { sweepExpiredLeases } from './commands/lease.ts'
 import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts'
 import { transitionNode } from './commands/node-state.ts'
@@ -90,11 +90,20 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
     // 先把上个 boot 写下的锚点换算到当前时钟：不换算的话 decide() 只会返回 uncertain，
     // fence / wait / 动作截止会永久停住（规格 4.4 行 342）。
+    // 已标不确定的节点不再自动推进：等宿主或人工确认（评审 P1-2）
+    const uncertainNodes = new Set<string>(
+      tx.all<{ node_run_id: string }>("SELECT node_run_id FROM node_runs WHERE recovery_uncertain IS NOT NULL").map((r) => r.node_run_id),
+    )
+    const skipNodes = new Set<string>([...broken, ...uncertainNodes])
     const reanchor: ReanchorReport = { reanchored: [], expired: [], uncertain: [] }
-    if (params.clock) reanchorInTx(tx, secret, params.clock, params.now, reanchor, broken)
+    if (params.clock) {
+      // 服务存活时先把剩余预算按单调钟递减落库：重启后靠它续算，墙钟不参与判定
+      refreshCheckpointsInTx(tx, params.clock)
+      reanchorInTx(tx, secret, params.clock, params.now, reanchor, skipNodes)
+    }
     // wait 到点与租约、围栏同轮处理：同一个扫描入口，不靠外部再记得调一次
-    const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, broken)
-    const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: broken, clock: params.clock })
+    const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, skipNodes)
+    const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: skipNodes, clock: params.clock })
     // 围栏宽限到点：撤围栏回 stopping，并把当前 attempt 的队头挑出来（规格 4.5 行 346）
     const fences = tx.all<FenceRow>(
       'SELECT node_run_id, attempt, revision, status, rearm_generation, fence_state, fence_grace_until, fence_grace_boot_id, fence_grace_monotonic_ns FROM node_runs WHERE fence_state = ? AND fence_grace_until IS NOT NULL',
@@ -104,7 +113,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     const heads: SweepResult['replay_heads'] = []
     for (const row of fences) {
       // 断链节点整轮跳过：恢复动作不许把坏账本再往前推（S2/S3 r64 P1-1）
-      if (broken.has(row.node_run_id)) continue
+      if (skipNodes.has(row.node_run_id)) continue
       if (!revokeFence(tx, secret, { row, now: params.now, clock: params.clock })) continue
       revoked.push(row.node_run_id)
       const head = pickReplayHead(tx, row.node_run_id, row.attempt)
@@ -121,7 +130,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       ['verifying'],
     )
     for (const row of verifying) {
-      if (broken.has(row.node_run_id)) continue
+      if (skipNodes.has(row.node_run_id)) continue
       const deadline = verifyDeadline(row)
       // 没有判定锚点就没有判定依据：按不确定处理，不拿墙钟硬比（规格 3.4 行 171）
       if (!deadline || !params.clock) {
@@ -147,7 +156,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       ['startup_unknown'],
     )
     for (const row of unknownRows) {
-      if (broken.has(row.node_run_id) || row.hang_reason !== null) continue
+      if (skipNodes.has(row.node_run_id) || row.hang_reason !== null) continue
       if (!row.startup_unknown_deadline_at) continue
       const anchored = deadlineFromAnchors({
         deadlineAt: row.startup_unknown_deadline_at,
@@ -219,7 +228,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     // 显式桥恢复信号：按 resume_state 回到六态之一；startup_unknown/verifying 按剩余预算重挂，不续满额
     const bridgeRestored: string[] = []
     for (const nodeRunId of new Set(params.bridgeRestored ?? [])) {
-      if (broken.has(nodeRunId)) continue
+      if (skipNodes.has(nodeRunId)) continue
       const row = tx.get<{
         attempt: number; status: string; resume_state: string | null; rearm_generation: number
         startup_unknown_remaining_ns: number | null; verify_remaining_ns: number | null
@@ -352,7 +361,17 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       + "WHERE r.parent_node_run_id IS NOT NULL AND n.status IN ('waiting', 'timing_out', 'stopping', 'superseded', 'timeout', 'failed', 'failed_with_unverified') AND r.status IN "
       + "('succeeded', 'succeeded_with_unverified', 'done', 'failed', 'failed_with_unverified', 'timeout', 'abandoned_unverified', 'orphaned', 'superseded', 'cancelled')",
     )
+    // 含断链/不确定节点的 run：不按其中节点的状态收口（评审 P1-1）
+    const taintedRuns = new Set<string>(
+      tx.all<{ run_id: string }>(
+        `SELECT DISTINCT run_id FROM node_runs WHERE node_run_id IN (${[...skipNodes].map(() => '?').join(',') || "''"})`,
+        [...skipNodes],
+      ).map((r) => r.run_id),
+    )
     for (const child of finishedChildren) {
+      // 父节点链已断：不推进父节点、不追加父节点事件
+      if (skipNodes.has(child.parent_node_run_id)) continue
+      if (taintedRuns.has(child.parent_run_id ?? '')) continue
       try {
         const out = finishSubworkflowChild(tx, secret, { childRunId: child.run_id, now: params.now })
         if (out.status !== 'waiting') subworkflowFinished.push(out.parentNodeRunId)
@@ -365,10 +384,11 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     const receipts = sweepInboxReceipts(tx, params.now)
     // 决策超时：2h 升级、24h 按默认动作过期。必须进维护扫描，
     // 否则服务每两秒扫一次租约/Wait，却永远不处理挂在人身上的卡（审计 P1-3）。
-    const decisions = sweepDecisions(tx, secret, { now: params.now })
+    const decisions = sweepDecisions(tx, secret, { now: params.now, skipNodeRunIds: skipNodes, skipRunIds: taintedRuns })
     // 控制节点链路不依赖宿主再发一次空 dispatch：每轮扫描对“节点全终态”的 run 统一收口。
     const runsClosed: string[] = []
     for (const row of tx.all<{ run_id: string }>("SELECT run_id FROM runs WHERE status = 'running' ORDER BY run_id")) {
+      if (taintedRuns.has(row.run_id)) continue
       if (closeRun(tx, row.run_id, params.now)) runsClosed.push(row.run_id)
     }
 

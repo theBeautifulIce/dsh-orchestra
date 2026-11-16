@@ -259,6 +259,8 @@ export function enterWaiting(tx: Tx, secret: string, req: {
       wait_deadline_at: deadline,
       wait_deadline_boot_id: waitDeadline.bootId,
       wait_deadline_monotonic_ns: waitDeadline.monotonicNs,
+      // 恢复检查点：等待剩余预算快照，重启后按它续算（评审 P1-2）
+      wait_remaining_ns: Math.round(req.maxWaitMs * 1e6),
     },
   })
   tx.run(

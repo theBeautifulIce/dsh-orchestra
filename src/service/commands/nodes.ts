@@ -19,6 +19,12 @@ const PATCH_COLUMNS = new Set([
   'hang_reason',
   'contradiction_decision_id',
   'startup_unknown_remaining_ns',
+  // 跨 boot 恢复检查点：剩余预算快照，重启后按它续算（评审 P1-2）
+  'action_remaining_ns',
+  'wait_remaining_ns',
+  'fence_remaining_ns',
+  'recovery_uncertain',
+  'recovery_uncertain_at',
   'startup_unknown_deadline_at',
   'startup_unknown_boot_id',
   'startup_unknown_monotonic_ns',

@@ -298,6 +298,10 @@ export function cancelDecision(tx: Tx, secret: string, p: CancelDecisionParams):
 export type SweepDecisionsOptions = EscalateOptions & {
   // 自动过期后要尝试收口对应 run
   closeRunAfter?: boolean
+  /** 哈希链已断或已标不确定的节点：不做自动升级、不放行节点（评审 P1-1） */
+  skipNodeRunIds?: ReadonlySet<string>
+  /** 含断链节点的 run：不做自动收口 */
+  skipRunIds?: ReadonlySet<string>
 }
 
 export type SweepDecisionsOutcome = {
@@ -326,8 +330,9 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     autonomy: string
     run_status: string | null
     node_status: string | null
+    node_run_id: string | null
   }>(
-    'SELECT d.decision_id, d.run_id, d.status, d.revision, d.created_at, '
+    'SELECT d.decision_id, d.run_id, d.status, d.revision, d.created_at, d.node_run_id, '
       + 'COALESCE(t.autonomy, \'autonomous\') AS autonomy, r.status AS run_status, n.status AS node_status '
       + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
       + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
@@ -336,6 +341,9 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
   )
   const out: SweepDecisionsOutcome = { blocked: 0, expired: 0, releasedNodes: [], closedRuns: [] }
   for (const row of rows) {
+    // 断链/不确定节点上的裁决卡：不自动升级、不放行（评审 P1-1）
+    if (row.node_run_id && opts.skipNodeRunIds?.has(row.node_run_id)) continue
+    if (opts.skipRunIds?.has(row.run_id)) continue
     // run 已终态：这张卡不再有业务含义，不自动改写也不尝试收口
     if (row.run_status !== null && (RUN_TERMINAL_STATUSES as readonly string[]).includes(row.run_status)) continue
     const age = nowMs - Date.parse(row.created_at)
@@ -348,7 +356,7 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       out.expired += 1
       const released = releaseBlockedPreNode(tx, secret, { decisionId: row.decision_id, now: opts.now })
       if (released) out.releasedNodes.push(released)
-      if (opts.closeRunAfter !== false) {
+      if (opts.closeRunAfter !== false && !opts.skipRunIds?.has(row.run_id)) {
         if (closeRun(tx, row.run_id, opts.now)) out.closedRuns.push(row.run_id)
       }
       continue

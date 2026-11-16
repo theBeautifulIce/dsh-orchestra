@@ -138,6 +138,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
         fence_grace_until: graceUntil,
         fence_grace_boot_id: grace.bootId,
         fence_grace_monotonic_ns: grace.monotonicNs,
+        // 恢复检查点：剩余宽限快照，重启后按它续算（停机不累计，评审 P1-2）
+        fence_remaining_ns: Math.round(params.graceMs * 1e6),
         cancel_requested_at: params.now,
         cancel_result: 'interrupted',
       },
@@ -157,8 +159,8 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       // 围栏立着时改状态会留下“stopping 但仍 armed”的双主人：只记取消结果，等宽限到点由 sweep 撤围栏（审计 P0-4）
       runCas(
         tx,
-        "UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND fence_state = 'armed'",
-        [params.now, 'not_interruptible', deadline, extended.bootId, extended.monotonicNs, params.now, params.nodeRunId, params.attempt, params.revision],
+        "UPDATE node_runs SET cancel_requested_at = ?, cancel_result = ?, deadline_at = ?, deadline_boot_id = ?, deadline_monotonic_ns = ?, action_remaining_ns = ?, revision = revision + 1, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND revision = ? AND fence_state = 'armed'",
+        [params.now, 'not_interruptible', deadline, extended.bootId, extended.monotonicNs, Math.round((params.extendDeadlineMs ?? 0) * 1e6), params.now, params.nodeRunId, params.attempt, params.revision],
         { rows: 1, what: 'cancel-not-interruptible-fenced' },
       )
       appendNodeRunEvent(tx, secret, params.nodeRunId, 'cancel_not_interruptible', { deadline_at: deadline, fence_pending: true })
@@ -297,6 +299,8 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
         deadline_at: new Date(rearm.wallClockMs).toISOString(),
         deadline_boot_id: rearm.bootId,
         deadline_monotonic_ns: rearm.monotonicNs,
+        // 重挂后动作截止的剩余检查点
+        action_remaining_ns: Math.round((params.rearmActionDeadlineMs ?? 30_000) * 1e6),
       },
     })
   } catch {
