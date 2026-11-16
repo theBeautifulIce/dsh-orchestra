@@ -190,6 +190,8 @@ describe('workflow.publish 事务', () => {
   it('列表按 owner 过滤，task_local 归属可查', () => {
     const { db } = freshLedger()
     create(db, { workflowId: 'wf_reuse' })
+    withTx(db, (tx) => tx.run(
+      "INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('task_1', 't', 'reserved', 0, ?, ?)", [NOW, NOW]))
     create(db, { workflowId: 'wf_task', scope: 'task_local', ownerTaskId: 'task_1', definition: goodDoc('任务专属') , name: '任务专属' })
     const all = withTx(db, (tx) => listWorkflows(tx))
     expect(all.map((w) => w.workflow_id)).toEqual(['wf_reuse', 'wf_task'])
@@ -342,6 +344,9 @@ describe('update.changed=false 与 task_local 归属（P2 收口）', () => {
     const { db } = freshLedger()
     expect(codeOf(() => create(db, { workflowId: 'wf_bad1', scope: 'task_local', ownerTaskId: null, definition: goodDoc('缺 owner'), name: '缺 owner' })))
       .toBe('PAYLOAD_SCHEMA_INVALID')
+    // owner 必须是真实存在的未消费预留任务，任意字符串不行
+    expect(codeOf(() => create(db, { workflowId: 'wf_bad3', scope: 'task_local', ownerTaskId: 'task_does_not_exist', definition: goodDoc('假 owner'), name: '假 owner' })))
+      .toBe('PAYLOAD_SCHEMA_INVALID')
     expect(codeOf(() => create(db, { workflowId: 'wf_bad2', scope: 'reusable', ownerTaskId: 'task_9', definition: goodDoc('多余 owner'), name: '多余 owner' })))
       .toBe('PAYLOAD_SCHEMA_INVALID')
     db.raw.close()
@@ -392,6 +397,8 @@ describe('update.changed=false 与 task_local 归属（P2 收口）', () => {
     const { WorkflowCatalog } = await import('../../src/service/workflows.ts')
     const { db } = freshLedger()
     const catalog = new WorkflowCatalog('S2', db)
+    withTx(db, (tx) => tx.run(
+      "INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('task_1', 't', 'reserved', 0, ?, ?)", [NOW, NOW]))
     create(db, { workflowId: 'wf_task', scope: 'task_local', ownerTaskId: 'task_1', definition: goodDoc('任务专属'), name: '任务专属' })
     withTx(db, (tx) => publishWorkflowCommand(tx, {
       workflowId: 'wf_task', revision: 1, baseVersion: 0, note: '发布说明', operationId: '4f0b1a10-1111-7aaa-8bbb-000000000001', actor: 'human:me', now: NOW,

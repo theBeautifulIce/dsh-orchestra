@@ -309,6 +309,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     if (req.method === 'POST' && url.pathname === '/v1/runs/start' && deps.commands) {
       const body = parseBody(startRunSchema, await readJsonBody(req), '起运行')
       const out = await queue.run(() => deps.commands!.startRun({
+        taskId: body.task_id,
         taskTitle: body.taskTitle,
         workflowId: body.workflowId,
         workflowVersion: body.workflowVersion,

@@ -176,6 +176,18 @@ export function createWorkflow(tx: Tx, p: CreateWorkflowParams): { workflow_id: 
   if (scope === 'reusable' && ownerTaskId !== null) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'reusable 工作流不能指定 owner_task_id', { workflow_id: p.workflowId })
   }
+  if (scope === 'task_local') {
+    // owner 必须是服务端预留且还没被消费的任务：任意字符串不能当归属（审计 P2）
+    const reserved = tx.get<{ task_id: string; status: string; current_run_id: string | null }>(
+      'SELECT task_id, status, current_run_id FROM tasks WHERE task_id = ?', [ownerTaskId!],
+    )
+    if (!reserved || reserved.status !== 'reserved' || reserved.current_run_id !== null) {
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'owner_task_id 必须是未消费的预留任务', {
+        workflow_id: p.workflowId,
+        owner_task_id: ownerTaskId,
+      })
+    }
+  }
   tx.run(
     'INSERT INTO workflows (workflow_id, name, status, current_version, created_by, updated_by, created_at, updated_at, scope, owner_task_id) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)',
     [p.workflowId, p.name, 'active', p.actor, p.actor, p.now, p.now, scope, ownerTaskId],

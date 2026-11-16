@@ -122,6 +122,31 @@ describe('工作流命令 HTTP 入口', () => {
     expect(v4.status).toBe(400)
   })
 
+  it('HTTP 链路：预留 task → 发布 → /v1/runs/start 绑定预留任务', async () => {
+    const base = await boot()
+    const reservedRes = await post(base + '/v1/tasks/reserve', {
+      operation_id: '5b4e9c7d-7d63-7eaf-9a2b-3c4d5e6f7081', title: '预留任务',
+    })
+    expect(reservedRes.status).toBe(200)
+    const reserved = (await reservedRes.json() as any).data as { task_id: string }
+
+    await post(base + '/v1/workflows', {
+      operation_id: '5b4e9c7d-7d63-7eaf-9a2b-3c4d5e6f7082', workflow_id: 'wf_bind', name: '发布流程', definition: doc,
+    })
+    const published = await post(base + '/v1/workflows/publish', {
+      operation_id: '5b4e9c7d-7d63-7eaf-9a2b-3c4d5e6f7083', workflow_id: 'wf_bind', revision: 1, base_version: 0, publish_note: '首次发布',
+    })
+    expect(published.status).toBe(200)
+
+    const started = await post(base + '/v1/runs/start', {
+      operationId: '5b4e9c7d-7d63-7eaf-9a2b-3c4d5e6f7084', task_id: reserved.task_id,
+      taskTitle: '绑定预留', workflowId: 'wf_bind', workflowVersion: '1',
+    })
+    const body = await started.json() as any
+    expect(started.status, JSON.stringify(body)).toBe(200)
+    expect(body.data.task_id).toBe(reserved.task_id)
+  })
+
   it('发布层不通过：422 + 未注册节点清单', async () => {
     const base = await boot()
     await post(base + '/v1/workflows', {

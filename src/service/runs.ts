@@ -123,11 +123,15 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
     }
     assertWorkflowUsable(tx, workflowId, p.ownerTaskId ?? null)
     if (p.taskId !== undefined) {
-      // 预留任务行已存在：绑定 run，不新建任务
-      tx.run(
-        'UPDATE tasks SET title = ?, workflow_id = ?, workflow_version = ?, status = ?, autonomy = ?, escalations_json = ?, current_run_id = ?, updated_at = ? WHERE task_id = ?',
-        [p.taskTitle, workflowId, version, 'running', autonomy, JSON.stringify(escalations), runIdValue, p.now, taskIdValue],
+      // 预留任务行已存在：绑定 run，不新建任务。CAS 带 status/current_run_id 谓词，一个预留只能被消费一次
+      const bound = tx.run(
+        "UPDATE tasks SET title = ?, workflow_id = ?, workflow_version = ?, status = 'running', autonomy = ?, escalations_json = ?, current_run_id = ?, updated_at = ? "
+        + "WHERE task_id = ? AND status = 'reserved' AND current_run_id IS NULL",
+        [p.taskTitle, workflowId, version, autonomy, JSON.stringify(escalations), runIdValue, p.now, taskIdValue],
       )
+      if (bound.changes !== 1) {
+        throw new OrchError('STALE_GENERATION', '预留任务已被占用或不在可绑定状态', { task_id: taskIdValue })
+      }
     } else {
       tx.run(
         'INSERT INTO tasks (task_id, title, workflow_id, workflow_version, status, revision, autonomy, escalations_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',

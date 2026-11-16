@@ -253,11 +253,15 @@ describe('G4：真并发发布（worker_threads + 屏障）', () => {
           const { publishWorkflowCommand, publishContextFor } = await import(workerData.cmdsUrl)
           const barrier = new Int32Array(workerData.barrier)
           const db = openDb(workerData.dbPath)
-          Atomics.add(barrier, 0, 1)
+          const arrived = Atomics.add(barrier, 0, 1) + 1
           Atomics.notify(barrier, 0)
           const deadline = Date.now() + 5000
           while (Atomics.load(barrier, 0) < workerData.participants && Date.now() < deadline) {
-            Atomics.wait(barrier, 0, Atomics.load(barrier, 0), 50)
+            // expected 必须用本地 arrived：再读计数会把已经到 2 的值当 expected，错过 notify（审计 P2）
+            Atomics.wait(barrier, 0, arrived, 50)
+          }
+          if (Atomics.load(barrier, 0) !== workerData.participants) {
+            throw new Error('worker barrier timeout')
           }
           try {
             const out = withTx(db, (tx) => publishWorkflowCommand(tx, workerData.publish, publishContextFor(tx, new Set(['agent', 'subworkflow', 'wait']))))
@@ -356,7 +360,30 @@ describe('G4：task_local 生命周期闭环（方向 A：预分配 task ID）',
       withTx(service.orchestra.db, (tx) => {
         expect(() => assertWorkflowUsable(tx, 'wf_child', reserved.task_id)).not.toThrow()
         expect(() => assertWorkflowUsable(tx, 'wf_child', 'task_other')).toThrowError(/只允许所属任务/)
+        expect(() => assertWorkflowUsable(tx, 'wf_child', null)).toThrowError(/只允许所属任务/)
       })
+      // 真实派发 subworkflow 节点：子 run 必须继承预留 task_id
+      await commands.dispatch!({
+        runId: run.run_id,
+        nodes: { s: { tools: [] } },
+        now: NOW,
+      })
+      const child = service.orchestra.db.raw.prepare(
+        'SELECT run_id, task_id, workflow_id, workflow_version, parent_run_id, parent_node_run_id FROM runs WHERE parent_run_id = ?',
+      ).get(run.run_id) as
+        { run_id: string; task_id: string; workflow_id: string; workflow_version: string | number; parent_run_id: string; parent_node_run_id: string } | undefined
+      expect(child).toBeTruthy()
+      expect(child!.task_id).toBe(reserved.task_id)
+      expect(child!.workflow_id).toBe('wf_child')
+      expect(String(child!.workflow_version)).toBe('1')
+      expect(child!.parent_run_id).toBe(run.run_id)
+      expect(child!.parent_node_run_id).toBeTruthy()
+      const parentNode = service.orchestra.db.raw.prepare(
+        "SELECT status FROM node_runs WHERE run_id = ? AND node_id = 's'").get(run.run_id) as { status: string }
+      expect(parentNode.status).toBe('waiting')
+      const started = service.orchestra.db.raw.prepare(
+        "SELECT COUNT(*) AS n FROM events WHERE type = 'subworkflow.started'").get() as { n: number }
+      expect(Number(started.n)).toBeGreaterThanOrEqual(1)
       expect(() => commands.createRun!({
         taskTitle: 'x', workflowId: 'wf_child', workflowVersion: '1', now: NOW,
       } as never)).toThrowError(/只能作为子流程/)
