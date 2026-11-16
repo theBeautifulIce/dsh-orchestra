@@ -6,7 +6,7 @@
 
 ---
 
-## 0.1 最新接手续接（2026-11-16 12:05，HEAD `872e5b1`，r68/r69/r20 已签已推）
+## 0.1 最新接手续接（2026-11-16 12:12，HEAD `bfa19df`，r68/r69/r20 已签已推）
 
 ### 当前进度
 
@@ -42,7 +42,7 @@
 
 ### 接手先做什么
 
-1. `git log --oneline -5` 确认 HEAD 是 `872e5b1`，`git status` 干净。
+1. `git log --oneline -5` 确认 HEAD 是 `bfa19df`（或其后仅文档提交），`git status` 干净。
 2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`、`pnpm gate`，确认 70 files / 940 passed | 1 skipped、300.94 kB / 72.62 kB、28/28、三门 exit 0。
 3. **不要动候选文件**（含 `codebasemap.md`、`审计要求.md`）：任何一处改动都会作废三份报告与三门签名，下一批要重新走 S1 r69 / S2 r70 / S3 r21。
 4. 下一批优先做上面 P2 的第 1 项（整链缺失检出），它与断链隔离同一族，改完一起复核最省事。
