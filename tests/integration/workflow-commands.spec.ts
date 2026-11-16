@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { freshLedger } from '../fixtures/ledger.ts'
 import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import {
-  createWorkflow, getWorkflow, listWorkflows, openDraft, publishDraft, updateDraft,
+  createWorkflow, getWorkflow, listWorkflows, openDraft, publishDraft, publishWorkflowCommand, updateDraft,
 } from '../../src/service/commands/workflows.ts'
 import { OrchError } from '../../src/core/errors.ts'
 
@@ -195,6 +195,61 @@ describe('workflow.publish 事务', () => {
     const mine = withTx(db, (tx) => listWorkflows(tx, { ownerTaskId: 'task_1' }))
     expect(mine.map((w) => w.workflow_id)).toEqual(['wf_task'])
     expect(mine[0]).toMatchObject({ scope: 'task_local', owner_task_id: 'task_1' })
+    db.raw.close()
+  })
+})
+
+describe('发布幂等与回执（Task 9）', () => {
+  it('同一个 operation_id 重放：回执原样返回，不产生第二个版本', () => {
+    const { db } = freshLedger()
+    create(db)
+    const first = withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', actor: 'human:me', now: NOW,
+    }, ctx))
+    expect(first.replayed).toBe(false)
+    expect(first.version).toBe('1')
+
+    const replay = withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-1', actor: 'human:me', now: NOW,
+    }, ctx))
+    expect(replay.replayed).toBe(true)
+    expect(replay.version).toBe('1')
+
+    const count = db.raw.prepare("SELECT COUNT(*) AS n FROM workflow_versions WHERE workflow_id = 'wf1'").get() as { n: number }
+    expect(Number(count.n)).toBe(1)
+    const row = db.raw.prepare("SELECT status, receipt_json FROM inbox WHERE operation_id = 'op-1'").get() as { status: string; receipt_json: string }
+    expect(row.status).toBe('applied')
+    expect(JSON.parse(row.receipt_json).result.version).toBe('1')
+    const applied = db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'command.applied'").get() as { n: number }
+    expect(Number(applied.n)).toBe(1)
+    db.raw.close()
+  })
+
+  it('同一个 operation_id 换请求：OPERATION_ID_CONFLICT', () => {
+    const { db } = freshLedger()
+    create(db)
+    withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 1, baseVersion: 0, operationId: 'op-2', actor: 'human:me', now: NOW,
+    }, ctx))
+    expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 2, baseVersion: 1, operationId: 'op-2', actor: 'human:me', now: NOW,
+    }, ctx)))).toBe('OPERATION_ID_CONFLICT')
+    db.raw.close()
+  })
+
+  it('业务失败时整笔回滚：inbox 不留 running 行，可换 operation_id 重试', () => {
+    const { db } = freshLedger()
+    create(db)
+    withTx(db, (tx) => updateDraft(tx, {
+      workflowId: 'wf1', revision: 1,
+      definition: { name: '发布流程', nodes: [node('a')], edges: [] },
+      actor: 'human:me', now: NOW,
+    }))
+    expect(codeOf(() => withTx(db, (tx) => publishWorkflowCommand(tx, {
+      workflowId: 'wf1', revision: 2, baseVersion: 0, operationId: 'op-3', actor: 'human:me', now: NOW,
+    }, ctx)))).toBe('WORKFLOW_VALIDATION_FAILED')
+    const row = db.raw.prepare("SELECT COUNT(*) AS n FROM inbox WHERE operation_id = 'op-3'").get() as { n: number }
+    expect(Number(row.n)).toBe(0)
     db.raw.close()
   })
 })

@@ -16,6 +16,7 @@ import {
   type WorkflowDoc,
 } from '../../core/workflow-doc.ts'
 import { definitionHashOf } from '../workflows.ts'
+import { requestHashOf, runIdempotentCommand } from './idempotency.ts'
 import type { WorkflowDefinition, WorkflowNodeDef } from '../../core/workflow-def.ts'
 
 export type WorkflowScope = 'reusable' | 'task_local'
@@ -341,6 +342,27 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): Pub
     payload: { workflow_id: p.workflowId, version, based_on_version: basedOn, definition_hash: definitionHash },
   })
   return { workflow_id: p.workflowId, version, definition_hash: definitionHash, based_on_version: basedOn }
+}
+
+/** 对外入口：发布带幂等与回执（规格 6.2 步骤 10），业务与回执同笔 */
+export function publishWorkflowCommand(
+  tx: Tx,
+  p: PublishParams & { operationId: string },
+  ctx: PublishContext,
+): PublishResult & { replayed: boolean } {
+  const requestHash = requestHashOf('workflow.publish', {
+    workflow_id: p.workflowId,
+    revision: p.revision,
+    base_version: p.baseVersion,
+    publish_note: p.note ?? null,
+  })
+  const { result, replayed } = runIdempotentCommand(tx, {
+    kind: 'workflow.publish',
+    operationId: p.operationId,
+    requestHash,
+    now: p.now,
+  }, () => publishDraft(tx, p, ctx))
+  return { ...result, replayed }
 }
 
 export type WorkflowSummary = {
