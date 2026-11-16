@@ -80,6 +80,8 @@ describe('run 绑定 workflow_id + version 复合身份', () => {
   it('hydrate 交叉校验行键与快照：行被改成 default 但快照仍是 wf-a 时拒绝', () => {
     const { db } = freshLedger()
     new WorkflowCatalog('S2', db).load(def('wf-a', 'a'))
+    // 027 起已发布版本有不可变触发器：要构造"行被改坏"，得先卸掉触发器——这本身也是隔离边界的断言
+    for (const t of ['workflow_versions_no_update', 'workflow_versions_no_delete']) db.raw.exec('DROP TRIGGER IF EXISTS ' + t)
     db.raw.prepare("UPDATE workflow_versions SET workflow_id = 'default' WHERE workflow_id = 'wf-a'").run()
     const broken = new WorkflowCatalog('S2', db)
     expect(() => broken.hydrate()).toThrow(/行键与快照身份不一致/)
