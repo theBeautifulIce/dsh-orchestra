@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { WorkflowView } from '../api/types.ts'
+import type { WorkflowCommandsApi } from '../api/workflow-commands.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { WorkflowEditor } from './workflow-editor.tsx'
 
 export type WorkflowCanvasProps = {
   api: ResourcesApi
@@ -10,9 +12,11 @@ export type WorkflowCanvasProps = {
   onBack: () => void
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
+  /** 给了命令客户端就把草稿编辑、保存、发布接到本屏；没给仍是只读检查页。 */
+  commands?: WorkflowCommandsApi | null
 }
 
-export function WorkflowCanvas({ api, workflowId, onBack, reloadVersion = 0, onSnapshot }: WorkflowCanvasProps) {
+export function WorkflowCanvas({ api, workflowId, onBack, reloadVersion = 0, onSnapshot, commands = null }: WorkflowCanvasProps) {
   const [workflow, setWorkflow] = useState<WorkflowView | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -34,7 +38,10 @@ export function WorkflowCanvas({ api, workflowId, onBack, reloadVersion = 0, onS
     return () => { current = false }
   }, [api, workflowId, retry, reloadVersion, onSnapshot])
 
-  const definition = workflow?.draft?.definition ?? workflow?.current?.definition ?? null
+  const editable = commands !== null
+  const draftDefinition = workflow?.draft?.definition ?? null
+  const publishedDefinition = workflow?.current?.definition ?? null
+  const definition = draftDefinition ?? publishedDefinition
   const draftMode = Boolean(workflow?.draft)
   return <section aria-labelledby="workflow-canvas-title" style={{ display: 'grid', gap: 18 }}>
     <button type="button" onClick={onBack} style={buttonStyle}>返回流程列表</button>
@@ -43,20 +50,26 @@ export function WorkflowCanvas({ api, workflowId, onBack, reloadVersion = 0, onS
       <h1 id="workflow-canvas-title" style={titleStyle}>{workflow?.workflow.name ?? '流程详情'}</h1>
       <p style={mutedStyle}>{draftMode ? `当前查看未发布草稿（修订 ${workflow?.draft?.revision ?? '未知'}）` : `当前查看已发布版本 v${workflow?.current?.version ?? '—'}；此版本只读`}</p>
     </header>
-    <div style={noticeStyle}>此屏只读。草稿编辑、保存和发布尚未接入控制面命令与回执。</div>
+    <div style={noticeStyle}>{editable
+      ? '草稿可编辑。已发布版本只读，保存与发布都走控制面命令，结果以回执为准。'
+      : '此屏只读。草稿编辑、保存和发布尚未接入控制面命令与回执。'}</div>
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={() => setRetry((value) => value + 1)} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取流程定义…</p>}
     {!loading && !failed && workflow && <>
-      <section aria-labelledby="workflow-validation-title" style={cardStyle}>
-        <h2 id="workflow-validation-title" style={sectionTitleStyle}>检查结果</h2>
-        <IssueGroup title="需要修正" issues={workflow.validation.errors} tone="error" />
-        <IssueGroup title="提醒" issues={workflow.validation.warnings} tone="warning" />
-        {workflow.validation.errors.length === 0 && workflow.validation.warnings.length === 0 && <p style={mutedStyle}>当前查询没有返回结构错误或提醒。</p>}
-      </section>
+      {editable
+        ? <WorkflowEditor commands={commands!} workflow={workflow} onRefresh={() => setRetry((value) => value + 1)} />
+        : <section aria-labelledby="workflow-validation-title" style={cardStyle}>
+          <h2 id="workflow-validation-title" style={sectionTitleStyle}>检查结果</h2>
+          <IssueGroup title="需要修正" issues={workflow.validation.errors} tone="error" />
+          <IssueGroup title="提醒" issues={workflow.validation.warnings} tone="warning" />
+          {workflow.validation.errors.length === 0 && workflow.validation.warnings.length === 0 && <p style={mutedStyle}>当前查询没有返回结构错误或提醒。</p>}
+        </section>}
       <section aria-labelledby="workflow-definition-title" style={cardStyle}>
-        <h2 id="workflow-definition-title" style={sectionTitleStyle}>流程定义</h2>
-        {definition === null ? <p style={mutedStyle}>流程定义暂不可用。</p> : <pre style={jsonStyle}>{JSON.stringify(definition, null, 2)}</pre>}
-        {(workflow.draft?.definition_hash ?? workflow.current?.definition_hash) && <p style={mutedStyle}>定义摘要：{workflow.draft?.definition_hash ?? workflow.current?.definition_hash}</p>}
+        <h2 id="workflow-definition-title" style={sectionTitleStyle}>{editable ? '已发布定义（只读）' : '流程定义'}</h2>
+        {(editable ? publishedDefinition : definition) === null
+          ? <p style={mutedStyle}>{editable ? '还没有已发布版本。' : '流程定义暂不可用。'}</p>
+          : <pre style={jsonStyle}>{JSON.stringify(editable ? publishedDefinition : definition, null, 2)}</pre>}
+        {!(editable ? definition : publishedDefinition) && <p style={mutedStyle}>定义摘要：{workflow.draft?.definition_hash ?? workflow.current?.definition_hash}</p>}
       </section>
       <section aria-labelledby="workflow-versions-title" style={cardStyle}>
         <h2 id="workflow-versions-title" style={sectionTitleStyle}>已发布版本</h2>

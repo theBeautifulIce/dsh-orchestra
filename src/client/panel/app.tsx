@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ApiClient } from '../api/client.ts'
 import { createResourcesApi } from '../api/resources.ts'
+import { createWorkflowCommandsApi } from '../api/workflow-commands.ts'
 import type { EventStream, StreamStatus } from '../api/sse.ts'
 import { PanelShell, type PanelRoute } from './shell.tsx'
 import { DecisionInbox } from './decision-inbox.tsx'
@@ -23,6 +24,8 @@ export type PanelAppProps = {
 
 export function PanelApp(props: PanelAppProps) {
   const api = useMemo(() => createResourcesApi(props.client), [props.client])
+  // 控制面写命令客户端：流程新建、草稿保存、发布都走同一套命令与回执。
+  const commands = useMemo(() => createWorkflowCommandsApi(props.client), [props.client])
   const [route, setRoute] = useState<PanelRoute>(props.initialRoute ?? 'tasks')
   const [taskId, setTaskId] = useState<string | null>(null)
   const [workflowId, setWorkflowId] = useState<string | null>(null)
@@ -63,8 +66,8 @@ export function PanelApp(props: PanelAppProps) {
     screen = <UnverifiedEffects api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'workflows') {
     screen = workflowId
-      ? <WorkflowCanvas api={api} workflowId={workflowId} onBack={() => setWorkflowId(null)} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
-      : <WorkflowListScreen api={api} onSelectWorkflow={setWorkflowId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+      ? <WorkflowCanvas api={api} workflowId={workflowId} onBack={() => setWorkflowId(null)} reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} />
+      : <WorkflowListScreen api={api} onSelectWorkflow={setWorkflowId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} />
   } else {
     screen = props.additionalScreens?.[route] ?? <div role="status" style={pendingStyle}>此页面尚未接入真实数据。</div>
   }
