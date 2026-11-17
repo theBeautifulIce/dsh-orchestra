@@ -379,14 +379,54 @@ describe('G4：task_local 生命周期闭环（方向 A：预分配 task ID）',
       expect(child!.parent_run_id).toBe(run.run_id)
       expect(child!.parent_node_run_id).toBeTruthy()
       const parentNode = service.orchestra.db.raw.prepare(
-        "SELECT status FROM node_runs WHERE run_id = ? AND node_id = 's'").get(run.run_id) as { status: string }
+        "SELECT node_run_id, status FROM node_runs WHERE run_id = ? AND node_id = 's'").get(run.run_id) as
+        { node_run_id: string; status: string }
       expect(parentNode.status).toBe('waiting')
+      // 关联必须是精确的 node_run_id，不是「非空就行」
+      expect(child!.parent_node_run_id).toBe(parentNode.node_run_id)
       const started = service.orchestra.db.raw.prepare(
-        "SELECT COUNT(*) AS n FROM events WHERE type = 'subworkflow.started'").get() as { n: number }
-      expect(Number(started.n)).toBeGreaterThanOrEqual(1)
+        "SELECT payload_redacted AS payload FROM events WHERE type = 'subworkflow.started' ORDER BY seq DESC LIMIT 1").get() as
+        { payload: string } | undefined
+      expect(started).toBeTruthy()
+      expect(JSON.parse(started!.payload).child_run_id).toBe(child!.run_id)
       expect(() => commands.createRun!({
         taskTitle: 'x', workflowId: 'wf_child', workflowVersion: '1', now: NOW,
       } as never)).toThrowError(/只能作为子流程/)
+    } finally {
+      await service.release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('G4：预留任务只许消费一次', () => {
+  it('第二次绑定同一预留任务（换 operation_id）必须 STALE_GENERATION', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { openServiceOrchestra } = await import('../../src/index.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-bind-'))
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-bind', phase: 'S4' })
+    try {
+      const commands = service.orchestra.commands
+      const id = (n: number) => '6f2e3d4c-0000-7aaa-8bbb-000000000' + String(400 + n).slice(-3)
+      const reserved = commands.reserveTask!({ title: '一次性任务', actor: 'human:me', now: NOW, operationId: id(1) }) as { task_id: string }
+      commands.createWorkflow!({
+        workflowId: 'wf_once', name: '发布流程', definition: doc(), actor: 'human:me', now: NOW, operationId: id(2),
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_once', revision: 1, baseVersion: 0, note: '首次发布', actor: 'human:me', now: NOW, operationId: id(3),
+      } as never)
+      const first = commands.startRun!({
+        taskTitle: '第一次', workflowId: 'wf_once', workflowVersion: '1', taskId: reserved.task_id,
+        operationId: id(4), now: NOW,
+      }) as { task_id: string }
+      expect(first.task_id).toBe(reserved.task_id)
+      // 换个 operation_id 再绑同一个预留任务：必须被拒，不能悄悄新建任务
+      expect(() => commands.startRun!({
+        taskTitle: '第二次', workflowId: 'wf_once', workflowVersion: '1', taskId: reserved.task_id,
+        operationId: id(5), now: NOW,
+      } as never)).toThrowError(/预留任务已被占用/)
     } finally {
       await service.release()
       rmSync(dir, { recursive: true, force: true })
