@@ -42,7 +42,7 @@
     "G2-16"
   ],
   "failed_items": [],
-  "notes": "r70 遗留 P2-2（typecheck 11 处）与 P2-3（前置非成功终态后置滞留 queued）已修复并实跑验证：typecheck exit 0；readinessOf 增 failedPreds 档、按有效行（ORDER BY attempt DESC）判定，后置经 failQueuedNode 结算（error_code=RESOLUTION_NOT_AVAILABLE）且结算行进 dispatch outcomes，run 同轮收口；M-60 换行场景经独立探针确认走放行路径（收口错误码 EVIDENCE_SOURCE_UNAVAILABLE，非结算档）。G2 单节点闭环无回归：无 edges 路径 preds 为空、行为与上轮逐字相同，G2 核心文件零改动；全量 78 files / 1023 passed / 1 skipped、证据复现 29/29 两遍字节一致。P2×1 为 r69 遗留 hang_reason 存量标记（维持）。P3：目录 edges 无绑定哈希比对（维持）；终态词表多处维护（维持，本批 dispatcher 又增一处）；新用例场景二断言弱（放行与结算不可区分，探针已补判）；非拓扑序声明的多跳级联需逐轮派发收齐（与既有逐轮派发模型一致）。gate-check 快照：G1–G3 按预期待重签，G4 正文与 artifact 结论不一致属 S4 门记录问题，已在回包转 S4。"
+  "notes": "r70 遗留 P2-2（typecheck 11 处）与 P2-3（前置非成功终态后置滞留 queued）已修复并实跑验证：typecheck exit 0；readinessOf 增 failedPreds 档、按有效行（ORDER BY attempt DESC）判定，后置经 failQueuedNode 结算（error_code=RESOLUTION_NOT_AVAILABLE）且结算行进 dispatch outcomes，run 同轮收口；M-60 换行场景经独立探针确认走放行路径（收口错误码 EVIDENCE_SOURCE_UNAVAILABLE，非结算档）。G2 单节点闭环无回归：无 edges 路径 preds 为空、行为与上轮逐字相同，G2 核心文件零改动；全量 78 files / 1023 passed / 1 skipped、证据复现 29/29 两遍字节一致。P2×1 为 r69 遗留 hang_reason 存量标记（维持）。P3：目录 edges 无绑定哈希比对（维持）；终态词表多处维护（维持，本批 dispatcher 又增一处）；新用例场景二断言弱（放行与结算不可区分，探针已补判）；非拓扑序声明的多跳级联需逐轮派发收齐（与既有逐轮派发模型一致）。gate-check 快照：G1–G3 按预期待重签；G4 结论正文措辞已由 docs-only 提交 f686657 中性化，重签链待 G1–G3 重签闭合。"
 }
 ```
 <!-- audit-verdict:end -->
@@ -57,7 +57,7 @@ P0 = 0，P1 = 0，P2 = 1；必过项 20/20。
 
 | 项 | 值 |
 | --- | --- |
-| 主线 HEAD / 本轮候选 / 本报告绑定提交 | `4ecff7a5ff94d10862da24e75f6ab69c0bd4a22f`（审计期间 HEAD 不再前进；本人改动只有本报告，`tmp/r71/` 探针交付前已删；同工作树另有其他审计员在途的 `docs/audits/S4-independent-audit-round1.md` 改动，未触碰） |
+| 主线 HEAD / 本轮候选 / 本报告绑定提交 | 候选与绑定提交均为 `4ecff7a5ff94d10862da24e75f6ab69c0bd4a22f`；审计期间另有 docs-only 提交 `4384b6e`/`d9ce139`/`f686657`（S4 审计报告与 G4 门记录措辞，属 `docs/audits` 与 `docs/gates`，不在 G2 候选范围），G2 候选文件零改动，绑定不受影响；本人改动只有本报告（`tmp/r71/` 探针交付前已删） |
 | 审计范围 | `git diff 4e751de..4ecff7a`：10 个文件；S4 修复批次（dispatcher 前置失败结算与有效行判定、gate-check 的 G4 非空断言、G4 新回归用例、四份审计报告落盘、full-suite 数字重测、G4.md 证据映射） |
 | G2 共享路径生产改动 | 仅 `src/service/dispatcher.ts`（+43：`effectiveStatus` 有效行读取、`readinessOf` 的 failedPreds 档、`dispatchRun` 结算分支与 outcomes 收集、`[...settled, ...outcomes]` 返回） |
 | G2 核心文件零改动 | `apply-report.ts`、`lease.ts`、`cancel.ts`、`recovery.ts`、`run-close.ts`、`nodes.ts`、`node-state.ts`、`clock-recovery.ts`、`ledger.ts`、`state-machine.ts` 均不在 diff 名单内 |
@@ -139,8 +139,8 @@ P0 = 0，P1 = 0，P2 = 1；必过项 20/20。
 | `npx vitest run tests/integration/workflow-g4.spec.ts` | 1 file，14 passed（含前置失败收口与换行放行两个新场景） |
 | `npx vitest run tests/gate/gate-check.spec.ts` | 1 file，187 passed / 1 skipped（G4 注册用例收窄后全绿） |
 | `node --no-warnings scripts/check-evidence-repro.ts` | 证据复现成立：29 份，每份重跑两遍都与 HEAD 字节一致 |
-| 本人探针 `npx vitest run --root tmp/r71` | 2 例全过。探针一：M-60 换行（旧行 superseded、新行 attempt=2 done）后后置走放行路径，收口错误码 `EVIDENCE_SOURCE_UNAVAILABLE`（非 `RESOLUTION_NOT_AVAILABLE` 结算档），结算行出现在 dispatch outcomes；探针二：非拓扑序声明的 a→b→c 链，a 落 `failed` 后一轮收 b、二轮收 c，run 收口（第 6 节 P3-5） |
-| `node --no-warnings scripts/gate-check.ts` | G1/G2/G3 按预期待重签（证据文件 `docs/gates/evidence/G1/G-14.md` 在各自门记录候选之后改过）；G4 报「门记录正文结论与 GateArtifact 不符：正文=fail，artifact=pass」，属 S4 门记录问题（已在回包转 S4） |
+| 本人探针 `npx vitest run --root tmp/r71` | 2 例全过。探针一：M-60 换行（旧行 superseded、新行 attempt=2 done）后后置走放行路径，收口错误码 `EVIDENCE_SOURCE_UNAVAILABLE`（非 `RESOLUTION_NOT_AVAILABLE` 结算档），结算行出现在 dispatch outcomes；探针二：非拓扑序声明的 a→b→c 链，a 落非成功终态后一轮收 b、二轮收 c，run 收口（第 6 节 P3-5） |
+| `node --no-warnings scripts/gate-check.ts` | G1/G2/G3 按预期待重签（证据文件 `docs/gates/evidence/G1/G-14.md` 在各自门记录候选之后改过）；G4 首测报「门记录正文结论与 GateArtifact 不符」（正文沿用 S4 首轮审计裁决、artifact 记为 pass），审计后 S4 以 docs-only 提交 `f686657` 中性化正文措辞，复测转报「previous_artifact_hash 与前序门记录的 artifact_hash 不符（重签链断了）」，属重签链预期状态 |
 
 ## 9. 退出条件与阶段性判定
 
@@ -160,7 +160,7 @@ P0 = 0，P1 = 0，P2 = 1；必过项 20/20。
 
 ## 10. 下一步建议
 
-1. 本报告提交后按 G1→G2→G3 重签门记录（gate-check 显示证据文件在旧候选之后改过，属预期待重签）；G4 门记录「正文=fail / artifact=pass」的结论不一致请 S4 收口时对齐；
+1. 本报告定稿入库后按 G1→G2→G3→G4 顺序重签门记录（G1–G3 的证据文件在旧候选之后改过，属预期待重签；G4 正文措辞已由 `f686657` 中性化，重签链随 G1–G3 重签闭合）；
 2. 建议结束 S2/G2 的全面收敛审计轮次，转入正常功能开发；S4 面只剩 P3 级收尾（P3-4 断言收紧、P3-5 拓扑序或自唤醒、P3-1/P3-3 顺手对齐），不单开 S2 轮次；
 3. 升级部署时按 r69/r70 建议给 hang_reason 存量标记留一条只清标记的运维出口（P2-1），并抽查 `recovery_unit_fixes` 的 `unclassified_kept` 行。
 
