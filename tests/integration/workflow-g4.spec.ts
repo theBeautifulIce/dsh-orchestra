@@ -487,3 +487,51 @@ describe('G4：nodeIds 必须构成依赖闭包（审计 P1）', () => {
     }
   })
 })
+
+describe('G4：dispatcher 防御面（缺前置可观测失败）', () => {
+  it('账本被改到缺前置时，后置节点收成 failed 并留事件，run 不滞留 running', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { openServiceOrchestra } = await import('../../src/index.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-miss-'))
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-miss', phase: 'S4' })
+    try {
+      const commands = service.orchestra.commands
+      const id = (n: number) => '8b4c5d6e-0000-7aaa-8bbb-000000000' + String(600 + n).slice(-3)
+      commands.createWorkflow!({
+        workflowId: 'wf_miss', name: '发布流程', actor: 'human:me', now: NOW, operationId: id(1),
+        definition: { name: '发布流程', nodes: [node('t', 'trigger'), node('a'), node('b')], edges: [{ from: 't', to: 'a' }, { from: 'a', to: 'b' }] },
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_miss', revision: 1, baseVersion: 0, note: '首次发布', actor: 'human:me', now: NOW, operationId: id(2),
+      } as never)
+      const run = commands.startRun!({
+        taskTitle: '缺前置', workflowId: 'wf_miss', workflowVersion: '1', operationId: id(3), now: NOW,
+      }) as { run_id: string }
+      // 人为把前置节点行删掉：模拟账本被改/闭包被绕过的异常形态
+      service.orchestra.db.raw.prepare("DELETE FROM node_runs WHERE run_id = ? AND node_id = 'a'").run(run.run_id)
+      // 绕过装配层的执行器前置检查，直接打 dispatcher：防御面测的是 dispatchRun 本身
+      const { dispatchRun } = await import('../../src/service/dispatcher.ts')
+      await dispatchRun(
+        { db: service.orchestra.db, secret: 'g4-miss', catalog: service.orchestra.catalog } as never,
+        { runId: run.run_id, now: NOW, nodes: { a: { nodeType: 'agent' }, b: { nodeType: 'agent' } } } as never,
+      )
+      const b = service.orchestra.db.raw.prepare(
+        "SELECT node_run_id, status FROM node_runs WHERE run_id = ? AND node_id = 'b'").get(run.run_id) as
+        { node_run_id: string; status: string }
+      expect(b.status).toBe('failed')
+      const evt = service.orchestra.db.raw.prepare(
+        "SELECT payload FROM node_run_events WHERE node_run_id = ? ORDER BY seq DESC LIMIT 1").get(b.node_run_id) as
+        { payload: string } | undefined
+      expect(evt).toBeTruthy()
+      expect(JSON.parse(evt!.payload)).toMatchObject({ error_code: 'SCHEMA_VERSION_UNSUPPORTED' })
+      // run 不滞留：b 已终态，收口路径能写 run.terminal
+      const runRow = service.orchestra.db.raw.prepare('SELECT status FROM runs WHERE run_id = ?').get(run.run_id) as { status: string }
+      expect(runRow.status).not.toBe('running')
+    } finally {
+      await service.release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
