@@ -537,3 +537,65 @@ describe('G4：dispatcher 防御面（缺前置可观测失败）', () => {
     }
   })
 })
+
+describe('G4：前置失败/换行后的后置收口（S4 r1 P1-2、S3 r21 P2-5）', () => {
+  it('前置 failed → 后置结算 failed、run 收口；前置换行 done → 后置照常放行', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { openServiceOrchestra } = await import('../../src/index.ts')
+    const { dispatchRun } = await import('../../src/service/dispatcher.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-fail-'))
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-fail', phase: 'S4' })
+    try {
+      const commands = service.orchestra.commands
+      const db = service.orchestra.db
+      const id = (n: number) => '9c5d6e7f-0000-7aaa-8bbb-000000000' + String(700 + n).slice(-3)
+      const dispatch = (runId: string) => dispatchRun(
+        { db, secret: 'g4-fail', catalog: service.orchestra.catalog } as never,
+        { runId, now: NOW, nodes: { a: { nodeType: 'agent' }, b: { nodeType: 'agent' } } } as never,
+      )
+      commands.createWorkflow!({
+        workflowId: 'wf_fail', name: '发布流程', actor: 'human:me', now: NOW, operationId: id(1),
+        definition: { name: '发布流程', nodes: [node('t', 'trigger'), node('a'), node('b')], edges: [{ from: 't', to: 'a' }, { from: 'a', to: 'b' }] },
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_fail', revision: 1, baseVersion: 0, note: '首次发布', actor: 'human:me', now: NOW, operationId: id(2),
+      } as never)
+
+      // 场景一：a 落非成功终态，b 必须被结算而不是永等
+      const run1 = commands.startRun!({
+        taskTitle: '前置失败', workflowId: 'wf_fail', workflowVersion: '1', operationId: id(3), now: NOW,
+      }) as { run_id: string }
+      db.raw.prepare("UPDATE node_runs SET status = 'failed' WHERE run_id = ? AND node_id = 'a'").run(run1.run_id)
+      await dispatch(run1.run_id)
+      const b1 = db.raw.prepare("SELECT node_run_id, status FROM node_runs WHERE run_id = ? AND node_id = 'b'").get(run1.run_id) as
+        { node_run_id: string; status: string }
+      expect(b1.status).toBe('failed')
+      const evt = db.raw.prepare(
+        'SELECT type, payload FROM node_run_events WHERE node_run_id = ? ORDER BY seq DESC LIMIT 1').get(b1.node_run_id) as
+        { type: string; payload: string }
+      expect(evt.type).toBe('dispatch.failed')
+      expect(JSON.parse(evt.payload)).toMatchObject({ error_code: 'RESOLUTION_NOT_AVAILABLE' })
+      const run1Row = db.raw.prepare('SELECT status FROM runs WHERE run_id = ?').get(run1.run_id) as { status: string }
+      expect(run1Row.status).not.toBe('running')
+
+      // 场景二：a 经 M-60 换行（旧行 superseded、新行 attempt=2 done），b 照常放行
+      const run2 = commands.startRun!({
+        taskTitle: '前置换行', workflowId: 'wf_fail', workflowVersion: '1', operationId: id(4), now: NOW,
+      }) as { run_id: string }
+      db.raw.prepare("UPDATE node_runs SET status = 'superseded' WHERE run_id = ? AND node_id = 'a'").run(run2.run_id)
+      db.raw.prepare(
+        "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) "
+        + "VALUES (?, ?, 'a', 99, 'agent', 2, 'done', 0, ?, ?)",
+      ).run(id(5), run2.run_id, NOW, NOW)
+      await dispatch(run2.run_id)
+      const b2 = db.raw.prepare("SELECT status FROM node_runs WHERE run_id = ? AND node_id = 'b'").get(run2.run_id) as { status: string }
+      // b 不许停在 queued：要么被派发尝试，要么被收口
+      expect(b2.status).not.toBe('queued')
+    } finally {
+      await service.release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

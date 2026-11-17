@@ -104,16 +104,36 @@ export type DispatchDeps = {
 // 前置节点压根不在 run 里 = 配置错误（nodeIds 闭包被绕过/账本被改），必须可观测地失败，
 // 不能无限期静默跳过（审计 P1 防御面）。
 const SUCCESS_STATUS = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
-type Readiness = { ready: true } | { ready: false; missingPreds: string[] } | { ready: false; waitingPreds: string[] }
+// 非成功终态：前置停在这些状态上时后置永远等不到，必须结算而不是长等（S4 r1 P1-2 / S3 r21 P2-5a）
+const BLOCKED_TERMINAL = new Set(['failed', 'failed_with_unverified', 'timeout', 'cancelled', 'superseded', 'orphaned', 'abandoned_unverified', 'indeterminate_side_effect'])
+type Readiness =
+  | { ready: true }
+  | { ready: false; missingPreds: string[] }
+  | { ready: false; failedPreds: string[] }
+  | { ready: false; waitingPreds: string[] }
+
+// 前置按「有效行」判定：M-60 重试会换行（旧行 superseded、新行 attempt+1），
+// 只看第一行会把已 done 的新行当成没跑（S3 r21 P2-5b）
+function effectiveStatus(db: DispatchDeps['db'], runId: string, nodeId: string): string | null {
+  const row = db.raw.prepare(
+    'SELECT status FROM node_runs WHERE run_id = ? AND node_id = ? ORDER BY attempt DESC, seq DESC LIMIT 1',
+  ).get(runId, nodeId) as { status: string } | undefined
+  return row?.status ?? null
+}
+
 function readinessOf(db: DispatchDeps['db'], runId: string, nodeId: string, preds: ReadonlyMap<string, string[]>): Readiness {
   const missing: string[] = []
+  const failed: string[] = []
   const waiting: string[] = []
   for (const pred of preds.get(nodeId) ?? []) {
-    const row = db.raw.prepare('SELECT status FROM node_runs WHERE run_id = ? AND node_id = ?').get(runId, pred) as { status: string } | undefined
-    if (!row) missing.push(pred)
-    else if (!SUCCESS_STATUS.has(row.status)) waiting.push(pred)
+    const status = effectiveStatus(db, runId, pred)
+    if (status === null) missing.push(pred)
+    else if (SUCCESS_STATUS.has(status)) continue
+    else if (BLOCKED_TERMINAL.has(status)) failed.push(pred)
+    else waiting.push(pred)
   }
   if (missing.length > 0) return { ready: false, missingPreds: missing }
+  if (failed.length > 0) return { ready: false, failedPreds: failed }
   if (waiting.length > 0) return { ready: false, waitingPreds: waiting }
   return { ready: true }
 }
@@ -142,15 +162,24 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
     preds.set(edge.to, list)
   }
   const rows: typeof all = []
+  const settled: DispatchOutcome[] = []
   for (const row of all) {
     const readiness = readinessOf(deps.db, p.runId, row.node_id, preds)
     if (readiness.ready) {
       rows.push(row)
       continue
     }
+    // 防御面与失败传播：两种都不能让节点永滞 queued，收口结果要进 outcomes（调用方看得见）
     if ('missingPreds' in readiness) {
-      // 防御面：前置节点不在 run 里，收成失败留事件，别让 run 永远卡在 queued
-      failQueuedNode(deps, p, row, '前置节点不在本 run 里：' + readiness.missingPreds.join(','), 'SCHEMA_VERSION_UNSUPPORTED')
+      settled.push(outcomeForSettlement(
+        failQueuedNode(deps, p, row, '前置节点不在本 run 里：' + readiness.missingPreds.join(','), 'SCHEMA_VERSION_UNSUPPORTED'),
+        row, '前置节点不在本 run 里', 'SCHEMA_VERSION_UNSUPPORTED' as DispatchOutcomeErrorCode,
+      ))
+    } else if ('failedPreds' in readiness) {
+      settled.push(outcomeForSettlement(
+        failQueuedNode(deps, p, row, '前置节点未成功完成：' + readiness.failedPreds.join(','), 'RESOLUTION_NOT_AVAILABLE'),
+        row, '前置节点未成功完成', 'RESOLUTION_NOT_AVAILABLE' as DispatchOutcomeErrorCode,
+      ))
     }
   }
   // 装配层给了执行函数，它已经带并发闸：同批节点可以一起排，谁先拿到名额谁先跑。
@@ -164,7 +193,7 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
       })()
   // 这一轮跑完后收口 run：所有子节点都已终态才写，未满足条件保持原状。
   inTx(deps.db, (tx) => { closeRun(tx, deps.secret, p.runId, p.now) })
-  return outcomes
+  return [...settled, ...outcomes]
 }
 
 async function dispatchOne(
