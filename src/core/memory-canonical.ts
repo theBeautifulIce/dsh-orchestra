@@ -117,3 +117,37 @@ export function assertProposal(items: readonly MemoryItemInput[]): void {
     invalid(item.ttl_days !== null && (!Number.isInteger(item.ttl_days) || item.ttl_days < 1), 'ttl_days', 'ttl_days 必须是正整数')
   }
 }
+
+export type MemoryTargetResolution = {
+  /** One candidate per target; targetless creates are retained independently. */
+  items: MemoryItemInput[]
+  /** Same-target, same-content proposals excluded from evaluation and persisted as skipped. */
+  skippedDuplicates: MemoryItemInput[]
+}
+
+/** Deterministic pre-evaluation handling for proposals that name an existing target. */
+export function resolveTargetConflicts(items: readonly MemoryItemInput[]): MemoryTargetResolution {
+  const targetFirst = new Map<string, MemoryItemInput>()
+  const resolved: MemoryItemInput[] = []
+  const skippedDuplicates: MemoryItemInput[] = []
+  for (const item of items) {
+    if (item.target_id === null) {
+      resolved.push(item)
+      continue
+    }
+    const first = targetFirst.get(item.target_id)
+    if (!first) {
+      targetFirst.set(item.target_id, item)
+      resolved.push(item)
+      continue
+    }
+    if (first.content !== item.content) {
+      throw new OrchError('MEMORY_BATCH_CONFLICT', '同一批次里同一目标对应了不同内容', {
+        target_id: item.target_id,
+        client_keys: [first.client_key, item.client_key],
+      })
+    }
+    skippedDuplicates.push(item)
+  }
+  return { items: resolved, skippedDuplicates }
+}
