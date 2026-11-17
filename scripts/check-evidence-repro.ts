@@ -27,6 +27,11 @@ const G3_DIGEST_CASES: { name: string; source: 'G1' | 'G2' }[] = [
   { name: 'G-16', source: 'G1' },
 ]
 
+// G4 注入：生成器在 G1 子目录，证据正文在 G4 目录，用同一套摘要行绑定（S4 门禁）
+const G4_DIGEST_CASES: { name: string; source: 'G1' | 'G2' }[] = [
+  { name: 'G-10', source: 'G1' },
+]
+
 // G3 的另外三份注入证据不是副本，直接引用 G1/G2 的文件（见 docs/gates/G3.md 的 evidenceMap）。
 // 这里做静态一致性：引用的文件必须真的在逐字节复现清单里，否则 G3 会借一份没人校验的文件过关。
 const G3_REFERENCED: { gate: 'G1' | 'G2'; name: string }[] = [
@@ -78,6 +83,21 @@ try {
     }
   }
 
+  for (const item of G4_DIGEST_CASES) {
+    runCase(item.name, first)
+    runCase(item.name, second)
+    const file = 'docs/gates/evidence/G4/' + item.name + '.md'
+    const committed = normalize(execFileSync('git', ['show', 'HEAD:' + file], { cwd: ROOT, encoding: 'utf8' }))
+    const a = stabilize(readFileSync(join(first, item.source, item.name + '.md'), 'utf8'))
+    const b = stabilize(readFileSync(join(second, item.source, item.name + '.md'), 'utf8'))
+    const digest = createHash('sha256').update(a).digest('hex')
+    const pinned = DIGEST_RE.exec(committed)?.[1] ?? null
+    checked += 1
+    if (a !== b) problems.push(file + '：同一次生成两遍字节不同，生成器不确定')
+    else if (pinned === null) problems.push(file + '：缺少 <!-- repro-sha256: ... --> 摘要行，G4 证据没有进自动复现')
+    else if (pinned !== digest) problems.push(file + '：注入结果摘要与 HEAD 记录不一致（当前 ' + digest.slice(0, 12) + '…），证据已漂移')
+  }
+
   for (const item of G3_DIGEST_CASES) {
     runCase(item.name, first)
     runCase(item.name, second)
@@ -104,5 +124,5 @@ if (problems.length > 0) {
   for (const p of problems) console.error(' - ' + p)
   process.exitCode = 1
 } else {
-  console.log('证据复现成立：' + String(checked) + ' 份，每份重跑两遍都与 HEAD 字节一致（含 G3 注入摘要）')
+  console.log('证据复现成立：' + String(checked) + ' 份，每份重跑两遍都与 HEAD 字节一致（含 G3/G4 注入摘要）')
 }
