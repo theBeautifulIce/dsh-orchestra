@@ -116,7 +116,7 @@
 
 ### S5-E：记忆入口、权限闸与幂等启动（Task 11–12）
 
-**状态：** Task 11–12 部分实现。直接 Agent 写工具必须继续被拒绝。
+**状态：** 完成（`266ca72`）。直接 Agent 写工具继续被拒绝。已落：事务内建运行入口（`insertRunInTx` / `insertNodeRunsInTx`）、`memory_start_run`（request_key + operation_id 幂等、`MEMORY_RUN_ACTIVE` 冲突、`MEMORY_SOURCE_RUN_NOT_SETTLED` 前置）、迁移 032（未终结批次部分唯一索引 + 源运行收口触发器）、三面写工具闸。**余项：** 路由 `POST /memory/runs/start` 未接线；task_session 面闸未接模板加载；记忆节点 `node_type` 命名与拓扑序待 S5-F 统一。
 
 **权威任务：** S5 实施计划 Task 11/12；启动事务必须检查 `src/service/runs.ts:createRun()` 与 `src/infra/db/tx.ts`。
 
@@ -192,7 +192,7 @@
 
 ## 4. 下一位智能体领取的唯一第一项
 
-S5-A 已完成（155b37a9f82c69ee6876c473a1b82f095ea401e0），S5-B 已完成（`0f77074` + `51c9cce`）。本轮并行推进 S5-C（决策与待核实页面/命令，依赖 S5-A 契约）与 S5-E（`memory_start_run` 与事务内 Run 创建入口）；其后下一包是 **S5-D**（工作流管理屏 Task 10）。结算写入口仍属 S5-C，实现必须逐条对照 S5-A 附录的判定矩阵，不得按 `status='resolved'` 放行。
+S5-A 已完成（155b37a9f82c69ee6876c473a1b82f095ea401e0），S5-B 已完成（`0f77074` + `51c9cce`），S5-E 已完成（`266ca72`）。本轮并行推进 S5-C（决策与待核实页面/命令，依赖 S5-A 契约）与 S5-D（工作流管理屏 Task 10），并已切出 S5-Fa（固定记忆图声明表）与 S5-Ga（评估端口纯逻辑层）两个纯新增切片；其后下一包是 **S5-F**（记忆固定图运行时）与 **S5-G**（评估与审批卡），再后是 **S5-H**（受控写入 apply / inspect / 对账）、S5-I/S5-J（面板与视觉）、S5-K（独立测试审计）。结算写入口仍属 S5-C，实现必须逐条对照 S5-A 附录的判定矩阵，不得按 `status='resolved'` 放行。
 
 ## 5. 完成状态更新模板
 
