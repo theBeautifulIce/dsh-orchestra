@@ -19,10 +19,10 @@ export async function submitThenReceipt<T = unknown, Receipt = unknown>(
       const receipt = await unwrap<Receipt>(await getOperation(operationId))
       return { replayed: true, receipt: receipt.data }
     } catch (receiptError) {
-      if (receiptError instanceof ApiError && ['NOT_FOUND', 'SERVICE_UNAVAILABLE', 'OPERATION_TIMEOUT'].includes(receiptError.code)) {
+      if (!(receiptError instanceof ApiError) || ['NOT_FOUND', 'SERVICE_UNAVAILABLE', 'OPERATION_TIMEOUT', 'OPERATION_OUTCOME_UNKNOWN'].includes(receiptError.code)) {
         throw new ApiError('OPERATION_OUTCOME_UNKNOWN', '操作结果暂不可确认；请稍后查询回执，不要重新提交', true, {
           operation_id: operationId,
-          receipt_error: receiptError.code,
+          receipt_error: receiptError instanceof ApiError ? receiptError.code : 'NETWORK_ERROR',
         })
       }
       throw receiptError

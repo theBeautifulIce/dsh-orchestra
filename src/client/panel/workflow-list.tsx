@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { WorkflowListItem } from '../api/types.ts'
 import { COPY } from './copy.ts'
@@ -21,6 +21,16 @@ export function WorkflowListScreen({ api, onSelectWorkflow, reloadVersion = 0, o
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
+  const lastReloadVersion = useRef(reloadVersion)
+
+  useEffect(() => {
+    if (lastReloadVersion.current === reloadVersion) return
+    lastReloadVersion.current = reloadVersion
+    setItems([])
+    setCursor(undefined)
+    setNextCursor(null)
+    setRetry((value) => value + 1)
+  }, [reloadVersion])
 
   useEffect(() => {
     let current = true
@@ -37,7 +47,7 @@ export function WorkflowListScreen({ api, onSelectWorkflow, reloadVersion = 0, o
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [api, cursor, retry, reloadVersion, onSnapshot])
+  }, [api, cursor, retry, onSnapshot])
 
   function refresh() { setCursor(undefined); setRetry((value) => value + 1) }
   return <section aria-labelledby="workflow-list-title" style={{ display: 'grid', gap: 18 }}>
@@ -57,7 +67,7 @@ export function WorkflowListScreen({ api, onSelectWorkflow, reloadVersion = 0, o
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 12 }}>
         <div>
           <h2 style={cardTitleStyle}>{workflow.name}</h2>
-          <p style={mutedStyle}>{workflow.scope === 'task_local' ? '任务专属流程' : workflow.scope === 'shared' ? '共享流程' : <UnknownState value={workflow.scope} />}</p>
+          <p style={mutedStyle}>{workflow.scope === 'task_local' ? '任务专属流程' : workflow.scope === 'reusable' ? '可复用流程' : <UnknownState value={workflow.scope} />}</p>
         </div>
         <button type="button" onClick={() => onSelectWorkflow(workflow.workflow_id)} style={buttonStyle}>查看流程</button>
       </div>

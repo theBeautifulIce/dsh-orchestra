@@ -6,7 +6,7 @@
 
 ### 当前基线
 
-- 分支 `main`，本次工作从代码基线 `1fcc31b feat(memory): resolve proposal target collisions` 开始。本次交接提交包含 executor 运行时权限加固和本快照；提交号以 `git log --oneline -1` 为准。
+- 分支 `main`，本轮从 `e12eb7a3070a413ec938e8af1728ff081087bdee` 开始；本轮修复尚未提交。提交后以 `git log --oneline -1` 为准。
 - S1–S4 已完成，G1–G4 已签署。当前阶段是 S5，G5 尚未交付。
 - 主计划：[S5 面板与记忆实施计划](docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md)；产品路线：[2026-11-17 产品路线](docs/superpowers/plans/2026-11-17-product-roadmap.md)。
 
@@ -15,9 +15,12 @@
 - Task 1–2：查询基元、任务与运行读模型已有实现。
 - Task 3–8：部分实现；事件/证据查询、控制面、宿主连接、六屏整合和视觉走查仍有缺口。
 - Task 9：「等你决定」「待核实」已接真实查询、分页、刷新和 SSE 快照联动；决策策略字段、完整待核实详情、命令和测试未完成。
-- Task 10：流程列表及只读检查页已接真实 API，活跃任务数来自查询投影；草稿编辑、保存/发布命令和测试未完成。
+- Task 10：流程列表及只读检查页已接真实 API。活跃任务计数现从全部活动 Run 去重 task_id，包含子流程；草稿编辑、保存/发布命令和面板刷新测试未完成。
 - Task 11：新增 `030_memory.sql` 四表、唯一键、状态/结果约束、批准快照保护与批准后条目冻结；固定图、`MemoryBridgeRegistry` 已建立；工作流 agent allow 在发布/加载阶段、executor 的运行时 allow 在分派前拒绝直接记忆写工具。真实端口、任务会话模板权限闸门和数据库用例未完成。
-- Task 12：`src/core/memory-canonical.ts` 有 canonical 白名单、tag 码点排序去重、question 保序、哈希、基础尺寸/字段校验和同目标冲突处理。`memory_start_run`、重复项落库和对应测试未完成。
+- Task 12：`src/core/memory-canonical.ts` 按 canonical 完整提议对象限制单条 64 KiB 与整批 256 KiB；另限制 tag 256 B、question 4 KiB、key/target_id 各 256 B；同目标只有业务字段一致才作为重复项跳过，空标签/空问题元素拒绝（空数组允许）。本轮新增边界测试。`memory_start_run` 与重复项落库仍未完成。
+- 最新审计修复：工作流统计覆盖子 Run；任务/流程收到 SSE reloadVersion 后清空旧分页并从第一页重查；reusable scope 文案修正；命令 POST 失败后若回执查询发生网络异常，统一返回 `OPERATION_OUTCOME_UNKNOWN`；迁移 031 增加 resolution 的同 node/run/attempt 与完成状态关联约束。
+- 副作用核实仍不能上线：迁移 031 的证据触发器只验证工具执行记录作用域及 finished_at，SQLite 触发器无法验证带密钥的 node_run 事件链；决定来源也只要求已收口，尚未定义哪些决定结论足以证明副作用事实。由于目前没有 `unverified_resolutions` 写命令，下一步应先明确结算协议，再实现同事务服务层 evidence 链验证与决定结论策略，最后补故障测试。不得将迁移约束描述为完整证据验证。
+- 本轮验证：`pnpm typecheck` 通过；定向 Vitest 3 个文件 / 8 项通过；`git diff --check` 通过。未运行全量测试或构建，G5 不可签。
 - Task 13–17 未开始；目前不能进入 G5 验收。
 
 ### 最近提交
@@ -28,14 +31,14 @@
 - `6736567` 记忆账本迁移、固定图、独立端口注册表和 agent 工具禁令基础。
 - `ea61a72` canonical 提议字段与哈希。
 - `1fcc31b` 同目标提议冲突/重复处理。
-- 本交接提交：`executor/session.ts` 在解析工具 allow 时拒绝 `memory_write` / `memory_update`，并同步本快照；`pnpm typecheck`、`git diff --check` 通过。
+- 当前基线提交：`e12eb7a`（S5 进度快照和直接记忆写工具限制）。本轮工作尚未提交。
 
 ### 关键前置与下一步
 
 1. 记忆固定图需要 `tool`、`branch`、`approval`、`trigger` 等节点。`WorkflowDoc` 可描述其中部分类型，但运行时 `WorkflowDefinition` / `WorkflowNodeDef` 与 dispatcher 尚不能执行这条图；先补节点加载、路由、工具调用、审批和收口契约，固定图常量不代表已有可执行闭环。
 2. `src/service/runs.ts:createRun()` 内部自行调用 `withTx()`。`memory_start_run` 需要将 memory Run、节点、`memory_batches` 和 `memory_run_requests` 同事务提交；先抽取事务内 Run 创建入口，不能先起 Run 再另开事务插幂等映射。
 3. 随后实现 `memory_start_run`：源 Run 仅接受 `succeeded`；同 `(source_run_id, request_key)` 幂等；换 key 遇到活跃记忆 Run 返回 `MEMORY_RUN_ACTIVE`。之后将重复项以 `skipped` 持久化。
-4. 最近一次 `pnpm typecheck` 与 `git diff --check` 在 `1fcc31b` 前的记忆代码状态通过；记忆迁移和 S5 页面测试未运行。补齐 S5 计划要求的测试与运行时验证后再推进阶段门。
+4. 最近一次 `pnpm typecheck`、定向 Vitest（3 文件 / 8 项）与 `git diff --check` 在本轮工作区通过。尚未运行全量测试或构建；提交本轮切片后继续处理副作用核实协议与记忆执行闭环。
 
 ### 接手步骤
 

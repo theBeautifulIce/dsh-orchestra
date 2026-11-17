@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { TaskSummary } from '../api/types.ts'
 import { COPY } from './copy.ts'
@@ -29,6 +29,16 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [reload, setReload] = useState(0)
+  const lastReloadVersion = useRef(reloadVersion)
+
+  useEffect(() => {
+    if (lastReloadVersion.current === reloadVersion) return
+    lastReloadVersion.current = reloadVersion
+    setItems([])
+    setCursor(undefined)
+    setNextCursor(null)
+    setReload((value) => value + 1)
+  }, [reloadVersion])
 
   useEffect(() => {
     let current = true
@@ -46,7 +56,7 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [api, cursor, query, reload, reloadVersion, onSnapshot])
+  }, [api, cursor, query, reload, onSnapshot])
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()

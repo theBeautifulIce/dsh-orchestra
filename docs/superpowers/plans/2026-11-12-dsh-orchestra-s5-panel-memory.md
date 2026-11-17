@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 12.3.4 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · react 18.3.1 · react-dom 18.3.1 · jsdom 29.1.1 · node:sqlite（内置 DatabaseSync）· DSH bundle 插件
 
-**实施进度（2026-11-17，工作区快照；不代表任务验收或阶段关闭）：** 17 项中，Task 1–2 的查询基元和任务/运行读模型已有实现；Task 3–8 部分实现，仍有明确查询、控制面、宿主连接、六屏整合和视觉走查缺口。Task 9 已接入「等你决定」和「待核实」两屏的真实只读列表、分页、刷新、加载/错误/空状态及 SSE 快照联动；策略字段与待核实详情尚未进入查询模型，相关命令和页面测试未完成，故 Task 9 仍为部分实现。Task 10 已接入真实流程列表和只读流程检查页及活跃任务数；草稿编辑、保存/发布命令和页面测试未完成，故 Task 10 仍为部分实现。Task 11 已建立四张记忆账本表、批准快照约束、固定图常量、独立内存端口注册表，并在工作流 agent 白名单的发布与加载路径拒绝直接记忆写工具；executor/任务会话模板两面、实际端口实现和数据库用例仍未完成，故 Task 11 为部分实现。Task 12 已落 canonical 原像、标签码点排序/去重、proposal/content 哈希、基础尺寸/字段校验及同目标冲突判定；memory_start_run 幂等和测试未完成，故 Task 12 为部分实现。Task 13–17 尚未开始，G5 尚未交付。针对最新审计的 P2-1 至 P2-4 已完成代码修正，测试保护仍待补齐。本轮执行 `pnpm typecheck` 与差异检查，不运行测试套件。
+**实施进度（2026-11-17，工作区快照；不代表任务验收或阶段关闭）：** 17 项中，Task 1–2 的查询基元和任务/运行读模型已有实现；Task 3–8 部分实现，仍有明确查询、控制面、宿主连接、六屏整合和视觉走查缺口。Task 9 已接入「等你决定」和「待核实」两屏的真实只读列表、分页、刷新、加载/错误/空状态及 SSE 快照联动；策略字段与待核实详情尚未进入查询模型，相关命令和页面测试未完成，故 Task 9 仍为部分实现。Task 10 已接入真实流程列表和只读流程检查页；活动任务数查询改为从所有活动 Run 按 task_id 去重，任务/流程 SSE 失效刷新会清空旧分页并从第一页重查，可复用 scope 文案已修正；草稿编辑、保存/发布命令和面板测试未完成，故 Task 10 仍为部分实现。Task 11 已建立四张记忆账本表、批准快照约束、固定图常量、独立内存端口注册表，并在工作流 agent 白名单的发布与加载路径拒绝直接记忆写工具；executor/任务会话模板两面、实际端口实现和数据库用例仍未完成，故 Task 11 为部分实现。Task 12 已落 canonical 原像、标签码点排序/去重、proposal/content 哈希；提议大小覆盖完整 canonical item 与整批 JSON，字段限制为 tag 256 B、question 4 KiB、key/target_id 各 256 B；空标签/空问题元素拒绝（空数组允许），同目标冲突按 client_key 之外的完整 canonical 字段判断；`memory_start_run` 幂等与落库仍未完成。迁移 031 加强副作用结算来源的数据库作用域校验，但事件链验证和“什么决定结果足以结算”的写入策略仍缺失；目前没有对应结算命令，写入能力不得上线。Task 13–17 尚未开始，G5 尚未交付。本轮 `pnpm typecheck`、3 个定向测试文件（8 项）和 `git diff --check` 通过；未运行全量测试或构建。
 
 ---
 
@@ -1728,7 +1728,7 @@ git commit -m "feat(memory): 建记忆四表与三端口固定图"
 
 ### Task 12：记忆发起、幂等与 canonical 哈希
 
-**当前实现状态（2026-11-17）：** canonical 白名单原像、按 Unicode 码点排序并去重的 tags、保序 questions、按 client_key 排序的 proposal hash、条数/字节/字段限制校验和同目标冲突处理已落在 `src/core/memory-canonical.ts`。同目标异内容会拒绝进入评估；同目标同内容会分离出待持久化为 skipped 的重复项。`memory_start_run` 的事务幂等、重复项落库及对应测试仍待实现，Task 12 仍为部分实现。
+**当前实现状态（2026-11-17）：** canonical 白名单原像、按 Unicode 码点排序并去重的 tags、保序 questions、按 client_key 排序的 proposal hash、条数/完整对象字节/字段限制校验和同目标冲突处理已落在 `src/core/memory-canonical.ts`。单条 canonical item 上限 64 KiB，整批 canonical proposal 上限 256 KiB；字段另限 tag 256 B、question 4 KiB、key 与 target_id 各 256 B。tags/questions 可为空数组，但数组内空白字符串拒绝。同目标只有除 client_key 外的完整 canonical 业务字段一致才分离为待持久化的 skipped 重复项，任一业务字段不同均报冲突。边界测试已覆盖。`memory_start_run` 的事务幂等与重复项落库仍待实现，Task 12 仍为部分实现。
 
 **目标：** 交出 `memory_start_run` 的幂等发起、提议条目的边界校验、canonical 原像与两个哈希（规格 9.4 行 704-711、9.5 行 712-724、9.8 行 751-757）。
 

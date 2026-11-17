@@ -29,7 +29,11 @@ export const MEMORY_LIMITS = {
   reasonMin: 1,
   reasonMax: 500,
   questions: 4,
+  questionBytes: 4 * 1024,
   tags: 12,
+  tagBytes: 256,
+  keyBytes: 256,
+  targetIdBytes: 256,
 } as const
 
 function compareCodePoints(left: string, right: string): number {
@@ -80,16 +84,15 @@ export function assertProposalSize(items: readonly MemoryItemInput[]): void {
   if (items.length > MEMORY_LIMITS.items) {
     throw new OrchError('MEMORY_BATCH_TOO_LARGE', `一次最多整理 ${MEMORY_LIMITS.items} 条`, { limit: MEMORY_LIMITS.items })
   }
-  let totalBytes = 0
   for (const item of items) {
-    const bytes = Buffer.byteLength(item.content, 'utf8')
+    const bytes = Buffer.byteLength(canonicalJson(canonicalItem(item)), 'utf8')
     if (bytes > MEMORY_LIMITS.itemBytes) {
-      throw new OrchError('MEMORY_BATCH_TOO_LARGE', '有一条内容太长', { limit_bytes: MEMORY_LIMITS.itemBytes })
+      throw new OrchError('MEMORY_BATCH_TOO_LARGE', '有一条记忆提议太大', { limit_bytes: MEMORY_LIMITS.itemBytes })
     }
-    totalBytes += bytes
   }
+  const totalBytes = Buffer.byteLength(canonicalJson(canonicalProposal(items)), 'utf8')
   if (totalBytes > MEMORY_LIMITS.batchBytes) {
-    throw new OrchError('MEMORY_BATCH_TOO_LARGE', '这一批内容加起来太长', { limit_bytes: MEMORY_LIMITS.batchBytes })
+    throw new OrchError('MEMORY_BATCH_TOO_LARGE', '这一批记忆提议太大', { limit_bytes: MEMORY_LIMITS.batchBytes })
   }
 }
 
@@ -113,6 +116,12 @@ export function assertProposal(items: readonly MemoryItemInput[]): void {
     invalid(item.tags.length > MEMORY_LIMITS.tags, 'tags', '标签最多 12 个')
     invalid(!item.tags.every((tag) => typeof tag === 'string'), 'tags', '标签必须是字符串')
     invalid(!item.questions.every((question) => typeof question === 'string'), 'questions', '问题必须是字符串')
+    invalid(item.tags.some((tag) => !tag.trim()), 'tags', '标签不能为空')
+    invalid(item.questions.some((question) => !question.trim()), 'questions', '问题不能为空')
+    invalid(item.tags.some((tag) => Buffer.byteLength(tag, 'utf8') > MEMORY_LIMITS.tagBytes), 'tags', '单个标签不能超过 256 字节')
+    invalid(item.questions.some((question) => Buffer.byteLength(question, 'utf8') > MEMORY_LIMITS.questionBytes), 'questions', '单个问题不能超过 4 KiB')
+    invalid(item.key !== null && Buffer.byteLength(item.key, 'utf8') > MEMORY_LIMITS.keyBytes, 'key', 'key 不能超过 256 字节')
+    invalid(item.target_id !== null && Buffer.byteLength(item.target_id, 'utf8') > MEMORY_LIMITS.targetIdBytes, 'target_id', 'target_id 不能超过 256 字节')
     invalid(item.importance !== null && (!Number.isInteger(item.importance) || item.importance < 1 || item.importance > 10), 'importance', '重要度必须是 1–10 的整数')
     invalid(item.ttl_days !== null && (!Number.isInteger(item.ttl_days) || item.ttl_days < 1), 'ttl_days', 'ttl_days 必须是正整数')
   }
@@ -121,7 +130,7 @@ export function assertProposal(items: readonly MemoryItemInput[]): void {
 export type MemoryTargetResolution = {
   /** One candidate per target; targetless creates are retained independently. */
   items: MemoryItemInput[]
-  /** Same-target, same-content proposals excluded from evaluation and persisted as skipped. */
+  /** Same-target, same-canonical-proposal items excluded from evaluation and persisted as skipped. */
   skippedDuplicates: MemoryItemInput[]
 }
 
@@ -141,8 +150,12 @@ export function resolveTargetConflicts(items: readonly MemoryItemInput[]): Memor
       resolved.push(item)
       continue
     }
-    if (first.content !== item.content) {
-      throw new OrchError('MEMORY_BATCH_CONFLICT', '同一批次里同一目标对应了不同内容', {
+    const firstCanonical = canonicalItem(first)
+    const itemCanonical = canonicalItem(item)
+    delete firstCanonical.client_key
+    delete itemCanonical.client_key
+    if (canonicalJson(firstCanonical) !== canonicalJson(itemCanonical)) {
+      throw new OrchError('MEMORY_BATCH_CONFLICT', '同一批次里同一目标对应了不同提议', {
         target_id: item.target_id,
         client_keys: [first.client_key, item.client_key],
       })

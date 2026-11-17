@@ -104,7 +104,7 @@ const SUMMARY_SELECT = `SELECT w.workflow_id, w.name, w.status, w.scope, w.owner
   d.updated_at AS draft_updated_at, d.updated_by AS draft_updated_by,
   v.doc_json AS current_doc_json, v.definition_json AS current_runtime_json,
   v.created_at AS current_published_at,
-  (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.run_id = t.current_run_id
+  (SELECT COUNT(DISTINCT r.task_id) FROM runs r
     WHERE r.workflow_id = w.workflow_id
       AND r.status NOT IN ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) AS active_task_count
 FROM workflows w
