@@ -3,6 +3,8 @@ import type { ApiClient } from '../api/client.ts'
 import { createResourcesApi } from '../api/resources.ts'
 import type { EventStream, StreamStatus } from '../api/sse.ts'
 import { PanelShell, type PanelRoute } from './shell.tsx'
+import { DecisionInbox } from './decision-inbox.tsx'
+import { UnverifiedEffects } from './unverified-effects.tsx'
 import { TaskDetailScreen } from './task-detail-screen.tsx'
 import { TaskListScreen } from './tasks-screen.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
@@ -52,6 +54,10 @@ export function PanelApp(props: PanelAppProps) {
     screen = taskId
       ? <TaskDetailScreen api={api} taskId={taskId} onBack={() => setTaskId(null)} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
       : <TaskListScreen api={api} onSelectTask={setTaskId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+  } else if (route === 'decisions') {
+    screen = <DecisionInbox api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+  } else if (route === 'effects') {
+    screen = <UnverifiedEffects api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else {
     screen = props.additionalScreens?.[route] ?? <div role="status" style={pendingStyle}>此页面尚未接入真实数据。</div>
   }
