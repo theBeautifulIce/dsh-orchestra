@@ -1,7 +1,7 @@
 // src/service/runs.ts —— 生产路径建任务、run 与节点（审计 F-01：起节点不许靠手写 INSERT）
 import { OrchError } from '../core/errors.ts'
 import { nodeRunId as newNodeRunId, runId as newRunId, taskId as newTaskId } from '../core/ids.ts'
-import type { Db } from '../infra/sqlite/driver.ts'
+import type { Db, Tx } from '../infra/sqlite/driver.ts'
 import { withTx } from '../infra/sqlite/driver.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from './workflows.ts'
@@ -171,20 +171,20 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
         [taskIdValue, p.taskTitle, workflowId, version, 'running', autonomy, JSON.stringify(escalations), p.now, p.now],
       )
     }
-    tx.run(
-      'INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, started_at, created_at, updated_at, root_run_id, subworkflow_depth) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0)',
-      [runIdValue, taskIdValue, workflowId, version, definitionHash, 'running', p.now, p.now, p.now, runIdValue],
-    )
-    picked.forEach((n, idx) => {
-      const id = newNodeRunId()
-      const seq = idx + 1
-      tx.run(
-        'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation, rearm_generation, created_at, updated_at) '
-        + 'VALUES (?, ?, ?, ?, ?, 1, ?, 0, 0, 0, ?, ?)',
-        [id, runIdValue, n.node_id, seq, n.type, 'queued', p.now, p.now],
-      )
-      nodes.push({ node_run_id: id, node_id: n.node_id, seq, node_type: n.type, status: 'queued' })
+    insertRunInTx(tx, {
+      run_id: runIdValue,
+      task_id: taskIdValue,
+      workflow_id: workflowId,
+      workflow_version: version,
+      workflow_definition_hash: definitionHash,
+      status: 'running',
+      root_run_id: runIdValue,
+      subworkflow_depth: 0,
+      started_at: p.now,
+      created_at: p.now,
+      updated_at: p.now,
     })
+    nodes.push(...insertNodeRunsInTx(tx, runIdValue, picked.map((n) => ({ node_id: n.node_id, node_type: n.type })), p.now))
     appendEvent(tx, {
       type: 'task.created',
       runId: runIdValue,
@@ -207,3 +207,49 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
   })
   return { task_id: taskIdValue, run_id: runIdValue, workflow_id: workflowId, workflow_version: version, autonomy, nodes }
 }
+
+export type RunRowInput = {
+  run_id: string
+  task_id: string
+  workflow_id: string | null
+  workflow_version: string | null
+  workflow_definition_hash: string | null
+  status: string
+  root_run_id?: string | null
+  subworkflow_depth?: number
+  started_at: string
+  created_at: string
+  updated_at: string
+}
+
+/** 事务内建 run 行：createRun 与记忆发起共用，保证 run 与业务写入同一笔事务提交 */
+export function insertRunInTx(tx: Tx, row: RunRowInput): void {
+  const rootRunId = row.root_run_id ?? row.run_id
+  const depth = row.subworkflow_depth ?? 0
+  tx.run(
+    'INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, started_at, created_at, updated_at, root_run_id, subworkflow_depth) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)',
+    [
+      row.run_id, row.task_id, row.workflow_id, row.workflow_version, row.workflow_definition_hash,
+      row.status, row.started_at, row.created_at, row.updated_at, rootRunId, depth,
+    ],
+  )
+}
+
+export type NodeRunInput = { node_id: string; node_type: string }
+
+/** 事务内建 node_run 行：seq 按给定顺序从 1 开始 */
+export function insertNodeRunsInTx(tx: Tx, runId: string, nodes: readonly NodeRunInput[], now: string): CreatedNodeRun[] {
+  const created: CreatedNodeRun[] = []
+  nodes.forEach((node, idx) => {
+    const id = newNodeRunId()
+    const seq = idx + 1
+    tx.run(
+      'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation, rearm_generation, created_at, updated_at) '
+      + 'VALUES (?, ?, ?, ?, ?, 1, ?, 0, 0, 0, ?, ?)',
+      [id, runId, node.node_id, seq, node.node_type, 'queued', now, now],
+    )
+    created.push({ node_run_id: id, node_id: node.node_id, seq, node_type: node.node_type, status: 'queued' })
+  })
+  return created
+}
+
