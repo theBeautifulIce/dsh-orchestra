@@ -522,9 +522,11 @@ describe('G4：dispatcher 防御面（缺前置可观测失败）', () => {
         { node_run_id: string; status: string }
       expect(b.status).toBe('failed')
       const evt = service.orchestra.db.raw.prepare(
-        "SELECT payload FROM node_run_events WHERE node_run_id = ? ORDER BY seq DESC LIMIT 1").get(b.node_run_id) as
-        { payload: string } | undefined
+        "SELECT type, payload FROM node_run_events WHERE node_run_id = ? ORDER BY seq DESC LIMIT 1").get(b.node_run_id) as
+        { type: string; payload: string } | undefined
       expect(evt).toBeTruthy()
+      // 事件类型也锁死：只验 payload 会被将来恰好同形的其它事件钻空子
+      expect(evt!.type).toBe('dispatch.failed')
       expect(JSON.parse(evt!.payload)).toMatchObject({ error_code: 'SCHEMA_VERSION_UNSUPPORTED' })
       // run 不滞留：b 已终态，收口路径能写 run.terminal
       const runRow = service.orchestra.db.raw.prepare('SELECT status FROM runs WHERE run_id = ?').get(run.run_id) as { status: string }
