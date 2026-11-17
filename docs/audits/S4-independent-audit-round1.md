@@ -5,7 +5,7 @@
 
 结论：fail（P0 0 项、P1 2 项、P2 1 项；必过项 13/14，G4-13 失败）。
 
-按《工程可靠性收敛审计规范》第十节第 6 条口径即「未通过」：S4 的业务实现（两层校验、四命令、发布事务、幂等、task_local 归属、依赖闭包、HTTP 六入口）经代码走查与全量实测成立，13/14 必过项通过；但 G4-13「S4 全量测试与构建全绿」的证据在候选上不可复现——`pnpm typecheck` 确定性失败 11 处，且 `docs/gates/evidence/G4/full-suite.md` 声称的 `typecheck exit 0` 与 build 体积与实测不符（P1-1）。另有 P1-2：带拓扑的 run 里前置节点落到非成功终态时，后置节点没有任何收口出口，run 永停 `running`，只能人工取消兜底；兜底后 `runs.status` 只能落 `cancelled`，业务失败只能从 `run.terminal` 事件的 `outcome` 字段读出。两个 P1 修复并换候选复验前，G4 不具备签发条件。
+按《工程可靠性收敛审计规范》第十节第 6 条口径即「未通过」：S4 的业务实现（两层校验、四命令、发布事务、幂等、task_local 归属、依赖闭包、HTTP 六入口）经代码走查与全量实测成立，13/14 必过项通过；但 G4-13「S4 全量测试与构建全绿」的证据在候选上不可复现——`pnpm typecheck` 确定性失败 11 处，且 `docs/gates/evidence/G4/full-suite.md` 声称的 `typecheck exit 0` 与 build 体积与实测不符（P1-1）。另有 P1-2：带拓扑的 run 里 `readinessOf` 前置判定有两个缺口（换 attempt 后读到旧 `superseded` 行、前置非成功终态无处置），后置节点没有任何收口出口，run 永停 `running`，只能人工取消兜底；兜底后 `runs.status` 只能落 `cancelled`，业务失败只能从 `run.terminal` 事件的 `outcome` 字段读出。两个 P1 修复并换候选复验前，G4 不具备签发条件。
 
 ## 一、审计基准
 
@@ -17,6 +17,7 @@
 | 本轮变化 | S4 首轮正式审计，无上一轮报告；对 9fbecdd 之后 23 个提交的实现整体独立复核，不默认已修好 |
 | 使用文档 | `审计要求.md`（§1/§4/§5/§6）、`GLOSSARY.md`、`docs/gates/G4.md`、`docs/gates/evidence/G4/{G-10.md,full-suite.md}`、`src/core/audit-verdict.ts`、`scripts/gate-check.ts` |
 | 未能确认的范围 | SQLite 写锁等待与 busy 行为（G4-08 只证业务串行化，门记录措辞已如实限定）；S5 面板对 task_local 创建的可信上下文注入尚无实现，本轮只按服务层口径审 |
+| 审计期间工作树变动 | 候选之后无新提交（HEAD 仍为 `4e751de`）；审计进行期间工作树出现针对本轮发现的在途未提交改动（`src/service/dispatcher.ts`、`tests/gate/gate-check.spec.ts`、`tests/integration/workflow-g4.spec.ts`、`docs/gates/G4.md` 等）。本报告全部实测与结论只对候选提交 `4e751de` 负责，在途改动属于候选之后的修复，须并入下一轮候选重新审计 |
 
 ## 二、已知历史问题复验
 
@@ -32,7 +33,7 @@
 
 ## 三、实测命令与退出码
 
-全部在候选工作树实跑（工作树全程干净，`git status` 为空）。
+全部在候选工作树实跑；跑下列命令时工作树与候选提交一致（审计后期工作树出现未提交在途修复，见基准表，不影响本节数字）。
 
 | 命令 | 退出码 | 实测结果 |
 | --- | --- | --- |
@@ -76,11 +77,11 @@ full-suite.md 声称的 `78 files，1022 passed | 1 skipped` 与 `check-evidence
 
 修复建议：给 `tests/gate/gate-check.spec.ts` 的 `GATE_SPECS.G4` 访问加非空断言（或在 `scripts/gate-check.ts` 导出具名 `G4_SPEC` 常量），`pnpm typecheck` 归零后重跑 typecheck/test/build/check-evidence-repro 四命令，按实测更新 `full-suite.md` 的结果行与运行顺序（测试数 1022、证据复现 29/29 已核对一致可保留）。验证：`pnpm check` 三步全绿且 full-suite.md 每个数字都可复现。因改动落在候选范围内，须换候选重审。
 
-| P1-2 | 带拓扑（edges）的 run 里前置节点落到非成功终态（failed/timeout 等）时，后置节点没有任何收口出口：依赖闸把「前置未 done」一律归入 waiting 长等，既不派发也不失败；closeRun 要求全节点终态，run 永停 `running`，sweep 无 queued 清道夫。唯一出口是人工 run 级取消，取消兜底后 `runs.status` 只能落 `cancelled` 而非 `failed`（失败事实保留在 `run.terminal` 事件的 `outcome` 字段，但「按 failed 自动收口」这条正常路径不存在）。这是 S4「执行拓扑进定义」激活的真实路径，节点失败是常态场景，非极端条件 | `src/service/dispatcher.ts:106-118`（`readinessOf` 只分 missing/waiting，无「前置已到非成功终态」档）、`:144-155`（仅 missingPreds 走 `failQueuedNode`）；`src/service/commands/run-close.ts:42`（任一非终态节点即拒收口）；`src/service/sweep.ts:393-398`（只对 running run 调 closeRun，不清 queued） | 附审计探针（`tmp/s4r1-probe-pred-failed.ts`，已删）：create/publish `t→a→b`、startRun、`a` 置 `failed` 后 `dispatchRun` 两轮 + `sweep` 一轮，终态 `a:failed,b:queued,run:running`、outcomes 为空；`cancelRun` + sweep 后 `b:superseded,run:cancelled` |
+| P1-2 | `readinessOf` 的前置状态判定有两个缺口，症状相同：带拓扑（edges）的 run 里后置节点永滞 `queued`、run 无法收口。面 A（旧挡新，S3 r21 P2-5b 同源）：M-60 换 attempt 后同一 `(run_id,node_id)` 有两行（旧行 `superseded` + 新行 `done`），候选查询 `.get()` 无 ORDER BY、无有效行过滤，稳定读到旧行，把已 done 的前置当成没跑；面 B（非成功终态无处置）：前置落到 `failed`/`timeout` 等非成功终态时后置只长等、不结算。closeRun 要求全节点终态，sweep 无 queued 清道夫，唯一出口是人工 run 级取消，取消兜底后 `runs.status` 只能落 `cancelled` 而非 `failed`（失败事实保留在 `run.terminal` 事件的 `outcome` 字段，但「按 failed 自动收口」这条正常路径不存在）。这是 S4「执行拓扑进定义」激活的真实路径，节点失败与重试换 attempt 都是常态场景，非极端条件 | 候选查询 `SELECT status FROM node_runs WHERE run_id = ? AND node_id = ?`（无 ORDER BY/有效行过滤，`git show 4e751de:src/service/dispatcher.ts` 的 `readinessOf`，工作树行号 `src/service/dispatcher.ts:106-118`）、`:144-155`（仅 missingPreds 走 `failQueuedNode`）；`src/service/commands/nodes.ts:253-280`（换 attempt 产生双行，旧行写 `replacement_node_run_id`）、`src/core/state-machine.ts:205`（M-60 作废旧行）；`src/service/commands/run-close.ts:42`（任一非终态节点即拒收口）；`src/service/sweep.ts:393-398`（只对 running run 调 closeRun，不清 queued） | 面 B 探针（`tmp/s4r1-probe-pred-failed.ts`，已删）：create/publish `t→a→b`、startRun、`a` 置 `failed` 后 `dispatchRun` 两轮 + `sweep` 一轮，终态 `a:failed,b:queued,run:running`、outcomes 为空；`cancelRun` + sweep 后 `b:superseded,run:cancelled`。面 A 数据层探针（`tmp/s4r1-probe-stale-row.ts`，已删）：旧行 `superseded` + 新行 `done` 时候选 `.get()` 10/10 读到 `superseded`，`ORDER BY attempt DESC` 读到 `done` |
 
-影响：任何多节点拓扑 run 的节点失败都会让 run 永久滞留 `running`，监控与收口全线失真——「run 停在 running 且没有自动出口」本身就足以定 P1（与 S3 第 9 轮 P1-1 同口径）。且缺「按 failed 自动收口」路径：正常收口本应在后置结算后由 closeRun 落 `failed`，如今只能人工取消兜底，`runs.status` 落 `cancelled`；业务失败事实在 `run.terminal` 事件的 `outcome` 字段仍可读（`src/service/commands/run-close.ts:80-90` 明确设计为「调用方判业务成败看 outcome，不看 runs.status」），但状态列与业务结果分离，按状态列读监控的调用方会漏判失败。违反《审计要求》§3 通用退出条件 6「重要异常路径有合理的失败处理与恢复策略」——该路径当前没有恢复策略。不在 14 项必过项覆盖内，但按门禁 `P0/P1=0` 的口径阻断重签。
+影响：任何多节点拓扑 run 在节点失败、或前置经换 attempt 重试后，都会让 run 永久滞留 `running`，监控与收口全线失真——「run 停在 running 且没有自动出口」本身就足以定 P1（与 S3 第 9 轮 P1-1 同口径）。且缺「按 failed 自动收口」路径：正常收口本应在后置结算后由 closeRun 落 `failed`，如今只能人工取消兜底，`runs.status` 落 `cancelled`；业务失败事实在 `run.terminal` 事件的 `outcome` 字段仍可读（`src/service/commands/run-close.ts:80-90` 明确设计为「调用方判业务成败看 outcome，不看 runs.status」），但状态列与业务结果分离，按状态列读监控的调用方会漏判失败。违反《审计要求》§3 通用退出条件 6「重要异常路径有合理的失败处理与恢复策略」——该路径当前没有恢复策略。不在 14 项必过项覆盖内，但按门禁 `P0/P1=0` 的口径阻断重签。
 
-修复建议：`readinessOf` 区分「前置在途（继续等）」与「前置已到非成功终态（立刻结算后置）」；后者走既有 `failQueuedNode` 机制把后置节点收成终态（failed/superseded，带 `dispatch.failed` 事件与明确 error_code），或在 `dispatchRun`/sweep 里对「全部前置均为非成功终态」的 queued 节点统一结算。保持不变量：前置在途时后置仍不派发；缺前置防御（`SCHEMA_VERSION_UNSUPPORTED`）不受影响；run 失败后应能按 `closeRun` 收成 `failed` 而不是只能 `cancelled`。补用例：`tests/integration/workflow-g4.spec.ts` 的防御面 describe 加「a failed → b 收终态留事件 → run 收口 failed」一例。
+修复建议：`readinessOf` 两个面一起修——(A) 前置按有效行判定（`ORDER BY attempt DESC` 取最大 attempt，或排除已被 `replacement_node_run_id` 接班的旧行），换 attempt 后按新行状态放行；(B) 区分「前置在途（继续等）」与「前置已到非成功终态（立刻结算后置）」，后者走既有 `failQueuedNode` 机制把后置节点收成终态（failed/superseded，带 `dispatch.failed` 事件与明确 error_code），或在 `dispatchRun`/sweep 里对「全部前置均为非成功终态」的 queued 节点统一结算。保持不变量：前置在途时后置仍不派发；缺前置防御（`SCHEMA_VERSION_UNSUPPORTED`）不受影响；run 失败后应能按 `closeRun` 收成 `failed` 而不是只能 `cancelled`。补两条用例（`tests/integration/workflow-g4.spec.ts` 防御面 describe）：「a failed → b 收终态留事件 → run 收口 failed」；「a 换 attempt 双行（旧行 superseded、新行 done）→ b 正常放行」。
 
 ## 六、P2（可延期，重签前须处理）
 
@@ -107,7 +108,7 @@ full-suite.md 声称的 `78 files，1022 passed | 1 skipped` 与 `check-evidence
   "must_pass_passed": 13,
   "must_pass_ids": ["G4-01", "G4-02", "G4-03", "G4-04", "G4-05", "G4-06", "G4-07", "G4-08", "G4-09", "G4-10", "G4-11", "G4-12", "G4-13", "G-10"],
   "failed_items": ["G4-13"],
-  "notes": "S4 业务实现与 13 项必过项经实测成立；G4-13 因 typecheck 11 处 TS 错误与 full-suite.md 失实数字（typecheck exit 0、343.00 kB）未过。P1-2：前置非成功终态时后置节点无收口出口、run 永停 running（dispatcher readinessOf 缺口，探针复现）。P2-1 为 G4.md 的 G4-06 双证据绑定缺口，签门前补正。两个 P1 修复后须换候选重审。"
+  "notes": "S4 业务实现与 13 项必过项经实测成立；G4-13 因 typecheck 11 处 TS 错误与 full-suite.md 失实数字（typecheck exit 0、343.00 kB）未过。P1-2：readinessOf 前置判定两缺口（M-60 换 attempt 后 .get() 读到旧 superseded 行、前置非成功终态无处置），后置永滞 queued、run 永停 running，双探针复现。P2-1 为 G4.md 的 G4-06 双证据绑定缺口，签门前补正。两个 P1 修复后须换候选重审。"
 }
 ```
 <!-- audit-verdict:end -->
@@ -128,6 +129,6 @@ full-suite.md 声称的 `78 files，1022 passed | 1 skipped` 与 `check-evidence
 ## 九、重签前待办
 
 1. 修 P1-1：`tests/gate/gate-check.spec.ts` 的 `GATE_SPECS.G4` 访问加非空断言或改用具名常量，`pnpm typecheck` 归零；重跑四命令并按实测更新 `docs/gates/evidence/G4/full-suite.md`。
-2. 修 P1-2：`readinessOf` 增加「前置已到非成功终态」档并结算后置节点（走既有 `failQueuedNode` 机制留事件），补「a failed → b 收终态 → run 收口 failed」回归用例。
+2. 修 P1-2（两个面一起）：`readinessOf` 前置按有效行判定（`ORDER BY attempt DESC` 或排除被接班旧行）并对非成功终态前置结算后置节点（走既有 `failQueuedNode` 机制留事件），补「a failed → b 收终态 → run 收口 failed」与「换 attempt 双行 → b 正常放行」两条回归用例。
 3. 修 P2-1：`docs/gates/G4.md` 的 artifact 给 G4-06 的 `evidence_ids` 补 `ev-g4-14`、evidence-index 块补 `ev-g4-14` 条目（候选范围外，不触发重审）。
 4. 两个 P1 的修复都落在候选范围内：换候选后重审（一轮快审），复验通过再按 §7 流程签门过门；G4 若过，建议结束 S1–S4 收敛审计，转入 S5 面板与记忆开发。
