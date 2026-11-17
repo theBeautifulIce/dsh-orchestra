@@ -7,6 +7,7 @@
 import { type Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import { OrchError } from '../../core/errors.ts'
+import { assertNoMemoryWriteTool } from '../../core/memory-graph.ts'
 import {
   validatePublishLayer,
   validateSaveLayer,
@@ -373,6 +374,14 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): Pub
   }
 
   const doc = JSON.parse(draft.doc_json) as WorkflowDoc
+  // Reject direct memory mutation at publish time, before a version row is created.
+  for (const node of doc.nodes) {
+    if (node.type !== 'agent' || !node.config || typeof node.config !== 'object') continue
+    const tools = node.config.tools
+    if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue
+    const allow = (tools as Record<string, unknown>).allow
+    if (Array.isArray(allow)) assertNoMemoryWriteTool(allow.filter((name): name is string => typeof name === 'string'))
+  }
   const issues = validatePublishLayer(doc, ctx)
   if (issues.length > 0) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '定义没有通过发布层校验', {

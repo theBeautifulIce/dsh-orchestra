@@ -2,6 +2,7 @@
 import { relative, resolve, sep } from 'node:path'
 import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
+import { MEMORY_TOOL_PREFIX, MEMORY_TOOLS } from '../core/memory-graph.ts'
 
 export type ToolCapability = 'read_only' | 'mutating' | 'compensating'
 export type SideEffectPolicy = 'pure' | 'compensable' | 'irreversible'
@@ -13,6 +14,49 @@ export type ToolDescriptor = {
   command: { bin: string; args: string[] }
   // 补偿描述符：mutating 工具要声明 compensable 就必须给，而且要可执行
   compensation?: { tool: string; args: string[]; verify: { command: string; args: string[] } }
+}
+
+export type MemoryPort = {
+  name: string
+  capability: 'read_only' | 'mutating'
+  irreversible?: boolean
+  invoke: (args: Record<string, unknown>) => Promise<unknown>
+}
+
+const MEMORY_PORT_CAPABILITIES: Readonly<Record<string, { capability: MemoryPort['capability']; irreversible: boolean }>> = {
+  [MEMORY_TOOLS.evaluate]: { capability: 'read_only', irreversible: false },
+  [MEMORY_TOOLS.applyGoverned]: { capability: 'mutating', irreversible: true },
+  [MEMORY_TOOLS.inspectBatch]: { capability: 'read_only', irreversible: false },
+}
+
+/** Internal-only registry: memory bridge ports never enter the executor shell-tool registry. */
+export class MemoryBridgeRegistry {
+  private readonly ports = new Map<string, MemoryPort>()
+
+  register(port: MemoryPort): void {
+    const ref = `${MEMORY_TOOL_PREFIX}${port.name}`
+    const expected = MEMORY_PORT_CAPABILITIES[ref]
+    if (!expected) throw new OrchError('TOOL_NOT_REGISTERED', '记忆端口不在固定注册表里', { tool: ref })
+    if (port.capability !== expected.capability || (port.irreversible === true) !== expected.irreversible) {
+      throw new OrchError('SIDE_EFFECT_UNDECLARED', '记忆端口能力声明与固定策略不一致', {
+        tool: ref,
+        expected_capability: expected.capability,
+        expected_irreversible: expected.irreversible,
+      })
+    }
+    this.ports.set(ref, port)
+  }
+
+  lookup(ref: string): MemoryPort | undefined {
+    if (!ref.startsWith(MEMORY_TOOL_PREFIX)) return undefined
+    return this.ports.get(ref)
+  }
+
+  require(ref: string): MemoryPort {
+    const found = this.lookup(ref)
+    if (!found) throw new OrchError('TOOL_NOT_REGISTERED', '记忆端口没注册', { tool: ref })
+    return found
+  }
 }
 
 export class ToolRegistry {

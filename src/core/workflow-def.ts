@@ -1,6 +1,7 @@
 // src/core/workflow-def.ts —— 定义校验与阶段兼容（规格 2.4 行 122、11.1 行 930-937）
 import { OrchError } from './errors.ts'
 import { PHASE_CAPABILITIES, type Phase } from './config.ts'
+import { assertNoMemoryWriteTool } from './memory-graph.ts'
 import type { PassCondition } from './policy.ts'
 
 export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait'
@@ -171,6 +172,7 @@ export function assertDefinitionAllowed(def: WorkflowDefinition, phase: Phase): 
   assertNoDuplicateRequiredHashes('template', def.required_hashes)
   for (const node of def.nodes) {
     assertNoDuplicateRequiredHashes(node.node_id, node.required_hashes)
+    assertNoMemoryWriteTool(node.tools?.allow ?? [])
     if (!isKnownNodeType(node.type)) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '未知节点类型', { node_id: node.node_id, type: node.type })
     }
