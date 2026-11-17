@@ -62,7 +62,10 @@ export function createApiClient(baseUrl: string, fetcher: FetchLike = globalThis
     let response: Response
     try { response = await fetcher(urlFor(path, query), init) } catch (error) {
       const timedOut = error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')
-      throw new ApiError(timedOut ? 'OPERATION_TIMEOUT' : 'SERVICE_UNAVAILABLE', timedOut ? '请求超时，结果待确认' : '服务未连接', true)
+      const commandOutcomeUnknown = init.method === 'POST'
+      const code = timedOut ? 'OPERATION_TIMEOUT' : commandOutcomeUnknown ? 'OPERATION_OUTCOME_UNKNOWN' : 'SERVICE_UNAVAILABLE'
+      const message = timedOut || commandOutcomeUnknown ? '请求结果暂不可确认' : '服务未连接'
+      throw new ApiError(code, message, true)
     }
     return unwrap<T>(response)
   }

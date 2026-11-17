@@ -1,6 +1,7 @@
 import { createContext, useContext, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import type { StreamStatus } from '../api/sse.ts'
 
 export const PANEL_ROUTES = [
   { id: 'tasks', label: '任务' },
@@ -18,6 +19,7 @@ export type PanelShellProps = {
   serviceConnected: boolean
   protocolMismatch?: boolean
   snapshotStale?: boolean
+  streamStatus?: StreamStatus
   children?: ReactNode
 }
 
@@ -53,8 +55,11 @@ export function PanelShell(props: PanelShellProps) {
     </main>
   }
 
-  const stateLabel = props.serviceConnected ? '服务已连接' : COPY.serviceDown
-  const commandsEnabled = props.serviceConnected && !props.snapshotStale
+  const stateLabel = !props.serviceConnected
+    ? COPY.serviceDown
+    : props.streamStatus === 'polling' ? '轮询更新' : props.streamStatus === 'stale' ? '数据可能已过期' : props.streamStatus === 'live' ? '实时更新' : '服务已连接'
+  const isStale = props.snapshotStale || props.streamStatus === 'stale'
+  const commandsEnabled = props.serviceConnected && !isStale
   const commandsUnavailableReason = !props.serviceConnected ? COPY.serviceDown : COPY.staleNotice
   return <CommandsEnabledContext.Provider value={{ enabled: commandsEnabled, reason: commandsUnavailableReason }}>
   <div style={appStyle}>
@@ -77,10 +82,9 @@ export function PanelShell(props: PanelShellProps) {
           {stateLabel}
         </span>
       </header>
-      {!props.serviceConnected && <div role="status" style={noticeStyle}>
+      {(!props.serviceConnected || isStale) && <div role="status" style={noticeStyle}>
         {COPY.staleNotice}。当前页面保留已加载内容，写入操作应由页面禁用。
       </div>}
-      {props.snapshotStale && props.serviceConnected && <div role="status" style={noticeStyle}>{COPY.staleNotice}</div>}
       <main id="panel-content" style={contentStyle}>{props.children}</main>
     </div>
   </div>

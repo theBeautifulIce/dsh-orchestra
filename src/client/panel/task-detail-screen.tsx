@@ -5,10 +5,16 @@ import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
 
-export type TaskDetailScreenProps = { api: ResourcesApi; taskId: string; onBack: () => void }
+export type TaskDetailScreenProps = {
+  api: ResourcesApi
+  taskId: string
+  onBack: () => void
+  reloadVersion?: number
+  onSnapshot?: (asOfSeq: number) => void
+}
 type DetailData = { task: TaskSummary; runs: RunSummary[]; nodes: NodeRunView[]; selectedRun: RunSummary | null }
 
-export function TaskDetailScreen({ api, taskId, onBack }: TaskDetailScreenProps) {
+export function TaskDetailScreen({ api, taskId, onBack, reloadVersion = 0, onSnapshot }: TaskDetailScreenProps) {
   const [data, setData] = useState<DetailData | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -22,7 +28,9 @@ export function TaskDetailScreen({ api, taskId, onBack }: TaskDetailScreenProps)
       const task = taskResult.data
       const runs = runsResult.data.items
       const selectedRun = runs.find((run) => run.run_id === task.current_run_id) ?? runs[0] ?? null
-      const nodes = selectedRun ? (await api.listNodes(selectedRun.run_id, 200)).data.items : []
+      const nodesResult = selectedRun ? await api.listNodes(selectedRun.run_id, 200) : null
+      const nodes = nodesResult?.data.items ?? []
+      onSnapshot?.(Math.max(taskResult.as_of_seq, runsResult.as_of_seq, nodesResult?.as_of_seq ?? 0))
       if (current) setData({ task, runs, nodes, selectedRun })
     }).catch(() => {
       if (current) setFailed(true)
@@ -30,7 +38,7 @@ export function TaskDetailScreen({ api, taskId, onBack }: TaskDetailScreenProps)
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [api, taskId, reload])
+  }, [api, taskId, reload, reloadVersion, onSnapshot])
 
   return <section aria-labelledby="task-detail-title" style={{ display: 'grid', gap: 20 }}>
     <button type="button" onClick={onBack} style={quietButtonStyle}>← 返回任务</button>
@@ -74,7 +82,7 @@ function NodeRow({ node }: { node: NodeRunView }) {
     </div>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 8, color: COLOR.inkMuted, fontSize: FONT_PX.helper }}>
       <span>第 {node.attempt} 次尝试</span>
-      {node.evidence_ids.length > 0 && <span>{node.evidence_ids.length} 条系统证据</span>}
+      {node.execution_count > 0 && <span>{node.execution_count} 条工具执行记录（未验证）</span>}
       {node.active_decision_ids.length > 0 && <span>{node.active_decision_ids.length} 项等你决定</span>}
       {node.projection_missing.length > 0 && <span>部分信息暂不可用</span>}
     </div>

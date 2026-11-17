@@ -51,10 +51,11 @@ export type NodeRunView = {
   side_effect_verified_none: boolean
   declared_effect: string | null
   verified_effect: string | null
-  evidence_strength: 'strong' | null
-  evidence_state: 'none' | 'not_required'
+  evidence_strength: null
+  evidence_state: 'none' | 'not_required' | 'unverified'
   evidence_state_reason: string | null
-  evidence_ids: string[]
+  execution_ids: string[]
+  execution_count: number
   projection_missing: string[]
   attestation_id: string | null
   action_start_source: 'human_attested' | null
@@ -71,7 +72,7 @@ export type NodeRunView = {
 
 type NodeRow = Record<string, unknown> & { node_run_id: string; status: string; run_id: string }
 
-function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], evidenceIds: string[]): NodeRunView {
+function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], executionIds: string[]): NodeRunView {
   return {
     node_run_id: String(row.node_run_id),
     run_id: String(row.run_id),
@@ -86,10 +87,13 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], evid
     side_effect_verified_none: Number(row.side_effect_verified_none ?? 0) === 1,
     declared_effect: null,
     verified_effect: null,
-    evidence_strength: evidenceIds.length > 0 ? 'strong' : null,
-    evidence_state: 'none',
-    evidence_state_reason: '当前记录了宿主工具执行痕迹，但没有结构化的 verified_effect 事实。',
-    evidence_ids: evidenceIds,
+    evidence_strength: null,
+    evidence_state: executionIds.length > 0 ? 'unverified' : 'none',
+    evidence_state_reason: executionIds.length > 0
+      ? '存在工具执行记录，但尚未验证完成事件和事件链，不能作为 strong 证据。'
+      : '没有工具执行记录。',
+    execution_ids: executionIds,
+    execution_count: executionIds.length,
     projection_missing: ['declared_effect', 'verified_effect'],
     attestation_id: typeof row.attestation_id === 'string' ? row.attestation_id : null,
     action_start_source: typeof row.attestation_id === 'string' ? 'human_attested' : null,
@@ -112,7 +116,7 @@ function activeDecisions(ctx: ReadCtx, nodeRunId: string): string[] {
   ).map((row) => row.decision_id)
 }
 
-function nodeEvidenceIds(ctx: ReadCtx, nodeRunId: string, attempt: number): string[] {
+function nodeExecutionIds(ctx: ReadCtx, nodeRunId: string, attempt: number): string[] {
   return ctx.tx.all<{ execution_id: string }>(
     'SELECT execution_id FROM tool_executions WHERE node_run_id = ? AND attempt = ? ORDER BY tool_seq, execution_id',
     [nodeRunId, attempt],
@@ -138,7 +142,7 @@ export function listNodes(db: Db, runId: string, limit = 100): { items: NodeRunV
     )
     const settling = runSettling(ctx, runId)
     const items = rows.map((row) => toNodeView(
-      row, settling, activeDecisions(ctx, row.node_run_id), nodeEvidenceIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
+      row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
     ))
     return { items, as_of_seq: ctx.as_of_seq }
   })
@@ -154,7 +158,7 @@ export function getNodeSnapshot(db: Db, nodeRunId: string): { item: NodeRunView;
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个执行节点', { node_run_id: nodeRunId })
     return {
       item: toNodeView(
-        row, runSettling(ctx, row.run_id), activeDecisions(ctx, row.node_run_id), nodeEvidenceIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
+        row, runSettling(ctx, row.run_id), activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
       ),
       as_of_seq: ctx.as_of_seq,
     }

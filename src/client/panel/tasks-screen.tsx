@@ -16,9 +16,11 @@ const EFFECT_LABEL: Record<string, string> = { pure: '只读步骤', compensable
 export type TaskListScreenProps = {
   api: ResourcesApi
   onSelectTask: (taskId: string) => void
+  reloadVersion?: number
+  onSnapshot?: (asOfSeq: number) => void
 }
 
-export function TaskListScreen({ api, onSelectTask }: TaskListScreenProps) {
+export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapshot }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
   const [cursor, setCursor] = useState<string | undefined>()
@@ -36,6 +38,7 @@ export function TaskListScreen({ api, onSelectTask }: TaskListScreenProps) {
       if (!current) return
       setItems((previous) => cursor ? [...previous, ...result.data.items] : result.data.items)
       setNextCursor(result.data.next_cursor)
+      onSnapshot?.(result.as_of_seq)
     }).catch(() => {
       if (!current) return
       setError(true)
@@ -43,7 +46,7 @@ export function TaskListScreen({ api, onSelectTask }: TaskListScreenProps) {
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [api, cursor, query, reload])
+  }, [api, cursor, query, reload, reloadVersion, onSnapshot])
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()

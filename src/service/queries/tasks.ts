@@ -1,7 +1,7 @@
 import { OrchError } from '../../core/errors.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
-import { deriveAttention, attentionWeight, maxSideEffectLevel, type Attention, type SideEffectLevel } from './attention.ts'
+import { deriveAttention, maxSideEffectLevel, type Attention, type SideEffectLevel } from './attention.ts'
 import { withReadTx } from './read-tx.ts'
 
 const TASKS_LIMIT_MAX = 100
@@ -100,7 +100,8 @@ const TASK_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_versio
   (SELECT MIN(d.created_at) FROM decisions d WHERE d.run_id = t.current_run_id
     AND d.status IN ('pending','acknowledged','blocked_for_human')) AS oldest_open_decision_at,
   (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id
-    AND n.side_effect_policy <> 'pure' AND n.side_effect_verified_none <> 1) AS unverified_count,
+    AND n.side_effect_policy <> 'pure' AND n.side_effect_verified_none <> 1
+    AND NOT EXISTS (SELECT 1 FROM unverified_resolutions ur WHERE ur.node_run_id = n.node_run_id)) AS unverified_count,
   (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id
     AND n.status = 'orphaned' AND n.replacement_node_run_id IS NULL) AS orphaned_node_count,
   (SELECT GROUP_CONCAT(DISTINCT n.side_effect_policy) FROM node_runs n WHERE n.run_id = t.current_run_id) AS side_effect_levels,
@@ -109,38 +110,70 @@ const TASK_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_versio
       'failed_with_unverified','orphaned','superseded','cancelled')) AS oldest_active_heartbeat_at
 FROM tasks t`
 
+// The CASE ordering mirrors deriveAttention() and attentionWeight(); keep the SQL projection in sync with those display helpers.
+const TASK_ATTENTION_CTE = `WITH task_metrics AS (${TASK_SELECT}), task_attention AS (
+  SELECT task_metrics.*,
+    CASE
+      WHEN open_decision_count > 0 THEN 'decision'
+      WHEN unverified_count > 0 THEN 'unverified'
+      WHEN current_run_status IN ('failed','failed_with_unverified') THEN 'failed'
+      WHEN current_run_status = 'orphaned' OR orphaned_node_count > 0 THEN 'orphaned'
+      WHEN status = 'running' OR (current_run_status IS NOT NULL AND current_run_status NOT IN
+        ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) THEN 'running'
+      ELSE 'none'
+    END AS attention,
+    CASE
+      WHEN open_decision_count > 0 THEN 6
+      WHEN unverified_count > 0 THEN 5
+      WHEN current_run_status IN ('failed','failed_with_unverified') THEN 4
+      WHEN current_run_status = 'orphaned' OR orphaned_node_count > 0 THEN 3
+      WHEN status = 'running' OR (current_run_status IS NOT NULL AND current_run_status NOT IN
+        ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) THEN 2
+      ELSE 1
+    END AS attention_weight
+  FROM task_metrics
+)`
+
 export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items: TaskSummary[]; next_cursor: string | null; as_of_seq: number } {
   const limit = params.limit ?? 50
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > TASKS_LIMIT_MAX) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 ' + String(TASKS_LIMIT_MAX) + ' 条', { limit })
   const filter = { status: params.status ?? null, attention: params.attention ?? null, query: params.query ?? null }
   return withReadTx(db, (ctx) => {
-    const rows = ctx.tx.all<TaskRow>(TASK_SELECT + ' ORDER BY t.updated_at DESC, t.task_id DESC')
     const now = params.now ?? Date.now()
-    let items = rows.map((row) => taskSummary(row, now))
-    if (filter.status) items = items.filter((item) => item.status === filter.status)
-    if (filter.attention) items = items.filter((item) => item.attention === filter.attention)
+    const where: string[] = []
+    const values: unknown[] = []
+    if (filter.status) { where.push('status = ?'); values.push(filter.status) }
+    if (filter.attention) { where.push('attention = ?'); values.push(filter.attention) }
     if (filter.query) {
-      const q = filter.query.toLocaleLowerCase()
-      items = items.filter((item) => item.title.toLocaleLowerCase().includes(q) || item.task_id.toLocaleLowerCase().includes(q))
+      where.push('(instr(lower(title), lower(?)) > 0 OR instr(lower(task_id), lower(?)) > 0)')
+      values.push(filter.query, filter.query)
     }
-    items.sort((a, b) => attentionWeight(b.attention) - attentionWeight(a.attention)
-      || b.updated_at.localeCompare(a.updated_at) || b.task_id.localeCompare(a.task_id))
-
     if (params.cursor) {
       const cursor = decodeCursor(params.cursor, 'tasks', filter)
-      const index = items.findIndex((item) => item.task_id === cursor.last_id
-        && `${attentionWeight(item.attention)}\t${item.updated_at}` === cursor.last_key)
-      if (index < 0) throw new OrchError('CURSOR_EXPIRED', '游标所在任务已变化，请重新加载', { task_id: cursor.last_id })
-      items = items.slice(index + 1)
+      const separator = cursor.last_key.indexOf('\t')
+      const lastWeight = Number(cursor.last_key.slice(0, separator))
+      const lastUpdatedAt = cursor.last_key.slice(separator + 1)
+      if (separator < 1 || !Number.isInteger(lastWeight) || lastWeight < 1 || lastWeight > 6 || !lastUpdatedAt) {
+        throw new OrchError('CURSOR_EXPIRED', '游标里的任务位置不合法，请重新加载', { task_id: cursor.last_id })
+      }
+      where.push('(attention_weight < ? OR (attention_weight = ? AND (updated_at < ? OR (updated_at = ? AND task_id < ?))))')
+      values.push(lastWeight, lastWeight, lastUpdatedAt, lastUpdatedAt, cursor.last_id)
     }
-    const hasMore = items.length > limit
-    const page = items.slice(0, limit)
+    const rows = ctx.tx.all<TaskRow & { attention: Attention; attention_weight: number }>(
+      TASK_ATTENTION_CTE + ' SELECT * FROM task_attention'
+      + (where.length ? ' WHERE ' + where.join(' AND ') : '')
+      + ' ORDER BY attention_weight DESC, updated_at DESC, task_id DESC LIMIT ?',
+      [...values, limit + 1],
+    )
+    const hasMore = rows.length > limit
+    const page = hasMore ? rows.slice(0, limit) : rows
+    const items = page.map((row) => taskSummary(row, now))
     const last = page[page.length - 1]
     const nextCursor = hasMore && last
-      ? encodeCursor(makeCursor('tasks', filter, `${attentionWeight(last.attention)}\t${last.updated_at}`, last.task_id, ctx.as_of_seq, now))
+      ? encodeCursor(makeCursor('tasks', filter, `${last.attention_weight}\t${last.updated_at}`, last.task_id, ctx.as_of_seq, now))
       : null
-    return { items: page, next_cursor: nextCursor, as_of_seq: ctx.as_of_seq }
+    return { items, next_cursor: nextCursor, as_of_seq: ctx.as_of_seq }
   })
 }
 

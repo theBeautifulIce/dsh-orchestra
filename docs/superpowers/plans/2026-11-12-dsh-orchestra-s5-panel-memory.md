@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 12.3.4 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · react 18.3.1 · react-dom 18.3.1 · jsdom 29.1.1 · node:sqlite（内置 DatabaseSync）· DSH bundle 插件
 
-**实施进度（2026-11-17，工作区快照；不代表任务验收或阶段关闭）：** 17 项中，Task 1–2 的查询基元和任务/运行读模型已有实现；Task 3–8 部分实现，仍有明确查询、控制面、宿主连接、六屏整合和视觉走查缺口；Task 9–17 尚未开始，G5 尚未交付。最近一次 `pnpm typecheck` 通过；本轮未运行测试套件，也未创建提交。
+**实施进度（2026-11-17，工作区快照；不代表任务验收或阶段关闭）：** 17 项中，Task 1–2 的查询基元和任务/运行读模型已有实现；Task 3–8 部分实现，仍有明确查询、控制面、宿主连接、六屏整合和视觉走查缺口；Task 9–17 尚未开始，G5 尚未交付。针对最新审计的 P2-1 至 P2-4 已完成代码修正，测试保护仍待补齐。最近一次 `pnpm typecheck` 通过；本轮未运行测试套件。
 
 ---
 
@@ -195,6 +195,8 @@ git commit -m "feat(service): 建读模型查询基元与不透明游标"
 
 **目标：** 交出 `list_tasks`、`get_task`、`list_runs`、`get_run` 四个查询与 TaskSummary / RunSummary 两种视图，排序、聚合计数与展示状态全部由服务端给全（规格 8.2 行 623-631、8.3 行 635-640）。
 
+**审计修正：** 任务摘要现将已存在 `unverified_resolutions` 的节点排除；attention 过滤、关键词/状态过滤、排序、键集游标和 `limit + 1` 均在 SQLite 查询中完成，不再把全量摘要拉到 JavaScript 后分页。
+
 **Files:**
 - Create: `src/service/queries/tasks.ts` —— 任务列表与任务详情。
 - Create: `src/service/queries/runs.ts` —— 运行列表与运行详情。
@@ -368,7 +370,7 @@ git commit -m "feat(service): 交出任务与运行读视图及服务端聚合"
 
 **目标：** 交出 `list_nodes`、`get_node`、`list_decisions`、`get_decision`、`list_unverified_side_effects`、`get_evidence`、`get_attestation`、`get_artifact`、`verify_ledger` 九个查询与 NodeRunView / DecisionView / UnverifiedEffectView 三种视图（规格 8.2 行 627-631、8.3 行 635-640）。
 
-**实施前置补正：** 本任务原示例引用了 `unverified_resolutions`、`attestations` 两张当前 schema 缺失的表，以及 `node_runs.action`、`stopped_at`、`evidence`、`last_known_phase` 等不存在列。迁移 `029_effect_resolution_records.sql` 现在定义两类只追加记录：人证绑定 run/node/attempt，固定为 `human_attested` 且不作为证据；副作用结算以 `node_run_id` 唯一，`verified_none` 必须与节点的 `side_effect_verified_none + stop_evidence` 一致，其他结算绑定 evidence 或 decision。迁移含作用域守卫与禁止修改/删除触发器，记忆迁移仍为 030。**已完成：** 人证在确认启动事务中落表，并由独立 attestation 查询读取；节点、裁决、证据、产物及未验证副作用基础读模型已实现。`get_evidence` 以宿主签发的 `execution_id` 寻址，只返回哈希、工具结果和时间；会核验对应 `tool_finished` 事件、事件链及两处记录一致，不返回 stdout/stderr，也不接纳人证为系统证据。节点视图能列出同 attempt 的系统证据 ID；`declared_effect` / `verified_effect` 因缺少事实字段继续标为 `projection_missing`。裁决读模型对当前 schema 没有持久化的优先级、允许选项、目标摘要、证据要求显式返回 `null` 并标记 `projection_missing`。**仍待补齐：** 当前没有一个通用的副作用核验/结算命令；现有 `resolveDecision` 的多种 decision 与 resolution 不能不经策略判定就等同为结算。因此 `unverified_resolutions` 暂无写入者，`list_unverified_side_effects` 只按该表过滤已结算行，读模型不推测结算状态。后续需先在 §9 规格中明确各 decision kind 的允许 resolution、证据引用和幂等规则，再把相应落表放进同一裁决事务。缺失的动作描述、停止时刻、证据详情和执行阶段列不得用空值或布尔推断伪造；节点状态、产物和账本查询可独立推进。
+**实施前置补正：** 本任务原示例引用了 `unverified_resolutions`、`attestations` 两张当前 schema 缺失的表，以及 `node_runs.action`、`stopped_at`、`evidence`、`last_known_phase` 等不存在列。迁移 `029_effect_resolution_records.sql` 现在定义两类只追加记录：人证绑定 run/node/attempt，固定为 `human_attested` 且不作为证据；副作用结算以 `node_run_id` 唯一，`verified_none` 必须与节点的 `side_effect_verified_none + stop_evidence` 一致，其他结算绑定 evidence 或 decision。迁移含作用域守卫与禁止修改/删除触发器，记忆迁移仍为 030。**已完成：** 人证在确认启动事务中落表，并由独立 attestation 查询读取；节点、裁决、证据、产物及未验证副作用基础读模型已实现。`get_evidence` 以宿主签发的 `execution_id` 寻址，只返回哈希、工具结果和时间；会核验对应 `tool_finished` 事件、事件链及两处记录一致，不返回 stdout/stderr，也不接纳人证为系统证据。节点视图仅列出同 attempt 的工具 `execution_ids` / 数量，不再由记录存在推断 strong；只有 `get_evidence` 完成 tool_finished 与事件链交叉验证后才返回系统证据。`declared_effect` / `verified_effect` 因缺少事实字段继续标为 `projection_missing`。裁决读模型对当前 schema 没有持久化的优先级、允许选项、目标摘要、证据要求显式返回 `null` 并标记 `projection_missing`。**仍待补齐：** 当前没有一个通用的副作用核验/结算命令；现有 `resolveDecision` 的多种 decision 与 resolution 不能不经策略判定就等同为结算。因此 `unverified_resolutions` 暂无写入者，`list_unverified_side_effects` 只按该表过滤已结算行，读模型不推测结算状态。后续需先在 §9 规格中明确各 decision kind 的允许 resolution、证据引用和幂等规则，再把相应落表放进同一裁决事务。缺失的动作描述、停止时刻、证据详情和执行阶段列不得用空值或布尔推断伪造；节点状态、产物和账本查询可独立推进。
 
 **Files:**
 - Create: `src/service/queries/nodes.ts` —— 节点列表与详情，节点显示映射与证据四列。
@@ -634,7 +636,7 @@ git commit -m "feat(service): 交出节点裁决与未验证副作用读视图"
 
 **目标：** 交出 `list_workflows`、`get_workflow`、`get_workflow_version` 三个工作流查询，并把控制面限定为规格 8.4 行 644-648 的六条命令，带信封、幂等、确认预检与 revision CAS（规格 3.7 行 201-220）。
 
-**当前进度：** 工作流列表、详情、版本只读查询已实现并接入 HTTP，查询从单个只读快照返回 `as_of_seq`；沿用当前数据库实际的 ISO 时间文本，旧版本缺少 `doc_json` 时明确标 `projection_missing`。S4 已有四条带 `operation_id` 的工作流写命令，但 S5 的统一六命令信封、decision acknowledge 与回执查询仍待完成。
+**当前进度：** 工作流列表、详情、版本只读查询已实现并接入 HTTP，查询从单个只读快照返回 `as_of_seq`；沿用当前数据库实际的 ISO 时间文本，旧版本缺少 `doc_json` 时明确标 `projection_missing`。S4 已有四条带 `operation_id` 的工作流写命令，但 S5 的统一六命令信封与 decision acknowledge 仍待完成；命令回执查询已提供，歧义网络结果会查回执且不自动重提。
 
 **Files:**
 - Create: `src/service/queries/workflows.ts` —— `list_workflows`、`get_workflow`、`get_workflow_version` 三个查询与 WorkflowView。
@@ -872,7 +874,7 @@ git commit -m "feat(service): 限定控制面六命令并接上信封与回执"
 
 **目标：** 交出 `list_events` 与 SSE 通道：事件只当失效信号，断号整页重取，重复事件按 event_id 去重（规格 8.3 行 635、8.4 行 647；设计稿 §4.7）。
 
-**当前进度：** 服务端 SSE 已支持 Last-Event-ID、按 seq 连续续传、15 秒心跳、断号/积压时发 `resync_required` 后关闭；客户端控制器支持 event_id 去重、合并刷新和轮询降级，并新增基于注入 fetch 的 SSE 流解析器及连接到 list_events 的控制器工厂。宿主认证/代理接线与具体视图刷新回调仍待完成。
+**当前进度：** 服务端 SSE 已支持 Last-Event-ID、按 seq 连续续传、15 秒心跳、断号/积压时发 `resync_required` 后关闭；客户端控制器支持 event_id 去重、合并刷新和轮询降级；PanelApp 可注入 EventStream 工厂，在任务列表/详情首个快照后续传，并在事件失效时重取当前读模型。宿主认证/代理接线及其余视图联动仍待完成。
 
 **Files:**
 - Create: `src/service/queries/events.ts` —— 事件列表与按 seq 续读。
