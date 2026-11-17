@@ -1,12 +1,58 @@
 # dsh-orchestra 接手指引（handoff）
 
+## 当前接手快照（权威，2026-11-17）
+
+> 本快照覆盖下方早期接手步骤中的旧 HEAD、旧测试计数与旧阶段路线。下方保留的 S1–S4 时间线只用于追溯历史。
+
+### 当前基线
+
+- 分支 `main`，本次工作从代码基线 `1fcc31b feat(memory): resolve proposal target collisions` 开始。本次交接提交包含 executor 运行时权限加固和本快照；提交号以 `git log --oneline -1` 为准。
+- S1–S4 已完成，G1–G4 已签署。当前阶段是 S5，G5 尚未交付。
+- 主计划：[S5 面板与记忆实施计划](docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md)；产品路线：[2026-11-17 产品路线](docs/superpowers/plans/2026-11-17-product-roadmap.md)。
+
+### S5 进度
+
+- Task 1–2：查询基元、任务与运行读模型已有实现。
+- Task 3–8：部分实现；事件/证据查询、控制面、宿主连接、六屏整合和视觉走查仍有缺口。
+- Task 9：「等你决定」「待核实」已接真实查询、分页、刷新和 SSE 快照联动；决策策略字段、完整待核实详情、命令和测试未完成。
+- Task 10：流程列表及只读检查页已接真实 API，活跃任务数来自查询投影；草稿编辑、保存/发布命令和测试未完成。
+- Task 11：新增 `030_memory.sql` 四表、唯一键、状态/结果约束、批准快照保护与批准后条目冻结；固定图、`MemoryBridgeRegistry` 已建立；工作流 agent allow 在发布/加载阶段、executor 的运行时 allow 在分派前拒绝直接记忆写工具。真实端口、任务会话模板权限闸门和数据库用例未完成。
+- Task 12：`src/core/memory-canonical.ts` 有 canonical 白名单、tag 码点排序去重、question 保序、哈希、基础尺寸/字段校验和同目标冲突处理。`memory_start_run`、重复项落库和对应测试未完成。
+- Task 13–17 未开始；目前不能进入 G5 验收。
+
+### 最近提交
+
+- `cc0b919` 接入「等你决定」与「待核实」两屏。
+- `62bb4e0` 接入只读流程列表与检查页。
+- `0670789` 展示真实流程活跃任务数。
+- `6736567` 记忆账本迁移、固定图、独立端口注册表和 agent 工具禁令基础。
+- `ea61a72` canonical 提议字段与哈希。
+- `1fcc31b` 同目标提议冲突/重复处理。
+- 本交接提交：`executor/session.ts` 在解析工具 allow 时拒绝 `memory_write` / `memory_update`，并同步本快照；`pnpm typecheck`、`git diff --check` 通过。
+
+### 关键前置与下一步
+
+1. 记忆固定图需要 `tool`、`branch`、`approval`、`trigger` 等节点。`WorkflowDoc` 可描述其中部分类型，但运行时 `WorkflowDefinition` / `WorkflowNodeDef` 与 dispatcher 尚不能执行这条图；先补节点加载、路由、工具调用、审批和收口契约，固定图常量不代表已有可执行闭环。
+2. `src/service/runs.ts:createRun()` 内部自行调用 `withTx()`。`memory_start_run` 需要将 memory Run、节点、`memory_batches` 和 `memory_run_requests` 同事务提交；先抽取事务内 Run 创建入口，不能先起 Run 再另开事务插幂等映射。
+3. 随后实现 `memory_start_run`：源 Run 仅接受 `succeeded`；同 `(source_run_id, request_key)` 幂等；换 key 遇到活跃记忆 Run 返回 `MEMORY_RUN_ACTIVE`。之后将重复项以 `skipped` 持久化。
+4. 最近一次 `pnpm typecheck` 与 `git diff --check` 在 `1fcc31b` 前的记忆代码状态通过；记忆迁移和 S5 页面测试未运行。补齐 S5 计划要求的测试与运行时验证后再推进阶段门。
+
+### 接手步骤
+
+1. `git status -sb`、`git log --oneline -8`，确认 `main` 与 `origin/main` 同步。
+2. 阅读本快照、仓库 `AGENTS.md`、产品路线、S5 计划 Task 11–13，以及 `docs/orchestra-design-draft.md` 的记忆 §§5.4、9.3–9.10、11。
+3. 结构查询使用 `codebase-memory` skill；项目名 `D-aboutAI-dsh-orchestra`。迁移文件存在解析覆盖缺口，SQL 相关结论以源码为准。
+4. 每个可审阅切片提交并推送后更新本快照。完成 S5 计划所有 Task 和 G5 证据后，才能更新阶段关闭状态。
+
+---
+
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 最后更新：2026-11-16 12:05。本文件在项目根目录，遵 dshQQ 硬约束第 5 条。
+> 历史记录最后核对：2026-11-17；本节以下旧内容不作为当前操作指令。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 
 ---
 
-## 0.1 最新接手续接（2026-11-17，S1–S4 收敛审计全部收口，四门已签）
+## 历史快照：S1–S4 收敛审计全部收口（2026-11-17）
 
 ### 阶段状态：可靠性收敛 **正式通过**，转入 S5
 

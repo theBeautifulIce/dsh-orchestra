@@ -1,5 +1,6 @@
 // src/executor/session.ts —— agent 节点执行器（规格 5.2 行 442-449、4.1 行 272）
 import { OrchError } from '../core/errors.ts'
+import { assertNoMemoryWriteTool } from '../core/memory-graph.ts'
 import { deriveEffectiveCapability, resolveDeclaredPolicy, type ToolDescriptor, type ToolRegistry } from './tools.ts'
 
 export type ToolPolicy = {
@@ -22,6 +23,7 @@ export type OutputTriplet = {
 // 未声明默认不给：allow 没提到的工具一律不给（规格 5.2 行 444）
 export function resolveToolSet(registry: ToolRegistry, policy: ToolPolicy): ToolDescriptor[] {
   const allow = policy.allow ?? []
+  assertNoMemoryWriteTool(allow)
   const deny = new Set(policy.deny ?? [])
   const chosen: ToolDescriptor[] = []
   for (const name of allow) {
