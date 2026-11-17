@@ -96,6 +96,39 @@ export function createRun(db: Db, catalog: WorkflowCatalog, p: CreateRunParams):
     })
   }
   // 绑定预留任务：预留阶段就存在的 task_id 是可信身份，task_local 的 owner 指向它
+  // 依赖闭包（审计 P1）：edges 里指向的前置必须同批入选，否则该节点永远等不到前置完成。
+  // 只选部分节点（nodeIds）时必须把依赖一起选上；错误里列出缺谁，方便客户端补齐。
+  if (wanted) {
+    const preds = new Map<string, string[]>()
+    for (const edge of def.edges ?? []) {
+      const list = preds.get(edge.to) ?? []
+      list.push(edge.from)
+      preds.set(edge.to, list)
+    }
+    const missing = new Map<string, string[]>()
+    const stack = [...wanted]
+    const seen = new Set<string>()
+    while (stack.length > 0) {
+      const current = stack.pop()!
+      if (seen.has(current)) continue
+      seen.add(current)
+      for (const pred of preds.get(current) ?? []) {
+        if (!wanted.has(pred)) {
+          const list = missing.get(current) ?? []
+          list.push(pred)
+          missing.set(current, list)
+        } else {
+          stack.push(pred)
+        }
+      }
+    }
+    if (missing.size > 0) {
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '所选节点缺少必要的前置依赖，请把前置节点一起选上', {
+        selected_node_ids: [...wanted],
+        missing_dependencies: Object.fromEntries(missing),
+      })
+    }
+  }
   let taskIdValue = newTaskId()
   if (p.taskId !== undefined) {
     const reserved = db.raw.prepare('SELECT task_id, status, current_run_id FROM tasks WHERE task_id = ?').get(p.taskId) as

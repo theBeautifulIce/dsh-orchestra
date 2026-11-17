@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
 import { auditBindingOf, auditConclusionOf, bodyConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, proseVerdictClashes, verifyGateRecord } from '../../scripts/gate-check.ts'
 
+import { GATE_SPECS, DEFAULT_GATE_PATHS } from '../../scripts/gate-check.ts'
+
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
 // 测试在开发期的脏树上跑：显式放行脏树，脏树拒绝另有一条专门的用例
@@ -1730,3 +1732,30 @@ describe('正文与结构化裁决一致性（S2 第三十五轮 P2-1）', () =>
   })
 })
 
+describe('G4 注册固定（审计 P2）', () => {
+  it('前序链与裁决要求：prevGate=G3、scopeBase=9fbecdd、requireVerdict=true', () => {
+    expect(GATE_SPECS.G4.prevGate).toBe('G3')
+    expect(GATE_SPECS.G4.scopeBase).toBe('9fbecdd')
+    expect(GATE_SPECS.G4.requireVerdict).toBe(true)
+    expect(GATE_SPECS.G4.gateFile).toBe('docs/gates/G4.md')
+  })
+
+  it('必过项与证据映射一一对应，不漏项也不多项', () => {
+    expect(Object.keys(GATE_SPECS.G4.evidenceMap).sort()).toEqual([...GATE_SPECS.G4.items].sort())
+    for (const ids of Object.values(GATE_SPECS.G4.evidenceMap)) {
+      for (const id of ids) expect(GATE_SPECS.G4.evidenceFiles[id]).toBeTruthy()
+    }
+  })
+
+  it('G4-06 同时有生命周期与 owner 真实性两份证据', () => {
+    expect(GATE_SPECS.G4.evidenceMap['G4-06']).toEqual(['ev-g4-06', 'ev-g4-14'])
+    expect(GATE_SPECS.G4.evidenceFiles['ev-g4-14']).toBe('tests/integration/workflow-commands.spec.ts')
+  })
+
+  it('默认门列表覆盖 G1–G4，注册新门不能漏出默认检查', () => {
+    expect(DEFAULT_GATE_PATHS).toEqual([
+      'docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md',
+    ])
+    expect(Object.keys(GATE_SPECS).every((gate) => DEFAULT_GATE_PATHS.includes(GATE_SPECS[gate].gateFile))).toBe(true)
+  })
+})

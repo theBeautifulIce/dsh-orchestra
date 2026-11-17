@@ -433,3 +433,57 @@ describe('G4：预留任务只许消费一次', () => {
     }
   })
 })
+
+describe('G4：nodeIds 必须构成依赖闭包（审计 P1）', () => {
+  const chainDoc = {
+    name: '链式流程',
+    nodes: [node('t', 'trigger'), node('a'), node('b'), node('c')],
+    edges: [{ from: 't', to: 'a' }, { from: 'a', to: 'b' }, { from: 'b', to: 'c' }],
+  }
+
+  it('只选 A / 选 A+B / 选 A+B+C 成功；缺前置在建 run 前拒绝并列出缺谁', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { openServiceOrchestra } = await import('../../src/index.ts')
+    const dir = mkdtempSync(join(tmpdir(), 'orch-g4-dep2-'))
+    const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 'g4-dep2', phase: 'S4' })
+    try {
+      const commands = service.orchestra.commands
+      const id = (n: number) => '7a3b4c5d-0000-7aaa-8bbb-000000000' + String(500 + n).slice(-3)
+      commands.createWorkflow!({
+        workflowId: 'wf_chain', name: '链式流程', definition: chainDoc, actor: 'human:me', now: NOW, operationId: id(1),
+      } as never)
+      commands.publishWorkflow!({
+        workflowId: 'wf_chain', revision: 1, baseVersion: 0, note: '首次发布', actor: 'human:me', now: NOW, operationId: id(2),
+      } as never)
+      const start = (nodeIds: string[], operationId: string) => commands.startRun!({
+        taskTitle: '闭包', workflowId: 'wf_chain', workflowVersion: '1', nodeIds, operationId, now: NOW,
+      })
+      // 只选 A（trigger 不进运行面，A 无前置）→ 成功
+      expect(() => start(['a'], id(3))).not.toThrow()
+      // 选 A+B → 成功，B 等 A
+      expect(() => start(['a', 'b'], id(4))).not.toThrow()
+      // 只选 B → 建 run 前拒绝，并指出缺 a
+      try {
+        start(['b'], id(5))
+        throw new Error('本应抛错')
+      } catch (err) {
+        expect((err as { code?: string }).code).toBe('PAYLOAD_SCHEMA_INVALID')
+        expect(JSON.stringify((err as { details?: unknown }).details)).toContain('"a"')
+      }
+      // 选 A+B+C → 成功
+      expect(() => start(['a', 'b', 'c'], id(6))).not.toThrow()
+      // 选 B+C（缺 a）→ 拒绝
+      try {
+        start(['b', 'c'], id(7))
+        throw new Error('本应抛错')
+      } catch (err) {
+        expect((err as { code?: string }).code, String(err)).toBe('PAYLOAD_SCHEMA_INVALID')
+      }
+    } finally {
+      await service.release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

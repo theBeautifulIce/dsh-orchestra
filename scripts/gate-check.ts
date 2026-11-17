@@ -1,5 +1,7 @@
 // 门记录校验：读 S*.md 里的 GateArtifact，核字段、结论规则、必过项清单、证据文件哈希与四个哈希的原像（规格 11.3 行 978-986）
-// 用法：node --no-warnings scripts/gate-check.ts [可选：门记录路径…]；无参依次校验 G1/G2/G3
+// 用法：node --no-warnings scripts/gate-check.ts [可选：门记录路径…]；无参依次校验 G1–G4
+// 默认列表抽成常量：注册新门时测试能固定住默认路径，不靠 CLI 字符串碰运气（审计 P2）
+export const DEFAULT_GATE_PATHS = ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md']
 //
 // 哈希口径（门记录里的值都能重算，不是手写数）：
 //   candidate_hash      = SHA256(canonical_json([{path, sha256}]，按 path 升序))，取 HEAD 上候选范围内的文件内容
@@ -319,7 +321,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'G4-03': ['ev-g4-03'],
       'G4-04': ['ev-g4-04'],
       'G4-05': ['ev-g4-05'],
-      'G4-06': ['ev-g4-06'],
+      'G4-06': ['ev-g4-06', 'ev-g4-14'],
       'G4-07': ['ev-g4-07'],
       'G4-08': ['ev-g4-08'],
       'G4-09': ['ev-g4-09'],
@@ -344,6 +346,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
       'ev-g4-12': 'tests/contract/workflow-routes.spec.ts',
       'ev-g4-13': 'docs/gates/evidence/G4/full-suite.md',
       'ev-g4-g10': 'docs/gates/evidence/G4/G-10.md',
+      'ev-g4-14': 'tests/integration/workflow-commands.spec.ts',
     },
     scopeBase: '9fbecdd',
     requireVerdict: true,
@@ -2767,7 +2770,7 @@ if (process.argv[1] && /gate-check\.ts$/.test(process.argv[1].replace(/\\/g, '/'
   // 无参默认把三道门都验完：只查 G1 会让 G2/G3 的正文与证据悄悄漂移（S3 审计 P0-3）
   const paths = process.argv.length > 2
     ? process.argv.slice(2)
-    : ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md']
+    : DEFAULT_GATE_PATHS
   for (const path of paths) {
     try {
       const out = verifyGateRecord(readFileSync(path, 'utf8'), { path })

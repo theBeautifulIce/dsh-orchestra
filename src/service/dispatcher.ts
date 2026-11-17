@@ -100,14 +100,22 @@ export type DispatchDeps = {
 }
 
 // 只派发排队中的节点：一个节点失败不拖垮同批别的节点
-// 依赖放行：定义里带了 edges 时，前置节点没到 done 的不派发（审计 P1-3）
+// 依赖放行：定义里带了 edges 时，前置节点没到 done 的不派发（审计 P1-3）。
+// 前置节点压根不在 run 里 = 配置错误（nodeIds 闭包被绕过/账本被改），必须可观测地失败，
+// 不能无限期静默跳过（审计 P1 防御面）。
 const SUCCESS_STATUS = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
-function readyToDispatch(db: DispatchDeps['db'], runId: string, nodeId: string, preds: ReadonlyMap<string, string[]>): boolean {
-  const waiting = (preds.get(nodeId) ?? []).filter((pred) => {
+type Readiness = { ready: true } | { ready: false; missingPreds: string[] } | { ready: false; waitingPreds: string[] }
+function readinessOf(db: DispatchDeps['db'], runId: string, nodeId: string, preds: ReadonlyMap<string, string[]>): Readiness {
+  const missing: string[] = []
+  const waiting: string[] = []
+  for (const pred of preds.get(nodeId) ?? []) {
     const row = db.raw.prepare('SELECT status FROM node_runs WHERE run_id = ? AND node_id = ?').get(runId, pred) as { status: string } | undefined
-    return !row || !SUCCESS_STATUS.has(row.status)
-  })
-  return waiting.length === 0
+    if (!row) missing.push(pred)
+    else if (!SUCCESS_STATUS.has(row.status)) waiting.push(pred)
+  }
+  if (missing.length > 0) return { ready: false, missingPreds: missing }
+  if (waiting.length > 0) return { ready: false, waitingPreds: waiting }
+  return { ready: true }
 }
 
 export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promise<DispatchOutcome[]> {
@@ -133,7 +141,18 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
     list.push(edge.from)
     preds.set(edge.to, list)
   }
-  const rows = all.filter((row) => readyToDispatch(deps.db, p.runId, row.node_id, preds))
+  const rows: typeof all = []
+  for (const row of all) {
+    const readiness = readinessOf(deps.db, p.runId, row.node_id, preds)
+    if (readiness.ready) {
+      rows.push(row)
+      continue
+    }
+    if ('missingPreds' in readiness) {
+      // 防御面：前置节点不在 run 里，收成失败留事件，别让 run 永远卡在 queued
+      failQueuedNode(deps, p, row, '前置节点不在本 run 里：' + readiness.missingPreds.join(','), 'SCHEMA_VERSION_UNSUPPORTED')
+    }
+  }
   // 装配层给了执行函数，它已经带并发闸：同批节点可以一起排，谁先拿到名额谁先跑。
   // 没给执行函数（老装配/单测）时保持原来的串行次序，不凭空放并发。
   const outcomes = deps.executeNode
