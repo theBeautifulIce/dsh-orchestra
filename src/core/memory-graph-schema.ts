@@ -4,13 +4,13 @@
 // 纯数据 + 纯校验：不接运行时、不碰数据库、不碰 dispatcher；
 // 只 import core/errors.ts（OrchError）与 core/memory-graph.ts（端口常量与写工具禁令）。
 import { OrchError } from './errors.ts'
-import { MEMORY_TOOLS, assertNoMemoryWriteTool } from './memory-graph.ts'
+import { MEMORY_TOOLS, MEMORY_PORT_CAPABILITIES, assertNoMemoryWriteTool, type MemoryPortCapability } from './memory-graph.ts'
 
 /** 节点种类：规格 §9.3 括注。 */
 export type MemoryNodeKind = 'trigger' | 'agent' | 'tool' | 'branch' | 'approval' | 'report'
 
-/** 端口能力：与 src/executor/tools.ts:26-30 的固定表同口径。 */
-export type MemoryPortCapability = 'read_only' | 'mutating'
+/** 端口能力：口径来自唯一声明处 src/core/memory-graph.ts 的 MEMORY_PORT_CAPABILITIES。 */
+export type { MemoryPortCapability }
 
 /** 分支路由：route 名字 → 目标节点。 */
 export type MemoryRoute = { route: string; to: string }
@@ -40,15 +40,10 @@ export type MemoryGraphNode = {
 }
 
 /**
- * 端口固定能力表（src/executor/tools.ts:26-30 的镜像）。
- * 本文件只允许 import core/errors.ts 与 core/memory-graph.ts，故此处留一份副本。
- * 风险：两份副本可能漂移；后续切片应把固定表提到 src/core/memory-graph.ts 统一（本包不动那个文件）。
+ * 端口固定能力表：唯一数值副本在 src/core/memory-graph.ts 的 MEMORY_PORT_CAPABILITIES。
+ * 这里只是同对象别名（不是第二份数值），旧名字留给既有调用方。
  */
-export const MEMORY_GRAPH_PORT_CAPABILITIES: Readonly<Record<string, { capability: MemoryPortCapability; irreversible: boolean }>> = {
-  [MEMORY_TOOLS.evaluate]: { capability: 'read_only', irreversible: false },
-  [MEMORY_TOOLS.applyGoverned]: { capability: 'mutating', irreversible: true },
-  [MEMORY_TOOLS.inspectBatch]: { capability: 'read_only', irreversible: false },
-}
+export const MEMORY_GRAPH_PORT_CAPABILITIES = MEMORY_PORT_CAPABILITIES
 
 /**
  * 固定记忆图的唯一声明表；数组顺序即显式拓扑序（执行序）：
@@ -105,6 +100,20 @@ export function memoryGraphOrder(): readonly string[] {
 /** 按 node_id 查节点；查不到返回 undefined。 */
 export function findMemoryNode(node_id: string): MemoryGraphNode | undefined {
   return MEMORY_GRAPH_NODES.find((node) => node.node_id === node_id)
+}
+
+/**
+ * 固定图派生的节点规格：node_id 取固定图 node_id，node_type 取节点 kind（规格 §9.3 的六种）。
+ * 顺序 = 显式拓扑序（memoryGraphOrder），不是边表首次出现序。
+ */
+export function memoryGraphNodeSpecs(): ReadonlyArray<{ node_id: string; node_type: MemoryNodeKind }> {
+  return memoryGraphOrder().map((node_id) => {
+    const node = findMemoryNode(node_id)
+    if (!node) {
+      throw new OrchError('WORKFLOW_NODE_UNREACHABLE', '记忆图拓扑序里有节点在声明表里找不到', { node_id })
+    }
+    return { node_id, node_type: node.kind }
+  })
 }
 
 /** 由节点表派生边：branch 节点走 routes，其余节点走 next。 */

@@ -3,6 +3,7 @@
 // 源运行没成功收口就拒；run、节点、批次与映射在同一笔事务里提交。
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/core/errors.ts'
+import { findMemoryNode, memoryGraphOrder } from '../src/core/memory-graph-schema.ts'
 import { openDb, withTx, type Db } from '../src/infra/sqlite/driver.ts'
 import { MEMORY_WORKFLOW_ID, saveMemoryProposal, startMemoryRun } from '../src/service/commands/memory.ts'
 import type { MemoryItemInput } from '../src/core/memory-canonical.ts'
@@ -122,10 +123,15 @@ describe('memory_start_run 发起与幂等', () => {
     expect(runRow.task_id).toBe('tsk_mem_1')
     expect(runRow.workflow_id).toBe(MEMORY_WORKFLOW_ID)
     expect(runRow.status).toBe('running')
-    const nodeRows = db.raw.prepare('SELECT node_id, seq FROM node_runs WHERE run_id = ? ORDER BY seq')
-      .all(started.memory_run_id) as Array<{ node_id: string; seq: number }>
+    const nodeRows = db.raw.prepare('SELECT node_id, seq, node_type FROM node_runs WHERE run_id = ? ORDER BY seq')
+      .all(started.memory_run_id) as Array<{ node_id: string; seq: number; node_type: string }>
     expect(nodeRows.length).toBe(9)
     expect(nodeRows[0]?.node_id).toBe('mem_trigger')
+    // 节点顺序 = 固定图的显式拓扑序；node_type = 节点 kind（不再是旧的 memory_* 中间态命名）
+    expect(nodeRows.map((row) => row.node_id)).toEqual([...memoryGraphOrder()])
+    expect(nodeRows.map((row) => row.node_type)).toEqual(
+      [...memoryGraphOrder()].map((node_id) => findMemoryNode(node_id)?.kind),
+    )
     const batchRow = db.raw.prepare('SELECT source_run_id, memory_run_id, attempt, status, task_id FROM memory_batches WHERE batch_id = ?')
       .get(started.batch_id) as { source_run_id: string; memory_run_id: string; attempt: number; status: string; task_id: string }
     expect(batchRow.source_run_id).toBe('run_src_1')

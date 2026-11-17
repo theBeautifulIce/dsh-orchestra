@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/core/errors.ts'
 import { ToolRegistry } from '../src/executor/tools.ts'
-import { TASK_SESSION_TOOL_POLICY, resolveToolSet } from '../src/executor/session.ts'
+import { TASK_SESSION_TOOL_POLICY, resolveTaskSessionToolPolicy, resolveToolSet } from '../src/executor/session.ts'
 import { WorkflowCatalog } from '../src/service/workflows.ts'
 import { createWorkflow, publishDraft } from '../src/service/commands/workflows.ts'
 import { assertTaskSessionToolsAllowed } from '../src/service/commands/memory-permission.ts'
@@ -78,6 +78,26 @@ describe('直接记忆写工具的权限闸', () => {
     expect(err.code).toBe('MEMORY_WRITE_TOOL_FORBIDDEN')
     expect(err.details.surface).toBe('task_session')
     expect(TASK_SESSION_TOOL_POLICY.allow).toEqual([])
+  })
+
+  it('task_session 面：策略解析/下发入口出现写工具 → 拒', () => {
+    const err = errOf(() => resolveTaskSessionToolPolicy({ allow: ['memory_write'] }))
+    expect(err.code).toBe('MEMORY_WRITE_TOOL_FORBIDDEN')
+    expect(err.details.surface).toBe('task_session')
+    const err2 = errOf(() => resolveTaskSessionToolPolicy({ allow: ['memory_update'] }))
+    expect(err2.code).toBe('MEMORY_WRITE_TOOL_FORBIDDEN')
+    expect(err2.details.surface).toBe('task_session')
+  })
+
+  it('task_session 面：默认策略仍然不发工具，storages 读写一律 deny', () => {
+    const resolved = resolveTaskSessionToolPolicy()
+    expect(resolved.allow).toEqual([])
+    expect(TASK_SESSION_TOOL_POLICY.allow).toEqual([])
+    expect(TASK_SESSION_TOOL_POLICY.deny).toEqual([])
+    expect(resolved.deny).toEqual(['storages:read', 'storages:write'])
+    const custom = resolveTaskSessionToolPolicy({ allow: ['memory_start_run'], deny: ['memory.get'] })
+    expect(custom.allow).toEqual(['memory_start_run'])
+    expect(custom.deny).toEqual(['memory.get', 'storages:read', 'storages:write'])
   })
 
   it('三面都不含写工具时放行', () => {

@@ -18,10 +18,11 @@ import {
   resolveTargetConflicts,
   type MemoryItemInput,
 } from '../../core/memory-canonical.ts'
-import { MEMORY_GRAPH } from '../../core/memory-graph.ts'
+import { memoryGraphNodeSpecs } from '../../core/memory-graph-schema.ts'
 import { assertOperationId, requestHashOf, runIdempotentCommand } from './idempotency.ts'
-import { insertNodeRunsInTx, insertRunInTx } from '../runs.ts'
-import { assertTaskSessionToolsAllowed } from './memory-permission.ts'
+import { insertRunInTx } from '../runs.ts'
+import { createMemoryRunNodeRuns } from './memory-run.ts'
+import { resolveTaskSessionToolPolicy } from '../../executor/session.ts'
 
 /** 记忆 run 固定用的工作流标识（规格 9.3 固定图；图运行时在 S5-F） */
 export const MEMORY_WORKFLOW_ID = 'sys.memory_write'
@@ -37,29 +38,12 @@ export const MEMORY_TERMINAL_BATCH_STATUSES = [
 
 const TERMINAL_STATUS_SQL = MEMORY_TERMINAL_BATCH_STATUSES.map((status) => "'" + status + "'").join(', ')
 
-/** 固定图节点的运行面类型：记忆节点不走普通 agent 执行器 */
-const MEMORY_NODE_TYPES: Record<string, string> = {
-  mem_trigger: 'memory_trigger',
-  mem_prepare: 'memory_agent',
-  mem_check: 'memory_tool',
-  mem_route: 'memory_branch',
-  mem_confirm: 'memory_approval',
-  mem_apply: 'memory_tool',
-  mem_report: 'memory_report',
-  mem_report_empty: 'memory_report',
-  mem_report_blocked: 'memory_report',
-}
-
-/** 固定图节点顺序：从 MEMORY_GRAPH 的边推出节点，按出现次序落 seq */
-export const MEMORY_GRAPH_NODE_SPECS: ReadonlyArray<{ node_id: string; node_type: string }> = (() => {
-  const ids: string[] = []
-  for (const edge of MEMORY_GRAPH) {
-    for (const id of edge) {
-      if (!ids.includes(id)) ids.push(id)
-    }
-  }
-  return ids.map((node_id) => ({ node_id, node_type: MEMORY_NODE_TYPES[node_id] ?? 'memory_step' }))
-})()
+/**
+ * 固定图节点的运行面规格：node_id 取固定图 node_id，node_type 取节点 kind（规格 §9.3 的六种）。
+ * 唯一声明源是 src/core/memory-graph-schema.ts；顺序用显式拓扑序（memoryGraphOrder），
+ * 不用边表首次出现序。记忆节点不走普通 agent 执行器，也不进通用 workflow 节点类型表。
+ */
+export const MEMORY_GRAPH_NODE_SPECS: ReadonlyArray<{ node_id: string; node_type: string }> = memoryGraphNodeSpecs()
 
 export type StartMemoryRunParams = {
   source_run_id: string
@@ -155,7 +139,8 @@ export function startMemoryRun(db: Db, params: StartMemoryRunParams): MemoryRunS
   const requestKey = assertRequestKey(params.request_key)
   assertReason(params.reason)
   const operationId = assertOperationId(params.operation_id)
-  if (params.caller_allow) assertTaskSessionToolsAllowed(params.caller_allow)
+  // 发起方是任务会话：它的工具清单走任务会话策略解析（写工具闸 + storages deny）
+  if (params.caller_allow) resolveTaskSessionToolPolicy({ allow: [...params.caller_allow] })
   const requestHash = requestHashOf(MEMORY_START_RUN_KIND, payloadOf(params))
   // repeated：这次没有新建记忆 run，只是把上一次的结果原样还回去
   let repeated = false
@@ -254,7 +239,8 @@ function applyMemoryStart(tx: Tx, params: StartMemoryRunParams, requestKey: stri
     created_at: params.now,
     updated_at: params.now,
   })
-  const nodes = insertNodeRunsInTx(tx, memoryRunId, MEMORY_GRAPH_NODE_SPECS, params.now)
+  // 固定图的节点行跟记忆 run 同一笔事务落库（不另开事务）
+  const nodes = createMemoryRunNodeRuns(tx, memoryRunId, params.now)
   const prepareNodeRunId = nodes.find((node) => node.node_id === 'mem_prepare')?.node_run_id ?? null
   tx.run(
     'INSERT INTO memory_batches (batch_id, task_id, source_run_id, memory_run_id, prepare_node_run_id, attempt, status, created_at, updated_at) '

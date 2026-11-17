@@ -3,7 +3,7 @@
 // 非法声明（环 / 多入边 / 悬空边 / 重复 route / 未知端口 / 能力不符）一律抛既有错误码。
 import { describe, expect, it } from 'vitest'
 import { OrchError } from '../src/core/errors.ts'
-import { MEMORY_TOOLS, MEMORY_WRITE_TOOLS } from '../src/core/memory-graph.ts'
+import { MEMORY_PORT_CAPABILITIES, MEMORY_TOOLS, MEMORY_WRITE_TOOLS } from '../src/core/memory-graph.ts'
 import {
   MEMORY_GRAPH_NODES,
   MEMORY_GRAPH_PORT_CAPABILITIES,
@@ -11,6 +11,7 @@ import {
   assertMemoryGraphValid,
   findMemoryNode,
   memoryGraphEdges,
+  memoryGraphNodeSpecs,
   memoryGraphOrder,
   type MemoryGraphNode,
 } from '../src/core/memory-graph-schema.ts'
@@ -248,5 +249,22 @@ describe('固定记忆图 fail-closed 校验', () => {
   it('node_id 重复 fail closed（WORKFLOW_NODE_ID_DUPLICATE）', () => {
     const err = errOf(() => assertMemoryGraphTableValid([...MEMORY_GRAPH_NODES, MEMORY_GRAPH_NODES[0]!]))
     expect(err.code).toBe('WORKFLOW_NODE_ID_DUPLICATE')
+  })
+
+  it('端口能力表只有一份数值：固定图引用的是核心表同一个对象', () => {
+    expect(MEMORY_GRAPH_PORT_CAPABILITIES).toBe(MEMORY_PORT_CAPABILITIES)
+    expect(MEMORY_GRAPH_PORT_CAPABILITIES[MEMORY_TOOLS.evaluate]?.capability).toBe('read_only')
+    expect(MEMORY_GRAPH_PORT_CAPABILITIES[MEMORY_TOOLS.applyGoverned]?.capability).toBe('mutating')
+  })
+
+  it('节点规格按显式拓扑序派生，node_type 取节点 kind', () => {
+    const specs = memoryGraphNodeSpecs()
+    expect(specs.map((spec) => spec.node_id)).toEqual([...memoryGraphOrder()])
+    expect(specs.map((spec) => spec.node_type)).toEqual(
+      [...memoryGraphOrder()].map((node_id) => findMemoryNode(node_id)?.kind),
+    )
+    expect([...new Set(specs.map((spec) => spec.node_type))].sort()).toEqual(
+      ['agent', 'approval', 'branch', 'report', 'tool', 'trigger'],
+    )
   })
 })

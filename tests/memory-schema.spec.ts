@@ -27,7 +27,7 @@ function seed(db: Db): void {
       [NOW, NOW, NOW],
     )
     tx.run(
-      "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nrun_mem_1', 'run_mem', 'mem_prepare', 1, 'memory_agent', 1, 'queued', 0, ?, ?)",
+      "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) VALUES ('nrun_mem_1', 'run_mem', 'mem_prepare', 1, 'agent', 1, 'queued', 0, ?, ?)",
       [NOW, NOW],
     )
   })

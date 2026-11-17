@@ -1,6 +1,6 @@
 // src/executor/session.ts —— agent 节点执行器（规格 5.2 行 442-449、4.1 行 272）
 import { OrchError } from '../core/errors.ts'
-import { assertNoMemoryWriteTool } from '../core/memory-graph.ts'
+import { assertNoMemoryWriteTool, assertTaskSessionToolsAllowed } from '../core/memory-graph.ts'
 import { deriveEffectiveCapability, resolveDeclaredPolicy, type ToolDescriptor, type ToolRegistry } from './tools.ts'
 
 export type ToolPolicy = {
@@ -111,6 +111,19 @@ export function buildInstruction(input: { nodeId: string; outputSchema: unknown 
 // 任务会话默认不给工具，storages 读写 deny（规格 5.2 行 445-446）
 export const TASK_SESSION_TOOL_POLICY: ToolPolicy = { allow: [], deny: [], declaredPolicy: 'pure' }
 export const TASK_SESSION_STORAGE_DENY = ['storages:read', 'storages:write']
+
+/**
+ * 任务会话工具策略的解析/下发入口（规格 5.2 行 445-446、9.1 硬边界）：
+ * 下发前先过 task_session 面的写工具闸（allow 出现 memory_write / memory_update 直接拒），
+ * 再把 storages 读写并进 deny——任务会话默认不给工具，storages 读写一律 deny。
+ * 默认策略仍是 TASK_SESSION_TOOL_POLICY（allow=[]）。
+ */
+export function resolveTaskSessionToolPolicy(policy: ToolPolicy = TASK_SESSION_TOOL_POLICY): ToolPolicy {
+  const allow = policy.allow ?? []
+  assertTaskSessionToolsAllowed(allow)
+  const deny = Array.from(new Set([...(policy.deny ?? []), ...TASK_SESSION_STORAGE_DENY]))
+  return { ...policy, allow, deny }
+}
 
 export async function createExecutorAgent(
   host: HostAgentFactory,

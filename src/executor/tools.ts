@@ -2,7 +2,7 @@
 import { relative, resolve, sep } from 'node:path'
 import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
-import { MEMORY_TOOL_PREFIX, MEMORY_TOOLS } from '../core/memory-graph.ts'
+import { MEMORY_PORT_CAPABILITIES, MEMORY_TOOL_PREFIX } from '../core/memory-graph.ts'
 
 export type ToolCapability = 'read_only' | 'mutating' | 'compensating'
 export type SideEffectPolicy = 'pure' | 'compensable' | 'irreversible'
@@ -23,11 +23,7 @@ export type MemoryPort = {
   invoke: (args: Record<string, unknown>) => Promise<unknown>
 }
 
-const MEMORY_PORT_CAPABILITIES: Readonly<Record<string, { capability: MemoryPort['capability']; irreversible: boolean }>> = {
-  [MEMORY_TOOLS.evaluate]: { capability: 'read_only', irreversible: false },
-  [MEMORY_TOOLS.applyGoverned]: { capability: 'mutating', irreversible: true },
-  [MEMORY_TOOLS.inspectBatch]: { capability: 'read_only', irreversible: false },
-}
+/** 端口固定能力表：数值只声明在 src/core/memory-graph.ts，这里只引用。 */
 
 /** Internal-only registry: memory bridge ports never enter the executor shell-tool registry. */
 export class MemoryBridgeRegistry {
