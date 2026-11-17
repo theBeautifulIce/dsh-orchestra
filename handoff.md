@@ -6,60 +6,27 @@
 
 ---
 
-## 0.1 最新接手续接（2026-11-16 14:05，S4 进行中：Task 1–4 已落）
+## 0.1 最新接手续接（2026-11-17，S1–S4 收敛审计全部收口，四门已签）
 
-> **当前状态**：S1–S3 已收口；S4 进行中，代码候选 `3767f7f`（Task 1–4 + 接入前事项）。
-> 已定的两条设计口径：①未注册节点**按阶段能力拒发**，不做有损投影；②`trigger` 是**内建图节点**，不占运行时能力位。
-> 工作流分 `reusable` / `task_local` 两种归属（`workflows.scope` + `owner_task_id`）：临时工作流照样持久化、发版本、可审计，只是不要求复用；运行中改流程只能发新版本给新 run，Replan 是后续独立能力。
-> **三门处于失效状态（预期）**：候选一变签名必然失效，S4 完成后按 S1 r69 / S2 r70 / S3 r21 / S4 r1 重审并重签 G1→G4。
-> S4 已完成：`src/core/workflow-doc.ts`（两层校验）、迁移 027/028（身份、草稿生命周期、版本不可变、REPLACE 保护）。下一步是四条命令与发布事务（Task 5–8）。
+### 阶段状态：可靠性收敛 **正式通过**，转入 S5
 
+- 代码候选 **`32517a5`**；签名链 G1 r71（`273169dc…`）→ G2 r72（`cf5b57a9…`）→ G3 r23（`2f8d1357…`）→ G4 r3（`f3ce1d1f…`），`pnpm gate` 四门 exit 0，HEAD `6d4ca1a` 已推。
+- 审计：S1 r71 / S2 r72 / S3 r23 / S4 r3 全部 pass（P0/P1 全 0）。S4 历经 r1 fail（P1×2）→ 修复 → r2 pass → P2-7 修复 → r3 pass。
+- 全量 **78 files / 1023 passed | 1 skipped**；typecheck exit 0；build ESM 345.22 kB / gzip 82.84 kB；证据复现 **29/29**（含 G3/G4 注入摘要）。
+- S4 能力：WorkflowDoc 两层校验、四条写命令（UUIDv7 operation_id 幂等 + 同笔回执）、发布事务与版本不可变、task_local 预留任务归属闭环、执行拓扑进定义与 dispatcher 依赖放行（含前置失败结算、M-60 换行有效行、不确定态窗口等待）、HTTP 六入口、G-10 注入。
 
-### 阶段状态：S1–S3 可靠性收敛 **已通过**
+### 已知瑕疵（签门时接受，不阻断）
 
-- 候选 `fd2173b`，三门 G1 r68 / G2 r69 / G3 r20 全绿；三份独立审计 pass，P0/P1 = 0；`pnpm gate` exit 0。
-- 外部复审（按 `审计要求.md` 口径）结论一致：**可以收敛，转 S4 流程定义与版本开发**；不再为已登记的 P2 单开全面审计轮次。
-- **部署前核验项已关闭**：不存在执行过旧版 026 的持久库 —— 026 只出现在 `2bf9c07`、`0fda6ab` 两个未发布提交，仓库无 tag、无 `orchestra.db` / `storages/`，服务默认路径下也无实体库。无需回滚 026 或新开 027；以后改口径一律新开编号。
-- 遗留 P2 收进 GitHub issue **#11「可靠性收敛遗留 P2（S4 顺手修）」**；S4 任务 issue #7 已记录收口与重签口径。
+1. `docs/gates/evidence/G4/full-suite.md` 的 build 尺寸是 4ecff7a 时点散文数字（345.32 vs 签约时实测 345.22），check-evidence-repro 不覆盖该数字；改它会作废候选绑定，记 backlog。
+2. `runtime.spec.ts` B06 子进程用例在高负载下偶发时序抖动（单跑稳定），建议 marker 原子落盘。
+3. 回归用例场景三收尾断言偏弱（放行/结算区分靠场景二断言兜底）。
 
-### 当前进度
+### 下一批 backlog（跨轮 P2/P3，见各审计报告）
 
-- 代码候选 **`fd2173b`**；签名链 `4bc2ecd`（G1 r68）→ `fe1e201`（G2 r69）→ `872e5b1`（G3 r20）；r66 的旧签名是 `b992ec2`/`5098847`。
-- **三门通过**：G1 13/13（`d41bc2e50a22…`）、G2 20/20（`46a3393b456d…`）、G3 20/20（`d1ff6d8dbffc…`）；`pnpm gate` 三门 exit 0。
-- 审计：**S1 r68 / S2 r69 / S3 r20 三人独立复核全部 pass，P0/P1 = 0**，P2 分别 4 / 1 / 4。
-- 全量：**70 files / 940 passed | 1 skipped**；build ESM `lib/index.js` 300.94 kB / gzip 72.62 kB、d.ts 24.43 kB；证据复现 **28/28**。
-- 这一轮的完整链条：r67 判 fail（断链子 run 推父节点 + wait 收口无闸）→ `d85b09d` 整改 → 评审 P1/P2 收口（`2bf9c07`）→ 台账 P1-01（`91a8aa7`）→ 第一次复核 S1 r67 pass / S2 r68 fail / S3 r19 fail（链隔离只覆盖扫描）→ **统一断链闸门 `0fda6ab`** → P2 收尾 `fd2173b` → 第二次复核三门全 pass 并重签。
-
-### 本批改了什么（评审与审计整改）
-
-| 改动 | 对应 |
-| --- | --- |
-| 子 run 污染判定 + wait 超时跳过集 + run 收口闸（`taintedRuns`） | S2 r67 P1-1a / P1-1b |
-| `assertChainIntact()` 装到 `applyTransition` / `transitionNode` / `closeRun` | S3 r19 P1-1、S2 r68 P1-1 |
-| `acquireLease` 先验链，断链拒绝派发（`FORBIDDEN` / `chain_broken`） | 评审 P1-1 执行侧旁路 |
-| 锚点与恢复检查点同笔写；刷新按锚点补检查点；桥恢复写回预算 | 台账 P1-2026-11-16-01、S1 r67 P2-2 |
-| 迁移 026：按量级识别旧毫秒（`<1e6` 换算、`1e6~1e9` 记账、`≥1e9` 不动） | 评审 P2-2、S1 r67 P2-1 |
-| `retryDirective()`：`never` / `after_reread` / `after_status_query` | 评审 P2-3 |
-| `GET /v1/recovery/uncertain`、`POST /v1/recovery/resolve`（M-50，含 `cancelWait`） | 评审 P2-4、S3 r19 P2-3 |
-| 跨 boot 改为检查点驱动（无 30s 确认窗口、墙钟不参与判定） | 评审 P1-2（`6bb4132`/`93e1d88`） |
-
-### 已知 P2（已转 issue #11，摘要留档）
-
-1. **整链/链尾被删检不出**（S3 r20 P2-1）：`assertChainIntact`、扫描断链集、`closeRun` 都只比对链体；链整条删除或只删尾部时链体仍自洽。建议三处改用「链体 + 链头」核对，`verifyLedger` 的缺口口径已现成。
-2. **`wakeOnEvent` 按 run 回滚**（S3 r20 P2-3）：断链 wait 节点命中事件时链闸抛错，把同笔投递整体回滚，同 run 其它 wait 也推进不了。建议在 `scanRegistration` 里按登记跳过断链节点（与 `sweep` 的 `skipNodeRunIds` 同口径）。
-3. **不确定态 + 断链并存时清不掉**（S3 r20 P2-4、S2 r69 P2-1）：`resolveRecoveryUncertain` 走 `applyTransition`，被链闸或 `hang_reason IS NULL` 闸门挡住。值班口径：先核账修链，再确认不确定态；后续可加「只清标记、不做迁移」的运维出口。
-4. **迁移 026 是原地改写**（S1 r68 P2-1）：任何应用过 `2bf9c07..7a1e48b` 区间旧 026 的库，升级会因校验和不符拒绝启动。**确认 `dcee53d` 曾被实际部署就要升 P1**；否则保留现版，后续改口径务必新开 027，不要再动 026。
-5. **026 的量级口径有两处边界**（S1 r68 P2-2、S2 r69 P3-1、S3 r20 P3-3）：`<1e6` 一律当毫秒，真纳秒小值会被放大成秒级（方向是延后到期）；`1e6..1e9` 模糊带里的旧毫秒大预算会被读成接近到期。升级后按 `recovery_unit_fixes` 抽查一次。
-6. **断链派发失败节点仍留 queued**（S1 r68 P2-4）：`acquireLease` 抛 `FORBIDDEN` 被 dispatcher 收成结果，库内状态不变；缺只读查询区分「派发失败」与「链断拒绝」。
-7. **面板未接恢复状态**：`timer_uncertain` / `recovery_uncertain` 只有 HTTP 查询，author/run 视图没展示（评审 P2-4 的后续）。
-8. **文档口径**：`审计要求.md` §8 写「939 passed」，实测与证据均为 940（S3 P3-2、S2 P3-2）。别为它单独动候选，下次改文档顺手改。
-
-### 接手先做什么
-
-1. `git log --oneline -5` 确认 HEAD 是 `bfa19df`（或其后仅文档提交），`git status` 干净。
-2. 跑 `pnpm typecheck`、`pnpm test`、`pnpm build`、`node --no-warnings scripts/check-evidence-repro.ts`、`pnpm gate`，确认 70 files / 940 passed | 1 skipped、300.94 kB / 72.62 kB、28/28、三门 exit 0。
-3. **不要动候选文件**（含 `codebasemap.md`、`审计要求.md`）：任何一处改动都会作废三份报告与三门签名，下一批要重新走 S1 r69 / S2 r70 / S3 r21。
-4. 下一批优先做上面 P2 的第 1 项（整链缺失检出），它与断链隔离同一族，改完一起复核最省事。
+- 前置失败后多跳级联需逐轮 dispatchRun 收齐（或结算后自唤醒）；可选拓扑序声明校验。
+- hang_reason 存量行的不确定标记清不掉（r69 起维持）；整链缺失检不出；fence_state 残留；断链 wait 按 run 回滚；026 就地改写的升级隐患与量级口径。
+- `edges` 无绑定哈希比对（run 绑定校验）；SUCCESS_STATUS 仍手写（run-close/clock-recovery 词表未统一）。
+- 转 S5（面板与记忆）：按 docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md 推进，门 G5。
 
 ### 本轮改了什么（对应 round11 审计）
 
