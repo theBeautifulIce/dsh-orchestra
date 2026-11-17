@@ -65,7 +65,7 @@ export function WorkflowListScreen({ api, onSelectWorkflow, reloadVersion = 0, o
         <dt>当前版本</dt><dd>{workflow.current_version === null ? '尚未发布' : `v${workflow.current_version}`}</dd>
         <dt>草稿</dt><dd>{workflow.has_draft ? `有未发布草稿（修订 ${workflow.draft_revision ?? '未知'}）` : '没有未发布草稿'}</dd>
         <dt>步骤数</dt><dd>{workflow.node_count === null ? '暂不可用' : `${workflow.node_count} 个步骤`}</dd>
-        <dt>正在使用</dt><dd>活跃任务数尚未由查询提供</dd>
+        <dt>正在使用</dt><dd>{workflow.active_task_count} 个任务</dd>
         <dt>最近发布</dt><dd>{workflow.published_at ? formatDate(workflow.published_at) : '还没有发布版本'}</dd>
         <dt>状态</dt><dd>{STATUS_LABEL[workflow.status] ?? <UnknownState value={workflow.status} />}</dd>
       </dl>

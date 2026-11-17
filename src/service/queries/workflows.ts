@@ -17,6 +17,7 @@ export type WorkflowListItem = {
   has_draft: boolean
   draft_revision: number | null
   node_count: number | null
+  active_task_count: number
   published_at: string | null
   updated_at: string
   projection_missing: string[]
@@ -89,6 +90,7 @@ function summaryFromRow(row: SummaryRow): WorkflowListItem {
     has_draft: draftOpen,
     draft_revision: draftOpen ? Number(row.draft_revision) : null,
     node_count: count,
+    active_task_count: Number(row.active_task_count ?? 0),
     published_at: nullableString(row.current_published_at),
     updated_at: row.updated_at,
     projection_missing: count === null ? ['node_count'] : [],
@@ -101,7 +103,10 @@ const SUMMARY_SELECT = `SELECT w.workflow_id, w.name, w.status, w.scope, w.owner
   d.based_on_version AS draft_based_on_version, d.definition_hash AS draft_definition_hash,
   d.updated_at AS draft_updated_at, d.updated_by AS draft_updated_by,
   v.doc_json AS current_doc_json, v.definition_json AS current_runtime_json,
-  v.created_at AS current_published_at
+  v.created_at AS current_published_at,
+  (SELECT COUNT(*) FROM tasks t JOIN runs r ON r.run_id = t.current_run_id
+    WHERE r.workflow_id = w.workflow_id
+      AND r.status NOT IN ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) AS active_task_count
 FROM workflows w
 LEFT JOIN workflow_drafts d ON d.workflow_id = w.workflow_id
 LEFT JOIN workflow_versions v ON v.workflow_id = w.workflow_id AND v.version = w.current_version`
