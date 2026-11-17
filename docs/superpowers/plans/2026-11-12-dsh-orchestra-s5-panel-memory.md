@@ -2404,3 +2404,17 @@ S5 完成的判定，同时满足以下每一条：
 11. `pnpm check` 通过（typecheck + test + build），`pnpm gate --gate G5` 全绿。
 12. 任务档位与审计留痕可见：任务详情显示自治档位与例外名单，待你决定只列人来批的，审计收口的在折叠区可回看不可代批，卡片数字等于列表长度（规格 §18.3、§18.4）。
 13. `docs/gates/G5.md` 存在，结论之后有固定锚点 `artifact_hash=SHA256(canonical_json(artifact))`，且 artifact 的 must_pass_items 逐项有证据、failed_items 为空、producer=human、gate_run_id=null、run_terminal=not_applicable。
+
+---
+
+## Task 18（补充）：副作用核实与结算契约（S5-A 追加）
+
+Task 3「仍待补齐」段列的两项——结算判定口径（各 decision kind 的允许 resolution、证据引用与幂等规则）与结算落表位置（同一裁决事务内）——已由 [S5 副作用核实与结算契约（附录）](../specs/2026-11-17-s5-effect-resolution-addendum.md) 关闭：
+
+- 三条结算路径（`verified_none` / `evidence` / `decision`）与判定矩阵、节点状态 × basis 相容矩阵、可接受/拒绝矩阵与错误码；
+- 事务步骤、幂等与 CAS、事件、回滚、权限、错误优先级；
+- 读模型可见性，含 `src/service/commands/run-close.ts:60` 的未验证判定口径必须改为「既无 `side_effect_verified_none=1`（且 stop_evidence 非空）也无结算行才算未验证」；
+- 人工声明（attestations / human_attested）不得伪装成系统证据的边界；
+- 27 条故障案例与对应测试名。
+
+本附录只定口径，**不含任何核实写入口**；写入口实现属于工作包 S5-C。
