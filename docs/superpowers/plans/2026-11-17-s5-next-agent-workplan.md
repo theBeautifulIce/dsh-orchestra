@@ -130,11 +130,11 @@
 
 ### S5-F：固定记忆图运行时与三端口接线（Task 11 尚缺部分）
 
-**状态：** 尚未开始。当前固定图是静态定义，`MemoryBridgeRegistry` 是注册表；两者都不表示 AgentLifecycle 已能执行记忆图。
+**状态：** 进行中。S5-Fa 已交（1faf38b）：固定图声明源 src/core/memory-graph-schema.ts（9 节点、显式拓扑序、装载即 fail-closed 校验，错误码全部复用既有码）。S5-Fb 在途：端口能力表收敛到 core 层单一来源、记忆 node_type 统一到 kind 六值、专用记忆运行路径骨架 src/service/commands/memory-run.ts（专用路径，不接入通用 workflow 派发）、task_session 面写工具闸接生产调用点。
 
 **目标：** 将固定图节点装载、分支/审批路由、端口调用和终态收口接入现有执行主链，且仍使用 node_run/attempt、租约、事件、恢复与执行器权限边界。
 
-**先读：** S5 Task 11、`src/core/memory-graph.ts`、MemoryBridgeRegistry 定义、`src/app/agent-lifecycle/run-node.ts`、dispatcher、`src/service/runs.ts` 与 runtime workflow node types。
+**先读：** S5 Task 11、`src/core/memory-graph.ts`、`src/core/memory-graph-schema.ts`（已落地的固定图声明源）、MemoryBridgeRegistry 定义（src/executor/tools.ts）、`src/executor/run-node.ts`、dispatcher、`src/service/runs.ts` 与 runtime workflow node types。
 
 **负责文件：** memory graph loader/runtime adapter、memory bridge port handlers、executor/session 权限路径、对应 integration tests；尽量不更改通用 workflow 状态机。如果必须新增节点类型或状态，先修订规格并补迁移/兼容规则。
 

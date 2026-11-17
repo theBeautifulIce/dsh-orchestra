@@ -48,7 +48,10 @@
 2. `src/service/runs.ts:createRun()` 内部自行调用 `withTx()`。`memory_start_run` 需要将 memory Run、节点、`memory_batches` 和 `memory_run_requests` 同事务提交；先抽取事务内 Run 创建入口，不能先起 Run 再另开事务插幂等映射。
 3. 随后实现 `memory_start_run`：源 Run 仅接受 `succeeded`；同 `(source_run_id, request_key)` 幂等；换 key 遇到活跃记忆 Run 返回 `MEMORY_RUN_ACTIVE`。之后将重复项以 `skipped` 持久化。
 4. `pnpm typecheck` 与 `git diff --check` 通过；全量 Vitest 已在 `51c9cce` 跑过（88 文件 / 1086 通过 | 1 skipped）。尚未运行构建；记忆 apply 与副作用结算实现按 S5-A 契约推进，结算写入口属 S5-C。
-5. 本轮并行推进中：S5-C（结算写入口 + 待核实/决策面板，按 S5-A 契约）与 S5-E（`memory_start_run`、事务内 Run 创建入口、新迁移 032）。两者尚未提交；接手时若工作树出现相关改动，先核对归属。
+5. 本轮并行推进中：S5-C（结算写入口 + 待核实/决策面板，按 S5-A 契约）与 S5-D（工作流管理屏 Task 10），另有 S5-Ga（评估端口纯逻辑层）与 S5-Fb（记忆固定图运行时骨架 + 能力表收敛 + node_type 统一）在途；S5-E 已提交（`266ca72`）、S5-Fa 已提交（`1faf38b`）。接手时若工作树出现相关改动，先核对归属。
+
+6. **S5-H 落地写入口已定（lead 核实，2026-11-17）**：仓库内没有独立记忆存储——`src/infra/sqlite/migrations/` 里除 `030_memory.sql` 的 `memory_batches` / `memory_items` / `memory_evaluations` / `memory_run_requests` 四表外没有记忆表；`src/service/server.ts:672-687` 是入站 HTTP 服务（监听 127.0.0.1），`src/` 内无出站 fetch，即编排服务**没有服务→宿主写通道**。因此 `memory.apply_governed` 的落地写只能是 `memory_items` 的状态迁移（`proposed`/`approved` → `applied`/`skipped` + `applied_item_id`），与 `030_memory.sql:134-166` 的触发器语义一致（批准后除 `status`、`applied_item_id` 外只读，禁 INSERT/DELETE）。`action='create'` 行 `applied_item_id = item_id`；`action='update'` 行 `applied_item_id = target_id`。评估请求里的相似条目来源 = `memory_items` 中 `status='applied'` 的行。**不得自造服务→宿主的记忆写协议，不得在批准后 INSERT 新 `memory_items` 行**；宿主侧记忆插件若日后落地，另开切片并重新核对规格 §9.7/§9.8。
+7. `src/core/memory-graph-schema.ts`（S5-Fa）已落地固定声明表：9 节点、显式拓扑序（`mem_trigger → mem_prepare → mem_check → mem_route → mem_confirm → mem_apply → mem_report`，再 `mem_report_empty` / `mem_report_blocked`）、装载即 fail-closed 校验。已知瑕疵：端口能力表在 `src/core/memory-graph-schema.ts:47-51` 与 `src/executor/tools.ts:26-30` 各存一份副本，S5-Fb 需收敛为 core 层单一来源（`src/core/memory-graph.ts`）并让 `src/executor/tools.ts` 引用它。
 
 ### 接手步骤
 
