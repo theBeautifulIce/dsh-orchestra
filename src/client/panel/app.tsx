@@ -5,6 +5,8 @@ import type { EventStream, StreamStatus } from '../api/sse.ts'
 import { PanelShell, type PanelRoute } from './shell.tsx'
 import { DecisionInbox } from './decision-inbox.tsx'
 import { UnverifiedEffects } from './unverified-effects.tsx'
+import { WorkflowCanvas } from './workflow-canvas.tsx'
+import { WorkflowListScreen } from './workflow-list.tsx'
 import { TaskDetailScreen } from './task-detail-screen.tsx'
 import { TaskListScreen } from './tasks-screen.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
@@ -23,6 +25,7 @@ export function PanelApp(props: PanelAppProps) {
   const api = useMemo(() => createResourcesApi(props.client), [props.client])
   const [route, setRoute] = useState<PanelRoute>(props.initialRoute ?? 'tasks')
   const [taskId, setTaskId] = useState<string | null>(null)
+  const [workflowId, setWorkflowId] = useState<string | null>(null)
   const [reloadVersion, setReloadVersion] = useState(0)
   const [streamStatus, setStreamStatus] = useState<StreamStatus>()
   const streamStarted = useRef(false)
@@ -58,13 +61,17 @@ export function PanelApp(props: PanelAppProps) {
     screen = <DecisionInbox api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'effects') {
     screen = <UnverifiedEffects api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+  } else if (route === 'workflows') {
+    screen = workflowId
+      ? <WorkflowCanvas api={api} workflowId={workflowId} onBack={() => setWorkflowId(null)} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+      : <WorkflowListScreen api={api} onSelectWorkflow={setWorkflowId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else {
     screen = props.additionalScreens?.[route] ?? <div role="status" style={pendingStyle}>此页面尚未接入真实数据。</div>
   }
 
   return <PanelShell
     activeRoute={route}
-    onNavigate={(next) => { setRoute(next); if (next !== 'tasks') setTaskId(null) }}
+    onNavigate={(next) => { setRoute(next); if (next !== 'tasks') setTaskId(null); if (next !== 'workflows') setWorkflowId(null) }}
     serviceConnected={props.serviceConnected}
     protocolMismatch={props.protocolMismatch}
     snapshotStale={props.snapshotStale || streamStatus === 'stale'}
