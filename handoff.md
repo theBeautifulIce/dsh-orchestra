@@ -6,10 +6,10 @@
 
 ### 当前基线
 
-- 分支 `main`，当前 HEAD `269f62d32ec12a0bd67567e9f944d32ad629fa89`，与 `origin/main` 同步。后续剩余工作按 [S5 后续接手工作包](docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md) 顺序领取。
+- 分支 `main`，当前 HEAD `155b37a9f82c69ee6876c473a1b82f095ea401e0`，与 `origin/main` 同步。后续剩余工作按 [S5 后续接手工作包](docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md) 顺序领取。
 - S1–S4 已完成，G1–G4 已签署。当前阶段是 S5，G5 尚未交付。
 - 主计划：[S5 面板与记忆实施计划](docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md)；产品路线：[2026-11-17 产品路线](docs/superpowers/plans/2026-11-17-product-roadmap.md)。
-- 接手包把后续切成 S5-A 至 S5-K，列出每包的状态、先读文档、负责区域、依赖、验收和停止条件。**唯一第一项：S5-A，只写副作用核实/结算契约与矩阵；在规格明确前不要实现结算写命令。**
+- 接手包把后续切成 S5-A 至 S5-K，列出每包的状态、先读文档、负责区域、依赖、验收和停止条件。**S5-A 已完成**（结算契约见 [S5 副作用核实与结算契约（附录）](docs/superpowers/specs/2026-11-17-s5-effect-resolution-addendum.md)）；本轮并行 S5-B（测试基座）与 S5-E（`memory_start_run`），其后下一包是 S5-C。**结算写入口仍未实现，实现必须对照该契约。**
 
 ### S5 进度
 
@@ -20,12 +20,14 @@
 - Task 11：新增 `030_memory.sql` 四表、唯一键、状态/结果约束、批准快照保护与批准后条目冻结；固定图、`MemoryBridgeRegistry` 已建立；工作流 agent allow 在发布/加载阶段、executor 的运行时 allow 在分派前拒绝直接记忆写工具。真实端口、任务会话模板权限闸门和数据库用例未完成。
 - Task 12：`src/core/memory-canonical.ts` 按 canonical 完整提议对象限制单条 64 KiB 与整批 256 KiB；另限制 tag 256 B、question 4 KiB、key/target_id 各 256 B；同目标只有业务字段一致才作为重复项跳过，空标签/空问题元素拒绝（空数组允许）。本轮新增边界测试。`memory_start_run` 与重复项落库仍未完成。
 - 最新审计修复：工作流统计覆盖子 Run；任务/流程收到 SSE reloadVersion 后清空旧分页并从第一页重查；reusable scope 文案修正；命令 POST 失败后若回执查询发生网络异常，统一返回 `OPERATION_OUTCOME_UNKNOWN`；迁移 031 增加 resolution 的同 node/run/attempt 与完成状态关联约束。
-- 副作用核实仍不能上线：迁移 031 的证据触发器只验证工具执行记录作用域及 finished_at，SQLite 触发器无法验证带密钥的 node_run 事件链；决定来源也只要求已收口，尚未定义哪些决定结论足以证明副作用事实。由于目前没有 `unverified_resolutions` 写命令，下一步应先明确结算协议，再实现同事务服务层 evidence 链验证与决定结论策略，最后补故障测试。不得将迁移约束描述为完整证据验证。
+- S5-A 已完成（`155b37a`）：结算契约冻结在 [S5 副作用核实与结算契约（附录）](docs/superpowers/specs/2026-11-17-s5-effect-resolution-addendum.md)——三条路径（`verified_none` / `evidence` / `decision`）判定矩阵、节点状态 × basis 相容矩阵、事务步骤与错误优先级、27 条故障案例与对应测试名；明确 `status='resolved'` 不足以放行、`abandon_ack.approved` 不作结算、人证不得进 `evidence_id`、结算必须同事务写节点字段；新增错误码只有 `EFFECT_RESOLUTION_CONFLICT`。本包**未**添加任何核实写入口。
+- 副作用核实仍不能上线：迁移 031 的证据触发器只验证工具执行记录作用域及 finished_at，SQLite 触发器无法验证带密钥的 node_run 事件链；结算判定口径已由 S5-A 冻结，但同事务服务层 evidence 链验证、决定结论策略与写命令尚未实现。不得将迁移约束描述为完整证据验证。
 - 本轮验证：`pnpm typecheck` 通过；定向 Vitest 3 个文件 / 8 项通过；`git diff --check` 通过。未运行全量测试或构建，G5 不可签。
 - Task 13–17 未开始；目前不能进入 G5 验收。接手顺序以 S5 后续接手工作包 §3 为准，G5（S5-K）最后执行。
 
 ### 最近提交
 
+- `155b37a` 冻结副作用核实与结算契约（S5-A 附录），并在 S5 计划追加 Task 18 指针。
 - `cc0b919` 接入「等你决定」与「待核实」两屏。
 - `62bb4e0` 接入只读流程列表与检查页。
 - `0670789` 展示真实流程活跃任务数。
@@ -33,14 +35,15 @@
 - `ea61a72` canonical 提议字段与哈希。
 - `1fcc31b` 同目标提议冲突/重复处理。
 - `269f62d` 修正活动子流程计数、SSE 分页刷新、记忆完整提议边界/重复判定、未知回执网络错误，并加入 migration 031 结算来源关系守卫与 8 项定向测试。
-- 当前权威 HEAD：`269f62d32ec12a0bd67567e9f944d32ad629fa89`，已推送。
+- 当前权威 HEAD：`155b37a9f82c69ee6876c473a1b82f095ea401e0`，已推送。
 
 ### 关键前置与下一步
 
 1. 记忆固定图需要 `tool`、`branch`、`approval`、`trigger` 等节点。`WorkflowDoc` 可描述其中部分类型，但运行时 `WorkflowDefinition` / `WorkflowNodeDef` 与 dispatcher 尚不能执行这条图；先补节点加载、路由、工具调用、审批和收口契约，固定图常量不代表已有可执行闭环。
 2. `src/service/runs.ts:createRun()` 内部自行调用 `withTx()`。`memory_start_run` 需要将 memory Run、节点、`memory_batches` 和 `memory_run_requests` 同事务提交；先抽取事务内 Run 创建入口，不能先起 Run 再另开事务插幂等映射。
 3. 随后实现 `memory_start_run`：源 Run 仅接受 `succeeded`；同 `(source_run_id, request_key)` 幂等；换 key 遇到活跃记忆 Run 返回 `MEMORY_RUN_ACTIVE`。之后将重复项以 `skipped` 持久化。
-4. 最近一次 `pnpm typecheck`、定向 Vitest（3 文件 / 8 项）与 `git diff --check` 在 `269f62d` 通过。尚未运行全量测试或构建；当前不要领取记忆 apply 或副作用结算实现，先按 S5-A 冻结结算业务规则。
+4. 最近一次 `pnpm typecheck` 与 `git diff --check` 在 `155b37a` 通过（本包只改文档，未跑测试）。尚未运行全量测试或构建；记忆 apply 与副作用结算实现按 S5-A 契约推进，结算写入口属 S5-C。
+5. 本轮并行推进中：S5-B（读模型 / SSE / 面板测试基座，只动 `tests/`）与 S5-E（`memory_start_run`、事务内 Run 创建入口、新迁移 032）。两者尚未提交；接手时若工作树出现相关改动，先核对归属。
 
 ### 接手步骤
 
