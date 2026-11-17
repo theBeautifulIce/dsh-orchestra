@@ -5,6 +5,19 @@ import { sha256Hex } from '../core/canonical.ts'
 import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
+import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
+import type { ListTaskParams, TaskSummary } from './queries/tasks.ts'
+import type { RunSummary } from './queries/runs.ts'
+import type { NodeRunView } from './queries/nodes.ts'
+import type { ArtifactView } from './queries/artifacts.ts'
+import type { AttestationView } from './queries/attestations.ts'
+import type { DecisionView, ListDecisionParams } from './queries/decisions.ts'
+import type { EvidenceView } from './queries/evidence.ts'
+import type { LedgerVerify } from './queries/verify_ledger.ts'
+import type { ListEffectsParams, UnverifiedEffectView } from './queries/effects.ts'
+import type { ListWorkflowParams, WorkflowListItem, WorkflowVersionView, WorkflowView } from './queries/workflows.ts'
+import type { OperationRow } from './queries/get_operation.ts'
+import { LAST_EVENT_ID_HEADER, startEventStream } from './events/stream.ts'
 import {
   cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
   ledgerEventSchema, leaseSchema, parseBody, recoveryResolveSchema,
@@ -32,6 +45,7 @@ export type ServerDeps = {
   asOfSeq: () => number
   listTasks: (limit: number) => unknown[]
   listEvents: (fromSeq: number, limit: number) => unknown[]
+  queries?: ServerQueries
   appendLedgerEvent: (body: unknown, actor: string) => { seq: number; event_id: string }
   log?: Logger
   queue?: WriteQueue
@@ -40,6 +54,27 @@ export type ServerDeps = {
   now?: () => string
   // 生产路径的节点命令；缺省时这几条路由一律 404，老测试不受影响
   commands?: NodeCommands
+}
+
+export type ServerQueries = {
+  listEvents: (fromSeq: number, limit: number) => { rows: unknown[]; as_of_seq: number }
+  listTaskSummaries: (params: ListTaskParams) => { items: TaskSummary[]; next_cursor: string | null; as_of_seq: number }
+  getTaskSummary: (taskId: string, now: number) => { item: TaskSummary; as_of_seq: number }
+  listRuns: (opts: { task_id?: string; limit?: number }) => { items: RunSummary[]; as_of_seq: number }
+  getRun: (runId: string) => RunSummary
+  listNodes: (runId: string, limit?: number) => { items: NodeRunView[]; as_of_seq: number }
+  getNode: (nodeRunId: string) => { item: NodeRunView; as_of_seq: number }
+  getArtifact: (artifactId: string, now: number) => { item: ArtifactView; as_of_seq: number }
+  getAttestation: (attestationId: string) => { item: AttestationView; as_of_seq: number }
+  listDecisions: (params: ListDecisionParams) => { items: DecisionView[]; next_cursor: string | null; as_of_seq: number }
+  getDecision: (decisionId: string) => { item: DecisionView; as_of_seq: number }
+  getEvidence: (evidenceId: string) => { item: EvidenceView; as_of_seq: number }
+  verifyLedger: () => { item: LedgerVerify; as_of_seq: number }
+  listUnverifiedEffects: (params: ListEffectsParams) => { items: UnverifiedEffectView[]; next_cursor: string | null; as_of_seq: number }
+  listWorkflows: (params: ListWorkflowParams) => { items: WorkflowListItem[]; next_cursor: string | null; as_of_seq: number }
+  getWorkflow: (workflowId: string) => { item: WorkflowView; as_of_seq: number }
+  getWorkflowVersion: (workflowId: string, version: number) => { item: WorkflowVersionView; as_of_seq: number }
+  getOperation: (operationId: string, now: number) => { item: OperationRow; as_of_seq: number }
 }
 
 import type { CreateWorkflowParams, OpenDraftParams, PublishParams, UpdateDraftParams } from './commands/workflows.ts'
@@ -96,7 +131,7 @@ export type NodeCommands = {
   }) => DecisionResolution
   // 启动未知的人工确认：M-08/M-09/M-61 的生产入口
   confirmStart: (body: { nodeRunId: string; attempt: number; attested?: boolean; now: string; actor?: string }) => {
-    trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'
+    trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'; attestation_id?: string
   }
   // 补偿的生产入口：开始与收口都由服务层做幂等和状态迁移，HTTP 只搬描述符
   startCompensation: (body: {
@@ -199,6 +234,13 @@ const intParam = (url: URL, name: string, fallback: number): number => {
   return n
 }
 
+function stringParam(url: URL, name: string, maxLength = 256): string | undefined {
+  const value = url.searchParams.get(name)
+  if (value === null) return undefined
+  if (value.length > maxLength) throw new OrchError('RANGE_TOO_LARGE', '查询参数太长', { name, limit: maxLength })
+  return value
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDeps, queue: WriteQueue): Promise<void> {
   const log = deps.log ?? nullLogger
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -212,8 +254,98 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     const actor = authenticate(req, deps.secret)
 
     if (req.method === 'GET' && url.pathname === '/v1/tasks') {
-      const limit = Math.min(intParam(url, 'limit', 50), 200)
-      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: deps.listTasks(limit) }))
+      if (deps.queries) {
+        const attentionRaw = stringParam(url, 'attention', 24)
+        if (attentionRaw !== undefined && !(ATTENTION_ORDER as readonly string[]).includes(attentionRaw)) {
+          throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'attention 过滤值无效', { attention: attentionRaw })
+        }
+        const result = deps.queries.listTaskSummaries({
+          limit: Math.min(intParam(url, 'limit', 50), 100),
+          cursor: stringParam(url, 'cursor', 4096),
+          status: stringParam(url, 'status', 64),
+          query: stringParam(url, 'query', 200),
+          attention: attentionRaw as Attention | undefined,
+          now: Date.parse(requestNow),
+        })
+        sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
+      } else {
+        const limit = Math.min(intParam(url, 'limit', 50), 200)
+        sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: deps.listTasks(limit) }))
+      }
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/tasks/get' && deps.queries) {
+      const taskId = stringParam(url, 'task_id', 256) ?? ''
+      const result = deps.queries.getTaskSummary(taskId, Date.parse(requestNow))
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/runs' && deps.queries) {
+      const taskId = stringParam(url, 'task_id', 256)
+      const result = deps.queries.listRuns({ task_id: taskId, limit: Math.min(intParam(url, 'limit', 50), 100) })
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/runs/get' && deps.queries) {
+      const result = deps.queries.getRun(stringParam(url, 'run_id', 256) ?? '')
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/node-runs' && deps.queries) {
+      const runId = stringParam(url, 'run_id', 256) ?? ''
+      const result = deps.queries.listNodes(runId, Math.min(intParam(url, 'limit', 100), 200))
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/node-runs/get' && deps.queries) {
+      const result = deps.queries.getNode(stringParam(url, 'node_run_id', 256) ?? '')
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/artifacts/get' && deps.queries) {
+      const result = deps.queries.getArtifact(stringParam(url, 'artifact_id', 256) ?? '', Date.parse(requestNow))
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/attestations/get' && deps.queries) {
+      const result = deps.queries.getAttestation(stringParam(url, 'attestation_id', 256) ?? '')
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/decisions' && deps.queries) {
+      const result = deps.queries.listDecisions({
+        run_id: stringParam(url, 'run_id', 256),
+        status: stringParam(url, 'status', 64),
+        limit: Math.min(intParam(url, 'limit', 50), 100),
+        cursor: stringParam(url, 'cursor', 4096),
+        now: Date.parse(requestNow),
+      })
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/decisions/get' && deps.queries) {
+      const result = deps.queries.getDecision(stringParam(url, 'decision_id', 256) ?? '')
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/evidence/get' && deps.queries) {
+      const result = deps.queries.getEvidence(stringParam(url, 'evidence_id', 256) ?? '')
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/ledger/verify' && deps.queries) {
+      const result = deps.queries.verifyLedger()
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/effects/unverified' && deps.queries) {
+      const result = deps.queries.listUnverifiedEffects({
+        run_id: stringParam(url, 'run_id', 256),
+        limit: Math.min(intParam(url, 'limit', 50), 100),
+        cursor: stringParam(url, 'cursor', 4096),
+        now: Date.parse(requestNow),
+      })
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/events') {
@@ -224,10 +356,24 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         : Number(decodeCursor(rawCursor, 'events', {}).last_key)
       if (!Number.isInteger(fromSeq) || fromSeq < 0) throw new OrchError('CURSOR_EXPIRED', '游标里的位置不合法', { cursor: rawCursor })
       const limit = Math.min(intParam(url, 'limit', 100), 200)
-      const rows = deps.listEvents(fromSeq, limit)
+      const result = deps.queries?.listEvents(fromSeq, limit)
+      const rows = result?.rows ?? deps.listEvents(fromSeq, limit)
       const last = rows.length === 0 ? null : (rows[rows.length - 1] as { seq?: number }).seq
-      const nextCursor = typeof last === 'number' ? encodeCursor(makeCursor('events', {}, String(last), '', deps.asOfSeq())) : null
-      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: rows, next_cursor: nextCursor }))
+      const asOfSeq = result?.as_of_seq ?? deps.asOfSeq()
+      const nextCursor = typeof last === 'number' ? encodeCursor(makeCursor('events', {}, String(last), '', asOfSeq)) : null
+      sendJson(res, 200, okEnvelope(asOfSeq, { items: rows, next_cursor: nextCursor }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/events/stream' && deps.queries) {
+      const headerValue = req.headers[LAST_EVENT_ID_HEADER]
+      const queryValue = url.searchParams.get('after_seq')
+      if (Array.isArray(headerValue)) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'Last-Event-ID 只能有一个值', {})
+      const rawSeq = typeof headerValue === 'string' ? headerValue : queryValue
+      const initialSeq = rawSeq === null || rawSeq === undefined || rawSeq === '' ? 0 : Number(rawSeq)
+      if (!Number.isSafeInteger(initialSeq) || initialSeq < 0) {
+        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'Last-Event-ID 必须是非负整数', { last_event_id: rawSeq })
+      }
+      startEventStream(req, res, (afterSeq, limit) => deps.queries!.listEvents(afterSeq, limit), initialSeq)
       return
     }
     // 恢复不确定的节点：宿主面板查这里，确认后走 resolve（评审 P2-4）
@@ -294,16 +440,48 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
+    if (req.method === 'GET' && url.pathname === '/v1/workflows/get' && deps.queries) {
+      const workflowId = stringParam(url, 'workflow_id', 256) ?? ''
+      const out = deps.queries.getWorkflow(workflowId)
+      sendJson(res, 200, okEnvelope(out.as_of_seq, out.item))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/workflows/get' && deps.commands) {
       const workflowId = url.searchParams.get('workflow_id') ?? ''
       const out = deps.commands.getWorkflow({ workflowId })
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
+    if (req.method === 'GET' && url.pathname === '/v1/workflows' && deps.queries) {
+      const out = deps.queries.listWorkflows({
+        owner_task_id: stringParam(url, 'owner_task_id', 256),
+        status: stringParam(url, 'status', 64),
+        query: stringParam(url, 'query', 200),
+        limit: Math.min(intParam(url, 'limit', 50), 100),
+        cursor: stringParam(url, 'cursor', 4096),
+        now: Date.parse(requestNow),
+      })
+      sendJson(res, 200, okEnvelope(out.as_of_seq, { items: out.items, next_cursor: out.next_cursor }))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/workflows' && deps.commands) {
       const owner = url.searchParams.get('owner_task_id')
       const out = deps.commands.listWorkflows({ ownerTaskId: owner === null ? undefined : owner })
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: out }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/workflows/versions/get' && deps.queries) {
+      const workflowId = stringParam(url, 'workflow_id', 256) ?? ''
+      const version = intParam(url, 'version', 0)
+      if (version < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'version 必须是正整数', { version })
+      const out = deps.queries.getWorkflowVersion(workflowId, version)
+      sendJson(res, 200, okEnvelope(out.as_of_seq, out.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/operations/get' && deps.queries) {
+      const operationId = stringParam(url, 'operation_id', 64) ?? ''
+      const out = deps.queries.getOperation(operationId, Date.parse(requestNow))
+      sendJson(res, 200, okEnvelope(out.as_of_seq, out.item))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs/start' && deps.commands) {

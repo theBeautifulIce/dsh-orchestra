@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript 6.0.3（ESM / NodeNext）· Node `^22.19.0 || >=24.0.0` · pnpm 12.3.4 · vitest 4.1.8 · tsdown 0.22.14 · zod 4.4.3 · react 18.3.1 · react-dom 18.3.1 · jsdom 29.1.1 · node:sqlite（内置 DatabaseSync）· DSH bundle 插件
 
+**实施进度（2026-11-17，工作区快照；不代表任务验收或阶段关闭）：** 17 项中，Task 1–2 的查询基元和任务/运行读模型已有实现；Task 3–8 部分实现，仍有明确查询、控制面、宿主连接、六屏整合和视觉走查缺口；Task 9–17 尚未开始，G5 尚未交付。最近一次 `pnpm typecheck` 通过；本轮未运行测试套件，也未创建提交。
+
 ---
 
 ## 0. 前置、边界与口径
@@ -366,13 +368,15 @@ git commit -m "feat(service): 交出任务与运行读视图及服务端聚合"
 
 **目标：** 交出 `list_nodes`、`get_node`、`list_decisions`、`get_decision`、`list_unverified_side_effects`、`get_evidence`、`get_attestation`、`get_artifact`、`verify_ledger` 九个查询与 NodeRunView / DecisionView / UnverifiedEffectView 三种视图（规格 8.2 行 627-631、8.3 行 635-640）。
 
+**实施前置补正：** 本任务原示例引用了 `unverified_resolutions`、`attestations` 两张当前 schema 缺失的表，以及 `node_runs.action`、`stopped_at`、`evidence`、`last_known_phase` 等不存在列。迁移 `029_effect_resolution_records.sql` 现在定义两类只追加记录：人证绑定 run/node/attempt，固定为 `human_attested` 且不作为证据；副作用结算以 `node_run_id` 唯一，`verified_none` 必须与节点的 `side_effect_verified_none + stop_evidence` 一致，其他结算绑定 evidence 或 decision。迁移含作用域守卫与禁止修改/删除触发器，记忆迁移仍为 030。**已完成：** 人证在确认启动事务中落表，并由独立 attestation 查询读取；节点、裁决、证据、产物及未验证副作用基础读模型已实现。`get_evidence` 以宿主签发的 `execution_id` 寻址，只返回哈希、工具结果和时间；会核验对应 `tool_finished` 事件、事件链及两处记录一致，不返回 stdout/stderr，也不接纳人证为系统证据。节点视图能列出同 attempt 的系统证据 ID；`declared_effect` / `verified_effect` 因缺少事实字段继续标为 `projection_missing`。裁决读模型对当前 schema 没有持久化的优先级、允许选项、目标摘要、证据要求显式返回 `null` 并标记 `projection_missing`。**仍待补齐：** 当前没有一个通用的副作用核验/结算命令；现有 `resolveDecision` 的多种 decision 与 resolution 不能不经策略判定就等同为结算。因此 `unverified_resolutions` 暂无写入者，`list_unverified_side_effects` 只按该表过滤已结算行，读模型不推测结算状态。后续需先在 §9 规格中明确各 decision kind 的允许 resolution、证据引用和幂等规则，再把相应落表放进同一裁决事务。缺失的动作描述、停止时刻、证据详情和执行阶段列不得用空值或布尔推断伪造；节点状态、产物和账本查询可独立推进。
+
 **Files:**
 - Create: `src/service/queries/nodes.ts` —— 节点列表与详情，节点显示映射与证据四列。
-- Create: `src/service/queries/decisions.ts` —— 待决事项列表与详情，allowed_resolutions 与 priority。
+- Create: `src/service/queries/decisions.ts` —— 待决事项列表与详情；现阶段回传真实持久化字段，并把未定义的 allowed_resolutions 与 priority 标成 projection_missing。
 - Create: `src/service/queries/effects.ts` —— 未验证副作用列表与 resolved 判定。
-- Create: `src/service/queries/evidence.ts` —— 证据与人工签字的分离读取。
+- Create: `src/service/queries/evidence.ts` —— 系统证据按 execution_id 查询；人工签字仍由独立 attestation 读口读取。
 - Create: `src/service/queries/artifacts.ts` —— `get_artifact` 读取产物元数据，保留期外只回「已过保留期」。
-- Create: `src/service/queries/ledger.ts` —— `verify_ledger` 校验事件哈希链，复用 `src/core/hash-chain.ts`。
+- Create: `src/service/queries/verify_ledger.ts` —— `verify_ledger` 校验事件哈希链，复用 `src/core/hash-chain.ts`。
 - Create: `tests/queries-nodes.spec.ts` —— 节点、裁决、副作用、证据、产物与账本校验的用例。
 
 **步骤：**
@@ -630,6 +634,8 @@ git commit -m "feat(service): 交出节点裁决与未验证副作用读视图"
 
 **目标：** 交出 `list_workflows`、`get_workflow`、`get_workflow_version` 三个工作流查询，并把控制面限定为规格 8.4 行 644-648 的六条命令，带信封、幂等、确认预检与 revision CAS（规格 3.7 行 201-220）。
 
+**当前进度：** 工作流列表、详情、版本只读查询已实现并接入 HTTP，查询从单个只读快照返回 `as_of_seq`；沿用当前数据库实际的 ISO 时间文本，旧版本缺少 `doc_json` 时明确标 `projection_missing`。S4 已有四条带 `operation_id` 的工作流写命令，但 S5 的统一六命令信封、decision acknowledge 与回执查询仍待完成。
+
 **Files:**
 - Create: `src/service/queries/workflows.ts` —— `list_workflows`、`get_workflow`、`get_workflow_version` 三个查询与 WorkflowView。
 - Create: `src/service/commands/envelope.ts` —— 命令信封与 `request_hash` 计算。
@@ -866,6 +872,8 @@ git commit -m "feat(service): 限定控制面六命令并接上信封与回执"
 
 **目标：** 交出 `list_events` 与 SSE 通道：事件只当失效信号，断号整页重取，重复事件按 event_id 去重（规格 8.3 行 635、8.4 行 647；设计稿 §4.7）。
 
+**当前进度：** 服务端 SSE 已支持 Last-Event-ID、按 seq 连续续传、15 秒心跳、断号/积压时发 `resync_required` 后关闭；客户端控制器支持 event_id 去重、合并刷新和轮询降级，并新增基于注入 fetch 的 SSE 流解析器及连接到 list_events 的控制器工厂。宿主认证/代理接线与具体视图刷新回调仍待完成。
+
 **Files:**
 - Create: `src/service/queries/events.ts` —— 事件列表与按 seq 续读。
 - Create: `src/service/events/stream.ts` —— 服务端 SSE 通道与心跳。
@@ -996,6 +1004,8 @@ git commit -m "feat(service): 接上事件查询与 SSE 失效信号通道"
 
 **目标：** 把读模型客户端、命令提交与回执查询收成一层，让面板只经这一层取数与发命令，不直接碰账本、不直接连 SQLite（规格 8.4 行 646；Q-22）。
 
+**当前进度：** 已有信封解包、协议版本检查、通用 get/post、超时转 operation receipt 查询、视图类型入口及任务/运行/节点/决定/证据/事件/工作流/回执只读资源 API，以及复用注入 fetch 的事件流控制器；宿主认证/代理注入、SSE 状态到具体视图的刷新回调、写命令清单接线仍待完成。
+
 **Files:**
 - Create: `src/client/api/client.ts` —— 读模型客户端：查询调用与信封解包。
 - Create: `src/client/api/commands.ts` —— 命令提交、`operation_id` 回执查询与重试纪律。
@@ -1097,6 +1107,8 @@ git commit -m "feat(client): 建面板 API 层与回执查询纪律"
 ### Task 7：面板骨架与视觉硬门槛
 
 **目标：** 立起面板外壳与设计令牌，把规格 8.6 行 661-667 的视觉硬门槛变成可测的断言：字号下限、对比度下限、浅色主题、无黑底、无菜单彩色左条（规格 13.3 行 1118-1120）。
+
+**当前进度：** 已实现颜色/字号令牌、对比度计算与受检色对、中文文案表，以及可复用的导航/服务状态外壳并从 client 入口导出，PanelApp 已把任务列表与详情装配进共享外壳；PanelCommandButton 会在服务断开或快照陈旧时禁用。仍待接入 DSH 实际宿主挂载与认证，确保后续写命令使用该控件，并完成两个视口的渲染级视觉走查。
 
 **Files:**
 - Create: `src/client/panel/tokens.ts` —— 颜色与字号令牌，以及各项下限常量。
@@ -1219,6 +1231,8 @@ git commit -m "feat(client): 立面板外壳与视觉硬门槛令牌"
 ### Task 8：六屏之一二——任务列表与任务详情
 
 **目标：** 交出任务列表与任务详情两屏，行内元素与风险栏按规格 8.5 行 652-653 的清单逐条落实（规格 13.3 行 1121 的逐屏走查）。
+
+**当前进度：** 任务列表已接真实只读 API，支持搜索、游标分页、刷新、加载/空/错误态、状态与待处理事项展示；详情页可查看任务摘要、最近运行、节点状态与运行记录。两页已由 PanelApp 串接；其他逐屏规格、后续运行选择和视口走查未完成。
 
 **Files:**
 - Create: `src/client/panel/task-list.tsx` —— 任务列表屏。

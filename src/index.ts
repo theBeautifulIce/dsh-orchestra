@@ -21,6 +21,18 @@ import { wakeOnEvent } from './service/commands/wait.ts'
 import { propagateRunCancellation } from './service/commands/subworkflow.ts'
 import { resolveRecoveryUncertain } from './service/commands/recovery.ts'
 import { listRecoveryUncertain } from './service/queries/recovery.ts'
+import { listTaskSummaries, getTaskSummarySnapshot } from './service/queries/tasks.ts'
+import { listRuns, getRun } from './service/queries/runs.ts'
+import { listNodes, getNodeSnapshot } from './service/queries/nodes.ts'
+import { getArtifactSnapshot } from './service/queries/artifacts.ts'
+import { getAttestationSnapshot } from './service/queries/attestations.ts'
+import { getDecisionSnapshot, listDecisions } from './service/queries/decisions.ts'
+import { getEvidenceSnapshot } from './service/queries/evidence.ts'
+import { verifyLedgerSnapshot } from './service/queries/verify_ledger.ts'
+import { getWorkflowSnapshot, getWorkflowVersionSnapshot, listWorkflowSummaries as listWorkflowQuery } from './service/queries/workflows.ts'
+import { listUnverifiedEffects } from './service/queries/effects.ts'
+import { listEvents as listEventPage } from './service/queries/list_events.ts'
+import { getOperationSnapshot } from './service/queries/get_operation.ts'
 import { inTx } from './infra/db/tx.ts'
 import type { NodeCommands, ServerDeps } from './service/server.ts'
 import { startServer } from './service/server.ts'
@@ -382,6 +394,26 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       asOfSeq: opts.asOfSeq,
       listTasks: opts.listTasks,
       listEvents: opts.listEvents,
+      queries: {
+        listEvents: (fromSeq, limit) => listEventPage(orchestra.db, { fromSeq, limit }),
+        listTaskSummaries: (params) => listTaskSummaries(orchestra.db, params),
+        getTaskSummary: (taskId, now) => getTaskSummarySnapshot(orchestra.db, taskId, now),
+        listRuns: (query) => listRuns(orchestra.db, query),
+        getRun: (runId) => getRun(orchestra.db, runId),
+        listNodes: (runId, limit) => listNodes(orchestra.db, runId, limit),
+        getNode: (nodeRunId) => getNodeSnapshot(orchestra.db, nodeRunId),
+        getArtifact: (artifactId, now) => getArtifactSnapshot(orchestra.db, artifactId, now),
+        getAttestation: (attestationId) => getAttestationSnapshot(orchestra.db, attestationId),
+        listDecisions: (params) => listDecisions(orchestra.db, params),
+        getDecision: (decisionId) => getDecisionSnapshot(orchestra.db, decisionId),
+        getEvidence: (evidenceId) => getEvidenceSnapshot(orchestra.db, opts.secret, evidenceId),
+        verifyLedger: () => verifyLedgerSnapshot(orchestra.db, opts.secret),
+        listWorkflows: (params) => listWorkflowQuery(orchestra.db, params),
+        getWorkflow: (workflowId) => getWorkflowSnapshot(orchestra.db, workflowId),
+        getWorkflowVersion: (workflowId, version) => getWorkflowVersionSnapshot(orchestra.db, workflowId, version),
+        getOperation: (operationId, now) => getOperationSnapshot(orchestra.db, operationId, now),
+        listUnverifiedEffects: (params) => listUnverifiedEffects(orchestra.db, params),
+      },
       appendLedgerEvent: opts.appendLedgerEvent,
       commands: orchestra.commands,
       log,

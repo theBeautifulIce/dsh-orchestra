@@ -1,6 +1,7 @@
 // 事件分页：seq 升序、单页强一致、跨页不承诺同一快照；limit 上限 200（规格 8.3 行 637）
 import { OrchError } from '../../core/errors.ts'
 import { type Db } from '../../infra/sqlite/driver.ts'
+import { withReadTx } from './read-tx.ts'
 
 export const EVENTS_LIMIT_MAX = 200
 
@@ -11,9 +12,12 @@ export function listEvents(db: Db, opts: { fromSeq?: number; limit?: number }): 
     throw new OrchError('RANGE_TOO_LARGE', '一次最多要 ' + String(EVENTS_LIMIT_MAX) + ' 条', { limit })
   }
   const from = opts.fromSeq ?? 0
-  const rows = db.raw.prepare(
-    'SELECT seq, event_id, type, occurred_at, boot_id, monotonic_ns, run_id, node_run_id, decision_id, payload_redacted, payload_ref '
-    + 'FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?').all(from, limit)
-  const head = db.raw.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').get() as { seq: number }
-  return { rows, as_of_seq: Number(head.seq) }
+  return withReadTx(db, ({ tx, as_of_seq }) => {
+    const rows = tx.all(
+      'SELECT seq, event_id, type, occurred_at, boot_id, monotonic_ns, run_id, node_run_id, decision_id, payload_redacted, payload_ref '
+      + 'FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?',
+      [from, limit],
+    )
+    return { rows, as_of_seq }
+  })
 }

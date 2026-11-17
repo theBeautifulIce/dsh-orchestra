@@ -5,6 +5,7 @@ import { OrchError } from '../../core/errors.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { applyTransition } from './nodes.ts'
 import { deadlineFromSample, type ClockProvider } from '../../core/clock.ts'
+import { attestationId } from '../../core/ids.ts'
 
 export type ConfirmStartParams = {
   nodeRunId: string
@@ -23,10 +24,10 @@ export function confirmStartup(
   db: Db,
   secret: string,
   p: ConfirmStartParams,
-): { trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool' } {
+): { trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'; attestation_id?: string } {
   return withTx(db, (tx) => {
-    const row = tx.get<{ status: string; attempt: number; revision: number; rearm_generation: number }>(
-      'SELECT status, attempt, revision, rearm_generation FROM node_runs WHERE node_run_id = ?',
+    const row = tx.get<{ status: string; attempt: number; revision: number; rearm_generation: number; run_id: string }>(
+      'SELECT status, attempt, revision, rearm_generation, run_id FROM node_runs WHERE node_run_id = ?',
       [p.nodeRunId],
     )
     if (!row || row.status !== 'startup_unknown' || row.attempt !== p.attempt) {
@@ -40,6 +41,12 @@ export function confirmStartup(
       [p.nodeRunId],
     ))
     const trigger = hasTool ? 'confirm-started-with-tool' : p.attested ? 'confirm-started-attested' : 'confirm-started'
+    if (trigger === 'confirm-started-attested' && !p.actor) {
+      throw new OrchError('FORBIDDEN', '人证必须记录确认人', { nodeRunId: p.nodeRunId })
+    }
+    const attestation = trigger === 'confirm-started-attested'
+      ? { id: attestationId(), actor: p.actor! }
+      : null
     // 三条出口共用同一对状态：必须显式点名走哪条，不能让无守卫的 M-08 替带条件的 M-61 放行
     const ruleId = hasTool ? 'M-61' : p.attested ? 'M-09' : 'M-08'
     const actionDeadlineMs = p.actionDeadlineMs ?? 30_000
@@ -74,8 +81,16 @@ export function confirmStartup(
     appendNodeRunEvent(tx, secret, p.nodeRunId, 'startup.confirmed', {
       trigger,
       actor: p.actor ?? null,
+      ...(attestation ? { attestation_id: attestation.id } : {}),
       action_deadline_ms: actionDeadlineMs,
     })
-    return { trigger }
+    if (attestation) {
+      tx.run(
+        'INSERT INTO attestations (attestation_id, run_id, node_run_id, attempt, claim, attested_by, attested_at, action_start_source, summary, created_at) '
+        + "VALUES (?, ?, ?, ?, 'action_started', ?, ?, 'human_attested', NULL, ?)",
+        [attestation.id, row.run_id, p.nodeRunId, p.attempt, attestation.actor, p.now, p.now],
+      )
+    }
+    return { trigger, ...(attestation ? { attestation_id: attestation.id } : {}) }
   })
 }

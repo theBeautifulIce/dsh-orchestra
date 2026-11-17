@@ -1,0 +1,67 @@
+export const ATTENTION_ORDER = ['decision', 'unverified', 'failed', 'orphaned', 'running', 'none'] as const
+export type Attention = (typeof ATTENTION_ORDER)[number]
+
+export const SIDE_EFFECT_LEVEL = ['pure', 'compensable', 'irreversible'] as const
+export type SideEffectLevel = (typeof SIDE_EFFECT_LEVEL)[number]
+
+export type TaskAggregates = {
+  open_decision_count: number
+  oldest_open_decision_age_seconds: number | null
+  unverified_count: number
+  max_side_effect_level: SideEffectLevel | null
+  max_heartbeat_age_ms: number | null
+}
+
+export type AttentionInput = {
+  openDecisionCount: number
+  oldestOpenDecisionAgeSeconds: number | null
+  unverifiedCount: number
+  currentRunStatus: string | null
+  orphanedNodeCount: number
+  taskStatus: string
+}
+
+/** 高优先级返回更大的权重，供服务端稳定排序；未知档位排在已知档位之后。 */
+export function attentionWeight(attention: string): number {
+  const index = ATTENTION_ORDER.indexOf(attention as Attention)
+  return index < 0 ? 0 : ATTENTION_ORDER.length - index
+}
+
+export function sideEffectWeight(level: string): number {
+  const index = SIDE_EFFECT_LEVEL.indexOf(level as SideEffectLevel)
+  return index < 0 ? -1 : index
+}
+
+export function maxSideEffectLevel(levels: readonly string[]): SideEffectLevel | null {
+  let max: SideEffectLevel | null = null
+  for (const level of levels) {
+    if (sideEffectWeight(level) > sideEffectWeight(max ?? '')) max = level as SideEffectLevel
+  }
+  return max
+}
+
+export function deriveAttention(input: AttentionInput): { attention: Attention; attention_reason: string | null } {
+  if (input.openDecisionCount > 0) {
+    const age = input.oldestOpenDecisionAgeSeconds
+    const minutes = age === null ? null : Math.max(1, Math.floor(age / 60))
+    return {
+      attention: 'decision',
+      attention_reason: minutes === null ? `有 ${input.openDecisionCount} 个决定等你处理` : `有决定已等你 ${minutes} 分钟`,
+    }
+  }
+  if (input.unverifiedCount > 0) {
+    return { attention: 'unverified', attention_reason: `有 ${input.unverifiedCount} 笔副作用待核实` }
+  }
+  if (input.currentRunStatus === 'failed' || input.currentRunStatus === 'failed_with_unverified') {
+    return { attention: 'failed', attention_reason: '最近一次运行未成功' }
+  }
+  if (input.currentRunStatus === 'orphaned' || input.orphanedNodeCount > 0) {
+    return { attention: 'orphaned', attention_reason: '有节点尚未由新的执行尝试接手' }
+  }
+  if (input.taskStatus === 'running' || (input.currentRunStatus !== null && !RUN_TERMINAL.has(input.currentRunStatus))) {
+    return { attention: 'running', attention_reason: '任务仍在执行' }
+  }
+  return { attention: 'none', attention_reason: null }
+}
+
+const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])

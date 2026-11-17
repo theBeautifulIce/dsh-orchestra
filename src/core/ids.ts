@@ -20,6 +20,7 @@ const short = (): string => uuidv7().replace(/-/g, '')
 export const eventId = (): string => 'evt_' + short()
 export const nodeRunId = (): string => 'nrun_' + short()
 export const decisionId = (): string => 'dec_' + short()
+export const attestationId = (): string => 'att_' + short()
 export const runId = (): string => 'run_' + short()
 export const taskId = (): string => 'tsk_' + short()
 // 工具执行身份：同一次节点执行里每跑一遍工具都有自己的 id，收口时按它回查痕迹行
