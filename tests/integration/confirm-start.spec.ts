@@ -26,8 +26,15 @@ describe('确认启动 M-08/M-09/M-61', () => {
 
   it('人工声明确实启动 → M-09', () => {
     const db = startupUnknown()
-    const out = confirmStartup(db, TEST_SECRET, { nodeRunId: 'nr1', attempt: 1, now: NOW, attested: true })
+    const out = confirmStartup(db, TEST_SECRET, { nodeRunId: 'nr1', attempt: 1, now: NOW, attested: true, actor: 'service:human' })
     expect(out.trigger).toBe('confirm-started-attested')
+  })
+
+  it('人证 attestation 必须记录确认人 → 未给 actor 直接拒绝', () => {
+    const db = startupUnknown()
+    expect(() => confirmStartup(db, TEST_SECRET, { nodeRunId: 'nr1', attempt: 1, now: NOW, attested: true }))
+      .toThrowError(/人证必须记录确认人/)
+    expect(statusOf(db)).toBe('startup_unknown')
   })
 
   it('账本已有 tool_started → M-61，不接受调用方自报', () => {
