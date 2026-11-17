@@ -3,6 +3,7 @@
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
 import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
+import { TERMINAL_STATUSES } from '../core/state-machine.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
 import { acquireNodeRun, type RuntimeDeps } from './commands/runtime.ts'
@@ -103,9 +104,10 @@ export type DispatchDeps = {
 // 依赖放行：定义里带了 edges 时，前置节点没到 done 的不派发（审计 P1-3）。
 // 前置节点压根不在 run 里 = 配置错误（nodeIds 闭包被绕过/账本被改），必须可观测地失败，
 // 不能无限期静默跳过（审计 P1 防御面）。
-const SUCCESS_STATUS = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
-// 非成功终态：前置停在这些状态上时后置永远等不到，必须结算而不是长等（S4 r1 P1-2 / S3 r21 P2-5a）
-const BLOCKED_TERMINAL = new Set(['failed', 'failed_with_unverified', 'timeout', 'cancelled', 'superseded', 'orphaned', 'abandoned_unverified', 'indeterminate_side_effect'])
+const SUCCESS_STATUS: ReadonlySet<string> = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
+// 非成功终态必须从状态机终态表派生：indeterminate_side_effect / startup_unknown 等非终态
+// 还能经裁决走到 done，当成失败前置会在裁决窗口误结算后置（S3 r22 P2-7）
+const BLOCKED_TERMINAL: ReadonlySet<string> = new Set(TERMINAL_STATUSES.filter((status) => !SUCCESS_STATUS.has(status)))
 type Readiness =
   | { ready: true }
   | { ready: false; missingPreds: string[] }

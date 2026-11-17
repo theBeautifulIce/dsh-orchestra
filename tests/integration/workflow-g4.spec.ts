@@ -590,9 +590,35 @@ describe('G4：前置失败/换行后的后置收口（S4 r1 P1-2、S3 r21 P2-5�
         + "VALUES (?, ?, 'a', 99, 'agent', 2, 'done', 0, ?, ?)",
       ).run(id(5), run2.run_id, NOW, NOW)
       await dispatch(run2.run_id)
-      const b2 = db.raw.prepare("SELECT status FROM node_runs WHERE run_id = ? AND node_id = 'b'").get(run2.run_id) as { status: string }
-      // b 不许停在 queued：要么被派发尝试，要么被收口
+      // 场景三（S3 r22 P2-7）：前置在 indeterminate_side_effect（非终态、可裁决恢复）
+      // 时后置必须继续等，不能被结算；裁决换行 done 后放行
+      const run3 = commands.startRun!({
+        taskTitle: '不确定前置', workflowId: 'wf_fail', workflowVersion: '1', operationId: id(6), now: NOW,
+      }) as { run_id: string }
+      db.raw.prepare("UPDATE node_runs SET status = 'indeterminate_side_effect' WHERE run_id = ? AND node_id = 'a'").run(run3.run_id)
+      await dispatch(run3.run_id)
+      const b3mid = db.raw.prepare("SELECT status FROM node_runs WHERE run_id = ? AND node_id = 'b'").get(run3.run_id) as { status: string }
+      expect(b3mid.status).toBe('queued')
+      const run3row = db.raw.prepare('SELECT status FROM runs WHERE run_id = ?').get(run3.run_id) as { status: string }
+      expect(run3row.status).toBe('running')
+      // 裁决换行（M-60）：旧行 superseded、新行 attempt=2 done
+      db.raw.prepare("UPDATE node_runs SET status = 'superseded' WHERE run_id = ? AND node_id = 'a' AND attempt = 1").run(run3.run_id)
+      db.raw.prepare(
+        "INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at) "
+        + "VALUES (?, ?, 'a', 98, 'agent', 2, 'done', 0, ?, ?)",
+      ).run(id(7), run3.run_id, NOW, NOW)
+      await dispatch(run3.run_id)
+      const b3 = db.raw.prepare("SELECT status FROM node_runs WHERE run_id = ? AND node_id = 'b'").get(run3.run_id) as { status: string }
+      expect(b3.status).not.toBe('queued')
+
+      const b2 = db.raw.prepare("SELECT node_run_id, status FROM node_runs WHERE run_id = ? AND node_id = 'b'").get(run2.run_id) as
+        { node_run_id: string; status: string }
+      // b 不许停在 queued，且必须是「被放行执行」而不是「被前置结算」（S3 r22 P3-2）
       expect(b2.status).not.toBe('queued')
+      const b2Evt = db.raw.prepare(
+        'SELECT payload FROM node_run_events WHERE node_run_id = ? ORDER BY seq DESC LIMIT 1').get(b2.node_run_id) as
+        { payload: string } | undefined
+      expect(b2Evt === undefined || JSON.parse(b2Evt.payload).error_code !== 'RESOLUTION_NOT_AVAILABLE').toBe(true)
     } finally {
       await service.release()
       rmSync(dir, { recursive: true, force: true })
