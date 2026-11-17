@@ -106,7 +106,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
     requireVerdict: true,
     // handoff 是活文档，每次收尾都会改；它进候选范围会让门哈希随一次文档更新失效（审计 F-02）
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: null,
     gateFile: 'docs/gates/G1.md',
   },
@@ -194,7 +194,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: '4f3ada7',
     requireVerdict: true,
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: 'G1',
     gateFile: 'docs/gates/G2.md',
   },
@@ -281,9 +281,75 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: 'c296d72',
     requireVerdict: true,
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
     prevGate: 'G2',
     gateFile: 'docs/gates/G3.md',
+  },
+  G4: {
+    items: [
+      'G4-01', 'G4-02', 'G4-03', 'G4-04', 'G4-05', 'G4-06', 'G4-07', 'G4-08',
+      'G4-09', 'G4-10', 'G4-11', 'G4-12', 'G4-13', 'G-10',
+    ],
+    content: {
+      'G4-01': 'Q-37 命令路径 404、草稿分流与 based_on_version 断言',
+      'G4-02': 'Q-38 已消费草稿优先 DRAFT_NOT_OPEN，内容未变返回 changed=false',
+      'G4-03': 'Q-39 保存层拒绝码：id/边/坐标/标题/名称/自环/重复边/超限',
+      'G4-04': 'Q-40 子流程 pin 已发布版本、深度 2 与成环拒',
+      'G4-05': 'Q-41 版本只增不减、版本行不可变、在途 run 固定旧版本',
+      'G4-06': 'Q-42 task_local 归属：预留任务、owner 真实性与根入口禁起',
+      'G4-07': '发布事务与回执同笔：版本插入、current_version 上调、草稿消费与 command.applied',
+      'G4-08': '并发发布只有一个版本（双 worker 真并发抢一张草稿）',
+      'G4-09': '在途 run 时发布新版本：旧 run 固定 v1、新 run 用 v2',
+      'G4-10': '非法图与空名称拒：保存层结构性拒绝，发布层全量图语义拒',
+      'G4-11': '回滚发布不影响已固定 run：版本不可变与 run 固定两条一起断言',
+      'G4-12': 'HTTP 六入口与 UUIDv7 operation_id 幂等协议',
+      'G4-13': 'S4 全量测试与构建全绿',
+      'G-10': '在途 run 时发布新版本',
+    },
+    invariants: {
+      I1: { statement: '发布只影响之后新建的 run：在途 run 永远按创建时的版本解释', evidence_ids: ['ev-g4-05', 'ev-g4-09', 'ev-g4-g10'] },
+      I2: { statement: '已发布版本不可变：只插不改不删，回滚只能发新版本', evidence_ids: ['ev-g4-05', 'ev-g4-11'] },
+      I3: { statement: '发布事务与回执同笔：失败整笔回滚，重放拿原回执不产生第二份副作用', evidence_ids: ['ev-g4-07', 'ev-g4-08'] },
+      I4: { statement: 'task_local 只归属预留任务：owner 必须真实未消费，根入口不许起', evidence_ids: ['ev-g4-06'] },
+      I5: { statement: '校验分两层：保存层只拒结构问题，发布层拒全部图语义问题且错误带 path', evidence_ids: ['ev-g4-03', 'ev-g4-10'] },
+    },
+    evidenceMap: {
+      'G4-01': ['ev-g4-01'],
+      'G4-02': ['ev-g4-02'],
+      'G4-03': ['ev-g4-03'],
+      'G4-04': ['ev-g4-04'],
+      'G4-05': ['ev-g4-05'],
+      'G4-06': ['ev-g4-06'],
+      'G4-07': ['ev-g4-07'],
+      'G4-08': ['ev-g4-08'],
+      'G4-09': ['ev-g4-09'],
+      'G4-10': ['ev-g4-10'],
+      'G4-11': ['ev-g4-11'],
+      'G4-12': ['ev-g4-12'],
+      'G4-13': ['ev-g4-13'],
+      'G-10': ['ev-g4-g10'],
+    },
+    evidenceFiles: {
+      'ev-g4-01': 'tests/integration/workflow-commands.spec.ts',
+      'ev-g4-02': 'tests/integration/workflow-commands.spec.ts',
+      'ev-g4-03': 'tests/unit/workflow-doc-save.spec.ts',
+      'ev-g4-04': 'tests/unit/workflow-doc-publish.spec.ts',
+      'ev-g4-05': 'tests/integration/workflow-g4.spec.ts',
+      'ev-g4-06': 'tests/integration/workflow-g4.spec.ts',
+      'ev-g4-07': 'tests/integration/workflow-commands.spec.ts',
+      'ev-g4-08': 'tests/integration/workflow-g4.spec.ts',
+      'ev-g4-09': 'tests/integration/workflow-g4.spec.ts',
+      'ev-g4-10': 'tests/unit/workflow-doc-save.spec.ts',
+      'ev-g4-11': 'tests/integration/workflow-g4.spec.ts',
+      'ev-g4-12': 'tests/contract/workflow-routes.spec.ts',
+      'ev-g4-13': 'docs/gates/evidence/G4/full-suite.md',
+      'ev-g4-g10': 'docs/gates/evidence/G4/G-10.md',
+    },
+    scopeBase: '9fbecdd',
+    requireVerdict: true,
+    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    prevGate: 'G3',
+    gateFile: 'docs/gates/G4.md',
   },
 }
 
@@ -2701,7 +2767,7 @@ if (process.argv[1] && /gate-check\.ts$/.test(process.argv[1].replace(/\\/g, '/'
   // 无参默认把三道门都验完：只查 G1 会让 G2/G3 的正文与证据悄悄漂移（S3 审计 P0-3）
   const paths = process.argv.length > 2
     ? process.argv.slice(2)
-    : ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md']
+    : ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md']
   for (const path of paths) {
     try {
       const out = verifyGateRecord(readFileSync(path, 'utf8'), { path })
