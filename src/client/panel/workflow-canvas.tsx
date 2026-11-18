@@ -4,6 +4,7 @@ import type { WorkflowView } from '../api/types.ts'
 import type { WorkflowCommandsApi } from '../api/workflow-commands.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
 import { WorkflowEditor } from './workflow-editor.tsx'
 
 export type WorkflowCanvasProps = {
@@ -42,6 +43,7 @@ export function WorkflowCanvas({ api, workflowId, onBack, reloadVersion = 0, onS
   const draftDefinition = workflow?.draft?.definition ?? null
   const publishedDefinition = workflow?.current?.definition ?? null
   const definition = draftDefinition ?? publishedDefinition
+  const shownDefinition = editable ? publishedDefinition : definition
   const draftMode = Boolean(workflow?.draft)
   return <section aria-labelledby="workflow-canvas-title" style={{ display: 'grid', gap: 18 }}>
     <button type="button" onClick={onBack} style={buttonStyle}>返回流程列表</button>
@@ -66,9 +68,18 @@ export function WorkflowCanvas({ api, workflowId, onBack, reloadVersion = 0, onS
         </section>}
       <section aria-labelledby="workflow-definition-title" style={cardStyle}>
         <h2 id="workflow-definition-title" style={sectionTitleStyle}>{editable ? '已发布定义（只读）' : '流程定义'}</h2>
-        {(editable ? publishedDefinition : definition) === null
+        {shownDefinition === null
           ? <p style={mutedStyle}>{editable ? '还没有已发布版本。' : '流程定义暂不可用。'}</p>
-          : <pre style={jsonStyle}>{JSON.stringify(editable ? publishedDefinition : definition, null, 2)}</pre>}
+          : (
+            <>
+              <WorkflowCanvasView
+                definition={shownDefinition}
+                readOnly
+                canvasId={editable ? 'published-canvas' : 'readonly-canvas'}
+              />
+              <pre style={jsonStyle}>{JSON.stringify(shownDefinition, null, 2)}</pre>
+            </>
+          )}
         {!(editable ? definition : publishedDefinition) && <p style={mutedStyle}>定义摘要：{workflow.draft?.definition_hash ?? workflow.current?.definition_hash}</p>}
       </section>
       <section aria-labelledby="workflow-versions-title" style={cardStyle}>

@@ -7,21 +7,30 @@ export { createSseSubscribe } from './api/sse-fetch.ts'
 export { createConnectedEventStream } from './api/event-stream.ts'
 export type { ConnectedEventStreamOptions } from './api/event-stream.ts'
 export { createResourcesApi } from './api/resources.ts'
-export type { ListDecisionsParams, ListEventsParams, ListTasksParams, ListWorkflowsParams, Page, ResourcesApi } from './api/resources.ts'
+export { createDecisionCommandsApi, DECISION_COMMAND_KINDS, DECISION_ERROR_TEXT, describeDecisionError } from './api/decision-commands.ts'
+export type {
+  DecisionAcknowledgeInput, DecisionAcknowledgeResult, DecisionCommandKind, DecisionCommandOutcome,
+  DecisionCommandsApi, DecisionResolveInput, DecisionResolveResult,
+} from './api/decision-commands.ts'
+export type { ListDecisionsParams, ListEventsParams, ListMemoryBatchesParams, ListTasksParams, ListWorkflowsParams, Page, ResourcesApi } from './api/resources.ts'
 export { PANEL_ROUTES, PanelCommandButton, PanelShell, UnknownState, usePanelCommandsEnabled } from './panel/shell.tsx'
 export { TaskListScreen } from './panel/tasks-screen.tsx'
 export { TaskDetailScreen } from './panel/task-detail-screen.tsx'
-export { DecisionInbox } from './panel/decision-inbox.tsx'
+export { DecisionInbox, priorityRank, readMemoryApprovalCard, sortDecisions } from './panel/decision-inbox.tsx'
+export { MemoryPanel, memoryCopy } from './panel/memory-panel.tsx'
 export { UnverifiedEffects, VERIFY_BANNER } from './panel/unverified-effects.tsx'
 export { WorkflowCanvas } from './panel/workflow-canvas.tsx'
+export { WorkflowCanvasView } from './panel/workflow-canvas-view.tsx'
 export { WorkflowListScreen } from './panel/workflow-list.tsx'
 export { PanelApp } from './panel/app.tsx'
 export type { PanelRoute, PanelShellProps } from './panel/shell.tsx'
 export type { TaskListScreenProps } from './panel/tasks-screen.tsx'
 export type { TaskDetailScreenProps } from './panel/task-detail-screen.tsx'
 export type { DecisionInboxProps } from './panel/decision-inbox.tsx'
+export type { MemoryCopy, MemoryPanelProps } from './panel/memory-panel.tsx'
 export type { UnverifiedEffectsProps } from './panel/unverified-effects.tsx'
 export type { WorkflowCanvasProps } from './panel/workflow-canvas.tsx'
+export type { WorkflowCanvasViewProps } from './panel/workflow-canvas-view.tsx'
 export type { WorkflowListScreenProps } from './panel/workflow-list.tsx'
 export type { PanelAppProps } from './panel/app.tsx'
 export { COLOR, FONT_FLOOR_PX, FONT_PX } from './panel/tokens.ts'
@@ -29,6 +38,8 @@ export { contrastRatio, relativeLuminance, TEXT_PAIRS } from './panel/contrast.t
 export type { ApiClient, ApiResult, FetchLike } from './api/client.ts'
 export type { EventStreamOptions, Invalidation, StreamStatus } from './api/sse.ts'
 export type {
-  ArtifactView, AttestationView, DecisionView, EventView, EvidenceView, LedgerVerify, NodeRunView, OperationRow,
-  RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem, WorkflowVersionView, WorkflowView,
+  ArtifactView, AttestationView, DecisionView, EventView, EvidenceView, LedgerVerify, MemoryApprovalCard,
+  MemoryApprovalCardButton, MemoryApprovalCardItem, MemoryBatchStatus, MemoryBatchView, MemoryItemStatus,
+  MemoryItemView, NodeRunView, OperationRow, RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem,
+  WorkflowVersionView, WorkflowView,
 } from './api/types.ts'

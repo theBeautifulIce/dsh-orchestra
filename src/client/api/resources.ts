@@ -1,7 +1,7 @@
 import type { ApiClient, ApiResult } from './client.ts'
 import type {
-  ArtifactView, AttestationView, DecisionView, EventView, EvidenceView, LedgerVerify, NodeRunView, OperationRow,
-  RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem, WorkflowVersionView, WorkflowView,
+  ArtifactView, AttestationView, DecisionView, EventView, EvidenceView, LedgerVerify, MemoryBatchView, NodeRunView,
+  OperationRow, RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem, WorkflowVersionView, WorkflowView,
 } from './types.ts'
 
 export type Page<T> = { items: T[]; next_cursor: string | null }
@@ -9,6 +9,7 @@ export type ListTasksParams = { limit?: number; cursor?: string; status?: string
 export type ListDecisionsParams = { run_id?: string; status?: string; limit?: number; cursor?: string }
 export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; query?: string; owner_task_id?: string }
 export type ListEventsParams = { from_seq?: number; limit?: number; cursor?: string }
+export type ListMemoryBatchesParams = { task_id?: string; limit?: number; cursor?: string }
 
 const compact = (params: Record<string, string | number | undefined>) => params
 
@@ -29,6 +30,9 @@ export function createResourcesApi(client: ApiClient) {
       client.get('/v1/node-runs/get', { node_run_id }),
     listDecisions: (params: ListDecisionsParams = {}): Promise<ApiResult<Page<DecisionView>>> =>
       client.get('/v1/decisions', compact(params)),
+    // 记忆批次只读：面板不写记忆，也不发任何写命令。
+    listMemoryBatches: (params: ListMemoryBatchesParams = {}): Promise<ApiResult<Page<MemoryBatchView>>> =>
+      client.get('/v1/memory/batches', compact(params)),
     getDecision: (decision_id: string): Promise<ApiResult<DecisionView>> =>
       client.get('/v1/decisions/get', { decision_id }),
     listUnverifiedEffects: (params: { run_id?: string; limit?: number; cursor?: string } = {}): Promise<ApiResult<Page<UnverifiedEffectView>>> =>

@@ -12,6 +12,9 @@ const STATUS_LABEL: Record<string, string> = {
   waiting: '等待中', cancelled: '已取消', indeterminate_side_effect: '副作用情况待核实',
 }
 
+// 当前读模型没有来源列的字段一律写「未知」，不用别的值顶替。
+const UNKNOWN = '未知'
+
 export type UnverifiedEffectsProps = {
   api: ResourcesApi
   reloadVersion?: number
@@ -26,6 +29,7 @@ export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot }: Unveri
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
   const lastReload = useRef(reloadVersion)
+  const [developerView, setDeveloperView] = useState(false)
 
   useEffect(() => {
     if (lastReload.current !== reloadVersion) {
@@ -62,16 +66,28 @@ export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot }: Unveri
       <h2 style={sectionTitleStyle}>未验证操作</h2>
       <button type="button" onClick={refresh} disabled={loading} style={buttonStyle}>{loading ? '正在更新…' : '刷新'}</button>
     </div>
+    <div style={toolbarStyle}>
+      <label style={toggleStyle}>
+        <input
+          type="checkbox"
+          aria-label="开发者视图"
+          checked={developerView}
+          onChange={(event) => setDeveloperView(event.target.checked)}
+        />
+        开发者视图
+      </label>
+    </div>
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={refresh} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取待核实事项…</p>}
     {!loading && !failed && items.length === 0 && <div style={emptyStyle}>{COPY.emptyEffects}</div>}
-    {!failed && items.map((effect) => <EffectCard key={effect.node_run_id} effect={effect} />)}
+    {!failed && items.map((effect) => <EffectCard key={effect.node_run_id} effect={effect} developerView={developerView} />)}
     {nextCursor && !failed && <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>}
   </section>
 }
 
-function EffectCard({ effect }: { effect: UnverifiedEffectView }) {
+function EffectCard({ effect, developerView }: { effect: UnverifiedEffectView; developerView: boolean }) {
   const level = EFFECT_LABEL[effect.side_effect_policy]
+  const age = effect.age_seconds === null ? '时长未知' : `已等待 ${effect.age_seconds} 秒`
   return <article style={cardStyle}>
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
       <h2 style={cardTitleStyle}>{effect.node_id || '未命名步骤'}</h2>
@@ -86,8 +102,42 @@ function EffectCard({ effect }: { effect: UnverifiedEffectView }) {
       <dt>开始时间</dt><dd>{effect.started_at ? formatDate(effect.started_at) : '没有记录开始时间'}</dd>
       <dt>停止记录</dt><dd>{effect.stop_evidence ?? '没有记录停止证据'}</dd>
       <dt>签认状态</dt><dd>{effect.resolved ? '已有处理记录' : '尚无处理记录'}</dd>
+      {developerView && <><dt>节点运行 ID</dt><dd>{effect.node_run_id}</dd></>}
     </dl>
-    <p style={mutedStyle}>动作摘要、停止时刻、最后执行阶段和已验证证据尚未由当前读模型提供。</p>
+    <table style={tableStyle}>
+      <thead>
+        <tr>
+          <th scope="col">运行</th>
+          <th scope="col">节点</th>
+          <th scope="col">动作摘要</th>
+          <th scope="col">副作用等级</th>
+          <th scope="col">停止时刻 stopped_at</th>
+          <th scope="col">最后已知阶段 last_known_phase</th>
+          <th scope="col">验证状态</th>
+          <th scope="col">证据</th>
+          <th scope="col">年龄</th>
+          <th scope="col">是否已解决 / 解决依据</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>{effect.run_id}</td>
+          <td>{effect.node_id || '未命名步骤'}</td>
+          <td>{UNKNOWN}</td>
+          <td>{level ?? <UnknownState value={effect.side_effect_policy} />}</td>
+          <td>{UNKNOWN}</td>
+          <td>{UNKNOWN}</td>
+          <td>未验证</td>
+          <td>{UNKNOWN}</td>
+          <td>{age}</td>
+          <td>
+            <div>{effect.resolved ? '是（已有处理记录）' : '否（尚无处理记录）'}</div>
+            <div>解决依据：{effect.resolution_basis ?? UNKNOWN}</div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p style={mutedStyle}>动作摘要、停止时刻、最后执行阶段和已验证证据在当前读模型里没有来源列，列里显示「未知」。</p>
   </article>
 }
 
@@ -106,3 +156,6 @@ const detailGridStyle = { display: 'grid', gridTemplateColumns: '150px minmax(0,
 const emptyStyle = { border: `1px dashed ${COLOR.line}`, borderRadius: 9, padding: 32, textAlign: 'center' as const, color: COLOR.inkMuted }
 const buttonStyle = { minHeight: 36, justifySelf: 'start' as const, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' }
 const errorStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 14, color: COLOR.danger, background: '#fff1f0', borderRadius: 8 }
+const toolbarStyle = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 } as const
+const toggleStyle = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: FONT_PX.body } as const
+const tableStyle = { width: '100%', margin: '16px 0 0', borderCollapse: 'collapse', fontSize: FONT_PX.helper, textAlign: 'left' as const } as const

@@ -8,6 +8,7 @@ import type {
   WorkflowCommandsApi,
 } from '../api/workflow-commands.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
 
 export type WorkflowEditorProps = {
   commands: WorkflowCommandsApi
@@ -45,6 +46,9 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
   const [quality, setQuality] = useState<CommandValidationIssue[]>([])
   const [parseError, setParseError] = useState<string | null>(null)
   const [note, setNote] = useState('')
+
+  // 画布与 JSON 抽屉共用同一份定义：抽屉里的 JSON 文本是唯一真源，画布只是它的另一种画法。
+  const parsed = useMemo(() => parseForCanvas(text), [text])
 
   // 只盯草稿修订号：修订变了才重置编辑区；用户改过就只提示冲突，绝不覆盖手里的草稿。
   useEffect(() => {
@@ -232,15 +236,24 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
           草稿修订 {draft.revision}；基线 {draft.based_on_version === null ? '尚未发布' : `v${draft.based_on_version}`}
           {draft.definition_hash ? `；定义摘要 ${draft.definition_hash}` : ''}
         </p>
-        <label htmlFor="workflow-definition-editor" style={labelStyle}>流程定义 JSON</label>
-        <textarea
-          id="workflow-definition-editor"
-          style={editorStyle}
-          rows={16}
-          value={text}
-          onChange={(event) => markDirty(event.target.value)}
+        <WorkflowCanvasView
+          definition={parsed.ok ? parsed.value : null}
+          readOnly={false}
+          onChange={(next) => markDirty(JSON.stringify(next, null, 2))}
+          canvasId="draft-canvas"
         />
-        <p style={mutedStyle}>{DEFINITION_NOTE}</p>
+        <details open data-definition-drawer="true" style={drawerStyle}>
+          <summary style={sectionTitleStyle}>流程定义 JSON 抽屉</summary>
+          <label htmlFor="workflow-definition-editor" style={labelStyle}>流程定义 JSON</label>
+          <textarea
+            id="workflow-definition-editor"
+            style={editorStyle}
+            rows={16}
+            value={text}
+            onChange={(event) => markDirty(event.target.value)}
+          />
+          <p style={mutedStyle}>{DEFINITION_NOTE}</p>
+        </details>
         {parseError && <p role="alert" style={errorTextStyle}>定义 JSON 解析失败：{parseError}</p>}
         <button type="button" style={buttonStyle} disabled={busy !== null} onClick={() => { void save() }}>保存草稿</button>
         {dirty && <p style={mutedStyle}>有未保存的改动。</p>}
@@ -370,6 +383,19 @@ function formatDefinition(definition: unknown): string {
   return JSON.stringify(definition, null, 2)
 }
 
+/** 画布要的是一份对象：抽屉里的文本还没成对象时，画布先不显示。 */
+function parseForCanvas(text: string): { ok: true; value: Record<string, unknown> } | { ok: false } {
+  const trimmed = text.trim()
+  if (trimmed === '') return { ok: false }
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false }
+    return { ok: true, value: parsed as Record<string, unknown> }
+  } catch {
+    return { ok: false }
+  }
+}
+
 function mergeIssues(
   base: CommandValidationIssue[],
   extra: CommandValidationIssue[],
@@ -445,6 +471,7 @@ function describeChanges(
 
 const cardStyle = { minWidth: 0, padding: 18, border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface } as const
 const sectionTitleStyle = { margin: 0, fontSize: 16 } as const
+const drawerStyle = { marginTop: 12, padding: '10px 12px', border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface } as const
 const groupTitleStyle = { margin: '10px 0 4px', fontSize: 14 } as const
 const mutedStyle = { margin: '6px 0 0', color: COLOR.inkMuted, fontSize: FONT_PX.body } as const
 const labelStyle = { display: 'block', margin: '12px 0 4px', fontSize: FONT_PX.body } as const
