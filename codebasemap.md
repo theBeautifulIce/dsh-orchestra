@@ -16,8 +16,9 @@
 | `dsh-superagent-prototype` | `references/dsh-superagent-prototype/` | 2,012 节点 / 8,492 边 | TypeScript 108 + YAML 1 + CSS 1 | moderate | 官方研究原型参考 |
 | `DS-Bot` | `references/DS-Bot/` | 10,539 节点 / 33,229 边 | JS 224 / YAML 14 / CSS 6 / Bash 5 / TS 2 / Py 2 / HTML 2 | moderate | 成品 bot 实现参考 |
 | `dsh-orchestra-docs` | `docs/` | 97 节点 / 96 边 | Markdown | moderate | **本项目设计文档图谱** |
+| `dsh-orchestra` | `.`（本仓根） | 7,547 节点 / 21,312 边 | TypeScript + SQL + Markdown | moderate | **本仓代码主图谱**（2026-11-18 重建，含 src/ tests/ scripts/ docs/） |
 
-> 注：`dsh-orchestra` 整仓图谱在 2026-11-11 建过一次（12,674 节点 / 42,766 边），但因为它把三份参考项目重复计了一遍、没有信息增量，已删除；本项目自身只对 `docs/` 建图谱，参考项目各自独立建。
+> 注：整仓图谱曾于 2026-11-11 建过一次并因重复计入参考项目被删除；**2026-11-18 重建**为 `dsh-orchestra`（moderate，7,547 节点 / 21,312 边），不含 `references/` 下三份参考项目（它们各自独立建图，见上表）。旧名 `D-aboutAI-dsh-orchestra` 与更早的 `dsh-orchestra`（1,923 节点的残图）已删除，避免同名双图。
 
 ### 更新命令
 
@@ -29,9 +30,18 @@ index_repository(repo_path="D:\aboutAI\dsh-orchestra\references\DS-Bot",        
 
 # 本项目文档
 index_repository(repo_path="D:\aboutAI\dsh-orchestra\docs", mode="moderate", name="dsh-orchestra-docs")
+
+# 本仓代码主图谱（改了代码就跑这条；CLI 形式更稳，见下）
+codebase-memory-mcp cli --quiet --json index_repository --repo_path=D:/aboutAI/dsh-orchestra --name=dsh-orchestra
+index_repository(repo_path="D:\aboutAI\dsh-orchestra", mode="moderate", name="dsh-orchestra")
 ```
 
 `mode` 选 `full` 时会额外建相似度/语义边（节点数与边数更大、查询更全，但耗时更久）。共享给团队时加 `persistence=true`。
+
+> **三个坑（2026-11-18 实测）**：
+> 1. 通过 MCP 工具调 `index_repository` 会报 `{"status":"error","outcome":"exit_nonzero"}`（索引 worker 崩溃），**用 CLI 更稳**：`codebase-memory-mcp cli --quiet --json index_repository --repo_path=<绝对路径> --name=<图谱名>`。参数必须用 `--repo_path=` / `--name=` 的破折号形式，写成 `name=xxx path=yyy` 会被判成「repo_path is required」。
+> 2. `--name` 必须是稳定短名。同一路径传不同 name 会并存成两份图谱（旧图不会自动消失），所以本仓只保留 `dsh-orchestra` 一份；重建前先 `delete_project` 掉旧名。
+> 3. 重建完成后用 `index_status(project)` 核对 `nodes/edges/head_sha`，再用 `detect_changes` 确认 `changed_count=0`。
 
 ### 查询工具速查
 

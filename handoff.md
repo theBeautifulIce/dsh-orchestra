@@ -108,7 +108,7 @@
 5. 记忆审批：**`mem_apply` 的前置批准复用 `mem_confirm` 的 `audit_result`（同一 `decision_id`，不新建第二张卡）**（规格 `docs/orchestra-design-draft.md:419` 与 `:651`；事件记 `pre_execution.reused`）。
 6. 错误码只复用 `src/core/errors.ts` 既有项；加码必须同时改 `ERROR_STATUS` 与规格 §17.1 总表。
 7. 授权子代理路由只能继承父路由（`list_subagent_models` 只列 `minimax — MiniMax Code`；显式指定 provider/model 会报 `ToolCallError: child LLM route ... is not allowed for this Session`）。
-8. 代码定位走 `codebase-memory-mcp`（`search_code` 的 pattern 含 `|` 必须 `regex:true`，否则静默 0 命中）；`tests/` / `scripts/` / `docs/` 不在索引内用 grep / read。
+8. 代码定位走 `codebase-memory-mcp`（`search_code` 的 pattern 含 `|` 必须 `regex:true`，否则静默 0 命中）；`tests/` / `scripts/` / `docs/` 不在索引内用 grep / read。**整仓主图谱已重建**为 `dsh-orchestra`（2026-11-18，7,547 节点 / 21,312 边）；重建只能走 CLI：`codebase-memory-mcp cli --quiet --json index_repository --repo_path=D:/aboutAI/dsh-orchestra --name=dsh-orchestra`（MCP 工具直调会报 exit_nonzero），重建前先 `delete_project` 掉同名旧图。
 9. 每个可审阅切片单独提交并推送；提交后更新本快照与工作包状态。
 
 ### 接手步骤
@@ -121,7 +121,7 @@
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
 > 历史记录最后核对：2026-11-18；本节以下旧内容不作为当前操作指令。
-> 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
+> 配套：`codebasemap.md`（代码与图谱在哪，含 2026-11-18 重建的整仓主图谱 `dsh-orchestra` 与重建命令）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
 ---
 
 ## 历史快照：S1–S4 收敛审计全部收口（2026-11-17）
