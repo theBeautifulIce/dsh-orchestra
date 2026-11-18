@@ -1,82 +1,127 @@
 # dsh-orchestra 接手指引（handoff）
 
-## 当前接手快照（权威，2026-11-17）
+## 当前接手快照（权威，2026-11-18）
 
 > 本快照覆盖下方早期接手步骤中的旧 HEAD、旧测试计数与旧阶段路线。下方保留的 S1–S4 时间线只用于追溯历史。
 
 ### 当前基线
 
-- 分支 `main`，代码基线 HEAD `d1400b2`（S5-D 工作流草稿编辑器），与 `origin/main` 同步；本快照的文档提交紧随其后。后续剩余工作按 [S5 后续接手工作包](docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md) 顺序领取。
-- S1–S4 已完成，G1–G4 已签署。当前阶段是 S5，G5 尚未交付。
-- 主计划：[S5 面板与记忆实施计划](docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md)；产品路线：[2026-11-17 产品路线](docs/superpowers/plans/2026-11-17-product-roadmap.md)。
-- 接手包把后续切成 S5-A 至 S5-K，列出每包的状态、先读文档、负责区域、依赖、验收和停止条件。已完成：**S5-A**（结算契约冻结）、**S5-B**（读模型/SSE/面板测试基座）、**S5-E**（`memory_start_run` 与事务内 Run 创建入口）。部分完成：**S5-F**（Fa 固定图声明表 + Fb 运行时骨架与命名统一）、**S5-G**（Ga 评估端口纯逻辑层）、**S5-D**（草稿编辑器与四条写命令）。**S5-C 未产出任何文件，需要重派**；其后顺序为 S5-C → S5-Gb → S5-H → S5-I → S5-J → S5-K。结算写入口必须对照 [S5 副作用核实与结算契约（附录）](docs/superpowers/specs/2026-11-17-s5-effect-resolution-addendum.md)。
+- 分支 `main`，HEAD `375806a`（feat(memory): add read-only memory batch projection for the panel），与 `origin/main` 同步，工作树干净。
+- S1–S4 已完成，G1–G4 已签署。当前阶段是 S5，**G5 尚未交付**（`docs/gates/G5.md` 与 `docs/gates/evidence/G5/` 均不存在）。
+- 主计划：`docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md`；工作包：`docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md`；结算契约：`docs/superpowers/specs/2026-11-17-s5-effect-resolution-addendum.md`；权威问答清单：`docs/orchestra-design-draft.md`（Q-01…Q-63 + 43b/43c/44b/44c/47b/52b 共 69 个 id；Q-37…Q-42 属 S4，不进 G5）。
+- 本轮（`d1400b2` 之后）共 16 笔提交，已全部推送。
 
-### S5 进度
+### 本轮完成（16 笔提交）
 
-- Task 1–2：查询基元、任务与运行读模型已有实现。
-- Task 3–8：部分实现；事件/证据查询、控制面、宿主连接、六屏整合和视觉走查仍有缺口。
-- Task 9：「等你决定」「待核实」已接真实查询、分页、刷新和 SSE 快照联动；决策策略字段、完整待核实详情、结算写命令与测试未完成（属 S5-C）。
-- Task 10：流程列表及只读检查页已接真实 API。活跃任务计数现从全部活动 Run 去重 task_id，包含子流程。S5-D 已补草稿编辑（JSON 文本框编辑 + 保存/发布/打开草稿 + 按节点/连线分组的检查面板 + 发布确认四件事）与新建流程入口；**余项**：拖拽式画布（节点条拖九种节点、右侧圆点拉边、双击空白加一步、按拓扑重排、已发布只读）未实现，无真实 HTTP 端到端证据，视觉走查留给 S5-J。
-- Task 11：新增 `030_memory.sql` 四表、唯一键、状态/结果约束、批准快照保护与批准后条目冻结；固定图、`MemoryBridgeRegistry` 已建立；工作流 agent allow 在发布/加载阶段、executor 的运行时 allow 在分派前拒绝直接记忆写工具。三面写工具闸已全部接上生产路径（S5-E 补 workflow/executor 面，S5-Fb 把 task_session 面接到 `resolveTaskSessionToolPolicy`），迁移 030/032 约束用例已补齐。真实端口处理器仍未完成。
-- Task 12：`src/core/memory-canonical.ts` 按 canonical 完整提议对象限制单条 64 KiB 与整批 256 KiB；另限制 tag 256 B、question 4 KiB、key/target_id 各 256 B；同目标只有业务字段一致才作为重复项跳过，空标签/空问题元素拒绝（空数组允许）。本轮新增边界测试。`memory_start_run` 与重复项落库已在 S5-E 完成（`266ca72`）。
-- 最新审计修复：工作流统计覆盖子 Run；任务/流程收到 SSE reloadVersion 后清空旧分页并从第一页重查；reusable scope 文案修正；命令 POST 失败后若回执查询发生网络异常，统一返回 `OPERATION_OUTCOME_UNKNOWN`；迁移 031 增加 resolution 的同 node/run/attempt 与完成状态关联约束。
-- S5-A 已完成（`155b37a`）：结算契约冻结在 [S5 副作用核实与结算契约（附录）](docs/superpowers/specs/2026-11-17-s5-effect-resolution-addendum.md)——三条路径（`verified_none` / `evidence` / `decision`）判定矩阵、节点状态 × basis 相容矩阵、事务步骤与错误优先级、27 条故障案例与对应测试名；明确 `status='resolved'` 不足以放行、`abandon_ack.approved` 不作结算、人证不得进 `evidence_id`、结算必须同事务写节点字段；新增错误码只有 `EFFECT_RESOLUTION_CONFLICT`。本包**未**添加任何核实写入口。
-- S5-B 已完成（`0f77074`）：新增 `tests/client/harness.ts` 面板夹具与 7 个测试文件、54 条用例——结算前后 `unverified_count`/attention、evidence strong 可读性与三种坏因（无 tool_finished / 事件链坏 / 字段不一致）、workflow 根与子 Run 活跃任务去重计数、SSE 幂等/序号缺口重同步/断线转轮询与恢复、第二页 reload 不残留不重复、四屏各 5 态、服务端 nextSeq 连续性与 invalidation/resync_required 帧。未覆盖：记忆屏与设置屏五态（组件尚不存在）、SSE 真实 HTTP 端到端、视觉与双视口（留给 S5-I/S5-J）。
-- S5-E 已完成（`266ca72`）：`src/service/runs.ts` 抽出 `insertRunInTx` / `insertNodeRunsInTx` 事务内建运行入口；新增 `src/service/commands/memory.ts`（`startMemoryRun` / `saveMemoryProposal`）与 `src/service/commands/memory-permission.ts`（三面写工具闸）；新增迁移 `032_memory_start_guards.sql`（未终结批次部分唯一索引 + 源运行收口触发器）；新增 27 条用例（发起幂等与回放、活跃冲突、事务中途失败无半成品、权限负例、030/032 约束）。**余项：** `POST /memory/runs/start` 未接线（task_session 面闸与记忆 node_type 命名已由 S5-Fb 收敛，见下）。
-- S5-Fa 已完成（`1faf38b`）：`src/core/memory-graph-schema.ts` 落地固定图声明表——9 节点（trigger/agent/tool/branch/approval/report 六种 kind）、显式拓扑序、装载即 fail-closed 校验；错误码全部复用 `src/core/errors.ts`，新增 0 条。
-- S5-Fb 已完成（`e8c3b39`）：端口能力表收敛到 `src/core/memory-graph.ts` 唯一声明处（`src/executor/tools.ts` 与 `src/core/memory-graph-schema.ts` 改为引用）；记忆 `node_type` 统一到 kind 六值、顺序 = `memoryGraphOrder()`；新建 `src/service/commands/memory-run.ts`（`createMemoryRunNodeRuns` 同事务建 9 行 + `advanceMemoryRun` fail-closed 推进原语）；task_session 面写工具闸接入生产路径 `resolveTaskSessionToolPolicy`。**余项：** 三端口真实处理器未实现、固定图推进未接执行主链租约/事件/恢复、缺终态收口、`POST /memory/runs/start` 路由未接线。
-- S5-Ga 已完成（`5580ab3`）：评估端口纯逻辑层 `src/core/memory-eval.ts`。**余项：** 审批卡生成与 decision 落库（`mem_apply` 的前置批准复用 `mem_confirm` 的 `audit_result`，同一 decision_id，不新建第二张卡）、评估出口接固定图、审批 24h 过期与拒绝后不调用 apply。
-- S5-D 部分完成（`d1400b2`）：新建 `src/client/api/workflow-commands.ts`（四条写命令 + 回执查询，`AMBIGUOUS_CODES = OPERATION_TIMEOUT / OPERATION_OUTCOME_UNKNOWN / SERVICE_UNAVAILABLE`，结果不明时只按同 operation_id 查回执不重发，`newOperationId` 造 UUIDv7）与 `src/client/panel/workflow-editor.tsx`（JSON 文本框编辑、save/publish/openDraft/reloadDraft、检查面板按 node/edge/workflow 分组、发布确认四件事、`DEFINITION_NOTE` 与规格一字不差）；`workflow-canvas.tsx` 加 `commands` prop（有则渲染编辑器，无则保持只读检查页）；`workflow-list.tsx` 加「新建流程」区。**余项：** 拖拽画布（规格 §8.5 行 657 的节点条拖九种节点 / 右侧圆点拉边 / 双击空白加一步 / 按拓扑重排 / 已发布只读）未实现、无真实 HTTP 端到端证据、视觉走查留给 S5-J。
-- S5-C 未产出：原 S5-C 子代理在实现中被停止，`src/service/commands/effects.ts` 与 `tests/integration/effect-resolution.spec.ts` 均不存在，工作树无残留 → 需重新派发。
-- 副作用核实仍不能上线：迁移 031 的证据触发器只验证工具执行记录作用域及 finished_at，SQLite 触发器无法验证带密钥的 node_run 事件链；结算判定口径已由 S5-A 冻结，但同事务服务层 evidence 链验证、决定结论策略与写命令尚未实现。不得将迁移约束描述为完整证据验证。
-- 本轮验证：`pnpm typecheck` exit 0；全量 Vitest 96 文件 / 1169 通过 | 1 skipped（1170），exit 0；记忆定向 5 文件 / 62 项全绿；`git diff --check` 通过。未运行构建与 G5 门，G5 不可签（S5-C 重派与 S5-Gb/S5-H 尚未交付，测试计数会继续变化）。
-- Task 13–17 未开始；目前不能进入 G5 验收。接手顺序以 S5 后续接手工作包 §3 为准，G5（S5-K）最后执行。
+- `f346bda` G5 门闸规格：`scripts/gate-check.ts` 加 `GATE_SPECS.G5`（73 项 items / 6 条 invariants / 73 项 evidenceMap / 73 项 evidenceFiles）+ 新建 `src/core/gate-artifact.ts`（`candidateEntries` / `bodyHashInput` / `bodyHash` 原像口径）+ `tests/gate/gate-g5.spec.ts`（24 例）。
+- `0c8ee22` 客户端切片：`src/client/api/decision-commands.ts`（只暴露 `decision.acknowledge` / `decision.resolve`，写操作一律带 UUIDv7 `operation_id`，模糊三码 `OPERATION_TIMEOUT` / `OPERATION_OUTCOME_UNKNOWN` / `SERVICE_UNAVAILABLE` 只 `GET /v1/operations/get` 查回执不重发）、记忆面板、拖拽画布（`workflow-canvas-nodes.tsx` 纯逻辑层 + `workflow-canvas-view.tsx` 视图）。
+- `e61fba1` 门记录模板生成器 `scripts/gen-g5-record.ts`（从 `GATE_SPECS.G5` 抄出 73 项与 6 条不变量生成门记录模板，含「这是生成模板，不是门记录」横幅）。
+- `22358c0` 视觉门闸：`src/client/panel/settings-screen.tsx`（六行真实状态，取不到显示「未知」）、`src/client/panel-host.tsx`（`createPanelHost` 装配 ApiClient + `createConnectedEventStream` + PanelApp）、`scripts/visual-check.mjs`（无头 Chrome 实测 1366×900 与 1600×1000）、`tests/client/panel-visual.spec.tsx`。
+- `9d336e8` 迁移 `033_decision_projection.sql`：`decisions` 增 `priority` / `priority_reason` / `expiry_effect`（CHECK `auto_resolve|escalate_only|none`）/ `expiry_effect_reason`，老行留 NULL。
+- `e6f1d08` S5-Gb 审批卡：`src/service/commands/memory-approval.ts` + `tests/integration/memory-approval.spec.ts`（15 例）。
+- `cb6ecfa` 测试布局修复：6 个 spec 从 `tests/` 根 git mv 到 `tests/unit/`（memory-eval、memory-graph-schema）与 `tests/integration/`（memory-graph-runtime、memory-permission、memory-schema、memory-start），导入深度重写；`scripts/check-test-layout.mjs` 的 `CATEGORIES` 增加 `client` 分类（面板渲染层只打假服务、不开库不起 HTTP 服务），`docs/agents/testing-conventions.md` 目录分层表同步加一行。审计会看这条放宽，理由已写在表里。
+- `adbaec4` **结算写入口**：`src/service/commands/effects.ts`（637 行，唯一受控写入口，`BASIS_STATUSES` 状态×basis 矩阵，E1–E5 证据门，`assertSettlementActor` 只放行 human 或带 `orchestra.audit` 的 agent，`settleEvidenceFromReport` / `settleDecisionOutcome` 自动结算静默跳过）+ `tests/integration/effect-resolution.spec.ts`（附录 §10 全部 27 条，用例名与附录一字不差）+ `src/core/errors.ts` 加 `EFFECT_RESOLUTION_CONFLICT: 409` + `src/service/{schemas.ts,server.ts,queries/effects.ts,commands/{apply-report,decisions,nodes,run-close}.ts}` + `src/index.ts` 装配 + `tests/unit/errors.spec.ts`（85→86）。规格 §17.1 错误码总表已补该行（现 86 行）。
+- `8c0aea0` 证据生成器 `scripts/gen-g5-evidence.ts`（433 行：`parseMatrix` / `buildEvidenceFile` 纯函数 + CLI；路径不自拼：item id → `spec.evidenceMap[id][0]` → `spec.evidenceFiles[evidenceId]`；只写「状态=proved 且证明用例非空 且固定口径有证据映射」的条目；命令失败或超时不写文件）+ `tests/unit/g5-evidence-generator.spec.ts`（12 例）。
+- `2324791` 两份计划文档里 18 处 `tests/memory-*.spec.ts` 陈旧路径改到新目录。
+- `ecc9121` Q-26 / Q-27 性能预算 `tests/integration/perf-budget.spec.ts`（预热 5 轮 + 测 30 轮，nearest-rank p95）+ `docs/reviews/S5-perf-budget.md`。实测三条时延门槛全达标（get_run p95 1.85–3.25ms；list_nodes p95 9.17–11.16ms；list_tasks p95 40.7–46.9ms；Q-26 六条 SQL 计划无一条 SCAN）。唯一未达标是 Q-27 计划级（`tasks` 表除主键无索引，`attention_weight` 是 CASE 派生值）→ 不做物化，记为非阻断缺口。
+- `378c30e` **G5 73 项就绪矩阵** `docs/reviews/S5-g5-item-map.md`（160 行；生成时 proved 27 / partial 37 / gap 9；gap id = Q-02、Q-05、Q-06、Q-08、Q-11、Q-15、Q-19、Q-59、G-11）。
+- `1065b8b` 记忆运行时与三端口：`src/service/commands/memory-ports.ts`（594 行：`createMemoryPorts`、`evaluateMemoryBatch` / `applyGovernedMemoryBatch` / `inspectMemoryBatch`、`itemContentHash`）+ `src/service/commands/memory-runtime.ts`（`advanceMemoryRuntime(deps, {memory_run_id})`、固定图九节点推进）+ `tests/integration/memory-runtime.spec.ts`（17 例）。
+- `fa191be` **WP-A 面板侧八项**：`src/client/panel/copy.ts`（新增 6 条文案）、`tasks-screen.tsx`（`mergeByTaskId` 去重合并 + 未验证终态独立色板 `unverifiedStatusView` + 「仍有未结算不可逆动作」）、`task-detail-screen.tsx`（`RunStatusLabel` / `PendingNotices` / `heartbeatNotice` 心跳 30 秒阈值）、`tests/client/harness.ts`（新增 `runSummary` / `nodeRunView` 夹具）、`tests/client/panel-screens.spec.tsx`（新增 Q-20 用例）、新建 `tests/client/panel-status.spec.tsx`（6 例）、`scripts/check-panel-no-sqlite.mjs` + `tests/unit/panel-no-sqlite.spec.ts`（2 例）、`docs/reviews/S5-g5-item-map-wpa.md`（8 行全 proved，判定语与 `GATE_SPECS.G5` 逐字比对通过）。
+- `375806a` **记忆批次只读投影**：`src/service/queries/memory-batches.ts`（298 行，`listMemoryBatches(db, params)` 返回 `{items, next_cursor, as_of_seq}`；四个计数一律从 items 真数、不读冗余列；`allowed_resolutions` 从关联 `decisions.payload_json` 读、indeterminate 只给 `["abandon"]`、其余 null；键集游标 `kind=memory_batches`，换 task_id 用旧游标 → `CURSOR_FILTER_MISMATCH`）+ `tests/integration/memory-batches.spec.ts`（8 例）+ `docs/reviews/S5-memory-batches.md`。
 
-### 最近提交
+### 本轮验证（lead 亲跑，HEAD=375806a）
 
-- `d1400b2` S5-D 工作流草稿编辑器与命令回执客户端（`workflow-commands.ts`、`workflow-editor.tsx` + 两个测试）。
-- `e8c3b39` S5-Fb 固定图运行时骨架、能力表收敛、记忆 node_type 命名统一（新建 `memory-run.ts` 与 `memory-graph-runtime.spec.ts`）。
-- `5580ab3` S5-Ga 评估端口纯逻辑层 `src/core/memory-eval.ts`。
-- `1faf38b` S5-Fa 固定记忆图声明表 `src/core/memory-graph-schema.ts` 与 23 条用例。
-- `266ca72` S5-E 记忆发起入口：事务内建运行入口、`memory_start_run` 幂等与冲突、迁移 032 约束、三面写工具闸。
-- `51c9cce` 修正陈旧 M-09 人证用例：attested 路径必须给 actor，并补一条无确认人被拒的负例。
-- `0f77074` S5-B 读模型/SSE/面板回归基座（8 个测试文件、54 条用例）。
-- `155b37a` 冻结副作用核实与结算契约（S5-A 附录），并在 S5 计划追加 Task 18 指针。
-- `cc0b919` 接入「等你决定」与「待核实」两屏。
-- `62bb4e0` 接入只读流程列表与检查页。
-- `0670789` 展示真实流程活跃任务数。
-- `6736567` 记忆账本迁移、固定图、独立端口注册表和 agent 工具禁令基础。
-- `ea61a72` canonical 提议字段与哈希。
-- `1fcc31b` 同目标提议冲突/重复处理。
-- `269f62d` 修正活动子流程计数、SSE 分页刷新、记忆完整提议边界/重复判定、未知回执网络错误，并加入 migration 031 结算来源关系守卫与 8 项定向测试。
-- 当前权威代码基线：`d1400b2`，已推送。
+- `pnpm typecheck` exit 0。
+- `pnpm vitest run` → **109 文件 / 1335 通过 | 2 跳过（1337）**，exit 0。两条跳过：`tests/integration/perf-budget.spec.ts` 的 Q-27（忙核占比 >50% 时自跳过，p95=120ms 超 100ms 预算）、`tests/gate/gate-check.spec.ts` 的 1 条。
+- `node scripts/check-test-layout.mjs` exit 0。
+- `node scripts/visual-check.mjs` exit 0：两个视口 G0–G9 全通过（`scrollWidth == clientWidth`、越界元素 `[]`、菜单 13px / 顶导 13px / 正文 14px / 最小 12px、长标题 `title` 含全文）。
+- 证据生成器对 WP-A 矩阵实跑（临时目录）：8 条全部 proved、已写 8 份、失败 0、缺口 0。
+- `pnpm build` 本轮**未跑**（接手第一件事应补跑）。
 
-### 关键前置与下一步
+### 未完成与唯一下一项
 
-1. **下一包是 S5-C 重派**（结算写入口 + 待核实/决策面板）。原 S5-C 子代理在实现中被停止，`src/service/commands/effects.ts` 与 `tests/integration/effect-resolution.spec.ts` 均未落地，工作树无残留 → 从零重派。真相源是 [S5 副作用核实与结算契约（附录）](docs/superpowers/specs/2026-11-17-s5-effect-resolution-addendum.md) §1–§11。硬约束：`status='resolved'` 不足以放行；`abandon_ack.approved` 不作结算依据；人证不得进 `evidence_id`；结算必须同事务写节点字段；新增错误码只有 `EFFECT_RESOLUTION_CONFLICT`。
-2. 记忆固定图需要 `tool`、`branch`、`approval`、`trigger` 等节点。运行时 `WorkflowDefinition` / `WorkflowNodeDef` 与 dispatcher 尚不能执行这条图；S5-Fa/Fb 已给出声明表与骨架（`src/core/memory-graph-schema.ts`、`src/service/commands/memory-run.ts`），但三端口真实处理器、固定图推进接执行主链（租约/事件/恢复）与终态收口仍未做——固定图常量不代表已有可执行闭环。
-3. `src/service/runs.ts:createRun()` 内部自行调用 `withTx()`。`memory_start_run` 需要将 memory Run、节点、`memory_batches` 和 `memory_run_requests` 同事务提交；S5-E 已抽出 `insertRunInTx` / `insertNodeRunsInTx` 事务内入口并实现 `memory_start_run`（源 Run 仅接受 `succeeded`；同 `(source_run_id, request_key)` 幂等；换 key 遇活跃记忆 Run 返回 `MEMORY_RUN_ACTIVE`；重复项以 `skipped` 持久化）。余项：`POST /memory/runs/start` 路由未接线。
-4. `pnpm typecheck` 与 `git diff --check` 通过；全量 Vitest 已在 `d1400b2` 跑过（96 文件 / 1169 通过 | 1 skipped）。尚未运行构建；记忆 apply 与副作用结算实现按 S5-A 契约推进，结算写入口属 S5-C。
-5. 工作树当前只有 `docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md` 的状态行改动未提交；接手时若工作树出现其他相关改动，先核对归属。
-6. **S5-C 边界（重派时沿用，禁止越界）**：可改 `decisions.ts` / `apply-report.ts` / `run-close.ts` / `nodes.ts` / `core/errors.ts` / `queries/effects.ts` / `server.ts`（仅新增结算路由）/ client api 三件 / panel 两个组件；新建 `src/service/commands/effects.ts` 与 `tests/integration/effect-resolution.spec.ts`。禁改 `memory*`、`runs.ts`、`infra/db`、迁移 SQL、docs、handoff.md。子代理若发现需要改边界外文件，必须 hand_back 而不是自行越界。
-7. **记忆节点命名已统一（勿回退）**：全仓不再出现 `memory_trigger` / `memory_agent` / `memory_tool` / `memory_branch` / `memory_approval` / `memory_report` / `memory_step` 字面量，node_type 一律用 kind 六值（trigger/agent/tool/branch/approval/report），顺序取 `memoryGraphOrder()`。注意记忆节点 kind `'agent'` 与通用 `NodeType 'agent'` 同名，靠「记忆 run `workflow_definition_hash=null` → 通用 dispatcher fail closed」与「记忆 node_id 不与通用节点类型同名」两条隔离；`src/index.ts:275-299` 用 `queued AND node_type='agent'` 判是否需要 executor（禁改文件），记忆 run 误送通用 dispatch 会计入该数。
-8. **S5-H 落地写入口已定（lead 核实，2026-11-17）**：仓库内没有独立记忆存储——`src/infra/sqlite/migrations/` 里除 `030_memory.sql` 的 `memory_batches` / `memory_items` / `memory_evaluations` / `memory_run_requests` 四表外没有记忆表；`src/service/server.ts:672-687` 是入站 HTTP 服务（监听 127.0.0.1），`src/` 内无出站 fetch，即编排服务**没有服务→宿主写通道**。因此 `memory.apply_governed` 的落地写只能是 `memory_items` 的状态迁移（`proposed`/`approved` → `applied`/`skipped` + `applied_item_id`），与 `030_memory.sql:134-166` 的触发器语义一致（批准后除 `status`、`applied_item_id` 外只读，禁 INSERT/DELETE）。`action='create'` 行 `applied_item_id = item_id`；`action='update'` 行 `applied_item_id = target_id`。评估请求里的相似条目来源 = `memory_items` 中 `status='applied'` 的行。**不得自造服务→宿主的记忆写协议，不得在批准后 INSERT 新 `memory_items` 行**；宿主侧记忆插件若日后落地，另开切片并重新核对规格 §9.7/§9.8。
-9. `src/core/memory-graph-schema.ts`（S5-Fa）已落地固定声明表：9 节点、显式拓扑序（`mem_trigger → mem_prepare → mem_check → mem_route → mem_confirm → mem_apply → mem_report`，再 `mem_report_empty` / `mem_report_blocked`）、装载即 fail-closed 校验。端口能力表已由 S5-Fb 收敛为 core 层单一来源（`src/core/memory-graph.ts`），`src/executor/tools.ts` 与 `src/core/memory-graph-schema.ts` 均改为引用——该已知瑕疵已消除。
+用户指令（2026-11-18）：子代理完成后停手、不再派发、只更新 handoff。因此本轮**没有派发**新切片，以下缺口原样留给接手人。
+
+**下一包（唯一第一项）：WP-B 服务端读模型十一项**（Q-01、Q-03、Q-04、Q-08、Q-09、Q-24、Q-30、Q-31、Q-33、Q-34、Q-36）。本轮子代理 `s5wp-b2` 掉线且**零文件改动**，需从零派发。这些项的服务端实现大多已存在，只缺用例断言与少数投影补齐：
+
+- Q-01 `src/service/queries/tasks.ts:137-178` 已按 `attention_weight DESC, updated_at DESC, task_id DESC` 排序，缺次序断言（`tests/integration/task-summary-attention.spec.ts`）。
+- Q-03 `src/service/queries/runs.ts:84` 走 `withReadTx`（`src/service/queries/read-tx.ts:19`），counts `:41`、top_nodes `:47` 同事务，缺「同一读事务」断言。
+- Q-04 `src/service/queries/runs.ts:59` `display_status = status`（settling 单列），缺用例。
+- Q-08 `src/service/queries/nodes.ts:88-97` 把 `declared_effect` / `verified_effect` 写死 null 并列入 `projection_missing`，面板无高亮、无 decision 链接 → 需补投影 + 高亮。
+- Q-09 缺「最长等待」与「最后心跳」展示（`max_heartbeat_age_ms` 已有）。
+- Q-24 `src/service/queries/artifacts.ts:19` / `:42` 已 `NOT_FOUND`，缺用例。
+- Q-30 `src/service/queries/nodes.ts:9-30` 按执行 id 数量取 `unverified` / `none`，从不产出 `not_required`，缺用例。
+- Q-31 同文件 `NODE_LABEL` 20 条唯一，缺用例。
+- Q-33 人证走独立端点 `src/service/queries/attestations.ts:15`，`evidence.ts` 排除人证，缺用例。
+- Q-34 actor 由密钥派生，已有断言片段，缺整例。
+- Q-36 `src/service/commands/idempotency.ts:74` `COMMAND_BUSY` 与 `sweep.ts:503` 超时扫描已有实现，缺用例。
+
+**后续队列（按依赖顺序）**
+
+1. **WP-B**（上述十一项）。
+2. **WP-C 记忆运行时结算口径修复**（真实缺陷，见下）。
+3. **WP-D 裁决投影 + acknowledge 入口**（子代理两次掉线零产出）。
+4. **WP-E 生产接线**（`GET /v1/memory/batches` 路由、`src/index.ts` 三端口装配 + `POST /memory/runs/start` + 终态收口）。
+5. **主矩阵回填 WP-A 八项**（见下「证据链断点」）。
+6. **G-11 注入用例**。
+7. **73 份证据落库**（须在候选 SHA 冻结前）。
+8. **冻结候选 SHA + 独立审计 round1**。
+9. **签 G5 门**。
+
+### 证据链断点（接手后必须先处理，否则 8 份证据出不来）
+
+- WP-A 已把 Q-02、Q-05、Q-06、Q-07、Q-19、Q-20、Q-22、Q-23 做实，证明命令写在 `docs/reviews/S5-g5-item-map-wpa.md`（8 行全 proved，判定语已与 `GATE_SPECS.G5` 逐字比对通过，命令实跑通过）。
+- 但主矩阵 `docs/reviews/S5-g5-item-map.md` 里这 8 行仍是旧状态（Q-02/Q-05/Q-06/Q-19 为 gap，Q-07/Q-20/Q-22/Q-23 为 partial），**而证据生成器只写「状态=proved」的条目** → 这 8 项在主矩阵里不会被生成证据。
+- 两条出路，二选一：(a) 把主矩阵这 8 行改成 proved 并填上与 WP-A 矩阵逐字相同的证明命令；(b) 给 `scripts/gen-g5-evidence.ts` 增「多矩阵」参数并合并两个矩阵。**禁止**在证据文件里手写结论。
+
+### 已知真实缺陷（接手后必须先修）
+
+1. **记忆运行时把「零副作用」写成普通迁移 patch，绕过了结算契约**：`src/service/commands/memory-runtime.ts` 的 5 处 patch（`:509` 失败路径 M-48、`:561` 成功路径 M-44、`:816` 驳回/过期路径 M-41、`:938` `supersedeOffPath` M-62、`:1021` `supersedeRemaining`）都写 `side_effect_policy: pure` + `side_effect_verified_none: 1`，但**不写 `stop_evidence`**。而 `src/service/commands/run-close.ts:68-71` 的未验证判定式是「非 pure **且** 没有 `side_effect_verified_none=1` **且 `stop_evidence` 非空** **且** 没有 `unverified_resolutions` 结算行」→ 单写 verified_none 仍判未验证 → 驳回/过期路径的 run 终态会误报 `failed_with_unverified`。同时 `src/service/commands/nodes.ts:65` 的 `SETTLEMENT_ONLY_COLUMNS` 只含 `stop_evidence`，`:198-203` 规定 `stop_evidence` 只能由结算事务写（普通迁移路径命中即 `FORBIDDEN`）。正确口径：先走 M-41 迁移（**不** patch policy、**不** patch verified_none），再用 `resolveEffect(basis=verified_none, stopEvidence=no_tool_started:<node_run_id>:<attempt>)` 在同一事务落结算行；`src/service/commands/effects.ts:32` 的 `N1_PREFIXES`（`no_tool_started:` / `stopped_confirmed:`）、`:315-332` 写节点两列再写结算行、`:262-289` 的 stop_evidence 形状校验、`:252-260` 的 `assertSettlementActor`（只放行 human 或带 `orchestra.audit` 的 agent）是现成入口。**不得自己写 `unverified_resolutions` 表或直接 UPDATE `node_runs.side_effect_verified_none`。**
+2. **结算弱证据判据来自请求自带声明**：`src/service/commands/effects.ts:243-244`、`:572`、`:639` 用 `source ?? payload[evidence_source] ?? null`，DB 内没有弱证据标记（`src/service/queries/evidence.ts:13` / `:89` 一律 `source: run_tool`；`src/core/policy.ts:35` 的 strength 由 `ev.source` 决定）。方向 fail closed 正确（声明 `tool_result` 必被拒），但省略即按 DB 事实判强 → **审计报告必须写进未解决风险说明**。
+3. **子流程收口统计用旧口径**：`src/service/commands/subworkflow.ts:530-538` 的 `unverified` 只看 `side_effect_policy <> pure AND side_effect_verified_none <> 1`，既不要求 `stop_evidence` 非空、也不排除已结算行，与 `run-close.ts:68-71` / `src/service/queries/tasks.ts:102-104` 口径不一致 → 审计候选 P2（会导致已结算子流程被误判未验证并把父节点拉成 `abandoned_unverified`）。
+4. **决策四投影列无人写值**：迁移 033 已加 `priority` / `priority_reason` / `expiry_effect` / `expiry_effect_reason`，但 `src/service/commands/decisions.ts` 的 `openDecision` INSERT 不写这四列 → 当前四列全 NULL；`src/service/queries/decisions.ts:66-67` 把 `priority` / `priority_reason` 写死 null，`:71-72` 的 `projection_missing` 列 `priority`、`priority_reason`、`allowed_resolutions`、`required_evidence`、`target_summary` 五项；`DecisionView`（`:8-29`）还缺 `expiry_effect` / `expiry_effect_reason` / `age_seconds`；`listDecisions` 排序是 `created_at DESC, decision_id DESC`（规格要求 `priority → age_seconds → created_at`）。
+5. **客户端 acknowledge 会 404**：`src/client/api/decision-commands.ts` 已实现 `decision.acknowledge`（body `{decisionId, revision}`、不带 `side_effect_verified_none`），但 `src/service/server.ts` 只有 `:330 GET /v1/decisions`、`:341 GET /v1/decisions/get`、`:518 POST /v1/decisions/resolve`、`:534 POST /v1/effects/resolve` —— **没有 `POST /v1/decisions/acknowledge`**。
+6. **记忆批次只读投影已落地但路由未接线**：`src/service/queries/memory-batches.ts` 已提交，但 `src/service/server.ts` 没有 `GET /v1/memory/batches`；客户端 `src/client/api/resources.ts:34-35` 已按 `{items, next_cursor, as_of_seq}` 三个顶层键读。
+7. **记忆运行时未接生产主链**：`advanceMemoryRuntime` / `createMemoryPorts` 目前只有 `tests/integration/memory-runtime.spec.ts` 在用，`src/index.ts` 里**没有任何** memory 相关装配（grep 无命中）→ `POST /memory/runs/start` 未接线，记忆 run 无终态收口。
+8. **indeterminate 的「放弃这次写入」按钮恒禁用**：面板 `src/client/panel/memory-panel.tsx:100-103` 与 `:172-187` 按 `batch.allowed_resolutions` 里的 `abandon` 决定按钮是否可点，取不到就显示「服务端这次没有给出放弃的选项，这里不替你编。」。而 `src/core/memory-eval.ts:334` 的审批卡 `allowed_resolutions` 按规格 9.6 恒为空数组（正确），indeterminate 场景需要的 `abandon` 要来自 `verify_human` 卡的 payload —— 当前服务端开卡不把 allowed_resolutions 写进 payload，故该按钮实际不可用。
+
+### G5 签门机制（接手后照此执行，勿改口径）
+
+- 门闸规格在 `scripts/gate-check.ts` 的 `GATE_SPECS.G5`；`src/core/gate-artifact.ts` 提供 `candidateEntries`（`candidate_hash` = `[{path,sha256}]` 升序）、`change_scope_hash`（`[path]` 升序）、`evidence_index_hash`（`[{id,file,sha256}]` 按 id 升序）、`invariants_hash`（`[{id,statement,evidence_ids}]` 按 id 升序）、`body_hash = bodyHashInput(text)`。
+- `checkEvidence`（`scripts/gate-check.ts:697-729`）要求每份证据**已在 HEAD**、sha256 按 LF 归一后与 `evidence-index` 相符、证据 id 必须在 `GATE_SPECS.G5.evidenceFiles` 固定映射里且路径逐字相符 → **73 份证据必须在候选 SHA 冻结前产出并提交**。
+- 证据路径固定为 `docs/gates/evidence/G5/<ITEM-ID>.md`；落库命令：`node --no-warnings scripts/gen-g5-evidence.ts --matrix docs/reviews/S5-g5-item-map.md --out-root .`（先在临时目录试跑，再落库）；落库后需重算 `evidence-index` 的 sha256 并提交。
+- 签门顺序：全部代码 + 73 份证据提交 → 冻结候选 SHA → 独立审计该 SHA → 提交审计报告（`docs/audits/` 在 excludes 内）→ 生成 `docs/gates/G5.md` 并 `node --no-warnings scripts/sign-gate.ts docs/gates/G5.md`（要求工作树干净）→ 提交门记录 → 跑 `node --no-warnings scripts/gate-check.ts`。
+- **禁止创建 `docs/gates/G5.md`、禁止创建 PASS 门文件、禁止提前签 G5**。
+- 门记录结构照 `docs/gates/G4.md`：标题 → `- 门：G5` / `- 候选：` / `- 结论：**pass**` / `- 批准人：human:啸春` / `- 批准时间：` → `## 结论` → `## 必过项与证据` 表 → `## 证据文件与哈希` 表 → `## 失败项` / `## 例外` / `## 回滚` → `## 不变量` 表 → `## GateArtifact` json 块 → `evidence-index` json 块 → `invariants` json 块 → 末尾 `- artifact_hash=<64hex>` 与 `- body_hash=<64hex>`。
+- `verifyGateRecord`（`scripts/gate-check.ts:2936-3019`）硬校验：`GATE_FIELDS` 20 项齐全；`must_pass_items` 的 id 顺序与 `spec.items` 完全相同、每项 `result=pass` 且证据集 == `spec.evidenceMap[id]`；`failed_items` 空；`conclusion=pass`；`previous_artifact_hash` = G4 门记录在 HEAD 的 `artifact_hash`（`f3ce1d1f083ae74c6018bfc9539b5c80e35d1e23de9427dd0ff401baa7a03a79`）；`audit_report` 在 HEAD 且 `audit_report_sha256` 相符；`artifact_hash` 锚点 == `sha256(canonicalJson(artifact))`；`body_hash` 锚点校验。
+- 审计报告格式见根目录 `审计要求.md` §6：路径 `docs/audits/S5-independent-audit-round1.md`，文件名 round 必须等于裁决块 `audit_round`；唯一两行绑定行「门：G5」「候选提交：<40 位 commit>」各自独占一行；裁决块夹在 `<!-- audit-verdict:begin -->` 与 `<!-- audit-verdict:end -->` 之间，字段按 `src/core/audit-verdict.ts`（`schema, gate, audit_round, candidate_commit, conclusion, p0, p1, p2, must_pass_total, must_pass_passed, must_pass_ids, failed_items, notes`）；`must_pass_ids` 必须恰好覆盖 73 项。
+- 注入现状：`scripts/fault-inject.ts` 的 `InjectionCase` 联合**没有 `G-11`**（有 G-01…G-10、G-12、G-14…G-16 与 `ev-g2-*`）；`caseG11` 不存在；既有 G-06 / G-12 证据在 `docs/gates/evidence/G3/`。G-11 的定义见 `docs/orchestra-design-draft.md:2234`（tool.result 丢失 → 批次保持 `applying`、outcome 空、节点 `indeterminate_side_effect`；对账确认部分写入 → `applying → indeterminate`、已写 `applied`、未写仍 `approved`、不整批盲重试）。G-11 用例依赖记忆 apply / inspect / confirm API。
+- 仓库无 playwright / puppeteer；本机 Chrome `C:\Program Files\Google\Chrome\Application\chrome.exe` 可 headless；`scripts/visual-check.mjs` 用 tsdown iife bundle + CDP `setDeviceMetricsOverride` 实测两视口。对比度口径只能静态实算（规格 `:2171` 写 axe-core，已记为「静态实测而非 axe-core 扫描」的口径差，保留 proved）。
+- 门记录与审计报告提交纪律：仓库根目录任何新文件都在门候选范围内（门只排除 `docs/gates/*.md`、`docs/audits`、`docs/reviews`、`handoff.md`）。
+
+### 硬约束（继续遵守）
+
+1. 结算契约真相源是附录 §1–§11：`status=resolved` 不放行；`abandon_ack` 不作结算依据；人证不得进 `evidence_id`；唯一新增错误码 `EFFECT_RESOLUTION_CONFLICT(409)`（规格 §17.1 已在 `:1376` 补行，现 86 行）。
+2. S5-H 记忆落地写只能是 `memory_items` 状态迁移（`proposed`/`approved` → `applied`/`skipped` + `applied_item_id`；`action=create` 行取 `item_id`、`action=update` 行取 `target_id`）；禁自造服务→宿主写协议、禁批准后 INSERT 新行、禁改批准后不可变列（迁移 030 四触发器：`memory_batches_approval_snapshot_immutable` / `memory_items_no_insert_after_approval` / `memory_items_no_delete_after_approval` / `memory_items_proposal_immutable_after_approval`）。
+3. 记忆节点 kind `agent` 与通用 `NodeType agent` 同名，靠「记忆 run `workflow_definition_hash=null` → 通用 dispatcher fail closed」与「记忆 node_id 不与通用节点类型同名」两条隔离；`src/index.ts:275-299` 是禁改文件。
+4. 面板控制面只允许六个写命令（规格 §8.4）：`decision.acknowledge`、`decision.resolve`、`workflow.create`、`workflow.open_draft`、`workflow.update`、`workflow.publish`。
+5. 记忆审批：**`mem_apply` 的前置批准复用 `mem_confirm` 的 `audit_result`（同一 `decision_id`，不新建第二张卡）**（规格 `docs/orchestra-design-draft.md:419` 与 `:651`；事件记 `pre_execution.reused`）。
+6. 错误码只复用 `src/core/errors.ts` 既有项；加码必须同时改 `ERROR_STATUS` 与规格 §17.1 总表。
+7. 授权子代理路由只能继承父路由（`list_subagent_models` 只列 `minimax — MiniMax Code`；显式指定 provider/model 会报 `ToolCallError: child LLM route ... is not allowed for this Session`）。
+8. 代码定位走 `codebase-memory-mcp`（`search_code` 的 pattern 含 `|` 必须 `regex:true`，否则静默 0 命中）；`tests/` / `scripts/` / `docs/` 不在索引内用 grep / read。
+9. 每个可审阅切片单独提交并推送；提交后更新本快照与工作包状态。
 
 ### 接手步骤
 
-1. `git status -sb`、`git log --oneline -8`，确认 `main` 与 `origin/main` 同步。
-2. 阅读本快照、`docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md` 的 §1–4、仓库 `AGENTS.md`、产品路线、S5 计划 Task 3/11–16，以及 `docs/orchestra-design-draft.md` 的记忆 §§5.4、9.3–9.10、11。
-3. 结构查询使用 `codebase-memory` skill；项目名 `D-aboutAI-dsh-orchestra`。迁移文件存在解析覆盖缺口，SQL 相关结论以源码为准。
-4. 剩余工作包顺序（S5 后续接手工作包 §3）：**S5-C 重派** → S5-Gb（审批卡生成 + decision 落库，mem_apply 复用 mem_confirm 的 audit_result）→ S5-H（apply / inspect / 对账）→ S5-I → S5-J（视觉走查，用本机 Chrome/Edge headless --screenshot 出 Before/After）→ S5-K（独立测试审计，报告落在 `docs/audits/S5-independent-audit-round1.md`）。
-5. 每个可审阅切片提交并推送后更新本快照。完成 S5 计划所有 Task 和 G5 证据后，才能更新阶段关闭状态。
-
----
+1. `git status -sb`、`git log --oneline -8`，确认 `main` 与 `origin/main` 同步（应为 `375806a`）。
+2. 读本快照、`docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md` 的 §2–§4、`docs/reviews/S5-g5-item-map.md`（73 项就绪矩阵）、`docs/orchestra-design-draft.md` 的 G5 门禁行 `:2164` 与记忆章节 §§5.4、9.3–9.10、11。
+3. 先补跑 `pnpm build`（本轮未跑）。
+4. 从 **WP-B 服务端读模型十一项** 开始；接着按上面「后续队列」推进，队列走完才做冻结候选与签门。
+5. 每次切片提交后回来更新本快照的 HEAD、测试计数与「唯一下一项」。
 
 > 面向「任何人（包括三个月后的自己）拿到这个目录就能继续干活」写的。
-> 历史记录最后核对：2026-11-17；本节以下旧内容不作为当前操作指令。
+> 历史记录最后核对：2026-11-18；本节以下旧内容不作为当前操作指令。
 > 配套：`codebasemap.md`（代码与图谱在哪）、`docs/requirements.md`（主人要什么）、`docs/design-notes.md`（为什么这么设计）。
-
 ---
 
 ## 历史快照：S1–S4 收敛审计全部收口（2026-11-17）
