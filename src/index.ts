@@ -61,6 +61,11 @@ import { randomUUID } from 'node:crypto'
 export const name = 'dsh-orchestra'
 export const version = '0.1.0'
 
+export { inspectMemoryRecovery, resolveMemoryRecovery } from './service/commands/memory-recovery.ts'
+export { createMemoryRuntime, type MemoryRuntimeOptions } from './service/commands/memory-runtime.ts'
+export type { MemoryRecoveryRequest, MemoryWriteEvidence } from './service/commands/memory-recovery.ts'
+export type { InspectMemoryWrite, MemoryWriteInspection } from './service/commands/memory-ports.ts'
+
 export type OrchestraOptions = {
   dbFile: string
   secret: string

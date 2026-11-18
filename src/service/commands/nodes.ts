@@ -249,6 +249,7 @@ export type CreateNodeRunRequest = {
   nodeType: string
   attempt: number
   originNodeRunId: string
+  previousActionGeneration?: number
   now: string
 }
 
@@ -270,9 +271,9 @@ export function createNodeRun(tx: Tx, req: CreateNodeRunRequest): void {
     }
   }
   tx.run(
-    'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, origin_node_run_id, created_at, updated_at) ' +
-      "VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?)",
-    [req.newNodeRunId, req.runId, req.nodeId, req.seq, req.nodeType, req.attempt, req.originNodeRunId, req.now, req.now],
+    'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, origin_node_run_id, created_at, updated_at, action_generation) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?)",
+    [req.newNodeRunId, req.runId, req.nodeId, req.seq, req.nodeType, req.attempt, req.originNodeRunId, req.now, req.now, req.previousActionGeneration ?? 0],
   )
   const res = tx.run(
     'UPDATE node_runs SET replacement_node_run_id = ?, updated_at = ? WHERE node_run_id = ? AND replacement_node_run_id IS NULL',

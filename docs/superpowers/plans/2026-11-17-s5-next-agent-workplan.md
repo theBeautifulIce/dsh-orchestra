@@ -154,7 +154,7 @@
 
 ### S5-H：受控记忆写入与不确定状态对账（Task 14；高风险包）
 
-**状态：** 部分完成。三端口的受控写入与对账已交（`1065b8b`：`src/service/commands/memory-ports.ts` 的 `applyGovernedMemoryBatch` / `inspectMemoryBatch` / `itemContentHash`，落地写只迁移 `memory_items` 状态 proposed/approved → applied/skipped + `applied_item_id`，`action=create` 行取 `item_id`、`action=update` 行取 `target_id`，禁 INSERT 新行、禁改批准后不可变列）。**余项：** 幂等键 `(batch_id, client_key)` 与 Q-54 三走向（applying / indeterminate / confirm_applied / confirm_not_applied）的整条断言仍缺；`MEMORY_APPLY_CONFLICT` 分支未实现（`src/core/errors.ts` 有码、apply 路径不抛）；G-11 注入用例不存在（`scripts/fault-inject.ts` 的 `InjectionCase` 联合无 `G-11`），本包仍属高风险切片，验收前必须补齐「批准后改正文 / 增删行 / hash 不一致 / 部分写入进程退出」四类故障测试。
+**状态**　Q-54 三条对账与恢复分支已完成。宿主接口 `createMemoryRuntime` 绑定受控写入和停止后对账。G-11 使用独立的 SQLite 写入库和真实 SIGKILL 复现全写入、原子回滚与部分写入，证据见 `docs/gates/evidence/G5/G-11.md`。仍需把实际记忆插件适配到宿主入口并逐项补齐生产写入幂等冲突、面板恢复入口和最终 G5 证据。
 
 **权威任务：** S5 实施计划 Task 14、规格 §9.7 与 G-06/G-11/G-12。
 

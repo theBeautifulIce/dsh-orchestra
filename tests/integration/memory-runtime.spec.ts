@@ -12,6 +12,8 @@ import { findMemoryNode, memoryGraphOrder } from '../../src/core/memory-graph-sc
 import type { MemoryItemInput } from '../../src/core/memory-canonical.ts'
 import { startMemoryRun } from '../../src/service/commands/memory.ts'
 import { resolveMemoryApproval } from '../../src/service/commands/memory-approval.ts'
+import { inspectMemoryRecovery, resolveMemoryRecovery } from '../../src/service/commands/memory-recovery.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 import {
   createMemoryPorts,
   type MemoryJudge,
@@ -583,6 +585,37 @@ describe('记忆 run 运行驱动', () => {
     const retry = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
     expect(retry.status).toBe('blocked')
     expect(writes).toBe(1)
+  })
+
+  it('零写入确认后，旧 attempt 的迟到失败回执不能关闭新 attempt', async () => {
+    const { db } = freshLedger()
+    const started = startRun(db)
+    const actor = { kind: 'human', id: 'tester' } as const
+    let announceWrite!: () => void
+    const enteredWrite = new Promise<void>((resolve) => { announceWrite = resolve })
+    let returnOld!: (value: { outcome: 'not_written' }) => void
+    const oldReceipt = new Promise<{ outcome: 'not_written' }>((resolve) => { returnOld = resolve })
+    const deps = makeDeps(db, { writeMemory: async () => { announceWrite(); return oldReceipt } })
+    await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
+    const waiting = one<{ decision_id: string }>(db, 'SELECT decision_id FROM memory_batches WHERE batch_id = ?', started.batch_id)
+    inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+      batch_id: started.batch_id, decision_id: waiting!.decision_id, resolution: 'approved', now: LATER, actor,
+    }))
+    const first = advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
+    await enteredWrite
+    const recovery = { db, secret: TEST_SECRET, now: () => LATER, inspectWrite: async (scope: {
+      batch_id: string; node_run_id: string
+    }) => ({ ...scope, stopped_at: LATER, entries: [] }) }
+    const proof = await inspectMemoryRecovery(recovery, started.batch_id)
+    resolveMemoryRecovery(recovery, actor, {
+      batch_id: started.batch_id, decision_id: proof.decision_id, revision: proof.revision,
+      evidence_id: proof.evidence_id, stopped_at: proof.stopped_at,
+      resolution: 'confirm_not_applied', operation_id: uuidv7(),
+    })
+    returnOld({ outcome: 'not_written' })
+    expect(await first).toMatchObject({ status: 'blocked', batch_status: 'applying', run_status: 'running' })
+    expect(await advanceMemoryRuntime(makeDeps(db), { memory_run_id: started.memory_run_id, now: LATER }))
+      .toMatchObject({ terminal: 'succeeded', batch_status: 'applied' })
   })
 
   it('人驳回时批次 declined、run failed、受控写没被调用', async () => {

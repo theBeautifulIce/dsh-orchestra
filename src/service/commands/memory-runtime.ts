@@ -21,12 +21,14 @@ import { isTerminal } from '../../core/state-machine.ts'
 import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { inTx } from '../../infra/db/tx.ts'
 import type { Db, Tx } from '../../infra/sqlite/driver.ts'
-import { acquireLease, releaseLease, renewLease } from './lease.ts'
+import { acquireLease, loadNodeRun, releaseLease, renewLease } from './lease.ts'
 import { applyBranchRoute, applyTransition, enterBlockedPre, resumeFromBlockedPre } from './nodes.ts'
 import { openMemoryApprovalCard } from './memory-approval.ts'
 import { advanceMemoryRun } from './memory-run.ts'
 import { saveMemoryProposal } from './memory.ts'
-import type { MemoryBatchRow, MemoryPorts } from './memory-ports.ts'
+import { createMemoryPorts, type InspectMemoryWrite, type MemoryBatchRow, type MemoryPortDeps, type MemoryPorts } from './memory-ports.ts'
+import { inspectMemoryRecovery, pauseMemoryWrite, resolveMemoryRecovery, type MemoryRecoveryRequest } from './memory-recovery.ts'
+import type { Actor } from '../decision/approver.ts'
 import { closeRun, type RunTerminal } from './run-close.ts'
 
 /** 事件类型名集中表：节点链事件与 run 级事件都从这里取名。 */
@@ -89,6 +91,24 @@ export type MemoryRuntimeDeps = {
   ownerEpoch?: number
   leaseTtlMs?: number
   now?: () => string
+}
+
+export type MemoryRuntimeOptions = Omit<MemoryRuntimeDeps, 'ports'> &
+  Pick<MemoryPortDeps, 'judge' | 'evalEnabled' | 'judgeTimeoutMs'> & {
+    writer: { writeMemory: MemoryPortDeps['writeMemory']; fenceAndInspect: InspectMemoryWrite }
+  }
+
+/** Host entry point. Both operations are bound to the same trusted writer. */
+export function createMemoryRuntime(options: MemoryRuntimeOptions) {
+  const { writer, ...deps } = options
+  const ports = createMemoryPorts({ ...deps, writeMemory: (input) => writer.writeMemory(input) })
+  const recovery = { db: deps.db, secret: deps.secret, now: deps.now,
+    inspectWrite: (scope: Parameters<InspectMemoryWrite>[0]) => writer.fenceAndInspect(scope) }
+  return {
+    advance: (params: AdvanceMemoryRuntimeParams) => advanceMemoryRuntime({ ...deps, ports }, params),
+    inspectBatch: (batchId: string) => inspectMemoryRecovery(recovery, batchId),
+    resolveRecovery: (actor: Actor, request: MemoryRecoveryRequest) => resolveMemoryRecovery(recovery, actor, request),
+  }
 }
 
 export type AdvanceMemoryRuntimeParams = {
@@ -180,7 +200,7 @@ function loadNodes(db: Db, runId: string): Map<string, NodeRow> {
   const rows = db.raw
     .prepare(
       'SELECT node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation' +
-        ' FROM node_runs WHERE run_id = ? ORDER BY seq',
+        ' FROM node_runs WHERE run_id = ? AND replacement_node_run_id IS NULL ORDER BY seq',
     )
     .all(runId)
   const map = new Map<string, NodeRow>()
@@ -396,6 +416,7 @@ export async function advanceMemoryRuntime(
   if (!batch) {
     throw new OrchError('MEMORY_BATCH_NOT_FOUND', '记忆批次不存在', { memory_run_id: params.memory_run_id })
   }
+  if (runStatusOf(deps.db, params.memory_run_id) === 'paused') return blockedResult(deps, batch, steps)
 
   for (let index = 0; index < maxSteps; index += 1) {
     const nodes = loadNodes(deps.db, params.memory_run_id)
@@ -413,9 +434,20 @@ export async function advanceMemoryRuntime(
     if (!current) {
       return finishCompleted(deps, batch, steps, now)
     }
-    if (current.status === 'indeterminate_side_effect' ||
-      (current.node_id === 'mem_apply' && loadBatchById(deps.db, batch.batch_id)?.status === 'applying')) {
+    const writing = current.node_id === 'mem_apply' ? loadBatchById(deps.db, batch.batch_id) : undefined
+    if (current.status === 'indeterminate_side_effect' || (writing?.status === 'applying' && writing.apply_node_run_id)) {
       return blockedResult(deps, batch, steps)
+    }
+    if (current.status === 'started' && writing?.status === 'applied' && writing.apply_node_run_id === current.node_run_id) {
+      inTx(deps.db, (tx) => {
+        applyTransition(tx, deps.secret, { nodeRunId: current.node_run_id, from: ['started'], to: 'done',
+          ruleId: 'M-44', attempt: current.attempt, expectedRevision: current.revision, now })
+        releaseLease(tx, { nodeRunId: current.node_run_id, now })
+        appendNodeRunEvent(tx, deps.secret, current.node_run_id, MEMORY_RUNTIME_EVENTS.nodeAdvanced, {
+          node_id: 'mem_apply', status: 'done', batch_id: batch.batch_id, recovered_receipt: true,
+        })
+      })
+      continue
     }
     const outcome = await runNode(deps, batch, current, now)
     steps.push(outcome.step)
@@ -504,13 +536,13 @@ async function runWorkNode(
     detail = await work()
   } catch (err) {
     const orch = toOrchError(err)
-    if (node.node_id === 'mem_apply' && loadBatchById(deps.db, batch.batch_id)?.status === 'applying') {
+    const write = node.node_id === 'mem_apply' ? loadBatchById(deps.db, batch.batch_id) : undefined
+    const claimedHere = write?.status === 'applying' && write.apply_node_run_id === node.node_run_id
+    const current = write && loadNodes(deps.db, batch.memory_run_id).get('mem_apply')
+    if (claimedHere || (current && (current.node_run_id !== node.node_run_id || current.status !== 'started'))) {
       const status = 'indeterminate_side_effect' as const
-      inTx(deps.db, (tx) => {
-        applyTransition(tx, secret, { nodeRunId: node.node_run_id, from: ['started'], to: status, ruleId: 'M-50', attempt: node.attempt, now })
-        releaseLease(tx, { nodeRunId: node.node_run_id, now })
-        tx.run("UPDATE runs SET status = 'paused', revision = revision + 1, updated_at = ? WHERE run_id = ? AND status IN ('running','settling')", [now, batch.memory_run_id])
-        appendEvent(tx, { type: 'memory.apply.outcome_unknown', runId: batch.memory_run_id, nodeRunId: node.node_run_id, payload: { batch_id: batch.batch_id } })
+      if (claimedHere && current?.status === 'started') inTx(deps.db, (tx) => {
+        pauseMemoryWrite(tx, secret, loadNodeRun(tx, node.node_run_id), batch.batch_id, now)
       })
       return { status, step: { node_id: node.node_id, node_run_id: node.node_run_id, status } }
     }
@@ -973,7 +1005,7 @@ function finishCompleted(
   now: string,
 ): MemoryRuntimeResult {
   const terminal = inTx(deps.db, (tx: Tx) => closeRun(tx, deps.secret, batch.memory_run_id, now))
-  inTx(deps.db, (tx: Tx) => {
+  if (terminal) inTx(deps.db, (tx: Tx) => {
     appendEvent(tx, {
       type: MEMORY_RUNTIME_EVENTS.runClosed,
       runId: batch.memory_run_id,

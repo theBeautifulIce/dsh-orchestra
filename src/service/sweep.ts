@@ -2,7 +2,8 @@
 import type { Db, Tx } from '../infra/sqlite/driver.ts'
 import { inTx } from '../infra/db/tx.ts'
 import { reanchorInTx, refreshCheckpointsInTx, type ReanchorReport } from './clock-recovery.ts'
-import { sweepExpiredLeases } from './commands/lease.ts'
+import { loadNodeRun, sweepExpiredLeases } from './commands/lease.ts'
+import { pauseMemoryWrite } from './commands/memory-recovery.ts'
 import { pickReplayHead, revokeFence, type FenceRow } from './commands/cancel.ts'
 import { transitionNode } from './commands/node-state.ts'
 import { applyTransition } from './commands/nodes.ts'
@@ -110,7 +111,23 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
     // wait 到点与租约、围栏同轮处理：同一个扫描入口，不靠外部再记得调一次
     const waitTimedOut = sweepWaitTimeouts(tx, secret, params.now, params.clock, skipNodes, taintedRuns)
-    const leaseExpired = sweepExpiredLeases(tx, secret, { now: params.now, leaseTtlMs: 0, skipNodeRunIds: skipNodes, clock: params.clock })
+    const governedClaims = tx.all<{ batch_id: string; node_run_id: string; lease_expires_at: string | null; status: string }>(
+      "SELECT b.batch_id, n.node_run_id, n.lease_expires_at, b.status FROM memory_batches b " +
+      "JOIN node_runs n ON n.node_run_id = b.apply_node_run_id JOIN runs r ON r.run_id = n.run_id " +
+      "WHERE b.status IN ('applying','applied') AND n.status = 'started' AND r.status IN ('running','settling','paused')",
+    )
+    const expiredMemory: string[] = []
+    for (const claim of governedClaims) {
+      if (skipNodes.has(claim.node_run_id)) continue
+      skipNodes.add(claim.node_run_id)
+      if (claim.status === 'applying' && claim.lease_expires_at && claim.lease_expires_at <= params.now) {
+        pauseMemoryWrite(tx, secret, loadNodeRun(tx, claim.node_run_id), claim.batch_id, params.now)
+        expiredMemory.push(claim.node_run_id)
+      }
+    }
+    const leaseExpired = [...expiredMemory, ...sweepExpiredLeases(tx, secret, {
+      now: params.now, leaseTtlMs: 0, skipNodeRunIds: skipNodes, clock: params.clock,
+    })]
     // 围栏宽限到点：撤围栏回 stopping，并把当前 attempt 的队头挑出来（规格 4.5 行 346）
     const fences = tx.all<FenceRow>(
       'SELECT node_run_id, attempt, revision, status, rearm_generation, fence_state, fence_grace_until, fence_grace_boot_id, fence_grace_monotonic_ns FROM node_runs WHERE fence_state = ? AND fence_grace_until IS NOT NULL',

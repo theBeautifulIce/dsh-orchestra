@@ -4,7 +4,7 @@
 >
 > 清单来源（唯一）：`scripts/gate-check.ts:359-443`（`GATE_SPECS.G5.items` 与 `.content`，逐字照抄，未改写、未新增、未删减）。证据 id 规则 `ev-g5-<item-id 小写>`，固定路径 `docs/gates/evidence/G5/<ITEM-ID>.md`（见 `scripts/gate-check.ts:453` 起）。Q-37…Q-42 属 S4，不在 G5 清单内。
 >
-> 本图谱只读代码得出，**未改动任何源码、测试或门文件**。本会话按 Lead 指令 **不得创建** `docs/gates/G5.md` 与 `docs/gates/evidence/G5/**`，因此下文所有 G5 证据文件都标为「待候选 SHA 冻结后生成」。
+> 2026-11-18 已回填 Q-54、G5-MEMORY-RECONCILE 和 G-11。G-11 原始注入证据已落库。按仓库流程，正式门记录仍需冻结候选并经过独立审计。
 
 ## 状态口径
 
@@ -18,15 +18,15 @@
 
 **proved 的门槛**：判定语的**每个子句**都有断言（断言可以分布在多条用例里），且「证明用例」列给出的那一条命令可执行、当前通过；互补用例写在「缺口与建议」列。命令跑不通（退出码 ≠ 0）或还有子句缺断言，一律不记 proved —— 门证据生成器会按这一列真跑命令，跑不通的不出证据文件。
 
-命令都在仓库根目录执行。注入脚本必须带 `--out <临时目录>`：`scripts/fault-inject.ts:1585-1589` 会按 case 名选门目录写证据文件，不带 `--out` 会写进 `docs/gates/evidence/`，本会话禁止。
+命令都在仓库根目录执行。复现注入时用 `--out <临时目录>` 保留仓库中的证据原文。G-11 的门证据使用注入 CLI 生成的账本片段和查询结果。
 
 ## 汇总
 
 | 状态 | 条数 |
 | --- | --- |
-| proved | 27 |
-| partial | 37 |
-| gap | 9 |
+| proved | 30 |
+| partial | 35 |
+| gap | 8 |
 | 合计 | 73 |
 
 ### 缺口（gap）按区域
@@ -37,13 +37,12 @@
 | 服务 | Q-11、Q-15 | 2 | `allowed_resolutions` 恒 null；无 `CONFIRMATION_REQUIRED` 抛出方（Q-32 的落库路径已落地，降为 partial，见该行） |
 | 记忆 | Q-59 | 1 | `MEMORY_APPLY_CONFLICT` 只有错误码定义，apply 路径不抛 |
 | 视觉 | （无） | 0 | 五个视觉硬门槛有可执行断言；对比度是静态实测而非 axe-core（见下） |
-| 注入 | G-11 | 1 | `InjectionCase` 无 `'G-11'`，无注入用例、无测试、无证据文件 |
 
 ### partial 的分布（供排期参考）
 
 - 面板与服务（Q-01…Q-36 组）：19 条 partial —— 绝大多数是「服务端/面板已实现一半，但没有断言」或「只覆盖了判定语的子句」（Q-32 已由 gap 升为 partial：`unverified_resolutions` 落库路径与两条规则各一支断言都已落地）。
-- 记忆（Q-43…Q-63 组）：16 条 partial + 1 条 gap（Q-59）—— apply / inspect / 审批闭环的服务端行为已落地在 `src/service/commands/memory-ports.ts`、`src/service/commands/memory-approval.ts`、`src/service/commands/memory-runtime.ts`，并已有用例（`tests/integration/memory-runtime.spec.ts` 18 例、`tests/integration/effect-resolution.spec.ts` 27 例）；剩下的 partial 集中在「同一判定语只断言了部分子句」（Q-47、Q-48、Q-49、Q-51、Q-53、Q-57）与「confirm_* 三条走向未落地」（Q-54、G5-MEMORY-RECONCILE）。
-- 视觉与阶段（末组）：2 条 partial —— G5-MEMORY-RECONCILE（inspect 口径已证，`partial=true` 的部分写入场景未证，依赖 confirm_* 三条走向落地）、G5-PHASE-RELEASE（能力表已证，`wf_release_v1` 启动被拒未证）。
+- 记忆（Q-43…Q-63 组）：15 条 partial 和 1 条 gap（Q-59）。Q-54 的全量、零条、部分写入三条分支已用 G-11 证明。
+- 视觉与阶段（末组）：1 条 partial。G5-PHASE-RELEASE 的能力表已验证，`wf_release_v1` 启动拒绝仍缺验证。
 
 ## 就绪矩阵（73 项，顺序同 `scripts/gate-check.ts`）
 
@@ -102,7 +101,7 @@
 | Q-52 | 错批次 decision_id 或改 content 后 apply 报 MEMORY_APPLY_BINDING_INVALID 且一条不写 | — | partial | 「改 content」已证：`pnpm vitest run tests/integration/memory-approval.spec.ts -t "批准后改正文 → MEMORY_APPLY_BINDING_INVALID"`。缺：「错批次 decision_id」用例（apply 路径的绑定校验见 `src/service/commands/memory-ports.ts:475`）。最小修复位置：`tests/integration/memory-approval.spec.ts` |
 | Q-52b | 批准后对 memory_items 的 INSERT / DELETE / 非 content 字段 UPDATE / 换序四种篡改都被拒，报 MEMORY_APPLY_BINDING_INVALID | — | partial | 三支已证：`pnpm vitest run tests/integration/memory-approval.spec.ts -t "批准后新增行 → MEMORY_APPLY_BINDING_INVALID"`、"批准后删除行 → MEMORY_APPLY_BINDING_INVALID"、"批准后改哈希 → MEMORY_APPLY_BINDING_INVALID"（哈希是非 content 字段 UPDATE）。缺：「换序」——且**规格口径冲突**：`docs/orchestra-design-draft.md:2071` 明说「单纯调整行的物理顺序不改变集合，不属于内容篡改，不要求检出」，与本条判定语把「换序」列为四种篡改之一直接矛盾。最小修复位置：`tests/integration/memory-approval.spec.ts`（补换序用例）+ **需要 Lead/规格裁决口径**（见文末「待裁决口径」） |
 | Q-53 | 同批次连续两次 apply：第二次 already_applied=true 且不产生新的 memory.applied 事件 | — | partial | 实现已落地：`src/service/commands/memory-ports.ts:460-468`（批次 status=`applied` → 返回 `already_applied:true`）；「重复推进不重跑、不重复写事件」已证（不证明本项全句）：`pnpm vitest run tests/integration/memory-runtime.spec.ts -t "重复推进不重跑已完成的节点、不重复写事件、不重复写批次"`（第二次推进 steps 为空、事件数不变、批次行不变、writeCalls 仍为 1）。缺：`already_applied=true` 这个返回值没有用例（第二次推进根本不会再次调 apply 端口）。最小修复位置：`tests/integration/memory-runtime.spec.ts`（对同一批次第二次直接调 apply 端口并断言 already_applied） |
-| Q-54 | apply 的 tool.result 丢失时批次保持 applying，inspect_batch 能对账三条走向 | — | partial | apply 前置 `status='applying'`（`src/service/commands/memory-ports.ts:483`）、`inspectMemoryBatch` 端口返回逐条 status / `written_count` / `missing_count` / `partial` / `evidence_id`（`:551-580`）、`src/service/commands/memory-runtime.ts:683-696` 已调用；**全成功一条走向**已证（不证明本项全句）：`pnpm vitest run tests/integration/memory-runtime.spec.ts -t "inspect_batch 口径齐全，evidence_id 记进节点事件"`。缺：「tool.result 丢失 → 批次保持 applying」与**三条走向**（2 条都在 / 0 条 → confirm_not_applied 重跑 / 1 条部分写入 → indeterminate + abandon → run 落 succeeded_with_unverified）无用例与实现；`VERIFICATION_TOO_WEAK` 只在 `src/core/errors.ts:22` 定义、无抛出方。最小修复位置：`src/service/commands/memory-runtime.ts`（confirm_* 路径）+ `tests/integration/memory-apply-lost-result.spec.ts`（新建） |
+| Q-54 | apply 的 tool.result 丢失时批次保持 applying，inspect_batch 能对账三条走向 | `pnpm vitest run tests/integration/memory-g11.spec.ts` | proved | 宿主运行接口对独立写入库实测三条分支，校验停止时刻、证据、节点代次、写入状态和放弃签认。生产宿主接入另行验证。 |
 | Q-55 | 源 run A 的批次用源 run B 的 decision_id 写入报 MEMORY_APPLY_BINDING_INVALID | — | partial | 归属校验有一部分：`src/service/commands/memory-ports.ts:338-341`「批次不属于该准备节点」→ `MEMORY_BATCH_NOT_FOUND`；但 apply 路径未显式校验 decision 与批次的 run 归属，也无用例。最小修复位置：`src/service/commands/memory-ports.ts`（applyGovernedMemoryBatch）+ `tests/integration/memory-approval.spec.ts` |
 | Q-56 | 写入后条目能追回 source_run_id、memory_run_id、batch_id、decision_id 与 client_key | — | partial | 结构具备（`src/infra/sqlite/migrations/030_memory.sql`：memory_items 有 batch_id/client_key，memory_batches 有 source_run_id/memory_run_id/decision_id）；现有覆盖（不证明本项）：`tests/integration/memory-start.spec.ts:135-144` 只断言批次行与映射（写入前）。缺：写入后条目五字段全链路 + 面板跳转。最小修复位置：`tests/integration/memory-approval.spec.ts` |
 | Q-57 | 不存在或不属该记忆 run 的 batch_id 报 MEMORY_BATCH_NOT_FOUND | — | partial | 已实现：`src/service/commands/memory-ports.ts:458`、`:338-341`、`src/service/commands/memory.ts:180,312`。「不属该记忆 run」已证（不证明本项全句）：`pnpm vitest run tests/integration/memory-runtime.spec.ts -t "评估端口按 batch_id + prepare_node_run_id 找批次，对不上报 MEMORY_BATCH_NOT_FOUND"`（评估端口）。缺：「batch_id 根本不存在」这一支、以及 apply 路径（`memory-ports.ts:458`）无用例。最小修复位置：`tests/integration/memory-runtime.spec.ts` |
@@ -117,10 +116,10 @@
 | G5-FONT-BODY | 正文不小于 13px，辅助文字不小于 12px | `pnpm vitest run tests/client/panel-visual.spec.tsx -t "门槛② 实测字号"` | proved | 无缺口。静态侧同文件「门槛② 字号下限：FONT_PX 每项不低于 FONT_FLOOR_PX，且下限本身不低于规格」；常量在 `src/client/panel/tokens.ts:14-15`（body 14 / helper 12，floor body 13 / helper 12） |
 | G5-FONT-MENU | 左侧菜单与顶部导航不小于 12.5px | `pnpm vitest run tests/client/panel-visual.spec.tsx -t "门槛② 实测字号"` | proved | 无缺口。该用例与 `node scripts/visual-check.mjs` 都实测左侧菜单 13px、顶部导航 13px（下限 12.5px）；常量 `tokens.ts:14` `FONT_PX.menu=13`、`:15` `FONT_FLOOR_PX.menu=12.5` |
 | G5-CONTRAST-LIGHT | 浅色主题正文对比度 4.5:1，大字与 UI 3:1 | `pnpm vitest run tests/client/panel-visual.spec.tsx -t "门槛③ 对比度"` | proved | **口径差（Lead 已裁决：保留 proved）**：规格 `docs/orchestra-design-draft.md:2171` 写的是 Playwright + axe-core 复核，但本仓没有 playwright/puppeteer，现实现是 `src/client/panel/contrast.ts:18` `contrastRatio` 对 `TEXT_PAIRS` **静态实测**（6 对，floor 4.5 / 3，canvas=`#ffffff`），**不是 axe-core 扫描**。后续建议：补 axe-core 扫描（最小修复位置：`tests/client/panel-visual.spec.tsx`），或把规格口径改成静态实测 |
-| G5-MEMORY-RECONCILE | 记忆批次部分写入能对账：已写入与未写入逐条可查 | — | partial | 对账端口已落地并有断言（不证明本项全句）：`pnpm vitest run tests/integration/memory-runtime.spec.ts -t "inspect_batch 口径齐全，evidence_id 记进节点事件"`（`written_count=1`/`missing_count=0`/`partial=false`/`evidence_id` 以 `mev_` 开头）；实现见 `src/service/commands/memory-ports.ts:551-580` 与 `src/service/commands/memory-runtime.ts:683-696`。缺：**部分写入**（`partial=true`、`missing_count>0`）的逐条对账用例，且 apply 侧 confirm_* 三条走向未落地（见 Q-54）。最小修复位置：`tests/integration/memory-apply-lost-result.spec.ts`（新建） |
+| G5-MEMORY-RECONCILE | 记忆批次部分写入能对账：已写入与未写入逐条可查 | `pnpm vitest run tests/integration/memory-g11.spec.ts` | proved | 部分提交分支对照独立写入库和账本，验证第一条 applied、第二条 approved。 |
 | G5-PHASE-RELEASE | S5 阶段能力表不含 release，S5 启动 wf_release_v1 被拒 | — | partial | 能力表半边已证，现有覆盖（不证明本项全句）：`pnpm vitest run tests/gate/gate-g5.spec.ts -t "S5 阶段不提供 release 能力"`（`src/core/config.ts:20`，S6 含 release、S5 不含；同文件另有「S6 才提供 release 能力」「S1 还没有 panel 能力，S5 有 panel 与 memory 但没有 release」）。缺：「S5 启动 wf_release_v1 被拒」——仓库里没有 `wf_release_v1` 工作流定义，也没有对应拒绝用例（`src/`、`tests/` 均无 `wf_release_v1`）。最小修复位置：`tests/gate/gate-g5.spec.ts`（加一条「S5 阶段发布/启动 release 工作流被拒」用例） |
 | G-06 | tool.result 丢失后同 callId 只重发结果，工具不重跑 | `pnpm vitest run tests/integration/g3-faults.spec.ts -t "G-06：工具只执行一次，前后账本恰有一条 tool_started 与一条 tool_finished"` | proved | 无缺口。注入侧同案：`node scripts/fault-inject.ts --case G-06 --out <临时目录>`（`scripts/fault-inject.ts:527` `caseG06`；必须带 `--out`，否则会写进 `docs/gates/evidence/`）。现有证据文件在 `docs/gates/evidence/G3/G-06.md` |
-| G-11 | 记忆批次写一半杀进程后可对账并恢复到确定终态 | — | gap | 三处都缺：`scripts/fault-inject.ts:41` 的 `InjectionCase` 联合**没有 `'G-11'`**（有 G-06、G-12，无 G-11/G-13），`runCase` 无 G-11 分支（`:1549-1578`）；`tests/` 无 G-11 用例；`docs/gates/evidence/` 无 G-11 任何文件。最小修复位置：`scripts/fault-inject.ts`（新增 `caseG11` 并把 `'G-11'` 登记进 `InjectionCase`）+ 新增 `tests/integration/memory-apply-lost-result.spec.ts`；证据文件 `docs/gates/evidence/G5/G-11.md` 待候选 SHA 冻结后由门证据生成器产出 |
+| G-11 | 记忆批次写一半杀进程后可对账并恢复到确定终态 | `pnpm vitest run tests/integration/memory-g11.spec.ts` | proved | 真实 SIGKILL 注入三种写入结果，原始前后账本及对账查询见 `docs/gates/evidence/G5/G-11.md`，由注入 CLI 生成。 |
 | G-12 | 审批双击与同决定重复提交只赢一笔 | `pnpm vitest run tests/integration/g3-faults.spec.ts -t "G-12：双击只留一笔 resolved，revision 前进到 2"` | proved | 无缺口。注入侧同案：`node scripts/fault-inject.ts --case G-12 --out <临时目录>`（`scripts/fault-inject.ts:561` `caseG12`）。现有证据文件在 `docs/gates/evidence/G3/G-12.md` |
 
 ## 注入三项现状
@@ -128,7 +127,7 @@
 | 项 | `InjectionCase` 成员？ | 注入用例做什么 | 现有证据文件 |
 | --- | --- | --- | --- |
 | G-06 | **是**。`scripts/fault-inject.ts:41` 联合含 `'G-06'`（联合成员为 `'G-10'`、`'G-01'`…`'G-09'`、`'G-12'`、`'G-14'`、`'G-15'`、`'G-16'`） | `caseG06`（`scripts/fault-inject.ts:527`）：同一 `callId='call_g06'` 连续 collect 两次，输出「宿主实际执行次数=」+ 两次 exitCode + outbox status，验证 tool.result 丢失后只重发结果、工具不重跑 | `docs/gates/evidence/G3/G-06.md`（G3 门产出）。运行器默认门目录按 case 名判定，`G-06` → `G1`，所以 **必须带 `--out`** 才不会污染 `docs/gates/evidence/` |
-| G-11 | **否**。联合里没有 `'G-11'`（也没有 G-13），`runCase` 的 switch（`:1549-1578`）无 G-11 分支，文件里没有 `caseG11` | 无可运行注入用例 | **无**。`docs/gates/evidence/` 下没有 G-11 的任何文件；G5 目录整体尚未创建 |
+| G-11 | **是** | `node --no-warnings scripts/fault-inject.ts --case G-11 --out <证据根目录>` | `docs/gates/evidence/G5/G-11.md`，按同一输出命令复现 |
 | G-12 | **是**。联合含 `'G-12'` | `caseG12`（`scripts/fault-inject.ts:561`）：同一 `revision=1` 连点两次 approve，第二次 catch 取错误码，验证双击只赢一笔、revision 前进到 2 | `docs/gates/evidence/G3/G-12.md`（G3 门产出） |
 
 注入运行器 CLI：`node scripts/fault-inject.ts --case <name> [--out <dir>]`（`scripts/fault-inject.ts:1581-1591`）。门归属规则：`G-03/G-04/G-05/G-07/ev-g2-*` → `G2`，其余 → `G1`；G-06/G-12 的既有证据落在 `G3/` 是 G3 门自己跑的产物，不是这个默认路径。
@@ -138,11 +137,11 @@
 | 不变量 | 覆盖的 item | 本图谱当前状态 |
 | --- | --- | --- |
 | I1 | Q-01、Q-02、Q-13、Q-24 | Q-01 partial、Q-02 gap、Q-13 proved、Q-24 partial —— 四条里只有 Q-13 是完整 proved |
-| I2 | Q-52、Q-52b、Q-62、G-11 | 三条 partial + 一条 gap；G-11 注入用例不存在 |
+| I2 | Q-52、Q-52b、Q-62、G-11 | 三条 partial，G-11 proved |
 | I3 | G5-PHASE-RELEASE | partial |
 | I4 | G5-VIEWPORT-NARROW、WIDE、G5-FONT-BODY、G5-FONT-MENU、G5-CONTRAST-LIGHT | 五条 proved（对比度未走 axe-core，见该行） |
-| I5 | G-06、G-11、G-12 | 两条 proved + G-11 gap |
-| I6 | G5-MEMORY-RECONCILE、Q-54、Q-63 | 三条全 partial；共同依赖 s5h-apply 的 apply/inspect/confirm |
+| I5 | G-06、G-11、G-12 | 三条 proved |
+| I6 | G5-MEMORY-RECONCILE、Q-54、Q-63 | 前两项 proved，Q-63 partial |
 
 ## 待裁决口径（不是我能单方面决定的）
 

@@ -177,7 +177,17 @@ export type DecisionResolution = {
  * - confirm/continue/abandon/uphold 类结论只推进 revision，status 保持原活跃态。
  * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
  */
-export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
+const MEMORY_RECOVERY = Symbol('memory-recovery')
+
+export function resolveMemoryRecoveryDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
+  return resolveDecision(tx, secret, req, MEMORY_RECOVERY)
+}
+
+export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequest, scope?: symbol): DecisionResolution {
+  if (scope !== MEMORY_RECOVERY && tx.get(
+    'SELECT 1 FROM memory_write_recoveries WHERE decision_id = ? OR abandon_ack_id = ?',
+    [req.decisionId, req.decisionId],
+  )) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆恢复决定必须走带对账证据的恢复命令')
   const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string }>(
     'SELECT status, payload_json, approver, confirm_required, run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
@@ -364,6 +374,7 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
       + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
       + "WHERE d.kind <> 'report_contradicted' "
+      + 'AND NOT EXISTS (SELECT 1 FROM memory_write_recoveries m WHERE m.decision_id = d.decision_id OR m.abandon_ack_id = d.decision_id) '
       + `AND d.status IN ${ACTIVE_STATUSES}`,
   )
   const out: SweepDecisionsOutcome = { blocked: 0, expired: 0, releasedNodes: [], closedRuns: [] }

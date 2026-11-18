@@ -194,8 +194,10 @@ function applyMemoryStart(tx: Tx, params: StartMemoryRunParams, requestKey: stri
   }
   // ② 同源已有未终结的记忆批次且换了 key：回滚并报 MEMORY_RUN_ACTIVE
   const active = tx.get<BatchRow>(
-    'SELECT batch_id, memory_run_id, attempt, task_id, status FROM memory_batches '
-    + 'WHERE source_run_id = ? AND status NOT IN (' + TERMINAL_STATUS_SQL + ') ORDER BY attempt DESC LIMIT 1',
+    'SELECT batch_id, memory_run_id, attempt, task_id, status FROM memory_batches b '
+    + 'WHERE source_run_id = ? AND (status NOT IN (' + TERMINAL_STATUS_SQL + ') '
+    + "OR (status = 'indeterminate' AND EXISTS (SELECT 1 FROM runs r WHERE r.run_id = b.memory_run_id AND r.status = 'paused'))) "
+    + 'ORDER BY attempt DESC LIMIT 1',
     [params.source_run_id],
   )
   if (active) {

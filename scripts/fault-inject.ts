@@ -37,8 +37,9 @@ import { propagateRunCancellation } from '../src/service/commands/subworkflow.ts
 import { runNode } from '../src/executor/run-node.ts'
 import type { HostAgentFactory } from '../src/executor/session.ts'
 import type { Db } from '../src/infra/sqlite/driver.ts'
+import { caseG11 } from './g11-memory.ts'
 
-export type InjectionCase = 'G-10' | 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-06' | 'G-07' | 'G-08' | 'G-09' | 'G-12' | 'G-14' | 'G-15' | 'G-16'
+export type InjectionCase = 'G-10' | 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-06' | 'G-07' | 'G-08' | 'G-09' | 'G-11' | 'G-12' | 'G-14' | 'G-15' | 'G-16'
   | 'ev-g2-01' | 'ev-g2-02' | 'ev-g2-03' | 'ev-g2-04' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
   | 'ev-g2-08' | 'ev-g2-09' | 'ev-g2-10' | 'ev-g2-11' | 'ev-g2-12' | 'ev-g2-13' | 'ev-g2-14' | 'ev-g2-15'
 
@@ -1557,6 +1558,7 @@ export async function runCase(name: InjectionCase): Promise<InjectionResult> {
     case 'G-09': return caseG09()
     case 'G-12': return caseG12()
     case 'G-10': return caseG10()
+    case 'G-11': return caseG11()
     case 'G-14': return caseG14()
     case 'G-15': return caseG15()
     case 'G-16': return caseG16()
@@ -1582,7 +1584,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const idx = process.argv.indexOf('--case')
   const name = (idx >= 0 ? process.argv[idx + 1] : 'G-01') as InjectionCase
   const out = await runCase(name)
-  const gate = ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11', 'ev-g2-12', 'ev-g2-13', 'ev-g2-14', 'ev-g2-15'].includes(name) ? 'G2' : 'G1'
+  const gate = name === 'G-11' ? 'G5' : ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11', 'ev-g2-12', 'ev-g2-13', 'ev-g2-14', 'ev-g2-15'].includes(name) ? 'G2' : 'G1'
   // --out 只是给复现守卫用的：把证据写到临时目录，别把工作树弄脏（S2 第三十五轮 P1-1）
   const outIdx = process.argv.indexOf('--out')
   const evidenceRoot = outIdx >= 0 ? process.argv[outIdx + 1]! : join(process.cwd(), 'docs/gates/evidence')

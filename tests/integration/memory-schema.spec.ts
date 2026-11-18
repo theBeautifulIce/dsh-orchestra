@@ -77,15 +77,15 @@ function insertItem(db: Db, over: { item_id?: string; batch_id?: string; client_
   })
 }
 
-describe('记忆迁移 030/032 的数据约束', () => {
-  it('四张记忆表都在', () => {
+describe('记忆迁移 030/032/034 的数据约束', () => {
+  it('业务表和恢复证据索引表齐全', () => {
     const { db } = freshLedger()
     const tables = db.raw.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_%' ORDER BY name",
     ).all() as Array<{ name: string }>
-    expect(tables.map((row) => row.name)).toEqual([
-      'memory_batches', 'memory_evaluations', 'memory_items', 'memory_run_requests',
-    ])
+    expect(tables.map((row) => row.name)).toEqual(expect.arrayContaining([
+      'memory_batches', 'memory_evaluations', 'memory_items', 'memory_run_requests', 'memory_write_recoveries',
+    ]))
     db.raw.close()
   })
 

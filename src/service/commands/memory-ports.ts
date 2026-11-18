@@ -34,6 +34,21 @@ export type GovernedWriteInput = {
   items: readonly MemoryItemInput[]
 }
 
+/** A fence is durable for this node_run_id. A fenced attempt can no longer commit. */
+export type MemoryWriteInspection = {
+  batch_id: string
+  node_run_id: string
+  stopped_at: string
+  entries: readonly {
+    client_key: string
+    content_hash: string
+    applied_item_id: string
+  }[]
+}
+
+/** The adapter fences this attempt and reads the same durable store used by writeMemory. */
+export type InspectMemoryWrite = (scope: Pick<GovernedWriteInput, 'batch_id' | 'run_id' | 'node_run_id'>) => Promise<MemoryWriteInspection>
+
 /** 受控写回调逐条回执。 */
 export type GovernedWriteApplied = {
   client_key: string
@@ -467,15 +482,18 @@ export async function applyGovernedMemoryBatch(
       [batch.decision_id],
     )
     const replay = batch.status === 'applied'
+    const retry = batch.status === 'applying' && batch.apply_node_run_id === null
     if (!decision || decision.status !== 'resolved' || decision.closed_reason !== 'approved'
-      || (!replay && (batch.status !== 'approved' || (decision.expires_at && !(Date.parse(now) < Date.parse(decision.expires_at)))))) {
+      || (!replay && ((!retry && batch.status !== 'approved') || (decision.expires_at && !(Date.parse(now) < Date.parse(decision.expires_at)))))) {
       throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '批次未批准，不许受控写', {
         batch_id: input.batch_id,
         status: batch.status,
       })
     }
-    const node = tx.get<{ status: string }>(
-      "SELECT status FROM node_runs WHERE node_run_id = ? AND run_id = ? AND node_id = 'mem_apply'",
+    const node = tx.get<{ status: string; origin_node_run_id: string | null }>(
+      "SELECT n.status, n.origin_node_run_id FROM node_runs n JOIN runs r ON r.run_id = n.run_id" +
+      " WHERE n.node_run_id = ? AND n.run_id = ? AND n.node_id = 'mem_apply'" +
+      (replay ? '' : " AND r.status = 'running' AND r.cancel_requested_at IS NULL"),
       [input.node_run_id, batch.memory_run_id],
     )
     if (batch.decision_id !== input.decision_id || batch.memory_run_id !== input.run_id || !node ||
@@ -483,6 +501,11 @@ export async function applyGovernedMemoryBatch(
       (!replay && node.status !== 'started')) {
       throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '写入节点不属于这张记忆批次或尚未启动')
     }
+    if (retry && !tx.get(
+      "SELECT 1 FROM memory_write_recoveries r JOIN node_runs old ON old.node_run_id = r.node_run_id" +
+      " WHERE r.node_run_id = ? AND r.batch_id = ? AND r.status = 'confirmed_not_applied' AND old.replacement_node_run_id = ?",
+      [node.origin_node_run_id, batch.batch_id, input.node_run_id],
+    )) throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '新的写入 attempt 没有零写入确认')
     const rows = loadItems(deps.db, input.batch_id)
     const actualProposalHash = proposalHash(rows.map(toMemoryItemInput))
     const pairs = rows.map((row) => [row.client_key, contentHash(toMemoryItemInput(row))])
@@ -501,11 +524,11 @@ export async function applyGovernedMemoryBatch(
     const approved = rows.filter((row) => row.status === 'approved')
     if (approved.length === 0) throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '批准快照没有可写入的条目')
     const res = tx.run(
-      "UPDATE memory_batches SET status = 'applying', apply_node_run_id = ?, updated_at = ? WHERE batch_id = ? AND status = 'approved'",
-      [input.node_run_id, now, input.batch_id],
+      "UPDATE memory_batches SET status = 'applying', apply_node_run_id = ?, updated_at = ? WHERE batch_id = ? AND status = ? AND apply_node_run_id IS NULL",
+      [input.node_run_id, now, input.batch_id, batch.status],
     )
     if (res.changes !== 1) throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '批次已被其他写入领取')
-    return approved
+    return { approved, skipped: rows.length - approved.length }
   })
   if (!claim) return { batch_id: input.batch_id, applied_count: 0, skipped_count: 0, applied_item_ids: [], already_applied: true }
 
@@ -515,7 +538,7 @@ export async function applyGovernedMemoryBatch(
       batch_id: input.batch_id,
       run_id: input.run_id,
       node_run_id: input.node_run_id,
-      items: claim.map(toMemoryItemInput),
+      items: claim.approved.map(toMemoryItemInput),
     })
   } catch {
     throw new OrchError('MEMORY_APPLY_FAILED', '记忆写入结果暂不可确认，需要对账')
@@ -524,9 +547,10 @@ export async function applyGovernedMemoryBatch(
     if (written.outcome !== 'not_written') throw new OrchError('MEMORY_APPLY_FAILED', '写入端返回了未知结果，需要对账')
     const message = '写入端确认整批未落库'
     inTx(deps.db, (tx: Tx) => {
+      assertWriteClaim(tx, input)
       tx.run(
         "UPDATE memory_batches SET status = 'failed', outcome = 'failed', error_code = 'MEMORY_APPLY_FAILED'," +
-          " error_message = ?, updated_at = ? WHERE batch_id = ? AND status IN ('approved','applying')",
+          " error_message = ?, updated_at = ? WHERE batch_id = ? AND status = 'applying'",
         [message, now, input.batch_id],
       )
       tx.run("UPDATE memory_items SET status = 'failed' WHERE batch_id = ? AND status = 'approved'", [input.batch_id])
@@ -538,28 +562,29 @@ export async function applyGovernedMemoryBatch(
     })
   }
 
-  const applied = written.applied ?? alignApplied(claim, written.applied_item_ids)
+  const { approved, skipped } = claim
+  const applied = written.applied ?? alignApplied(approved, written.applied_item_ids)
   const appliedIds = new Set(applied.map((item) => item.item_id))
-  if (written.applied_count !== claim.length || written.skipped_count !== 0
-    || applied.length !== claim.length || new Set(applied.map((item) => item.client_key)).size !== claim.length
-    || written.applied_item_ids.length !== claim.length || appliedIds.size !== claim.length
-    || new Set(written.applied_item_ids).size !== claim.length
+  if (written.applied_count !== approved.length || written.skipped_count !== 0
+    || applied.length !== approved.length || new Set(applied.map((item) => item.client_key)).size !== approved.length
+    || written.applied_item_ids.length !== approved.length || appliedIds.size !== approved.length
+    || new Set(written.applied_item_ids).size !== approved.length
     || applied.some((item) => !item.item_id || !written.applied_item_ids.includes(item.item_id)
-      || !claim.some((row) => row.client_key === item.client_key))) {
+      || !approved.some((row) => row.client_key === item.client_key))) {
     throw new OrchError('MEMORY_APPLY_FAILED', '记忆写入回执不完整，需要对账')
   }
   inTx(deps.db, (tx: Tx) => {
+    assertWriteClaim(tx, input)
     for (const item of applied) {
       tx.run(
         "UPDATE memory_items SET status = 'applied', applied_item_id = ? WHERE batch_id = ? AND client_key = ? AND status = 'approved'",
         [item.item_id, input.batch_id, item.client_key],
       )
     }
-    tx.run("UPDATE memory_items SET status = 'skipped' WHERE batch_id = ? AND status = 'approved'", [input.batch_id])
     const result = tx.run(
       "UPDATE memory_batches SET status = 'applied', outcome = 'written', applied_count = ?, skipped_count = ?," +
         " applied_at = ?, updated_at = ? WHERE batch_id = ? AND status = 'applying'",
-      [written.applied_count, written.skipped_count, now, now, input.batch_id],
+      [written.applied_count, skipped, now, now, input.batch_id],
     )
     if (result.changes !== 1) throw new OrchError('MEMORY_APPLY_FAILED', '记忆批次状态已变，需要对账')
   })
@@ -567,10 +592,18 @@ export async function applyGovernedMemoryBatch(
   return {
     batch_id: input.batch_id,
     applied_count: written.applied_count,
-    skipped_count: written.skipped_count,
+    skipped_count: skipped,
     applied_item_ids: written.applied_item_ids,
     already_applied: false,
   }
+}
+
+function assertWriteClaim(tx: Tx, scope: ApplyGovernedPortInput): void {
+  if (!tx.get(
+    "SELECT 1 FROM memory_batches b JOIN node_runs n ON n.node_run_id = b.apply_node_run_id" +
+    " WHERE b.batch_id = ? AND b.status = 'applying' AND n.node_run_id = ? AND n.status = 'started'",
+    [scope.batch_id, scope.node_run_id],
+  )) throw new OrchError('STALE_GENERATION', '记忆写入回执来自已停止的 attempt')
 }
 
 function alignApplied(approved: readonly ItemRow[], appliedItemIds: readonly string[]): GovernedWriteApplied[] {

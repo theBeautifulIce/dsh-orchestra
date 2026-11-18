@@ -1,5 +1,14 @@
 # dsh-orchestra 接手指引（handoff）
 
+## 2026-11-18 记忆写入恢复与 G-11
+
+- 本轮从 `007659c` 推进。以下接手状态覆盖旧快照中「三条恢复路径未实现」「G-11 不存在」和「G5 证据目录尚未创建」的记录。当前仅已生成 G-11 注入证据，G5 尚未签署。
+- `034_memory_write_recovery.sql` 持久记录 attempt、对账证据、人工决定和处置结果。`memory-recovery.ts` 核对写入端停止时刻、条目键与批准哈希。确认全写入后继续收口，零写入确认后只建一个新 attempt，批次保持 applying；部分写入保留已写条目和未写条目，只允许放弃并另行签认，运行收为 succeeded_with_unverified。
+- 宿主入口是 `src/index.ts` 导出的 `createMemoryRuntime`。同一个 writer 实现 `writeMemory` 和 `fenceAndInspect`。后者必须把旧 attempt 持久隔离后读取实际写入库，返回该批次逐条持久记录。调用 `inspectBatch(batchId)` 后取得决定、版本、停止时刻与证据。由认证的人调用 `resolveRecovery`；全写入和零写入分支再调用 `advance` 处理后续节点。部分写入放弃后读取签认决定，再调用一次 `resolveRecovery`。原批准决定仍按原有效期约束重新写入。
+- G-11 使用真实子进程与独立的持久 SQLite 测试写入库。三种注入及前后账本和对账查询见 [G-11 证据](docs/gates/evidence/G5/G-11.md)。复现命令为 `node --no-warnings scripts/fault-inject.ts --case G-11 --out <独立证据根目录>`。批量生成 G5 证据后仍以这条注入命令生成 G-11 原文。
+- `pnpm check` 通过，111 个测试文件、1,345 项通过、2 项跳过。G-11 证据重复生成的 SHA-256 均为 `63a596a20a31a5111241cd456ab5053e978b9dd4216683ebf927291121294e7c`（Windows 文件字节）。旧 attempt 的迟到回执、维护扫描越过对账和无有效证据的确认均有回归断言。
+- 接手先把实际记忆插件适配到上述宿主接口，接通生产记忆启动及面板恢复决定，再验证真实宿主中断恢复并准备完整 G5 候选。库内流程与故障注入已经覆盖，无需重做三条恢复状态机。
+
 ## 2026-11-18 S5 审计增量
 
 - 审计从本地与远端一致的 `9ee9e2b` 开始。后续代码以 `git log` 和本节的 [开发审计记录](docs/audits/S5-development-audit-2026-11-18.md) 为准。本节优先于下方旧快照的已知缺陷、测试计数和工作顺序。
