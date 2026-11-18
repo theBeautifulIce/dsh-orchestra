@@ -148,7 +148,7 @@
 
 **权威任务：** S5 实施计划 Task 13 与规格 §9.5–9.6。
 
-**负责文件：** `src/core/memory-eval.ts`、`src/service/commands/memory.ts`、相关 fixed-graph/port adapter、`tests/memory-eval.spec.ts`。
+**负责文件：** `src/core/memory-eval.ts`、`src/service/commands/memory.ts`、相关 fixed-graph/port adapter、`tests/unit/memory-eval.spec.ts`。
 
 **验收重点：** 评估端口只评估不写；返回 schema 严格校验；超时/不可用/截断/非法输出有规定终态；每次重评估保留 attempt；只有 ready 产生一个审批卡；审批 24 小时过期不自动批准；拒绝和过期不调用 apply。
 
@@ -158,7 +158,7 @@
 
 **权威任务：** S5 实施计划 Task 14、规格 §9.7 与 G-06/G-11/G-12。
 
-**负责文件：** `src/service/commands/memory.ts`、`src/service/queries/memory.ts`、`memory.apply_governed` adapter、迁移（如确有需要，编号 032 起）、`tests/memory-apply.spec.ts`。
+**负责文件：** `src/service/commands/memory.ts`、`src/service/queries/memory.ts`、`memory.apply_governed` adapter、迁移（如确有需要，编号 032 起）、`tests/integration/memory-apply.spec.ts`。
 
 **强制执行顺序：** 先全量验证批准快照和绑定，再原子写整批；不确定结果保持 applying/indeterminate 并 inspect；绝不可因 tool.result 丢失而重放整批。批准后改正文、元数据、插入/删除行、hash 不一致、部分写入进程退出均需故障测试。每次恢复依照 inspect 逐条状态，不能猜测。
 

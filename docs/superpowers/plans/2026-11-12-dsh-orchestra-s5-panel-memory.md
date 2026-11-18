@@ -1526,7 +1526,7 @@ git commit -m "feat(client): 交出流程列表与流程画布两屏"
 - Create: `src/infra/sqlite/migrations/030_memory.sql` —— 记忆四张表、索引与批准后只读触发器。
 - Create: `src/core/memory-graph.ts` —— 固定图定义、三端口引用前缀与写工具禁令判定。
 - Modify: `src/executor/tools.ts` —— 注册 `memory_bridge:` 前缀的三个端口。
-- Create: `tests/memory-schema.spec.ts` —— 表结构、约束与触发器的用例。
+- Create: `tests/integration/memory-schema.spec.ts` —— 表结构、约束与触发器的用例。
 
 **步骤：**
 
@@ -1702,7 +1702,7 @@ export function registerMemoryPorts(registry: ToolRegistry, ports: MemoryPort[])
 
 **测试：**
 
-- Create: `tests/memory-schema.spec.ts`
+- Create: `tests/integration/memory-schema.spec.ts`
   - 四张表存在，列名与规格 3.9 一致；唯一键 (source_run_id, attempt)、(batch_id, client_key)、(batch_id, eval_attempt)、(source_run_id, request_key) 都能挡住重复插入。
   - 批次 approved 之后对 `memory_items` 的 INSERT / DELETE / 非白名单字段 UPDATE 都被触发器拒绝，报 `MEMORY_APPLY_BINDING_INVALID`；只改 status 与 applied_item_id 允许（Q-52b）。
   - `memory_run_requests` 同键重复插入报主键冲突；memory_run_id 重复也报冲突。
@@ -1712,7 +1712,7 @@ export function registerMemoryPorts(registry: ToolRegistry, ports: MemoryPort[])
 
 ```powershell
 pnpm typecheck
-pnpm test tests/memory-schema.spec.ts
+pnpm test tests/integration/memory-schema.spec.ts
 ```
 
 期望：全绿。
@@ -1720,7 +1720,7 @@ pnpm test tests/memory-schema.spec.ts
 **提交：**
 
 ```powershell
-git add src/infra/sqlite/migrations/030_memory.sql src/core/memory-graph.ts src/executor/tools.ts tests/memory-schema.spec.ts
+git add src/infra/sqlite/migrations/030_memory.sql src/core/memory-graph.ts src/executor/tools.ts tests/integration/memory-schema.spec.ts
 git commit -m "feat(memory): 建记忆四表与三端口固定图"
 ```
 
@@ -1735,7 +1735,7 @@ git commit -m "feat(memory): 建记忆四表与三端口固定图"
 **Files:**
 - Create: `src/core/memory-canonical.ts` —— canonical_item、canonical_proposal 与两个哈希。
 - Create: `src/service/commands/memory.ts` —— `memory_start_run` 与批次落库。
-- Create: `tests/memory-start.spec.ts` —— 发起幂等、边界校验与哈希的用例。
+- Create: `tests/integration/memory-start.spec.ts` —— 发起幂等、边界校验与哈希的用例。
 
 **步骤：**
 
@@ -1892,7 +1892,7 @@ export function startMemoryRun(
 
 **测试：**
 
-- Create: `tests/memory-start.spec.ts`
+- Create: `tests/integration/memory-start.spec.ts`
   - 源运行未 succeeded → `MEMORY_SOURCE_RUN_NOT_SETTLED`（409）；成功后可发起（Q-43）。
   - 同 (source_run_id, request_key) 重发返回同一个 memory_run_id 与 attempt，`replayed=true`；同源已有未终结记忆运行换 key → `MEMORY_RUN_ACTIVE`（409）且返回既有 run_id（Q-43）。
   - 并发同 key 请求只有一个事务插进 `memory_run_requests`，另一个主键冲突后读回同一 memory_run_id；重启后同 key 再发仍 `replayed=true`（Q-43c）。
@@ -1905,7 +1905,7 @@ export function startMemoryRun(
 
 ```powershell
 pnpm typecheck
-pnpm test tests/memory-start.spec.ts
+pnpm test tests/integration/memory-start.spec.ts
 ```
 
 期望：全绿。
@@ -1913,7 +1913,7 @@ pnpm test tests/memory-start.spec.ts
 **提交：**
 
 ```powershell
-git add src/core/memory-canonical.ts src/service/commands/memory.ts tests/memory-start.spec.ts
+git add src/core/memory-canonical.ts src/service/commands/memory.ts tests/integration/memory-start.spec.ts
 git commit -m "feat(memory): 实现发起幂等与 canonical 哈希"
 ```
 
@@ -1926,7 +1926,7 @@ git commit -m "feat(memory): 实现发起幂等与 canonical 哈希"
 **Files:**
 - Create: `src/core/memory-eval.ts` —— 评估端口的唯一出口、裁判结果解析与 recommendation 推导。
 - Modify: `src/service/commands/memory.ts` —— 评估调用、审批卡生成、批准与驳回。
-- Create: `tests/memory-eval.spec.ts` —— 评估与审批的用例。
+- Create: `tests/unit/memory-eval.spec.ts` —— 评估与审批的用例。
 
 **步骤：**
 
@@ -2004,7 +2004,7 @@ export function buildApprovalCard(
 
 **测试：**
 
-- Create: `tests/memory-eval.spec.ts`
+- Create: `tests/unit/memory-eval.spec.ts`
   - 裁判返回非 JSON / 缺 items / verdict=maybe → `MEMORY_EVAL_INVALID_OUTPUT`（502），批次 failed、run failed、无审批卡、无写入，剩余 proposed 全部 skipped；重跑产生新 attempt，旧评估保留（Q-47）。
   - `truncated=true` 且 verdict=approve → `MEMORY_EVAL_INVALID_OUTPUT`，不进 ready；只有 needs_user 允许 truncated（批次 blocked、无写入）（Q-47b）。
   - 任一条 needs_user → recommendation=blocked，不生成审批卡，走 `mem_report_blocked` 收口，批次 outcome=blocked（Q-48）。
@@ -2018,7 +2018,7 @@ export function buildApprovalCard(
 
 ```powershell
 pnpm typecheck
-pnpm test tests/memory-eval.spec.ts
+pnpm test tests/unit/memory-eval.spec.ts
 ```
 
 期望：全绿。
@@ -2026,7 +2026,7 @@ pnpm test tests/memory-eval.spec.ts
 **提交：**
 
 ```powershell
-git add src/core/memory-eval.ts src/service/commands/memory.ts tests/memory-eval.spec.ts
+git add src/core/memory-eval.ts src/service/commands/memory.ts tests/unit/memory-eval.spec.ts
 git commit -m "feat(memory): 实现评估口径与审批卡落库"
 ```
 
@@ -2039,7 +2039,7 @@ git commit -m "feat(memory): 实现评估口径与审批卡落库"
 **Files:**
 - Modify: `src/service/commands/memory.ts` —— apply、confirm_applied、confirm_not_applied。
 - Create: `src/service/queries/memory.ts` —— `memory.inspect_batch` 读侧与记忆面板的取数。
-- Create: `tests/memory-apply.spec.ts` —— 写入、绑定、幂等与对账的用例。
+- Create: `tests/integration/memory-apply.spec.ts` —— 写入、绑定、幂等与对账的用例。
 
 **步骤：**
 
@@ -2109,7 +2109,7 @@ export function assertVerificationProof(args: {
 
 **测试：**
 
-- Create: `tests/memory-apply.spec.ts`
+- Create: `tests/integration/memory-apply.spec.ts`
   - 用另一批次的 decision_id 调 apply → `MEMORY_APPLY_BINDING_INVALID`（403），整笔拒绝一条不写，错误文案不含哈希与内部 id；源运行 A 的批次不能用源运行 B 的 decision_id（Q-52、Q-55）。
   - 改某条 content 后调 apply → `MEMORY_APPLY_BINDING_INVALID`；同时改 content 与 content_hash 并重算 proposal_hash 仍被拒（Q-52）。
   - 批准后直接 UPDATE 正文 / 哈希 / 集合被数据库约束拒绝（触发器），只改 status 不改正文时 proposal_hash 不变，tags 仅换顺序按规范化等价不算改值（Q-52、Q-52b）。
@@ -2125,7 +2125,7 @@ export function assertVerificationProof(args: {
 
 ```powershell
 pnpm typecheck
-pnpm test tests/memory-apply.spec.ts
+pnpm test tests/integration/memory-apply.spec.ts
 ```
 
 期望：全绿。
@@ -2133,7 +2133,7 @@ pnpm test tests/memory-apply.spec.ts
 **提交：**
 
 ```powershell
-git add src/service/commands/memory.ts src/service/queries/memory.ts tests/memory-apply.spec.ts
+git add src/service/commands/memory.ts src/service/queries/memory.ts tests/integration/memory-apply.spec.ts
 git commit -m "feat(memory): 实现受控写入与部分写入对账"
 ```
 
