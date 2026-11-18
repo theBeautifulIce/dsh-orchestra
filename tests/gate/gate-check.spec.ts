@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1758,6 +1758,16 @@ describe('G4 注册固定（审计 P2）', () => {
     expect(DEFAULT_GATE_PATHS).toEqual([
       'docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md',
     ])
-    expect(Object.keys(GATE_SPECS).every((gate) => DEFAULT_GATE_PATHS.includes(GATE_SPECS[gate]!.gateFile))).toBe(true)
+    // 注册了新门、门记录文件一旦落盘就必须进入默认检查；门记录还没签（G5.md 不存在）时不强制
+    for (const gate of Object.keys(GATE_SPECS)) {
+      const gateFile = GATE_SPECS[gate]!.gateFile
+      if (existsSync(join(process.cwd(), gateFile))) {
+        expect(DEFAULT_GATE_PATHS).toContain(gateFile)
+      }
+    }
+    // 默认门列表里的每一项都必须真实存在
+    for (const path of DEFAULT_GATE_PATHS) {
+      expect(existsSync(join(process.cwd(), path))).toBe(true)
+    }
   })
 })
