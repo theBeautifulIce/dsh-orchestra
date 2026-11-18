@@ -1,14 +1,14 @@
 // S5-E：直接记忆写工具的权限负例——workflow / executor / task_session 三条路径
 // 规格 9.1：唯一写入口是 memory.apply_governed；三个面的 allow 出现 memory_write / memory_update 都拒。
 import { describe, expect, it } from 'vitest'
-import { OrchError } from '../src/core/errors.ts'
-import { ToolRegistry } from '../src/executor/tools.ts'
-import { TASK_SESSION_TOOL_POLICY, resolveTaskSessionToolPolicy, resolveToolSet } from '../src/executor/session.ts'
-import { WorkflowCatalog } from '../src/service/workflows.ts'
-import { createWorkflow, publishDraft } from '../src/service/commands/workflows.ts'
-import { assertTaskSessionToolsAllowed } from '../src/service/commands/memory-permission.ts'
-import { withTx } from '../src/infra/sqlite/driver.ts'
-import { freshLedger } from './fixtures/ledger.ts'
+import { OrchError } from '../../src/core/errors.ts'
+import { ToolRegistry } from '../../src/executor/tools.ts'
+import { TASK_SESSION_TOOL_POLICY, resolveTaskSessionToolPolicy, resolveToolSet } from '../../src/executor/session.ts'
+import { WorkflowCatalog } from '../../src/service/workflows.ts'
+import { createWorkflow, publishDraft } from '../../src/service/commands/workflows.ts'
+import { assertTaskSessionToolsAllowed } from '../../src/service/commands/memory-permission.ts'
+import { withTx } from '../../src/infra/sqlite/driver.ts'
+import { freshLedger } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-18T05:00:00.000Z'
 const RUNTIME = new Set(['agent', 'parallel', 'subworkflow', 'decision', 'wait'])

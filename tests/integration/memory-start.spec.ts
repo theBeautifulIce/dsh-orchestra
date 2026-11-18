@@ -2,12 +2,12 @@
 // 规格 9.4：同 key 重发返回同一个记忆 run 与 attempt；同源换 key 撞活跃批次报 MEMORY_RUN_ACTIVE；
 // 源运行没成功收口就拒；run、节点、批次与映射在同一笔事务里提交。
 import { describe, expect, it } from 'vitest'
-import { OrchError } from '../src/core/errors.ts'
-import { findMemoryNode, memoryGraphOrder } from '../src/core/memory-graph-schema.ts'
-import { openDb, withTx, type Db } from '../src/infra/sqlite/driver.ts'
-import { MEMORY_WORKFLOW_ID, saveMemoryProposal, startMemoryRun } from '../src/service/commands/memory.ts'
-import type { MemoryItemInput } from '../src/core/memory-canonical.ts'
-import { countOf, freshLedger } from './fixtures/ledger.ts'
+import { OrchError } from '../../src/core/errors.ts'
+import { findMemoryNode, memoryGraphOrder } from '../../src/core/memory-graph-schema.ts'
+import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
+import { MEMORY_WORKFLOW_ID, saveMemoryProposal, startMemoryRun } from '../../src/service/commands/memory.ts'
+import type { MemoryItemInput } from '../../src/core/memory-canonical.ts'
+import { countOf, freshLedger } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-18T03:00:00.000Z'
 const OP_A = '0192c3a4-5b6d-7e8f-9a0b-1c2d3e4f5061'

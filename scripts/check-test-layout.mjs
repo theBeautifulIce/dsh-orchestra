@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // 测试文件放置与分类规范检查（docs/agents/testing-conventions.md 的强制实现）
 // 规则：
-//   1. tests/ 下所有 *.spec.ts 必须位于 tests/<category>/ 内，category ∈ {unit,integration,contract,e2e,gate}
+//   1. tests/ 下所有 *.spec.ts 必须位于 tests/<category>/ 内，category ∈ {unit,integration,contract,e2e,gate,client}
+//      （client 是 S5 起新增的面板渲染层：只渲染组件、只打假服务，不开库也不起 HTTP 服务）
 //   2. tests/ 根目录只允许放 README.md、fixtures/、helpers/，不得直接放 *.spec.ts
 //   3. 仓库根目录与 tests/ 下不得出现 tmp-* / probe-* / scratch-* / *.tmp.* 之类的临时文件
 //   4. 临时探针文件名不得以 .spec.ts 结尾（避免被 vitest include 命中并污染用例计数）
@@ -12,7 +13,7 @@ import { join, relative, sep } from 'node:path'
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/(?:([A-Za-z]:))/, '$1').replace(/\\/g, '/')
 const TESTS = join(ROOT, 'tests')
-const CATEGORIES = new Set(['unit', 'integration', 'contract', 'e2e', 'gate'])
+const CATEGORIES = new Set(['unit', 'integration', 'contract', 'e2e', 'gate', 'client'])
 const ALLOWED_ROOT_ENTRIES = new Set(['README.md', 'fixtures', 'helpers'])
 const TMP_PREFIX = /^(tmp[-_.]|probe[-_.]|scratch[-_.]|debug[-_.]|probe-|tmp-)/i
 const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*\.spec\.(ts|tsx)$/
@@ -52,7 +53,7 @@ for (const name of rootEntries) {
   const p = join(TESTS, name)
   if (statSync(p).isDirectory()) {
     if (name === 'fixtures' || name === 'helpers') continue
-    if (!CATEGORIES.has(name)) note(p, '未知分类目录：只允许 unit / integration / contract / e2e / gate')
+    if (!CATEGORIES.has(name)) note(p, '未知分类目录：只允许 unit / integration / contract / e2e / gate / client')
     continue
   }
   if (name === 'README.md') continue
@@ -80,7 +81,7 @@ for (const p of walk(TESTS, [])) {
     note(p, 'spec 文件必须位于 tests/<分类>/<name>.spec.ts')
     continue
   }
-  if (!CATEGORIES.has(parts[1])) note(p, '未知分类目录：只允许 unit / integration / contract / e2e / gate')
+  if (!CATEGORIES.has(parts[1])) note(p, '未知分类目录：只允许 unit / integration / contract / e2e / gate / client')
   if (!NAME_RE.test(base)) note(p, 'spec 文件名必须是 kebab-case：' + NAME_RE.source)
 }
 

@@ -2,8 +2,8 @@
 // 钉住：9 节点声明表与显式拓扑序、tool 端口白名单与能力声明、
 // 非法声明（环 / 多入边 / 悬空边 / 重复 route / 未知端口 / 能力不符）一律抛既有错误码。
 import { describe, expect, it } from 'vitest'
-import { OrchError } from '../src/core/errors.ts'
-import { MEMORY_PORT_CAPABILITIES, MEMORY_TOOLS, MEMORY_WRITE_TOOLS } from '../src/core/memory-graph.ts'
+import { OrchError } from '../../src/core/errors.ts'
+import { MEMORY_PORT_CAPABILITIES, MEMORY_TOOLS, MEMORY_WRITE_TOOLS } from '../../src/core/memory-graph.ts'
 import {
   MEMORY_GRAPH_NODES,
   MEMORY_GRAPH_PORT_CAPABILITIES,
@@ -14,7 +14,7 @@ import {
   memoryGraphNodeSpecs,
   memoryGraphOrder,
   type MemoryGraphNode,
-} from '../src/core/memory-graph-schema.ts'
+} from '../../src/core/memory-graph-schema.ts'
 
 const NODE_IDS = [
   'mem_trigger',

@@ -3,21 +3,21 @@
 // 事务中途失败不留半成品、推进原语的三个分支路由与 fail closed 行为、
 // 记忆节点不进通用 workflow 节点类型表、memory_bridge: 前缀不进普通工具注册表。
 import { describe, expect, it } from 'vitest'
-import { OrchError } from '../src/core/errors.ts'
-import { MEMORY_TOOLS } from '../src/core/memory-graph.ts'
-import { findMemoryNode, memoryGraphOrder } from '../src/core/memory-graph-schema.ts'
-import { isKnownNodeType } from '../src/core/workflow-def.ts'
-import { ToolRegistry } from '../src/executor/tools.ts'
-import { withTx, type Db } from '../src/infra/sqlite/driver.ts'
-import { MEMORY_WORKFLOW_ID, startMemoryRun } from '../src/service/commands/memory.ts'
+import { OrchError } from '../../src/core/errors.ts'
+import { MEMORY_TOOLS } from '../../src/core/memory-graph.ts'
+import { findMemoryNode, memoryGraphOrder } from '../../src/core/memory-graph-schema.ts'
+import { isKnownNodeType } from '../../src/core/workflow-def.ts'
+import { ToolRegistry } from '../../src/executor/tools.ts'
+import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
+import { MEMORY_WORKFLOW_ID, startMemoryRun } from '../../src/service/commands/memory.ts'
 import {
   MEMORY_ROUTE_NAMES,
   advanceMemoryRun,
   assertMemoryRunStart,
   createMemoryRunNodeRuns,
   memoryRunStartNode,
-} from '../src/service/commands/memory-run.ts'
-import { countOf, freshLedger } from './fixtures/ledger.ts'
+} from '../../src/service/commands/memory-run.ts'
+import { countOf, freshLedger } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-18T07:00:00.000Z'
 const OP_A = '0192c3a4-5b6d-7e8f-9a0b-1c2d3e4f5071'

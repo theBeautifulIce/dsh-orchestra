@@ -2,9 +2,9 @@
 // 钉住：四张表的唯一键、批准后条目冻结、request_key/client_key 字符合法性、
 // 同一源运行只允许一条未终结批次、批次只能挂在成功收口的源运行上。
 import { describe, expect, it } from 'vitest'
-import { withTx, type Db } from '../src/infra/sqlite/driver.ts'
-import { MEMORY_GRAPH } from '../src/core/memory-graph.ts'
-import { freshLedger } from './fixtures/ledger.ts'
+import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
+import { MEMORY_GRAPH } from '../../src/core/memory-graph.ts'
+import { freshLedger } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-18T06:00:00.000Z'
 

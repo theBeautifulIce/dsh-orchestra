@@ -20,9 +20,14 @@
 | `tests/e2e/` | 生产路径：加载 → 派发 → 执行 → 收口 | 只测一个函数的分支 |
 | `tests/gate/` | 门检查解析器（`scripts/gate-check.ts`）的裁决语义 | 业务逻辑 |
 | `tests/fixtures/` | 固定样本（工作流定义、报告文本等） | 断言 |
+| `tests/client/` | 面板渲染层：React 组件渲染、假服务契约、视觉硬门槛 | 数据库与账本断言 |
 
 一条用例只落一处。就近放：改了 `src/service/workflows.ts` 的用例放 `tests/integration/workflows.spec.ts`，
 改了 `src/core/hash-chain.ts` 的放 `tests/unit/` 或 `tests/integration/hash-chain.spec.ts`。
+
+S5 起面板（`src/client/`）有独立的渲染测试层，单独放在 `tests/client/`：这类用例只渲染组件、只打假服务，不开数据库也不起 HTTP 服务，
+塞进 `unit/`（那一类的语义是单模块纯函数）或 `integration/`（那一类的语义是迁移、账本、状态机、证据门）都会把两边的口径弄脏，所以单列一类。
+该目录里可以放一个 `harness.ts`（渲染与假服务的共用脚手架）；它不是用例，文件名不要以 `.spec.ts` 结尾。
 
 ## 命名
 

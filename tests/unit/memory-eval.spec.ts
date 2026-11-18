@@ -1,7 +1,7 @@
 // S5-F：memory.evaluate 评估端口的纯逻辑层（规格 9.5 行 712-724、9.6 行 725-734、9.11 行 778-838）
 // 计划 Task 13 行 2008-2015 中属于纯逻辑的部分：解析失败、截断处置、判定规则、审批卡文案。
 import { describe, expect, it } from 'vitest'
-import { OrchError } from '../src/core/errors.ts'
+import { OrchError } from '../../src/core/errors.ts'
 import {
   EVAL_RESPONSE_MAX_BYTES,
   JUDGE_CONTENT_LIMIT,
@@ -11,8 +11,8 @@ import {
   parseJudgeResponse,
   summarize,
   type EvalItem,
-} from '../src/core/memory-eval.ts'
-import type { MemoryItemInput } from '../src/core/memory-canonical.ts'
+} from '../../src/core/memory-eval.ts'
+import type { MemoryItemInput } from '../../src/core/memory-canonical.ts'
 
 function errOf(fn: () => unknown): OrchError {
   try {
