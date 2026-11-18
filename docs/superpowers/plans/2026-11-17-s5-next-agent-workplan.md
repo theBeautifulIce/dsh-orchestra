@@ -48,7 +48,7 @@
 | 命令回执 | POST 结果不明时会查回执；回执查询网络错误也已统一为 `OPERATION_OUTCOME_UNKNOWN` | 页面上的命令仍需逐个确认成功、拒绝、重试和未知结果 UI |
 | 副作用核实 | 结算写入口已上线（`adbaec4`：`src/service/commands/effects.ts` 唯一受控写入口 + 附录 §10 的 27 条用例）；`EFFECT_RESOLUTION_CONFLICT(409)` 已加码并补进规格 §17.1 | 弱证据判据仍来自请求自带 `evidence_source` 声明（DB 内无弱证据标记），审计须记为未解决风险；`memory-runtime.ts` 5 处 patch 不写 `stop_evidence`，与 `run-close.ts` 未验证口径冲突 |
 | 记忆 | migration 030、固定图、注册表、canonical 校验与直接写工具禁令已有；固定图声明源（`1faf38b`）、评估纯逻辑层（`5580ab3`）、运行时骨架与命名统一（`e8c3b39`）、审批卡与批准落库（`e6f1d08`）、三端口与固定图推进（`1065b8b`）、批次只读投影（`375806a`）已有 | 三端口真实处理器已实现但未接生产主链（`src/index.ts` 无 memory 装配）；批准字段不等于 apply 闭环；`GET /v1/memory/batches` 路由未接线 |
-| 测试 | 全量 Vitest 109 文件 / 1335 通过 / 2 跳过（HEAD `0c2525c`）；`node scripts/check-test-layout.mjs` exit 0；`node scripts/visual-check.mjs` exit 0 | 2 跳过（perf-budget 的 Q-27、gate-check 的 1 条） | `pnpm build` 已补跑 exit 0；没有 S5 CI 与 G5 证据 |
+| 测试 | 全量 Vitest 109 文件 / 1335 通过 / 2 跳过（最近一笔代码提交 `375806a`）；`node scripts/check-test-layout.mjs` exit 0；`node scripts/visual-check.mjs` exit 0 | 2 跳过（perf-budget 的 Q-27、gate-check 的 1 条） | `pnpm build` 已补跑 exit 0；没有 S5 CI 与 G5 证据 |
 | 门状态 | G5 尚未交付；门闸规格 `GATE_SPECS.G5`（73 项）、门记录模板生成器、证据生成器、73 项就绪矩阵已就位 | 不创建 PASS 门记录，不沿用 S1–S4 测试数字 | 73 份证据须在候选 SHA 冻结前产出并提交；G-11 注入用例不存在 |
 
 ## 3. 工作包队列
