@@ -5,6 +5,7 @@ import type { PassCondition } from '../../core/policy.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { transitionNode } from './node-state.ts'
+import { settleEvidenceFromReport } from './effects.ts'
 import { applyTransition, createNodeRun } from './nodes.ts'
 import { loadNodeRun, assertLeaseValid, type NodeRunRow } from './lease.ts'
 import { openDecision, resolveDecision, type Resolution } from './decisions.ts'
@@ -545,6 +546,13 @@ export function applyReport(
     report_seq: reportSeq,
     next_status: report.status,
     evidence_digest: evidenceDigest,
+  })
+  // 副作用结算：done 收口的同一笔事务里落 evidence 分支结算行（附录 §4）。
+  // 证据不合格就不落行（fail closed），但绝不打断报告本身的收口。
+  settleEvidenceFromReport(tx, secret, {
+    nodeRunId: params.nodeRunId,
+    executionIds: traceEntriesOf(report).map((entry) => entry.executionId),
+    now: params.now,
   })
   return { accepted: true, next_status: report.status, registry_state: 'applied' }
 }

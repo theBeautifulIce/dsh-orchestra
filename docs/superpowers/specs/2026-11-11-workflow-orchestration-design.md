@@ -1373,6 +1373,7 @@ artifact_hash 只指 GateArtifact 的锚点哈希：SHA256(canonical_json(artifa
 | MEMORY_RUN_ACTIVE | 409 | 同源已有未终结记忆运行 |
 | MEMORY_SOURCE_RUN_NOT_SETTLED | 409 | 源运行未收口 |
 | MEMORY_WRITE_TOOL_FORBIDDEN | 422 | 前向路径出现记忆写工具 |
+| EFFECT_RESOLUTION_CONFLICT | 409 | 目标节点已有结算行且依据不同 |
 
 ### 17.2 配置样例
 

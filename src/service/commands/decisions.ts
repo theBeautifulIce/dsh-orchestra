@@ -4,6 +4,7 @@ import type { DecisionKind } from '../../core/state-machine.ts'
 import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
 import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { closeRun } from './run-close.ts'
+import { settleDecisionOutcome } from './effects.ts'
 import { applyTransition } from './nodes.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
@@ -216,6 +217,9 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
       [req.decisionId],
     )
     : undefined
+  // 副作用结算：人工裁决收口的同一笔事务里落结算行（附录 §4）。
+  // 裁决说「已发生」→ decision 分支；说「没发生」→ verified_none 分支（事件带 decision_id）。
+  if (closing) settleDecisionOutcome(tx, secret, { decisionId: req.decisionId, now: req.now })
   // 裁决卡收口后，若所有节点都已到终态，run 也要在同一笔事务里收口。
   if (closing) closeRun(tx, secret, current.run_id, req.now)
   return {

@@ -12,6 +12,7 @@ import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWor
 import { requireCapability } from './core/config.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { resolveDecision } from './service/commands/decisions.ts'
+import { resolveEffect } from './service/commands/effects.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
@@ -219,6 +220,22 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       }
       return out
     }),
+    resolveEffect: (b) => inTx(db, (tx) => resolveEffect(tx, opts.secret, {
+      basis: b.basis,
+      nodeRunId: b.nodeRunId,
+      runId: b.runId ?? null,
+      evidenceId: b.evidenceId ?? null,
+      decisionId: b.decisionId ?? null,
+      stopEvidence: b.stopEvidence ?? null,
+      evidenceSource: b.evidenceSource ?? null,
+      expected: {
+        revision: b.expected.revision,
+        decisionRevision: b.expected.decisionRevision ?? null,
+      },
+      operationId: b.operationId,
+      actor: b.actor,
+      now: b.now,
+    })),
     confirmStart: (b) => confirmStartup(db, opts.secret, { ...b, clock }),
     startCompensation: (b) => inTx(db, (tx) => startCompensation(tx, opts.secret, {
       nodeRunId: b.nodeRunId,

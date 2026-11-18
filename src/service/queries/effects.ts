@@ -19,6 +19,11 @@ export type UnverifiedEffectView = {
   resolved: false
   resolved_at: null
   resolution_basis: null
+  // node_runs 上没有 stopped_at / last_known_phase / evidence 列：读模型不许用 started_at 顶替，
+  // 也不许用布尔伪造证据。要显示必须先补列；这里一律返回 null，由界面标「未知」（附录 §7）。
+  stopped_at?: string | null
+  last_known_phase?: string | null
+  evidence?: string | null
 }
 
 export type ListEffectsParams = { run_id?: string; limit?: number; cursor?: string; now?: number }
@@ -78,6 +83,9 @@ export function listUnverifiedEffects(db: Db, params: ListEffectsParams = {}): {
       resolved: false,
       resolved_at: null,
       resolution_basis: null,
+      stopped_at: null,
+      last_known_phase: null,
+      evidence: null,
     }))
     const lastRow = page[page.length - 1]
     const cursor = hasMore && lastRow

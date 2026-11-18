@@ -19,7 +19,7 @@ import type { ListWorkflowParams, WorkflowListItem, WorkflowVersionView, Workflo
 import type { OperationRow } from './queries/get_operation.ts'
 import { LAST_EVENT_ID_HEADER, startEventStream } from './events/stream.ts'
 import {
-  cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema,
+  cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema, effectResolveSchema,
   ledgerEventSchema, leaseSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
   taskReserveSchema, workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
@@ -33,6 +33,7 @@ import type { LoadWorkflowResult } from './workflows.ts'
 import type { CreateRunResult } from './runs.ts'
 import type { StartRunResult } from './commands/start-run.ts'
 import type { DecisionResolution, Resolution } from './commands/decisions.ts'
+import type { EffectResolutionResult, EvidenceSource, ResolutionBasis } from './commands/effects.ts'
 import type { Actor } from './decision/approver.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
@@ -129,6 +130,20 @@ export type NodeCommands = {
     contentHash?: string
     now: string
   }) => DecisionResolution
+  // 副作用结算：服务受控写入口（附录 §4、§5）
+  resolveEffect: (body: {
+    basis: ResolutionBasis
+    nodeRunId: string
+    runId?: string | null
+    evidenceId?: string | null
+    decisionId?: string | null
+    stopEvidence?: string | null
+    evidenceSource?: EvidenceSource | null
+    expected: { revision: number; decisionRevision?: number | null }
+    operationId: string
+    now: string
+    actor: Actor
+  }) => EffectResolutionResult
   // 启动未知的人工确认：M-08/M-09/M-61 的生产入口
   confirmStart: (body: { nodeRunId: string; attempt: number; attested?: boolean; now: string; actor?: string }) => {
     trigger: 'confirm-started' | 'confirm-started-attested' | 'confirm-started-with-tool'; attestation_id?: string
@@ -514,6 +529,27 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), { decisionId: body.decisionId, revision: body.revision + 1 }))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/effects/resolve' && deps.commands) {
+      const body = parseBody(effectResolveSchema, await readJsonBody(req), '副作用结算')
+      const out = await queue.run(() => deps.commands!.resolveEffect({
+        basis: body.basis,
+        nodeRunId: body.node_run_id,
+        runId: body.run_id ?? null,
+        evidenceId: body.evidence_id ?? null,
+        decisionId: body.decision_id ?? null,
+        stopEvidence: body.stop_evidence ?? null,
+        evidenceSource: body.evidence_source ?? null,
+        expected: {
+          revision: body.expected.revision,
+          decisionRevision: body.expected.decision_revision ?? null,
+        },
+        operationId: body.operation_id,
+        actor: { kind: 'human', id: actor },
+        now: requestNow,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs' && deps.commands) {

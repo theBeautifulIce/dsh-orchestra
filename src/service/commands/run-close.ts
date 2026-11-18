@@ -56,8 +56,19 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
     if (chainBreakOf(secret, readChain(tx, node.node_run_id))) return null
   }
 
-  // stop_evidence 只证明执行停了，不证明副作用已核实；有副作用策略的节点必须 verified_none=1
-  const unverified = (node: NodeRow) => node.side_effect_policy !== 'pure' && node.side_effect_verified_none !== 1
+  // 结算口径（附录 §7）：节点有非 pure 副作用策略，且既没有 side_effect_verified_none=1
+  // （且 stop_evidence 非空），也没有 unverified_resolutions 结算行，才算未验证。
+  // 结算行是真相源：已发生且已核实的节点不再阻塞 succeeded。
+  // 只对新收口的 run 生效，不回填历史终态（附录 §12 A2）。
+  const settledRows = tx.all<{ node_run_id: string }>(
+    'SELECT node_run_id FROM unverified_resolutions WHERE run_id = ?',
+    [runId],
+  )
+  const settled = new Set(settledRows.map((row) => row.node_run_id))
+  const unverified = (node: NodeRow) =>
+    node.side_effect_policy !== 'pure'
+    && !(node.side_effect_verified_none === 1 && typeof node.stop_evidence === 'string' && node.stop_evidence.length > 0)
+    && !settled.has(node.node_run_id)
   const failed = nodes.some((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status))
   const orphaned = nodes.some((node) => node.status === 'orphaned' && !node.replacement_node_run_id)
   const hasUnverified = nodes.some(unverified)

@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { ERROR_STATUS, OrchError, failEnvelope, okEnvelope, toOrchError } from '../../src/core/errors.ts'
 
 describe('规格 17.1 错误码表', () => {
-  it('条目数与规格一致（85 条）', () => {
-    expect(Object.keys(ERROR_STATUS).length).toBe(85)
+  it('条目数与规格一致（86 条）', () => {
+    // 规格附录 §9 新增 EFFECT_RESOLUTION_CONFLICT（409），§17.1 总表随之 +1
+    expect(Object.keys(ERROR_STATUS).length).toBe(86)
   })
 
   it('抽样核对 HTTP 状态', () => {

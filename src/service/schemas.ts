@@ -228,6 +228,22 @@ export const resolveDecisionSchema = z.looseObject({
   contentHash: z.string().min(1).max(128).optional(),
 })
 
+// 副作用结算写入口（附录 §12 A1）：服务命令的唯一受控入口，普通 Agent 无权调用。
+export const effectResolveSchema = z.looseObject({
+  basis: z.enum(['verified_none', 'evidence', 'decision']),
+  node_run_id: identifier,
+  run_id: identifier.optional(),
+  evidence_id: identifier.optional(),
+  decision_id: identifier.optional(),
+  stop_evidence: z.string().min(1).max(256).optional(),
+  evidence_source: z.enum(['run_tool', 'tool_result']).optional(),
+  expected: z.looseObject({
+    revision: z.number().int().nonnegative(),
+    decision_revision: z.number().int().nonnegative().optional(),
+  }),
+  operation_id: z.string().regex(UUID_V7_RE, 'operation_id 必须是 UUIDv7'),
+})
+
 export const dispatchSchema = z.looseObject({
   runId: identifier,
   nodes: z.record(identifier, nodeSpecSchema),

@@ -61,6 +61,9 @@ const PATCH_COLUMNS = new Set([
   'side_effect_verified_none',
 ])
 
+// 结算专用列：只能由副作用结算事务写，普通迁移路径碰了就拒绝（附录 §11）
+const SETTLEMENT_ONLY_COLUMNS = new Set(['stop_evidence'])
+
 function assertExplicitRule(rule: TransitionRule, req: TransitionRequest, from: NodeStatus): void {
   if (!rule.from.includes(from) || !rule.to.includes(req.to)) {
     throw new OrchError('STALE_GENERATION', '显式规则与来源/目标不匹配', {
@@ -193,6 +196,9 @@ export function applyTransition(tx: Tx, secret: string, req: TransitionRequest):
   const patch = req.patch ?? {}
   const columns = Object.keys(patch)
   for (const column of columns) {
+    if (SETTLEMENT_ONLY_COLUMNS.has(column)) {
+      throw new OrchError('FORBIDDEN', 'stop_evidence 只能由副作用结算事务写入', { column })
+    }
     if (!PATCH_COLUMNS.has(column)) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '迁移 patch 含未登记的列', { column })
     }
