@@ -21,7 +21,7 @@ import type { OperationRow } from './queries/get_operation.ts'
 import { LAST_EVENT_ID_HEADER, startEventStream } from './events/stream.ts'
 import {
   acknowledgeDecisionSchema, cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema, effectResolveSchema,
-  ledgerEventSchema, leaseSchema, parseBody, recoveryResolveSchema,
+  ledgerEventSchema, leaseSchema, memoryInspectSchema, memoryRecoverySchema, memoryStartSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
   taskReserveSchema, workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
 } from './schemas.ts'
@@ -36,6 +36,7 @@ import type { StartRunResult } from './commands/start-run.ts'
 import type { acknowledgeDecision, Resolution } from './commands/decisions.ts'
 import type { EffectResolutionResult, EvidenceSource, ResolutionBasis } from './commands/effects.ts'
 import type { Actor } from './decision/approver.ts'
+import type { MemoryHost } from './memory-host.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
 import type { ToolPolicy } from '../executor/session.ts'
@@ -56,6 +57,7 @@ export type ServerDeps = {
   now?: () => string
   // 生产路径的节点命令；缺省时这几条路由一律 404，老测试不受影响
   commands?: NodeCommands
+  memory?: MemoryHost
 }
 
 export type ServerQueries = {
@@ -355,6 +357,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         now: Date.parse(requestNow),
       })
       sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/memory/runs/start' && deps.memory) {
+      const body = parseBody(memoryStartSchema, await readJsonBody(req), '启动记忆整理')
+      const out = await queue.run(() => deps.memory!.start({ ...body, now: requestNow }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/memory/recovery/inspect' && deps.memory) {
+      const body = parseBody(memoryInspectSchema, await readJsonBody(req), '核对记忆写入')
+      // The adapter call awaits the writer outside the global write queue. Recovery verifies the scope again in its final transaction.
+      const out = await deps.memory.inspect(body.batch_id)
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/memory/recovery/resolve' && deps.memory) {
+      const body = parseBody(memoryRecoverySchema, await readJsonBody(req), '恢复记忆写入')
+      const out = await queue.run(() => deps.memory!.resolve({ kind: 'human', id: actor }, body))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/evidence/get' && deps.queries) {

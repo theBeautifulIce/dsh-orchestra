@@ -31,6 +31,8 @@ export type GovernedWriteInput = {
   batch_id: string
   run_id: string
   node_run_id: string
+  source_run_id: string
+  decision_id: string
   items: readonly MemoryItemInput[]
 }
 
@@ -528,7 +530,7 @@ export async function applyGovernedMemoryBatch(
       [input.node_run_id, now, input.batch_id, batch.status],
     )
     if (res.changes !== 1) throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '批次已被其他写入领取')
-    return { approved, skipped: rows.length - approved.length }
+    return { approved, skipped: rows.length - approved.length, sourceRunId: batch.source_run_id }
   })
   if (!claim) return { batch_id: input.batch_id, applied_count: 0, skipped_count: 0, applied_item_ids: [], already_applied: true }
 
@@ -538,6 +540,8 @@ export async function applyGovernedMemoryBatch(
       batch_id: input.batch_id,
       run_id: input.run_id,
       node_run_id: input.node_run_id,
+      source_run_id: claim.sourceRunId,
+      decision_id: input.decision_id,
       items: claim.approved.map(toMemoryItemInput),
     })
   } catch {

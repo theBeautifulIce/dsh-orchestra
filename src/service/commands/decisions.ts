@@ -178,9 +178,14 @@ export type DecisionResolution = {
  * CAS 带 revision，旧 revision 抛 DECISION_REVISION_CONFLICT。
  */
 const MEMORY_RECOVERY = Symbol('memory-recovery')
+const MEMORY_APPROVAL = Symbol('memory-approval')
 
 export function resolveMemoryRecoveryDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
   return resolveDecision(tx, secret, req, MEMORY_RECOVERY)
+}
+
+export function resolveMemoryApprovalDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
+  return resolveDecision(tx, secret, req, MEMORY_APPROVAL)
 }
 
 export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequest, scope?: symbol): DecisionResolution {
@@ -188,6 +193,9 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
     'SELECT 1 FROM memory_write_recoveries WHERE decision_id = ? OR abandon_ack_id = ?',
     [req.decisionId, req.decisionId],
   )) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆恢复决定必须走带对账证据的恢复命令')
+  if (scope !== MEMORY_APPROVAL && tx.get('SELECT 1 FROM memory_batches WHERE decision_id = ?', [req.decisionId])) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆审批必须同时记录批次批准快照')
+  }
   const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string }>(
     'SELECT status, payload_json, approver, confirm_required, run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
@@ -374,6 +382,7 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
       + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
       + "WHERE d.kind <> 'report_contradicted' "
+      + 'AND NOT EXISTS (SELECT 1 FROM memory_batches b WHERE b.decision_id = d.decision_id) '
       + 'AND NOT EXISTS (SELECT 1 FROM memory_write_recoveries m WHERE m.decision_id = d.decision_id OR m.abandon_ack_id = d.decision_id) '
       + `AND d.status IN ${ACTIVE_STATUSES}`,
   )

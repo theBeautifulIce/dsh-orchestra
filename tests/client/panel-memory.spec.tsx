@@ -26,7 +26,7 @@ function panelService(handler: (query: FakeQuery) => FakeReply) {
     return service.fetcher(input)
   }
   const client = createApiClient('http://panel.test', fetcher)
-  return { posts, calls: service.calls, api: createResourcesApi(client), commands: createDecisionCommandsApi(client) }
+  return { posts, calls: service.calls, client, api: createResourcesApi(client), commands: createDecisionCommandsApi(client) }
 }
 
 function memoryItem(over: Partial<MemoryItemView> = {}): MemoryItemView {
@@ -74,6 +74,11 @@ function memoryService(batches: MemoryBatchView[]) {
     if (query.path === '/v1/memory/batches') return { ok: true, data: page(batches) }
     if (query.path === '/v1/decisions') return { ok: true, data: page([]) }
     if (query.path === '/v1/decisions/resolve') return { ok: true, data: { decisionId: 'dec', revision: 4 } }
+    if (query.path === '/v1/memory/recovery/inspect') return { ok: true, data: {
+      batch_id: 'batch-77', decision_id: 'dec-mid', revision: 4, evidence_id: 'proof-mid',
+      stopped_at: '2026-11-17T10:05:00.000Z', written_count: 1, missing_count: 1, allowed_resolutions: ['abandon'],
+    } }
+    if (query.path === '/v1/memory/recovery/resolve') return { ok: true, data: { status: 'abandoned' } }
     return { ok: false, error: { code: 'NOT_FOUND', message: '没有这条接口', retryable: false } }
   })
 }
@@ -200,10 +205,11 @@ describe('记忆屏的四问', () => {
   })
 
   it('AC5 写到一半时只显示已写入的条目，唯一可选动作是放弃这次写入', async () => {
-    const { api, commands, posts } = memoryService([memoryBatch({
+    const { client, posts } = memoryService([memoryBatch({
       status: 'indeterminate',
       applied_count: 1,
       allowed_resolutions: ['abandon'],
+      recovery_available: true,
       decision_id: 'dec-mid',
       decision_revision: 4,
       items: [
@@ -211,12 +217,16 @@ describe('记忆屏的四问', () => {
         memoryItem({ client_key: 'pending', status: 'approved', title: '没写进去的那一条' }),
       ],
     })])
-    const view = await renderPanel(<MemoryPanel api={api} commands={commands} />)
+    const view = await renderPanel(<PanelApp client={client} serviceConnected initialRoute="memory" />)
     await view.flush()
     const text = view.text()
     expect(text).toContain('写到一半，等你确认')
     expect(text).toContain('已经写进去的一条')
     expect(text).not.toContain('没写进去的那一条')
+    expect(view.findAll('button').some((button) => button.textContent === '放弃这次写入')).toBe(false)
+    await view.click(view.findAll('button').find((button) => button.textContent === '核对记忆写入')!)
+    await view.flush()
+    expect(view.text()).toContain('已写入 1 条，未写入 1 条。')
     const labels = view.findAll('button').map((button) => button.textContent ?? '')
     expect(labels).toContain('放弃这次写入')
     expect(labels).not.toContain('按这个方案写入')
@@ -225,14 +235,18 @@ describe('记忆屏的四问', () => {
     expect(abandon).toBeDefined()
     await view.click(abandon!)
     await view.flush()
-    const resolves = posts.filter((post) => post.path === '/v1/decisions/resolve')
+    const resolves = posts.filter((post) => post.path === '/v1/memory/recovery/resolve')
     expect(resolves.length).toBe(1)
-    expect(resolves[0]!.body).toMatchObject({ decisionId: 'dec-mid', revision: 4, resolution: 'abandon' })
+    expect(resolves[0]!.body).toMatchObject({
+      batch_id: 'batch-77', decision_id: 'dec-mid', revision: 4, resolution: 'abandon',
+      evidence_id: 'proof-mid', stopped_at: '2026-11-17T10:05:00.000Z',
+    })
+    expect(posts.some((post) => post.path === '/v1/decisions/resolve')).toBe(false)
     view.unmount()
   })
 
-  it('AC5 服务端没给放弃选项时按钮禁用，并说明这里不替你编', async () => {
-    const { api, commands, posts } = memoryService([memoryBatch({
+  it('AC5 未装配恢复服务时不提供核对或放弃操作', async () => {
+    const { client, posts } = memoryService([memoryBatch({
       status: 'indeterminate',
       applied_count: 1,
       allowed_resolutions: null,
@@ -240,15 +254,24 @@ describe('记忆屏的四问', () => {
       decision_revision: 4,
       items: [memoryItem({ client_key: 'written', status: 'applied' })],
     })])
-    const view = await renderPanel(<MemoryPanel api={api} commands={commands} />)
+    const view = await renderPanel(<PanelApp client={client} serviceConnected initialRoute="memory" />)
     await view.flush()
     const abandon = view.findAll('button').find((button) => button.textContent === '放弃这次写入')
-    expect(abandon).toBeDefined()
-    expect((abandon as HTMLButtonElement).disabled).toBe(true)
-    expect(view.text()).toContain('服务端这次没有给出放弃的选项，这里不替你编。')
-    await view.click(abandon!)
+    expect(abandon).toBeUndefined()
+    expect(view.findAll('button').some((button) => button.textContent === '核对记忆写入')).toBe(false)
+    expect(posts).toHaveLength(0)
+    view.unmount()
+  })
+
+  it('快照过期时不能从面板封锁旧写入尝试', async () => {
+    const { client, posts } = memoryService([memoryBatch({ status: 'applying', recovery_available: true })])
+    const view = await renderPanel(<PanelApp client={client} serviceConnected snapshotStale initialRoute="memory" />)
     await view.flush()
-    expect(posts.filter((post) => post.path === '/v1/decisions/resolve').length).toBe(0)
+    expect(view.text()).toContain('写入结果待核对')
+    const button = view.findAll('button').find((item) => item.textContent === '核对记忆写入') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    await view.click(button)
+    expect(posts).toHaveLength(0)
     view.unmount()
   })
 })

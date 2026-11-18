@@ -43,7 +43,7 @@ function setupWriter(file: string) {
   return db
 }
 
-function insertRows(tx: Pick<Tx, 'get' | 'run'>, input: GovernedWriteInput, items: readonly MemoryItemInput[]) {
+function insertRows(tx: Pick<Tx, 'get' | 'run'>, input: Pick<GovernedWriteInput, 'batch_id' | 'node_run_id' | 'run_id'>, items: readonly MemoryItemInput[]) {
   if (tx.get('SELECT 1 FROM fences WHERE attempt_id = ?', [input.node_run_id])) throw new Error('attempt fenced')
   return items.map((item) => {
     const id = 'g11_' + item.client_key
@@ -220,7 +220,7 @@ async function scenario(dir: string, crash: Crash) {
     if (crash === 'rolled_back') assert.deepEqual(final.nodes.map((row) => row.action_generation), [1, 2])
     assert.equal(db.raw.prepare("SELECT status FROM runs WHERE run_id = 'r1'").get()?.status, 'succeeded')
     assert.throws(() => withTx(writer, (tx) => insertRows(tx,
-      { batch_id: batch, node_run_id: proof.node_run_id, run_id: run, items: proposals }, proposals)), /attempt fenced/)
+      { batch_id: batch, node_run_id: proof.node_run_id, run_id: run }, proposals)), /attempt fenced/)
     return {
       crash, before, after: final,
       reconcile: { writer_rows: stored, written_count_at_inspect: proof.written_count, missing_count_at_inspect: proof.missing_count,

@@ -235,6 +235,25 @@ export const acknowledgeDecisionSchema = z.strictObject({
   revision: z.number().int().positive(),
 })
 
+export const memoryStartSchema = z.strictObject({
+  source_run_id: identifier,
+  request_key: z.string().regex(/^[a-z0-9_-]{1,64}$/),
+  reason: z.string().min(1).max(500),
+  retry: z.boolean().optional(),
+  operation_id: z.string().regex(UUID_V7_RE),
+})
+
+export const memoryInspectSchema = z.strictObject({ batch_id: identifier })
+
+export const memoryRecoverySchema = memoryInspectSchema.extend({
+  decision_id: identifier,
+  revision: z.number().int().positive(),
+  resolution: z.enum(['confirm_applied', 'confirm_not_applied', 'abandon', 'acknowledge_abandon']),
+  stopped_at: z.string().min(1).max(64),
+  evidence_id: identifier,
+  operation_id: z.string().regex(UUID_V7_RE),
+})
+
 // 副作用结算写入口（附录 §12 A1）：服务命令的唯一受控入口，普通 Agent 无权调用。
 export const effectResolveSchema = z.looseObject({
   basis: z.enum(['verified_none', 'evidence', 'decision']),

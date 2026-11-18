@@ -57,6 +57,8 @@ import {
 import { loadConfig } from './core/config.ts'
 import { SystemClock } from './core/clock.ts'
 import { randomUUID } from 'node:crypto'
+import { createMemoryHost, type MemoryHostOptions } from './service/memory-host.ts'
+export type { MemoryHostOptions, MemoryPluginWriter } from './service/memory-host.ts'
 
 export const name = 'dsh-orchestra'
 export const version = '0.1.0'
@@ -394,6 +396,7 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 
 // 供宿主接进 DSH：返回 endpoint 与关闭句柄
 export async function serveOrchestra(opts: OrchestraOptions & {
+  memory?: MemoryHostOptions
   asOfSeq: ServerDeps['asOfSeq']
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
@@ -406,10 +409,12 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   // 服务启动顺序固定：文件锁 → epoch → 打开服务库 → 迁移 → 起服务（第四轮审计 M3）
   const service = await openServiceOrchestra({ ...opts, scheduler })
   const orchestra = service.orchestra
+  let memory: ReturnType<typeof createMemoryHost> | undefined
   // 维护扫描：租约过期、围栏宽限到点，2 秒一轮；失败只记日志，下一轮继续
   const sweepTimer = setInterval(() => {
     try {
       sweepNow(orchestra.runtime, new Date().toISOString())
+      memory?.resume()
     } catch (err) {
       log.error('维护扫描失败', { err: err instanceof Error ? err.message : String(err) })
     }
@@ -417,6 +422,12 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   sweepTimer.unref?.()
   let server: Awaited<ReturnType<typeof startServer>>
   try {
+    if (opts.memory) {
+      requireCapability(opts.phase, 'memory')
+      memory = createMemoryHost(orchestra.db, opts.secret, opts.memory, (error) => {
+        log.error('记忆运行推进失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' })
+      })
+    }
     server = await startServer({
       secret: opts.secret,
       phase: opts.phase,
@@ -443,12 +454,17 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getWorkflowVersion: (workflowId, version) => getWorkflowVersionSnapshot(orchestra.db, workflowId, version),
         getOperation: (operationId, now) => getOperationSnapshot(orchestra.db, operationId, now),
         listUnverifiedEffects: (params) => listUnverifiedEffects(orchestra.db, params),
-        listMemoryBatches: (params) => listMemoryBatches(orchestra.db, params),
+        listMemoryBatches: (params) => listMemoryBatches(orchestra.db, { ...params, recoveryEnabled: memory !== undefined }),
       },
       appendLedgerEvent: opts.appendLedgerEvent,
-      commands: orchestra.commands,
+      commands: {
+        ...orchestra.commands,
+        resolveDecision: (request) => memory?.resolveApproval(request) ?? orchestra.commands.resolveDecision(request),
+      },
+      memory,
       log,
     })
+    memory?.resume()
   } catch (err) {
     clearInterval(sweepTimer)
     await service.release()
@@ -463,6 +479,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         await server.close()
       } finally {
         // 先停入口，再把在跑与排队的任务收干净，最后才释放服务锁。
+        await memory?.close()
         await scheduler.close({ drain: true })
         await service.release()
       }

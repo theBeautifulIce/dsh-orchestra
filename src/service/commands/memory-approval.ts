@@ -12,7 +12,7 @@ import { proposalHash, type MemoryItemInput } from '../../core/memory-canonical.
 import type { ApprovalCard } from '../../core/memory-eval.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import type { Actor } from '../decision/approver.ts'
-import { activeDecision, cancelDecision, openDecision, resolveDecision } from './decisions.ts'
+import { activeDecision, cancelDecision, openDecision, resolveMemoryApprovalDecision } from './decisions.ts'
 
 /** 审批卡类型：与固定图 mem_confirm 节点的 approval_kind 一致。 */
 export const MEMORY_APPROVAL_KIND = 'audit_result'
@@ -279,7 +279,7 @@ export function resolveMemoryApproval(
     .map((row) => [row.client_key, row.content_hash] as [string, string])
     .sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
 
-  const resolution = resolveDecision(tx, secret, {
+  const resolution = resolveMemoryApprovalDecision(tx, secret, {
     decisionId: input.decision_id,
     revision: input.revision ?? decision.revision,
     resolution: input.resolution,

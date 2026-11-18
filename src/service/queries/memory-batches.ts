@@ -68,6 +68,7 @@ export type MemoryBatchView = {
   decision_id: string | null;
   decision_revision: number | null;
   allowed_resolutions: string[] | null;
+  recovery_available?: boolean;
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -78,6 +79,7 @@ export type ListMemoryBatchesParams = {
   limit?: number;
   cursor?: string;
   now?: number;
+  recoveryEnabled?: boolean;
 };
 
 export type MemoryBatchPage = {
@@ -245,7 +247,13 @@ export function listMemoryBatches(db: Db, params: ListMemoryBatchesParams = {}):
     }
     const rows = ctx.tx.all<BatchRow>(
       'SELECT batch_id, task_id, status, attempt, outcome, proposal_hash, evaluation_id, decision_id, '
-      + 'error_message, created_at, updated_at FROM memory_batches'
+      + 'error_message, created_at, updated_at'
+      + (params.recoveryEnabled ? `, EXISTS (SELECT 1 FROM node_runs n
+          LEFT JOIN memory_write_recoveries mr ON mr.node_run_id = n.node_run_id
+          WHERE n.node_run_id = memory_batches.apply_node_run_id
+            AND ((memory_batches.status = 'applying' AND n.status = 'indeterminate_side_effect')
+              OR (memory_batches.status = 'indeterminate' AND mr.status IN ('inspected','abandoned')))) AS recovery_available` : '')
+      + ' FROM memory_batches'
       + (where.length ? ' WHERE ' + where.join(' AND ') : '')
       + ' ORDER BY created_at DESC, batch_id DESC LIMIT ?',
       [...values, limit + 1],
@@ -286,7 +294,10 @@ export function listMemoryBatches(db: Db, params: ListMemoryBatchesParams = {}):
       const batchId = String(row.batch_id ?? '');
       const decisionId = text(row.decision_id);
       const decision = decisionId ? decisionById.get(decisionId) : undefined;
-      return toBatchView(row, itemsByBatch.get(batchId) ?? [], decision);
+      return {
+        ...toBatchView(row, itemsByBatch.get(batchId) ?? [], decision),
+        ...(params.recoveryEnabled ? { recovery_available: row.recovery_available === 1 } : {}),
+      };
     });
 
     const last = page[page.length - 1];

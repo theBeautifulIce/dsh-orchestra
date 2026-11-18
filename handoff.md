@@ -1,6 +1,13 @@
 # dsh-orchestra 接手指引（handoff）
 
-## 2026-11-18 记忆写入恢复与 G-11
+## 2026-11-18 当前接手点 · 真实插件和面板恢复
+
+- 生产服务 `serveOrchestra` 通过 `memory: { context: ctx, prepareItems, judge }` 取得 Cordis 的私有 `orchestraMemoryWriter`。评估／提议回调由宿主提供。客户端包导出 `createPanelHost`，沿用受认证的 API 连接。「记忆」可发起核对、提交证据绑定的恢复决定，并对部分写入另行签认。普通决定路径不能绕过批准快照和恢复证据。
+- 上游记忆插件 `theBeautifulIce/dsh-Immunity-memory@5d6f008` 提供 Go 迁移 v5 和 Windows 侧车。条目、来源和回执同事务提交。对账先持久封锁旧 attempt，再读取同一批次回执。旧 Go 侧车、Node SQLite 和 JSON 不提供这项能力。恢复期间需要保留原 Go 存储目录。
+- [实测与复现](docs/reviews/S5-real-memory-plugin-recovery.md) 使用已提交插件和独立临时数据，验证全写入 2 条、零写入确认后仅一次新 attempt、部分写入留存 1 条并放弃和签认。均重启侧车后核对，也验证了旧 attempt 无法再写入。`pnpm check` 共 111 文件，1,346 项通过、2 项跳过。G-11 进程中断回归通过，原证据哈希一致。
+- 本机运行中的桌面配置和记忆库未用于实测。接手从真实 DSH 环境的宿主装配和剩余 [G5 验收项](docs/reviews/S5-g5-item-map.md) 继续。完整 G5 候选尚待冻结并接受独立审计。本节优先于下方历史快照。
+
+## 2026-11-18 历史快照 · 记忆写入恢复与 G-11
 
 - 本轮从 `007659c` 推进。以下接手状态覆盖旧快照中「三条恢复路径未实现」「G-11 不存在」和「G5 证据目录尚未创建」的记录。当前仅已生成 G-11 注入证据，G5 尚未签署。
 - `034_memory_write_recovery.sql` 持久记录 attempt、对账证据、人工决定和处置结果。`memory-recovery.ts` 核对写入端停止时刻、条目键与批准哈希。确认全写入后继续收口，零写入确认后只建一个新 attempt，批次保持 applying；部分写入保留已写条目和未写条目，只允许放弃并另行签认，运行收为 succeeded_with_unverified。
@@ -19,7 +26,7 @@
 - `pnpm check` 通过，110 文件、1,343 项通过、2 项跳过。Q-27 单独复测通过。无头 Chrome 两视口在隔离临时目录后复测通过。
 - 下一项先实现权威记忆写端的对账和恢复，逐条绑定 `batch_id/client_key/content_hash`，覆盖完整、零条、部分写入三种结果并补 G-11。接通真实生产记忆启动后再更新主矩阵和冻结候选。
 
-## 当前接手快照（权威，2026-11-18）
+## 早期接手快照（2026-11-18）
 
 > 本快照覆盖下方早期接手步骤中的旧 HEAD、旧测试计数与旧阶段路线。下方保留的 S1–S4 时间线只用于追溯历史。
 

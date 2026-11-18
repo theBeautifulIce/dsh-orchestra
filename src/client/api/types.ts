@@ -65,6 +65,7 @@ export type MemoryBatchView = {
   decision_id: string | null
   decision_revision: number | null
   allowed_resolutions: string[] | null
+  recovery_available?: boolean
   error_message: string | null
   created_at: string
   updated_at: string

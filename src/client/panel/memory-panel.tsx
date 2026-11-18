@@ -1,9 +1,11 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import type { DecisionCommandsApi } from '../api/decision-commands.ts'
+import { ApiError } from '../api/client.ts'
 import { describeDecisionError } from '../api/decision-commands.ts'
+import type { MemoryRecoveryApi, MemoryRecoveryView, RecoveryChoice } from '../api/memory-recovery.ts'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { MemoryBatchView, MemoryItemView } from '../api/types.ts'
 import { COPY } from './copy.ts'
+import { PanelCommandButton } from './shell.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
 
 /** 面板上说的每一句状态话：固定十二句，一字不改。 */
@@ -14,6 +16,7 @@ const NOT_PROVIDED = '服务端未提供'
 
 /** 批次状态 → 面板文案（规格 §9.9 的十二句）。 */
 export function memoryCopy(batch: MemoryBatchView): MemoryCopy {
+  if (batch.status === 'applying' && batch.recovery_available) return { text: '写入结果待核对', tone: 'wait' }
   switch (batch.status) {
     case 'draft': return { text: '正在整理', tone: 'neutral' }
     case 'evaluating': return { text: '管家在看有没有重复', tone: 'neutral' }
@@ -45,7 +48,7 @@ const NEXT_STEP: Record<string, string> = {
 
 export type MemoryPanelProps = {
   api: ResourcesApi
-  commands?: DecisionCommandsApi
+  recovery?: MemoryRecoveryApi
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
   /** 跳到「等你决定」去看同一张审批卡。 */
@@ -54,7 +57,19 @@ export type MemoryPanelProps = {
 
 type Notice = { text: string; tone: 'ok' | 'error' }
 
-export function MemoryPanel({ api, commands, reloadVersion = 0, onSnapshot, onOpenDecisions }: MemoryPanelProps) {
+const RECOVERY_LABEL: Record<RecoveryChoice, string> = {
+  confirm_applied: '确认全部写入',
+  confirm_not_applied: '确认未写入并重新执行',
+  abandon: '放弃这次写入',
+  acknowledge_abandon: '签认并结束',
+}
+
+function recoveryError(error: unknown): string {
+  if (error instanceof ApiError && ['RESOLUTION_NOT_AVAILABLE', 'OPERATION_OUTCOME_UNKNOWN'].includes(error.code)) return error.message
+  return describeDecisionError(error)
+}
+
+export function MemoryPanel({ api, recovery, reloadVersion = 0, onSnapshot, onOpenDecisions }: MemoryPanelProps) {
   const [batches, setBatches] = useState<MemoryBatchView[]>([])
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -63,12 +78,12 @@ export function MemoryPanel({ api, commands, reloadVersion = 0, onSnapshot, onOp
   const [openedItem, setOpenedItem] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState(false)
+  const [proof, setProof] = useState<MemoryRecoveryView | null>(null)
 
   useEffect(() => {
     let current = true
     setLoading(true)
     setFailed(false)
-    // 只读一个 GET：面板自己不发任何写请求。
     void api.listMemoryBatches({}).then((result) => {
       if (!current) return
       setBatches(result.data.items)
@@ -97,19 +112,33 @@ export function MemoryPanel({ api, commands, reloadVersion = 0, onSnapshot, onOp
   // ③ 哪条没写成。
   const notWrittenBatches = useMemo(() => batches.filter((batch) => NOT_WRITTEN_STATUSES.has(batch.status)), [batches])
 
-  async function abandonBatch(batch: MemoryBatchView) {
-    if (!commands) return
-    // resolution 由服务端给；服务端没给「放弃」这个选项，这里就只说明，不替它编。
-    const resolution = batch.allowed_resolutions?.find((value) => value === 'abandon')
-    if (!resolution || !batch.decision_id || batch.decision_revision === null) return
+  async function inspectBatch(batch: MemoryBatchView) {
+    if (!recovery) return
+    setBusy(true)
+    setNotice(null)
+    setProof(null)
+    try {
+      setProof(await recovery.inspect(batch.batch_id))
+      setRetry((value) => value + 1)
+    } catch (error) {
+      setNotice({ text: recoveryError(error), tone: 'error' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function resolveRecovery(inspection: MemoryRecoveryView, choice: RecoveryChoice) {
+    if (!recovery) return
     setBusy(true)
     setNotice(null)
     try {
-      await commands.resolveDecision({ decisionId: batch.decision_id, revision: batch.decision_revision, resolution })
-      setNotice({ text: '已放弃这次写入。', tone: 'ok' })
+      await recovery.resolve(inspection, choice)
+      setProof(null)
+      setNotice({ text: choice === 'abandon' ? '已放弃本次写入，请签认。' : '已记录恢复决定。', tone: 'ok' })
       setRetry((value) => value + 1)
     } catch (error) {
-      setNotice({ text: describeDecisionError(error), tone: 'error' })
+      setProof(null)
+      setNotice({ text: recoveryError(error), tone: 'error' })
     } finally {
       setBusy(false)
     }
@@ -158,6 +187,20 @@ export function MemoryPanel({ api, commands, reloadVersion = 0, onSnapshot, onOp
           <p style={statusStyle}>有 {pendingTotal} 条等你确认</p>
           <button type="button" onClick={() => onOpenDecisions?.()} disabled={!onOpenDecisions} style={buttonStyle}>去「等你决定」看看</button>
         </>}
+      {batches.filter((batch) => batch.recovery_available).map((batch) => {
+        const inspection = proof?.batch_id === batch.batch_id ? proof : null
+        return <div key={batch.batch_id} style={itemStyle}>
+          <PanelCommandButton disabled={!recovery || busy || loading || failed} onClick={() => { void inspectBatch(batch) }} style={buttonStyle}>
+            核对记忆写入
+          </PanelCommandButton>
+          {inspection && <>
+            <p style={mutedStyle}>已写入 {inspection.written_count} 条，未写入 {inspection.missing_count} 条。</p>
+            {inspection.allowed_resolutions.map((choice) => <PanelCommandButton key={choice}
+              disabled={busy || loading || failed} style={buttonStyle}
+              onClick={() => { void resolveRecovery(inspection, choice) }}>{RECOVERY_LABEL[choice]}</PanelCommandButton>)}
+          </>}
+        </div>
+      })}
     </section>
 
     {/* ③ 哪条没写成，为什么 */}
@@ -169,23 +212,12 @@ export function MemoryPanel({ api, commands, reloadVersion = 0, onSnapshot, onOp
           const copy = memoryCopy(batch)
           const hideItems = batch.status === 'indeterminate'
           const notWritten = batch.items.filter((item) => item.status !== 'applied')
-          const abandonResolution = batch.allowed_resolutions?.find((value) => value === 'abandon') ?? null
-          const abandonReady = Boolean(batch.decision_id) && batch.decision_revision !== null && abandonResolution !== null
           return <div key={batch.batch_id} style={itemStyle}>
             <p style={statusStyle}>{copy.text}</p>
             <p style={mutedStyle}>{NEXT_STEP[batch.status] ?? '可以再让管家处理一次。'}</p>
             {!hideItems && notWritten.map((item) => <p key={item.client_key} style={mutedStyle}>
               {item.title}：{item.judge_reason ?? '这次没有写进去'}
             </p>)}
-            {batch.status === 'indeterminate' && <>
-              <button
-                type="button"
-                onClick={() => { void abandonBatch(batch) }}
-                disabled={!commands || busy || !abandonReady}
-                style={buttonStyle}
-              >放弃这次写入</button>
-              {!abandonReady && <p style={mutedStyle}>服务端这次没有给出放弃的选项，这里不替你编。</p>}
-            </>}
           </div>
         })}
     </section>

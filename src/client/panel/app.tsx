@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { ApiClient } from '../api/client.ts'
 import { createResourcesApi } from '../api/resources.ts'
 import { createDecisionCommandsApi } from '../api/decision-commands.ts'
+import { createMemoryRecoveryApi } from '../api/memory-recovery.ts'
 import { createWorkflowCommandsApi } from '../api/workflow-commands.ts'
 import type { EventStream, StreamStatus } from '../api/sse.ts'
 import { PanelShell, type PanelRoute } from './shell.tsx'
@@ -31,6 +32,7 @@ export function PanelApp(props: PanelAppProps) {
   const commands = useMemo(() => createWorkflowCommandsApi(props.client), [props.client])
   // 决定控制面写命令客户端：接手与处理走同一套命令与回执纪律。
   const decisionCommands = useMemo(() => createDecisionCommandsApi(props.client), [props.client])
+  const memoryRecovery = useMemo(() => createMemoryRecoveryApi(props.client), [props.client])
   const [route, setRoute] = useState<PanelRoute>(props.initialRoute ?? 'tasks')
   const [taskId, setTaskId] = useState<string | null>(null)
   const [workflowId, setWorkflowId] = useState<string | null>(null)
@@ -71,7 +73,7 @@ export function PanelApp(props: PanelAppProps) {
     screen = <UnverifiedEffects api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'memory') {
     screen = props.additionalScreens?.memory
-      ?? <MemoryPanel api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} />
+      ?? <MemoryPanel api={api} recovery={memoryRecovery} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} />
   } else if (route === 'settings') {
     screen = props.additionalScreens?.settings
     ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={props.snapshotStale} streamStatus={streamStatus} />
