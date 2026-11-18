@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import type { ReactNode } from 'react'
 import type { FetchLike } from '../../src/client/api/client.ts'
 import type { Page } from '../../src/client/api/resources.ts'
-import type { DecisionView, TaskSummary, UnverifiedEffectView, WorkflowListItem } from '../../src/client/api/types.ts'
+import type { DecisionView, NodeRunView, RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem } from '../../src/client/api/types.ts'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -98,6 +98,63 @@ export function taskSummary(over: Partial<TaskSummary> = {}): TaskSummary {
     attention: 'running',
     attention_reason: '任务仍在执行',
     updated_at: '2026-11-17T10:00:00.000Z',
+    ...over,
+  }
+}
+
+export function runSummary(over: Partial<RunSummary> = {}): RunSummary {
+  return {
+    run_id: 'r1',
+    task_id: 't1',
+    workflow_id: 'wf1',
+    workflow_version: 1,
+    status: 'running',
+    display_status: 'running',
+    settling: false,
+    revision: 1,
+    counts: [],
+    total: 0,
+    top_nodes: [],
+    last_event_seq: 1,
+    as_of_seq: 1,
+    created_at: '2026-11-17T10:00:00.000Z',
+    updated_at: '2026-11-17T10:00:00.000Z',
+    ...over,
+  }
+}
+
+export function nodeRunView(over: Partial<NodeRunView> = {}): NodeRunView {
+  return {
+    node_run_id: 'nr1',
+    run_id: 'r1',
+    node_id: 'n1',
+    node_type: 'tool',
+    attempt: 1,
+    status: 'started',
+    display_status: 'running',
+    status_label: '已开跑，等回写',
+    revision: 1,
+    side_effect_policy: 'compensable',
+    side_effect_verified_none: false,
+    declared_effect: null,
+    verified_effect: null,
+    evidence_strength: null,
+    evidence_state: 'none',
+    evidence_state_reason: '没有工具执行记录。',
+    execution_ids: [],
+    execution_count: 0,
+    projection_missing: [],
+    attestation_id: null,
+    action_start_source: null,
+    stop_evidence: null,
+    hang_reason: null,
+    recovery_uncertain: null,
+    replacement_node_run_id: null,
+    heartbeat_at: null,
+    started_at: '2026-11-17T10:00:00.000Z',
+    created_at: '2026-11-17T10:00:00.000Z',
+    updated_at: '2026-11-17T10:00:00.000Z',
+    active_decision_ids: [],
     ...over,
   }
 }

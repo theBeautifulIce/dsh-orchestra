@@ -4,7 +4,7 @@ import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi, type ResourcesApi } from '../../src/client/api/resources.ts'
 import { COPY } from '../../src/client/panel/copy.ts'
 import { DecisionInbox } from '../../src/client/panel/decision-inbox.tsx'
-import { PanelShell } from '../../src/client/panel/shell.tsx'
+import { PanelCommandButton, PanelShell } from '../../src/client/panel/shell.tsx'
 import { TaskListScreen } from '../../src/client/panel/tasks-screen.tsx'
 import { UnverifiedEffects } from '../../src/client/panel/unverified-effects.tsx'
 import { WorkflowListScreen } from '../../src/client/panel/workflow-list.tsx'
@@ -319,6 +319,49 @@ describe('面板外壳', () => {
     expect(view.text()).toContain(COPY.serviceDown)
     expect(view.text()).toContain(COPY.staleNotice)
     view.unmount()
+  })
+
+  it('Q-20 服务停止后保留最后一次快照并标 stale，命令按钮禁用', async () => {
+    const view = await renderPanel(
+      <PanelShell activeRoute="tasks" onNavigate={noop} serviceConnected={false} streamStatus="stale">
+        <div>上一次拿到的任务内容</div>
+        <PanelCommandButton>执行命令</PanelCommandButton>
+      </PanelShell>,
+    )
+    // 最后一次快照还在屏上，不显示空白。
+    expect(view.text()).toContain('上一次拿到的任务内容')
+    // stale 标记与提示都在。
+    expect(view.text()).toContain(COPY.staleNotice)
+    expect(view.text()).toContain(COPY.serviceDown)
+    // 命令按钮禁用。
+    const button = view.findAll('button').find((item) => item.textContent === '执行命令') as HTMLButtonElement | undefined
+    expect(button).toBeDefined()
+    expect(button?.disabled).toBe(true)
+    view.unmount()
+
+    // 事件流也过期时，面板把 stale 写在状态位上，命令按钮同样禁用。
+    const stale = await renderPanel(
+      <PanelShell activeRoute="tasks" onNavigate={noop} serviceConnected streamStatus="stale">
+        <div>上一次拿到的任务内容</div>
+        <PanelCommandButton>执行命令</PanelCommandButton>
+      </PanelShell>,
+    )
+    expect(stale.text()).toContain('数据可能已过期')
+    expect(stale.text()).toContain(COPY.staleNotice)
+    const staleButton = stale.findAll('button').find((item) => item.textContent === '执行命令') as HTMLButtonElement | undefined
+    expect(staleButton?.disabled).toBe(true)
+    stale.unmount()
+
+    // 服务正常时命令按钮可用（禁用确实来自服务停止，不是常灰）。
+    const live = await renderPanel(
+      <PanelShell activeRoute="tasks" onNavigate={noop} serviceConnected streamStatus="live">
+        <PanelCommandButton>执行命令</PanelCommandButton>
+      </PanelShell>,
+    )
+    const liveButton = live.findAll('button').find((item) => item.textContent === '执行命令') as HTMLButtonElement | undefined
+    expect(liveButton).toBeDefined()
+    expect(liveButton?.disabled).toBe(false)
+    live.unmount()
   })
 
   it('协议版本不一致时整页提示并停用面板', async () => {

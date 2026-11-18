@@ -4,6 +4,7 @@ import type { NodeRunView, RunSummary, TaskSummary } from '../api/types.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
+import { unverifiedStatusView } from './tasks-screen.tsx'
 
 export type TaskDetailScreenProps = {
   api: ResourcesApi
@@ -13,6 +14,14 @@ export type TaskDetailScreenProps = {
   onSnapshot?: (asOfSeq: number) => void
 }
 type DetailData = { task: TaskSummary; runs: RunSummary[]; nodes: NodeRunView[]; selectedRun: RunSummary | null }
+
+/** 心跳超过这个秒数就提示「心跳已停 X 秒」；只影响显示，不改节点状态。 */
+const HEARTBEAT_STALE_SECONDS = 30
+
+/** 收口后的节点不再提示心跳：已结束的事实优先，状态文字保持原样。 */
+const NODE_TERMINAL_STATUSES = new Set([
+  'done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded',
+])
 
 export function TaskDetailScreen({ api, taskId, onBack, reloadVersion = 0, onSnapshot }: TaskDetailScreenProps) {
   const [data, setData] = useState<DetailData | null>(null)
@@ -55,7 +64,11 @@ export function TaskDetailScreen({ api, taskId, onBack, reloadVersion = 0, onSna
         <h2 id="current-run-title" style={sectionTitleStyle}>最近一次运行</h2>
         {!data.selectedRun && <p style={mutedStyle}>这项任务还没有运行记录。</p>}
         {data.selectedRun && <>
-          <p style={mutedStyle}>{data.selectedRun.display_status} · {data.selectedRun.total} 个执行步骤{data.selectedRun.settling ? ' · 正在收尾' : ''}</p>
+          <p style={mutedStyle}>
+            <RunStatusLabel status={data.selectedRun.display_status} unverifiedCount={data.task.unverified_count} />
+            {' · '}{data.selectedRun.total} 个执行步骤{data.selectedRun.settling ? ' · 正在收尾' : ''}
+          </p>
+          <PendingNotices task={data.task} />
           <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
             {data.nodes.map((node) => <NodeRow key={node.node_run_id} node={node} />)}
           </div>
@@ -74,7 +87,27 @@ export function TaskDetailScreen({ api, taskId, onBack, reloadVersion = 0, onSna
   </section>
 }
 
+/** 未验证终态是独立状态：自己的中文文案与色板，不折叠进「已完成」或「未成功」。 */
+function RunStatusLabel({ status, unverifiedCount }: { status: string; unverifiedCount: number }) {
+  const unverified = unverifiedStatusView(status)
+  if (!unverified) return <span>{status}</span>
+  return <>
+    <span style={{ color: unverified.tone }}>{unverified.label}</span>
+    {unverifiedCount > 0 && <span style={{ color: unverified.tone, border: `1px solid ${unverified.tone}`, borderRadius: 999, padding: '0 6px', marginLeft: 6 }}>{unverifiedCount} {COPY.unverifiedBadge}</span>}
+  </>
+}
+
+/** 待裁决与未结算动作同时说清：光说 blocked 让人以为没有要处理的事。 */
+function PendingNotices({ task }: { task: TaskSummary }) {
+  const parts: string[] = []
+  if (task.open_decision_count > 0) parts.push(`${task.open_decision_count} 项${COPY.awaitingDecision}`)
+  if (task.unverified_count > 0) parts.push(`${COPY.pendingIrreversible}（${task.unverified_count} ${COPY.unverifiedBadge}）`)
+  if (parts.length === 0) return null
+  return <p style={attentionStyle}>{parts.join(' · ')}</p>
+}
+
 function NodeRow({ node }: { node: NodeRunView }) {
+  const heartbeat = heartbeatNotice(node)
   return <article style={nodeStyle}>
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
       <strong title={node.node_id}>{node.node_id}</strong>
@@ -83,11 +116,23 @@ function NodeRow({ node }: { node: NodeRunView }) {
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 8, color: COLOR.inkMuted, fontSize: FONT_PX.helper }}>
       <span>第 {node.attempt} 次尝试</span>
       {node.execution_count > 0 && <span>{node.execution_count} 条工具执行记录（未验证）</span>}
-      {node.active_decision_ids.length > 0 && <span>{node.active_decision_ids.length} 项等你决定</span>}
+      {node.active_decision_ids.length > 0 && <span>{node.active_decision_ids.length} 项{COPY.awaitingDecision}</span>}
+      {heartbeat && <span style={{ color: COLOR.warning }}>{heartbeat}</span>}
       {node.projection_missing.length > 0 && <span>部分信息暂不可用</span>}
     </div>
     {node.hang_reason && <p style={{ margin: '8px 0 0', fontSize: FONT_PX.body }}>{node.hang_reason}</p>}
   </article>
+}
+
+/** 心跳超阈值只加提示，不动节点状态：状态文字一个字不改。 */
+function heartbeatNotice(node: NodeRunView): string | null {
+  if (!node.heartbeat_at) return null
+  if (NODE_TERMINAL_STATUSES.has(node.status)) return null
+  const at = Date.parse(node.heartbeat_at)
+  if (Number.isNaN(at)) return null
+  const seconds = Math.floor((Date.now() - at) / 1000)
+  if (seconds <= HEARTBEAT_STALE_SECONDS) return null
+  return `${COPY.heartbeatStopped} ${seconds} 秒`
 }
 
 function formatDate(value: string): string {

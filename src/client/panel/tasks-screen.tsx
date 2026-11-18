@@ -13,11 +13,31 @@ const STATUS_LABEL: Record<string, string> = {
 }
 const EFFECT_LABEL: Record<string, string> = { pure: '只读步骤', compensable: '可能需要补偿', irreversible: '涉及不可逆操作' }
 
+/** 未验证终态是独立状态：自己的中文文案与色板，不折叠进「已完成」或「未成功」。 */
+const UNVERIFIED_STATUS: Record<string, { label: string; tone: string }> = {
+  succeeded_with_unverified: { label: COPY.succeededWithUnverified, tone: COLOR.warning },
+  failed_with_unverified: { label: COPY.failedWithUnverified, tone: COLOR.danger },
+}
+
+/** 未验证终态的独立文案与色板：面板各处共用一份，不各写各的。 */
+export function unverifiedStatusView(status: string): { label: string; tone: string } | undefined {
+  return UNVERIFIED_STATUS[status]
+}
+
 export type TaskListScreenProps = {
   api: ResourcesApi
   onSelectTask: (taskId: string) => void
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
+}
+
+/** 任务状态文案与色板：display_status 优先，未验证终态走独立文案。 */
+function statusView(task: TaskSummary): { label: string | undefined; tone: string | undefined } {
+  const key = UNVERIFIED_STATUS[task.status] ? task.status : task.display_status
+  const unverified = UNVERIFIED_STATUS[key]
+  if (unverified) return { label: unverified.label, tone: unverified.tone }
+  if (task.display_status !== task.status) return { label: task.display_status, tone: undefined }
+  return { label: STATUS_LABEL[task.status], tone: undefined }
 }
 
 export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapshot }: TaskListScreenProps) {
@@ -46,7 +66,7 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
     setError(false)
     void api.listTasks({ limit: 50, cursor, query: query || undefined }).then((result) => {
       if (!current) return
-      setItems((previous) => cursor ? [...previous, ...result.data.items] : result.data.items)
+      setItems((previous) => cursor ? mergeByTaskId(previous, result.data.items) : result.data.items)
       setNextCursor(result.data.next_cursor)
       onSnapshot?.(result.as_of_seq)
     }).catch(() => {
@@ -106,20 +126,45 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
   </section>
 }
 
+/**
+ * 分页途中插入新任务时按 task_id 去重：同 task_id 后页整条覆盖前页，
+ * 首次出现的位置不动（不重复行，也不把旧行挪到末尾）。
+ */
+function mergeByTaskId(previous: TaskSummary[], incoming: TaskSummary[]): TaskSummary[] {
+  const merged = [...previous]
+  const position = new Map<string, number>()
+  merged.forEach((task, index) => {
+    if (!position.has(task.task_id)) position.set(task.task_id, index)
+  })
+  for (const task of incoming) {
+    const at = position.get(task.task_id)
+    if (at === undefined) {
+      position.set(task.task_id, merged.length)
+      merged.push(task)
+    } else {
+      merged[at] = task
+    }
+  }
+  return merged
+}
+
 function TaskRow({ task, onSelect }: { task: TaskSummary; onSelect: () => void }) {
   const attention = ATTENTION_LABEL[task.attention]
-  const status = task.display_status !== task.status ? task.display_status : STATUS_LABEL[task.status]
+  const { label: status, tone } = statusView(task)
+  const hasUnverified = task.unverified_count > 0
   return <article style={rowStyle}>
     <button type="button" onClick={onSelect} title={task.title} style={taskTitleStyle}>{task.title || '未命名任务'}</button>
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 16px', color: COLOR.inkMuted, fontSize: FONT_PX.helper }}>
-      <span>{status ?? <UnknownState value={task.status} />}</span>
+      <span style={tone ? { color: tone } : undefined}>{status ?? <UnknownState value={task.status} />}</span>
+      {tone && hasUnverified && <span style={{ color: tone, border: `1px solid ${tone}`, borderRadius: 999, padding: '0 6px' }}>{task.unverified_count} {COPY.unverifiedBadge}</span>}
       <span>{attention ? <strong style={{ color: task.attention === 'none' ? COLOR.inkMuted : COLOR.warning }}>{attention}</strong> : <UnknownState value={task.attention} />}</span>
       <span>{task.run_count} 次运行</span>
       {task.max_side_effect_level && <strong style={{ color: task.max_side_effect_level === 'irreversible' ? COLOR.danger : COLOR.inkMuted }}>
         {EFFECT_LABEL[task.max_side_effect_level] ?? <UnknownState value={task.max_side_effect_level} />}
       </strong>}
-      {task.open_decision_count > 0 && <span>{task.open_decision_count} 项等你决定</span>}
-      {task.unverified_count > 0 && <span>{task.unverified_count} 项待核实</span>}
+      {task.open_decision_count > 0 && <span>{task.open_decision_count} 项{COPY.awaitingDecision}</span>}
+      {hasUnverified && !tone && <span>{task.unverified_count} 项待核实</span>}
+      {hasUnverified && <span style={{ color: COLOR.warning }}>{COPY.pendingIrreversible}</span>}
       <time dateTime={task.updated_at}>{formatDate(task.updated_at)}</time>
     </div>
     {task.attention_reason && <p style={{ margin: '8px 0 0', fontSize: FONT_PX.body }}>{task.attention_reason}</p>}
