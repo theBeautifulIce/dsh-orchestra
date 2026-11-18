@@ -6,12 +6,12 @@
 
 ### 当前基线
 
-- 分支 `main`，HEAD `375806a`（feat(memory): add read-only memory batch projection for the panel），与 `origin/main` 同步，工作树干净。
+- 分支 `main`，HEAD `0c2525c`（docs(handoff): refresh S5 handoff snapshot and workplan status），与 `origin/main` 同步，工作树干净。
 - S1–S4 已完成，G1–G4 已签署。当前阶段是 S5，**G5 尚未交付**（`docs/gates/G5.md` 与 `docs/gates/evidence/G5/` 均不存在）。
 - 主计划：`docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md`；工作包：`docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md`；结算契约：`docs/superpowers/specs/2026-11-17-s5-effect-resolution-addendum.md`；权威问答清单：`docs/orchestra-design-draft.md`（Q-01…Q-63 + 43b/43c/44b/44c/47b/52b 共 69 个 id；Q-37…Q-42 属 S4，不进 G5）。
-- 本轮（`d1400b2` 之后）共 16 笔提交，已全部推送。
+- `d1400b2` 之后共 17 笔提交：其中 `9cdc029` 与 `0c2525c` 是两次快照刷新本身，下面清单是其余 **15 笔代码/文档提交**（已全部推送）。
 
-### 本轮完成（16 笔提交）
+### 本轮完成（15 笔代码/文档提交 + 本次快照刷新）
 
 - `f346bda` G5 门闸规格：`scripts/gate-check.ts` 加 `GATE_SPECS.G5`（73 项 items / 6 条 invariants / 73 项 evidenceMap / 73 项 evidenceFiles）+ 新建 `src/core/gate-artifact.ts`（`candidateEntries` / `bodyHashInput` / `bodyHash` 原像口径）+ `tests/gate/gate-g5.spec.ts`（24 例）。
 - `0c8ee22` 客户端切片：`src/client/api/decision-commands.ts`（只暴露 `decision.acknowledge` / `decision.resolve`，写操作一律带 UUIDv7 `operation_id`，模糊三码 `OPERATION_TIMEOUT` / `OPERATION_OUTCOME_UNKNOWN` / `SERVICE_UNAVAILABLE` 只 `GET /v1/operations/get` 查回执不重发）、记忆面板、拖拽画布（`workflow-canvas-nodes.tsx` 纯逻辑层 + `workflow-canvas-view.tsx` 视图）。
@@ -29,14 +29,14 @@
 - `fa191be` **WP-A 面板侧八项**：`src/client/panel/copy.ts`（新增 6 条文案）、`tasks-screen.tsx`（`mergeByTaskId` 去重合并 + 未验证终态独立色板 `unverifiedStatusView` + 「仍有未结算不可逆动作」）、`task-detail-screen.tsx`（`RunStatusLabel` / `PendingNotices` / `heartbeatNotice` 心跳 30 秒阈值）、`tests/client/harness.ts`（新增 `runSummary` / `nodeRunView` 夹具）、`tests/client/panel-screens.spec.tsx`（新增 Q-20 用例）、新建 `tests/client/panel-status.spec.tsx`（6 例）、`scripts/check-panel-no-sqlite.mjs` + `tests/unit/panel-no-sqlite.spec.ts`（2 例）、`docs/reviews/S5-g5-item-map-wpa.md`（8 行全 proved，判定语与 `GATE_SPECS.G5` 逐字比对通过）。
 - `375806a` **记忆批次只读投影**：`src/service/queries/memory-batches.ts`（298 行，`listMemoryBatches(db, params)` 返回 `{items, next_cursor, as_of_seq}`；四个计数一律从 items 真数、不读冗余列；`allowed_resolutions` 从关联 `decisions.payload_json` 读、indeterminate 只给 `["abandon"]`、其余 null；键集游标 `kind=memory_batches`，换 task_id 用旧游标 → `CURSOR_FILTER_MISMATCH`）+ `tests/integration/memory-batches.spec.ts`（8 例）+ `docs/reviews/S5-memory-batches.md`。
 
-### 本轮验证（lead 亲跑，HEAD=375806a）
+### 本轮验证（lead 亲跑，HEAD=0c2525c）
 
 - `pnpm typecheck` exit 0。
 - `pnpm vitest run` → **109 文件 / 1335 通过 | 2 跳过（1337）**，exit 0。两条跳过：`tests/integration/perf-budget.spec.ts` 的 Q-27（忙核占比 >50% 时自跳过，p95=120ms 超 100ms 预算）、`tests/gate/gate-check.spec.ts` 的 1 条。
 - `node scripts/check-test-layout.mjs` exit 0。
 - `node scripts/visual-check.mjs` exit 0：两个视口 G0–G9 全通过（`scrollWidth == clientWidth`、越界元素 `[]`、菜单 13px / 顶导 13px / 正文 14px / 最小 12px、长标题 `title` 含全文）。
 - 证据生成器对 WP-A 矩阵实跑（临时目录）：8 条全部 proved、已写 8 份、失败 0、缺口 0。
-- `pnpm build` 本轮**未跑**（接手第一件事应补跑）。
+- `pnpm build` exit 0（CJS `lib/client.js` 187.46 kB / gzip 38.64 kB；ESM `lib/index.js` 423.80 kB / gzip 100.70 kB + `lib/index.d.ts` 35.24 kB；tsdown 0.22.14 / rolldown 1.2.19，有一条 ESM 建议 WARN）。
 
 ### 未完成与唯一下一项
 
@@ -113,9 +113,9 @@
 
 ### 接手步骤
 
-1. `git status -sb`、`git log --oneline -8`，确认 `main` 与 `origin/main` 同步（应为 `375806a`）。
+1. `git status -sb`、`git log --oneline -8`，确认 `main` 与 `origin/main` 同步（应为 `0c2525c`）。
 2. 读本快照、`docs/superpowers/plans/2026-11-17-s5-next-agent-workplan.md` 的 §2–§4、`docs/reviews/S5-g5-item-map.md`（73 项就绪矩阵）、`docs/orchestra-design-draft.md` 的 G5 门禁行 `:2164` 与记忆章节 §§5.4、9.3–9.10、11。
-3. 先补跑 `pnpm build`（本轮未跑）。
+3. 补跑 `pnpm build` 已完成（exit 0）；接手后仍应重跑一次 `pnpm typecheck` + `pnpm vitest run` 确认基线未漂移。
 4. 从 **WP-B 服务端读模型十一项** 开始；接着按上面「后续队列」推进，队列走完才做冻结候选与签门。
 5. 每次切片提交后回来更新本快照的 HEAD、测试计数与「唯一下一项」。
 
