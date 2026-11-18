@@ -1,6 +1,7 @@
 // src/service/commands/run-close.ts —— 运行终态收口（规格 4.8 行 403）
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
+import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
@@ -10,9 +11,7 @@ const RUN_TERMINAL: readonly RunTerminal[] = ['succeeded', 'succeeded_with_unver
 type NodeRow = {
   node_run_id: string
   status: string
-  side_effect_policy: string
-  side_effect_verified_none: number
-  stop_evidence: string | null
+  unverified: number
   replacement_node_run_id: string | null
 }
 
@@ -35,7 +34,7 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
   }
   refreshRunSettling(tx, runId, now)
   const nodes = tx.all<NodeRow>(
-    'SELECT node_run_id, status, side_effect_policy, side_effect_verified_none, stop_evidence, replacement_node_run_id FROM node_runs WHERE run_id = ?',
+    `SELECT node_run_id, status, replacement_node_run_id, (${UNVERIFIED_EFFECT}) AS unverified FROM node_runs n WHERE run_id = ?`,
     [runId],
   )
   const terminal = new Set(['done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded'])
@@ -56,19 +55,7 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
     if (chainBreakOf(secret, readChain(tx, node.node_run_id))) return null
   }
 
-  // 结算口径（附录 §7）：节点有非 pure 副作用策略，且既没有 side_effect_verified_none=1
-  // （且 stop_evidence 非空），也没有 unverified_resolutions 结算行，才算未验证。
-  // 结算行是真相源：已发生且已核实的节点不再阻塞 succeeded。
-  // 只对新收口的 run 生效，不回填历史终态（附录 §12 A2）。
-  const settledRows = tx.all<{ node_run_id: string }>(
-    'SELECT node_run_id FROM unverified_resolutions WHERE run_id = ?',
-    [runId],
-  )
-  const settled = new Set(settledRows.map((row) => row.node_run_id))
-  const unverified = (node: NodeRow) =>
-    node.side_effect_policy !== 'pure'
-    && !(node.side_effect_verified_none === 1 && typeof node.stop_evidence === 'string' && node.stop_evidence.length > 0)
-    && !settled.has(node.node_run_id)
+  const unverified = (node: NodeRow) => node.unverified === 1
   const failed = nodes.some((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status))
   const orphaned = nodes.some((node) => node.status === 'orphaned' && !node.replacement_node_run_id)
   const hasUnverified = nodes.some(unverified)

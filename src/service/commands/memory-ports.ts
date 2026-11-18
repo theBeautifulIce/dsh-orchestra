@@ -9,7 +9,7 @@
 import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
 import { OrchError, toOrchError } from '../../core/errors.ts'
 import { uuidv7 } from '../../core/ids.ts'
-import { contentHash, type MemoryItemInput } from '../../core/memory-canonical.ts'
+import { contentHash, proposalHash, resolveTargetConflicts, type MemoryItemInput } from '../../core/memory-canonical.ts'
 import {
   assertEvalShape,
   buildEvaluateRequest,
@@ -50,7 +50,7 @@ export type GovernedWriteResult = {
 }
 
 /** 受控写实现（真实写库由外部注入）。 */
-export type MemoryWriteGoverned = (input: GovernedWriteInput) => Promise<GovernedWriteResult>
+export type MemoryWriteGoverned = (input: GovernedWriteInput) => Promise<GovernedWriteResult | { outcome: 'not_written' }>
 
 /** 端口依赖。 */
 export type MemoryPortDeps = {
@@ -85,6 +85,7 @@ export type EvaluatePortResult = {
 }
 
 export type ApplyGovernedPortInput = {
+  decision_id: string
   batch_id: string
   run_id: string
   node_run_id: string
@@ -295,7 +296,10 @@ function dedupeItems(rows: readonly ItemRow[], batch_id: string): { kept: ItemRo
       kept.push(row)
       continue
     }
-    if (prev.content_hash !== row.content_hash) {
+    const previous = toMemoryItemInput(prev)
+    const current = toMemoryItemInput(row)
+    if (row.action === 'update') resolveTargetConflicts([previous, current])
+    if (row.action === 'create' && contentHash({ ...previous, client_key: current.client_key }) !== contentHash(current)) {
       throw new OrchError('MEMORY_BATCH_CONFLICT', '同一目标的记忆内容冲突', {
         batch_id,
         client_key: row.client_key,
@@ -446,55 +450,79 @@ export async function evaluateMemoryBatch(deps: MemoryPortDeps, input: EvaluateP
 
 /**
  * applyGoverned 端口：调注入的受控写实现，把 applied / skipped 计数与 applied_item_ids 记进结果。
- * 失败 → MEMORY_APPLY_FAILED：批次 failed、approved 条目全 failed、不留 proposed。
+ * 写入端确认回滚时收为 failed。结果未知时保留 applying，等写入端对账。
  */
 export async function applyGovernedMemoryBatch(
   deps: MemoryPortDeps,
   input: ApplyGovernedPortInput,
 ): Promise<ApplyGovernedPortResult> {
   const now = input.now ?? new Date().toISOString()
-  const batch = loadBatch(deps.db, input.batch_id)
-  if (!batch) {
-    throw new OrchError('MEMORY_BATCH_NOT_FOUND', '记忆批次不存在', { batch_id: input.batch_id })
-  }
-  if (batch.status === 'applied') {
-    return {
-      batch_id: input.batch_id,
-      applied_count: 0,
-      skipped_count: 0,
-      applied_item_ids: [],
-      already_applied: true,
+  const claim = inTx(deps.db, (tx) => {
+    const batch = loadBatch(deps.db, input.batch_id)
+    if (!batch) {
+      throw new OrchError('MEMORY_BATCH_NOT_FOUND', '记忆批次不存在', { batch_id: input.batch_id })
     }
-  }
-  if (batch.status !== 'approved') {
-    throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '批次未批准，不许受控写', {
-      batch_id: input.batch_id,
-      status: batch.status,
-    })
-  }
-  if (!batch.approved_proposal_hash || !batch.approved_item_hashes_json) {
-    throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '批准快照缺失，不许受控写', { batch_id: input.batch_id })
-  }
-  const approved = loadItems(deps.db, input.batch_id).filter((row) => row.status === 'approved')
-  const items = approved.map(toMemoryItemInput)
-
-  inTx(deps.db, (tx: Tx) => {
-    tx.run(
+    const decision = tx.get<{ run_id: string; node_run_id: string | null; kind: string; status: string; closed_reason: string | null; expires_at: string | null; content_hash: string | null }>(
+      'SELECT run_id, node_run_id, kind, status, closed_reason, expires_at, content_hash FROM decisions WHERE decision_id = ?',
+      [batch.decision_id],
+    )
+    const replay = batch.status === 'applied'
+    if (!decision || decision.status !== 'resolved' || decision.closed_reason !== 'approved'
+      || (!replay && (batch.status !== 'approved' || (decision.expires_at && !(Date.parse(now) < Date.parse(decision.expires_at)))))) {
+      throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '批次未批准，不许受控写', {
+        batch_id: input.batch_id,
+        status: batch.status,
+      })
+    }
+    const node = tx.get<{ status: string }>(
+      "SELECT status FROM node_runs WHERE node_run_id = ? AND run_id = ? AND node_id = 'mem_apply'",
+      [input.node_run_id, batch.memory_run_id],
+    )
+    if (batch.decision_id !== input.decision_id || batch.memory_run_id !== input.run_id || !node ||
+      (batch.apply_node_run_id && batch.apply_node_run_id !== input.node_run_id) ||
+      (!replay && node.status !== 'started')) {
+      throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '写入节点不属于这张记忆批次或尚未启动')
+    }
+    const rows = loadItems(deps.db, input.batch_id)
+    const actualProposalHash = proposalHash(rows.map(toMemoryItemInput))
+    const pairs = rows.map((row) => [row.client_key, contentHash(toMemoryItemInput(row))])
+    let snapshot: unknown = null
+    try { snapshot = JSON.parse(batch.approved_item_hashes_json ?? 'null') } catch { /* handled by comparison */ }
+    if (decision.kind !== 'audit_result' || decision.run_id !== batch.memory_run_id
+      || !batch.confirm_node_run_id || decision.node_run_id !== batch.confirm_node_run_id
+      || decision.content_hash !== actualProposalHash || batch.proposal_hash !== actualProposalHash
+      || batch.approved_proposal_hash !== actualProposalHash
+      || canonicalJson(snapshot) !== canonicalJson(pairs)
+      || rows.some((row, index) => row.content_hash !== pairs[index]![1] || row.approved_content_hash !== row.content_hash
+        || row.status !== (row.verdict === 'approve' || row.verdict === 'merge' ? (replay ? 'applied' : 'approved') : 'skipped'))) {
+      throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '当前记忆提议与批准快照不一致')
+    }
+    if (replay) return null
+    const approved = rows.filter((row) => row.status === 'approved')
+    if (approved.length === 0) throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '批准快照没有可写入的条目')
+    const res = tx.run(
       "UPDATE memory_batches SET status = 'applying', apply_node_run_id = ?, updated_at = ? WHERE batch_id = ? AND status = 'approved'",
       [input.node_run_id, now, input.batch_id],
     )
+    if (res.changes !== 1) throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '批次已被其他写入领取')
+    return approved
   })
+  if (!claim) return { batch_id: input.batch_id, applied_count: 0, skipped_count: 0, applied_item_ids: [], already_applied: true }
 
-  let written: GovernedWriteResult
+  let written: Awaited<ReturnType<MemoryWriteGoverned>>
   try {
     written = await deps.writeMemory({
       batch_id: input.batch_id,
       run_id: input.run_id,
       node_run_id: input.node_run_id,
-      items,
+      items: claim.map(toMemoryItemInput),
     })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+  } catch {
+    throw new OrchError('MEMORY_APPLY_FAILED', '记忆写入结果暂不可确认，需要对账')
+  }
+  if ('outcome' in written) {
+    if (written.outcome !== 'not_written') throw new OrchError('MEMORY_APPLY_FAILED', '写入端返回了未知结果，需要对账')
+    const message = '写入端确认整批未落库'
     inTx(deps.db, (tx: Tx) => {
       tx.run(
         "UPDATE memory_batches SET status = 'failed', outcome = 'failed', error_code = 'MEMORY_APPLY_FAILED'," +
@@ -510,7 +538,16 @@ export async function applyGovernedMemoryBatch(
     })
   }
 
-  const applied = written.applied ?? alignApplied(approved, written.applied_item_ids)
+  const applied = written.applied ?? alignApplied(claim, written.applied_item_ids)
+  const appliedIds = new Set(applied.map((item) => item.item_id))
+  if (written.applied_count !== claim.length || written.skipped_count !== 0
+    || applied.length !== claim.length || new Set(applied.map((item) => item.client_key)).size !== claim.length
+    || written.applied_item_ids.length !== claim.length || appliedIds.size !== claim.length
+    || new Set(written.applied_item_ids).size !== claim.length
+    || applied.some((item) => !item.item_id || !written.applied_item_ids.includes(item.item_id)
+      || !claim.some((row) => row.client_key === item.client_key))) {
+    throw new OrchError('MEMORY_APPLY_FAILED', '记忆写入回执不完整，需要对账')
+  }
   inTx(deps.db, (tx: Tx) => {
     for (const item of applied) {
       tx.run(
@@ -519,11 +556,12 @@ export async function applyGovernedMemoryBatch(
       )
     }
     tx.run("UPDATE memory_items SET status = 'skipped' WHERE batch_id = ? AND status = 'approved'", [input.batch_id])
-    tx.run(
+    const result = tx.run(
       "UPDATE memory_batches SET status = 'applied', outcome = 'written', applied_count = ?, skipped_count = ?," +
         " applied_at = ?, updated_at = ? WHERE batch_id = ? AND status = 'applying'",
       [written.applied_count, written.skipped_count, now, now, input.batch_id],
     )
+    if (result.changes !== 1) throw new OrchError('MEMORY_APPLY_FAILED', '记忆批次状态已变，需要对账')
   })
 
   return {
@@ -552,6 +590,9 @@ export function inspectMemoryBatch(deps: MemoryPortDeps, input: InspectBatchPort
   const batch = loadBatch(deps.db, input.batch_id)
   if (!batch) {
     throw new OrchError('MEMORY_BATCH_NOT_FOUND', '记忆批次不存在', { batch_id: input.batch_id })
+  }
+  if (batch.status === 'applying') {
+    throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '本地批次尚无写入回执，需要从写入端对账')
   }
   const rows = loadItems(deps.db, input.batch_id)
   const written = rows.filter((row) => row.status === 'applied')

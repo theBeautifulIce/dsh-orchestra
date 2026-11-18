@@ -213,6 +213,7 @@ export const RESOLUTIONS = [
 ] as const
 
 export const resolveDecisionSchema = z.looseObject({
+  operation_id: z.string().regex(UUID_V7_RE).optional(),
   decisionId: identifier,
   revision: z.number().int().positive(),
   resolution: z.enum(RESOLUTIONS),
@@ -226,6 +227,12 @@ export const resolveDecisionSchema = z.looseObject({
   confirm: z.boolean().optional(),
   // 审批绑定的内容哈希：卡上有哈希时必须逐字匹配，否则不恢复节点
   contentHash: z.string().min(1).max(128).optional(),
+})
+
+export const acknowledgeDecisionSchema = z.strictObject({
+  operation_id: z.string().regex(UUID_V7_RE),
+  decisionId: identifier,
+  revision: z.number().int().positive(),
 })
 
 // 副作用结算写入口（附录 §12 A1）：服务命令的唯一受控入口，普通 Agent 无权调用。

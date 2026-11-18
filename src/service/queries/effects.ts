@@ -1,5 +1,6 @@
 import { OrchError } from '../../core/errors.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
+import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx } from './read-tx.ts'
 
@@ -47,7 +48,7 @@ export function listUnverifiedEffects(db: Db, params: ListEffectsParams = {}): {
   const filter = { run_id: params.run_id ?? null }
 
   return withReadTx(db, (ctx) => {
-    const where = ["n.side_effect_policy <> 'pure'", 'n.side_effect_verified_none <> 1', 'r.node_run_id IS NULL']
+    const where = [UNVERIFIED_EFFECT]
     const values: unknown[] = []
     if (filter.run_id) {
       where.push('n.run_id = ?')
@@ -61,7 +62,6 @@ export function listUnverifiedEffects(db: Db, params: ListEffectsParams = {}): {
     const rows = ctx.tx.all<EffectRow>(
       'SELECT n.run_id, n.node_run_id, n.node_id, n.status, n.side_effect_policy, n.side_effect_verified_none, '
       + 'n.stop_evidence, n.started_at, n.created_at FROM node_runs n '
-      + 'LEFT JOIN unverified_resolutions r ON r.node_run_id = n.node_run_id '
       + 'WHERE ' + where.join(' AND ')
       + ' ORDER BY COALESCE(n.started_at, n.created_at) DESC, n.node_run_id DESC LIMIT ?',
       [...values, limit + 1],

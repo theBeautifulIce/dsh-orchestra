@@ -411,9 +411,23 @@ describe('副作用结算：读模型、run 终态与账本（附录 §7）', ()
     const db = setup({ status: 'failed' })
     const before = listUnverifiedEffects(db, { run_id: 'r1' })
     expect(before.items.map((item) => item.node_run_id)).toContain('nr1')
-    settle(db, { basis: 'verified_none', stopEvidence: 'no_tool_started:nr1:1:2' })
+    settle(db, { basis: 'verified_none', stopEvidence: 'no_tool_started:nr1:1' })
     const after = listUnverifiedEffects(db, { run_id: 'r1' })
     expect(after.items.map((item) => item.node_run_id)).not.toContain('nr1')
+  })
+
+  it('当前 attempt 已启动工具时拒绝按未启动结算', () => {
+    const db = setup({ status: 'failed' })
+    withTx(db, (tx) => appendNodeRunEvent(tx, TEST_SECRET, 'nr1', 'tool_started', { attempt: 1 }))
+    expectCode(() => settle(db, { basis: 'verified_none', stopEvidence: 'no_tool_started:nr1:1' }), 'RESOLUTION_NOT_AVAILABLE')
+    expect(resolutionRows(db)).toHaveLength(0)
+    expect(listUnverifiedEffects(db, { run_id: 'r1' }).items.map((item) => item.node_run_id)).toContain('nr1')
+  })
+
+  it('仅提供停止证据字符串且账本无对应确认时拒绝结算', () => {
+    const db = setup({ status: 'stopping' })
+    expectCode(() => settle(db, { basis: 'verified_none', stopEvidence: 'stopped_confirmed:nr1:1' }), 'RESOLUTION_NOT_AVAILABLE')
+    expect(resolutionRows(db)).toHaveLength(0)
   })
 
   it('run_close_treats_settled_node_as_verified', () => {

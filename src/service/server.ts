@@ -15,11 +15,12 @@ import type { DecisionView, ListDecisionParams } from './queries/decisions.ts'
 import type { EvidenceView } from './queries/evidence.ts'
 import type { LedgerVerify } from './queries/verify_ledger.ts'
 import type { ListEffectsParams, UnverifiedEffectView } from './queries/effects.ts'
+import type { ListMemoryBatchesParams, MemoryBatchPage } from './queries/memory-batches.ts'
 import type { ListWorkflowParams, WorkflowListItem, WorkflowVersionView, WorkflowView } from './queries/workflows.ts'
 import type { OperationRow } from './queries/get_operation.ts'
 import { LAST_EVENT_ID_HEADER, startEventStream } from './events/stream.ts'
 import {
-  cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema, effectResolveSchema,
+  acknowledgeDecisionSchema, cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema, effectResolveSchema,
   ledgerEventSchema, leaseSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
   taskReserveSchema, workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
@@ -32,7 +33,7 @@ import type { RecoveryUncertainItem } from './queries/recovery.ts'
 import type { LoadWorkflowResult } from './workflows.ts'
 import type { CreateRunResult } from './runs.ts'
 import type { StartRunResult } from './commands/start-run.ts'
-import type { DecisionResolution, Resolution } from './commands/decisions.ts'
+import type { acknowledgeDecision, Resolution } from './commands/decisions.ts'
 import type { EffectResolutionResult, EvidenceSource, ResolutionBasis } from './commands/effects.ts'
 import type { Actor } from './decision/approver.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
@@ -72,6 +73,7 @@ export type ServerQueries = {
   getEvidence: (evidenceId: string) => { item: EvidenceView; as_of_seq: number }
   verifyLedger: () => { item: LedgerVerify; as_of_seq: number }
   listUnverifiedEffects: (params: ListEffectsParams) => { items: UnverifiedEffectView[]; next_cursor: string | null; as_of_seq: number }
+  listMemoryBatches: (params: ListMemoryBatchesParams) => MemoryBatchPage
   listWorkflows: (params: ListWorkflowParams) => { items: WorkflowListItem[]; next_cursor: string | null; as_of_seq: number }
   getWorkflow: (workflowId: string) => { item: WorkflowView; as_of_seq: number }
   getWorkflowVersion: (workflowId: string, version: number) => { item: WorkflowVersionView; as_of_seq: number }
@@ -119,6 +121,7 @@ export type NodeCommands = {
     now: string
   }) => StartRunResult
   // 裁决收口：批准人、confirm_required 与 revision 都由服务层判
+  acknowledgeDecision: (body: Parameters<typeof acknowledgeDecision>[1]) => ReturnType<typeof acknowledgeDecision>
   resolveDecision: (body: {
     decisionId: string
     revision: number
@@ -128,8 +131,9 @@ export type NodeCommands = {
     evidenceProducers?: string[]
     confirm?: boolean
     contentHash?: string
+    operationId?: string
     now: string
-  }) => DecisionResolution
+  }) => { decisionId: string; revision: number }
   // 副作用结算：服务受控写入口（附录 §4、§5）
   resolveEffect: (body: {
     basis: ResolutionBasis
@@ -343,6 +347,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
       return
     }
+    if (req.method === 'GET' && url.pathname === '/v1/memory/batches' && deps.queries?.listMemoryBatches) {
+      const result = deps.queries.listMemoryBatches({
+        task_id: stringParam(url, 'task_id', 256),
+        limit: intParam(url, 'limit', 50),
+        cursor: stringParam(url, 'cursor', 4096),
+        now: Date.parse(requestNow),
+      })
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/evidence/get' && deps.queries) {
       const result = deps.queries.getEvidence(stringParam(url, 'evidence_id', 256) ?? '')
       sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
@@ -515,9 +529,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
+    if (req.method === 'POST' && url.pathname === '/v1/decisions/acknowledge' && deps.commands) {
+      const body = parseBody(acknowledgeDecisionSchema, await readJsonBody(req), '确认收到决定')
+      const out = await queue.run(() => deps.commands!.acknowledgeDecision({
+        decisionId: body.decisionId, revision: body.revision, operationId: body.operation_id,
+        actor: { kind: 'human', id: actor }, now: requestNow,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
     if (req.method === 'POST' && url.pathname === '/v1/decisions/resolve' && deps.commands) {
       const body = parseBody(resolveDecisionSchema, await readJsonBody(req), '裁决收口')
-      await queue.run(() => deps.commands!.resolveDecision({
+      const out = await queue.run(() => deps.commands!.resolveDecision({
         decisionId: body.decisionId,
         revision: body.revision,
         resolution: body.resolution,
@@ -526,9 +549,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         evidenceProducers: body.evidenceProducers,
         confirm: body.confirm,
         contentHash: body.contentHash,
+        operationId: body.operation_id,
         now: requestNow,
       }))
-      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { decisionId: body.decisionId, revision: body.revision + 1 }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/effects/resolve' && deps.commands) {

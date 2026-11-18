@@ -97,7 +97,7 @@ export type AdvanceMemoryRuntimeParams = {
   max_steps?: number
 }
 
-export type MemoryRuntimeStepStatus = 'done' | 'failed' | 'blocked_pre' | 'superseded'
+export type MemoryRuntimeStepStatus = 'done' | 'failed' | 'blocked_pre' | 'superseded' | 'indeterminate_side_effect'
 
 export type MemoryRuntimeStep = {
   node_id: string
@@ -377,7 +377,7 @@ async function resolveSourceOf(deps: MemoryRuntimeDeps, batch: MemoryBatchRow): 
 }
 
 type NodeOutcome = {
-  status: 'done' | 'failed' | 'blocked_pre'
+  status: 'done' | 'failed' | 'blocked_pre' | 'indeterminate_side_effect'
   step: MemoryRuntimeStep
   error_code?: string
 }
@@ -413,23 +413,16 @@ export async function advanceMemoryRuntime(
     if (!current) {
       return finishCompleted(deps, batch, steps, now)
     }
+    if (current.status === 'indeterminate_side_effect' ||
+      (current.node_id === 'mem_apply' && loadBatchById(deps.db, batch.batch_id)?.status === 'applying')) {
+      return blockedResult(deps, batch, steps)
+    }
     const outcome = await runNode(deps, batch, current, now)
     steps.push(outcome.step)
     if (outcome.status === 'failed') {
       return finishFailed(deps, batch, current, nodes, steps, now, outcome.error_code)
     }
-    if (outcome.status === 'blocked_pre') {
-      const currentBatch = loadBatchById(deps.db, batch.batch_id)
-      return {
-        memory_run_id: params.memory_run_id,
-        batch_id: batch.batch_id,
-        status: 'blocked',
-        steps,
-        terminal: null,
-        batch_status: currentBatch?.status ?? batch.status,
-        run_status: runStatusOf(deps.db, params.memory_run_id),
-      }
-    }
+    if (outcome.status === 'blocked_pre' || outcome.status === 'indeterminate_side_effect') return blockedResult(deps, batch, steps)
     // 路由还没定（还没有评估结论）时不能把分支节点当旁路收掉，等评估出结论再定路径。
     if (route !== null) {
       supersedeOffPath(deps, nodes, path, now)
@@ -439,6 +432,18 @@ export async function advanceMemoryRuntime(
     memory_run_id: params.memory_run_id,
     max_steps: maxSteps,
   })
+}
+
+function blockedResult(deps: MemoryRuntimeDeps, batch: MemoryBatchRow, steps: MemoryRuntimeStep[]): MemoryRuntimeResult {
+  return {
+    memory_run_id: batch.memory_run_id,
+    batch_id: batch.batch_id,
+    status: 'blocked',
+    steps,
+    terminal: null,
+    batch_status: loadBatchById(deps.db, batch.batch_id)?.status ?? batch.status,
+    run_status: runStatusOf(deps.db, batch.memory_run_id),
+  }
 }
 
 async function runNode(
@@ -490,6 +495,7 @@ async function runWorkNode(
       ruleId: 'M-04',
       attempt: node.attempt,
       now,
+      patch: { side_effect_policy: sideEffectPolicy },
     })
   })
 
@@ -498,6 +504,16 @@ async function runWorkNode(
     detail = await work()
   } catch (err) {
     const orch = toOrchError(err)
+    if (node.node_id === 'mem_apply' && loadBatchById(deps.db, batch.batch_id)?.status === 'applying') {
+      const status = 'indeterminate_side_effect' as const
+      inTx(deps.db, (tx) => {
+        applyTransition(tx, secret, { nodeRunId: node.node_run_id, from: ['started'], to: status, ruleId: 'M-50', attempt: node.attempt, now })
+        releaseLease(tx, { nodeRunId: node.node_run_id, now })
+        tx.run("UPDATE runs SET status = 'paused', revision = revision + 1, updated_at = ? WHERE run_id = ? AND status IN ('running','settling')", [now, batch.memory_run_id])
+        appendEvent(tx, { type: 'memory.apply.outcome_unknown', runId: batch.memory_run_id, nodeRunId: node.node_run_id, payload: { batch_id: batch.batch_id } })
+      })
+      return { status, step: { node_id: node.node_id, node_run_id: node.node_run_id, status } }
+    }
     inTx(deps.db, (tx: Tx) => {
       applyTransition(tx, secret, {
         nodeRunId: node.node_run_id,
@@ -558,7 +574,6 @@ async function runWorkNode(
       ruleId: 'M-44',
       attempt: node.attempt,
       now,
-      patch: { side_effect_policy: sideEffectPolicy, side_effect_verified_none: 1 },
     })
     appendNodeRunEvent(tx, secret, node.node_run_id, MEMORY_RUNTIME_EVENTS.nodeAdvanced, {
       node_id: node.node_id,
@@ -684,23 +699,23 @@ async function applyWork(
   // mem_apply 复用 mem_confirm 那张卡：同一 decision_id，不新建第二张 pre_execution 卡。
   const current = loadBatchById(deps.db, batch.batch_id) ?? batch
   const decision = loadDecision(deps.db, current.decision_id)
-  if (decision) {
-    inTx(deps.db, (tx: Tx) => {
-      appendNodeRunEvent(tx, deps.secret, node.node_run_id, MEMORY_RUNTIME_EVENTS.approvalReused, {
-        node_id: node.node_id,
-        decision_id: decision.decision_id,
-        closed_reason: decision.closed_reason,
-      })
+  if (!decision) throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '找不到写入使用的批准决定')
+  inTx(deps.db, (tx: Tx) => {
+    appendNodeRunEvent(tx, deps.secret, node.node_run_id, MEMORY_RUNTIME_EVENTS.approvalReused, {
+      node_id: node.node_id,
+      decision_id: decision.decision_id,
+      closed_reason: decision.closed_reason,
     })
-  }
+  })
   const result = await deps.ports.applyGoverned({
+    decision_id: decision.decision_id,
     batch_id: batch.batch_id,
     run_id: batch.memory_run_id,
     node_run_id: node.node_run_id,
     now,
   })
   return {
-    decision_id: decision?.decision_id ?? null,
+    decision_id: decision.decision_id,
     applied_count: result.applied_count,
     skipped_count: result.skipped_count,
     applied_item_ids: result.applied_item_ids,

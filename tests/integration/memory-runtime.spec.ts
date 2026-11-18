@@ -393,9 +393,7 @@ describe('记忆 run 运行驱动', () => {
     const second = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
     expect(second.status).toBe('completed')
     expect(second.steps.map((step) => step.node_id)).toEqual(['mem_confirm', 'mem_apply', 'mem_report'])
-    // mem_apply 是不可逆节点（apply_governed 端口 irreversible）：run-close 的现行口径把没有结算行的
-    // 非 pure 节点算成未核实副作用，所以写成功的记忆 run 收口是 succeeded_with_unverified。
-    expect(second.terminal).toBe('succeeded_with_unverified')
+    expect(second.terminal).toBe('succeeded')
 
     // 全 run 只有一张 audit_result 卡
     expect(countOf(db, 'decisions')).toBe(1)
@@ -506,7 +504,7 @@ describe('记忆 run 运行驱动', () => {
       writeCalls,
       writeMemory: async (input) => {
         writeCalls.push({ batch_id: input.batch_id, items: input.items })
-        throw new Error('写入后端挂了')
+        return { outcome: 'not_written' }
       },
     })
     await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
@@ -546,6 +544,45 @@ describe('记忆 run 运行驱动', () => {
     const again = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
     expect(again.status).toBe('failed')
     expect(writeCalls.length).toBe(1)
+  })
+
+  it.each(['lost_receipt', 'invalid_receipt', 'mismatched_snapshot'] as const)('%s 无法冒充确认写入或触发重放', async (scenario) => {
+    const { db } = freshLedger()
+    const started = startRun(db)
+    let writes = 0
+    const deps = makeDeps(db, {
+      writeMemory: async () => {
+        writes += 1
+        if (scenario === 'lost_receipt') throw new Error('写入后连接断开')
+        return { applied_count: 1, skipped_count: 0, applied_item_ids: [] }
+      },
+    })
+    await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
+    const waiting = one<{ decision_id: string }>(db, 'SELECT decision_id FROM memory_batches WHERE batch_id = ?', started.batch_id)
+    inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+      batch_id: started.batch_id, decision_id: waiting!.decision_id, resolution: 'approved',
+      now: LATER, actor: { kind: 'human', id: 'tester' },
+    }))
+    if (scenario === 'mismatched_snapshot') {
+      withTx(db, (tx) => {
+        const trigger = tx.get<{ sql: string }>("SELECT sql FROM sqlite_master WHERE name = 'memory_items_proposal_immutable_after_approval'")
+        tx.run('DROP TRIGGER memory_items_proposal_immutable_after_approval')
+        tx.run("UPDATE memory_items SET title = '批准后遭篡改的标题' WHERE batch_id = ?", [started.batch_id])
+        tx.run(trigger!.sql)
+      })
+      const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
+      expect(result.error_code).toBe('MEMORY_APPLY_BINDING_INVALID')
+      expect(writes).toBe(0)
+      return
+    }
+
+    const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
+    expect(result).toMatchObject({ status: 'blocked', batch_status: 'applying', run_status: 'paused', terminal: null })
+    expect(nodeStatus(db, started.memory_run_id, 'mem_apply')).toBe('indeterminate_side_effect')
+    expect(() => deps.ports.inspectBatch({ batch_id: started.batch_id })).toThrow(/写入端对账/)
+    const retry = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
+    expect(retry.status).toBe('blocked')
+    expect(writes).toBe(1)
   })
 
   it('人驳回时批次 declined、run failed、受控写没被调用', async () => {

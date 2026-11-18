@@ -11,7 +11,8 @@ import { createRun, reserveTask } from './service/runs.ts'
 import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
 import { requireCapability } from './core/config.ts'
 import { startRun } from './service/commands/start-run.ts'
-import { resolveDecision } from './service/commands/decisions.ts'
+import { acknowledgeDecision, resolveDecision } from './service/commands/decisions.ts'
+import { requestHashOf, runIdempotentCommand } from './service/commands/idempotency.ts'
 import { resolveEffect } from './service/commands/effects.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
@@ -32,6 +33,7 @@ import { getEvidenceSnapshot } from './service/queries/evidence.ts'
 import { verifyLedgerSnapshot } from './service/queries/verify_ledger.ts'
 import { getWorkflowSnapshot, getWorkflowVersionSnapshot, listWorkflowSummaries as listWorkflowQuery } from './service/queries/workflows.ts'
 import { listUnverifiedEffects } from './service/queries/effects.ts'
+import { listMemoryBatches } from './service/queries/memory-batches.ts'
 import { listEvents as listEventPage } from './service/queries/list_events.ts'
 import { getOperationSnapshot } from './service/queries/get_operation.ts'
 import { inTx } from './infra/db/tx.ts'
@@ -193,32 +195,38 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       operationId: b.operationId,
       now: b.now,
     }),
-    resolveDecision: (b) => inTx(db, (tx) => {
-      const out = resolveDecision(tx, opts.secret, {
-        decisionId: b.decisionId,
-        revision: b.revision,
-        resolution: b.resolution,
-        payload: b.payload,
-        actor: b.actor,
-        evidenceProducers: b.evidenceProducers,
-        confirm: b.confirm,
-        contentHash: b.contentHash,
-        now: b.now,
-      })
-      // 生产入口必须把审批结论落回节点：批准回 queued，拒绝/过期落 failed。
-      // 两步在同一事务里，不会出现“卡已 resolved、节点还卡在 blocked_pre”。
-      if (out.blockedNode && (out.closedReason === 'approved' || out.closedReason === 'rejected' || out.closedReason === 'expired_final')) {
-        resumeFromBlockedPre(tx, opts.secret, {
-          nodeRunId: out.blockedNode.nodeRunId,
-          attempt: out.blockedNode.attempt,
-          decisionId: out.decisionId,
-          approved: out.closedReason === 'approved',
-          contentHash: b.contentHash ?? null,
-          now: b.now,
+    acknowledgeDecision: (b) => inTx(db, (tx) => acknowledgeDecision(tx, b)),
+    resolveDecision: ({ operationId, now, ...b }) => inTx(db, (tx) => {
+      const apply = () => {
+        const out = resolveDecision(tx, opts.secret, {
+          decisionId: b.decisionId,
+          revision: b.revision,
+          resolution: b.resolution,
+          payload: b.payload,
+          actor: b.actor,
+          evidenceProducers: b.evidenceProducers,
+          confirm: b.confirm,
+          contentHash: b.contentHash,
+          now,
         })
-        if (out.closedReason !== 'approved') closeRun(tx, opts.secret, out.runId, b.now)
+        // 生产入口必须把审批结论落回节点：批准回 queued，拒绝/过期落 failed。
+        // 两步在同一事务里，不会出现“卡已 resolved、节点还卡在 blocked_pre”。
+        if (out.blockedNode && (out.closedReason === 'approved' || out.closedReason === 'rejected' || out.closedReason === 'expired_final')) {
+          resumeFromBlockedPre(tx, opts.secret, {
+            nodeRunId: out.blockedNode.nodeRunId,
+            attempt: out.blockedNode.attempt,
+            decisionId: out.decisionId,
+            approved: out.closedReason === 'approved',
+            contentHash: b.contentHash ?? null,
+            now,
+          })
+          if (out.closedReason !== 'approved') closeRun(tx, opts.secret, out.runId, now)
       }
-      return out
+      return { decisionId: out.decisionId, revision: b.revision + 1 }
+      }
+      if (!operationId) return apply()
+      const kind = 'decision.resolve'
+      return runIdempotentCommand(tx, { kind, operationId, now, requestHash: requestHashOf(kind, b) }, apply).result
     }),
     resolveEffect: (b) => inTx(db, (tx) => resolveEffect(tx, opts.secret, {
       basis: b.basis,
@@ -430,6 +438,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getWorkflowVersion: (workflowId, version) => getWorkflowVersionSnapshot(orchestra.db, workflowId, version),
         getOperation: (operationId, now) => getOperationSnapshot(orchestra.db, operationId, now),
         listUnverifiedEffects: (params) => listUnverifiedEffects(orchestra.db, params),
+        listMemoryBatches: (params) => listMemoryBatches(orchestra.db, params),
       },
       appendLedgerEvent: opts.appendLedgerEvent,
       commands: orchestra.commands,

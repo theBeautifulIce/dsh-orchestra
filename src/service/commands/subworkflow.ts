@@ -4,6 +4,7 @@ import { OrchError } from '../../core/errors.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from '../workflows.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { runId as newRunId, uuidv7 } from '../../core/ids.ts'
 import { applyTransition } from './nodes.ts'
 import { loadNodeRun, type NodeRunRow } from './lease.ts'
@@ -518,7 +519,6 @@ const NODE_TERMINAL = [
 const CHILD_SUCCESS = ['succeeded', 'succeeded_with_unverified', 'done'] as const
 const CHILD_CANCELLED = ['superseded', 'cancelled'] as const
 // 这些子运行终态本身就带“副作用没核实”的语义，不能只按状态名判成功
-const CHILD_UNVERIFIED_FAMILY = ['succeeded_with_unverified', 'failed_with_unverified', 'abandoned_unverified', 'orphaned'] as const
 
 type ChildSideEffectAggregate = { policy: SideEffectPolicy; unverified: number }
 
@@ -529,8 +529,8 @@ type ChildSideEffectAggregate = { policy: SideEffectPolicy; unverified: number }
 function childSideEffectAggregate(tx: Tx, childRunId: string): ChildSideEffectAggregate {
   const row = tx.get<{ policy_rank: number; unverified: number }>(
     'SELECT COALESCE(MAX(CASE side_effect_policy WHEN \'irreversible\' THEN 2 WHEN \'compensable\' THEN 1 ELSE 0 END), 0) AS policy_rank, '
-    + 'COALESCE(SUM(CASE WHEN side_effect_policy <> \'pure\' AND side_effect_verified_none <> 1 THEN 1 ELSE 0 END), 0) AS unverified '
-    + 'FROM node_runs WHERE run_id = ?',
+    + `COALESCE(SUM(CASE WHEN ${UNVERIFIED_EFFECT} THEN 1 ELSE 0 END), 0) AS unverified `
+    + 'FROM node_runs n WHERE run_id = ?',
     [childRunId],
   )
   return {
@@ -562,8 +562,7 @@ export function finishSubworkflowChild(
   }
   const node = loadNodeRun(tx, child.parent_node_run_id)
   const aggregate = childSideEffectAggregate(tx, p.childRunId)
-  const childUnverified = aggregate.unverified > 0
-    || (CHILD_UNVERIFIED_FAMILY as readonly string[]).includes(child.status)
+  const childUnverified = aggregate.unverified > 0 || child.status === 'orphaned'
   if ((NODE_TERMINAL as readonly string[]).includes(node.status)) {
     // 父节点已经被取消/超时收口，但子 run 是后来才收的：未核实事实不能因此丢掉。
     // 状态不改，只把子运行的副作用事实回填到父节点，父 run 的终态仍能继承它。

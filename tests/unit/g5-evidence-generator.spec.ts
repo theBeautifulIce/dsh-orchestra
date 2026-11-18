@@ -107,7 +107,7 @@ describe('buildEvidenceFile', () => {
     command: 'pnpm vitest run "tests/x.spec.ts" -t "用例名"',
     exitCode: 0,
     timedOut: false,
-    output: '1 passed',
+    output: '      Tests  1 passed (1)',
   }
 
   it('正文含标题、判定语、证明用例、复现命令、退出码与输出摘录', () => {
@@ -130,6 +130,11 @@ describe('buildEvidenceFile', () => {
     const excerpt = excerptOutput('x'.repeat(9000))
     expect(excerpt.length).toBeLessThanOrEqual(4000)
     expect(excerpt).toMatch(/输出已截断/)
-    expect(buildEvidenceFile({ ...base, output: 'x'.repeat(9000) })).toContain('输出已截断')
+    expect(buildEvidenceFile({ ...base, output: 'x'.repeat(9000) + '\n' + base.output })).toContain('输出已截断')
+  })
+
+  it('Vitest 全跳过即使退出码为 0 也不能生成通过证据', () => {
+    expect(() => buildEvidenceFile({ ...base, output: '      Tests  1 skipped (1)' })).toThrow(/没有通过的用例/)
+    expect(buildEvidenceFile({ ...base, output: '      Tests  1 passed | 4 skipped (5)' })).toContain('通过（退出码 0）')
   })
 })

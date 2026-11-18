@@ -228,6 +228,9 @@ export function buildEvidenceFile(input: EvidenceFileInput): string {
   if (input.exitCode !== 0) {
     throw new Error('证据 ' + input.id + ' 的命令退出码是 ' + String(input.exitCode) + '，不写通过证据')
   }
+  if (missingVitestProof(input.command, input.output)) {
+    throw new Error('证据 ' + input.id + ' 的 Vitest 命令没有通过的用例')
+  }
   const excerpt = excerptOutput(input.output)
   const fence = excerpt.includes('```') ? '````' : '```'
   const lines = [
@@ -248,6 +251,12 @@ export function buildEvidenceFile(input: EvidenceFileInput): string {
     '',
   ]
   return lines.join('\n')
+}
+
+function missingVitestProof(command: string, output: string): boolean {
+  if (!/\bvitest\s+run\b/.test(command)) return false
+  const plain = output.replace(/\x1B\[[0-9;]*m/g, '')
+  return !/^\s*Tests\s+[1-9]\d* passed\b/m.test(plain)
 }
 
 // ---------------------------------------------------------------- 命令执行
@@ -386,10 +395,11 @@ function main(argv: string[]): number {
     const command = toCommand(plan.proof)
     process.stdout.write('[' + String(index) + '/' + String(plans.length) + '] ' + plan.id + ' … ')
     const result = runCommand(command, ROOT, opts.timeoutMs)
-    if (!result.ok) {
+    const noTestsPassed = missingVitestProof(command, result.output)
+    if (!result.ok || noTestsPassed) {
       const reason = result.timedOut
         ? '命令超时（超过 ' + String(opts.timeoutMs) + 'ms）'
-        : '退出码 ' + String(result.exitCode)
+        : result.ok ? 'Vitest 命令没有通过的用例' : '退出码 ' + String(result.exitCode)
       failures.push({ id: plan.id, reason })
       console.log('失败：' + reason)
       continue

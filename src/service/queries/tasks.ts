@@ -1,5 +1,6 @@
 import { OrchError } from '../../core/errors.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
+import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { deriveAttention, maxSideEffectLevel, type Attention, type SideEffectLevel } from './attention.ts'
 import { withReadTx } from './read-tx.ts'
@@ -100,8 +101,7 @@ const TASK_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_versio
   (SELECT MIN(d.created_at) FROM decisions d WHERE d.run_id = t.current_run_id
     AND d.status IN ('pending','acknowledged','blocked_for_human')) AS oldest_open_decision_at,
   (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id
-    AND n.side_effect_policy <> 'pure' AND n.side_effect_verified_none <> 1
-    AND NOT EXISTS (SELECT 1 FROM unverified_resolutions ur WHERE ur.node_run_id = n.node_run_id)) AS unverified_count,
+    AND ${UNVERIFIED_EFFECT}) AS unverified_count,
   (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id
     AND n.status = 'orphaned' AND n.replacement_node_run_id IS NULL) AS orphaned_node_count,
   (SELECT GROUP_CONCAT(DISTINCT n.side_effect_policy) FROM node_runs n WHERE n.run_id = t.current_run_id) AS side_effect_levels,

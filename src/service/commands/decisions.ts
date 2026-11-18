@@ -8,6 +8,7 @@ import { settleDecisionOutcome } from './effects.ts'
 import { applyTransition } from './nodes.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
+import { requestHashOf, runIdempotentCommand } from './idempotency.ts'
 
 export const DECISION_KINDS: readonly DecisionKind[] = [
   'pre_execution',
@@ -21,6 +22,28 @@ export const DECISION_KINDS: readonly DecisionKind[] = [
 ]
 
 const ACTIVE_STATUSES = "('pending', 'acknowledged', 'blocked_for_human')"
+
+export function acknowledgeDecision(tx: Tx, req: { decisionId: string; revision: number; operationId: string; actor: Actor; now: string }) {
+  const kind = 'decision.acknowledge'
+  const decision = tx.get<{ run_id: string; node_run_id: string | null; approver: string }>(
+    'SELECT run_id, node_run_id, approver FROM decisions WHERE decision_id = ?', [req.decisionId],
+  )
+  if (!decision) throw new OrchError('NOT_FOUND', '找不到这条决定')
+  assertApprover({ approver: decision.approver as Approver, actor: req.actor })
+  return runIdempotentCommand(tx, {
+    kind, operationId: req.operationId, now: req.now,
+    requestHash: requestHashOf(kind, { decision_id: req.decisionId, revision: req.revision, actor: req.actor.id }),
+  }, () => {
+    const result = tx.run("UPDATE decisions SET status = 'acknowledged', revision = revision + 1 WHERE decision_id = ? AND revision = ? AND status = 'pending'",
+      [req.decisionId, req.revision])
+    if (result.changes !== 1) throw new OrchError('DECISION_REVISION_CONFLICT', '决定状态或版本已变')
+    appendEvent(tx, {
+      type: 'decision.acknowledged', runId: decision.run_id, nodeRunId: decision.node_run_id, decisionId: req.decisionId,
+      payload: { actor: req.actor.id, revision: req.revision + 1 },
+    })
+    return { decisionId: req.decisionId, revision: req.revision + 1 }
+  }).result
+}
 
 export type DecisionDraft = {
   decisionId: string

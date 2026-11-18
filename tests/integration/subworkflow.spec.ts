@@ -10,6 +10,8 @@ import {
 import { assertRunCanTerminal } from '../../src/service/commands/parallel.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
 import { applyCancel } from '../../src/service/commands/cancel.ts'
+import { resolveEffect } from '../../src/service/commands/effects.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
@@ -302,6 +304,27 @@ describe('子流程副作用向父流程传播', () => {
       expect(parent.side_effect_policy).toBe('compensable')
       expect(parent.side_effect_verified_none).toBe(0)
       expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('succeeded_with_unverified')
+    })
+  })
+
+  it('子流程结算后父运行不继承未核实标记，子运行历史终态保留', () => {
+    const db = memoryDb()
+    const childId = seedChild(db, catalog(), {
+      runStatus: 'succeeded_with_unverified', nodeStatus: 'abandoned_unverified', policy: 'irreversible', verifiedNone: 0,
+    })
+    withTx(db, (tx) => {
+      const child = tx.get<{ node_run_id: string; attempt: number; revision: number }>(
+        'SELECT node_run_id, attempt, revision FROM node_runs WHERE run_id = ?', [childId],
+      )!
+      resolveEffect(tx, SECRET, {
+        basis: 'verified_none', nodeRunId: child.node_run_id, runId: childId,
+        stopEvidence: `no_tool_started:${child.node_run_id}:${child.attempt}`,
+        expected: { revision: child.revision }, now: NOW, operationId: uuidv7(),
+        actor: { kind: 'human', id: 'auditor' },
+      })
+      expect(finishSubworkflowChild(tx, SECRET, { childRunId: childId, now: NOW }).status).toBe('done')
+      expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('succeeded')
+      expect(tx.get('SELECT status FROM runs WHERE run_id = ?', [childId])).toMatchObject({ status: 'succeeded_with_unverified' })
     })
   })
 

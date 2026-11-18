@@ -8,13 +8,15 @@
 // 不新增依赖：构建用仓库自带的 tsdown，浏览器用本机 Chrome/Edge，CDP 走 Node 内置 WebSocket。
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'tsdown'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const WORK_DIR = join(REPO_ROOT, 'node_modules', '.cache', 'dsh-visual-check')
+const CACHE_DIR = join(REPO_ROOT, 'node_modules', '.cache')
+mkdirSync(CACHE_DIR, { recursive: true })
+const WORK_DIR = mkdtempSync(join(CACHE_DIR, 'dsh-visual-check-'))
 const PAGE_FILE = join(WORK_DIR, 'panel.html')
 const BUNDLE_FILE = join(WORK_DIR, 'panel.bundle.js')
 const ENTRY_FILE = join(WORK_DIR, 'entry.tsx')
@@ -356,9 +358,13 @@ async function waitForDevToolsEndpoint(profileDir, timeoutMs) {
   const portFile = join(profileDir, 'DevToolsActivePort')
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (existsSync(portFile)) {
+    try {
       const lines = readFileSync(portFile, 'utf8').split(/\r?\n/)
-      if (lines.length >= 2 && lines[0] && lines[1]) return 'ws://127.0.0.1:' + lines[0] + lines[1]
+      if (/^\d+$/.test(lines[0] ?? '') && lines[1]?.startsWith('/devtools/browser/')) {
+        return 'ws://127.0.0.1:' + lines[0] + lines[1]
+      }
+    } catch (error) {
+      if (!['ENOENT', 'EBUSY', 'EPERM'].includes(error?.code)) throw error
     }
     await sleep(100)
   }
@@ -371,12 +377,7 @@ function toFileUrl(path) {
 
 /** 在一个视口下真跑一次面板，把页面自己量出来的数据取回来。 */
 async function measureViewport(browserPath, viewport, pageUrl) {
-  const profileDir = join(WORK_DIR, 'profile-' + viewport.name)
-  try {
-    rmSync(profileDir, { recursive: true, force: true })
-  } catch (error) {
-    log('清理旧的浏览器 profile 失败（继续用新 profile）: ' + (error && error.message ? error.message : String(error)))
-  }
+  const profileDir = mkdtempSync(join(WORK_DIR, 'profile-' + viewport.name + '-'))
   const args = [
     '--headless',
     '--disable-gpu',
@@ -564,7 +565,7 @@ async function main() {
   if (!keep) {
     // 清理失败（例如 Chrome 仍占用工作目录）不该改判定结论：只提示，不动退出码。
     try {
-      rmSync(WORK_DIR, { recursive: true, force: true })
+      rmSync(WORK_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 })
     } catch (error) {
       log('清理工作目录失败（不影响判定）: ' + (error && error.message ? error.message : String(error)))
     }

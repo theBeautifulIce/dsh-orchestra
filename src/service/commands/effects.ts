@@ -288,6 +288,30 @@ function assertStopEvidenceNodeShape(node: SettlementNode, value: string): void 
   }
 }
 
+function assertLedgerStopEvidence(tx: Tx, secret: string, node: SettlementNode, value: string): void {
+  const chain = readChain(tx, node.node_run_id)
+  if (chainBreakOf(secret, chain)) {
+    throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '节点事件链断裂，不能证明动作未生效')
+  }
+  if (value.startsWith('stopped_confirmed:')) {
+    if (node.side_effect_verified_none === 1 && node.stop_evidence === value) return
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '账本未记录执行器确认动作停止且未生效')
+  }
+  const [, , seq] = value.slice('no_tool_started:'.length).split(':')
+  const started = chain.some((event) => {
+    if (event.type !== 'tool_started' && event.type !== 'tool_finished') return false
+    const attempt = parsePayload(event.payload).attempt
+    return !Number.isInteger(attempt) || attempt === node.attempt
+  })
+  const execution = tx.get('SELECT 1 FROM tool_executions WHERE node_run_id = ? AND attempt = ? LIMIT 1',
+    [node.node_run_id, node.attempt])
+  const memoryWrite = tx.get('SELECT 1 FROM memory_batches WHERE apply_node_run_id = ? LIMIT 1', [node.node_run_id])
+  if (node.status === 'stopping' || started || execution || memoryWrite
+    || (seq !== undefined && !chain.some((event) => event.seq === Number(seq)))) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '账本无法证明这个 attempt 没有启动工具')
+  }
+}
+
 /** 同一 basis 且依据完全相同 = 幂等重放；依据不同 = 冲突（附录 §2.4） */
 function sameBasis(existing: ResolutionRow, req: EffectResolveRequest): boolean {
   if (existing.resolution_basis !== req.basis) return false
@@ -363,9 +387,10 @@ function writeResolution(tx: Tx, secret: string, input: {
  * 结算写命令（附录 §4）。幂等、作用域、CAS、证据门、落库、事件、回执都在同一笔事务里。
  */
 export function resolveEffect(tx: Tx, secret: string, req: EffectResolveRequest): EffectResolutionResult {
+  assertSettlementActor(req.actor)
   const requestHash = sha256Hex(canonicalJson({
     command: COMMAND_KIND,
-    target: { node_run_id: req.nodeRunId, basis: req.basis },
+    target: { run_id: req.runId ?? null, node_run_id: req.nodeRunId, basis: req.basis },
     expected: { revision: req.expected?.revision ?? null, decision_revision: req.expected?.decisionRevision ?? null },
     payload: {
       evidence_id: req.evidenceId ?? null,
@@ -491,15 +516,14 @@ function applyEffectCommand(tx: Tx, secret: string, req: EffectResolveRequest): 
   if (req.basis === 'verified_none') {
     const value = req.stopEvidence as string
     assertStopEvidenceNodeShape(node, value)
-    if (!N1_PREFIXES.some((p) => value.startsWith(p))) {
+    if (N1_PREFIXES.some((p) => value.startsWith(p))) {
+      assertLedgerStopEvidence(tx, secret, node, value)
+    } else {
       // N2：一条证明动作未生效的强证据执行 ID，同样过 E1–E5
       const gate = checkSystemEvidence(tx, secret, node, value, req.evidenceSource)
       if (!gate.ok) throw new OrchError(gate.failure.code, gate.failure.message, gate.failure.details)
     }
   }
-
-  // 步骤 6：权限 —— 人或审计 Agent
-  assertSettlementActor(req.actor)
 
   // 步骤 7：落库 + 事件
   return writeResolution(tx, secret, {
@@ -569,7 +593,7 @@ function assertDecisionBasis(
       decision_id: decision.decision_id,
     })
   }
-  const declared = source ?? (payload['evidence_source'] as EvidenceSource | undefined) ?? null
+  const declared = payload['evidence_source'] === 'tool_result' ? 'tool_result' : source
   for (const id of evidenceIds) {
     if (typeof id !== 'string' || id === '') {
       throw new OrchError('RESOLUTION_NOT_AVAILABLE', '裁决引用的证据 ID 不是字符串', {
@@ -593,7 +617,7 @@ export function settleEvidenceFromReport(tx: Tx, secret: string, input: {
   const node = loadNode(tx, input.nodeRunId)
   if (!node) return
   if (node.side_effect_policy === 'pure') return
-  if (!BASIS_STATUSES.evidence.includes(node.status)) return
+  if (node.status !== 'done') return
   if (loadResolution(tx, node.node_run_id)) return
   for (const executionId of input.executionIds) {
     const gate = checkSystemEvidence(tx, secret, node, executionId, null)
@@ -636,7 +660,7 @@ export function settleDecisionOutcome(tx: Tx, secret: string, input: {
   if (loadResolution(tx, node.node_run_id)) return
   const basis: ResolutionBasis = verdict === 'applied' ? 'decision' : 'verified_none'
   if (!BASIS_STATUSES[basis].includes(node.status)) return
-  const declared = (payload['evidence_source'] as EvidenceSource | undefined) ?? null
+  const declared = payload['evidence_source'] === 'tool_result' ? 'tool_result' : null
   for (const id of evidenceIds) {
     if (typeof id !== 'string' || id === '') {
       throw new OrchError('RESOLUTION_NOT_AVAILABLE', '裁决引用的证据 ID 不是字符串', {
