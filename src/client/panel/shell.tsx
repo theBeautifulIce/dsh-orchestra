@@ -94,7 +94,7 @@ export function PanelShell(props: PanelShellProps) {
 const appStyle = { minHeight: '100vh', display: 'flex', background: COLOR.canvas, color: COLOR.ink, fontSize: FONT_PX.body, lineHeight: 1.55 } as const
 const sidebarStyle = { width: 236, flex: '0 0 236px', padding: '22px 14px', boxSizing: 'border-box' as const, background: COLOR.sidebar, borderRight: `1px solid ${COLOR.line}` }
 const brandStyle = { fontSize: 16, fontWeight: 700, padding: '4px 10px 22px' } as const
-const navButtonStyle = { minHeight: 40, padding: '0 12px', border: 0, borderRadius: 7, textAlign: 'left' as const, background: 'transparent', color: COLOR.ink, font: `500 ${FONT_PX.menu}px system-ui, sans-serif`, cursor: 'pointer' }
+const navButtonStyle = { minHeight: 40, padding: '0 12px', border: 0, borderRadius: 7, textAlign: 'left' as const, background: 'transparent', color: COLOR.ink, fontFamily: 'system-ui, sans-serif', fontSize: FONT_PX.menu, fontWeight: 500, cursor: 'pointer' }
 const activeNavStyle = { background: '#e9edf2', fontWeight: 700 } as const
 const headerStyle = { height: 58, padding: '0 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.menu } as const
 const noticeStyle = { padding: '10px 28px', background: '#fff8e9', color: COLOR.warning, borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.helper } as const

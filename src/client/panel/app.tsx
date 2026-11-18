@@ -7,6 +7,7 @@ import type { EventStream, StreamStatus } from '../api/sse.ts'
 import { PanelShell, type PanelRoute } from './shell.tsx'
 import { DecisionInbox } from './decision-inbox.tsx'
 import { MemoryPanel } from './memory-panel.tsx'
+import { SettingsScreen } from './settings-screen.tsx'
 import { UnverifiedEffects } from './unverified-effects.tsx'
 import { WorkflowCanvas } from './workflow-canvas.tsx'
 import { WorkflowListScreen } from './workflow-list.tsx'
@@ -71,6 +72,9 @@ export function PanelApp(props: PanelAppProps) {
   } else if (route === 'memory') {
     screen = props.additionalScreens?.memory
       ?? <MemoryPanel api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} />
+  } else if (route === 'settings') {
+    screen = props.additionalScreens?.settings
+    ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={props.snapshotStale} streamStatus={streamStatus} />
   } else if (route === 'workflows') {
     screen = workflowId
       ? <WorkflowCanvas api={api} workflowId={workflowId} onBack={() => setWorkflowId(null)} reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} />
