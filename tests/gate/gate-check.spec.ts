@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
 import { auditBindingOf, auditConclusionOf, bodyConclusionOf, candidateEntries, checkBodyEvidenceTable, checkBodyInvariants, proseVerdictClashes, verifyGateRecord } from '../../scripts/gate-check.ts'
 
-import { GATE_SPECS, DEFAULT_GATE_PATHS } from '../../scripts/gate-check.ts'
+import { GATE_SPECS, DEFAULT_GATE_PATHS, defaultGatePaths } from '../../scripts/gate-check.ts'
 
 const read = () => readFileSync(join(process.cwd(), 'docs/gates/G1.md'), 'utf8')
 const readG2 = () => readFileSync(join(process.cwd(), 'docs/gates/G2.md'), 'utf8')
@@ -82,6 +82,12 @@ describe('门记录校验', { timeout: 30000 }, () => {
 
   it('无 json 块时直接报找不到', () => {
     expect(() => check('# 空记录\n')).toThrow(/找不到 GateArtifact/)
+  })
+
+  it('正式记录路径为 G5 时拒绝 G4 的 GateArtifact', () => {
+    const text = readFileSync(join(process.cwd(), GATE_SPECS.G4!.gateFile), 'utf8')
+    expect(() => verifyGateRecord(text, { allowDirty: true, path: GATE_SPECS.G5!.gateFile }))
+      .toThrow(/门记录路径与 GateArtifact 门号不符/)
   })
 
   it('必过项被截短时指名清单不符（审计 M4）', () => {
@@ -1753,21 +1759,58 @@ describe('G4 注册固定（审计 P2）', () => {
     expect(G4.evidenceMap['G4-06']).toEqual(['ev-g4-06', 'ev-g4-14'])
     expect(G4.evidenceFiles['ev-g4-14']).toBe('tests/integration/workflow-commands.spec.ts')
   })
+})
 
-  it('默认门列表覆盖 G1–G4，注册新门不能漏出默认检查', () => {
+describe('默认门链', () => {
+  it('默认门链至少包含 G1–G4，并纳入所有已落盘的登记门', () => {
+    const root = process.cwd()
+    const paths = defaultGatePaths(root)
     expect(DEFAULT_GATE_PATHS).toEqual([
       'docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md',
     ])
-    // 注册了新门、门记录文件一旦落盘就必须进入默认检查；门记录还没签（G5.md 不存在）时不强制
-    for (const gate of Object.keys(GATE_SPECS)) {
-      const gateFile = GATE_SPECS[gate]!.gateFile
-      if (existsSync(join(process.cwd(), gateFile))) {
-        expect(DEFAULT_GATE_PATHS).toContain(gateFile)
-      }
+    expect(paths.slice(0, 4)).toEqual(DEFAULT_GATE_PATHS)
+    for (const { gateFile } of Object.values(GATE_SPECS)) {
+      if (existsSync(join(root, gateFile))) expect(paths).toContain(gateFile)
     }
-    // 默认门列表里的每一项都必须真实存在
-    for (const path of DEFAULT_GATE_PATHS) {
-      expect(existsSync(join(process.cwd(), path))).toBe(true)
+    for (const path of paths) expect(existsSync(join(root, path))).toBe(true)
+  })
+
+  it('G5 落盘后进入默认门链，删除已提交的 G5 时默认校验失败', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gate-default-chain-'))
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: root })
+    const commit = (message: string) => {
+      git('add', '--all')
+      git('-c', 'user.name=gate-test', '-c', 'user.email=gate-test@example.com', 'commit', '-q', '--no-gpg-sign', '-m', message)
+    }
+    const g5 = GATE_SPECS.G5!.gateFile
+    const g5Path = join(root, g5)
+    const fullChain = [...DEFAULT_GATE_PATHS, g5]
+
+    try {
+      git('init', '-q')
+      mkdirSync(join(root, 'docs/gates'), { recursive: true })
+      for (const path of DEFAULT_GATE_PATHS) writeFileSync(join(root, path), '# 门记录\n')
+      commit('G1 to G4')
+      expect(defaultGatePaths(root)).toEqual(DEFAULT_GATE_PATHS)
+
+      writeFileSync(g5Path, '# G5 门记录\n')
+      expect(defaultGatePaths(root)).toEqual(fullChain)
+      commit('add G5')
+      expect(defaultGatePaths(root)).toEqual(fullChain)
+
+      rmSync(g5Path)
+      expect(defaultGatePaths(root)).toEqual(fullChain)
+      commit('delete G5')
+      expect(defaultGatePaths(root)).toEqual(fullChain)
+
+      const cli = spawnSync(process.execPath, ['--no-warnings', join(process.cwd(), 'scripts/gate-check.ts')], {
+        cwd: root,
+        encoding: 'utf8',
+      })
+      expect(cli.status).toBe(1)
+      expect(cli.stderr).toMatch(/门检查失败（docs\/gates\/G5\.md）：ENOENT/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })

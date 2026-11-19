@@ -14,6 +14,8 @@
 
 首轮从 `be2f2b4` 开始复核历史问题和 G5 全部 73 项，见 [S5 第 1 轮独立审计](audits/S5-independent-audit-round1.md)。第二轮从 `a21e813` 开始，范围为成果版本切换、15 项定向验收与前置门证据漂移。冻结候选、裁决和遗留计数以 [S5 第 2 轮独立审计](audits/S5-independent-audit-round2.md) 为准。[G5 复核矩阵](reviews/S5-g5-item-map.md) 给出逐项复现入口与证据文件。
 
+G1–G5 签署依赖的专项从 `01b3571` 开始。候选范围、默认联检与五道门各自的技术裁决见 [S1 第 73 轮](audits/S1-independent-audit-round73.md)、[S2 第 74 轮](audits/S2-independent-audit-round74.md)、[S3 第 25 轮](audits/S3-independent-audit-round25.md)、[S4 第 5 轮](audits/S4-independent-audit-round5.md)及 [S5 第 3 轮](audits/S5-independent-audit-round3.md)。
+
 ### 历史设计审计
 
 | 轮次 | 审的范围 | 结论 | 致命 | 加固 | 小项 | 这一轮挖出来的主要性质 |

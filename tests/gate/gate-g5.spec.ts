@@ -4,7 +4,9 @@
 //   docs/superpowers/plans/2026-11-12-dsh-orchestra-s5-panel-memory.md Task16 行 2212-2325。
 // 哈希口径以 scripts/gate-check.ts 的门检查实现为权威，本文件逐一对拍。
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -121,7 +123,7 @@ describe('G5 门规格注册（scripts/gate-check.ts）', () => {
     }
   });
 
-  it('默认门列表仍只有 G1-G4，G1-G4 规格逐字段未变', () => {
+  it('固定起始列表为 G1–G4，且前四道门仍使用原基线、前序门、路径和结论要求', () => {
     expect(DEFAULT_GATE_PATHS).toEqual([
       'docs/gates/G1.md',
       'docs/gates/G2.md',
@@ -280,6 +282,61 @@ describe('哈希原像（门检查脚本口径）', () => {
 });
 
 describe('哈希口径对拍（scripts/gate-check.ts ↔ src/core/gate-artifact.ts）', () => {
+  it('依次提交 G1–G5 正式记录及修改 G5 正文时，五道门的候选和哈希保持稳定', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gate-sign-chain-'));
+    const git = (...args: string[]): string => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    const write = (path: string, text: string) => writeFileSync(join(root, path), text + '\n');
+    const commit = (message: string) => {
+      git('add', '--all');
+      git('-c', 'user.name=gate-test', '-c', 'user.email=gate-test@example.com', 'commit', '-q', '--no-gpg-sign', '-m', message);
+    };
+    const evidence = 'docs/gates/evidence/G5/Q-01.md';
+    const note = 'docs/gates/G5-notes.md';
+    const code = 'code.ts';
+
+    try {
+      git('init', '-q');
+      git('config', 'core.autocrlf', 'false');
+      mkdirSync(join(root, 'docs/gates/evidence/G5'), { recursive: true });
+      write(evidence, '# 初版证据');
+      write(code, 'export const version = 0;');
+      commit('base');
+      const scopeBase = git('rev-parse', 'HEAD');
+      write(code, 'export const version = 1;');
+      commit('candidate');
+
+      const gateSpecs = ['G1', 'G2', 'G3', 'G4', 'G5'].map((gate) => GATE_SPECS[gate]!);
+      const snapshots = () => gateSpecs.map(({ gateFile, excludes }) => {
+        const { paths, files } = candidateEntries(root, { scopeBase, excludes });
+        return { gateFile, paths, files, candidateHash: candidateHashOf(files), scopeHash: changeScopeHashOf(paths) };
+      });
+      const beforeRecords = snapshots();
+      for (const { paths } of beforeRecords) expect(paths).toEqual([code]);
+
+      for (const { gateFile } of gateSpecs) {
+        write(gateFile, '# 门记录 ' + gateFile);
+        commit('add ' + gateFile);
+        expect(snapshots(), '提交 ' + gateFile).toEqual(beforeRecords);
+      }
+      write(g5.gateFile, '# G5 正文修订');
+      commit('amend G5 record body');
+      expect(snapshots(), '修改 G5 正文').toEqual(beforeRecords);
+
+      write(note, '# 旁注');
+      write(evidence, '# 修订证据');
+      commit('change adjacent documentation and evidence');
+      for (const after of snapshots()) {
+        const before = beforeRecords.find(({ gateFile }) => gateFile === after.gateFile)!;
+        expect(after.paths, after.gateFile).toEqual([code, note, evidence]);
+        expect(after.files.map(({ path }) => path), after.gateFile).toEqual(after.paths);
+        expect(after.candidateHash, after.gateFile).not.toBe(before.candidateHash);
+        expect(after.scopeHash, after.gateFile).not.toBe(before.scopeHash);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   // 这个用例要对候选集里每个文件跑一次 git show，串行子进程多；全量并发跑时默认 5 秒会超时
   it('G5 真实候选清单：candidate_hash 与 change_scope_hash 两边一致', () => {
     const { paths, files } = candidateEntries(process.cwd(), g5);
