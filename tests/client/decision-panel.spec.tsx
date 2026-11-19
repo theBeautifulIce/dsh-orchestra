@@ -5,6 +5,7 @@ import { createApiClient, type FetchLike } from '../../src/client/api/client.ts'
 import { createDecisionCommandsApi, DECISION_COMMAND_KINDS } from '../../src/client/api/decision-commands.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { DecisionInbox, sortDecisions } from '../../src/client/panel/decision-inbox.tsx'
+import { PanelShell } from '../../src/client/panel/shell.tsx'
 import { UnverifiedEffects, VERIFY_BANNER } from '../../src/client/panel/unverified-effects.tsx'
 import { createFakeService, decisionView, effectView, page, renderPanel, type FakeQuery, type FakeReply } from './harness.ts'
 
@@ -28,32 +29,40 @@ function panelService(handler: (query: FakeQuery) => FakeReply) {
 }
 
 describe('待你决定屏的排序', () => {
-  it('按服务端给的 priority 降序排决定，同 priority 按创建时间降序', async () => {
+  it('Q-10 结果不一致只由人工处理，即使旧记录有截止时间也不显示自动收口时间', async () => {
+    const { api } = panelService(() => ({ ok: true, data: page([decisionView({ kind: 'report_contradicted',
+      expires_at: '2026-11-21T00:00:00.000Z', expiry_effect: 'auto_resolve', allowed_resolutions: [] })]) }))
+    const view = await renderPanel(<DecisionInbox api={api} />)
+    expect(view.text()).toContain('仅由人工处理，系统不会自动收口')
+    expect(view.text()).not.toContain('按已记录的规则自动处理')
+    view.unmount()
+  })
+  it('按服务端给的 priority 降序排决定，同 priority 先显示等待较久的', async () => {
     const items = [
       decisionView({ decision_id: 'd-low', kind: 'audit_result', priority: 'low', created_at: '2026-11-17T12:00:00.000Z' }),
       decisionView({ decision_id: 'd-old', kind: 'verify_human', priority: 'high', created_at: '2026-11-17T09:00:00.000Z' }),
       decisionView({ decision_id: 'd-new', kind: 'pre_execution', priority: 'high', created_at: '2026-11-17T11:00:00.000Z' }),
     ]
-    expect(sortDecisions(items).map((item) => item.decision_id)).toEqual(['d-new', 'd-old', 'd-low'])
+    expect(sortDecisions(items).map((item) => item.decision_id)).toEqual(['d-old', 'd-new', 'd-low'])
 
     const { api } = panelService(() => ({ ok: true, data: page(items) }))
     const view = await renderPanel(<DecisionInbox api={api} />)
     await view.flush()
-    expect(view.findAll('article h2').map((node) => node.textContent)).toEqual(['执行前确认', '人工核验', '结果复核'])
+    expect(view.findAll('article h2').map((node) => node.textContent)).toEqual(['人工核验', '执行前确认', '结果复核'])
   })
 
-  it('服务端没给 priority 时按创建时间降序，界面上不显示编造的优先级', async () => {
+  it('服务端没给 priority 时先显示等待较久的，界面上不显示编造的优先级', async () => {
     const items = [
       decisionView({ decision_id: 'd-old', kind: 'verify_human', priority: null, created_at: '2026-11-17T09:00:00.000Z' }),
       decisionView({ decision_id: 'd-new', kind: 'pre_execution', priority: null, created_at: '2026-11-17T11:00:00.000Z' }),
     ]
-    expect(sortDecisions(items).map((item) => item.decision_id)).toEqual(['d-new', 'd-old'])
+    expect(sortDecisions(items).map((item) => item.decision_id)).toEqual(['d-old', 'd-new'])
 
     const { api } = panelService(() => ({ ok: true, data: page(items) }))
     const view = await renderPanel(<DecisionInbox api={api} />)
     await view.flush()
     expect(view.text()).not.toContain('优先级')
-    expect(view.findAll('article h2').map((node) => node.textContent)).toEqual(['执行前确认', '人工核验'])
+    expect(view.findAll('article h2').map((node) => node.textContent)).toEqual(['人工核验', '执行前确认'])
   })
 })
 
@@ -118,7 +127,7 @@ describe('待你决定屏的交互', () => {
     })
     const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
     await view.flush()
-    const resolveButton = view.findAll('button[aria-label="按 continue 处理"]')[0]
+    const resolveButton = view.findAll('button[aria-label="按 continue 处理"]').find((button) => button.closest('article')?.textContent?.includes('执行前确认'))
     expect(resolveButton).toBeDefined()
     await view.click(resolveButton!)
     await view.flush()
@@ -128,8 +137,50 @@ describe('待你决定屏的交互', () => {
       decisionId: 'd1',
       revision: 1,
       resolution: 'continue',
-      actor: { kind: 'human', id: 'panel' },
     })
+    expect(resolves[0]!.body).not.toHaveProperty('actor')
+  })
+
+  it('Q-15 / Q-20 高风险点选先取得挑战，连接过期禁发确认，恢复后只用原请求编号确认', async () => {
+    let readFails = false
+    const { api, commands, posts } = panelService(({ path }) => {
+      if (path === '/v1/decisions') {
+        if (readFails) throw new Error('lost connection')
+        return { ok: true, data: page([decisionView({ decision_id: 'high', kind: 'pre_execution',
+          allowed_resolutions: ['approved'], content_hash: 'original-content', confirm_required: true })]) }
+      }
+      if (posts.length === 1) return { ok: false, error: { code: 'CONFIRMATION_REQUIRED', message: '请确认',
+        retryable: false, details: { confirm_challenge: 'challenge-token' } } }
+      return { ok: true, data: { decisionId: 'high', revision: 2 } }
+    })
+    const render = (connected: boolean, snapshotStale: boolean) => <PanelShell activeRoute="decisions" onNavigate={() => {}}
+      serviceConnected={connected} snapshotStale={snapshotStale}><DecisionInbox api={api} commands={commands} /></PanelShell>
+    const view = await renderPanel(render(true, false))
+    const find = (label: string) => view.findAll('button').find((button) => button.textContent === label) as HTMLButtonElement
+    await view.click(find('批准执行'))
+    expect(posts).toHaveLength(1)
+    const preflight = posts[0]!.body
+    expect(preflight).toMatchObject({ decisionId: 'high', revision: 1, resolution: 'approved', contentHash: 'original-content' })
+    expect(preflight).not.toHaveProperty('confirm_challenge')
+    expect(view.text()).toContain('确认批准执行？')
+
+    readFails = true
+    await view.rerender(render(false, true))
+    await view.click(find('刷新'))
+    expect(view.text()).toContain('执行前确认')
+    expect(find('批准执行').disabled).toBe(true)
+    expect(find('确认处理').disabled).toBe(true)
+    await view.click(find('确认处理'))
+    expect(posts).toHaveLength(1)
+
+    readFails = false
+    await view.rerender(render(true, false))
+    await view.click(find('刷新'))
+    expect(find('确认处理').disabled).toBe(false)
+    await view.click(find('确认处理'))
+    expect(posts).toHaveLength(2)
+    expect(posts[1]!.body).toEqual({ ...preflight, confirm_challenge: 'challenge-token' })
+    view.unmount()
   })
 
   it('服务端没给可选项时处理按钮禁用，并说明缺哪些字段', async () => {

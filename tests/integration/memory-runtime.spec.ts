@@ -9,11 +9,13 @@ import { TEST_SECRET, countOf, freshLedger } from '../fixtures/ledger.ts'
 import { inTx } from '../../src/infra/db/tx.ts'
 import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { findMemoryNode, memoryGraphOrder } from '../../src/core/memory-graph-schema.ts'
+import { OrchError } from '../../src/core/errors.ts'
 import type { MemoryItemInput } from '../../src/core/memory-canonical.ts'
 import { startMemoryRun } from '../../src/service/commands/memory.ts'
 import { resolveMemoryApproval } from '../../src/service/commands/memory-approval.ts'
 import { inspectMemoryRecovery, resolveMemoryRecovery } from '../../src/service/commands/memory-recovery.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
+import { listUnverifiedEffects } from '../../src/service/queries/effects.ts'
 import {
   createMemoryPorts,
   type MemoryJudge,
@@ -556,6 +558,7 @@ describe('记忆 run 运行驱动', () => {
       writeMemory: async () => {
         writes += 1
         if (scenario === 'lost_receipt') throw new Error('写入后连接断开')
+        if (scenario === 'mismatched_snapshot') throw new OrchError('MEMORY_APPLY_CONFLICT', '外部写端有同键不同哈希记录')
         return { applied_count: 1, skipped_count: 0, applied_item_ids: [] }
       },
     })
@@ -569,7 +572,7 @@ describe('记忆 run 运行驱动', () => {
       withTx(db, (tx) => {
         const trigger = tx.get<{ sql: string }>("SELECT sql FROM sqlite_master WHERE name = 'memory_items_proposal_immutable_after_approval'")
         tx.run('DROP TRIGGER memory_items_proposal_immutable_after_approval')
-        tx.run("UPDATE memory_items SET title = '批准后遭篡改的标题' WHERE batch_id = ?", [started.batch_id])
+        tx.run("UPDATE memory_items SET content = '批准后遭篡改的正文' WHERE batch_id = ?", [started.batch_id])
         tx.run(trigger!.sql)
       })
       const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: LATER })
@@ -607,6 +610,10 @@ describe('记忆 run 运行驱动', () => {
       batch_id: string; node_run_id: string
     }) => ({ ...scope, stopped_at: LATER, entries: [] }) }
     const proof = await inspectMemoryRecovery(recovery, started.batch_id)
+    expect(listUnverifiedEffects(db, { run_id: started.memory_run_id }).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ node_run_id: proof.node_run_id, stopped_at: proof.stopped_at, decision_id: proof.decision_id,
+        evidence: proof.evidence_id, side_effect_verified_none: false, resolved: false }),
+    ]))
     resolveMemoryRecovery(recovery, actor, {
       batch_id: started.batch_id, decision_id: proof.decision_id, revision: proof.revision,
       evidence_id: proof.evidence_id, stopped_at: proof.stopped_at,

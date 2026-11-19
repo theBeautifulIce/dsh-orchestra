@@ -2,13 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { TEST_SECRET, countOf, freshLedger } from '../fixtures/ledger.ts'
 import { inTx } from '../../src/infra/db/tx.ts'
 import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
-import type { MemoryItemInput } from '../../src/core/memory-canonical.ts'
+import { contentHash, type MemoryItemInput } from '../../src/core/memory-canonical.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 import type { ClockProvider } from '../../src/core/clock.ts'
 import { startMemoryRun } from '../../src/service/commands/memory.ts'
 import { resolveMemoryApproval } from '../../src/service/commands/memory-approval.ts'
 import { sweepExpiredLeases } from '../../src/service/commands/lease.ts'
 import { createMemoryPorts, type MemoryJudge, type MemoryWriteGoverned } from '../../src/service/commands/memory-ports.ts'
-import { advanceMemoryRuntime, type MemoryRuntimeDeps } from '../../src/service/commands/memory-runtime.ts'
+import { advanceMemoryRuntime, createMemoryRuntime, type MemoryRuntimeDeps } from '../../src/service/commands/memory-runtime.ts'
+import { createMemoryHost } from '../../src/service/memory-host.ts'
 
 const NOW = '2026-11-18T03:00:00.000Z'
 const LATER = '2026-11-18T04:00:00.000Z'
@@ -55,13 +57,13 @@ function seedSourceRun(db: Db, runId = SOURCE_RUN, status = 'succeeded'): void {
   })
 }
 
-function startRun(db: Db, requestKey = 'req_1') {
-  seedSourceRun(db)
+function startRun(db: Db, requestKey = 'req_1', sourceRunId = SOURCE_RUN) {
+  seedSourceRun(db, sourceRunId)
   return startMemoryRun(db, {
-    source_run_id: SOURCE_RUN,
+    source_run_id: sourceRunId,
     reason: '整理这次任务的记忆',
     request_key: requestKey,
-    operation_id: OPERATION_ID,
+    operation_id: sourceRunId === SOURCE_RUN ? OPERATION_ID : uuidv7(),
     now: NOW,
   })
 }
@@ -293,6 +295,212 @@ describe('记忆运行时的租约与异步时间语义', () => {
       'mem_prepare',
     )
     expect(lease?.lease_id).toBeNull()
+  })
+
+  it.each([
+    { scenario: '属主变更后的成功回执', code: 'STALE_GENERATION', wrote: true },
+    { scenario: '租约到期后的零写入回执', code: 'LEASE_EXPIRED', wrote: false },
+  ])('$scenario 不改变账本，由写入端权威对账恢复', async ({ code, wrote }) => {
+    const { db } = freshLedger()
+    const started = startRun(db)
+    const actor = { kind: 'human', id: 'tester' } as const
+    const approved = item('item_1')
+    const appliedId = 'memitem_1'
+    let writeCalls = 0
+    let wallClockMs = Date.parse(NOW)
+    const clock: ClockProvider = {
+      bootId: BOOT,
+      sample: () => ({ bootId: BOOT, wallClockMs, monotonicNs: 0 }),
+      decide: () => ({ kind: 'pending', remainingMs: 1000 }),
+    }
+    let enteredWrite!: () => void
+    const inFlight = new Promise<void>((resolve) => { enteredWrite = resolve })
+    let releaseReceipt!: () => void
+    const receiptReady = new Promise<void>((resolve) => { releaseReceipt = resolve })
+    const runtime = createMemoryRuntime({
+      db, secret: TEST_SECRET, clock, now: () => new Date(wallClockMs).toISOString(),
+      prepareItems: async () => ({ items: [approved] }),
+      judge: async () => judgeBody('approve', ['item_1']),
+      writer: {
+        async writeMemory() {
+          writeCalls++
+          enteredWrite()
+          await receiptReady
+          return wrote
+            ? { applied_count: 1, skipped_count: 0, applied_item_ids: [appliedId] }
+            : { outcome: 'not_written' }
+        },
+        async fenceAndInspect(scope) {
+          return { ...scope, stopped_at: new Date(wallClockMs).toISOString(),
+            entries: wrote ? [{ client_key: approved.client_key, content_hash: contentHash(approved), applied_item_id: appliedId }] : [] }
+        },
+      },
+    })
+    await runtime.advance({ memory_run_id: started.memory_run_id })
+    const waiting = one<{ decision_id: string }>(db, 'SELECT decision_id FROM memory_batches WHERE batch_id = ?', started.batch_id)
+    inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+      batch_id: started.batch_id, decision_id: waiting!.decision_id, resolution: 'approved', now: NOW, actor,
+    }))
+    const advance = runtime.advance({ memory_run_id: started.memory_run_id })
+    await inFlight
+    const applyNode = nodeRunId(db, started.memory_run_id, 'mem_apply')!
+    if (wrote) db.raw.prepare('UPDATE node_runs SET owner_epoch = owner_epoch + 1 WHERE node_run_id = ?').run(applyNode)
+    else wallClockMs += 31_000
+    releaseReceipt()
+    await expect(advance).rejects.toMatchObject({ code, details: { ownership_lost: true } })
+    expect(nodeStatus(db, started.memory_run_id, 'mem_apply')).toBe('started')
+    expect(one(db, 'SELECT status, applied_count, error_code FROM memory_batches WHERE batch_id = ?', started.batch_id))
+      .toEqual({ status: 'applying', applied_count: 0, error_code: null })
+    expect(one(db, 'SELECT status, applied_item_id FROM memory_items WHERE batch_id = ?', started.batch_id))
+      .toEqual({ status: 'approved', applied_item_id: null })
+    expect(all(db, "SELECT type FROM node_run_events WHERE node_run_id = ? AND type = 'lease_lost'", applyNode))
+      .toEqual([{ type: 'lease_lost' }])
+    await expect(runtime.advance({ memory_run_id: started.memory_run_id })).resolves.toMatchObject({ status: 'blocked' })
+    const proof = await runtime.inspectBatch(started.batch_id)
+    const resolution = wrote ? 'confirm_applied' : 'confirm_not_applied'
+    expect(proof.allowed_resolutions).toEqual([resolution])
+    expect(runtime.resolveRecovery(actor, {
+      batch_id: started.batch_id, decision_id: proof.decision_id, revision: proof.revision,
+      evidence_id: proof.evidence_id, stopped_at: proof.stopped_at, resolution, operation_id: uuidv7(),
+    })).toMatchObject({ status: wrote ? 'confirmed_applied' : 'confirmed_not_applied' })
+    if (wrote) {
+      await expect(runtime.advance({ memory_run_id: started.memory_run_id }))
+        .resolves.toMatchObject({ terminal: 'succeeded', batch_status: 'applied' })
+    }
+    expect(writeCalls).toBe(1)
+  })
+
+  it('宿主插件回执哈希冲突保留 MEMORY_APPLY_CONFLICT，等待权威对账而不重写', async () => {
+    const { db } = freshLedger()
+    const started = startRun(db)
+    const approved = item('item_1')
+    let writes = 0
+    const host = createMemoryHost(db, TEST_SECRET, {
+      clock: {
+        bootId: BOOT,
+        sample: () => ({ bootId: BOOT, wallClockMs: Date.parse(NOW), monotonicNs: 0 }),
+        decide: () => ({ kind: 'pending', remainingMs: 1000 }),
+      },
+      prepareItems: async () => ({ items: [approved] }),
+      judge: async () => judgeBody('approve', ['item_1']),
+      plugin: {
+        protocol: 1,
+        async writeMemory(input) {
+          writes++
+          expect(input.items).toEqual([{ ...approved, content_hash: contentHash(approved) }])
+          return [{ client_key: approved.client_key, content_hash: '0'.repeat(64), applied_item_id: 'external-id' }]
+        },
+        async fenceAndInspect(scope) {
+          return { ...scope, stopped_at: new Date().toISOString(),
+            entries: [{ client_key: approved.client_key, content_hash: contentHash(approved), applied_item_id: 'external-id' }] }
+        },
+      },
+    }, (error) => { throw error })
+    try {
+      host.resume(NOW)
+      await expect.poll(() => nodeStatus(db, started.memory_run_id, 'mem_confirm')).toBe('blocked_pre')
+      const waiting = one<{ decision_id: string }>(db, 'SELECT decision_id FROM memory_batches WHERE batch_id = ?', started.batch_id)
+      inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+        batch_id: started.batch_id, decision_id: waiting!.decision_id, resolution: 'approved', now: NOW,
+        actor: { kind: 'human', id: 'tester' },
+      }))
+      await expect.poll(() => {
+        host.resume(NOW)
+        return nodeStatus(db, started.memory_run_id, 'mem_apply')
+      }).toBe('indeterminate_side_effect')
+      const event = one<{ payload_redacted: string }>(db, "SELECT payload_redacted FROM events WHERE run_id = ? AND type = 'memory.apply.outcome_unknown'",
+        started.memory_run_id)
+      expect(JSON.parse(event!.payload_redacted)).toMatchObject({ batch_id: started.batch_id, error_code: 'MEMORY_APPLY_CONFLICT' })
+      expect(one(db, 'SELECT status FROM memory_batches WHERE batch_id = ?', started.batch_id)).toEqual({ status: 'applying' })
+      expect(one(db, 'SELECT status FROM memory_items WHERE batch_id = ?', started.batch_id)).toEqual({ status: 'approved' })
+      host.resume(NOW)
+      await expect(host.inspect(started.batch_id)).resolves.toMatchObject({ allowed_resolutions: ['confirm_applied'] })
+      expect(writes).toBe(1)
+    } finally {
+      await host.close()
+    }
+  })
+
+  it('受控写先拒绝跨 run 批次，再检查批准状态和节点归属', async () => {
+    const { db } = freshLedger()
+    const started = startRun(db)
+    const writeCalls: WriteCall[] = []
+    const deps = makeDeps(db, { writeCalls })
+    await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
+    const waiting = one<{ decision_id: string }>(db, 'SELECT decision_id FROM memory_batches WHERE batch_id = ?', started.batch_id)
+    const scope = {
+      batch_id: started.batch_id, run_id: started.memory_run_id, decision_id: waiting!.decision_id,
+      node_run_id: nodeRunId(db, started.memory_run_id, 'mem_confirm')!, now: NOW,
+    }
+    const neverRenew = () => { throw new Error('拒绝批次时不应续租') }
+    const other = startRun(db, 'req_other', 'source_other')
+    await expect(deps.ports.applyGoverned({ ...scope, batch_id: 'missing' }, neverRenew))
+      .rejects.toMatchObject({ code: 'MEMORY_BATCH_NOT_FOUND' })
+    await expect(deps.ports.applyGoverned({ ...scope, run_id: other.memory_run_id }, neverRenew))
+      .rejects.toMatchObject({ code: 'MEMORY_BATCH_NOT_FOUND' })
+    await expect(deps.ports.applyGoverned(scope, neverRenew)).rejects.toMatchObject({ code: 'MEMORY_BATCH_NOT_APPROVED' })
+    inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+      batch_id: scope.batch_id, decision_id: scope.decision_id, resolution: 'approved', now: NOW,
+      actor: { kind: 'human', id: 'tester' },
+    }))
+    await expect(deps.ports.applyGoverned(scope, neverRenew)).rejects.toMatchObject({ code: 'MEMORY_APPLY_BINDING_INVALID' })
+    expect(writeCalls).toHaveLength(0)
+    expect(one(db, 'SELECT status, apply_node_run_id FROM memory_batches WHERE batch_id = ?', started.batch_id))
+      .toEqual({ status: 'approved', apply_node_run_id: null })
+  })
+
+  it('运行 A 的批准批次拒绝运行 B 的已批准 decision_id', async () => {
+    const { db } = freshLedger()
+    const first = startRun(db)
+    const second = startRun(db, 'req_other', 'source_other')
+    const writeCalls: WriteCall[] = []
+    const deps = makeDeps(db, { writeCalls })
+    const actor = { kind: 'human', id: 'tester' } as const
+    const decisions: string[] = []
+    for (const run of [first, second]) {
+      await advanceMemoryRuntime(deps, { memory_run_id: run.memory_run_id, now: NOW })
+      const decision = one<{ decision_id: string }>(db, 'SELECT decision_id FROM memory_batches WHERE batch_id = ?', run.batch_id)!
+      inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+        batch_id: run.batch_id, decision_id: decision.decision_id, resolution: 'approved', now: NOW, actor,
+      }))
+      decisions.push(decision.decision_id)
+    }
+    const apply = deps.ports.applyGoverned
+    deps.ports.applyGoverned = (scope, renew) => apply({ ...scope, decision_id: decisions[1]! }, renew)
+    await expect(advanceMemoryRuntime(deps, { memory_run_id: first.memory_run_id, now: NOW }))
+      .resolves.toMatchObject({ error_code: 'MEMORY_APPLY_BINDING_INVALID' })
+    expect(writeCalls).toHaveLength(0)
+    expect(all(db, 'SELECT applied_count FROM memory_batches')).toEqual([{ applied_count: 0 }, { applied_count: 0 }])
+  })
+
+  it('同一批次与相同批准哈希重放返回 already_applied，写端仍只调用一次', async () => {
+    const { db } = freshLedger()
+    const started = startRun(db)
+    const writeCalls: WriteCall[] = []
+    const deps = makeDeps(db, { writeCalls })
+    await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
+    const waiting = one<{ decision_id: string }>(db, 'SELECT decision_id FROM memory_batches WHERE batch_id = ?', started.batch_id)
+    inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+      batch_id: started.batch_id, decision_id: waiting!.decision_id, resolution: 'approved', now: NOW,
+      actor: { kind: 'human', id: 'tester' },
+    }))
+    await expect(advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW }))
+      .resolves.toMatchObject({ terminal: 'succeeded', batch_status: 'applied' })
+    expect(one(db, 'SELECT b.source_run_id, b.memory_run_id, i.batch_id, b.decision_id, i.client_key FROM memory_items i'
+      + ' JOIN memory_batches b ON b.batch_id = i.batch_id WHERE i.applied_item_id = ?', 'memitem_item_1')).toEqual({
+      source_run_id: SOURCE_RUN, memory_run_id: started.memory_run_id, batch_id: started.batch_id,
+      decision_id: waiting!.decision_id, client_key: 'item_1',
+    })
+    const events = countOf(db, 'events')
+    const nodeEvents = countOf(db, 'node_run_events')
+    const replay = await deps.ports.applyGoverned({
+      batch_id: started.batch_id, run_id: started.memory_run_id, decision_id: waiting!.decision_id,
+      node_run_id: nodeRunId(db, started.memory_run_id, 'mem_apply')!, now: NOW,
+    }, () => { throw new Error('已应用回执重放无需续租') })
+    expect(replay).toMatchObject({ already_applied: true, applied_count: 0 })
+    expect(writeCalls).toHaveLength(1)
+    expect(countOf(db, 'events')).toBe(events)
+    expect(countOf(db, 'node_run_events')).toBe(nodeEvents)
   })
 
   it('AC4 写不确定不重复：写步骤超时后只调一次写端，走既有不确定/对账路径，再推进也不重写', async () => {

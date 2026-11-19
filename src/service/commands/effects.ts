@@ -14,6 +14,7 @@ import { assertOperationId, runIdempotentCommand } from './idempotency.ts'
 import { type Db, type Tx } from '../../infra/sqlite/driver.ts'
 import { withReadTx } from '../queries/read-tx.ts'
 import { type Actor } from '../decision/approver.ts'
+import type { EffectVerdict } from '../../executor/tools.ts'
 
 /** 幂等回执里的命令身份（附录 §4 步骤 1、§11） */
 const COMMAND_KIND = 'effect.resolve'
@@ -66,6 +67,7 @@ type SettlementNode = {
   node_run_id: string
   run_id: string
   node_id: string
+  workflow_definition_hash: string | null
   attempt: number
   status: string
   revision: number
@@ -114,7 +116,7 @@ type GateFailure = {
   details?: Record<string, unknown>
 }
 
-type GateResult = { ok: true; row: ToolExecution } | { ok: false; failure: GateFailure }
+type GateResult = { ok: true; row: ToolExecution; verdict: EffectVerdict } | { ok: false; failure: GateFailure }
 
 function fail(code: GateFailure['code'], message: string, details?: Record<string, unknown>): { ok: false; failure: GateFailure } {
   return { ok: false, failure: { code, message, details } }
@@ -122,8 +124,9 @@ function fail(code: GateFailure['code'], message: string, details?: Record<strin
 
 function loadNode(tx: Pick<Tx, 'get'>, nodeRunId: string): SettlementNode | undefined {
   return tx.get<SettlementNode>(
-    'SELECT node_run_id, run_id, node_id, attempt, status, revision, side_effect_policy, side_effect_verified_none, stop_evidence'
-    + ' FROM node_runs WHERE node_run_id = ?',
+    'SELECT n.node_run_id, n.run_id, n.node_id, n.attempt, n.status, n.revision, n.side_effect_policy,'
+    + ' n.side_effect_verified_none, n.stop_evidence, r.workflow_definition_hash'
+    + ' FROM node_runs n JOIN runs r ON r.run_id = n.run_id WHERE n.node_run_id = ?',
     [nodeRunId],
   )
 }
@@ -156,8 +159,7 @@ function parsePayload(text: string | null | undefined): Record<string, unknown> 
 }
 
 /**
- * 证据门 E1–E5：系统证据 = tool_executions 行 + 同 attempt 的 tool_finished 节点事件 + 有效事件链。
- * 判定口径只有这一份，人工裁决也走它（附录 §0、§2.1）。
+ * 系统证据须与同一次执行及签名事件链相符。结算还要求宿主核实器为该动作实例签发明确的业务结论。
  */
 function checkSystemEvidence(
   tx: Pick<Tx, 'get' | 'all'>,
@@ -165,6 +167,7 @@ function checkSystemEvidence(
   node: SettlementNode,
   executionId: string,
   source: EvidenceSource | null | undefined,
+  expectedVerdict?: EffectVerdict,
 ): GateResult {
   const row = tx.get<ToolExecution>(
     'SELECT execution_id, node_run_id, attempt, tool, exit_code, stdout_hash, stderr_hash, command_hash, finished_at'
@@ -247,21 +250,46 @@ function checkSystemEvidence(
       source,
     })
   }
-  return { ok: true, row }
+  const proof = matched['effect_proof']
+  if (row.exit_code !== 0 || !proof || typeof proof !== 'object' || Array.isArray(proof)) {
+    return fail('RESOLUTION_NOT_AVAILABLE', '工具执行没有给出可用于结算的业务核实结论', { execution_id: executionId })
+  }
+  const p = proof as Record<string, unknown>
+  const verdict = p['verdict']
+  if ((verdict !== 'applied' && verdict !== 'not_applied') || !node.workflow_definition_hash
+    || p['workflow_definition_hash'] !== node.workflow_definition_hash || p['node_id'] !== node.node_id
+    || p['node_run_id'] !== node.node_run_id || p['run_id'] !== node.run_id || p['attempt'] !== node.attempt
+    || typeof p['verifier_id'] !== 'string' || !p['verifier_id']
+    || typeof p['reference_hash'] !== 'string' || !/^[a-f0-9]{64}$/.test(p['reference_hash'])) {
+    return fail('RESOLUTION_NOT_AVAILABLE', '业务核实结论与当前动作实例不一致', { execution_id: executionId })
+  }
+  if (expectedVerdict !== undefined && verdict !== expectedVerdict) {
+    return fail('RESOLUTION_NOT_AVAILABLE', '证据支持的业务结论与本次结算不同', { execution_id: executionId })
+  }
+  return { ok: true, row, verdict }
 }
 
 export function inspectEffectEvidence(db: Db, secret: string, nodeRunId: string) {
   return withReadTx(db, ({ tx, as_of_seq }) => {
     const node = loadNode(tx, nodeRunId)
     if (!node) throw new OrchError('NOT_FOUND', '没找到目标节点')
-    const evidence: Array<{ evidence_id: string; tool: string; exit_code: number; finished_at: string }> = []
-    if (node.side_effect_policy !== 'pure' && BASIS_STATUSES.evidence.includes(node.status) && !loadResolution(tx, nodeRunId)) {
-      const rows = tx.all<{ execution_id: string }>('SELECT execution_id FROM tool_executions WHERE node_run_id = ? AND attempt = ?'
-        + ' AND finished_at IS NOT NULL ORDER BY tool_seq DESC LIMIT 10', [nodeRunId, node.attempt])
+    const evidence: Array<{ evidence_id: string; tool: string; exit_code: number; finished_at: string; verdict: EffectVerdict }> = []
+    const canConfirmApplied = BASIS_STATUSES.evidence.includes(node.status)
+    const canConfirmNotApplied = BASIS_STATUSES.verified_none.includes(node.status)
+    if (node.side_effect_policy !== 'pure' && (canConfirmApplied || canConfirmNotApplied) && !loadResolution(tx, nodeRunId)) {
+      const rows = tx.all<{ execution_id: string }>(`SELECT t.execution_id FROM tool_executions t
+        WHERE t.node_run_id = ? AND t.attempt = ? AND t.finished_at IS NOT NULL AND t.exit_code = 0 AND EXISTS (
+          SELECT 1 FROM node_run_events n WHERE n.node_run_id = t.node_run_id AND n.type = 'tool_finished'
+          AND CASE WHEN json_valid(n.payload) THEN json_extract(n.payload, '$.execution_id') = t.execution_id
+            AND json_type(n.payload, '$.effect_proof') = 'object' END
+        ) ORDER BY t.tool_seq DESC LIMIT 10`, [nodeRunId, node.attempt])
       for (const row of rows) {
         const gate = checkSystemEvidence(tx, secret, node, row.execution_id, 'run_tool')
-        if (gate.ok && gate.row.finished_at) evidence.push({ evidence_id: row.execution_id, tool: gate.row.tool,
-          exit_code: gate.row.exit_code, finished_at: gate.row.finished_at })
+        if (!gate.ok || !gate.row.finished_at) continue
+        if (gate.verdict === 'applied' ? !canConfirmApplied
+          : !canConfirmNotApplied || Boolean(node.stop_evidence && node.stop_evidence !== row.execution_id)) continue
+        evidence.push({ evidence_id: row.execution_id, tool: gate.row.tool, exit_code: gate.row.exit_code,
+          finished_at: gate.row.finished_at, verdict: gate.verdict })
       }
     }
     return { item: { node_run_id: node.node_run_id, run_id: node.run_id, revision: node.revision, evidence }, as_of_seq }
@@ -526,7 +554,7 @@ function applyEffectCommand(tx: Tx, secret: string, req: EffectResolveRequest): 
 
   // 步骤 5：证据门
   if (req.basis === 'evidence') {
-    const gate = checkSystemEvidence(tx, secret, node, req.evidenceId as string, req.evidenceSource)
+    const gate = checkSystemEvidence(tx, secret, node, req.evidenceId as string, req.evidenceSource, 'applied')
     if (!gate.ok) throw new OrchError(gate.failure.code, gate.failure.message, gate.failure.details)
   }
   if (req.basis === 'decision' && decision) {
@@ -538,8 +566,7 @@ function applyEffectCommand(tx: Tx, secret: string, req: EffectResolveRequest): 
     if (N1_PREFIXES.some((p) => value.startsWith(p))) {
       assertLedgerStopEvidence(tx, secret, node, value)
     } else {
-      // N2：一条证明动作未生效的强证据执行 ID，同样过 E1–E5
-      const gate = checkSystemEvidence(tx, secret, node, value, req.evidenceSource)
+      const gate = checkSystemEvidence(tx, secret, node, value, req.evidenceSource, 'not_applied')
       if (!gate.ok) throw new OrchError(gate.failure.code, gate.failure.message, gate.failure.details)
     }
   }
@@ -619,7 +646,7 @@ function assertDecisionBasis(
         decision_id: decision.decision_id,
       })
     }
-    const gate = checkSystemEvidence(tx, secret, node, id, declared)
+    const gate = checkSystemEvidence(tx, secret, node, id, declared, 'applied')
     if (!gate.ok) throw new OrchError(gate.failure.code, gate.failure.message, gate.failure.details)
   }
 }
@@ -639,7 +666,7 @@ export function settleEvidenceFromReport(tx: Tx, secret: string, input: {
   if (node.status !== 'done') return
   if (loadResolution(tx, node.node_run_id)) return
   for (const executionId of input.executionIds) {
-    const gate = checkSystemEvidence(tx, secret, node, executionId, null)
+    const gate = checkSystemEvidence(tx, secret, node, executionId, null, 'applied')
     if (!gate.ok) continue
     writeResolution(tx, secret, {
       node,
@@ -661,24 +688,22 @@ export function settleEvidenceFromReport(tx: Tx, secret: string, input: {
 export function settleDecisionOutcome(tx: Tx, secret: string, input: {
   decisionId: string
   now: string
-}): void {
+}): boolean {
   const decision = loadDecision(tx, input.decisionId)
-  if (!decision) return
-  if (decision.kind !== 'verify_human' && decision.kind !== 'action_overrun') return
-  if (!decision.node_run_id) return
-  if (decision.status !== 'resolved' || decision.closed_reason !== 'approved' || !decision.decided_at) return
+  if (!decision) return false
+  if (decision.kind !== 'verify_human' && decision.kind !== 'action_overrun') return false
+  if (!decision.node_run_id) return false
+  if (decision.status !== 'resolved' || decision.closed_reason !== 'approved' || !decision.decided_at) return false
   const payload = parsePayload(decision.payload_json)
   const verdict = payload['effect_verdict']
-  if (verdict !== 'applied' && verdict !== 'not_applied') return
+  if (verdict !== 'applied' && verdict !== 'not_applied') return false
   const evidenceIds = payload['evidence_ids']
-  if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) return
+  if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) return false
   const node = loadNode(tx, decision.node_run_id)
-  if (!node) return
-  if (node.run_id !== decision.run_id) return
-  if (node.side_effect_policy === 'pure') return
-  if (loadResolution(tx, node.node_run_id)) return
+  if (!node || node.run_id !== decision.run_id || node.side_effect_policy === 'pure') return false
+  if (loadResolution(tx, node.node_run_id)) return false
   const basis: ResolutionBasis = verdict === 'applied' ? 'decision' : 'verified_none'
-  if (!BASIS_STATUSES[basis].includes(node.status)) return
+  if (!BASIS_STATUSES[basis].includes(node.status)) return false
   const declared = payload['evidence_source'] === 'tool_result' ? 'tool_result' : null
   for (const id of evidenceIds) {
     if (typeof id !== 'string' || id === '') {
@@ -686,7 +711,7 @@ export function settleDecisionOutcome(tx: Tx, secret: string, input: {
         decision_id: decision.decision_id,
       })
     }
-    const gate = checkSystemEvidence(tx, secret, node, id, declared)
+    const gate = checkSystemEvidence(tx, secret, node, id, declared, verdict)
     if (!gate.ok) throw new OrchError(gate.failure.code, gate.failure.message, gate.failure.details)
   }
   if (basis === 'decision') {
@@ -699,7 +724,7 @@ export function settleDecisionOutcome(tx: Tx, secret: string, input: {
       now: input.now,
       expectedRevision: node.revision,
     })
-    return
+    return true
   }
   // 人工认定「没发生」：029 的 CHECK 让结算行存不了 decision_id，事件里必须带上
   writeResolution(tx, secret, {
@@ -712,4 +737,5 @@ export function settleDecisionOutcome(tx: Tx, secret: string, input: {
     now: input.now,
     expectedRevision: node.revision,
   })
+  return true
 }

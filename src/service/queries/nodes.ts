@@ -2,6 +2,7 @@ import { OrchError } from '../../core/errors.ts'
 import { MODEL_COMPLEXITIES, readModelUse, type ModelAssignment } from '../../executor/model-routing.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { withReadTx, type ReadCtx } from './read-tx.ts'
+import type { EffectVerdict } from '../../executor/tools.ts'
 
 export const NODE_TERMINAL = [
   'done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded',
@@ -54,8 +55,9 @@ export type NodeRunView = {
   declared_effect: string | null
   verified_effect: string | null
   evidence_strength: null
-  evidence_state: 'none' | 'not_required' | 'unverified'
+  evidence_state: 'none' | 'not_required' | 'unverified' | 'settled'
   evidence_state_reason: string | null
+  effect_decision_id?: string | null
   execution_ids: string[]
   execution_count: number
   projection_missing: string[]
@@ -74,13 +76,42 @@ export type NodeRunView = {
 }
 
 type NodeRow = Record<string, unknown> & { node_run_id: string; status: string; run_id: string }
+const NODE_VIEW_SELECT = `SELECT n.*, s.resolution_basis,
+  COALESCE(s.decision_id, (
+    SELECT d.decision_id FROM node_run_events e JOIN decisions d
+    ON d.decision_id = CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.decision_id') END
+    WHERE s.resolution_basis = 'verified_none' AND e.node_run_id = n.node_run_id AND e.type = 'effect.resolved'
+    AND d.run_id = n.run_id AND d.node_run_id = n.node_run_id
+    AND CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.resolved_at') = s.resolved_at
+      AND json_extract(e.payload, '$.stop_evidence') = s.stop_evidence END
+    ORDER BY e.seq DESC LIMIT 1
+  ), n.contradiction_decision_id, (
+    SELECT d.decision_id FROM decisions d WHERE d.run_id = n.run_id AND d.node_run_id = n.node_run_id
+    AND d.kind IN ('verify_human','action_overrun','report_contradicted')
+    ORDER BY d.created_at DESC, d.decision_id DESC LIMIT 1
+  )) AS effect_decision_id,
+  (SELECT a.attestation_id FROM attestations a WHERE a.node_run_id = n.node_run_id AND a.attempt = n.attempt
+    ORDER BY a.created_at DESC, a.attestation_id DESC LIMIT 1) AS attestation_id
+  FROM node_runs n LEFT JOIN unverified_resolutions s ON s.node_run_id = n.node_run_id`
 
-function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], executionIds: string[], model?: NodeRunView['model_assignment'], title?: string): NodeRunView {
+function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], executionIds: string[], model?: NodeRunView['model_assignment'],
+  doc?: { title: string; declaredEffect: EffectVerdict | null }): NodeRunView {
+  const declared = doc?.declaredEffect ?? null
+  const verified = row.resolution_basis === 'verified_none' ? 'not_applied'
+    : row.resolution_basis === 'evidence' || row.resolution_basis === 'decision' ? 'applied' : null
+  const evidenceState = verified ? 'settled' : row.side_effect_policy === 'pure' ? 'not_required'
+    : row.status === 'done' || executionIds.length === 0 ? 'none' : 'unverified'
+  const reasons = {
+    none: '尚无能够核实这次外部操作结果的证据。',
+    not_required: '只读策略不要求外部操作核实证据。',
+    unverified: '已有工具执行记录，外部操作结果仍待核实。',
+    settled: '账本已有结算记录。',
+  }
   return {
     node_run_id: String(row.node_run_id),
     run_id: String(row.run_id),
     node_id: String(row.node_id ?? ''),
-    ...(title ? { title } : {}),
+    ...(doc?.title ? { title: doc.title } : {}),
     node_type: String(row.node_type ?? ''),
     attempt: Number(row.attempt ?? 0),
     status: String(row.status),
@@ -89,16 +120,15 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     revision: Number(row.revision ?? 0),
     side_effect_policy: String(row.side_effect_policy ?? 'compensable'),
     side_effect_verified_none: Number(row.side_effect_verified_none ?? 0) === 1,
-    declared_effect: null,
-    verified_effect: null,
+    declared_effect: declared,
+    verified_effect: verified,
     evidence_strength: null,
-    evidence_state: executionIds.length > 0 ? 'unverified' : 'none',
-    evidence_state_reason: executionIds.length > 0
-      ? '存在工具执行记录，但尚未验证完成事件和事件链，不能作为 strong 证据。'
-      : '没有工具执行记录。',
+    evidence_state: evidenceState,
+    evidence_state_reason: reasons[evidenceState],
+    effect_decision_id: typeof row.effect_decision_id === 'string' ? row.effect_decision_id : null,
     execution_ids: executionIds,
     execution_count: executionIds.length,
-    projection_missing: ['declared_effect', 'verified_effect'],
+    projection_missing: declared === null ? ['declared_effect'] : [],
     attestation_id: typeof row.attestation_id === 'string' ? row.attestation_id : null,
     action_start_source: typeof row.attestation_id === 'string' ? 'human_attested' : null,
     stop_evidence: typeof row.stop_evidence === 'string' ? row.stop_evidence : null,
@@ -147,37 +177,38 @@ function nodeExecutionIds(ctx: ReadCtx, nodeRunId: string, attempt: number): str
 function runDisplay(ctx: ReadCtx, runId: string) {
   const row = ctx.tx.get<{ settling: number; doc_json: string | null }>(
     'SELECT r.settling, w.doc_json FROM runs r LEFT JOIN workflow_versions w'
-    + ' ON w.workflow_id = r.workflow_id AND w.version = r.workflow_version WHERE r.run_id = ?', [runId],
+    + ' ON w.workflow_id = r.workflow_id AND w.version = r.workflow_version'
+    + ' AND (r.workflow_definition_hash IS NULL OR w.content_hash = r.workflow_definition_hash) WHERE r.run_id = ?', [runId],
   )
   if (!row) throw new OrchError('NOT_FOUND', '没找到这次运行', { run_id: runId })
-  const titles = new Map<string, string>()
+  const nodes = new Map<string, { title: string; declaredEffect: EffectVerdict | null }>()
   if (row.doc_json) {
     // A legacy or damaged document cannot supply display labels for the execution facts.
     try {
-      const doc = JSON.parse(row.doc_json) as { nodes?: { node_id?: string; title?: string }[] } | null
+      const doc = JSON.parse(row.doc_json) as { nodes?: { node_id?: string; title?: string; contract?: { declared_effect?: unknown } }[] } | null
       if (Array.isArray(doc?.nodes)) {
         for (const node of doc.nodes) {
-          if (typeof node?.node_id === 'string' && typeof node.title === 'string') titles.set(node.node_id, node.title)
+          if (typeof node?.node_id !== 'string' || typeof node.title !== 'string') continue
+          const declared = node.contract?.declared_effect
+          nodes.set(node.node_id, { title: node.title, declaredEffect: declared === 'applied' || declared === 'not_applied' ? declared : null })
         }
       }
     } catch { /* Keep the persisted node IDs as labels. */ }
   }
-  return { settling: row.settling === 1, titles }
+  return { settling: row.settling === 1, nodes }
 }
 
 export function listNodes(db: Db, runId: string, limit = 100): { items: NodeRunView[]; as_of_seq: number } {
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
   return withReadTx(db, (ctx) => {
-    const { settling, titles } = runDisplay(ctx, runId)
+    const { settling, nodes } = runDisplay(ctx, runId)
     const rows = ctx.tx.all<NodeRow>(
-      'SELECT n.*, (SELECT a.attestation_id FROM attestations a WHERE a.node_run_id = n.node_run_id AND a.attempt = n.attempt '
-      + 'ORDER BY a.created_at DESC, a.attestation_id DESC LIMIT 1) AS attestation_id '
-      + 'FROM node_runs n WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit],
+      NODE_VIEW_SELECT + ' WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit],
     )
     const items = rows.map((row) => toNodeView(
       row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
-      modelAssignment(ctx, row), titles.get(String(row.node_id)),
+      modelAssignment(ctx, row), nodes.get(String(row.node_id)),
     ))
     return { items, as_of_seq: ctx.as_of_seq }
   })
@@ -185,17 +216,13 @@ export function listNodes(db: Db, runId: string, limit = 100): { items: NodeRunV
 
 export function getNodeSnapshot(db: Db, nodeRunId: string): { item: NodeRunView; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
-    const row = ctx.tx.get<NodeRow>(
-      'SELECT n.*, (SELECT a.attestation_id FROM attestations a WHERE a.node_run_id = n.node_run_id AND a.attempt = n.attempt '
-      + 'ORDER BY a.created_at DESC, a.attestation_id DESC LIMIT 1) AS attestation_id '
-      + 'FROM node_runs n WHERE n.node_run_id = ?', [nodeRunId],
-    )
+    const row = ctx.tx.get<NodeRow>(NODE_VIEW_SELECT + ' WHERE n.node_run_id = ?', [nodeRunId])
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个执行节点', { node_run_id: nodeRunId })
-    const { settling, titles } = runDisplay(ctx, row.run_id)
+    const { settling, nodes } = runDisplay(ctx, row.run_id)
     return {
       item: toNodeView(
         row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
-        modelAssignment(ctx, row), titles.get(String(row.node_id)),
+        modelAssignment(ctx, row), nodes.get(String(row.node_id)),
       ),
       as_of_seq: ctx.as_of_seq,
     }

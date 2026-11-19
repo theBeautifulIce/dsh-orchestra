@@ -12,7 +12,7 @@ export type FakeQuery = { path: string; params: URLSearchParams }
 
 export type FakeReply =
   | { ok: true; data: unknown; asOfSeq?: number }
-  | { ok: false; error: { code: string; message: string; retryable: boolean } }
+  | { ok: false; error: { code: string; message: string; retryable: boolean; details?: unknown } }
 
 export type FakeService = {
   fetcher: FetchLike

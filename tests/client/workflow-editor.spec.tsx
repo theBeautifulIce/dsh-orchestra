@@ -7,6 +7,7 @@ import { ApiError } from '../../src/client/api/client.ts'
 import type { OperationRow, WorkflowView } from '../../src/client/api/types.ts'
 import type { UpdateDraftInput, WorkflowCommandsApi } from '../../src/client/api/workflow-commands.ts'
 import { WorkflowEditor } from '../../src/client/panel/workflow-editor.tsx'
+import { PanelShell } from '../../src/client/panel/shell.tsx'
 
 const NOW = '2026-11-17T10:00:00.000Z'
 
@@ -120,6 +121,65 @@ async function clickButton(view: PanelView, label: string): Promise<void> {
 }
 
 describe('流程草稿编辑屏', () => {
+  it('Q-20 过期快照保留草稿和本地编辑，恢复连接后才发送保存与测试', async () => {
+    const writes: string[] = []
+    const commands = fakeCommands({
+      updateWorkflowDraft: async () => {
+        writes.push('save')
+        return { operation_id: 'save', kind: 'workflow.update', replayed: false,
+          result: { revision: 2, changed: false, validation: { errors: [], total: 0, truncated: false } }, receipt: receiptRow('save', 'workflow.update') }
+      },
+      testWorkflow: async () => {
+        writes.push('test')
+        return { revision: 2, passed: true, tested_at: NOW, order: [], issues: { errors: [], total: 0, truncated: false } }
+      },
+    })
+    const workflow = viewFixture()
+    const render = (snapshotStale: boolean) => <PanelShell activeRoute="workflows" onNavigate={() => {}}
+      serviceConnected snapshotStale={snapshotStale}><WorkflowEditor commands={commands} workflow={workflow} onRefresh={() => {}} /></PanelShell>
+    const view = await renderPanel(render(false))
+    await typeText(editorOf(view), EDITED)
+    await view.rerender(render(true))
+    const button = (label: string) => view.findAll('button').find((item) => item.textContent === label) as HTMLButtonElement
+    expect(editorOf(view).value).toBe(EDITED)
+    for (const label of ['保存草稿', '运行结构与模拟流转测试', '确认发布']) {
+      expect(button(label).disabled).toBe(true)
+      await view.click(button(label))
+    }
+    expect(writes).toEqual([])
+    await view.rerender(render(false))
+    await clickButton(view, '保存草稿')
+    await clickButton(view, '运行结构与模拟流转测试')
+    expect(writes).toEqual(['save', 'test'])
+    expect(button('确认发布').disabled).toBe(false)
+    view.unmount()
+  })
+
+  it('只把当前修订的结构与模拟流转测试用于发布闸', async () => {
+    const commands = fakeCommands({
+      testWorkflow: async (_workflowId, revision) => ({
+        revision, passed: true, tested_at: NOW,
+        issues: { errors: [], truncated: false, total: 0 },
+        order: DOC.nodes.map(({ node_id, title, type }) => ({ node_id, title, type })),
+      }),
+    })
+    const workflow = viewFixture()
+    const view = await renderPanel(<WorkflowEditor commands={commands} workflow={workflow} onRefresh={() => {}} />)
+    const publish = () => view.findAll('button').find((button) => button.textContent === '确认发布') as HTMLButtonElement
+
+    expect(publish().disabled).toBe(true)
+    expect(view.text()).toContain('当前草稿须通过结构与模拟流转测试后才能发布')
+    await clickButton(view, '运行结构与模拟流转测试')
+    expect(view.text()).toContain('结构与模拟流转测试通过 · 修订 2')
+    expect(view.text()).toContain('实际工具调用、Agent 执行和交付验收需要在正式运行中验证')
+    expect(publish().disabled).toBe(false)
+
+    const next = viewFixture({ draft: { ...workflow.draft!, revision: 3 } })
+    await view.rerender(<WorkflowEditor commands={commands} workflow={next} onRefresh={() => {}} />)
+    expect(publish().disabled).toBe(true)
+    expect(view.text()).not.toContain('结构与模拟流转测试通过 · 修订 2')
+  })
+
   it('加载草稿 → 改定义 → 保存 → 显示保存回执', async () => {
     const calls: UpdateDraftInput[] = []
     let refreshes = 0

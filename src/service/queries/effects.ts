@@ -20,11 +20,11 @@ export type UnverifiedEffectView = {
   resolved: false
   resolved_at: null
   resolution_basis: null
-  // node_runs 上没有 stopped_at / last_known_phase / evidence 列：读模型不许用 started_at 顶替，
-  // 也不许用布尔伪造证据。要显示必须先补列；这里一律返回 null，由界面标「未知」（附录 §7）。
+  // 实际停止时间只取宿主对账的观察记录。取消请求和签认均不供推断。
   stopped_at?: string | null
   last_known_phase?: string | null
   evidence?: string | null
+  decision_id?: string | null
 }
 
 export type ListEffectsParams = { run_id?: string; limit?: number; cursor?: string; now?: number }
@@ -61,7 +61,12 @@ export function listUnverifiedEffects(db: Db, params: ListEffectsParams = {}): {
     }
     const rows = ctx.tx.all<EffectRow>(
       'SELECT n.run_id, n.node_run_id, n.node_id, n.status, n.side_effect_policy, n.side_effect_verified_none, '
-      + 'n.stop_evidence, n.started_at, n.created_at FROM node_runs n '
+      + 'n.stop_evidence, n.started_at, n.created_at, m.stopped_at, m.evidence_id, '
+      + 'COALESCE(m.abandon_ack_id, m.decision_id, n.contradiction_decision_id, (SELECT d.decision_id FROM decisions d '
+      + 'WHERE d.run_id = n.run_id AND d.node_run_id = n.node_run_id '
+      + "AND d.kind IN ('verify_human','action_overrun','abandon_ack','report_contradicted') "
+      + 'ORDER BY d.created_at DESC, d.decision_id DESC LIMIT 1)) AS decision_id '
+      + 'FROM node_runs n LEFT JOIN memory_write_recoveries m ON m.node_run_id = n.node_run_id '
       + 'WHERE ' + where.join(' AND ')
       + ' ORDER BY COALESCE(n.started_at, n.created_at) DESC, n.node_run_id DESC LIMIT ?',
       [...values, limit + 1],
@@ -83,9 +88,10 @@ export function listUnverifiedEffects(db: Db, params: ListEffectsParams = {}): {
       resolved: false,
       resolved_at: null,
       resolution_basis: null,
-      stopped_at: null,
+      stopped_at: typeof row.stopped_at === 'string' ? row.stopped_at : null,
       last_known_phase: null,
-      evidence: null,
+      evidence: typeof row.evidence_id === 'string' ? row.evidence_id : null,
+      decision_id: typeof row.decision_id === 'string' ? row.decision_id : null,
     }))
     const lastRow = page[page.length - 1]
     const cursor = hasMore && lastRow

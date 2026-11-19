@@ -23,9 +23,10 @@ export type UnverifiedEffectsProps = {
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
   client?: ApiClient
+  onOpenDecision?: (id: string) => void
 }
 
-export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot, client }: UnverifiedEffectsProps) {
+export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot, client, onOpenDecision }: UnverifiedEffectsProps) {
   const [items, setItems] = useState<UnverifiedEffectView[]>([])
   const [cursor, setCursor] = useState<string | undefined>()
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -80,7 +81,7 @@ export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot, client }
     {loading && <p role="status" style={mutedStyle}>正在读取待核实事项…</p>}
     {!loading && !failed && items.length === 0 && <p className="ops-surface ops-empty">{COPY.emptyEffects}</p>}
     <div className="ops-card-grid">
-    {!failed && items.map((effect) => <EffectCard key={effect.node_run_id} effect={effect} developerView={developerView}>
+    {items.map((effect) => <EffectCard key={effect.node_run_id} effect={effect} developerView={developerView} onOpenDecision={onOpenDecision}>
       {client && <EffectEvidenceReview api={api} client={client} nodeId={effect.node_run_id} onResolved={refresh} />}
     </EffectCard>)}
     </div>
@@ -88,9 +89,12 @@ export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot, client }
   </section>
 }
 
-function EffectCard({ effect, developerView, children }: { effect: UnverifiedEffectView; developerView: boolean; children?: React.ReactNode }) {
+function EffectCard({ effect, developerView, children, onOpenDecision }: {
+  effect: UnverifiedEffectView; developerView: boolean; children?: React.ReactNode; onOpenDecision?: (id: string) => void
+}) {
   const level = EFFECT_LABEL[effect.side_effect_policy]
   const age = effect.age_seconds === null ? '时长未知' : `已等待 ${effect.age_seconds} 秒`
+  const decisionId = effect.decision_id
   return <article style={cardStyle}>
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
       <h2 style={cardTitleStyle}>{effect.node_id || '未命名步骤'}</h2>
@@ -103,10 +107,11 @@ function EffectCard({ effect, developerView, children }: { effect: UnverifiedEff
       <dt>核实状态</dt><dd>未验证</dd>
       <dt>已等待</dt><dd>{effect.age_seconds === null ? '时长未知' : `${effect.age_seconds} 秒`}</dd>
       <dt>开始时间</dt><dd>{effect.started_at ? formatDate(effect.started_at) : '没有记录开始时间'}</dd>
+      <dt>已确认停止时间</dt><dd>{effect.stopped_at ? formatDate(effect.stopped_at) : UNKNOWN}</dd>
       <dt>停止记录</dt><dd>{effect.stop_evidence ?? '没有记录停止证据'}</dd>
-      <dt>签认状态</dt><dd>{effect.resolved ? '已有处理记录' : '尚无处理记录'}</dd>
       {developerView && <><dt>节点运行 ID</dt><dd>{effect.node_run_id}</dd></>}
     </dl>
+    {decisionId && onOpenDecision && <button type="button" className="ops-button" onClick={() => onOpenDecision(decisionId)}>查看相关决定</button>}
     {children}
     {developerView && <><div className="ops-table-scroll"><table className="ops-table" style={tableStyle}>
       <thead>
@@ -129,10 +134,10 @@ function EffectCard({ effect, developerView, children }: { effect: UnverifiedEff
           <td>{effect.node_id || '未命名步骤'}</td>
           <td>{UNKNOWN}</td>
           <td>{level ?? <UnknownState value={effect.side_effect_policy} />}</td>
-          <td>{UNKNOWN}</td>
-          <td>{UNKNOWN}</td>
+          <td>{effect.stopped_at ? formatDate(effect.stopped_at) : UNKNOWN}</td>
+          <td>{effect.last_known_phase ?? UNKNOWN}</td>
           <td>未验证</td>
-          <td>{UNKNOWN}</td>
+          <td>{effect.evidence ?? UNKNOWN}</td>
           <td>{age}</td>
           <td>
             <div>{effect.resolved ? '是（已有处理记录）' : '否（尚无处理记录）'}</div>

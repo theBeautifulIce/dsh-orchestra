@@ -20,7 +20,7 @@ export type ListMemoryBatchesParams = { task_id?: string; limit?: number; cursor
 export type ActivityItem = Pick<EventView, 'seq' | 'event_id' | 'type' | 'occurred_at' | 'run_id' | 'node_run_id' | 'decision_id'> & { details?: ExecutionEntry['details'] }
 export type EffectReview = {
   node_run_id: string; run_id: string; revision: number
-  evidence: Array<{ evidence_id: string; tool: string; exit_code: number; finished_at: string }>
+  evidence: Array<{ evidence_id: string; tool: string; exit_code: number; finished_at: string; verdict: 'applied' | 'not_applied' }>
 }
 
 const compact = (params: Record<string, string | number | undefined>) => params

@@ -96,8 +96,12 @@ export function startRun(db: Db, catalog: WorkflowCatalog, p: StartRunParams): S
   if (typeof p.operationId !== 'string' || p.operationId.trim().length === 0) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '起运行必须带 operation_id', {})
   }
+  catalog.requireWorkflowCapability(p.workflowId)
   const prior = replay(db, p.operationId)
-  if (prior) return prior
+  if (prior) {
+    catalog.requireWorkflowCapability(prior.workflow_id)
+    return prior
+  }
   const autonomy = p.autonomy ?? 'autonomous'
   const escalations = validateEscalations(p.escalations)
   let created: CreateRunResult
@@ -117,7 +121,10 @@ export function startRun(db: Db, catalog: WorkflowCatalog, p: StartRunParams): S
   } catch (err) {
     // 并发重放：唯一键冲突时以已提交的那一笔为准，不建第二条任务。
     const raced = replay(db, p.operationId)
-    if (raced) return raced
+    if (raced) {
+      catalog.requireWorkflowCapability(raced.workflow_id)
+      return raced
+    }
     throw err
   }
   return {
@@ -221,17 +228,18 @@ export function startTrustedTaskLocalRun(
   if (typeof p.workflowVersion !== 'string' || p.workflowVersion.trim().length === 0) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '可信启动必须固定 workflow_version', {})
   }
+  catalog.requireWorkflowCapability(p.workflowId)
   // 0) 幂等重放优先于占用检查：重放时任务已经被上一次启动消费掉了
   if (p.allowReplay === true && p.operationId !== undefined) {
     const prior = replayTrustedRun(tx, p.operationId, p.taskId, p.workflowId)
     if (prior) return prior
   }
   // 1) 任务必须存在且在预留态：这是服务端 reserveTask 预留出来的身份
-  const task = tx.get<{ task_id: string; title: string; status: string; current_run_id: string | null }>(
-    'SELECT task_id, title, status, current_run_id FROM tasks WHERE task_id = ?', [p.taskId],
+  const task = tx.get<{ task_id: string; title: string; status: string; current_run_id: string | null; archived_at: string | null }>(
+    'SELECT task_id, title, status, current_run_id, archived_at FROM tasks WHERE task_id = ?', [p.taskId],
   )
   if (!task) throw new OrchError('NOT_FOUND', '预留任务不存在', { task_id: p.taskId })
-  if (task.status !== 'reserved' || task.current_run_id !== null) {
+  if (task.status !== 'reserved' || task.current_run_id !== null || task.archived_at !== null) {
     throw new OrchError('STALE_GENERATION', '预留任务已被占用或不在可绑定状态', {
       task_id: p.taskId, status: task.status,
     })

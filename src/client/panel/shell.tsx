@@ -29,15 +29,15 @@ export type PanelShellProps = {
 }
 
 type CommandsAvailability = { enabled: boolean; reason: string }
-const CommandsEnabledContext = createContext<CommandsAvailability>({ enabled: false, reason: COPY.serviceDown })
+const CommandsEnabledContext = createContext<CommandsAvailability | null>(null)
 
 /** Write controls default to disabled outside a connected panel shell. */
-export function usePanelCommandsEnabled(): boolean {
-  return useContext(CommandsEnabledContext).enabled
+export function usePanelCommandsEnabled(standalone = false): boolean {
+  return useContext(CommandsEnabledContext)?.enabled ?? standalone
 }
 
 export function PanelCommandButton(props: ButtonHTMLAttributes<HTMLButtonElement>) {
-  const { enabled, reason } = useContext(CommandsEnabledContext)
+  const { enabled, reason } = useContext(CommandsEnabledContext) ?? { enabled: false, reason: COPY.serviceDown }
   const { disabled, title, type, ...rest } = props
   return <button
     {...rest}
@@ -89,7 +89,7 @@ export function PanelShell(props: PanelShellProps) {
         </span>
       </header>
       {(!props.serviceConnected || isStale) && <div role="status" style={noticeStyle}>
-        {COPY.staleNotice}。当前页面保留已加载内容，写入操作应由页面禁用。
+        {COPY.staleNotice}。刷新成功后可继续写入。
       </div>}
       <main id="panel-content" style={contentStyle}>{props.children}</main>
     </div>

@@ -4,7 +4,6 @@ import { createConnectedEventStream } from './api/event-stream.ts'
 import type { StreamStatus } from './api/sse.ts'
 import { PanelApp } from './panel/app.tsx'
 import type { PanelRoute } from './panel/shell.tsx'
-import { SettingsScreen } from './panel/settings-screen.tsx'
 
 export type PanelHostProps = {
   /** 服务地址，例如 http://127.0.0.1:8787 */
@@ -57,12 +56,14 @@ export function PanelHost(props: PanelHostProps): ReactElement {
   }, [props.requestInit])
 
   const [status, setStatus] = useState<PanelHostStatus>({})
+  const probeGeneration = useRef(0)
 
   // 真实状态只有一个来源：探测 /health。连不上的项一律留空，设置屏显示「未知」。
-  const probe = useCallback(() => {
-    let cancelled = false
-    void client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; model_routing_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean }>('/health').then((result) => {
-      if (cancelled) return
+  const probe = useCallback(async (): Promise<boolean> => {
+    const generation = ++probeGeneration.current
+    try {
+      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; model_routing_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean }>('/health')
+      if (generation !== probeGeneration.current) return false
       setStatus((previous) => ({
         ...previous,
         serviceConnected: true,
@@ -74,19 +75,23 @@ export function PanelHost(props: PanelHostProps): ReactElement {
         reworkEnabled: result.data.rework_enabled === true,
         reworkPlannerEnabled: result.data.rework_planner_enabled === true,
       }))
-    }).catch((error: unknown) => {
-      if (cancelled) return
+      return true
+    } catch (error) {
+      if (generation !== probeGeneration.current) return false
       const mismatch = error instanceof ApiError && error.code === 'PROTOCOL_VERSION_MISMATCH'
       setStatus((previous) => ({
         ...previous,
         serviceConnected: mismatch,
         protocolMismatch: mismatch,
       }))
-    })
-    return () => { cancelled = true }
+      return false
+    }
   }, [client])
 
-  useEffect(() => probe(), [probe])
+  useEffect(() => {
+    void probe()
+    return () => { probeGeneration.current += 1 }
+  }, [probe])
 
   // 事件流回调是面板实时状态的唯一来源；身份必须稳定，否则面板会不停重建事件流。
   const createEventStream = useCallback(
@@ -97,34 +102,15 @@ export function PanelHost(props: PanelHostProps): ReactElement {
         baseUrl: props.baseUrl,
         requestInit: requestInitRef.current,
         onInvalidate,
-        onStatus: (status) => {
-          setStatus((previous) => ({ ...previous, streamStatus: status }))
-          onStatus(status)
-        },
+        onStatus,
       }),
     [client, fetcher, props.baseUrl],
-  )
-
-  const settingsScreen = useMemo(
-    () => (
-      <SettingsScreen
-        serviceConnected={status.serviceConnected}
-        protocolMismatch={status.protocolMismatch}
-        snapshotStale={status.streamStatus === 'stale'}
-        streamStatus={status.streamStatus}
-        phase={status.phase}
-        panelVersion={props.panelVersion}
-        onRefresh={probe}
-      />
-    ),
-    [status, props.panelVersion, probe],
   )
 
   return <PanelApp
     client={client}
     serviceConnected={status.serviceConnected ?? false}
     protocolMismatch={status.protocolMismatch ?? false}
-    snapshotStale={status.streamStatus === 'stale'}
     initialRoute={props.initialRoute}
     memoryEnabled={status.memoryEnabled === true && status.serviceConnected === true}
     modelRoutingEnabled={status.modelRoutingEnabled}
@@ -132,6 +118,8 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     reworkEnabled={status.reworkEnabled}
     reworkPlannerEnabled={status.reworkPlannerEnabled}
     createEventStream={createEventStream}
-    additionalScreens={{ settings: settingsScreen }}
+    servicePhase={status.phase}
+    panelVersion={props.panelVersion}
+    refreshServiceStatus={probe}
   />
 }

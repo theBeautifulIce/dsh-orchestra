@@ -43,7 +43,7 @@ export const requestHashOf = (kind: string, payload: unknown): string => sha256H
 
 export function runIdempotentCommand<T>(
   tx: Tx,
-  p: { kind: string; operationId: string; requestHash: string; now: string },
+  p: { kind: string; operationId: string; requestHash: string; now: string; legacyRequestHash?: string; beforeApply?: () => void },
   apply: () => T,
 ): { result: T; replayed: boolean } {
   const existing = tx.get<InboxRow>(
@@ -51,18 +51,18 @@ export function runIdempotentCommand<T>(
     [p.operationId],
   )
   if (existing) {
-    if (existing.kind !== p.kind || existing.request_hash !== p.requestHash) {
-      throw new OrchError('OPERATION_ID_CONFLICT', '同一个 operation_id 被用于不同的请求', {
-        operation_id: p.operationId,
-        registered_kind: existing.kind,
-      })
-    }
     // 过期判断放在回执存在性之前：sweep 清掉 receipt_json 后仍必须回 OPERATION_EXPIRED，
     // 否则会掉进下面的通用分支被误报成 OPERATION_ID_CONFLICT（审计 P2）
     if (existing.receipt_expired_at && new Date(existing.receipt_expired_at).getTime() <= new Date(p.now).getTime()) {
       throw new OrchError('OPERATION_EXPIRED', '回执已过期，请用新的 operation_id 重新发起', {
         operation_id: p.operationId,
         receipt_expired_at: existing.receipt_expired_at,
+      })
+    }
+    if (existing.kind !== p.kind || (existing.request_hash !== p.requestHash && existing.request_hash !== p.legacyRequestHash)) {
+      throw new OrchError('OPERATION_ID_CONFLICT', '同一个 operation_id 被用于不同的请求', {
+        operation_id: p.operationId,
+        registered_kind: existing.kind,
       })
     }
     if (existing.status === 'applied' && existing.receipt_json) {
@@ -79,6 +79,7 @@ export function runIdempotentCommand<T>(
     })
   }
 
+  p.beforeApply?.()
   tx.run(
     'INSERT INTO inbox (kind, operation_id, request_hash, status, created_at) VALUES (?, ?, ?, ?, ?)',
     [p.kind, p.operationId, p.requestHash, 'running', p.now],

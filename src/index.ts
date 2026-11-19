@@ -26,7 +26,8 @@ export {
   type TaskTriggerReadiness,
 } from './service/task-triggers.ts'
 import { acknowledgeDecision, resolveDecision } from './service/commands/decisions.ts'
-import { requestHashOf, runIdempotentCommand } from './service/commands/idempotency.ts'
+import { requestHashOf } from './service/commands/idempotency.ts'
+import { runDecisionCommand } from './service/decision/confirmation.ts'
 import { inspectEffectEvidence, resolveEffect } from './service/commands/effects.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
@@ -76,6 +77,7 @@ import { createModelRoutingSettingsHost } from './service/model-routing-settings
 export type { ModelRouting, ModelRoutingContext, ModelComplexity, ModelRecommendation, ModelProfile } from './executor/model-routing.ts'
 export { createDshExecutor, createDshPlanningCallback, type DshExecutionModel } from './executor/dsh-host.ts'
 export { ReadOnlyToolRunner, ToolRegistry } from './executor/tools.ts'
+export type { EffectVerifier, EffectVerificationTarget, EffectVerdict } from './executor/tools.ts'
 
 /** Mount inside DSH's Cordis context with a host-authorized parent and model catalog. */
 export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrchestra>[0], 'executor'> & {
@@ -266,7 +268,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       const out = inTx(db, (tx) => publishWorkflowCommand(tx, {
       workflowId: b.workflowId, revision: b.revision, baseVersion: b.baseVersion, note: b.note,
       actor: b.actor, now: b.now, operationId: b.operationId,
-    }, publishContextFor(tx, RUNTIME_NODE_TYPES), { requireTest: opts.phase === 'S5', tools: opts.executor?.registry }))
+    }, publishContextFor(tx, RUNTIME_NODE_TYPES), { requireTest: opts.phase === 'S5', tools: opts.executor?.registry, catalog }))
       // 发布成功 = 当前进程立即可跑：目录同步注册，哈希不符会当场抛（审计 P1-1）
       catalog.adopt(out.definition, out.definition_hash)
       return out
@@ -298,8 +300,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       return setTaskArchive(db, body, actor, now)
     },
     acknowledgeDecision: (b) => inTx(db, (tx) => acknowledgeDecision(tx, b)),
-    resolveDecision: ({ operationId, now, ...b }) => inTx(db, (tx) => {
-      const apply = () => {
+    resolveDecision: (input) => inTx(db, (tx) => {
+      const { operationId, now, confirmChallenge, ...b } = input
+      return runDecisionCommand(tx, opts.secret, input, requestHashOf('decision.resolve', b), false, (confirmed, requireEffectSettlement) => {
         const out = resolveDecision(tx, opts.secret, {
           decisionId: b.decisionId,
           revision: b.revision,
@@ -307,7 +310,8 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
           payload: b.payload,
           actor: b.actor,
           evidenceProducers: b.evidenceProducers,
-          confirm: b.confirm,
+          confirm: confirmed,
+          requireEffectSettlement,
           contentHash: b.contentHash,
           now,
         })
@@ -323,12 +327,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
             now,
           })
           if (out.closedReason !== 'approved') closeRun(tx, opts.secret, out.runId, now)
-      }
-      return { decisionId: out.decisionId, revision: b.revision + 1 }
-      }
-      if (!operationId) return apply()
-      const kind = 'decision.resolve'
-      return runIdempotentCommand(tx, { kind, operationId, now, requestHash: requestHashOf(kind, b) }, apply).result
+        }
+        return { decisionId: out.decisionId, revision: b.revision + 1 }
+      })
     }),
     resolveEffect: (b) => inTx(db, (tx) => resolveEffect(tx, opts.secret, {
       basis: b.basis,
@@ -594,8 +595,8 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getArtifactContent: (runId, artifactId, mode, now) => getArtifactContent(orchestra.db, runId, artifactId, mode, now),
         listRunArtifacts: (runId, now) => listRunArtifacts(orchestra.db, runId, now),
         getAttestation: (attestationId) => getAttestationSnapshot(orchestra.db, attestationId),
-        listDecisions: (params) => listDecisions(orchestra.db, params),
-        getDecision: (decisionId) => getDecisionSnapshot(orchestra.db, decisionId),
+        listDecisions: (params) => listDecisions(orchestra.db, { ...params, memoryEnabled: memory !== undefined }),
+        getDecision: (decisionId, now) => getDecisionSnapshot(orchestra.db, decisionId, now, memory !== undefined),
         getEvidence: (evidenceId) => getEvidenceSnapshot(orchestra.db, opts.secret, evidenceId),
         verifyLedger: () => verifyLedgerSnapshot(orchestra.db, opts.secret),
         listWorkflows: (params) => listWorkflowQuery(orchestra.db, params),

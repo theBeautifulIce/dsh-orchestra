@@ -22,7 +22,7 @@ import { isTerminal } from '../../core/state-machine.ts'
 import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { inTx } from '../../infra/db/tx.ts'
 import type { Db, Tx } from '../../infra/sqlite/driver.ts'
-import { acquireLease, loadNodeRun, releaseLease, renewLease, type AcquireLeaseResult } from './lease.ts'
+import { acquireLease, loadNodeRun, releaseLease, renewLease } from './lease.ts'
 import { applyBranchRoute, applyTransition, enterBlockedPre, resumeFromBlockedPre } from './nodes.ts'
 import { openMemoryApprovalCard } from './memory-approval.ts'
 import { advanceMemoryRun } from './memory-run.ts'
@@ -469,7 +469,9 @@ export async function advanceMemoryRuntime(
     if (outcome.status === 'failed') {
       return finishFailed(deps, batch, current, nodes, steps, now, outcome.error_code)
     }
-    if (outcome.status === 'blocked_pre' || outcome.status === 'indeterminate_side_effect') return blockedResult(deps, batch, steps)
+    if (outcome.status === 'blocked_pre' || outcome.status === 'indeterminate_side_effect') {
+      return { ...blockedResult(deps, batch, steps), ...(outcome.error_code ? { error_code: outcome.error_code } : {}) }
+    }
     // 路由还没定（还没有评估结论）时不能把分支节点当旁路收掉，等评估出结论再定路径。
     if (route !== null) {
       supersedeOffPath(deps, nodes, path, now)
@@ -533,30 +535,6 @@ function recordLeaseLost(deps: MemoryRuntimeDeps, node: NodeRow, reason: string)
   } catch {
     // 账本不可写时不吞掉失权事实
   }
-}
-
-/**
- * 续租：绑定 node_run_id + attempt + lease_id + owner_epoch。
- * 租约被抢占、attempt 变了、owner_epoch 变了或租约已过期，一律抛错（失权）。
- */
-function renewOwnedLease(
-  deps: MemoryRuntimeDeps,
-  node: NodeRow,
-  lease: AcquireLeaseResult,
-  leaseTtlMs: number,
-  base?: string,
-): void {
-  const now = nowOf(deps, base)
-  inTx(deps.db, (tx: Tx) => {
-    renewLease(tx, {
-      nodeRunId: node.node_run_id,
-      leaseTtlMs,
-      now,
-      attempt: node.attempt,
-      leaseId: lease.leaseId,
-      ownerEpoch: deps.ownerEpoch ?? 0,
-    })
-  })
 }
 
 /**
@@ -632,7 +610,7 @@ async function runWorkNode(
   node: NodeRow,
   now: string,
   sideEffectPolicy: 'pure' | 'irreversible',
-  work: (guard: () => void) => Promise<Record<string, unknown>>,
+  work: (checkLease: (tx?: Tx) => string) => Promise<Record<string, unknown>>,
 ): Promise<NodeOutcome> {
   const secret = deps.secret
   const leaseTtlMs = deps.leaseTtlMs ?? DEFAULT_MEMORY_LEASE_TTL_MS
@@ -654,95 +632,82 @@ async function runWorkNode(
     return acquired
   })
 
-  // 执行期心跳：动作比租约长时按 ≤ TTL/3 续租；续租失败就是失权，动作结束前按失权收口
-  const leaseState: { lost: string | null } = { lost: null }
-  const renewTimer = setInterval(() => {
-    if (leaseState.lost !== null) return
-    try {
-      renewOwnedLease(deps, node, lease, leaseTtlMs, now)
-    } catch (err) {
-      const code = err instanceof OrchError ? err.code : 'SERVICE_UNAVAILABLE'
-      leaseState.lost = code
-      recordLeaseLost(deps, node, code)
-    }
-  }, renewIntervalMs)
-  renewTimer.unref?.()
-
-  // 写端前的归属闸门：失权就不写，写端一次都不许被多调
-  const guard = (): void => {
+  const leaseState: { lost: string | null; reported: boolean } = { lost: null, reported: false }
+  const reportLeaseLoss = (): void => {
+    if (leaseState.lost === null || leaseState.reported) return
+    leaseState.reported = true
+    recordLeaseLost(deps, node, leaseState.lost)
+  }
+  // 同一检查用于心跳、写入领取、回执与节点收口。回执和状态更新在同一事务中检查归属。
+  const checkLease = (tx?: Tx): string => {
     if (leaseState.lost !== null) throw leaseLostError(node, leaseState.lost)
-    try {
-      renewOwnedLease(deps, node, lease, leaseTtlMs, now)
-    } catch (err) {
-      const code = err instanceof OrchError ? err.code : 'SERVICE_UNAVAILABLE'
-      leaseState.lost = code
-      recordLeaseLost(deps, node, code)
-      throw leaseLostError(node, code)
-    }
-  }
-
-  let detail: Record<string, unknown> = {}
-  try {
-    detail = await withStepTimeout(work(guard), stepTimeoutMs, node)
-  } catch (err) {
-    clearInterval(renewTimer)
-    const orch = toOrchError(err)
-    // 失权后不再动节点状态：状态归新属主，本执行者只留 lease_lost
-    if (orch.details.ownership_lost === true || leaseState.lost !== null) {
-      throw leaseLostError(node, leaseState.lost ?? orch.code)
-    }
-    return failWorkNode(deps, batch, node, orch, detail, now)
-  }
-  clearInterval(renewTimer)
-
-  // 提交前最后确认一次归属：失权就不落 done
-  if (leaseState.lost !== null) throw leaseLostError(node, leaseState.lost)
-  const commitNow = nowOf(deps, now)
-  inTx(deps.db, (tx: Tx) => {
-    renewLease(tx, {
+    const checkedAt = nowOf(deps, now)
+    const renew = (ledger: Tx) => renewLease(ledger, {
       nodeRunId: node.node_run_id,
       leaseTtlMs,
-      now: commitNow,
+      now: checkedAt,
       attempt: node.attempt,
       leaseId: lease.leaseId,
       ownerEpoch,
     })
-    applyTransition(tx, secret, {
-      nodeRunId: node.node_run_id,
-      from: ['started'],
-      to: 'done',
-      ruleId: 'M-44',
-      attempt: node.attempt,
-      now: commitNow,
-    })
-    appendNodeRunEvent(tx, secret, node.node_run_id, MEMORY_RUNTIME_EVENTS.nodeAdvanced, {
-      node_id: node.node_id,
-      status: 'done',
-      batch_id: batch.batch_id,
-      ...detail,
-    })
-    appendEvent(tx, {
-      type: MEMORY_RUNTIME_EVENTS.runNodeAdvanced,
-      runId: batch.memory_run_id,
-      nodeRunId: node.node_run_id,
-      payload: {
+    try {
+      if (tx) renew(tx)
+      else inTx(deps.db, renew)
+    } catch (err) {
+      leaseState.lost = err instanceof OrchError ? err.code : 'SERVICE_UNAVAILABLE'
+      throw leaseLostError(node, leaseState.lost)
+    }
+    return checkedAt
+  }
+  const renewTimer = setInterval(() => {
+    if (leaseState.lost !== null) return
+    try { checkLease() } catch { reportLeaseLoss() }
+  }, renewIntervalMs)
+  renewTimer.unref?.()
+
+  try {
+    let detail: Record<string, unknown>
+    try {
+      detail = await withStepTimeout(work(checkLease), stepTimeoutMs, node)
+    } catch (err) {
+      const orch = toOrchError(err)
+      if (leaseState.lost !== null) throw leaseLostError(node, leaseState.lost)
+      return failWorkNode(deps, batch, node, orch, checkLease)
+    }
+
+    inTx(deps.db, (tx: Tx) => {
+      const commitNow = checkLease(tx)
+      applyTransition(tx, secret, {
+        nodeRunId: node.node_run_id,
+        from: ['started'],
+        to: 'done',
+        ruleId: 'M-44',
+        attempt: node.attempt,
+        now: commitNow,
+      })
+      const payload = {
         node_id: node.node_id,
         status: 'done',
         batch_id: batch.batch_id,
         ...detail,
-      },
+      }
+      appendNodeRunEvent(tx, secret, node.node_run_id, MEMORY_RUNTIME_EVENTS.nodeAdvanced, payload)
+      appendEvent(tx, {
+        type: MEMORY_RUNTIME_EVENTS.runNodeAdvanced,
+        runId: batch.memory_run_id,
+        nodeRunId: node.node_run_id,
+        payload,
+      })
+      releaseLease(tx, { nodeRunId: node.node_run_id, now: commitNow })
     })
-    releaseLease(tx, { nodeRunId: node.node_run_id, now: commitNow })
-  })
 
-  return {
-    status: 'done',
-    step: {
-      node_id: node.node_id,
-      node_run_id: node.node_run_id,
+    return {
       status: 'done',
-      detail,
-    },
+      step: { node_id: node.node_id, node_run_id: node.node_run_id, status: 'done', detail },
+    }
+  } finally {
+    clearInterval(renewTimer)
+    reportLeaseLoss()
   }
 }
 
@@ -754,22 +719,25 @@ function failWorkNode(
   batch: MemoryBatchRow,
   node: NodeRow,
   orch: OrchError,
-  detail: Record<string, unknown>,
-  base?: string,
+  checkLease: (tx: Tx) => string,
 ): NodeOutcome {
   const secret = deps.secret
-  const now = nowOf(deps, base)
   const write = node.node_id === 'mem_apply' ? loadBatchById(deps.db, batch.batch_id) : undefined
   const claimedHere = write?.status === 'applying' && write.apply_node_run_id === node.node_run_id
   const current = write && loadNodes(deps.db, batch.memory_run_id).get('mem_apply')
   if (claimedHere || (current && (current.node_run_id !== node.node_run_id || current.status !== 'started'))) {
     const status = 'indeterminate_side_effect' as const
-    if (claimedHere && current?.status === 'started') inTx(deps.db, (tx) => {
-      pauseMemoryWrite(tx, secret, loadNodeRun(tx, node.node_run_id), batch.batch_id, now)
+    if (claimedHere && current?.node_run_id === node.node_run_id && current.status === 'started') inTx(deps.db, (tx) => {
+      const now = checkLease(tx)
+      pauseMemoryWrite(tx, secret, loadNodeRun(tx, node.node_run_id), batch.batch_id, now, orch)
     })
-    return { status, step: { node_id: node.node_id, node_run_id: node.node_run_id, status } }
+    return {
+      status, error_code: orch.code,
+      step: { node_id: node.node_id, node_run_id: node.node_run_id, status, detail: { error_code: orch.code } },
+    }
   }
   inTx(deps.db, (tx: Tx) => {
+    const now = checkLease(tx)
     applyTransition(tx, secret, {
       nodeRunId: node.node_run_id,
       from: ['started'],
@@ -784,7 +752,6 @@ function failWorkNode(
       status: 'failed',
       error_code: orch.code,
       error_message: orch.message,
-      ...detail,
     })
     appendEvent(tx, {
       type: MEMORY_RUNTIME_EVENTS.runNodeFailed,
@@ -910,7 +877,7 @@ async function applyWork(
   batch: MemoryBatchRow,
   node: NodeRow,
   now: string,
-  guard: () => void,
+  checkLease: (tx?: Tx) => string,
 ): Promise<Record<string, unknown>> {
   // mem_apply 复用 mem_confirm 那张卡：同一 decision_id，不新建第二张 pre_execution 卡。
   const current = loadBatchById(deps.db, batch.batch_id) ?? batch
@@ -924,14 +891,14 @@ async function applyWork(
     })
   })
   // 写端之前过归属闸门：失权就不写，写端一次都不许被多调。
-  guard()
+  checkLease()
   const result = await deps.ports.applyGoverned({
     decision_id: decision.decision_id,
     batch_id: batch.batch_id,
     run_id: batch.memory_run_id,
     node_run_id: node.node_run_id,
     now,
-  })
+  }, checkLease)
   return {
     decision_id: decision.decision_id,
     applied_count: result.applied_count,

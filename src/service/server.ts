@@ -44,7 +44,7 @@ import type { inspectEffectEvidence, EffectResolutionResult, EvidenceSource, Res
 import type { Actor } from './decision/approver.ts'
 import type { MemoryHost } from './memory-host.ts'
 import { planConfirmSchema, planInputSchema, type TaskPlanningHost } from './task-planning.ts'
-import { collaborationReviewSchema, collaborationScopeSchema, type CollaborationHost } from './collaboration.ts'
+import { collaborationReassignSchema, collaborationReviewSchema, collaborationScopeSchema, type CollaborationHost } from './collaboration.ts'
 import { reworkRequestSchema, reworkReviewSchema, type ReworkHost } from './rework-coordinator.ts'
 import { deliveryHoldSchema, type createDeliveryReviewHost } from './delivery-review.ts'
 import { localPlanInput, localPlanApproval, type createReworkPlanningHost } from './rework-planning.ts'
@@ -100,7 +100,7 @@ export type ServerQueries = {
   listRunArtifacts: (runId: string, now: number) => { items: RunArtifact[]; has_more: boolean; as_of_seq: number }
   getAttestation: (attestationId: string) => { item: AttestationView; as_of_seq: number }
   listDecisions: (params: ListDecisionParams) => { items: DecisionView[]; next_cursor: string | null; as_of_seq: number }
-  getDecision: (decisionId: string) => { item: DecisionView; as_of_seq: number }
+  getDecision: (decisionId: string, now?: number) => { item: DecisionView; as_of_seq: number }
   getEvidence: (evidenceId: string) => { item: EvidenceView; as_of_seq: number }
   verifyLedger: () => { item: LedgerVerify; as_of_seq: number }
   listUnverifiedEffects: (params: ListEffectsParams) => { items: UnverifiedEffectView[]; next_cursor: string | null; as_of_seq: number }
@@ -169,10 +169,11 @@ export type NodeCommands = {
     actor?: Actor
     evidenceProducers?: string[]
     confirm?: boolean
+    confirmChallenge?: string
     contentHash?: string
     operationId?: string
     now: string
-  }) => { decisionId: string; revision: number }
+  }) => { decisionId: string; revision: number; replayed?: boolean }
   // 副作用结算：服务受控写入口（附录 §4、§5）
   resolveEffect: (body: {
     basis: ResolutionBasis
@@ -408,7 +409,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/collaboration/scopes/get' && deps.collaboration) {
-      const { as_of_seq, item } = deps.collaboration.getScope(stringParam(url, 'scope_id', 128) ?? '', actor)
+      const { as_of_seq, item } = deps.collaboration.getScope(stringParam(url, 'scope_id', 128) ?? '', actor, requestNow)
       sendJson(res, 200, okEnvelope(as_of_seq, item))
       return
     }
@@ -421,6 +422,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     if (req.method === 'POST' && url.pathname === '/v1/collaboration/review' && deps.collaboration) {
       const body = parseBody(collaborationReviewSchema, await readJsonBody(req), '处理核验请求')
       const result = await queue.run(() => deps.collaboration!.review(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/collaboration/reassign' && deps.collaboration) {
+      const body = parseBody(collaborationReassignSchema, await readJsonBody(req), '重新指派核验')
+      const result = await queue.run(() => deps.collaboration!.reassignVerification(body, actor, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
@@ -588,7 +595,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/decisions/get' && deps.queries) {
-      const result = deps.queries.getDecision(stringParam(url, 'decision_id', 256) ?? '')
+      const result = deps.queries.getDecision(stringParam(url, 'decision_id', 256) ?? '', Date.parse(requestNow))
       sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
       return
     }
@@ -766,7 +773,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/workflows/test' && deps.commands) {
-      const body = parseBody(workflowTestSchema, await readJsonBody(req), '快速测试 Workflow')
+      const body = parseBody(workflowTestSchema, await readJsonBody(req), '流程结构与模拟流转测试')
       const result = await queue.run(() => deps.commands!.testWorkflowDraft({ workflowId: body.workflow_id, revision: body.revision, now: requestNow }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
@@ -869,6 +876,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         actor: { kind: 'human', id: actor },
         evidenceProducers: body.evidenceProducers,
         confirm: body.confirm,
+        confirmChallenge: body.confirm_challenge,
         contentHash: body.contentHash,
         operationId: body.operation_id,
         now: requestNow,

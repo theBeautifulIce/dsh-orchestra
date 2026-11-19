@@ -1,6 +1,6 @@
 import { createReworkApi } from '../api/rework.ts'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { ApiClient } from '../api/client.ts'
+import { ApiError, type ApiClient } from '../api/client.ts'
 import { createResourcesApi } from '../api/resources.ts'
 import { createDecisionCommandsApi } from '../api/decision-commands.ts'
 import { createMemoryRecoveryApi } from '../api/memory-recovery.ts'
@@ -31,6 +31,9 @@ export type PanelAppProps = {
   snapshotStale?: boolean
   memoryEnabled?: boolean
   modelRoutingEnabled?: boolean
+  servicePhase?: string
+  panelVersion?: string
+  refreshServiceStatus?: () => Promise<boolean>
   collaborationEnabled?: boolean
   reworkEnabled?: boolean
   reworkPlannerEnabled?: boolean
@@ -40,27 +43,54 @@ export type PanelAppProps = {
 }
 
 export function PanelApp(props: PanelAppProps) {
-  const rework = useMemo(() => props.reworkEnabled ? createReworkApi(props.client) : undefined, [props.client, props.reworkEnabled])
-  const api = useMemo(() => createResourcesApi(props.client), [props.client])
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>()
+  const [resyncRequest, setResyncRequest] = useState<number | null>(null)
+  const writesEnabled = useRef(false)
+  const snapshotStale = props.snapshotStale || streamStatus === 'stale' || resyncRequest !== null
+  writesEnabled.current = props.serviceConnected && !props.protocolMismatch && !snapshotStale
+  const client = useMemo<ApiClient>(() => ({
+    get: (...args) => props.client.get(...args),
+    async post<T>(path: string, payload: unknown) {
+      if (!writesEnabled.current) throw new ApiError('PANEL_WRITE_UNAVAILABLE', '当前为只读状态，刷新成功后再操作', false)
+      return props.client.post<T>(path, payload)
+    },
+  }), [props.client])
+  const rework = useMemo(() => props.reworkEnabled ? createReworkApi(client) : undefined, [client, props.reworkEnabled])
+  const api = useMemo(() => createResourcesApi(client), [client])
   // 控制面写命令客户端：流程新建、草稿保存、发布都走同一套命令与回执。
-  const commands = useMemo(() => createWorkflowCommandsApi(props.client), [props.client])
+  const commands = useMemo(() => createWorkflowCommandsApi(client), [client])
   // 决定控制面写命令客户端：接手与处理走同一套命令与回执纪律。
-  const decisionCommands = useMemo(() => createDecisionCommandsApi(props.client), [props.client])
-  const memoryRecovery = useMemo(() => createMemoryRecoveryApi(props.client), [props.client])
-  const taskCommands = useMemo(() => createTaskCommands(props.client), [props.client])
-  const triggerCommands = useMemo(() => createTaskTriggerCommands(props.client), [props.client])
+  const decisionCommands = useMemo(() => createDecisionCommandsApi(client), [client])
+  const memoryRecovery = useMemo(() => createMemoryRecoveryApi(client), [client])
+  const taskCommands = useMemo(() => createTaskCommands(client), [client])
+  const triggerCommands = useMemo(() => createTaskTriggerCommands(client), [client])
   const [route, setRoute] = useState<PanelRoute>(props.initialRoute ?? 'tasks')
   const [taskId, setTaskId] = useState<string | null>(null)
   const [taskRunId, setTaskRunId] = useState<string>()
   const taskTrigger = useRef<HTMLElement | null>(null)
   const [workflowId, setWorkflowId] = useState<string | null>(null)
+  const [decisionId, setDecisionId] = useState<string>()
   const [reloadVersion, setReloadVersion] = useState(0)
-  const [streamStatus, setStreamStatus] = useState<StreamStatus>()
+  const [settingsReloadVersion, setSettingsReloadVersion] = useState(0)
   const streamStarted = useRef(false)
+  const resyncGeneration = useRef(0)
+  const resyncAnchor = useRef<{ generation: number; seq: number } | null>(null)
+  const [refreshGeneration, setRefreshGeneration] = useState(0)
+  const requestResync = useCallback(() => {
+    writesEnabled.current = false
+    resyncAnchor.current = null
+    setResyncRequest(++resyncGeneration.current)
+  }, [])
   const eventStream = useMemo(() => props.createEventStream?.(
-    () => setReloadVersion((version) => version + 1),
-    setStreamStatus,
-  ) ?? null, [props.createEventStream])
+    (type) => {
+      if (type === 'resync_required') requestResync()
+      else setReloadVersion((version) => version + 1)
+    },
+    (status) => {
+      if (status === 'stale') writesEnabled.current = false
+      setStreamStatus(status)
+    },
+  ) ?? null, [props.createEventStream, requestResync])
 
   useEffect(() => {
     streamStarted.current = false
@@ -70,15 +100,75 @@ export function PanelApp(props: PanelAppProps) {
     }
   }, [eventStream])
 
+  const { refreshServiceStatus } = props
+  useEffect(() => {
+    if (!eventStream || resyncRequest === null) return
+    const generation = resyncRequest
+    let active = true
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const isCurrent = () => active && generation === resyncGeneration.current
+    async function recover() {
+      try {
+        // Capture the ledger watermark before refreshing any views so later writes are replayed.
+        const [{ as_of_seq }, health] = await Promise.all([api.listEvents({ limit: 1 }), refreshServiceStatus?.()])
+        if (!isCurrent()) return
+        if (health === false) throw new Error('Service health is unavailable')
+        resyncAnchor.current = { generation, seq: as_of_seq }
+        setRefreshGeneration(generation)
+        setSettingsReloadVersion((version) => version + 1)
+        setReloadVersion((version) => version + 1)
+      } catch {
+        if (isCurrent()) retry = setTimeout(() => { void recover() }, 5000)
+      }
+    }
+    void recover()
+    return () => { active = false; clearTimeout(retry) }
+  }, [api, eventStream, refreshServiceStatus, resyncRequest])
+
+  const finishResync = useCallback((asOfSeq?: number) => {
+    const anchor = resyncAnchor.current
+    if (!eventStream || !anchor || anchor.generation !== refreshGeneration || anchor.generation !== resyncGeneration.current
+      || (asOfSeq !== undefined && asOfSeq < anchor.seq)) return
+    resyncAnchor.current = null
+    setResyncRequest(null)
+    if (streamStarted.current) eventStream.setSnapshot(anchor.seq)
+    else {
+      streamStarted.current = true
+      eventStream.start(anchor.seq)
+    }
+  }, [eventStream, refreshGeneration])
+
   const onSnapshot = useCallback((asOfSeq: number) => {
-    if (!eventStream) return
+    // A query started before the stream found a gap cannot complete this resync.
+    if (!eventStream || refreshGeneration !== resyncGeneration.current) return
+    if (resyncAnchor.current) { finishResync(asOfSeq); return }
     if (!streamStarted.current) {
       eventStream.start(asOfSeq)
       streamStarted.current = true
     } else {
       eventStream.setSnapshot(asOfSeq)
     }
-  }, [eventStream])
+  }, [eventStream, finishResync, refreshGeneration])
+
+  const canReadViewSnapshot = route === 'settings' ? props.modelRoutingEnabled === true
+    : route === 'collaboration' ? props.collaborationEnabled === true
+      : route !== 'memory' || !props.additionalScreens?.memory
+  useEffect(() => {
+    if (!canReadViewSnapshot) finishResync()
+  }, [canReadViewSnapshot, finishResync])
+
+  function refreshSettings() {
+    if (resyncRequest !== null) requestResync()
+    else void Promise.resolve(refreshServiceStatus?.()).then((healthy) => {
+      if (healthy !== false) setSettingsReloadVersion((version) => version + 1)
+    })
+  }
+
+  function openDecision(id: string) {
+    setTaskId(null)
+    setDecisionId(id)
+    setRoute('decisions')
+  }
 
   let screen: ReactNode
   if (route === 'overview') {
@@ -94,13 +184,14 @@ export function PanelApp(props: PanelAppProps) {
       }} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
     </div>
   } else if (route === 'decisions') {
-    screen = <DecisionInbox rework={rework} reworkPlannerEnabled={props.reworkPlannerEnabled} api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+    screen = <DecisionInbox key={decisionId ?? 'all'} decisionId={decisionId} onShowAll={() => setDecisionId(undefined)}
+      rework={rework} reworkPlannerEnabled={props.reworkPlannerEnabled} api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'effects') {
-    screen = <UnverifiedEffects api={api} client={props.client} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+    screen = <UnverifiedEffects api={api} client={client} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={openDecision} />
   } else if (route === 'activity') {
     screen = <ActivityScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'collaboration' && props.collaborationEnabled) {
-    screen = <CollaborationScreen client={props.client} reloadVersion={reloadVersion} onSnapshot={onSnapshot}
+    screen = <CollaborationScreen client={client} reloadVersion={reloadVersion} onSnapshot={onSnapshot}
       onOpenRun={(task, run) => { setTaskId(task); setTaskRunId(run) }} />
   } else if (route === 'memory') {
     screen = props.additionalScreens?.memory
@@ -108,8 +199,9 @@ export function PanelApp(props: PanelAppProps) {
         reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} />
   } else if (route === 'settings') {
     screen = <section className="ops-page"><h1>设置</h1><div className="ops-context-grid">{props.additionalScreens?.settings
-      ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={props.snapshotStale} streamStatus={streamStatus} />}
-      {props.modelRoutingEnabled && <ModelRoutingSettings client={props.client} />}
+      ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={snapshotStale} streamStatus={streamStatus}
+        phase={props.servicePhase} panelVersion={props.panelVersion} onRefresh={refreshSettings} />}
+      {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
     </div></section>
   } else if (route === 'workflows') {
     screen = <>
@@ -124,10 +216,10 @@ export function PanelApp(props: PanelAppProps) {
 
   return <PanelShell
     activeRoute={route}
-    onNavigate={(next) => { setRoute(next); if (next !== 'tasks') setTaskId(null); if (next !== 'workflows') setWorkflowId(null) }}
+    onNavigate={(next) => { setDecisionId(undefined); setRoute(next); if (next !== 'tasks') setTaskId(null); if (next !== 'workflows') setWorkflowId(null) }}
     serviceConnected={props.serviceConnected}
     protocolMismatch={props.protocolMismatch}
-    snapshotStale={props.snapshotStale || streamStatus === 'stale'}
+    snapshotStale={snapshotStale}
     streamStatus={streamStatus}
     collaborationEnabled={props.collaborationEnabled}
   >{screen}
@@ -135,6 +227,7 @@ export function PanelApp(props: PanelAppProps) {
       setTaskId(null)
       taskTrigger.current?.focus({ preventScroll: true })
     }} taskCommands={taskCommands} triggerCommands={triggerCommands} onArchiveChanged={() => setReloadVersion((version) => version + 1)}
+      onOpenDecision={openDecision}
       onOpenMemory={props.memoryEnabled ? () => { setTaskId(null); setRoute('memory') } : undefined}
       reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
   </PanelShell>

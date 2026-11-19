@@ -1,5 +1,7 @@
 # S5 · G5 面板侧八项就绪矩阵补丁（WP-A）
 
+历史工作包草案。当前 73 项的实现、复现命令、固定证据路径和缺口统一见 [G5 逐项复核矩阵](S5-g5-item-map.md)。签门前使用该完整矩阵复核。
+
 > 目的：给 Lead 一张「WP-A 负责的八条 G5 必过项 × 代码位置 × 证明用例」的补丁矩阵，只覆盖面板侧。
 > 判定语逐字照抄 `scripts/gate-check.ts` 的 `GATE_SPECS.G5.content`（`docs/reviews/S5-g5-item-map.md` 是其拷贝），未改写、未新增、未删减。
 > 证据 id 规则 `ev-g5-<item-id 小写>`，固定路径 `docs/gates/evidence/G5/<ITEM-ID>.md`（由 Lead 后续跑 `scripts/gen-g5-evidence.ts --matrix docs/reviews/S5-g5-item-map-wpa.md` 生成；本会话不创建任何 `docs/gates/**` 文件）。

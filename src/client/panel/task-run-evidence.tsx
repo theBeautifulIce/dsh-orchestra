@@ -6,12 +6,31 @@ import { COLOR, FONT_PX } from './tokens.ts'
 
 type EvidenceReference = { kind: 'tool' | 'human'; id: string; label: string }
 
-export function NodeEvidence({ api, node, reloadVersion }: { api: ResourcesApi; node: NodeRunView; reloadVersion: number }) {
+export function NodeEffectFacts({ node, onOpenDecision }: { node: NodeRunView; onOpenDecision?: (id: string) => void }) {
+  const effectLabel = (value: string | null) => value === 'applied' ? '外部操作已发生'
+    : value === 'not_applied' ? '外部操作未发生' : '未知'
+  const mismatch = node.declared_effect && node.verified_effect && node.declared_effect !== node.verified_effect
+  const decisionId = node.effect_decision_id
+  return <div style={mismatch ? { ...evidenceStyle, background: '#fff8e9', color: COLOR.warning } : evidenceStyle}>
+    <dl className="task-run-facts">
+      <div><dt>节点声明</dt><dd>{effectLabel(node.declared_effect)}</dd></div>
+      <div><dt>系统核实</dt><dd>{effectLabel(node.verified_effect)}</dd></div>
+    </dl>
+    {node.evidence_state_reason && <p style={mutedStyle}>{node.evidence_state_reason}</p>}
+    {mismatch && <p role="status">声明与核实结果不一致。 {decisionId && onOpenDecision &&
+      <button type="button" className="ops-button" onClick={() => onOpenDecision(decisionId)}>查看相关决定</button>}</p>}
+  </div>
+}
+
+export function NodeEvidence({ api, node, reloadVersion, onOpenDecision }: {
+  api: ResourcesApi; node: NodeRunView; reloadVersion: number; onOpenDecision?: (id: string) => void
+}) {
   const refs: EvidenceReference[] = (node.execution_ids ?? []).map((id, index) => ({ kind: 'tool', id, label: `工具执行记录 ${index + 1}` }))
   if (node.attestation_id) refs.push({ kind: 'human', id: node.attestation_id, label: '人工签认' })
-  return refs.length
-    ? refs.map((ref) => <EvidenceRecord key={`${ref.kind}-${ref.id}`} api={api} node={node} record={ref} reloadVersion={reloadVersion} />)
-    : <p style={mutedStyle}>这一步尚无关联证据。</p>
+  return <>
+    <NodeEffectFacts node={node} onOpenDecision={onOpenDecision} />
+    {refs.map((ref) => <EvidenceRecord key={`${ref.kind}-${ref.id}`} api={api} node={node} record={ref} reloadVersion={reloadVersion} />)}
+  </>
 }
 
 function EvidenceRecord({ api, node, record, reloadVersion }: {

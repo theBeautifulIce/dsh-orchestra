@@ -10,11 +10,13 @@ import type {
 } from '../api/workflow-commands.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
+import { usePanelCommandsEnabled } from './shell.tsx'
 
 export type WorkflowEditorProps = {
   commands: WorkflowCommandsApi
   workflow: WorkflowView
   onRefresh: () => void
+  snapshotStale?: boolean
 }
 
 // 规格 8.5 行 657：画布与智能体共用同一份定义、同一套 workflow.update 命令。
@@ -29,7 +31,8 @@ type ReceiptState = {
   outcome: WorkflowCommandOutcome<unknown>
 }
 
-export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditorProps) {
+export function WorkflowEditor({ commands, workflow, onRefresh, snapshotStale = false }: WorkflowEditorProps) {
+  const canWrite = usePanelCommandsEnabled(true) && !snapshotStale
   const draft = workflow.draft
   const draftRevision = draft?.revision ?? null
   const definitionRef = useRef<unknown>(null)
@@ -99,7 +102,7 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
   const publishBlocked = structuralIssues.length > 0 || (commands.testWorkflow !== undefined && (!validated || criticalApprovals > 0))
 
   async function quickTest() {
-    if (!commands.testWorkflow || !draft || dirty || busy !== null) return
+    if (!canWrite || !commands.testWorkflow || !draft || dirty || busy !== null) return
     setBusy('testing')
     setCommandError(null)
     try { setTested(await commands.testWorkflow(workflowId, draft.revision)); onRefresh() }
@@ -150,7 +153,7 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
   }
 
   async function save() {
-    if (!draft || busy !== null) return
+    if (!canWrite || !draft || busy !== null) return
     const parsed = parseDefinition()
     if (!parsed.ok) {
       setParseError(parsed.message)
@@ -184,7 +187,7 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
   }
 
   async function publish() {
-    if (!draft || busy !== null || dirty || publishBlocked) return
+    if (!canWrite || !draft || busy !== null || dirty || publishBlocked) return
     const trimmedNote = note.trim()
     if (trimmedNote.length < 1 || trimmedNote.length > 500) {
       setCommandError('发布说明要写 1–500 字')
@@ -215,7 +218,7 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
   }
 
   async function openDraft() {
-    if (busy !== null) return
+    if (!canWrite || busy !== null) return
     setBusy('opening')
     setConflict(null)
     setCommandError(null)
@@ -254,8 +257,8 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
           {dirty && ' · 有未保存的改动'}
         </p>}
       </div>
-      {draft ? <button type="button" className="ops-button ops-button--primary" disabled={busy !== null} onClick={() => { void save() }}>保存草稿</button>
-        : <button type="button" className="ops-button ops-button--primary" disabled={busy !== null} onClick={() => { void openDraft() }}>打开草稿</button>}
+      {draft ? <button type="button" className="ops-button ops-button--primary" disabled={!canWrite || busy !== null} onClick={() => { void save() }}>保存草稿</button>
+        : <button type="button" className="ops-button ops-button--primary" disabled={!canWrite || busy !== null} onClick={() => { void openDraft() }}>打开草稿</button>}
     </header>
     {(draft || receipt || conflict || commandError) && <div className="ops-inset ops-stack">
     {draft && (
@@ -290,13 +293,13 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
     {draft !== null && (
       <div className="ops-workflow-controls">
         {commands.testWorkflow && <section>
-          <h3 style={sectionTitleStyle}>快速测试</h3>
-          <p style={mutedStyle}>检查结构和工具，演练节点依赖流转。</p>
-          <button type="button" className="ops-button" style={{ marginTop: 7 }} disabled={dirty || busy !== null} onClick={() => { void quickTest() }}>
-            {busy === 'testing' ? '正在测试…' : '运行快速测试'}
+          <h3 style={sectionTitleStyle}>结构与模拟流转测试</h3>
+          <p style={mutedStyle}>检查流程结构和工具声明，按节点依赖演练顺序。实际工具调用、Agent 执行和交付验收需要在正式运行中验证。</p>
+          <button type="button" className="ops-button" style={{ marginTop: 7 }} disabled={!canWrite || dirty || busy !== null} onClick={() => { void quickTest() }}>
+            {busy === 'testing' ? '正在测试…' : '运行结构与模拟流转测试'}
           </button>
           {dirty ? <p>请先保存修改再测试。</p> : tested?.revision === draft.revision && <div role="status">
-            <p>{tested.passed ? '测试通过' : '测试未通过'} · 修订 {tested.revision} · {new Date(tested.tested_at).toLocaleString()}</p>
+            <p>{tested.passed ? '结构与模拟流转测试通过' : '结构与模拟流转测试未通过'} · 修订 {tested.revision} · {new Date(tested.tested_at).toLocaleString()}</p>
             {tested.passed ? <ol>{tested.order.map((step) => <li key={step.node_id}>{step.title}</li>)}</ol>
               : <ul>{tested.issues.errors.map((item, index) => <li key={index}>{item.message} <code>{item.path}</code></li>)}</ul>}
           </div>}
@@ -318,13 +321,13 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
           onChange={(event) => setNote(event.target.value)}
         />
         {structuralIssues.length > 0 && <p style={mutedStyle}>发布前须修复结构错误。</p>}
-        {commands.testWorkflow && !validated && <p style={mutedStyle}>当前草稿须通过快速测试后才能发布。</p>}
+        {commands.testWorkflow && !validated && <p style={mutedStyle}>当前草稿须通过结构与模拟流转测试后才能发布。</p>}
         {commands.testWorkflow && criticalApprovals > 0 && <p style={mutedStyle}>仍有 {criticalApprovals} 项最高优先级审批待处理。</p>}
         <button
           type="button"
           className="ops-button ops-button--primary"
           style={{ marginTop: 7 }}
-          disabled={busy !== null || dirty || publishBlocked}
+          disabled={!canWrite || busy !== null || dirty || publishBlocked}
           onClick={() => { void publish() }}
         >确认发布</button>
         </section>

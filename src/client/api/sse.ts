@@ -29,6 +29,7 @@ export class EventStream {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private started = false
   private awaitingSnapshot = false
+  private transportGeneration = 0
   private reading = false
   private pendingTypes = new Set<string>()
 
@@ -46,40 +47,58 @@ export class EventStream {
 
   stop(): void {
     this.started = false
-    this.stopSubscription?.()
-    this.stopSubscription = null
-    if (this.pollTimer !== null) clearInterval(this.pollTimer)
+    this.awaitingSnapshot = false
+    this.closeTransport()
+    this.clearInvalidations()
+    this.seen.clear()
+  }
+
+  private clearInvalidations(): void {
     if (this.coalesceTimer !== null) clearTimeout(this.coalesceTimer)
-    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer)
-    this.pollTimer = null
     this.coalesceTimer = null
-    this.reconnectTimer = null
     this.pendingTypes.clear()
   }
 
-  /** Call after a full page refresh establishes the new authoritative event sequence. */
+  /** Accept a refreshed snapshot only after the stream requested a resync. */
   setSnapshot(asOfSeq: number): void {
-    if (!Number.isSafeInteger(asOfSeq) || asOfSeq < 0) return
+    if (!this.started || !this.awaitingSnapshot || !Number.isSafeInteger(asOfSeq) || asOfSeq < 0) return
     this.lastSeq = asOfSeq
     this.awaitingSnapshot = false
-    if (this.started && !this.stopSubscription && !this.pollTimer) this.openStream()
+    this.seen.clear()
+    this.openStream()
   }
 
   get lastEventSeq(): number { return this.lastSeq }
 
+  private closeTransport(): void {
+    this.transportGeneration += 1
+    this.stopSubscription?.()
+    this.stopSubscription = null
+    if (this.pollTimer !== null) clearInterval(this.pollTimer)
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer)
+    this.pollTimer = null
+    this.reconnectTimer = null
+    this.reading = false
+  }
+
   private openStream(): void {
     if (!this.started || this.awaitingSnapshot) return
+    const generation = this.transportGeneration
+    const active = () => generation === this.transportGeneration
     try {
       this.options.onStatus('stale')
-      this.stopSubscription = this.options.subscribe(
+      if (!active()) return
+      const unsubscribe = this.options.subscribe(
         this.lastSeq,
-        (event) => this.accept(event),
-        () => this.requireSnapshot(),
-        () => this.fallbackToPolling(),
-        () => this.options.onStatus('live'),
+        (event) => { if (active()) this.accept(event) },
+        () => { if (active()) this.requireSnapshot() },
+        () => { if (active()) this.fallbackToPolling() },
+        () => { if (active()) this.options.onStatus('live') },
       )
+      if (active()) this.stopSubscription = unsubscribe
+      else unsubscribe()
     } catch {
-      this.fallbackToPolling()
+      if (active()) this.fallbackToPolling()
     }
   }
 
@@ -109,44 +128,41 @@ export class EventStream {
   private requireSnapshot(): void {
     if (!this.started || this.awaitingSnapshot) return
     this.awaitingSnapshot = true
+    this.closeTransport()
+    this.clearInvalidations()
     this.options.onStatus('stale')
     this.options.onInvalidate('resync_required')
-    this.stopSubscription?.()
-    this.stopSubscription = null
-    if (this.pollTimer !== null) clearInterval(this.pollTimer)
-    this.pollTimer = null
   }
 
   private fallbackToPolling(): void {
     if (!this.started || this.awaitingSnapshot || this.pollTimer !== null) return
-    this.stopSubscription?.()
-    this.stopSubscription = null
-    this.options.onStatus('polling')
-    void this.pollOnce()
-    this.pollTimer = setInterval(() => { void this.pollOnce() }, this.options.pollIntervalMs ?? 5000)
+    this.closeTransport()
+    const generation = this.transportGeneration
+    this.options.onStatus('stale')
+    if (generation !== this.transportGeneration) return
+    this.pollTimer = setInterval(() => { void this.pollOnce(generation) }, this.options.pollIntervalMs ?? 5000)
     this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null
-      if (!this.started || this.awaitingSnapshot) return
-      if (this.pollTimer !== null) clearInterval(this.pollTimer)
-      this.pollTimer = null
+      if (generation !== this.transportGeneration) return
+      this.closeTransport()
       this.openStream()
     }, 30_000)
+    void this.pollOnce(generation)
   }
 
-  private async pollOnce(): Promise<void> {
-    if (!this.started || this.awaitingSnapshot || this.reading) return
+  private async pollOnce(generation: number): Promise<void> {
+    if (generation !== this.transportGeneration || this.reading) return
     this.reading = true
     try {
       const events = await this.options.readAfter(this.lastSeq, 200)
       for (const event of events) {
+        if (generation !== this.transportGeneration) return
         this.accept(event)
-        if (this.awaitingSnapshot) break
       }
-      if (!this.awaitingSnapshot) this.options.onStatus('polling')
+      if (generation === this.transportGeneration) this.options.onStatus('polling')
     } catch {
-      this.options.onStatus('stale')
+      if (generation === this.transportGeneration) this.options.onStatus('stale')
     } finally {
-      this.reading = false
+      if (generation === this.transportGeneration) this.reading = false
     }
   }
 }

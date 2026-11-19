@@ -53,7 +53,7 @@ export function WorkflowCanvas({ api, workflowId, onBack, onOpenRun, reloadVersi
   const action = status === 'active' ? '停用' : '启用'
   const reload = () => setRetry((value) => value + 1)
   async function changeStatus() {
-    if (!commands?.setWorkflowStatus || !changeable || statusBusy) return
+    if (!commands?.setWorkflowStatus || !changeable || statusBusy || failed) return
     setStatusBusy(true)
     setStatusProblem('')
     try {
@@ -80,19 +80,19 @@ export function WorkflowCanvas({ api, workflowId, onBack, onOpenRun, reloadVersi
         </div>}
       </div>
       {commands?.setWorkflowStatus && changeable && <PanelCommandButton className="ops-button" aria-expanded={confirmStatus}
-        disabled={statusBusy || loading} onClick={() => setConfirmStatus((open) => !open)}>{action} Workflow</PanelCommandButton>}
+        disabled={statusBusy || loading || failed} onClick={() => setConfirmStatus((open) => !open)}>{action} Workflow</PanelCommandButton>}
     </header>
     {confirmStatus && changeable && <div className="ops-surface ops-inset ops-toolbar">
       <span>{status === 'active' ? '停用会阻止新任务和后续触发；已创建的运行继续执行。' : '启用后可以启动新任务，已启用的触发器按原配置运行。'}</span>
       <div className="ops-actions">
         <button className="ops-button" type="button" onClick={() => setConfirmStatus(false)} disabled={statusBusy}>取消</button>
-        <PanelCommandButton className="ops-button ops-button--primary" disabled={statusBusy || loading} onClick={() => { void changeStatus() }}>确认{action}</PanelCommandButton>
+        <PanelCommandButton className="ops-button ops-button--primary" disabled={statusBusy || loading || failed} onClick={() => { void changeStatus() }}>确认{action}</PanelCommandButton>
       </div>
     </div>}
     {statusProblem && <p role="alert" className="ops-meta">{statusProblem}</p>}
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={reload} className="ops-button">{COPY.retry}</button></div>}
     {loading && !workflow && <p role="status" className="ops-meta">正在读取流程定义…</p>}
-    {!failed && workflow && <>
+    {workflow && <>
       <div role="group" aria-label="流程视图" className="ops-tabs">
         <button type="button" aria-pressed={view === 'design'} onClick={() => setView('design')}>设计画布</button>
         <button type="button" aria-pressed={view === 'versions'} onClick={() => setView('versions')}>版本记录</button>
@@ -101,7 +101,7 @@ export function WorkflowCanvas({ api, workflowId, onBack, onOpenRun, reloadVersi
       <div hidden={view !== 'design'}>
         <div className="ops-stack">
           {(!commands || !workflow.draft) && <DefinitionPanel definition={workflow.draft?.definition ?? workflow.current?.definition ?? null} />}
-          {commands && <WorkflowEditor commands={commands} workflow={workflow} onRefresh={reload} />}
+          {commands && <WorkflowEditor commands={commands} workflow={workflow} onRefresh={reload} snapshotStale={failed} />}
           {!commands && (workflow.validation.errors.length > 0 || workflow.validation.warnings.length > 0) &&
             <section className="ops-surface ops-inset" aria-label="检查结果">
               <IssueGroup title="需要修正" issues={workflow.validation.errors} tone="error" />
@@ -111,12 +111,12 @@ export function WorkflowCanvas({ api, workflowId, onBack, onOpenRun, reloadVersi
       </div>
       {view === 'runs' && <>
         <WorkflowRuns api={api} workflowId={workflowId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenRun={onOpenRun} />
-        {workflow.recent_tests && <section aria-label="快速测试记录" className="ops-surface">
-          <header className="ops-surface-head"><h2>快速测试记录</h2></header>
+        {workflow.recent_tests && <section aria-labelledby="workflow-tests-title" className="ops-surface">
+          <header className="ops-surface-head"><h2 id="workflow-tests-title">结构与模拟流转测试记录</h2></header>
           <div className="ops-inset">
-          {workflow.recent_tests.length === 0 && <p style={mutedStyle}>此 Workflow 尚无快速测试记录。</p>}
+          {workflow.recent_tests.length === 0 && <p style={mutedStyle}>此流程尚无结构与模拟流转测试记录。</p>}
           {workflow.recent_tests.map((test) => <details key={test.test_id}>
-            <summary>修订 {test.revision} · {test.passed ? '通过' : '未通过'} · {formatDate(test.tested_at)}</summary>
+            <summary>修订 {test.revision} · {test.passed ? '结构与模拟流转测试通过' : '结构与模拟流转测试未通过'} · {formatDate(test.tested_at)}</summary>
             {test.passed
               ? <ol>{test.order.map((step) => <li key={step.node_id}>{step.title}</li>)}</ol>
               : <ul>{test.issues.errors.map((issue, index) => <li key={index}>{issue.message}</li>)}</ul>}
@@ -180,7 +180,7 @@ function WorkflowRuns({ api, workflowId, reloadVersion, onSnapshot, onOpenRun }:
     {failed && <div role="alert" className="ops-empty">{COPY.queryFailed} <button type="button" className="ops-button" onClick={() => { setCursor(undefined); refresh((value) => value + 1) }}>{COPY.retry}</button></div>}
     {!failed && !runs && <p role="status" className="ops-empty">正在读取运行记录…</p>}
     {!failed && runs?.length === 0 && <p className="ops-empty">此流程还没有运行记录。</p>}
-    {!failed && runs && runs.length > 0 && <div className="ops-table-scroll"><table className="ops-table ops-table--wide">
+    {runs && runs.length > 0 && <div className="ops-table-scroll"><table className="ops-table ops-table--wide">
       <thead><tr><th>任务</th><th>结果</th><th>版本</th><th>触发方式</th><th>开始时间</th><th>耗时</th></tr></thead>
       <tbody>{runs.map((run) => <tr key={run.run_id}>
         <td>{onOpenRun && run.task_id

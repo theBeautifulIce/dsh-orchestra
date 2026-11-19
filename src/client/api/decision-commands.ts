@@ -12,7 +12,17 @@ export const DECISION_COMMAND_KINDS: readonly DecisionCommandKind[] = ['decision
 
 export type DecisionAcknowledgeInput = { decisionId: string; revision: number }
 
-export type DecisionResolveInput = { decisionId: string; revision: number; resolution: string; actorId?: string; contentHash?: string; confirm?: boolean }
+export type DecisionConfirmation = { operationId: string; challenge: string }
+export type DecisionResolveInput = { decisionId: string; revision: number; resolution: string; contentHash?: string; confirmation?: DecisionConfirmation }
+
+export class DecisionConfirmationRequired extends Error {
+  readonly confirmation: DecisionConfirmation
+
+  constructor(confirmation: DecisionConfirmation) {
+    super('请确认这次裁决')
+    this.confirmation = confirmation
+  }
+}
 
 export type DecisionAcknowledgeResult = { decisionId: string; revision: number; status?: string }
 
@@ -36,6 +46,8 @@ export const DECISION_ERROR_TEXT: Record<string, string> = {
   COMMAND_BUSY: '命令正在处理中，请稍后再试',
   OPERATION_ID_CONFLICT: '命令编号冲突，请稍后重试',
   OPERATION_EXPIRED: '命令已过期，请重新发起',
+  CONFIRMATION_EXPIRED: '确认已过期，请重新选择处理方式',
+  CONFIRMATION_MISMATCH: '确认与本次处理不再匹配，请重新选择',
   FORBIDDEN: '没有权限处理这条决定',
   RESOLUTION_NOT_AVAILABLE: '同一 kind 已有活跃 decision',
   NOT_FOUND: '找不到这条决定，可能已被处理',
@@ -86,12 +98,17 @@ async function submitDecisionCommand<T>(
   kind: DecisionCommandKind,
   path: string,
   body: Record<string, unknown>,
+  operationId = newOperationId(),
 ): Promise<DecisionCommandOutcome<T>> {
-  const operationId = newOperationId()
   try {
     const posted = await client.post<T>(path, { ...body, operation_id: operationId })
-    return { operation_id: operationId, kind, replayed: false, result: posted.data }
+    const result = posted.data as T & { replayed?: boolean }
+    return { operation_id: operationId, kind, replayed: result.replayed === true, result }
   } catch (error) {
+    if (kind === 'decision.resolve' && error instanceof ApiError && error.code === 'CONFIRMATION_REQUIRED') {
+      const challenge = (error.details as { confirm_challenge?: unknown } | undefined)?.confirm_challenge
+      if (typeof challenge === 'string' && challenge.length > 0) throw new DecisionConfirmationRequired({ operationId, challenge })
+    }
     if (!(error instanceof ApiError) || !AMBIGUOUS_CODES.has(error.code)) throw error
     const recovered = await recoverResult(client, operationId)
     if (recovered === null) {
@@ -118,9 +135,9 @@ export function createDecisionCommandsApi(client: ApiClient): DecisionCommandsAp
         revision: input.revision,
         resolution: input.resolution,
         ...(input.contentHash ? { contentHash: input.contentHash } : {}),
-        ...(input.confirm === true ? { confirm: true } : {}),
-        actor: { kind: 'human', id: input.actorId ?? 'panel' },
+        ...(input.confirmation ? { confirm_challenge: input.confirmation.challenge } : {}),
       },
+      input.confirmation?.operationId,
     ),
   }
 }

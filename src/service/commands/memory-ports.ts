@@ -141,9 +141,12 @@ export type InspectBatchPortResult = {
 /** 三个端口的集合类型。 */
 export type MemoryPorts = {
   evaluate: (input: EvaluatePortInput) => Promise<EvaluatePortResult>
-  applyGoverned: (input: ApplyGovernedPortInput) => Promise<ApplyGovernedPortResult>
+  applyGoverned: (input: ApplyGovernedPortInput, renewWriteLease: RenewWriteLease) => Promise<ApplyGovernedPortResult>
   inspectBatch: (input: InspectBatchPortInput) => InspectBatchPortResult
 }
+
+/** Renew the current attempt inside the transaction and return the current receipt time. */
+type RenewWriteLease = (tx: Tx) => string
 
 export type MemoryBatchRow = {
   batch_id: string
@@ -203,15 +206,16 @@ const FAILING_EVAL_CODES = [
   'MEMORY_BATCH_CONFLICT',
 ]
 
-function loadBatch(db: Db, batch_id: string): MemoryBatchRow | undefined {
+function loadBatch(db: Db, batch_id: string, memoryRunId?: string): MemoryBatchRow | undefined {
   const row = db.raw
     .prepare(
       'SELECT batch_id, task_id, source_run_id, memory_run_id, prepare_node_run_id, confirm_node_run_id,' +
         ' apply_node_run_id, attempt, status, outcome, proposal_hash, approved_proposal_hash,' +
         ' approved_item_hashes_json, evaluation_id, decision_id, applied_count, skipped_count, error_code,' +
-        ' error_message FROM memory_batches WHERE batch_id = ?',
+        ' error_message FROM memory_batches WHERE batch_id = ?' +
+        (memoryRunId === undefined ? '' : ' AND memory_run_id = ?'),
     )
-    .get(batch_id)
+    .get(...(memoryRunId === undefined ? [batch_id] : [batch_id, memoryRunId]))
   return row === undefined ? undefined : (row as unknown as MemoryBatchRow)
 }
 
@@ -472,10 +476,11 @@ export async function evaluateMemoryBatch(deps: MemoryPortDeps, input: EvaluateP
 export async function applyGovernedMemoryBatch(
   deps: MemoryPortDeps,
   input: ApplyGovernedPortInput,
+  renewWriteLease: RenewWriteLease,
 ): Promise<ApplyGovernedPortResult> {
   const now = input.now ?? new Date().toISOString()
   const claim = inTx(deps.db, (tx) => {
-    const batch = loadBatch(deps.db, input.batch_id)
+    const batch = loadBatch(deps.db, input.batch_id, input.run_id)
     if (!batch) {
       throw new OrchError('MEMORY_BATCH_NOT_FOUND', '记忆批次不存在', { batch_id: input.batch_id })
     }
@@ -498,7 +503,7 @@ export async function applyGovernedMemoryBatch(
       (replay ? '' : " AND r.status = 'running' AND r.cancel_requested_at IS NULL"),
       [input.node_run_id, batch.memory_run_id],
     )
-    if (batch.decision_id !== input.decision_id || batch.memory_run_id !== input.run_id || !node ||
+    if (batch.decision_id !== input.decision_id || !node ||
       (batch.apply_node_run_id && batch.apply_node_run_id !== input.node_run_id) ||
       (!replay && node.status !== 'started')) {
       throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '写入节点不属于这张记忆批次或尚未启动')
@@ -525,9 +530,10 @@ export async function applyGovernedMemoryBatch(
     if (replay) return null
     const approved = rows.filter((row) => row.status === 'approved')
     if (approved.length === 0) throw new OrchError('MEMORY_APPLY_BINDING_INVALID', '批准快照没有可写入的条目')
+    const claimedAt = renewWriteLease(tx)
     const res = tx.run(
       "UPDATE memory_batches SET status = 'applying', apply_node_run_id = ?, updated_at = ? WHERE batch_id = ? AND status = ? AND apply_node_run_id IS NULL",
-      [input.node_run_id, now, input.batch_id, batch.status],
+      [input.node_run_id, claimedAt, input.batch_id, batch.status],
     )
     if (res.changes !== 1) throw new OrchError('MEMORY_BATCH_NOT_APPROVED', '批次已被其他写入领取')
     return { approved, skipped: rows.length - approved.length, sourceRunId: batch.source_run_id }
@@ -544,7 +550,8 @@ export async function applyGovernedMemoryBatch(
       decision_id: input.decision_id,
       items: claim.approved.map(toMemoryItemInput),
     })
-  } catch {
+  } catch (error) {
+    if (error instanceof OrchError && error.code === 'MEMORY_APPLY_CONFLICT') throw error
     throw new OrchError('MEMORY_APPLY_FAILED', '记忆写入结果暂不可确认，需要对账')
   }
   if ('outcome' in written) {
@@ -552,10 +559,11 @@ export async function applyGovernedMemoryBatch(
     const message = '写入端确认整批未落库'
     inTx(deps.db, (tx: Tx) => {
       assertWriteClaim(tx, input)
+      const receivedAt = renewWriteLease(tx)
       tx.run(
         "UPDATE memory_batches SET status = 'failed', outcome = 'failed', error_code = 'MEMORY_APPLY_FAILED'," +
           " error_message = ?, updated_at = ? WHERE batch_id = ? AND status = 'applying'",
-        [message, now, input.batch_id],
+        [message, receivedAt, input.batch_id],
       )
       tx.run("UPDATE memory_items SET status = 'failed' WHERE batch_id = ? AND status = 'approved'", [input.batch_id])
       tx.run("UPDATE memory_items SET status = 'skipped' WHERE batch_id = ? AND status = 'proposed'", [input.batch_id])
@@ -579,6 +587,7 @@ export async function applyGovernedMemoryBatch(
   }
   inTx(deps.db, (tx: Tx) => {
     assertWriteClaim(tx, input)
+    const receivedAt = renewWriteLease(tx)
     for (const item of applied) {
       tx.run(
         "UPDATE memory_items SET status = 'applied', applied_item_id = ? WHERE batch_id = ? AND client_key = ? AND status = 'approved'",
@@ -588,7 +597,7 @@ export async function applyGovernedMemoryBatch(
     const result = tx.run(
       "UPDATE memory_batches SET status = 'applied', outcome = 'written', applied_count = ?, skipped_count = ?," +
         " applied_at = ?, updated_at = ? WHERE batch_id = ? AND status = 'applying'",
-      [written.applied_count, skipped, now, now, input.batch_id],
+      [written.applied_count, skipped, receivedAt, receivedAt, input.batch_id],
     )
     if (result.changes !== 1) throw new OrchError('MEMORY_APPLY_FAILED', '记忆批次状态已变，需要对账')
   })
@@ -605,7 +614,9 @@ export async function applyGovernedMemoryBatch(
 function assertWriteClaim(tx: Tx, scope: ApplyGovernedPortInput): void {
   if (!tx.get(
     "SELECT 1 FROM memory_batches b JOIN node_runs n ON n.node_run_id = b.apply_node_run_id" +
-    " WHERE b.batch_id = ? AND b.status = 'applying' AND n.node_run_id = ? AND n.status = 'started'",
+    " JOIN runs r ON r.run_id = n.run_id" +
+    " WHERE b.batch_id = ? AND b.status = 'applying' AND n.node_run_id = ? AND n.status = 'started'" +
+    " AND n.replacement_node_run_id IS NULL AND r.status = 'running' AND r.cancel_requested_at IS NULL",
     [scope.batch_id, scope.node_run_id],
   )) throw new OrchError('STALE_GENERATION', '记忆写入回执来自已停止的 attempt')
 }
@@ -660,7 +671,7 @@ export function inspectMemoryBatch(deps: MemoryPortDeps, input: InspectBatchPort
 export function createMemoryPorts(deps: MemoryPortDeps): MemoryPorts {
   return {
     evaluate: (input) => evaluateMemoryBatch(deps, input),
-    applyGoverned: (input) => applyGovernedMemoryBatch(deps, input),
+    applyGoverned: (input, renewWriteLease) => applyGovernedMemoryBatch(deps, input, renewWriteLease),
     inspectBatch: (input) => inspectMemoryBatch(deps, input),
   }
 }

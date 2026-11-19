@@ -1,7 +1,7 @@
 // src/service/workflows.ts —— 工作流定义目录（规格 2.4 行 122、6.1 行 837-844）
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
-import type { Phase } from '../core/config.ts'
+import { requireCapability, type Phase } from '../core/config.ts'
 import { deepFreeze } from '../core/freeze.ts'
 import { mergePassConditions, type PassCondition } from '../core/policy.ts'
 import { assertDefinitionAllowed, SUBWORKFLOW_MAX_DEPTH, type WorkflowDefinition, type WorkflowNodeDef } from '../core/workflow-def.ts'
@@ -80,7 +80,7 @@ export class WorkflowCatalog {
     for (const row of rows) {
       // 快照化：落库文本先还原成独立对象，校验、哈希、进目录都只认这份快照
       const snapshot = snapshotOf(JSON.parse(row.definition_json) as WorkflowDefinition)
-      assertDefinitionAllowed(snapshot, this.phase)
+      this.validateDefinition(snapshot)
       // 行键与快照必须指向同一个身份：011 升级时旧定义可能内嵌过 workflow_id，
       // 直接按 default 装回会把 wf-a 的定义挂到 default 名下，建 run 时再串到别的命名空间。
       const snapshotId = workflowIdOf(snapshot)
@@ -111,7 +111,7 @@ export class WorkflowCatalog {
    */
   adopt(def: WorkflowDefinition, expectedHash: string): void {
     const snapshot = snapshotOf(def)
-    assertDefinitionAllowed(snapshot, this.phase)
+    this.validateDefinition(snapshot)
     const workflowId = workflowIdOf(snapshot)
     const key = String(snapshot.workflow_version)
     if (definitionHashOf(snapshot) !== expectedHash) {
@@ -123,11 +123,21 @@ export class WorkflowCatalog {
     this.remember(workflowId, key, snapshot)
   }
 
+  /** 发布前沿用目录的阶段限制和运行配置校验，避免提交目录无法加载的版本。 */
+  validateDefinition(def: WorkflowDefinition): void {
+    this.requireWorkflowCapability(workflowIdOf(def))
+    assertDefinitionAllowed(def, this.phase)
+  }
+
+  requireWorkflowCapability(workflowId: string | undefined): void {
+    if (workflowId === 'wf_release_v1') requireCapability(this.phase, 'release')
+  }
+
   load(def: WorkflowDefinition): LoadWorkflowResult {
     // 快照化：canonical_json 走一遍再解析，拿到的是与调用方彻底断开的独立副本；
     // 调用方之后再改原对象（哪怕改嵌套的 tools.allow）也影响不到目录里的定义（第二次意见 P1 问题 A）
     const snapshot = snapshotOf(def)
-    assertDefinitionAllowed(snapshot, this.phase)
+    this.validateDefinition(snapshot)
     const workflowId = workflowIdOf(snapshot)
     const key = String(snapshot.workflow_version)
     assertDefinitionIdentity(workflowId, key)
@@ -255,6 +265,7 @@ export class WorkflowCatalog {
 
   // 目录本体：只有目录自己用，拿到的是冻结的那一份
   private internal(workflowId: string, version: string): WorkflowDefinition {
+    this.requireWorkflowCapability(workflowId)
     const direct = this.defs.get(keyOf(workflowId, version))
     if (direct) return direct
     // workflow_version 在账本里是整数列：'01' 这类版本号读回来是 1，按同一命名空间的别名兜住

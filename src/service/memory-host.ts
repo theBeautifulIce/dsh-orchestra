@@ -4,7 +4,8 @@ import { contentHash, type MemoryItemInput } from '../core/memory-canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 import type { Actor } from './decision/approver.ts'
-import { requestHashOf, runIdempotentCommand } from './commands/idempotency.ts'
+import { requestHashOf } from './commands/idempotency.ts'
+import { runDecisionCommand } from './decision/confirmation.ts'
 import { startMemoryRun, type StartMemoryRunParams } from './commands/memory.ts'
 import { expireMemoryApproval, resolveMemoryApproval } from './commands/memory-approval.ts'
 import type { GovernedWriteInput, InspectMemoryWrite } from './commands/memory-ports.ts'
@@ -94,22 +95,20 @@ export function createMemoryHost(db: Db, secret: string, options: MemoryHostOpti
     resolveApproval(input: Parameters<NodeCommands['resolveDecision']>[0]) {
       const row = db.raw.prepare('SELECT batch_id, memory_run_id FROM memory_batches WHERE decision_id = ?').get(input.decisionId)
       if (!row) return undefined
-      if (!input.actor || !input.operationId || (input.resolution !== 'approved' && input.resolution !== 'rejected')) {
-        throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆写入批准只接受批准或驳回，并须提供回执编号')
-      }
-      const actor = input.actor
-      const resolution = input.resolution
-      const kind = 'decision.resolve'
-      const out = withTx(db, (tx) => runIdempotentCommand(tx, {
-        kind, operationId: input.operationId!, now: input.now, requestHash: requestHashOf(kind, { ...input, now: undefined }),
-      }, () => {
+      const { confirmChallenge, ...legacy } = input
+      const legacyHash = requestHashOf('decision.resolve', { ...legacy, now: undefined })
+      const out = withTx(db, (tx) => runDecisionCommand(tx, secret, input, legacyHash, true, (confirmed) => {
+        const { actor, resolution } = input
+        if (!actor || !input.operationId || (resolution !== 'approved' && resolution !== 'rejected')) {
+          throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆写入批准只接受批准或驳回，并须提供回执编号')
+        }
         resolveMemoryApproval(tx, secret, {
           batch_id: String(row.batch_id), decision_id: input.decisionId, revision: input.revision,
-          now: input.now, actor, resolution, confirm: input.confirm, contentHash: input.contentHash,
+          now: input.now, actor, resolution, confirm: confirmed, contentHash: input.contentHash,
         })
         return { decisionId: input.decisionId, revision: input.revision + 1 }
-      }).result)
-      advance(String(row.memory_run_id))
+      }))
+      if (!out.replayed) advance(String(row.memory_run_id))
       return out
     },
     resume(now = new Date().toISOString()) {
