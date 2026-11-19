@@ -1,6 +1,7 @@
 import { canonicalJson, hmacSha256Hex, sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import type { Db, Tx } from '../infra/sqlite/driver.ts'
+import { appendEvent } from '../infra/db/ledger.ts'
 import { withReadTx } from './queries/read-tx.ts'
 import type { NodeSpec } from './dispatcher.ts'
 import type { WorkflowCatalog } from './workflows.ts'
@@ -19,11 +20,9 @@ const requestBackedNode = `(
     (i.node_run_id=n.node_run_id AND i.released_at IS NOT NULL AND q.status='closed')))
   OR EXISTS(SELECT 1 FROM rework_extra_steps e WHERE e.request_id=q.request_id AND e.run_id=n.run_id AND e.node_id=n.node_id AND q.status='closed')
  )`
+const notBlocked = `NOT EXISTS(SELECT 1 FROM rework_dispatch_blocks b WHERE b.request_id=q.request_id AND b.node_run_id=n.node_run_id AND b.resolved_at IS NULL)`
 export const MANUAL_REWORK_PENDING = `EXISTS(SELECT 1 FROM node_runs n JOIN rework_requests q ON q.run_id=n.run_id
- WHERE n.run_id=r.run_id AND n.status='queued' AND n.replacement_node_run_id IS NULL
- AND EXISTS(SELECT 1 FROM rework_dispatch_specs g WHERE g.run_id=n.run_id
- AND NOT EXISTS(SELECT 1 FROM rework_dispatch_invalidations v WHERE v.run_id=g.run_id AND v.node_id=g.node_id)
- AND (g.node_id=n.node_id OR EXISTS(SELECT 1 FROM rework_extra_steps e WHERE e.run_id=n.run_id AND e.node_id=n.node_id AND e.before_node_id=g.node_id))) AND ${requestBackedNode})`
+ WHERE n.run_id=r.run_id AND n.status='queued' AND n.replacement_node_run_id IS NULL AND ${notBlocked} AND ${requestBackedNode})`
 export const MANUAL_REWORK_ELIGIBLE = trustedRun + ' AND ' + MANUAL_REWORK_PENDING
 function signature(secret:string, row:Omit<Grant,'authority_hash'>):string {return hmacSha256Hex(secret,canonicalJson(row))}
 function bindings(registry:ToolRegistry,spec:NodeSpec):string {return canonicalJson(spec.tools.map(tool=>registry.require(tool.command)))}
@@ -48,10 +47,21 @@ export function rememberManualDispatchSpecs(tx:Tx,secret:string,catalog:Workflow
     if(tx.get('SELECT 1 FROM rework_requests WHERE run_id=? LIMIT 1',[runId]))throw new OrchError('CONFIRMATION_MISMATCH','manual continuation is bound to its original authorized inputs and tools')
     tx.run('INSERT OR IGNORE INTO rework_dispatch_invalidations VALUES(?,?,?,?)',[runId,nodeId,sha256Hex(specJson),now])
    }
+   const unchangedSpec = saved.spec_json === specJson
+   const validAuthority = saved.authority_hash === signature(secret, grantPayload(saved))
+   const unchangedTools = saved.tool_bindings_json === bindings(registry, spec)
+   const invalidated = tx.get(
+     'SELECT 1 FROM rework_dispatch_invalidations WHERE run_id=? AND node_id=?',
+     [runId, nodeId],
+   )
+   if (unchangedSpec && validAuthority && unchangedTools && !invalidated) {
+     clearManualDispatchBlocks(tx, runId, nodeId, now)
+   }
    continue
   }
   const grant={run_id:runId,node_id:nodeId,workflow_definition_hash:run.workflow_definition_hash,spec_json:specJson,tool_bindings_json:bindings(registry,spec),spec_hash:sha256Hex(specJson)}
   tx.run('INSERT INTO rework_dispatch_specs VALUES(?,?,?,?,?,?,?,?)',[grant.run_id,grant.node_id,grant.workflow_definition_hash,grant.spec_json,grant.tool_bindings_json,grant.spec_hash,signature(secret,grant),now])
+  clearManualDispatchBlocks(tx,runId,nodeId,now)
  }
 }
 export function resolveManualReworkSpecs(db:Db,secret:string,catalog:WorkflowCatalog,registry:ToolRegistry,run:TriggerRunReady):Record<string,NodeSpec>|undefined {
@@ -67,16 +77,82 @@ export function resolveManualReworkSpecs(db:Db,secret:string,catalog:WorkflowCat
    AND EXISTS(SELECT 1 FROM node_runs n JOIN rework_requests q ON q.run_id=n.run_id
     WHERE n.run_id=g.run_id AND n.status='queued' AND n.replacement_node_run_id IS NULL
     AND (n.node_id=g.node_id OR EXISTS(SELECT 1 FROM rework_extra_steps e WHERE e.run_id=n.run_id AND e.node_id=n.node_id AND e.before_node_id=g.node_id))
-    AND ${requestBackedNode})`,[run.run_id])) {
+    AND ${notBlocked} AND ${requestBackedNode})`,[run.run_id])) {
+   try {
    const {authority_hash}=row
    // Explicit selection avoids binding the signature to unrelated projection columns.
-   const signed={run_id:row.run_id,node_id:row.node_id,workflow_definition_hash:row.workflow_definition_hash,spec_json:row.spec_json,tool_bindings_json:row.tool_bindings_json,spec_hash:row.spec_hash}
+   const signed=grantPayload(row)
    if(authority_hash!==signature(secret,signed)||sha256Hex(row.spec_json)!==row.spec_hash||row.workflow_definition_hash!==current.workflow_definition_hash)throw new OrchError('CONFIRMATION_MISMATCH','manual dispatch authority hash changed')
    const spec=JSON.parse(row.spec_json) as NodeSpec
    validateSpec(catalog,registry,run,row.node_id,spec)
    if(bindings(registry,spec)!==row.tool_bindings_json)throw new OrchError('TOOL_NOT_ALLOWED','manual continuation tool registration changed')
    specs[row.node_id]=spec
+   } catch(error) {
+    if(error instanceof OrchError)throw new OrchError(error.code,error.message,{...error.details,node_id:row.node_id})
+    throw new OrchError('CONFIRMATION_MISMATCH','manual dispatch grant cannot be decoded',{node_id:row.node_id})
+   }
   }
   return Object.keys(specs).length?specs:undefined
  })
+}
+
+function grantPayload(row: Grant): Omit<Grant, 'authority_hash'> {
+  return {
+    run_id: row.run_id,
+    node_id: row.node_id,
+    workflow_definition_hash: row.workflow_definition_hash,
+    spec_json: row.spec_json,
+    tool_bindings_json: row.tool_bindings_json,
+    spec_hash: row.spec_hash,
+  }
+}
+
+function clearManualDispatchBlocks(tx: Tx, runId: string, nodeId: string, now: string): void {
+  const changed = tx.run(
+    'UPDATE rework_dispatch_blocks SET resolved_at=? WHERE run_id=? AND node_id=? AND resolved_at IS NULL',
+    [now, runId, nodeId],
+  )
+  if (changed.changes) {
+    appendEvent(tx, { type: 'rework.dispatch_unblocked', runId, payload: { node_id: nodeId } })
+  }
+}
+
+/** Persist one visible diagnostic per affected queued attempt; unrelated branches keep their facts. */
+export function recordManualDispatchBlock(tx: Tx, runId: string, reason: string, error: unknown, now: string): number {
+  if (!tx.get("SELECT 1 FROM runs WHERE run_id=? AND status='running' AND cancel_requested_at IS NULL", [runId])) return 0
+  const role = error instanceof OrchError && typeof error.details.node_id === 'string'
+    ? error.details.node_id
+    : null
+  const message = error instanceof Error ? error.message.slice(0, 1000) : reason
+  const affected = tx.all<{ request_id: string; node_run_id: string; node_id: string }>(
+    `SELECT DISTINCT q.request_id,n.node_run_id,n.node_id
+     FROM node_runs n JOIN rework_requests q ON q.run_id=n.run_id
+     WHERE n.run_id=? AND n.status='queued' AND n.replacement_node_run_id IS NULL
+       AND (? IS NULL OR n.node_id=? OR EXISTS(
+         SELECT 1 FROM rework_extra_steps e
+         WHERE e.run_id=n.run_id AND e.node_id=n.node_id AND e.before_node_id=?
+       ))
+       AND ${requestBackedNode}`,
+    [runId, role, role, role],
+  )
+  let count = 0
+  for (const row of affected) {
+    const change = tx.run(
+      `INSERT INTO rework_dispatch_blocks(request_id,node_run_id,run_id,node_id,reason,message,created_at)
+       VALUES(?,?,?,?,?,?,?)
+       ON CONFLICT(request_id,node_run_id) DO UPDATE SET reason=excluded.reason,message=excluded.message,
+         created_at=excluded.created_at,resolved_at=NULL
+       WHERE rework_dispatch_blocks.resolved_at IS NOT NULL`,
+      [row.request_id, row.node_run_id, runId, row.node_id, reason, message, now],
+    )
+    if (!change.changes) continue
+    count++
+    appendEvent(tx, {
+      type: 'rework.dispatch_blocked',
+      runId,
+      nodeRunId: row.node_run_id,
+      payload: { request_id: row.request_id, node_id: row.node_id, reason, message },
+    })
+  }
+  return count
 }

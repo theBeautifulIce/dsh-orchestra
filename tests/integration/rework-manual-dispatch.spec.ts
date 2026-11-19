@@ -102,3 +102,48 @@ it('grants only signed corroborated pure roles and preserves ordinary pre-feedba
  expect(db.raw.prepare('SELECT COUNT(*) AS n FROM rework_dispatch_invalidations').get()?.n).toBe(1)
  expect(JSON.parse(String(db.raw.prepare("SELECT spec_json FROM rework_dispatch_specs WHERE node_id='pure'").get()?.spec_json)).input.goal).toBe('first')
 })
+
+it.each(['permission','missing'] as const)('deduplicates visible manual %s blocks without failing siblings and lets explicit safe dispatch retry',async(mode)=>{
+ const {db,dir}=freshLedger();cleanups.push(async()=>{db.raw.close();rmSync(dir,{recursive:true,force:true})})
+ const registry=new ToolRegistry();registry.register({name:'ro.echo',capability:'read_only',command:{bin:'echo',args:[]}})
+ const catalog=new WorkflowCatalog('S5',db,name=>registry.lookup(name)?.capability==='read_only');const now=new Date().toISOString()
+ catalog.load({workflow_id:'isolation',workflow_version:'1',nodes:['A','sibling'].map(node_id=>({node_id,type:'agent',side_effect_policy:'pure',tools:{allow:['ro.echo']}}))})
+ const tools=[{command:'ro.echo',args:[],cwd:'.',timeoutMs:1000}];const specs={A:{tools},sibling:{tools}}
+ withTx(db,tx=>{
+  tx.run("INSERT INTO tasks(task_id,title,status,created_at,updated_at) VALUES('t','isolated','running',?,?)",[now,now])
+  tx.run("INSERT INTO runs(run_id,task_id,status,workflow_id,workflow_version,workflow_definition_hash,created_at,updated_at) VALUES('r','t','running','isolation','1',?,?,?)",[catalog.definitionHash('isolation','1'),now,now])
+  tx.run("INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,revision,side_effect_policy,created_at,updated_at) VALUES('a','r','A',1,'agent','done',1,'pure',?,?)",[now,now])
+  tx.run("INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,revision,side_effect_policy,created_at,updated_at) VALUES('sibling','r','sibling',2,'agent','queued',1,'pure',?,?)",[now,now])
+  rememberManualDispatchSpecs(tx,secret,catalog,registry,'r',mode==='missing'?{sibling:specs.sibling}:specs,now)
+ })
+ registerRunArtifact(db,{artifactId:'isolation-v1',runId:'r',nodeRunId:'a',fileName:'data.txt',bytes:Buffer.from('v1')})
+ const feedback=createReworkHost(db,secret)
+ const request=feedback.request({operation_id:uuidv7(),run_id:'r',target_node_run_id:'a',expected_revision:1,source_artifact_id:'isolation-v1',source_artifact_hash:sha256Hex('v1'),reason:'Fix A only',expected_result:'v2'},owner,now)
+ withTx(db,tx=>{
+  tx.run("INSERT INTO tasks(task_id,title,status,created_at,updated_at) VALUES('t2','healthy','running',?,?)",[now,now])
+  tx.run("INSERT INTO runs(run_id,task_id,status,workflow_id,workflow_version,workflow_definition_hash,created_at,updated_at) VALUES('r2','t2','running','isolation','1',?,?,?)",[catalog.definitionHash('isolation','1'),now,now])
+  tx.run("INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,revision,side_effect_policy,created_at,updated_at) VALUES('a_other','r2','A',1,'agent','done',1,'pure',?,?)",[now,now])
+  rememberManualDispatchSpecs(tx,secret,catalog,registry,'r2',{A:specs.A},now)
+ })
+ registerRunArtifact(db,{artifactId:'healthy-v1',runId:'r2',nodeRunId:'a_other',fileName:'data.txt',bytes:Buffer.from('v1')})
+ const healthy=feedback.request({operation_id:uuidv7(),run_id:'r2',target_node_run_id:'a_other',expected_revision:1,source_artifact_id:'healthy-v1',source_artifact_hash:sha256Hex('v1'),reason:'Fix independent run',expected_result:'v2'},owner,now)
+ const revoked=new ToolRegistry();let current=revoked;let calls=0;const errors:unknown[]=[];const dispatched:string[]=[]
+ const pump=createTriggerDispatchPump(db,undefined,async run=>{dispatched.push(run.run_id);if(run.run_id==='r2')withTx(db,tx=>tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?",[healthy.new_node_run_id]))},error=>errors.push(error),undefined,{secret,resolveManual:run=>{if(run.run_id==='r')calls++;return resolveManualReworkSpecs(db,secret,catalog,run.run_id==='r2'?registry:current,run)}})
+ try {
+  pump.tick()
+  await expect.poll(()=>db.raw.prepare('SELECT COUNT(*) AS n FROM rework_dispatch_blocks WHERE resolved_at IS NULL').get()?.n).toBe(1)
+  expect(db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id='sibling'").get()?.status).toBe('queued')
+  expect(db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id=?').get(request.new_node_run_id)?.status).toBe('queued')
+  expect(feedback.get(request.request_id,owner).item.dispatch_blocks).toMatchObject([{node_id:'A',reason:mode==='missing'?'resolver_returned_no_specs':'TOOL_NOT_REGISTERED',resolved_at:null}])
+  pump.tick();await new Promise(resolve=>setTimeout(resolve,20));pump.tick();await new Promise(resolve=>setTimeout(resolve,20))
+  expect(calls).toBe(1)
+  expect(db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE type='rework.dispatch_blocked'").get()?.n).toBe(1)
+  expect(errors).toHaveLength(mode==='missing'?0:1)
+  expect(dispatched).toEqual(['r2'])
+  current=registry
+  withTx(db,tx=>rememberManualDispatchSpecs(tx,secret,catalog,registry,'r',{A:specs.A},now))
+  pump.tick();await expect.poll(()=>dispatched).toEqual(['r2','r'])
+  expect(db.raw.prepare('SELECT COUNT(*) AS n FROM rework_dispatch_blocks WHERE resolved_at IS NULL').get()?.n).toBe(0)
+  expect(db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id='sibling'").get()?.status).toBe('queued')
+ } finally {await pump.close()}
+})

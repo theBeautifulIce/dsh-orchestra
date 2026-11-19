@@ -14,7 +14,7 @@ function clientFor(item: ReworkItem = request) {
   const posts: Array<{ path: string; body: Record<string, unknown> }> = []
   const client: ApiClient = {
     async get<T>(path: string) {
-      const data = path === '/v1/rework' ? { items: [item] } : path === '/v1/rework/get' ? { item: { request: item, attempts: [], reviews: [{ review_id: 'review1', round_no: 1, reviewer_actor: 'human', action: 'authorize', note: '允许补齐数据', created_at: '2026-11-19' }] } }
+      const data = path === '/v1/rework' ? { items: [item] } : path === '/v1/rework/get' ? { item: { request: item, attempts: [], dispatch_blocks: [{ node_id: 'audit', node_run_id: 'a2', reason: 'TOOL_NOT_ALLOWED', message: '核验工具授权已变化', resolved_at: null }], reviews: [{ review_id: 'review1', round_no: 1, reviewer_actor: 'human', action: 'authorize', note: '允许补齐数据', created_at: '2026-11-19' }] } }
         : path === '/v1/artifacts' ? { items: artifacts, has_more: false }
         : path === '/v1/node-runs' ? { items: [nodeRunView({ node_run_id: 'old', node_type: 'agent', status: 'done', revision: 7, replacement_node_run_id: null })] }
         : path === '/v1/rework/holds' ? { items: [] } : { plan: null }
@@ -39,6 +39,7 @@ describe('成果审核与返工', () => {
     await view.flush()
     expect(view.text()).toContain('第 1 / 3 轮')
     expect(view.text()).toContain('允许补齐数据')
+    expect(view.text()).toContain('核验工具授权已变化')
     expect(view.text()).toContain('v1')
     expect(view.text()).toContain('v2')
     expect(view.text()).not.toContain('拒绝执行')

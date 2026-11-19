@@ -112,4 +112,3 @@ it('holds a final delivery before close, rejects stale bytes and closes on expli
     expect(delivery.list(operator, 'r1').items[0]).toMatchObject({ status: 'accepted', sha256: accept.sha256 })
   } finally { db.raw.close() }
 })
-

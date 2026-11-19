@@ -11,6 +11,10 @@ export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' |
 
 const RUN_TERMINAL: readonly RunTerminal[] = ['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled']
 
+export function isRunTerminal(status: string): status is RunTerminal {
+  return RUN_TERMINAL.some(terminal => terminal === status)
+}
+
 type NodeRow = {
   node_run_id: string
   status: string
@@ -32,7 +36,7 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
     'SELECT status, cancel_requested_at, cancel_result FROM runs WHERE run_id = ?',
     [runId],
   )
-  if (!run || RUN_TERMINAL.includes(run.status as RunTerminal) || run.status === 'paused') {
+  if (!run || isRunTerminal(run.status) || run.status === 'paused') {
     return null
   }
   if (!run.cancel_requested_at && (hasUnresolvedRework(tx,runId) || hasDeliveryReviewHold(tx,runId))) return null

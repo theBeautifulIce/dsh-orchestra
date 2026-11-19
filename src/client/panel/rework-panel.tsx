@@ -108,6 +108,12 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
     <p>来源：{item.requester_actor} · 节点 {item.target_node_run_id} · 第 {item.target_attempt} 次执行</p>
     <p>{item.reason}</p><p>期望结果：{item.expected_result}</p>
     <p>范围：{scopes[item.suggested_scope] ?? item.suggested_scope}</p>
+    {history?.dispatch_blocks?.filter(block => !block.resolved_at).map(block =>
+      <section key={block.node_run_id} aria-label="自动派发受阻">
+        <h4>{block.node_id} 的自动派发已暂停</h4>
+        <p>{block.message} <code>{block.reason}</code></p>
+      </section>
+    )}
     <details><summary>修改前后成果与版本</summary>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 12 }}>
         <section><h4>修改前</h4><p>{item.source_artifact_id}</p><code style={hash}>{item.source_artifact_hash}</code>{old && <ArtifactContent api={api} artifact={old} />}</section>
@@ -220,5 +226,3 @@ const box: CSSProperties = { padding: 14, margin: '12px 0', border: `1px solid $
 const field: CSSProperties = { display: 'grid', gap: 5, margin: '10px 0' }
 const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '10px 0' }
 const hash: CSSProperties = { display: 'block', overflowWrap: 'anywhere', fontSize: FONT_PX.helper }
-
-
