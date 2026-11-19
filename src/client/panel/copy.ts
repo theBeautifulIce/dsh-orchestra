@@ -19,6 +19,9 @@ export const COPY = {
   // 未验证终态的独立文案：不折叠进「已完成」或「未成功」。
   succeededWithUnverified: '执行完成，外部操作待核验',
   failedWithUnverified: '执行失败，外部操作待核验',
+  // 交付验收的独立文案：执行完成不等于目标达成，验收结论要单独说。
+  deliveryAcceptanceFailed: '交付验收失败',
+  deliveryAcceptanceUnverifiable: '交付待核验',
   // 未验证角标的后缀，前面跟数量。
   unverifiedBadge: '项未验证',
 } as const

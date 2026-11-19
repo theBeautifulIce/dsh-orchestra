@@ -1,5 +1,8 @@
-import type { Db } from '../infra/sqlite/driver.ts'
-import type { NodeSpec } from './dispatcher.ts'
+import { OrchError } from '../core/errors.ts'
+import { withTx, type Db } from '../infra/sqlite/driver.ts'
+import { failQueuedNode, type NodeSpec } from './dispatcher.ts'
+import { closeRun } from './commands/run-close.ts'
+import { markTriggerDispatched, markTriggerResolveFailed } from './task-triggers.ts'
 
 export type TriggerRunReady = {
   run_id: string
@@ -12,8 +15,31 @@ export type TriggerRunReady = {
 export type ResolveTriggerNodeSpecs = (run: TriggerRunReady, signal: AbortSignal) =>
   Record<string, NodeSpec> | undefined | Promise<Record<string, NodeSpec> | undefined>
 
+export type TriggerDispatchOptions = {
+  /** 解析节点规格的时限；测试注入更短的时限，不必真的等 */
+  resolveTimeoutMs?: number
+  /** 就绪态落库用的时钟；测试可注入固定时钟 */
+  now?: () => string
+  /** 节点链签名密钥：写节点事件、收口运行都要用 */
+  secret?: string
+}
+
 const PARALLEL_RUNS = 4
 const RESOLVE_TIMEOUT_MS = 5000
+
+/** 解析失败原因：超时与宿主错误码各有各的形状，就绪态里要能分辨 */
+function resolveFailureReason(error: unknown): string {
+  if (error instanceof OrchError) return error.code
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) return 'resolver_timeout'
+  return 'resolver_failed'
+}
+
+/** 运行期权限被撤：这类阻断必须变成用户看得见的状态，不能只留一行日志 */
+const PERMISSION_DENIED_CODES = new Set(['TOOL_NOT_ALLOWED', 'TOOL_NOT_REGISTERED', 'RUN_TOOL_NOT_READ_ONLY'])
+
+function isPermissionDenied(error: unknown): error is OrchError {
+  return error instanceof OrchError && PERMISSION_DENIED_CODES.has(error.code)
+}
 
 export function createTriggerDispatchPump(
   db: Db,
@@ -21,10 +47,34 @@ export function createTriggerDispatchPump(
   dispatch: (run: TriggerRunReady, specs: Record<string, NodeSpec>) => Promise<unknown>,
   onError: (error: unknown) => void,
   resolvePlan?: ResolveTriggerNodeSpecs,
+  options?: TriggerDispatchOptions,
 ) {
   const active = new Map<string, Promise<void>>()
   const shutdown = new AbortController()
+  const timeoutMs = options?.resolveTimeoutMs ?? RESOLVE_TIMEOUT_MS
+  const clock = options?.now ?? (() => new Date().toISOString())
+  const secret = options?.secret
   let cursor = ''
+
+  /**
+   * 权限阻断的可见化：还排队的节点收成 failed（并写节点事件），运行随之收成失败，
+   * 任务因此进入待处理车道，而不是静悄悄地停在 queued。
+   */
+  function blockRunOnPermissionDenied(run: TriggerRunReady, error: OrchError) {
+    if (!secret) return
+    try {
+      const queued = db.raw.prepare(
+        "SELECT node_run_id, attempt FROM node_runs WHERE run_id = ? AND status = 'queued'",
+      ).all(run.run_id) as Array<{ node_run_id: string; attempt: number }>
+      for (const row of queued) {
+        const settlement = failQueuedNode({ db, secret }, { runId: run.run_id, nodes: {}, now: clock() }, row, error.message, error.code)
+        if (settlement.kind === 'storage_error') onError(settlement.error)
+      }
+      withTx(db, (tx) => { closeRun(tx, secret, run.run_id, clock()) })
+    } catch (blockError) {
+      onError(blockError)
+    }
+  }
 
   function ready(after: string): (TriggerRunReady & { source: 'trigger' | 'plan' })[] {
     return db.raw.prepare(`
@@ -45,7 +95,7 @@ export function createTriggerDispatchPump(
   }
 
   async function resolveBounded(run: TriggerRunReady, resolveSpecs: ResolveTriggerNodeSpecs) {
-    const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(RESOLVE_TIMEOUT_MS)])
+    const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(timeoutMs)])
     let onAbort: (() => void) | undefined
     try {
       return await Promise.race([
@@ -75,13 +125,22 @@ export function createTriggerDispatchPump(
         if (active.has(run.run_id)) continue
         const resolver = source === 'plan' ? resolvePlan : resolve
         if (!resolver) continue
+        const markDispatched = () => { try { markTriggerDispatched(db, run.run_id, clock()) } catch (error) { onError(error) } }
+        const markFailed = (reason: string) => { try { markTriggerResolveFailed(db, run.run_id, reason, clock()) } catch (error) { onError(error) } }
         const work = resolveBounded(run, resolver).then(async (specs) => {
-          if (shutdown.signal.aborted || !specs || Object.keys(specs).length === 0) return
+          if (shutdown.signal.aborted) return
+          // 解析不出规格不是"没事发生"：原因要落到就绪态里，不能被静默吞掉
+          if (!specs || Object.keys(specs).length === 0) { markFailed('resolver_returned_no_specs'); return }
           // Recheck after async host resolution because a separate command could have paused or cancelled the run.
           if (!db.raw.prepare("SELECT 1 FROM runs WHERE run_id = ? AND status = 'running' AND cancel_requested_at IS NULL").get(run.run_id)) return
           await dispatch(run, specs)
+          markDispatched()
         }).catch((error: unknown) => {
-          if (!shutdown.signal.aborted) onError(error)
+          if (shutdown.signal.aborted) return
+          markFailed(resolveFailureReason(error))
+          onError(error)
+          // 权限阻断要落成用户可见状态：节点收失败、运行收失败，任务进待处理车道
+          if (isPermissionDenied(error)) blockRunOnPermissionDenied(run, error)
         }).finally(() => { active.delete(run.run_id) })
         active.set(run.run_id, work)
       }

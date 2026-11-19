@@ -18,6 +18,12 @@ import { createTaskTriggerHost } from './service/task-triggers.ts'
 import { createTriggerDispatchPump, type ResolveTriggerNodeSpecs } from './service/task-trigger-dispatch.ts'
 export type { ResolveTriggerNodeSpecs, TriggerRunReady } from './service/task-trigger-dispatch.ts'
 export type { TaskTriggerCreate, TaskTriggerOccurrence, TaskTriggerView } from './core/task-trigger.ts'
+export {
+  listTriggerExecutionStates,
+  type TaskTriggerExecutionFilter,
+  type TaskTriggerExecutionRow,
+  type TaskTriggerReadiness,
+} from './service/task-triggers.ts'
 import { acknowledgeDecision, resolveDecision } from './service/commands/decisions.ts'
 import { requestHashOf, runIdempotentCommand } from './service/commands/idempotency.ts'
 import { inspectEffectEvidence, resolveEffect } from './service/commands/effects.ts'
@@ -81,11 +87,16 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   } : {}) })
   try {
     const generateWorkflow = dshPlanner && createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'workflow')
+    // 同一个流程生成回调既接给服务端入口，也接给规划侧：没有可复用的合适流程时，规划侧自动生成任务专属流程
+    const workflowGenerator = generateWorkflow ? (input: { goal: string }, signal: AbortSignal) =>
+      generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal) : undefined
     const service = await serveOrchestra({
       ...serviceOptions,
-      ...(dshPlanner ? { planning: { propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }) } } : {}),
-      ...(generateWorkflow ? { workflowGenerator: (input: { goal: string }, signal: AbortSignal) =>
-        generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal) } : {}),
+      ...(dshPlanner ? { planning: {
+        propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }),
+        ...(workflowGenerator ? { workflowGenerator } : {}),
+      } } : {}),
+      ...(workflowGenerator ? { workflowGenerator } : {}),
       executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
     })
     collaboration = service.collaboration
@@ -481,7 +492,9 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const orchestra = service.orchestra
   const collaboration = opts.collaboration ? createCollaborationHost(orchestra.db, opts.secret) : undefined
   const modelSettings = opts.executor?.modelRouting && createModelRoutingSettingsHost(orchestra.db, opts.executor.modelRouting.profiles)
-  const taskTriggers = opts.phase === 'S5' ? createTaskTriggerHost(orchestra.db, orchestra.catalog) : undefined
+  const taskTriggers = opts.phase === 'S5'
+    ? createTaskTriggerHost(orchestra.db, orchestra.catalog, { executorReady: () => Boolean(opts.resolveTriggerNodeSpecs) })
+    : undefined
   const triggerResolver = taskTriggers ? opts.resolveTriggerNodeSpecs : undefined
   const registry = opts.executor?.registry
   const planResolver = registry && (opts.phase === 'S5' || opts.phase === 'S6')
@@ -493,6 +506,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     (run, nodes) => orchestra.commands.dispatch({ runId: run.run_id, nodes, now: new Date().toISOString() }),
     (error) => log.error('运行自动派发失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }),
     planResolver,
+    { secret: opts.secret },
   )
   const tickTaskTriggers = () => {
     try {
@@ -521,7 +535,11 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   try {
     if (opts.planning) requireCapability(opts.phase, 'panel')
     if (collaboration) requireCapability(opts.phase, 'panel')
-    const planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, opts.planning)
+    const planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, opts.planning ? {
+      ...opts.planning,
+      workflowGenerator: opts.planning.workflowGenerator ?? opts.workflowGenerator,
+      runtimeNodeTypes: RUNTIME_NODE_TYPES,
+    } : undefined)
     if (opts.memory) {
       requireCapability(opts.phase, 'memory')
       memory = createMemoryHost(orchestra.db, opts.secret, opts.memory, (error) => {

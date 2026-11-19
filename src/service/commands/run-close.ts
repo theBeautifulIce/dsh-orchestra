@@ -3,6 +3,7 @@ import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
+import { applyRunAcceptance } from './run-acceptance.ts'
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
 
@@ -72,11 +73,16 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
     [terminalStatus, now, now, runId],
   )
   if (res.changes !== 1) return null
+  // 任务状态跟着当前 run 走：根 run 仍是任务的当前 run 才写，不看有没有触发规则
+  // （普通手动任务也要同步）；current_run_id 谓词保证旧 run 迟到收口不会覆盖后启动
+  // run 的任务状态（审计 P1-04）
   tx.run(
     'UPDATE tasks SET status = ?, display_status = NULL, updated_at = ?, revision = revision + 1 '
-    + 'WHERE current_run_id = ? AND EXISTS (SELECT 1 FROM task_triggers t WHERE t.task_id = tasks.task_id)',
+    + 'WHERE current_run_id = ?',
     [terminalStatus, now, runId],
   )
+  // 交付验收是独立阶段：只读执行事实、只写验收结论与任务展示状态，不改 run 终态
+  applyRunAcceptance(tx, runId, now)
   // cancelled 只说明“按要求停了”，不说明副作用都已核实：
   // 把失败与未核实节点一并写进终态事件，调用方不必再去翻节点账本才能发现风险。
   appendEvent(tx, {

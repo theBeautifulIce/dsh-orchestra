@@ -103,9 +103,28 @@ export function acquireLease(tx: Tx, secret: string, params: AcquireLeaseParams)
 }
 
 // 续期只动租约，不动 Ga；Ga 跟动作走，续期跟 Gr 走（规格 4.3 行 309-310）
-export function renewLease(tx: Tx, params: { nodeRunId: string; leaseTtlMs: number; now: string }): string {
+export function renewLease(tx: Tx, params: { nodeRunId: string; leaseTtlMs: number; now: string; attempt?: number; leaseId?: string; ownerEpoch?: number }): string {
   const row = loadNodeRun(tx, params.nodeRunId)
   if (!row.lease_id) throw new OrchError('STALE_GENERATION', '节点没有租约，续期无效', { nodeRunId: params.nodeRunId })
+  // 归属校验：续期只许持有这份租约的同一个执行者做（租约被抢占 / attempt 变了 / 属主变了都算失权）
+  if (params.leaseId !== undefined && row.lease_id !== params.leaseId) {
+    throw new OrchError('STALE_GENERATION', '租约已被其他执行者接管，续期无效', {
+      nodeRunId: params.nodeRunId,
+      lease_id: row.lease_id,
+    })
+  }
+  if (params.attempt !== undefined && row.attempt !== params.attempt) {
+    throw new OrchError('STALE_GENERATION', '节点 attempt 已变，续期无效', {
+      nodeRunId: params.nodeRunId,
+      attempt: row.attempt,
+    })
+  }
+  if (params.ownerEpoch !== undefined && row.owner_epoch !== params.ownerEpoch) {
+    throw new OrchError('STALE_GENERATION', '租约属主已变，续期无效', {
+      nodeRunId: params.nodeRunId,
+      owner_epoch: row.owner_epoch,
+    })
+  }
   assertLeaseValid(row, params.now)
   const expiresAt = new Date(Date.parse(params.now) + params.leaseTtlMs).toISOString()
   runCas(

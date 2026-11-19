@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+import { SystemClock, type ClockProvider } from '../core/clock.ts'
 import { contentHash, type MemoryItemInput } from '../core/memory-canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
@@ -17,7 +19,10 @@ export type MemoryPluginWriter = {
   fenceAndInspect: InspectMemoryWrite
 }
 
-export type MemoryHostOptions = Pick<MemoryRuntimeOptions, 'prepareItems' | 'judge' | 'resolveSource' | 'judgeTimeoutMs'> & (
+export type MemoryHostOptions = Pick<MemoryRuntimeOptions, 'prepareItems' | 'judge' | 'resolveSource' | 'judgeTimeoutMs'> & {
+  /** 注入时钟：记忆运行时的续租与状态落库按它取真实时刻；不注入就用系统时钟。 */
+  clock?: ClockProvider
+} & (
   { context: { get(name: 'orchestraMemoryWriter'): unknown }; plugin?: never }
   | { plugin: MemoryPluginWriter; context?: never }
 )
@@ -34,6 +39,8 @@ export function createMemoryHost(db: Db, secret: string, options: MemoryHostOpti
   getWriter()
   const runtime = createMemoryRuntime({
     ...runtimeOptions, db, secret, ownerEpoch: db.epoch,
+    // 时钟：续租与状态落库按真实时刻算，不再整轮共用一个 now
+    clock: runtimeOptions.clock ?? new SystemClock(randomUUID()),
     writer: {
       async writeMemory({ items, ...scope }) {
         const approved = items.map((item) => ({ ...item, content_hash: contentHash(item) }))

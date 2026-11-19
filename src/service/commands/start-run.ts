@@ -4,8 +4,8 @@ import type { TaskOrigin } from '../../core/task-workspace.ts'
 import { inTx } from '../../infra/db/tx.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import type { Db, Tx } from '../../infra/sqlite/driver.ts'
-import { AUTONOMY_LEVELS, createRun, createRunInTx, type Autonomy, type CreateRunResult } from '../runs.ts'
-import type { WorkflowCatalog } from '../workflows.ts'
+import { AUTONOMY_LEVELS, createRun, createRunInTx, type Autonomy, type CreatedNodeRun, type CreateRunResult } from '../runs.ts'
+import { workflowIdOf, type WorkflowCatalog } from '../workflows.ts'
 
 export type EscalationRule = {
   // node_type / action_category / workflow_version_publish
@@ -123,6 +123,170 @@ export function startRun(db: Db, catalog: WorkflowCatalog, p: StartRunParams): S
   return {
     task_id: created.task_id, run_id: created.run_id, workflow_id: created.workflow_id,
     workflow_version: created.workflow_version, autonomy: created.autonomy, replayed: false,
+  }
+}
+
+/**
+ * 服务端可信编排路径的根启动入口（审计 P1-03）：task_local 工作流只有这条路能当根跑。
+ * 客户端请求体触发不了它：HTTP /v1/runs/start 只映射显式字段到 startRun，走不到这里。
+ */
+export type TrustedTaskLocalRunParams = {
+  // 必须是 workflows.owner_task_id 登记的那个预留任务号
+  taskId: string
+  workflowId: string
+  // 必填：只能起已发布的确定版本
+  workflowVersion: string
+  taskTitle?: string
+  autonomy?: Autonomy
+  escalations?: readonly EscalationRule[]
+  operationId?: string
+  /**
+   * 幂等重放开关：同一个 operation_id 再来时还回既有 run（不重复消费任务、不重复建 run）。
+   * 默认关闭，保持可信路径原来的 fail-closed 口径（重复启动一律被拒）。
+   */
+  allowReplay?: boolean
+  now: string
+}
+
+export type TrustedTaskLocalRunResult = {
+  task_id: string
+  run_id: string
+  workflow_id: string
+  workflow_version: string
+  autonomy: Autonomy
+  nodes: CreatedNodeRun[]
+  /** true = 这次没有新建 run，是同一个 operation_id 的重放 */
+  replayed: boolean
+}
+
+/** 版本号允许 '01' 这种补零写法，与目录内部的别名规则一致 */
+function sameVersion(a: string, b: string): boolean {
+  if (a === b) return true
+  return /^\d+$/.test(a) && /^\d+$/.test(b) && Number(a) === Number(b)
+}
+
+/** 版本行必须已发布（published_by 非空）：草稿版本不许起根运行 */
+function hasPublishedVersion(tx: Tx, workflowId: string, version: string): boolean {
+  const rows = tx.all<{ version: string; published_by: string | null }>(
+    'SELECT version, published_by FROM workflow_versions WHERE workflow_id = ?', [workflowId])
+  return rows.some((row) => row.published_by !== null && sameVersion(row.version, version))
+}
+
+/**
+ * 可信路径的幂等重放：同一个 operation_id 再来就还回既有 run。
+ * 记账表和 startRun 用的是同一张 start_run_operations，所以这里也是唯一的事实来源。
+ */
+function replayTrustedRun(
+  tx: Tx,
+  operationId: string,
+  taskId: string,
+  workflowId: string,
+): TrustedTaskLocalRunResult | null {
+  const row = tx.get<{ task_id: string; run_id: string; workflow_id: string; workflow_version: string; autonomy: Autonomy }>(
+    'SELECT o.task_id, o.run_id, t.workflow_id, t.workflow_version, t.autonomy FROM start_run_operations o '
+    + 'JOIN tasks t ON t.task_id = o.task_id WHERE o.operation_id = ?',
+    [operationId],
+  )
+  if (!row) return null
+  if (row.task_id !== taskId || row.workflow_id !== workflowId) {
+    throw new OrchError('OPERATION_ID_CONFLICT', 'operation_id 已被别的启动用过', { operation_id: operationId })
+  }
+  const nodes = tx.all<{ node_run_id: string; node_id: string; seq: number; node_type: string; status: string }>(
+    'SELECT node_run_id, node_id, seq, node_type, status FROM node_runs WHERE run_id = ? ORDER BY seq ASC',
+    [row.run_id],
+  )
+  return {
+    task_id: row.task_id, run_id: row.run_id, workflow_id: row.workflow_id,
+    workflow_version: row.workflow_version, autonomy: row.autonomy,
+    nodes: nodes.map((node) => ({ ...node })), replayed: true,
+  }
+}
+
+/**
+ * 起 task_local 工作流的根运行：只有服务端可信编排路径能调。
+ * 逐项 fail-closed：任务在预留态、owner 对得上、工作流 active、版本已发布；任一不满足就拒，不留副作用。
+ * 任务消费与 run 创建在同一笔事务里（走既有 CAS），重复与并发启动只有一个成功。
+ */
+export function startTrustedTaskLocalRun(
+  tx: Tx,
+  catalog: WorkflowCatalog,
+  p: TrustedTaskLocalRunParams,
+): TrustedTaskLocalRunResult {
+  if (typeof p.taskId !== 'string' || p.taskId.trim().length === 0) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', '可信启动必须带预留任务号', {})
+  }
+  if (typeof p.workflowId !== 'string' || p.workflowId.trim().length === 0) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', '可信启动必须带 workflow_id', {})
+  }
+  if (typeof p.workflowVersion !== 'string' || p.workflowVersion.trim().length === 0) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', '可信启动必须固定 workflow_version', {})
+  }
+  // 0) 幂等重放优先于占用检查：重放时任务已经被上一次启动消费掉了
+  if (p.allowReplay === true && p.operationId !== undefined) {
+    const prior = replayTrustedRun(tx, p.operationId, p.taskId, p.workflowId)
+    if (prior) return prior
+  }
+  // 1) 任务必须存在且在预留态：这是服务端 reserveTask 预留出来的身份
+  const task = tx.get<{ task_id: string; title: string; status: string; current_run_id: string | null }>(
+    'SELECT task_id, title, status, current_run_id FROM tasks WHERE task_id = ?', [p.taskId],
+  )
+  if (!task) throw new OrchError('NOT_FOUND', '预留任务不存在', { task_id: p.taskId })
+  if (task.status !== 'reserved' || task.current_run_id !== null) {
+    throw new OrchError('STALE_GENERATION', '预留任务已被占用或不在可绑定状态', {
+      task_id: p.taskId, status: task.status,
+    })
+  }
+  // 2) 工作流必须是 active 的 task_local，且 owner 就是这个预留任务
+  const scopeRow = tx.get<{ scope: string; status: string; owner_task_id: string | null }>(
+    'SELECT scope, status, owner_task_id FROM workflows WHERE workflow_id = ?', [p.workflowId])
+  if (!scopeRow) throw new OrchError('NOT_FOUND', '工作流不存在', { workflow_id: p.workflowId })
+  if (scopeRow.scope !== 'task_local') {
+    throw new OrchError('FORBIDDEN', '可信启动只接受任务专属工作流', {
+      workflow_id: p.workflowId, scope: scopeRow.scope,
+    })
+  }
+  if (scopeRow.status !== 'active') {
+    throw new OrchError('FORBIDDEN', 'Workflow 已停用，无法启动新任务', { workflow_id: p.workflowId })
+  }
+  if (!scopeRow.owner_task_id || scopeRow.owner_task_id !== p.taskId) {
+    throw new OrchError('FORBIDDEN', '任务专属工作流只允许所属任务使用', {
+      workflow_id: p.workflowId, owner_task_id: scopeRow.owner_task_id, requested_by: p.taskId,
+    })
+  }
+  // 3) 目标版本必须已发布：草稿版本不许起
+  const def = catalog.get(p.workflowId, p.workflowVersion)
+  const version = String(def.workflow_version)
+  if (!hasPublishedVersion(tx, p.workflowId, version)) {
+    throw new OrchError('WORKFLOW_NOT_PUBLISHED', '只能起已发布的工作流版本', {
+      workflow_id: p.workflowId, workflow_version: version,
+    })
+  }
+  // 4) operation_id 复用既有记账表，不新增第二套幂等
+  if (p.operationId !== undefined) {
+    const prior = tx.get<{ run_id: string }>(
+      'SELECT run_id FROM start_run_operations WHERE operation_id = ?', [p.operationId])
+    if (prior) {
+      throw new OrchError('OPERATION_ID_CONFLICT', 'operation_id 已被别的启动用过', {
+        operation_id: p.operationId,
+      })
+    }
+  }
+  // 5) 起运行：owner 凭据一起带上，任务消费与 run 创建在同一笔事务里
+  const created = createRunInTx(tx, catalog, {
+    taskTitle: p.taskTitle ?? task.title,
+    workflowId: p.workflowId,
+    workflowVersion: p.workflowVersion,
+    autonomy: p.autonomy,
+    escalations: validateEscalations(p.escalations),
+    ownerTaskId: p.taskId,
+    taskId: p.taskId,
+    operationId: p.operationId,
+    now: p.now,
+  }, undefined, { ownerTaskId: p.taskId })
+  return {
+    task_id: created.task_id, run_id: created.run_id, workflow_id: created.workflow_id,
+    workflow_version: created.workflow_version, autonomy: created.autonomy, nodes: created.nodes,
+    replayed: false,
   }
 }
 

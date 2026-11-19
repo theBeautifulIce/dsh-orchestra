@@ -39,8 +39,50 @@ const RULE_SELECT = `SELECT a.trigger_id,a.task_id,a.workflow_id,a.workflow_vers
  a.event_type,a.next_fire_at,a.last_fired_at,a.created_at,a.updated_at,t.title,t.autonomy,t.archived_at,r.status AS run_status
  FROM task_triggers a JOIN tasks t ON t.task_id = a.task_id LEFT JOIN runs r ON r.run_id = t.current_run_id`
 
-function view({ enabled, autonomy: _autonomy, archived_at: _archive, run_status: _run, ...row }: TriggerRow): TaskTriggerView {
-  return { ...row, enabled: enabled === 1 }
+/** 触发执行就绪态：规则已配置 / 触发已发生 / 执行器未就绪 / 运行已派发 */
+export type TriggerExecutionState = 'configured' | 'fired' | 'executor_not_ready' | 'dispatched'
+export type TaskTriggerReadiness = {
+  state: TriggerExecutionState
+  reason: string | null
+  run_id: string | null
+  fired_at: string | null
+  updated_at: string | null
+}
+export type TaskTriggerExecutionRow = TaskTriggerReadiness & { trigger_id: string; occurrence_key: string }
+type TriggerView = TaskTriggerView & { readiness: TaskTriggerReadiness }
+type StateReader = { get<T = Record<string, unknown>>(sql: string, params?: unknown[]): T | undefined }
+const RULE_STATE_KEY = ''
+const STATE_SELECT = 'SELECT trigger_id, occurrence_key, run_id, state, reason, fired_at, updated_at FROM task_trigger_execution_state'
+
+function view(tx: StateReader, { enabled, autonomy: _autonomy, archived_at: _archive, run_status: _run, ...row }: TriggerRow): TriggerView {
+  return { ...row, enabled: enabled === 1, readiness: readinessOf(tx, row.trigger_id) }
+}
+
+/** 先改后插：状态迁移幂等，重放同一个触发不会多出一行 */
+function writeState(tx: Tx, next: {
+  trigger_id: string; occurrence_key: string; state: TriggerExecutionState; reason: string | null
+  run_id: string | null; fired_at: string | null; now: string
+}): void {
+  const changed = tx.run(
+    'UPDATE task_trigger_execution_state SET state = ?, reason = ?, run_id = ?, fired_at = COALESCE(?, fired_at), updated_at = ? '
+    + 'WHERE trigger_id = ? AND occurrence_key = ?',
+    [next.state, next.reason, next.run_id, next.fired_at, next.now, next.trigger_id, next.occurrence_key],
+  )
+  if (changed.changes === 0) {
+    tx.run('INSERT INTO task_trigger_execution_state (trigger_id, occurrence_key, run_id, state, reason, fired_at, updated_at) '
+      + 'VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [next.trigger_id, next.occurrence_key, next.run_id, next.state, next.reason, next.fired_at, next.now])
+  }
+}
+
+function readState(tx: StateReader, triggerId: string, occurrenceKey: string): TaskTriggerExecutionRow | undefined {
+  return tx.get<TaskTriggerExecutionRow>(STATE_SELECT + ' WHERE trigger_id = ? AND occurrence_key = ?', [triggerId, occurrenceKey])
+}
+
+function readinessOf(tx: StateReader, triggerId: string): TaskTriggerReadiness {
+  const row = readState(tx, triggerId, RULE_STATE_KEY)
+  if (!row) return { state: 'configured', reason: null, run_id: null, fired_at: null, updated_at: null }
+  return { state: row.state, reason: row.reason, run_id: row.run_id, fired_at: row.fired_at, updated_at: row.updated_at }
 }
 
 function loadRule(tx: Pick<Tx, 'get'>, ruleId: string): TriggerRow {
@@ -96,12 +138,18 @@ function publishedReusable(tx: Pick<Tx, 'get'>, workflowId: string, version: str
   ) !== undefined
 }
 
-export function createTaskTriggerHost(db: Db, catalog: WorkflowCatalog) {
+export type TaskTriggerHostOptions = {
+  /** 宿主是否已装配可信的节点规格解析器：没装配就只能停在"触发已发生"，不能冒充运行成功 */
+  executorReady?: () => boolean
+}
+
+export function createTaskTriggerHost(db: Db, catalog: WorkflowCatalog, options?: TaskTriggerHostOptions) {
+  const executorReady = options?.executorReady ?? (() => false)
   return {
     list(taskId?: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => ({
         items: tx.all<TriggerRow>(RULE_SELECT + (taskId ? ' WHERE a.task_id = ?' : '')
-          + ' ORDER BY a.created_at DESC, a.trigger_id DESC LIMIT ?', taskId ? [taskId, MAX_RULES] : [MAX_RULES]).map(view),
+          + ' ORDER BY a.created_at DESC, a.trigger_id DESC LIMIT ?', taskId ? [taskId, MAX_RULES] : [MAX_RULES]).map((row) => view(tx, row)),
         as_of_seq,
       }))
     },
@@ -128,8 +176,14 @@ export function createTaskTriggerHost(db: Db, catalog: WorkflowCatalog) {
           input.kind === 'scheduled' ? input.daily_time : null, input.kind === 'scheduled' ? input.time_zone : null,
           input.kind === 'event' ? input.event_type : null, next, actor, now, now,
         ])
+        writeState(tx, {
+          trigger_id: ruleId, occurrence_key: RULE_STATE_KEY,
+          state: executorReady() ? 'configured' : 'executor_not_ready',
+          reason: executorReady() ? null : 'executor_not_ready',
+          run_id: null, fired_at: null, now,
+        })
         appendEvent(tx, { type: 'task.trigger_created', payload: { task_id: taskId, trigger_id: ruleId, kind: input.kind, actor } })
-        return view(loadRule(tx, ruleId))
+        return view(tx, loadRule(tx, ruleId))
       }).result)
     },
     setEnabled(input: TriggerEnabled, actor: string, now: string) {
@@ -138,13 +192,19 @@ export function createTaskTriggerHost(db: Db, catalog: WorkflowCatalog) {
       }, () => {
         const row = loadRule(tx, input.trigger_id)
         if (row.revision !== input.expected_revision) throw new OrchError('STALE_GENERATION', '触发规则已变化，请刷新')
-        if (row.enabled === Number(input.enabled)) return view(row)
+        if (row.enabled === Number(input.enabled)) return view(tx, row)
         const next = input.enabled && row.kind === 'scheduled' ? nextDailyFire(row.daily_time!, row.time_zone!, now) : null
         tx.run('UPDATE task_triggers SET enabled = ?, revision = revision + 1, next_fire_at = ?, updated_at = ? WHERE trigger_id = ?',
           [Number(input.enabled), next, now, row.trigger_id])
+        writeState(tx, {
+          trigger_id: row.trigger_id, occurrence_key: RULE_STATE_KEY,
+          state: executorReady() ? 'configured' : 'executor_not_ready',
+          reason: executorReady() ? null : 'executor_not_ready',
+          run_id: null, fired_at: null, now,
+        })
         appendEvent(tx, { type: input.enabled ? 'task.trigger_enabled' : 'task.trigger_paused',
           payload: { task_id: row.task_id, trigger_id: row.trigger_id, actor } })
-        return view(loadRule(tx, row.trigger_id))
+        return view(tx, loadRule(tx, row.trigger_id))
       }).result)
     },
     emit(input: TriggerEvent, actor: string, now: string) {
@@ -162,7 +222,7 @@ export function createTaskTriggerHost(db: Db, catalog: WorkflowCatalog) {
         }
         tx.run('INSERT INTO task_trigger_events (event_id,event_type,received_at,received_by) VALUES (?,?,?,?)', [input.event_id, input.event_type, now, actor])
         const matched = tx.all<TriggerRow>(RULE_SELECT + " WHERE a.kind = 'event' AND a.enabled = 1 AND a.event_type = ? ORDER BY a.trigger_id", [input.event_type])
-        const items = matched.map((row) => fire(tx, catalog, row, input.event_id, now, now, input.event_id))
+        const items = matched.map((row) => fire(tx, catalog, row, input.event_id, now, now, input.event_id, executorReady()))
         return { items, replayed: false }
       })
     },
@@ -178,7 +238,7 @@ export function createTaskTriggerHost(db: Db, catalog: WorkflowCatalog) {
             const active = loadRule(tx, row.trigger_id)
             if (active.enabled !== 1 || active.next_fire_at === null || active.next_fire_at > now) return
             const next = nextDailyFire(active.daily_time!, active.time_zone!, now)
-            fire(tx, catalog, active, active.next_fire_at, active.next_fire_at, now, null)
+            fire(tx, catalog, active, active.next_fire_at, active.next_fire_at, now, null, executorReady())
             // Downtime can leave one overdue occurrence. Move forward from now instead of replaying a backlog.
             tx.run('UPDATE task_triggers SET next_fire_at = ? WHERE trigger_id = ?', [next, active.trigger_id])
           })
@@ -191,7 +251,7 @@ export function createTaskTriggerHost(db: Db, catalog: WorkflowCatalog) {
   }
 }
 
-function fire(tx: Tx, catalog: WorkflowCatalog, row: TriggerRow, occurrenceKey: string, dueAt: string, now: string, eventId: string | null): TaskTriggerOccurrence {
+function fire(tx: Tx, catalog: WorkflowCatalog, row: TriggerRow, occurrenceKey: string, dueAt: string, now: string, eventId: string | null, executorReady: boolean): TaskTriggerOccurrence {
   let reason: TaskTriggerOccurrence['reason'] = null
   if (row.archived_at !== null) reason = 'task_archived'
   else if (row.run_status !== null && !TERMINAL_RUN.has(row.run_status)) reason = 'previous_run_active'
@@ -208,8 +268,68 @@ function fire(tx: Tx, catalog: WorkflowCatalog, row: TriggerRow, occurrenceKey: 
   tx.run(`INSERT INTO task_trigger_occurrences (trigger_id,occurrence_key,source_event_id,due_at,run_id,status,reason,created_at)
     VALUES (?,?,?,?,?,?,?,?)`, [row.trigger_id, occurrenceKey, eventId, dueAt, occurrence.run_id, occurrence.status, reason, now])
   if (run) tx.run('UPDATE task_triggers SET last_fired_at = ?, updated_at = ? WHERE trigger_id = ?', [now, now, row.trigger_id])
+  // 触发已发生不等于运行已派发：宿主没装配解析器时明确记成 executor_not_ready
+  writeState(tx, {
+    trigger_id: row.trigger_id, occurrence_key: occurrenceKey, state: 'fired', reason,
+    run_id: occurrence.run_id, fired_at: now, now,
+  })
+  writeState(tx, {
+    trigger_id: row.trigger_id, occurrence_key: RULE_STATE_KEY,
+    state: reason === null && !executorReady ? 'executor_not_ready' : 'fired',
+    reason: reason !== null ? reason : (executorReady ? null : 'executor_not_ready'),
+    run_id: occurrence.run_id, fired_at: now, now,
+  })
   appendEvent(tx, { type: run ? 'task.trigger_fired' : 'task.trigger_skipped', runId: occurrence.run_id, payload: occurrence })
   return occurrence
+}
+
+/** 派发成功：把这次触发和规则当前就绪态都推进到"运行已派发" */
+export function markTriggerDispatched(db: Db, runId: string, now: string): void {
+  withTx(db, (tx) => {
+    const occurrence = tx.get<{ trigger_id: string; occurrence_key: string }>(
+      'SELECT trigger_id, occurrence_key FROM task_trigger_occurrences WHERE run_id = ?', [runId])
+    if (!occurrence) return
+    writeState(tx, {
+      trigger_id: occurrence.trigger_id, occurrence_key: occurrence.occurrence_key,
+      state: 'dispatched', reason: null, run_id: runId, fired_at: null, now,
+    })
+    writeState(tx, {
+      trigger_id: occurrence.trigger_id, occurrence_key: RULE_STATE_KEY,
+      state: 'dispatched', reason: null, run_id: runId, fired_at: null, now,
+    })
+  })
+}
+
+/** 解析没成功：状态停在"触发已发生"，原因写进就绪态，不让排障只能翻日志 */
+export function markTriggerResolveFailed(db: Db, runId: string, reason: string, now: string): void {
+  withTx(db, (tx) => {
+    const occurrence = tx.get<{ trigger_id: string; occurrence_key: string }>(
+      'SELECT trigger_id, occurrence_key FROM task_trigger_occurrences WHERE run_id = ?', [runId])
+    if (!occurrence) return
+    writeState(tx, {
+      trigger_id: occurrence.trigger_id, occurrence_key: occurrence.occurrence_key,
+      state: 'fired', reason, run_id: runId, fired_at: null, now,
+    })
+    writeState(tx, {
+      trigger_id: occurrence.trigger_id, occurrence_key: RULE_STATE_KEY,
+      state: 'fired', reason, run_id: runId, fired_at: null, now,
+    })
+  })
+}
+
+export type TaskTriggerExecutionFilter = { trigger_id?: string; run_id?: string; state?: TriggerExecutionState }
+
+/** 就绪态读取入口：规则当前四态与每次触发的历史都能查，事件与运行都能当筛选条件 */
+export function listTriggerExecutionStates(db: Db, filter?: TaskTriggerExecutionFilter): TaskTriggerExecutionRow[] {
+  return withReadTx(db, ({ tx }) => {
+    const clauses: string[] = []
+    const params: unknown[] = []
+    if (filter?.trigger_id) { clauses.push('trigger_id = ?'); params.push(filter.trigger_id) }
+    if (filter?.run_id) { clauses.push('run_id = ?'); params.push(filter.run_id) }
+    if (filter?.state) { clauses.push('state = ?'); params.push(filter.state) }
+    const where = clauses.length > 0 ? ' WHERE ' + clauses.join(' AND ') : ''
+    return tx.all<TaskTriggerExecutionRow>(STATE_SELECT + where + ' ORDER BY trigger_id, occurrence_key', params)
+  })
 }
 
 export type TaskTriggerHost = ReturnType<typeof createTaskTriggerHost>

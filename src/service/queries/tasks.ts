@@ -4,7 +4,7 @@ import type { Autonomy } from '../runs.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
-import { deriveAttention, maxSideEffectLevel, type Attention, type SideEffectLevel } from './attention.ts'
+import { deriveAttention, maxSideEffectLevel, DELIVERY_ACCEPTANCE, type Attention, type DeliveryAcceptance, type SideEffectLevel } from './attention.ts'
 import { withReadTx } from './read-tx.ts'
 
 const TASKS_LIMIT_MAX = 100
@@ -34,6 +34,16 @@ export type TaskSummary = {
   autonomy: Autonomy
   lane?: TaskLane
   current_run_status: string | null
+  delivery_acceptance?: DeliveryAcceptance
+  goal_met?: boolean
+}
+
+/** 验收结论取值由 SQL 汇总；脏数据一律回落到 not_applicable，视图不因它崩。 */
+function deliveryAcceptanceOf(value: unknown): DeliveryAcceptance {
+  const raw = value === null || value === undefined ? 'not_applicable' : String(value)
+  return (DELIVERY_ACCEPTANCE as readonly string[]).includes(raw)
+    ? (raw as DeliveryAcceptance)
+    : 'not_applicable'
 }
 
 export type ListTaskParams = {
@@ -76,6 +86,11 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
   const heartbeatAge = heartbeatAt === null ? null : Math.max(0, now - Date.parse(heartbeatAt))
   const sideEffectLevels = String(row.side_effect_levels ?? '').split(',').filter(Boolean)
   const taskStatus = String(row.status ?? '')
+  const deliveryAcceptance = deliveryAcceptanceOf(row.delivery_acceptance)
+  // 有已确认计划时，目标达成看验收汇总（必需交付项必须全部 passed），不能只看 run 终态
+  const goalMet = deliveryAcceptance === 'not_applicable'
+    ? taskStatus === 'succeeded' || taskStatus === 'succeeded_with_unverified'
+    : deliveryAcceptance === 'passed'
   const attention = deriveAttention({
     openDecisionCount,
     oldestOpenDecisionAgeSeconds: oldestDecisionAge,
@@ -83,6 +98,7 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     currentRunStatus,
     orphanedNodeCount,
     taskStatus,
+    deliveryAcceptance,
   })
 
   return {
@@ -110,6 +126,8 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     autonomy: row.autonomy as Autonomy,
     lane: row.lane as TaskLane,
     current_run_status: currentRunStatus,
+    delivery_acceptance: deliveryAcceptance,
+    goal_met: goalMet,
   }
 }
 
@@ -118,6 +136,17 @@ const TASK_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_versio
   tr.next_fire_at AS next_trigger_at, tr.enabled AS trigger_enabled,
   (SELECT COUNT(*) FROM runs r WHERE r.task_id = t.task_id) AS run_count,
   (SELECT r.status FROM runs r WHERE r.run_id = t.current_run_id) AS current_run_status,
+  (SELECT CASE
+    WHEN (SELECT COUNT(*) FROM run_acceptance_results r WHERE r.run_id = t.current_run_id) = 0 THEN
+      CASE WHEN EXISTS (SELECT 1 FROM start_run_operations o JOIN task_plans p
+        ON p.launch_operation_id = o.operation_id WHERE o.run_id = t.current_run_id)
+        THEN 'pending' ELSE 'not_applicable' END
+    WHEN EXISTS (SELECT 1 FROM run_acceptance_results r WHERE r.run_id = t.current_run_id
+      AND r.outcome = 'failed') THEN 'failed'
+    WHEN EXISTS (SELECT 1 FROM run_acceptance_results r WHERE r.run_id = t.current_run_id
+      AND r.outcome = 'unverifiable') THEN 'unverifiable'
+    ELSE 'passed'
+  END) AS delivery_acceptance,
   (SELECT COUNT(*) FROM decisions d WHERE d.run_id = t.current_run_id
     AND d.status IN ('pending','acknowledged','blocked_for_human')) AS open_decision_count,
   (SELECT MIN(d.created_at) FROM decisions d WHERE d.run_id = t.current_run_id
@@ -139,6 +168,8 @@ const TASK_ATTENTION_CTE = `WITH task_metrics AS (${TASK_SELECT}), task_attentio
       WHEN open_decision_count > 0 THEN 'decision'
       WHEN unverified_count > 0 THEN 'unverified'
       WHEN current_run_status IN ('failed','failed_with_unverified') THEN 'failed'
+      WHEN delivery_acceptance = 'unverifiable' THEN 'unverified'
+      WHEN delivery_acceptance = 'failed' THEN 'failed'
       WHEN current_run_status = 'orphaned' OR orphaned_node_count > 0 THEN 'orphaned'
       WHEN status = 'running' OR (current_run_status IS NOT NULL AND current_run_status NOT IN
         ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) THEN 'running'
@@ -148,6 +179,8 @@ const TASK_ATTENTION_CTE = `WITH task_metrics AS (${TASK_SELECT}), task_attentio
       WHEN open_decision_count > 0 THEN 6
       WHEN unverified_count > 0 THEN 5
       WHEN current_run_status IN ('failed','failed_with_unverified') THEN 4
+      WHEN delivery_acceptance = 'unverifiable' THEN 5
+      WHEN delivery_acceptance = 'failed' THEN 4
       WHEN current_run_status = 'orphaned' OR orphaned_node_count > 0 THEN 3
       WHEN status = 'running' OR (current_run_status IS NOT NULL AND current_run_status NOT IN
         ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) THEN 2

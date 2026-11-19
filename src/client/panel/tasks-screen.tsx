@@ -26,6 +26,12 @@ const UNVERIFIED_STATUS: Record<string, { label: string; tone: string }> = {
   failed_with_unverified: { label: COPY.failedWithUnverified, tone: COLOR.danger },
 }
 
+/** 交付验收结论的独立文案与色板：验收没过就不算目标达成，不能显示成「已完成」。 */
+const ACCEPTANCE_STATUS: Record<string, { label: string; tone: string }> = {
+  failed: { label: COPY.deliveryAcceptanceFailed, tone: COLOR.danger },
+  unverifiable: { label: COPY.deliveryAcceptanceUnverifiable, tone: COLOR.warning },
+}
+
 /** 未验证终态的独立文案与色板：面板各处共用一份，不各写各的。 */
 export function unverifiedStatusView(status: string): { label: string; tone: string } | undefined {
   return UNVERIFIED_STATUS[status]
@@ -51,6 +57,12 @@ export function taskStatusView(status: string, displayStatus = status): { label:
 export function taskCardStatus(task: TaskSummary) {
   if (task.lane === 'upcoming' && task.trigger_enabled === true) {
     return { label: task.trigger_kind === 'scheduled' ? '已排期' : '等待事件', tone: COLOR.link }
+  }
+  // 执行完成不等于目标达成：验收没过时把验收结论接在执行状态后面，别折叠成「已完成」
+  const acceptance = task.delivery_acceptance ? ACCEPTANCE_STATUS[task.delivery_acceptance] : undefined
+  if (acceptance) {
+    const execution = taskStatusView(task.status, task.display_status).label ?? task.status
+    return { label: `${execution} · ${acceptance.label}`, tone: acceptance.tone }
   }
   return taskStatusView(task.status, task.display_status)
 }

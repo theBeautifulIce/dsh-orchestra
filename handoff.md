@@ -1,6 +1,34 @@
 # dsh-orchestra 接手指引（handoff）
 
-## 2026-11-19 当前接手点
+## 2026-11-19 当前接手点 · S5 P1 修复轮（基线 de7936f）
+
+本轮处理一份外部代码审计提出的 6 条 P1（另有 3 条 P2 本轮未处理）。用户决定：六条 P1 全部修完、**提交代码但不派独立审计子代理**，只写「本轮修复与证据」文档并更新台账，正式门禁审计的候选提交之后再定。
+
+### 已交付（相对 de7936f）
+
+- **P1-01 派发与准入分离**：新根运行只在 `workflows.status='active'` 时放行（`FORBIDDEN`）；已启动的运行只认自己固定的 `workflow_id + version + content_hash`，流程被停用或后来发新版本都不改变它的派发内容；运行期工具撤权是独立错误码 `TOOL_NOT_ALLOWED`，且用户可见（排队节点写 `dispatch.failed` 事件、运行转 failed、任务进待处理车道）。改动在 `src/service/task-planning.ts`（新增 `PINNED_VERSION_SELECT`、`toolViolations()`）、`src/service/task-trigger-dispatch.ts`。
+- **P1-02 记忆租约与真实时间**：`advanceMemoryRuntime` 每轮取真实时钟；续租间隔被压到 ≤ TTL/3；续租与提交绑定 `node_run_id + attempt + lease_id + owner_epoch`，失权即中止推进并拒收迟到回执；无外部副作用的步骤有显式超时；写端最多被调一次，超时走既有「不确定 + 对账」路径。改动在 `src/service/commands/memory-runtime.ts`、`lease.ts`、`src/service/memory-host.ts`。
+- **P1-03a 可信根入口**：`startTrustedTaskLocalRun`（`src/service/commands/start-run.ts:210-291`）是唯一允许把 `task_local` 起成根 Run 的路径，凭据是「服务端预留的、owner 一致、版本已发布、任务未被消费」；普通入口继续禁止；客户端自报 `task_id` 不构成凭据。
+- **P1-03b 候选重排与自动生成（已实现，缺回归测试）**：候选从「按 updated_at 截断 24 条」改成「先检索 200 条 → 按任务适配性确定性打分排序 → 再截断 24 条」；候选池为空或主脑判定无合适流程时，自动生成 owner 绑定的 `task_local` 并发布，预留任务 + 建流程 + 发布 + 落计划在同一笔事务内。迁移 `046` 给 `task_plans` 补 `owner_task_id` / `auto_workflow_id`。
+- **P1-04 任务与根 Run 绑定**：普通新任务的 `INSERT tasks` 同事务写 `current_run_id`；`closeRun` 去掉 `EXISTS(task_triggers)` 谓词、只按 `current_run_id` 收口（旧 Run 迟到收口不覆盖后启动的 Run）；迁移 `043` 做**有界**历史修复（只动 `current_run_id IS NULL`，多根 Run 写核对表不猜「最新一条」）。
+- **P1-05 交付验收独立阶段**：新增 `run_acceptance_results` 表（迁移 `044`）与 `src/service/commands/run-acceptance.ts`；验收结论独立于 Run 终态（`RUN_TERMINAL` 枚举未动）；产物缺可靠登记证据记 `unverifiable`、字节不足或退出码不符记 `failed`；汇总优先级 failed > unverifiable > passed；任务「目标已交付」要求必需交付项全部 `passed`；面板文案区分「交付验收失败 / 交付待核验」。
+- **P1-06 触发执行就绪态**：新增表 `task_trigger_execution_state`（迁移 `045`），四态 `configured / fired / executor_not_ready / dispatched` 可查；解析器缺失、解析不出规格、解析超时，原因都落库；建 Run + 写触发记录 + 写就绪态在同一事务内。
+- **文档**：`docs/audits/S5-p1-fix-round-2026-11-19.md`（本轮修复与证据，非正式审计报告格式）、`docs/orchestra-audit-ledger.md` 追加一行。
+
+### 验证记录
+
+- `pnpm typecheck` 通过；`pnpm test` → Test Files **126 passed (126)**，Tests **1418 passed | 1 skipped (1419)**；`pnpm build` 通过（ESM `lib/index.js` 751.38 kB / gzip 186.06 kB）；`git diff --check` 通过。
+- 新增回归测试：`tests/integration/task-plan-dispatch-after-disable.spec.ts`（4）、`memory-lease-renewal.spec.ts`（4）、`task-local-root.spec.ts`（8）、`task-run-binding.spec.ts`（9）、`run-acceptance.spec.ts`（11）、`task-trigger-execution-readiness.spec.ts`（4）、`tests/client/task-status-view.spec.ts`（4）。
+- `node --no-warnings scripts/gate-check.ts` 目前 **exit 1**，原因是工作树脏（门记录不能对着脏树签）。这是本轮不签门、候选之后再定门禁的必然结果；提交后工作树干净，G1–G4 的既有签署仍需按各自候选提交复核。
+
+### 未完成及接手顺序
+
+1. **补 `tests/integration/task-plan-auto-workflow.spec.ts`（最高优先级）**：P1-03b 的候选重排、自动生成端到端、确认重放、伪造 `task_id` 绕过这四类用例目前只有代码、没有自动化证明。实现位置：`src/service/task-planning.ts:521-575`（`proposeAuto`）、`:585-621`（`propose`）、`:622-666`（`confirm`）、`src/service/commands/start-run.ts:210-291`。测试模板参照 `tests/integration/task-local-root.spec.ts` 与 `tests/integration/task-plan-dispatch-after-disable.spec.ts`。
+2. **正式门禁审计**：候选提交确定后按《工程可靠性收敛审计规范》走「冻结候选 → 派独立只读审计子代理 → 落 `docs/audits/S5-independent-audit-roundNN.md` → `sign-gate.ts` → `gate-check.ts`」，并复核 `docs/reviews/S5-g5-item-map.md`（P2-03）。
+3. **本轮遗留偏差**（详见 `docs/audits/S5-p1-fix-round-2026-11-19.md` §三、§六）：产物自动登记链路缺失（P1-05 产物类交付多落 `unverifiable`）、`tasks.display_status` 写中文文案与机器键列约定偏差、触发就绪态无独立 HTTP 路由、运行期权限阻断的就绪态只覆盖触发来源的运行、记忆续租失权判定偏严（瞬时忙等与真失权未区分）。
+4. **P2-01 / P2-02**：协作验证缺 `reassignVerification`（目标节点运行死亡后没有重新指派与旧记录撤回）；`testWorkflowDraft` 文案必须恒为「结构与模拟流转测试通过」，不能当交付质量结论。
+
+## 2026-11-19 历史快照 · 任务详情与面板改动
 
 阶段为 S5。此提交汇总 `81c6ff2` 之后的任务详情和面板改动。G1–G4 已签署，G5 尚待独立审计和签署。下方各节为历史记录，当前验证结果和后续顺序以本节为准。
 
