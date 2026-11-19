@@ -364,10 +364,10 @@ describe('流程画布', () => {
       <WorkflowCanvas api={api} workflowId="wf1" onBack={() => {}} />,
     )
 
-    expect(view.text()).toContain('此屏只读')
-    const palette = q(view, '[data-canvas-id="readonly-canvas"] [data-node-palette="agent"]') as HTMLButtonElement
-    expect(palette.disabled).toBe(true)
-    expect(palette.getAttribute('aria-disabled')).toBe('true')
-    expect(q(view, '[data-canvas-id="readonly-canvas"] [data-node-id="a"]')).toBeTruthy()
+    expect(view.text()).toContain('只读')
+    expect(qAll(view, '[data-canvas-readonly="true"] [data-node-palette]')).toHaveLength(0)
+    const node = q(view, '[data-canvas-readonly="true"] [data-node-id="a"]') as HTMLElement
+    expect(node.getAttribute('data-node-readonly')).toBe('true')
+    expect(node.style.top).toBe('100px')
   })
 })

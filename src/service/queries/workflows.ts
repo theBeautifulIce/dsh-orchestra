@@ -1,6 +1,7 @@
 import { OrchError } from '../../core/errors.ts'
 import { validateSaveLayer, type ValidationIssue } from '../../core/workflow-doc.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
+import { countWorkflowCriticalApprovals, type WorkflowDraftTest } from '../commands/workflows.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx, type ReadCtx } from './read-tx.ts'
 
@@ -48,6 +49,8 @@ export type WorkflowView = {
   current: WorkflowVersionView | null
   validation: { errors: ValidationIssue[]; warnings: ValidationIssue[] }
   versions: Array<{ version: number; published_at: string; publish_note: string }>
+  recent_tests?: Array<WorkflowDraftTest & { test_id: number }>
+  critical_approval_count?: number
 }
 
 export type ListWorkflowParams = {
@@ -153,7 +156,10 @@ export function listWorkflowSummaries(db: Db, params: ListWorkflowParams = {}): 
     const values: unknown[] = []
     if (filter.owner_task_id !== null) { where.push('w.owner_task_id = ?'); values.push(filter.owner_task_id) }
     if (filter.status !== null) { where.push('w.status = ?'); values.push(filter.status) }
-    if (filter.query !== null) { where.push('INSTR(LOWER(w.name), ?) > 0'); values.push(filter.query) }
+    if (filter.query !== null) {
+      where.push('(INSTR(LOWER(w.name), ?) > 0 OR INSTR(LOWER(w.workflow_id), ?) > 0)')
+      values.push(filter.query, filter.query)
+    }
     if (params.cursor) {
       const cursor = decodeCursor(params.cursor, 'workflows', filter, params.now)
       where.push('(w.updated_at < ? OR (w.updated_at = ? AND w.workflow_id < ?))')
@@ -210,7 +216,13 @@ export function getWorkflowSnapshot(db: Db, workflowId: string): { item: Workflo
       publish_note: String(version.publish_note ?? ''),
     }))
     return {
-      item: { workflow, draft, current, validation: { errors, warnings }, versions },
+      item: { workflow, draft, current, validation: { errors, warnings }, versions,
+        recent_tests: ctx.tx.all<{ test_id: number; result_json: string }>(
+          'SELECT test_id,result_json FROM workflow_draft_tests WHERE workflow_id=? ORDER BY test_id DESC LIMIT 20',
+          [workflowId],
+        ).map(({ test_id, result_json }) => ({ ...JSON.parse(result_json) as WorkflowDraftTest, test_id })),
+        critical_approval_count: countWorkflowCriticalApprovals(ctx.tx, workflowId),
+      },
       as_of_seq: ctx.as_of_seq,
     }
   })

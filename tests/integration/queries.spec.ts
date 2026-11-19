@@ -8,6 +8,7 @@ import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/
 import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { CURSOR_TTL_MS, decodeCursor, encodeCursor, makeCursor } from '../../src/service/queries/cursor.ts'
 import { listEvents, listEventHistory } from '../../src/service/queries/list_events.ts'
+import { listExecutionHistory } from '../../src/service/queries/execution-history.ts'
 import { listTasks } from '../../src/service/queries/list_tasks.ts'
 import { listTaskSummaries, getTaskSummary, getWorkspaceOverview } from '../../src/service/queries/tasks.ts'
 import { listRuns } from '../../src/service/queries/runs.ts'
@@ -51,6 +52,23 @@ const codeOf = (fn: () => unknown): string => {
   try { fn() } catch (err) { if (err instanceof OrchError) return err.code; throw err }
   throw new Error('本应抛错却通过了')
 }
+
+it('执行日志按任务和节点隔离，展示工具与报告摘要而不返回原始调用参数', () => {
+  const db = seeded()
+  withTx(db, (tx) => {
+    appendNodeRunEvent(tx, SECRET, 'n1', 'bridge.tool.call', { attempt: 1, executorAgentId: 'agent-1',
+      payload: { tool: 'ro.check', args: ['private-raw-argument'], timeoutMs: 5000 } })
+    appendNodeRunEvent(tx, SECRET, 'n1', 'bridge.turn', { attempt: 1, executorAgentId: 'agent-1',
+      payload: { kind: 'report', report: { status: 'done', output: { summary: '核对了两条候选', raw: 'private-report' } } } })
+  })
+  const page = listExecutionHistory(db, { taskId: 't1', limit: 1 })
+  expect(page.items[0]).toMatchObject({ node_run_id: 'n1', type: 'bridge.turn' })
+  expect(page.items[0]?.details).toContainEqual({ label: '报告摘要', value: '核对了两条候选' })
+  const next = listExecutionHistory(db, { nodeId: 'n1', limit: 1, before: page.next_before! })
+  expect(next.items[0]?.details).toContainEqual({ label: '工具', value: 'ro.check' })
+  expect(JSON.stringify([page, next])).not.toContain('private-')
+  expect(listExecutionHistory(db, { taskId: 't2' }).items).toEqual([])
+})
 
 it('按运行列出产物，报告保留期限且不暴露来源路径', () => {
   const db = seeded()

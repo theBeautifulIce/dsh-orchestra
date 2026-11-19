@@ -4,7 +4,6 @@ import { postWithOperationReceipt } from '../api/commands.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
 import type { ModelRoutingSettingsView } from '../../service/model-routing-settings.ts'
 import { PanelCommandButton } from './shell.tsx'
-import { COLOR, FONT_PX } from './tokens.ts'
 
 const PATH = '/v1/settings/model-routing'
 const LEVELS = [['routine', '常规'], ['standard', '中等'], ['complex', '复杂']] as const
@@ -39,15 +38,16 @@ export function ModelRoutingSettings({ client }: { client: ApiClient }) {
     } finally { setBusy(false) }
   }
 
-  return <section aria-labelledby="model-routing-title" style={panel}>
-    <h2 id="model-routing-title" style={{ fontSize: FONT_PX.section, margin: 0 }}>子智能体模型分配</h2>
-    <p style={{ color: COLOR.inkMuted }}>主脑判断节点复杂度。每一档按你的选择派发。自动模式采用合格的主脑候选，未指定候选时选满足要求的最低档。</p>
+  return <section aria-labelledby="model-routing-title" className="ops-surface">
+    <header className="ops-surface-head"><h2 id="model-routing-title">子智能体模型分配</h2></header>
+    <div className="ops-inset ops-stack">
+    <p className="ops-meta">自动模式采用合格的主脑候选，其次选满足要求的最低档。</p>
     {saved && draft ? <form onSubmit={(event) => { event.preventDefault(); void save() }} style={form}>
       {LEVELS.map(([level, label], index) => {
         const profiles = saved.profiles.filter((item) => LEVELS.findIndex(([candidate]) => candidate === item.capacity) >= index)
         const current = draft[level]
         return <label key={level} style={field}>{label}
-          <select disabled={busy} value={current ?? ''} onChange={(event) => setDraft({ ...draft, [level]: event.target.value || null })}>
+          <select className="ops-field" disabled={busy} value={current ?? ''} onChange={(event) => setDraft({ ...draft, [level]: event.target.value || null })}>
             <option value="">自动选择</option>
             {current && !profiles.some((item) => item.ref === current) && <option value={current}>已不可用 · {current}</option>}
             {profiles.map((item) => <option key={item.ref} value={item.ref}>
@@ -57,14 +57,14 @@ export function ModelRoutingSettings({ client }: { client: ApiClient }) {
         </label>
       })}
       <div style={{ display: 'flex', gap: 8 }}>
-        <PanelCommandButton type="submit" disabled={busy || LEVELS.every(([level]) => saved.mapping[level] === draft[level])}>保存模型分配</PanelCommandButton>
-        <button type="button" disabled={busy} onClick={() => { setError(false); setMessage(''); setReload((value) => value + 1) }}>重新读取</button>
+        <PanelCommandButton type="submit" className="ops-button ops-button--primary" disabled={busy || LEVELS.every(([level]) => saved.mapping[level] === draft[level])}>保存模型分配</PanelCommandButton>
+        <button type="button" className="ops-button" disabled={busy} onClick={() => { setError(false); setMessage(''); setReload((value) => value + 1) }}>重新读取</button>
       </div>
     </form> : !error && <p role="status">正在读取宿主模型…</p>}
     {message && <p role={error ? 'alert' : 'status'}>{message}</p>}
+    </div>
   </section>
 }
 
-const panel = { border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface, padding: 18, marginTop: 18 }
-const form = { display: 'grid', gap: 10, maxWidth: 520 }
+const form = { display: 'grid', gap: 7 }
 const field = { display: 'grid', gridTemplateColumns: '85px minmax(0, 1fr)', alignItems: 'center', gap: 8 }

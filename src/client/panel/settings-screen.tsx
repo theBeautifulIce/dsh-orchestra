@@ -27,9 +27,11 @@ const UNKNOWN = '未知'
 /** 设置屏只显示真实状态：拿不到的项一律写「未知」，不填猜测值。 */
 export function SettingsScreen(props: SettingsScreenProps) {
   const rows = buildRows(props)
-  return <section aria-labelledby="settings-title" style={sectionStyle}>
-    <h1 id="settings-title" style={titleStyle}>设置</h1>
-    <p style={leadStyle}>这里只写面板此刻能确认的状态；拿不到的项显示「未知」，不猜。</p>
+  return <section aria-labelledby="settings-title" className="ops-surface">
+    <header className="ops-surface-head">
+      <h2 id="settings-title">服务状态</h2>
+      {props.onRefresh && <button type="button" onClick={props.onRefresh} className="ops-button">重新检测</button>}
+    </header>
     <dl style={listStyle}>
       {rows.map((row) => (
         <div key={row.key} style={rowStyle}>
@@ -38,8 +40,6 @@ export function SettingsScreen(props: SettingsScreenProps) {
         </div>
       ))}
     </dl>
-    <p style={noteStyle}>「未知」说明面板此刻没拿到这个状态，不代表服务出了问题。</p>
-    {props.onRefresh && <button type="button" onClick={props.onRefresh} style={buttonStyle}>重新检测</button>}
   </section>
 }
 
@@ -106,12 +106,8 @@ function toneColor(tone: Tone): string {
   return COLOR.ink
 }
 
-const sectionStyle = { display: 'grid', gap: 16, maxWidth: '100%', minWidth: 0 } as const
-const titleStyle = { margin: 0, fontSize: FONT_PX.title, lineHeight: 1.3 } as const
-const leadStyle = { margin: 0, color: COLOR.inkMuted, fontSize: FONT_PX.body } as const
-const listStyle = { margin: 0, display: 'grid', gap: 10, minWidth: 0 } as const
-const rowStyle = { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '6px 16px', minWidth: 0, border: `1px solid ${COLOR.line}`, borderRadius: 9, padding: '14px 18px', background: COLOR.surface } as const
+const listStyle = { margin: 0, display: 'grid', minWidth: 0 } as const
+const rowStyle = { display: 'grid', gridTemplateColumns: 'minmax(90px, 42%) minmax(0, 1fr)', alignItems: 'baseline',
+  gap: '4px 10px', minWidth: 0, borderBottom: `1px solid ${COLOR.line}`, padding: '7px 12px' } as const
 const labelStyle = { margin: 0, color: COLOR.inkMuted, fontSize: FONT_PX.menu } as const
 const valueStyle = { margin: 0, fontSize: FONT_PX.body, fontWeight: 600 } as const
-const noteStyle = { margin: 0, color: COLOR.inkMuted, fontSize: FONT_PX.helper } as const
-const buttonStyle = { minHeight: 36, justifySelf: 'start', padding: '0 14px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' } as const

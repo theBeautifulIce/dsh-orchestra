@@ -5,6 +5,9 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { openServiceOrchestra } from '../../src/index.ts'
 import { startServer } from '../../src/service/server.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
+import type { Db } from '../../src/infra/sqlite/driver.ts'
+import { getWorkflowSnapshot } from '../../src/service/queries/workflows.ts'
 
 const SECRET = 'wf-routes-secret'
 const NOW = '2026-11-16T17:00:00.000Z'
@@ -16,10 +19,11 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) { try { rmSync(dir, { recursive: true, force: true }) } catch { /* 句柄晚释放 */ } }
 })
 
-async function boot(phase: 'S2' | 'S4' = 'S4') {
+async function boot(phase: 'S2' | 'S4' | 'S5' = 'S4', workflowGenerator?: () => Promise<unknown>, onDb?: (db: Db) => void) {
   const dir = mkdtempSync(join(tmpdir(), 'orch-wf-routes-'))
   dirs.push(dir)
   const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase })
+  onDb?.(service.orchestra.db)
   const svc = await startServer({
     secret: SECRET, phase, epoch: service.orchestra.db.epoch,
     asOfSeq: () => 0,
@@ -27,6 +31,7 @@ async function boot(phase: 'S2' | 'S4' = 'S4') {
     appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
     now: () => NOW,
     commands: service.orchestra.commands,
+    workflowGenerator,
   })
   closers.push(async () => { await svc.close(); await service.release() })
   return svc.endpoint
@@ -48,6 +53,65 @@ const doc = {
 }
 
 describe('工作流命令 HTTP 入口', () => {
+  it('S5 生成草稿后须测试同一修订，修改后旧回执不能放行发布', async () => {
+    let db!: Db
+    const base = await boot('S5', async () => doc, (opened) => { db = opened })
+    const generated = await (await post(base + '/v1/workflows/generate', { goal: '发布报告前执行系统核验' })).json() as any
+    expect(generated.data.definition).toMatchObject(doc)
+    const workflow_id = 'workflow-test-gate'
+    const created = await post(base + '/v1/workflows', {
+      workflow_id, name: doc.name, definition: generated.data.definition, operation_id: uuidv7(),
+    })
+    expect(created.status).toBe(200)
+    const submit = (revision: number, base_version = 0) => post(base + '/v1/workflows/publish', {
+      workflow_id, revision, base_version, publish_note: '发布说明', operation_id: uuidv7(),
+    })
+    expect((await submit(1)).status).toBe(428)
+    const test = async (revision: number) => (await (await post(base + '/v1/workflows/test', { workflow_id, revision })).json() as any).data
+    expect(await test(1)).toMatchObject({ revision: 1, passed: true, order: [{ node_id: 't' }, { node_id: 'a' }] })
+    const changed = await post(base + '/v1/workflows/update', {
+      workflow_id, revision: 1, operation_id: uuidv7(),
+      definition: { ...doc, nodes: doc.nodes.map((node) => node.node_id === 'a' ? { ...node, title: '执行核验' } : node) },
+    })
+    expect(changed.status).toBe(200)
+    expect((await submit(2)).status).toBe(428)
+    expect(await test(2)).toMatchObject({ revision: 2, passed: true })
+    expect((await submit(2)).status).toBe(200)
+    expect(getWorkflowSnapshot(db, workflow_id).item.recent_tests).toMatchObject([
+      { revision: 2, passed: true },
+      { revision: 1, passed: true },
+    ])
+
+    const started = await post(base + '/v1/runs/start', {
+      operationId: uuidv7(), taskTitle: '待审批任务', workflowId: workflow_id, workflowVersion: '1',
+    })
+    const run = await started.json() as { data: { run_id: string } }
+    expect(started.status).toBe(200)
+    db.raw.prepare(`INSERT INTO decisions (decision_id,run_id,kind,status,revision,payload_json,created_at,priority)
+      VALUES ('approval-critical',?,'pre_execution','pending',1,'{}',?,'critical')`).run(run.data.run_id, NOW)
+    const opened = await post(base + '/v1/workflows/open-draft', { workflow_id, base_version: 1, operation_id: uuidv7() })
+    expect(opened.status).toBe(200)
+    expect(await test(3)).toMatchObject({ revision: 3, passed: true })
+    const blocked = await submit(3, 1)
+    expect(blocked.status).toBe(428)
+    expect(await blocked.json()).toMatchObject({ error: { details: { critical_approval_count: 1 } } })
+    db.raw.prepare("UPDATE decisions SET status='resolved' WHERE decision_id='approval-critical'").run()
+    expect((await submit(3, 1)).status).toBe(200)
+
+    const disable = { workflow_id, expected_status: 'active', status: 'disabled', operation_id: uuidv7() }
+    const changeStatus = (body: unknown) => post(base + '/v1/workflows/status', body)
+    expect(await (await changeStatus(disable)).json()).toMatchObject({ data: { status: 'disabled', replayed: false } })
+    expect(await (await changeStatus(disable)).json()).toMatchObject({ data: { status: 'disabled', replayed: true } })
+    expect((await changeStatus({ ...disable, operation_id: uuidv7() })).status).toBe(409)
+    const startNew = () => post(base + '/v1/runs/start', {
+      operationId: uuidv7(), taskTitle: '新任务', workflowId: workflow_id, workflowVersion: '2',
+    })
+    expect((await startNew()).status).toBe(403)
+    expect(db.raw.prepare('SELECT status FROM runs WHERE run_id=?').get(run.data.run_id)).toMatchObject({ status: 'running' })
+    expect(getWorkflowSnapshot(db, workflow_id).item.workflow.status).toBe('disabled')
+    expect((await changeStatus({ ...disable, expected_status: 'disabled', status: 'active', operation_id: uuidv7() })).status).toBe(200)
+    expect((await startNew()).status).toBe(200)
+  })
   it('缺 operation_id 直接 400：写命令一律要走幂等协议', async () => {
     const base = await boot()
     const res = await post(base + '/v1/workflows', {

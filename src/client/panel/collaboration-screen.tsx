@@ -60,10 +60,13 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
   }
   const memberIds = members.split(/[\s,，]+/u).filter(Boolean)
   const shown = detail?.scope.scope_id === scopeId ? detail : undefined
-  return <section style={{ display: 'grid', gap: 15 }}>
-    <header><h1 style={{ fontSize: FONT_PX.title, margin: 0 }}>协作核验</h1>
-      <p>按授权范围追踪发现、派发、接手、核验结果和采纳决定。</p></header>
-    <details style={card}>
+  return <section className="ops-page">
+    <header className="ops-page-header"><h1>协作核验</h1>
+      {scopes && scopes.length > 0 && <label className="ops-actions">协作范围 <select className="ops-field" value={scopeId} onChange={(event) => {
+        setSelected(event.target.value); setReview(undefined)
+      }}>{scopes.map((scope) => <option key={scope.scope_id} value={scope.scope_id}>{scope.title}</option>)}</select></label>}
+    </header>
+    <details className="ops-surface ops-inset">
       <summary>新建协作范围</summary>
       <form style={form} onSubmit={(event) => {
         event.preventDefault()
@@ -78,13 +81,12 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
     </details>
     {notice && <p role={failed ? 'alert' : 'status'}>{notice} {failed && <button type="button" onClick={() => refresh((value) => value + 1)}>刷新</button>}</p>}
     {!scopes && !failed && <p role="status">正在读取协作范围…</p>}
-    {scopes?.length === 0 && <p>还没有协作范围。</p>}
-    {scopes && scopes.length > 0 && <label>协作范围 <select value={scopeId} onChange={(event) => {
-      setSelected(event.target.value); setReview(undefined)
-    }}>{scopes.map((scope) => <option key={scope.scope_id} value={scope.scope_id}>{scope.title}</option>)}</select></label>}
+    {scopes?.length === 0 && <p className="ops-surface ops-empty">还没有协作范围。</p>}
     {shown && <>
-      <section style={card}><strong>参与节点</strong><p>截至 {new Date(shown.scope.expires_at).toLocaleString()}</p>
-        <ul>{shown.members.map((node) => <li key={node.node_run_id}><button type="button" onClick={() => onOpenRun(node.task_id, node.run_id)}>{node.node_run_id}</button></li>)}</ul>
+      <section style={card}><div className="ops-toolbar"><strong>参与节点</strong><span className="ops-meta">有效至 {new Date(shown.scope.expires_at).toLocaleString()}</span></div>
+        <div className="ops-actions">{shown.members.map((node) => <button className="ops-button ops-button--link"
+          key={node.node_run_id} type="button" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}
+          onClick={() => onOpenRun(node.task_id, node.run_id)}>{node.node_run_id}</button>)}</div>
       </section>
       {shown.findings.map((finding) => <article key={finding.finding_id} style={card}>
         <h2 style={{ margin: 0, fontSize: FONT_PX.section }}>{finding.title}</h2>
@@ -117,5 +119,5 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
   </section>
 }
 
-const card = { border: `1px solid ${COLOR.line}`, background: COLOR.surface, borderRadius: 8, padding: 14, overflowWrap: 'anywhere' as const }
-const form = { display: 'grid', gap: 8, marginTop: 12, maxWidth: 540 }
+const card = { border: '1px solid #dde4ed', background: COLOR.surface, borderRadius: 8, padding: '9px 12px', overflowWrap: 'anywhere' as const }
+const form = { display: 'grid', gap: 7, marginTop: 8, maxWidth: 540 }

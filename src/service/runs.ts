@@ -158,9 +158,12 @@ export function createRunInTx(tx: Tx, catalog: WorkflowCatalog, p: CreateRunPara
   const create = () => {
     // task_local 只能作为所属任务的子流程出现，不许当独立根工作流起（审计 P2-1：
     // 客户端自报 task id 不是授权凭据，根入口拿不到可信的 owner 上下文）
-    const scopeRow = tx.get<{ scope: string }>('SELECT scope FROM workflows WHERE workflow_id = ?', [workflowId])
+    const scopeRow = tx.get<{ scope: string; status: string }>('SELECT scope, status FROM workflows WHERE workflow_id = ?', [workflowId])
     if (scopeRow?.scope === 'task_local') {
       throw new OrchError('FORBIDDEN', '任务专属工作流只能作为子流程启动', { workflow_id: workflowId })
+    }
+    if (scopeRow?.status === 'disabled' || scopeRow?.status === 'archived') {
+      throw new OrchError('FORBIDDEN', 'Workflow 已停用，无法启动新任务', { workflow_id: workflowId })
     }
     assertWorkflowUsable(tx, workflowId, p.ownerTaskId ?? null)
     if (triggerId !== undefined) {

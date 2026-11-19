@@ -193,7 +193,7 @@ describe('流程草稿编辑屏', () => {
     // 有结构错误时发布按钮不可点
     const publish = view.findAll('button').find((element) => element.textContent?.trim() === '确认发布')
     expect((publish as HTMLButtonElement | undefined)?.disabled).toBe(true)
-    expect(view.text()).toContain('有结构错误时发布按钮不可点。')
+    expect(view.text()).toContain('发布前须修复结构错误。')
   })
 
   it('保存被 CAS 拒绝时显示冲突文案，并且不丢用户草稿', async () => {

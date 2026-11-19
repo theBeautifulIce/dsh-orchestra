@@ -97,7 +97,7 @@ describe('任务列表页', () => {
     const view = await renderPanel(<TaskListScreen api={api} onSelectTask={noop} />)
     await view.flush()
     expect(view.text()).toContain('3 次运行')
-    expect(view.text()).toContain('2 项等你决定')
+    expect(view.text()).toContain('2 项待审批')
     expect(view.text()).toContain('5 项待核实')
     expect(view.text()).toContain('涉及不可逆操作')
     expect(view.text()).toContain('有 5 笔副作用待核实')
@@ -171,7 +171,7 @@ describe('任务列表页', () => {
 })
 
 describe('流程列表页', () => {
-  it('读取过程中显示正在读取，读完后显示流程卡片', async () => {
+  it('读取过程中显示正在读取，读完后显示流程表格', async () => {
     const gate = deferred<FakeReply>()
     const { api } = apiFrom(() => gate.promise)
     const view = await renderPanel(<WorkflowListScreen api={api} onSelectWorkflow={noop} />)
@@ -181,7 +181,7 @@ describe('流程列表页', () => {
     gate.resolve({ ok: true, data: page([workflowItem()]) })
     await view.flush()
     expect(view.text()).not.toContain('正在读取流程…')
-    expect(view.findAll('article').length).toBe(1)
+    expect(view.findAll('table tbody tr').length).toBe(1)
     expect(view.text()).toContain('流程一')
     view.unmount()
   })
@@ -191,7 +191,7 @@ describe('流程列表页', () => {
     const view = await renderPanel(<WorkflowListScreen api={api} onSelectWorkflow={noop} />)
     await view.flush()
     expect(view.text()).toContain('当前没有已保存的流程')
-    expect(view.findAll('article').length).toBe(0)
+    expect(view.findAll('table tbody tr').length).toBe(0)
     view.unmount()
   })
 
@@ -214,14 +214,13 @@ describe('流程列表页', () => {
   })
 
   it('真实数据把版本、步骤数和正在使用的任务数显示出来', async () => {
-    const { api } = apiFrom(() => ({ ok: true, data: page([workflowItem()]) }))
+    const { api } = apiFrom(() => ({ ok: true, data: page([workflowItem(), workflowItem({ workflow_id: 'disabled', status: 'disabled' })]) }))
     const view = await renderPanel(<WorkflowListScreen api={api} onSelectWorkflow={noop} />)
     await view.flush()
-    expect(view.text()).toContain('可复用流程')
+    expect(view.text()).toContain('可复用')
     expect(view.text()).toContain('v3')
-    expect(view.text()).toContain('4 个步骤')
-    expect(view.text()).toContain('2 个任务')
-    expect(view.text()).toContain('可使用')
+    expect(view.findAll('tbody tr:first-child td').map((cell) => cell.textContent?.trim())).toEqual(expect.arrayContaining(['4', '2', '已启用']))
+    expect(view.text()).toContain('已停用')
     view.unmount()
   })
 })

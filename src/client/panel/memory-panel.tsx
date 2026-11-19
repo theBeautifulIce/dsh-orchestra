@@ -145,20 +145,24 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
     }
   }
 
-  return <section aria-labelledby="memory-panel-title" style={{ display: 'grid', gap: 18 }}>
-    <header>
-      <p style={kickerStyle}>记忆</p>
-      <h1 id="memory-panel-title" style={titleStyle}>这次的记忆</h1>
-      <p style={mutedStyle}>这里只回答四个问题：这次记了什么、还有什么没定、哪条没写成、要不要现在记。</p>
-      {latest && <p style={statusStyle}>这次运行：{memoryCopy(latest).text}</p>}
+  return <section aria-labelledby="memory-panel-title" className="ops-page">
+    <header className="ops-page-header">
+      <div>
+        <h1 id="memory-panel-title">记忆管理</h1>
+        {latest && <p className="ops-meta">最近批次 · {memoryCopy(latest).text}</p>}
+      </div>
+      <label style={toggleStyle}>
+        <input type="checkbox" aria-label="开发者视图" checked={developerView} onChange={(event) => setDeveloperView(event.target.checked)} />
+        开发者视图
+      </label>
     </header>
     {notice && <p role={notice.tone === 'error' ? 'alert' : 'status'} style={notice.tone === 'error' ? errorTextStyle : mutedStyle}>{notice.text}</p>}
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={() => setRetry((value) => value + 1)} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取记忆…</p>}
 
-    {/* ① 这次记了什么 */}
+    <div className="ops-context-grid">
     <section aria-labelledby="memory-q1-title" style={blockStyle}>
-      <h2 id="memory-q1-title" style={sectionTitleStyle}>这次记了什么</h2>
+      <h2 id="memory-q1-title" style={sectionTitleStyle}>已写入条目</h2>
       {writtenItems.length === 0
         ? <p style={mutedStyle}>这次还没有记下东西。</p>
         : <ul style={listStyle}>
@@ -179,14 +183,13 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
         </ul>}
     </section>
 
-    {/* ② 还有什么没定 */}
     <section aria-labelledby="memory-q2-title" style={blockStyle}>
-      <h2 id="memory-q2-title" style={sectionTitleStyle}>还有什么没定</h2>
+      <h2 id="memory-q2-title" style={sectionTitleStyle}>审批与对账</h2>
       {awaitingBatches.length === 0
         ? <p style={mutedStyle}>没有待确认</p>
         : <>
           <p style={statusStyle}>有 {pendingTotal} 条等你确认</p>
-          <button type="button" onClick={() => onOpenDecisions?.()} disabled={!onOpenDecisions} style={buttonStyle}>去「等你决定」看看</button>
+          <button type="button" onClick={() => onOpenDecisions?.()} disabled={!onOpenDecisions} style={buttonStyle}>查看审批</button>
         </>}
       {batches.filter((batch) => batch.recovery_available).map((batch) => {
         const inspection = proof?.batch_id === batch.batch_id ? proof : null
@@ -204,9 +207,8 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
       })}
     </section>
 
-    {/* ③ 哪条没写成，为什么 */}
     <section aria-labelledby="memory-q3-title" style={blockStyle}>
-      <h2 id="memory-q3-title" style={sectionTitleStyle}>哪条没写成，为什么</h2>
+      <h2 id="memory-q3-title" style={sectionTitleStyle}>未写入条目</h2>
       {notWrittenBatches.length === 0
         ? <p style={mutedStyle}>这次没有没写成的条目。</p>
         : notWrittenBatches.map((batch) => {
@@ -224,7 +226,7 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
     </section>
 
     <section aria-labelledby="memory-q4-title" style={blockStyle}>
-      <h2 id="memory-q4-title" style={sectionTitleStyle}>要不要现在记</h2>
+      <h2 id="memory-q4-title" style={sectionTitleStyle}>整理状态</h2>
       {!latest
         ? <p style={mutedStyle}>{memoryEnabled === false ? '当前宿主尚未启用记忆整理。' : '记录这次任务可以从已成功任务的「结果」发起。'}</p>
         : <>
@@ -237,16 +239,6 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
         </>}
     </section>
 
-    <div style={toolbarStyle}>
-      <label style={toggleStyle}>
-        <input
-          type="checkbox"
-          aria-label="开发者视图"
-          checked={developerView}
-          onChange={(event) => setDeveloperView(event.target.checked)}
-        />
-        开发者视图
-      </label>
     </div>
     {developerView && <dl style={detailGridStyle}>
       {batches.map((batch) => <Fragment key={batch.batch_id}>
@@ -260,12 +252,10 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
   </section>
 }
 
-const kickerStyle = { margin: '0 0 5px', color: COLOR.inkMuted, fontSize: FONT_PX.helper } as const
-const titleStyle = { margin: 0, fontSize: FONT_PX.title }
 const sectionTitleStyle = { margin: 0, fontSize: 16 }
 const mutedStyle = { margin: '6px 0 0', color: COLOR.inkMuted, fontSize: FONT_PX.body }
 const statusStyle = { margin: '8px 0 0', fontSize: FONT_PX.body }
-const blockStyle = { display: 'grid', gap: 8, padding: 16, border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface }
+const blockStyle = { display: 'grid', gap: 5, padding: '11px 13px', border: '1px solid #dde4ed', borderRadius: 9, background: COLOR.surface }
 const listStyle = { display: 'grid', gap: 12, margin: 0, padding: 0, listStyle: 'none' } as const
 const itemStyle = { display: 'grid', gap: 4, minWidth: 0 } as const
 const itemTitleStyle = { margin: 0, fontSize: FONT_PX.body } as const
@@ -274,5 +264,4 @@ const detailGridStyle = { display: 'grid', gridTemplateColumns: '150px minmax(0,
 const buttonStyle = { minHeight: 36, justifySelf: 'start' as const, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' }
 const errorStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 14, color: COLOR.danger, background: '#fff1f0', borderRadius: 8 }
 const errorTextStyle = { margin: '8px 0 0', color: COLOR.danger, fontSize: FONT_PX.body } as const
-const toolbarStyle = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 } as const
 const toggleStyle = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: FONT_PX.body } as const

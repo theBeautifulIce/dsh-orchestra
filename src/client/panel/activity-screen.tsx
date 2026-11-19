@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
 import type { ActivityItem, ResourcesApi } from '../api/resources.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { EventDetails } from './execution-history.tsx'
 
 const LABELS: Readonly<Record<string, string>> = {
   'task.created': '创建任务', 'task.reserved': '预留任务', 'task.archived': '归档任务', 'task.restored': '取回任务',
-  'run.created': '创建运行', 'run.closed': '结束运行', 'decision.created': '需要人工决定', 'decision.resolved': '记录决定',
+  'run.created': '创建运行', 'run.closed': '结束运行', 'decision.created': '创建审批', 'decision.resolved': '记录审批结果',
   'artifact.registered': '登记交付产物',
   'task_plan.proposed': '生成待确认任务计划',
+  'workflow.draft_tested': '完成 Workflow 快速测试', 'workflow.published': '发布 Workflow 版本',
+  'workflow.status_changed': '变更 Workflow 启用状态',
   'run.terminal': '结束运行', 'task.run_started': '任务启动运行', 'task.trigger_created': '配置任务触发器',
   'task.trigger_enabled': '启用任务触发器', 'task.trigger_paused': '暂停任务触发器',
   'task.trigger_fired': '触发任务运行', 'task.trigger_skipped': '跳过这次触发',
@@ -24,9 +27,8 @@ const LABELS: Readonly<Record<string, string>> = {
 }
 
 export function ActivityScreen({ api, reloadVersion, onSnapshot }: { api: ResourcesApi; reloadVersion: number; onSnapshot: (seq: number) => void }) {
-  return <section aria-labelledby="activity-title" style={{ display: 'grid', gap: 13 }}>
-    <header><h1 id="activity-title" style={{ margin: 0, fontSize: FONT_PX.title }}>发生过的</h1>
-      <p style={muted}>按时间倒序查看任务、运行和决定的账本事件。</p></header>
+  return <section aria-labelledby="activity-title" className="ops-page">
+    <header className="ops-page-header"><h1 id="activity-title">事件日志</h1></header>
     <ActivityList api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   </section>
 }
@@ -59,7 +61,8 @@ export function ActivityList({ api, runId, taskId, reloadVersion, onSnapshot, co
     {!loading && !failed && items.length === 0 && <p style={muted}>当前没有活动记录。</p>}
     {items.length > 0 && <ol style={timeline}>{items.map((event) => <li key={event.seq} style={row}>
       <div><strong>{LABELS[event.type] ?? event.type}</strong><p style={muted}>
-        {[event.run_id, event.node_run_id, event.decision_id].filter(Boolean).join(' · ') || `事件 #${event.seq}`}</p></div>
+        {[event.run_id, event.node_run_id, event.decision_id].filter(Boolean).join(' · ') || `事件 #${event.seq}`}</p>
+        {!compact && <EventDetails entries={event.details} />}</div>
       <time dateTime={event.occurred_at} style={muted}>{new Date(event.occurred_at).toLocaleString()}</time>
     </li>)}</ol>}
     {!compact && next !== null && !failed && <button type="button" disabled={loading} onClick={() => setBefore(next)} style={{ justifySelf: 'start' }}>加载更早活动</button>}
@@ -67,5 +70,5 @@ export function ActivityList({ api, runId, taskId, reloadVersion, onSnapshot, co
 }
 
 const muted = { color: COLOR.inkMuted, fontSize: FONT_PX.helper, margin: '4px 0' }
-const timeline = { display: 'grid', gap: 0, padding: 0, margin: 0, listStyle: 'none', border: `1px solid ${COLOR.line}`, borderRadius: 8 } as const
-const row = { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, padding: '11px 13px', borderBottom: `1px solid ${COLOR.line}`, overflowWrap: 'anywhere' } as const
+const timeline = { display: 'grid', gap: 0, padding: 0, margin: 0, listStyle: 'none', border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.surface } as const
+const row = { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6, padding: '7px 11px', borderBottom: `1px solid ${COLOR.line}`, overflowWrap: 'anywhere', minWidth: 0 } as const

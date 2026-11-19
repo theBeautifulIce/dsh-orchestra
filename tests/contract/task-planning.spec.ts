@@ -69,6 +69,7 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
     edges: [{ from: 'start', to: 'collect' }, { from: 'collect', to: 'verify' }],
   }
   commands.createWorkflow({ workflowId: 'review', name: '交付复核', definition, actor: 'host', now, operationId: uuidv7() })
+  expect(commands.testWorkflowDraft({ workflowId: 'review', revision: 1, now }).passed).toBe(true)
   commands.publishWorkflow({ workflowId: 'review', revision: 1, baseVersion: 0, note: '可复用', actor: 'host', now, operationId: uuidv7() })
   const client = createApiClient(service.endpoint, (input, init) => {
     const headers = new Headers(init?.headers)

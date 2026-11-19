@@ -33,6 +33,7 @@ function publish(service: Awaited<ReturnType<typeof boot>>) {
   service.orchestra.commands.createWorkflow({
     workflowId, name: definition.name, scope: 'reusable', definition, actor: 'tester', now: NOW, operationId: uuidv7(),
   })
+  expect(service.orchestra.commands.testWorkflowDraft({ workflowId, revision: 1, now: NOW }).passed).toBe(true)
   service.orchestra.commands.publishWorkflow({
     workflowId, revision: 1, baseVersion: 0, note: 'fixture', actor: 'tester', now: NOW, operationId: uuidv7(),
   })
@@ -71,6 +72,7 @@ it('同一任务累积真实运行，重启幂等且不并行启动第二次', a
     const dueAt = '2099-11-18T01:00:00.000Z'
     const dueNext = '2099-11-19T01:00:00.000Z'
     const dueThird = '2099-11-20T01:00:00.000Z'
+    const dueFourth = '2099-11-21T01:00:00.000Z'
     const submit = scheduled()
     const rule = triggers.create(submit, 'test', before)
     expect(rule).toMatchObject({ next_fire_at: dueAt, enabled: true, revision: 1 })
@@ -98,8 +100,17 @@ it('同一任务累积真实运行，重启幂等且不并行启动第二次', a
     service = await boot(dir)
     const reopened = createTaskTriggerHost(service.orchestra.db, service.orchestra.catalog)
     expect(reopened.list(rule.task_id).items[0]).toMatchObject({ next_fire_at: dueThird, last_fired_at: dueAt })
+    service.orchestra.commands.setWorkflowStatus({
+      workflowId, status: 'disabled', expectedStatus: 'active', now: dueNext, actor: 'tester', operationId: uuidv7(),
+    })
     reopened.tick(dueThird, (err) => { throw err })
     reopened.tick(dueThird, (err) => { throw err })
+    expect(service.orchestra.db.raw.prepare('SELECT status, reason FROM task_trigger_occurrences WHERE due_at = ?').get(dueThird))
+      .toMatchObject({ status: 'skipped', reason: 'workflow_inactive' })
+    service.orchestra.commands.setWorkflowStatus({
+      workflowId, status: 'active', expectedStatus: 'disabled', now: dueThird, actor: 'tester', operationId: uuidv7(),
+    })
+    reopened.tick(dueFourth, (err) => { throw err })
     const runs = service.orchestra.db.raw.prepare('SELECT task_id, run_id FROM runs ORDER BY created_at').all()
     expect(runs).toHaveLength(2)
     expect(runs.every((run) => run.task_id === rule.task_id)).toBe(true)
@@ -124,6 +135,7 @@ it('生产宿主在重启时扫描到期定时，按可信节点规格派发进�
         }],
       },
     })
+    expect(service.orchestra.commands.testWorkflowDraft({ workflowId, revision: 1, now: NOW }).passed).toBe(true)
     service.orchestra.commands.publishWorkflow({
       workflowId, revision: 1, baseVersion: 0, note: 'fixture', actor: 'tester', now: NOW, operationId: uuidv7(),
     })

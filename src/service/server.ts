@@ -11,6 +11,7 @@ import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
 import type { ListTaskParams, TaskSummary, WorkspaceOverview } from './queries/tasks.ts'
 import type { listEventHistory } from './queries/list_events.ts'
+import type { listExecutionHistory } from './queries/execution-history.ts'
 import type { RunSummary } from './queries/runs.ts'
 import type { NodeRunView } from './queries/nodes.ts'
 import type { ArtifactView, RunArtifact, getArtifactContent } from './queries/artifacts.ts'
@@ -28,6 +29,7 @@ import {
   ledgerEventSchema, leaseSchema, memoryInspectSchema, memoryRecoverySchema, memoryStartSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
   taskReserveSchema, taskArchiveSchema, workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
+  workflowTestSchema, workflowGenerateSchema, workflowStatusSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
@@ -69,11 +71,13 @@ export type ServerDeps = {
   collaboration?: CollaborationHost
   modelSettings?: ModelRoutingSettingsHost
   taskTriggers?: TaskTriggerHost
+  workflowGenerator?: (input: { goal: string }, signal: AbortSignal) => Promise<unknown>
 }
 
 export type ServerQueries = {
   listEvents: (fromSeq: number, limit: number) => { rows: unknown[]; as_of_seq: number }
   listEventHistory: (params: Parameters<typeof listEventHistory>[1]) => ReturnType<typeof listEventHistory>
+  listExecutionHistory: (params: Parameters<typeof listExecutionHistory>[1]) => ReturnType<typeof listExecutionHistory>
   listTaskSummaries: (params: ListTaskParams) => { items: TaskSummary[]; next_cursor: string | null; as_of_seq: number }
   getTaskSummary: (taskId: string, now: number) => { item: TaskSummary; as_of_seq: number }
   getWorkspaceOverview: () => { item: WorkspaceOverview; as_of_seq: number }
@@ -101,6 +105,8 @@ export type ServerQueries = {
 }
 
 import type { CreateWorkflowParams, OpenDraftParams, PublishParams, UpdateDraftParams } from './commands/workflows.ts'
+import type { SetWorkflowStatusParams, WorkflowDraftTest } from './commands/workflows.ts'
+import { validateSaveLayer } from '../core/workflow-doc.ts'
 
 export type NodeCommands = {
   acquireLease: (body: { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }) => {
@@ -122,6 +128,9 @@ export type NodeCommands = {
   createWorkflow: (body: CreateWorkflowParams & { operationId: string }) => unknown
   openWorkflowDraft: (body: OpenDraftParams & { operationId: string }) => unknown
   updateWorkflowDraft: (body: UpdateDraftParams & { operationId: string }) => unknown
+  testWorkflowDraft: (body: { workflowId: string; revision: number; now: string }) => WorkflowDraftTest
+  getWorkflowDraftTest: (workflowId: string) => WorkflowDraftTest | null
+  setWorkflowStatus: (body: SetWorkflowStatusParams) => unknown
   publishWorkflow: (body: PublishParams & { operationId: string }) => unknown
   reserveTask: (body: { title: string; actor: string; now: string; operationId: string }) => unknown
   getWorkflow: (body: { workflowId: string }) => unknown
@@ -560,6 +569,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
       return
     }
+    if (req.method === 'GET' && url.pathname === '/v1/execution-history' && deps.queries) {
+      const { as_of_seq, ...data } = deps.queries.listExecutionHistory({
+        taskId: stringParam(url, 'task_id', 256), runId: stringParam(url, 'run_id', 256), nodeId: stringParam(url, 'node_run_id', 256),
+        before: intParam(url, 'before', Number.MAX_SAFE_INTEGER), limit: intParam(url, 'limit', 35),
+      })
+      sendJson(res, 200, okEnvelope(as_of_seq, data))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/activity' && deps.queries) {
       const { as_of_seq, ...data } = deps.queries.listEventHistory({ runId: stringParam(url, 'run_id', 256), taskId: stringParam(url, 'task_id', 256),
         beforeSeq: intParam(url, 'before_seq', Number.MAX_SAFE_INTEGER), limit: Math.min(intParam(url, 'limit', 40), 100) })
@@ -644,6 +661,43 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const body = parseBody(workflowUpdateCommandSchema, await readJsonBody(req), '更新草稿')
       const out = await queue.run(() => deps.commands!.updateWorkflowDraft({
         workflowId: body.workflow_id, revision: body.revision, definition: body.definition,
+        actor, now: requestNow, operationId: body.operation_id,
+      }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/workflows/generate/capability') {
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { enabled: Boolean(deps.workflowGenerator) }))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/workflows/generate' && deps.workflowGenerator) {
+      const body = parseBody(workflowGenerateSchema, await readJsonBody(req), '生成 Workflow 草稿')
+      const signal = AbortSignal.timeout(45_000)
+      const proposed = await deps.workflowGenerator(body, signal)
+      signal.throwIfAborted()
+      const saved = validateSaveLayer(proposed)
+      if (!saved.saved || saved.report.errors.length > 0 || saved.saved.scope === 'task_local') {
+        throw new OrchError('WORKFLOW_VALIDATION_FAILED', '生成的可复用 Workflow 草稿结构不合法', { errors: saved.report.errors })
+      }
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { definition: saved.saved, validation: saved.report }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/workflows/test' && deps.commands) {
+      const workflowId = stringParam(url, 'workflow_id', 256) ?? ''
+      const result = deps.commands.getWorkflowDraftTest(workflowId)
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/workflows/test' && deps.commands) {
+      const body = parseBody(workflowTestSchema, await readJsonBody(req), '快速测试 Workflow')
+      const result = await queue.run(() => deps.commands!.testWorkflowDraft({ workflowId: body.workflow_id, revision: body.revision, now: requestNow }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/workflows/status' && deps.commands) {
+      const body = parseBody(workflowStatusSchema, await readJsonBody(req), '更新 Workflow 状态')
+      const out = await queue.run(() => deps.commands!.setWorkflowStatus({
+        workflowId: body.workflow_id, status: body.status, expectedStatus: body.expected_status,
         actor, now: requestNow, operationId: body.operation_id,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))

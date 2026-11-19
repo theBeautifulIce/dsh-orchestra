@@ -74,19 +74,19 @@ describe('收到 reload 之后重新从第一页取数', () => {
     })
     const view = await renderPanel(<WorkflowListScreen api={api} onSelectWorkflow={noop} />)
     await view.flush()
-    expect(view.findAll('article').length).toBe(1)
+    expect(view.findAll('tbody tr').length).toBe(1)
     expect(view.text()).toContain('流程一')
 
     await view.click(loadMore(view))
     await view.flush()
-    expect(view.findAll('article').length).toBe(2)
+    expect(view.findAll('tbody tr').length).toBe(2)
     expect(view.text()).toContain('流程二')
 
     const before = service.calls.length
     await view.rerender(<WorkflowListScreen api={api} onSelectWorkflow={noop} reloadVersion={1} />)
     await view.flush()
 
-    expect(view.findAll('article').length).toBe(1)
+    expect(view.findAll('tbody tr').length).toBe(1)
     expect(view.text()).toContain('流程一')
     expect(view.text()).not.toContain('流程二')
     const after = service.calls.slice(before)

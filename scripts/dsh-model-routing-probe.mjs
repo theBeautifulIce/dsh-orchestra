@@ -21,6 +21,13 @@ const PLANNER = 'route-probe-planner'
 const FLOW = 'model-probe'
 const NODES = ['organize', 'compare']
 const modelFor = (node) => node === 'compare' ? COMPLEX : PREFERRED
+const workflowDoc = {
+  name: 'DSH 模型验收流程',
+  nodes: [{ node_id: 'trigger', title: '手工发起', type: 'trigger', position: { x: 0, y: 0 } },
+    ...NODES.map((node_id, index) => ({ node_id, title: node_id, type: 'agent', position: { x: index + 1, y: 0 },
+      config: { tools: { allow: ['ro.probe'] }, pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }] } }))],
+  edges: [{ from: 'trigger', to: 'organize' }, { from: 'organize', to: 'compare' }],
+}
 
 export const name = 'orchestra-model-routing-probe'
 export const inject = ['agents', 'tools', 'llm', 'appExit']
@@ -80,14 +87,10 @@ async function executeInDsh(context) {
       assert.equal(receipt.ok, true, JSON.stringify(receipt.error ?? receipt))
       return receipt.data
     }
-    const flowTitle = 'DSH 模型验收流程'
-    const draft = await call('/v1/workflows', { workflow_id: FLOW, name: flowTitle, operation_id: uuidv7(), definition: {
-      name: flowTitle,
-      nodes: [{ node_id: 'trigger', title: '手工发起', type: 'trigger', position: { x: 0, y: 0 } },
-        ...NODES.map((node_id, index) => ({ node_id, title: node_id, type: 'agent', position: { x: index + 1, y: 0 },
-          config: { tools: { allow: ['ro.probe'] }, pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }] } }))],
-      edges: [{ from: 'trigger', to: 'organize' }, { from: 'organize', to: 'compare' }],
-    } })
+    const generated = await call('/v1/workflows/generate', { goal: '先整理，再复核条目，保留只读工具回执' })
+    assert.deepEqual(generated.definition, workflowDoc)
+    const draft = await call('/v1/workflows', { workflow_id: FLOW, name: workflowDoc.name, operation_id: uuidv7(), definition: generated.definition })
+    assert.equal((await call('/v1/workflows/test', { workflow_id: FLOW, revision: draft.revision })).passed, true)
     await call('/v1/workflows/publish', { workflow_id: FLOW, base_version: 0, revision: draft.revision,
       publish_note: '隔离验收流程', operation_id: uuidv7() })
     const mapping = { routine: 'approved/custom-fast', standard: null, complex: 'approved/complex' }
@@ -148,7 +151,8 @@ async function main(binPath) {
       deliverables: [{ title: '已核对工具回执', node_id: 'compare', goal_ids: ['goal', 'R1'],
         acceptance: { kind: 'tool_evidence', tool: 'ro.probe', exit_code: 0 } }], risks: [] }
     const final = hasToolResult || planner
-    const delta = final ? { role: 'assistant', content: planner ? JSON.stringify(plan) : '{"status":"done","output":{"ok":true}}' }
+    const generatingWorkflow = planner && JSON.stringify(request.messages).includes('按用户目标生成可复用 Workflow 草稿')
+    const delta = final ? { role: 'assistant', content: planner ? JSON.stringify(generatingWorkflow ? workflowDoc : plan) : '{"status":"done","output":{"ok":true}}' }
       : { role: 'assistant', tool_calls: [{ index: 0, id: 'call_probe', type: 'function',
         function: { name: 'orchestra_read_tool', arguments: '{"tool":"ro.probe","args":[]}' } }] }
     for (const choice of [{ delta, finish_reason: null }, { delta: {}, finish_reason: final ? 'stop' : 'tool_calls' }]) {
@@ -182,7 +186,7 @@ async function main(binPath) {
     assert.equal(status, 0, stderr + '\n' + stdout)
     const line = stdout.split(/\r?\n/).find((item) => item.startsWith('ORCHESTRA_DSH_PROBE '))
     assert.ok(line, stdout + '\n' + stderr)
-    assert.deepEqual(received, [PLANNER, PREFERRED, PREFERRED, COMPLEX, COMPLEX])
+    assert.deepEqual(received, [PLANNER, PLANNER, PREFERRED, PREFERRED, COMPLEX, COMPLEX])
     console.log(line)
     console.log('Provider HTTP requests: ' + received.join(', '))
   } finally {

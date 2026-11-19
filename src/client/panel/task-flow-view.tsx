@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { NodeRunView, RunSummary, TaskSummary } from '../api/types.ts'
 import { TaskRunSteps, formatTaskDate, runDuration, usePinnedWorkflow } from './task-run-steps.tsx'
+import { ExecutionHistory } from './execution-history.tsx'
 import { NodeEvidence } from './task-run-evidence.tsx'
 import { taskAutonomyLabel, taskCardStatus, taskOriginLabel, taskStatusView } from './tasks-screen.tsx'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
@@ -70,7 +71,7 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask }: {
         {run && <div><dt>最近运行</dt><dd>{outcome}{run.settling ? ' · 正在收尾' : ''}</dd></div>}
         {run && <div><dt>开始时间</dt><dd>{run.started_at ? formatTaskDate(run.started_at) : '暂无开始记录'}</dd></div>}
         {duration && <div><dt>用时</dt><dd>{duration}</dd></div>}
-        {task.next_trigger_at && <div><dt>下次唤醒</dt><dd>{formatTaskDate(task.next_trigger_at)}</dd></div>}
+        {task.next_trigger_at && <div><dt>下次触发</dt><dd>{formatTaskDate(task.next_trigger_at)}</dd></div>}
         {task.trigger_enabled === false && <div><dt>触发器</dt><dd>已暂停</dd></div>}
       </dl>}
       <button type="button" className="task-quiet-button" onClick={(event) => onOpenTask(event.currentTarget)}>打开任务详情</button>
@@ -80,10 +81,8 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask }: {
     {hasRun && !nodes && !nodeError && <p role="status" className="task-flow-empty">正在读取执行步骤…</p>}
     {(!hasRun || nodes) && <TaskRunSteps nodes={nodes ?? []} doc={workflow?.doc} run={run}
       onOpenRun={run ? (trigger) => onOpenTask(trigger, run.run_id) : undefined}
-      renderEvidence={(node) => <section>
-        <h4>证据</h4>
-        <NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} />
-      </section>} />}
+      renderEvidence={(node) => <><ExecutionHistory key={node.node_run_id} api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} />
+        <section><h4>执行证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} /></section></>} />}
     {workflow?.error && <p className="task-flow-empty" role="status">当前固定版本的流程定义暂时不可读取。</p>}
     {workflow?.doc && <details className="task-flow-graph">
       <summary>查看固定流程图 · {workflow.doc.name || '流程'} v{run?.workflow_version ?? task.workflow_version}</summary>

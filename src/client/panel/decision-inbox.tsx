@@ -162,26 +162,22 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
     refresh()
   }
 
-  return <section aria-labelledby="decision-inbox-title" style={{ display: 'grid', gap: 18 }}>
-    <header>
-      <p style={kickerStyle}>需要你关注</p>
-      <h1 id="decision-inbox-title" style={titleStyle}>等你决定</h1>
-      <p style={mutedStyle}>这里列出当前仍开放的决定事项。页面只展示已保存的信息，不推测缺失的策略。</p>
+  return <section aria-labelledby="decision-inbox-title" className="ops-page">
+    <header className="ops-page-header">
+      <h1 id="decision-inbox-title">审批中心</h1>
+      <button type="button" onClick={refresh} disabled={loading} className="ops-button">{loading ? '正在更新…' : '刷新'}</button>
     </header>
-    <div role="group" aria-label="决定视图" style={{ display: 'flex', gap: 8 }}>
+    <div className="ops-toolbar">
+    <div role="group" aria-label="决定视图" className="ops-tabs">
       {[false, true].map((value) => <button type="button" key={String(value)} aria-pressed={value === history}
-        style={{ ...buttonStyle, background: value === history ? '#edf3fa' : COLOR.surface }} onClick={() => {
+        onClick={() => {
           setItems([]); setSelected([]); setNextCursor(null); setCursor(undefined); setHistory(value); setRetry((version) => version + 1)
         }}>{value ? '已处理' : '待处理'}</button>)}
     </div>
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-      <h2 style={sectionTitleStyle}>{history ? '处理记录' : '待处理事项'}</h2>
-      <button type="button" onClick={refresh} disabled={loading} style={buttonStyle}>{loading ? '正在更新…' : '刷新'}</button>
-    </div>
-    <div style={toolbarStyle}>
+    <div className="ops-actions">
       {!history && <>
       <span style={mutedStyle}>已选 {selected.length} 条</span>
-      <button type="button" onClick={() => { void acknowledgeSelected() }} disabled={!commands || busy || selected.length === 0} style={buttonStyle}>批量接手</button>
+      <button type="button" onClick={() => { void acknowledgeSelected() }} disabled={!commands || busy || selected.length === 0} className="ops-button">批量接手</button>
       </>}
       <label style={toggleStyle}>
         <input
@@ -193,10 +189,12 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
         开发者视图
       </label>
     </div>
+    </div>
     {notice && <p role={notice.tone === 'error' ? 'alert' : 'status'} style={notice.tone === 'error' ? errorTextStyle : mutedStyle}>{notice.text}</p>}
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={refresh} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取决定事项…</p>}
-    {!loading && !failed && items.length === 0 && <div style={emptyStyle}>{history ? '还没有已处理的决定。' : COPY.emptyDecisions}</div>}
+    {!loading && !failed && items.length === 0 && <p className="ops-surface ops-empty">{history ? '还没有已处理的决定。' : COPY.emptyDecisions}</p>}
+    <div className="ops-card-grid">
     {!failed && sorted.map((decision) => <DecisionCard
       key={decision.decision_id}
       decision={decision}
@@ -209,6 +207,7 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
       onAcknowledge={() => { void acknowledgeDecision(decision) }}
       onResolve={(resolution, confirm) => { void resolveDecision(decision, resolution, confirm) }}
     />)}
+    </div>
     {nextCursor && !failed && <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>}
   </section>
 }
@@ -431,22 +430,17 @@ function formatDate(value: string): string {
   return Number.isNaN(date.valueOf()) ? '时间未知' : date.toLocaleString()
 }
 
-const kickerStyle = { margin: '0 0 5px', color: COLOR.inkMuted, fontSize: FONT_PX.helper } as const
-const titleStyle = { margin: 0, fontSize: FONT_PX.title }
-const sectionTitleStyle = { margin: 0, fontSize: 16 }
 const cardTitleStyle = { margin: 0, fontSize: 16 }
 const mutedStyle = { margin: '6px 0 0', color: COLOR.inkMuted, fontSize: FONT_PX.body }
-const cardStyle = { minWidth: 0, padding: 18, border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface }
-const detailGridStyle = { display: 'grid', gridTemplateColumns: '150px minmax(0, 1fr)', gap: '8px 12px', margin: '16px 0 0', fontSize: FONT_PX.body } as const
+const cardStyle = { minWidth: 0, padding: '11px 13px', border: '1px solid #dde4ed', borderRadius: 9, background: COLOR.surface }
+const detailGridStyle = { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', gap: '4px 10px', margin: '8px 0 0', fontSize: FONT_PX.body } as const
 const listStyle = { display: 'grid', gap: 10, margin: '12px 0 0', padding: 0, listStyle: 'none' } as const
 const itemStyle = { display: 'grid', gap: 3, minWidth: 0 } as const
 const itemTitleStyle = { margin: 0, fontSize: FONT_PX.body } as const
 const detailStyle = { margin: '8px 0 0', paddingLeft: 10, borderLeft: `2px solid ${COLOR.line}` } as const
-const emptyStyle = { border: `1px dashed ${COLOR.line}`, borderRadius: 9, padding: 32, textAlign: 'center' as const, color: COLOR.inkMuted }
 const buttonStyle = { minHeight: 36, justifySelf: 'start' as const, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' }
 const errorStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 14, color: COLOR.danger, background: '#fff1f0', borderRadius: 8 }
 const warningStyle = { padding: 11, borderRadius: 7, background: '#fff8e9', color: COLOR.warning, fontSize: FONT_PX.body }
-const toolbarStyle = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 } as const
 const toggleStyle = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: FONT_PX.body } as const
 const actionStyle = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, margin: '14px 0 0' } as const
 const errorTextStyle = { margin: '8px 0 0', color: COLOR.danger, fontSize: FONT_PX.body } as const

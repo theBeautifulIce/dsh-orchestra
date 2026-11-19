@@ -2,14 +2,15 @@ import { createContext, useContext, type ButtonHTMLAttributes, type ReactNode } 
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import type { StreamStatus } from '../api/sse.ts'
+import { PANEL_LAYOUT_CSS } from './panel-layout.ts'
 
 export const PANEL_ROUTES = [
   { id: 'overview', label: '总览' },
   { id: 'tasks', label: '任务' },
-  { id: 'decisions', label: '等你决定' },
-  { id: 'effects', label: '待核实' },
-  { id: 'workflows', label: '流程' },
-  { id: 'activity', label: '发生过的' },
+  { id: 'decisions', label: '审批中心' },
+  { id: 'effects', label: '操作核验' },
+  { id: 'workflows', label: 'Workflow 管理' },
+  { id: 'activity', label: '事件日志' },
   { id: 'collaboration', label: '协作核验' },
   { id: 'memory', label: '记忆' },
   { id: 'settings', label: '设置' },
@@ -66,7 +67,8 @@ export function PanelShell(props: PanelShellProps) {
   const commandsEnabled = props.serviceConnected && !isStale
   const commandsUnavailableReason = !props.serviceConnected ? COPY.serviceDown : COPY.staleNotice
   return <CommandsEnabledContext.Provider value={{ enabled: commandsEnabled, reason: commandsUnavailableReason }}>
-  <div style={appStyle}>
+  <div className="ops-shell" data-panel-route={props.activeRoute} style={appStyle}>
+    <style>{PANEL_LAYOUT_CSS}</style>
     <aside aria-label="主导航" style={sidebarStyle}>
       <div style={brandStyle}>Orchestra</div>
       <nav aria-label="主菜单" style={{ display: 'grid', gap: 4 }}>
@@ -79,8 +81,8 @@ export function PanelShell(props: PanelShellProps) {
         >{route.label}</button>)}
       </nav>
     </aside>
-    <div style={{ minWidth: 0, flex: 1 }}>
-      <header style={headerStyle}>
+    <div className="ops-shell-main" data-panel-route={props.activeRoute} style={{ minWidth: 0, flex: 1 }}>
+      <header style={props.activeRoute === 'tasks' ? headerStyle : { ...headerStyle, height: 44, paddingInline: 22 }}>
         <strong>{PANEL_ROUTES.find((route) => route.id === props.activeRoute)?.label}</strong>
         <span role="status" style={{ color: props.serviceConnected ? COLOR.success : COLOR.warning }}>
           {stateLabel}
@@ -102,5 +104,5 @@ const navButtonStyle = { minHeight: 40, padding: '0 12px', border: 0, borderRadi
 const activeNavStyle = { background: '#e9edf2', fontWeight: 700 } as const
 const headerStyle = { height: 58, padding: '0 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.menu } as const
 const noticeStyle = { padding: '10px 28px', background: '#fff8e9', color: COLOR.warning, borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.helper } as const
-const contentStyle = { maxWidth: 1780, margin: '0 auto', padding: '28px 32px 80px', minWidth: 0 } as const
+const contentStyle = { maxWidth: 1780, margin: '0 auto', minWidth: 0 } as const
 const fullPageStyle = { minHeight: '100vh', display: 'grid', placeContent: 'center', padding: 24, background: COLOR.canvas, color: COLOR.ink, textAlign: 'center' as const }

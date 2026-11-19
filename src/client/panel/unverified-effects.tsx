@@ -7,12 +7,12 @@ import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
 import { EffectEvidenceReview } from './effect-evidence-review.tsx'
 
-export const VERIFY_BANNER = '签字只表示人接下了后果，不表示副作用已消失'
+export const VERIFY_BANNER = '人工签认记录责任接管。外部操作是否发生仍以核验证据为准。'
 const EFFECT_LABEL: Record<string, string> = { pure: '只读', compensable: '可补偿', irreversible: '不可逆' }
 const STATUS_LABEL: Record<string, string> = {
   running: '正在做', completed: '已完成', failed: '失败', blocked: '卡住了',
-  waiting: '等待中', cancelled: '已取消', indeterminate_side_effect: '副作用情况待核实',
-  abandoned_unverified: '已停止跟踪，副作用待核实', failed_with_unverified: '未成功，副作用待核实',
+  waiting: '等待中', cancelled: '已取消', indeterminate_side_effect: '外部操作结果待核验',
+  abandoned_unverified: '已停止跟踪，外部操作待核验', failed_with_unverified: '执行失败，外部操作待核验',
 }
 
 // 当前读模型没有来源列的字段一律写「未知」，不用别的值顶替。
@@ -60,17 +60,10 @@ export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot, client }
   }, [api, cursor, retry, reloadVersion, onSnapshot])
 
   function refresh() { setCursor(undefined); setRetry((value) => value + 1) }
-  return <section aria-labelledby="unverified-title" style={{ display: 'grid', gap: 18 }}>
-    <header>
-      <p style={kickerStyle}>需要跟进</p>
-      <h1 id="unverified-title" style={titleStyle}>待核实</h1>
-      <p style={mutedStyle}>{VERIFY_BANNER}</p>
-    </header>
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-      <h2 style={sectionTitleStyle}>未验证操作</h2>
-      <button type="button" onClick={refresh} disabled={loading} style={buttonStyle}>{loading ? '正在更新…' : '刷新'}</button>
-    </div>
-    <div style={toolbarStyle}>
+  return <section aria-labelledby="unverified-title" className="ops-page">
+    <header className="ops-page-header">
+      <div><h1 id="unverified-title">操作核验</h1><p className="ops-meta">{VERIFY_BANNER}</p></div>
+      <div className="ops-actions">
       <label style={toggleStyle}>
         <input
           type="checkbox"
@@ -80,13 +73,17 @@ export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot, client }
         />
         开发者视图
       </label>
-    </div>
+      <button type="button" onClick={refresh} disabled={loading} className="ops-button">{loading ? '正在更新…' : '刷新'}</button>
+      </div>
+    </header>
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={refresh} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取待核实事项…</p>}
-    {!loading && !failed && items.length === 0 && <div style={emptyStyle}>{COPY.emptyEffects}</div>}
+    {!loading && !failed && items.length === 0 && <p className="ops-surface ops-empty">{COPY.emptyEffects}</p>}
+    <div className="ops-card-grid">
     {!failed && items.map((effect) => <EffectCard key={effect.node_run_id} effect={effect} developerView={developerView}>
       {client && <EffectEvidenceReview api={api} client={client} nodeId={effect.node_run_id} onResolved={refresh} />}
     </EffectCard>)}
+    </div>
     {nextCursor && !failed && <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>}
   </section>
 }
@@ -111,13 +108,13 @@ function EffectCard({ effect, developerView, children }: { effect: UnverifiedEff
       {developerView && <><dt>节点运行 ID</dt><dd>{effect.node_run_id}</dd></>}
     </dl>
     {children}
-    {developerView && <><table style={tableStyle}>
+    {developerView && <><div className="ops-table-scroll"><table className="ops-table" style={tableStyle}>
       <thead>
         <tr>
           <th scope="col">运行</th>
           <th scope="col">节点</th>
           <th scope="col">动作摘要</th>
-          <th scope="col">副作用等级</th>
+          <th scope="col">外部操作风险</th>
           <th scope="col">停止时刻 stopped_at</th>
           <th scope="col">最后已知阶段 last_known_phase</th>
           <th scope="col">验证状态</th>
@@ -143,7 +140,7 @@ function EffectCard({ effect, developerView, children }: { effect: UnverifiedEff
           </td>
         </tr>
       </tbody>
-    </table>
+    </table></div>
     <p style={mutedStyle}>读模型未提供的字段显示「未知」。</p></>}
   </article>
 }
@@ -153,16 +150,11 @@ function formatDate(value: string): string {
   return Number.isNaN(date.valueOf()) ? '时间未知' : date.toLocaleString()
 }
 
-const kickerStyle = { margin: '0 0 5px', color: COLOR.inkMuted, fontSize: FONT_PX.helper } as const
-const titleStyle = { margin: 0, fontSize: FONT_PX.title }
-const sectionTitleStyle = { margin: 0, fontSize: 16 }
 const cardTitleStyle = { margin: 0, fontSize: 16 }
 const mutedStyle = { margin: '6px 0 0', color: COLOR.inkMuted, fontSize: FONT_PX.body }
-const cardStyle = { minWidth: 0, padding: 18, border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface }
-const detailGridStyle = { display: 'grid', gridTemplateColumns: '150px minmax(0, 1fr)', gap: '8px 12px', margin: '16px 0 0', fontSize: FONT_PX.body } as const
-const emptyStyle = { border: `1px dashed ${COLOR.line}`, borderRadius: 9, padding: 32, textAlign: 'center' as const, color: COLOR.inkMuted }
+const cardStyle = { minWidth: 0, padding: '11px 13px', border: '1px solid #dde4ed', borderRadius: 9, background: COLOR.surface }
+const detailGridStyle = { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', gap: '4px 10px', margin: '8px 0 0', fontSize: FONT_PX.body } as const
 const buttonStyle = { minHeight: 36, justifySelf: 'start' as const, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' }
 const errorStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 14, color: COLOR.danger, background: '#fff1f0', borderRadius: 8 }
-const toolbarStyle = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 } as const
 const toggleStyle = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: FONT_PX.body } as const
 const tableStyle = { width: '100%', margin: '16px 0 0', borderCollapse: 'collapse', fontSize: FONT_PX.helper, textAlign: 'left' as const } as const

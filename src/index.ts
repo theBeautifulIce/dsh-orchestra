@@ -8,7 +8,9 @@ import { acquireDbLock } from './infra/lock.ts'
 import { nullLogger, type Logger } from './infra/logger.ts'
 import { WorkflowCatalog } from './service/workflows.ts'
 import { createRun, reserveTask } from './service/runs.ts'
-import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
+import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, setWorkflowStatus, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
+import { getWorkflowDraftTest, testWorkflowDraft } from './service/commands/workflows.ts'
+import { withReadTx } from './service/queries/read-tx.ts'
 import { requireCapability } from './core/config.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { setTaskArchive } from './service/commands/task-archive.ts'
@@ -40,6 +42,7 @@ import { getWorkflowSnapshot, getWorkflowVersionSnapshot, listWorkflowSummaries 
 import { listUnverifiedEffects } from './service/queries/effects.ts'
 import { listMemoryBatches } from './service/queries/memory-batches.ts'
 import { listEvents as listEventPage, listEventHistory } from './service/queries/list_events.ts'
+import { listExecutionHistory } from './service/queries/execution-history.ts'
 import { getOperationSnapshot } from './service/queries/get_operation.ts'
 import { inTx } from './infra/db/tx.ts'
 import type { NodeCommands, ServerDeps } from './service/server.ts'
@@ -77,9 +80,12 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     },
   } : {}) })
   try {
+    const generateWorkflow = dshPlanner && createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'workflow')
     const service = await serveOrchestra({
       ...serviceOptions,
       ...(dshPlanner ? { planning: { propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }) } } : {}),
+      ...(generateWorkflow ? { workflowGenerator: (input: { goal: string }, signal: AbortSignal) =>
+        generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal) } : {}),
       executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
     })
     collaboration = service.collaboration
@@ -218,13 +224,22 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       workflowId: b.workflowId, revision: b.revision, definition: b.definition,
       actor: b.actor, now: b.now, operationId: b.operationId,
     })),
+    testWorkflowDraft: (b) => {
+      requireCapability(opts.phase, 'workflow_publish')
+      return inTx(db, (tx) => testWorkflowDraft(tx, b, publishContextFor(tx, RUNTIME_NODE_TYPES), opts.executor?.registry))
+    },
+    getWorkflowDraftTest: (workflowId) => withReadTx(db, ({ tx }) => getWorkflowDraftTest(tx, workflowId)),
+    setWorkflowStatus: (b) => {
+      requireCapability(opts.phase, 'workflow_publish')
+      return inTx(db, (tx) => setWorkflowStatus(tx, b))
+    },
     // 发布从 S4 起才许（规格 2.4）：闸门装在命令装配层，HTTP 与内部调用都绕不过
     publishWorkflow: (b) => {
       requireCapability(opts.phase, 'workflow_publish')
       const out = inTx(db, (tx) => publishWorkflowCommand(tx, {
       workflowId: b.workflowId, revision: b.revision, baseVersion: b.baseVersion, note: b.note,
       actor: b.actor, now: b.now, operationId: b.operationId,
-    }, publishContextFor(tx, RUNTIME_NODE_TYPES)))
+    }, publishContextFor(tx, RUNTIME_NODE_TYPES), { requireTest: opts.phase === 'S5', tools: opts.executor?.registry }))
       // 发布成功 = 当前进程立即可跑：目录同步注册，哈希不符会当场抛（审计 P1-1）
       catalog.adopt(out.definition, out.definition_hash)
       return out
@@ -450,6 +465,7 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 // 供宿主接进 DSH：返回 endpoint 与关闭句柄
 export async function serveOrchestra(opts: OrchestraOptions & {
   memory?: MemoryHostOptions
+  workflowGenerator?: ServerDeps['workflowGenerator']
   resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs
   asOfSeq: ServerDeps['asOfSeq']
   listTasks: ServerDeps['listTasks']
@@ -522,6 +538,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       queries: {
         listEvents: (fromSeq, limit) => listEventPage(orchestra.db, { fromSeq, limit }),
         listEventHistory: (params) => listEventHistory(orchestra.db, params),
+        listExecutionHistory: (params) => listExecutionHistory(orchestra.db, params),
         listTaskSummaries: (params) => listTaskSummaries(orchestra.db, params),
         getTaskSummary: (taskId, now) => getTaskSummarySnapshot(orchestra.db, taskId, now),
         getWorkspaceOverview: () => getWorkspaceOverview(orchestra.db),
@@ -554,6 +571,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       planning,
       collaboration,
       modelSettings,
+      workflowGenerator: opts.workflowGenerator,
       taskTriggers,
       log,
     })

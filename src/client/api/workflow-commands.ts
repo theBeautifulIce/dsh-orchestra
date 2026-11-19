@@ -3,7 +3,7 @@
 import { ApiError, type ApiClient } from './client.ts'
 import type { OperationRow } from './types.ts'
 
-export type WorkflowCommandKind = 'workflow.create' | 'workflow.open_draft' | 'workflow.update' | 'workflow.publish'
+export type WorkflowCommandKind = 'workflow.create' | 'workflow.open_draft' | 'workflow.update' | 'workflow.publish' | 'workflow.set_status'
 
 export type CommandValidationIssue = { path: string; code: string; message: string }
 
@@ -67,11 +67,19 @@ export type PublishWorkflowInput = {
   publish_note: string
 }
 
+import type { WorkflowDraftTest, WorkflowStatus } from '../../service/commands/workflows.ts'
+import type { WorkflowDoc } from '../../core/workflow-doc.ts'
+
 export type WorkflowCommandsApi = {
   createWorkflow(input: CreateWorkflowInput): Promise<WorkflowCommandOutcome<CreateWorkflowResult>>
   openWorkflowDraft(input: OpenDraftInput): Promise<WorkflowCommandOutcome<OpenDraftResult>>
   updateWorkflowDraft(input: UpdateDraftInput): Promise<WorkflowCommandOutcome<UpdateDraftResult>>
   publishWorkflow(input: PublishWorkflowInput): Promise<WorkflowCommandOutcome<PublishWorkflowResult>>
+  setWorkflowStatus?(input: { workflow_id: string; status: WorkflowStatus; expected_status: WorkflowStatus }): Promise<WorkflowCommandOutcome<{ workflow_id: string; status: WorkflowStatus }>>
+  testWorkflow?(workflowId: string, revision: number): Promise<WorkflowDraftTest>
+  getWorkflowTest?(workflowId: string): Promise<WorkflowDraftTest | null>
+  canGenerateWorkflow?(): Promise<boolean>
+  generateWorkflow?(goal: string): Promise<WorkflowDoc>
   getOperation(operationId: string): Promise<OperationRow>
 }
 
@@ -181,6 +189,11 @@ async function submitCommand<T>(
 
 export function createWorkflowCommandsApi(client: ApiClient): WorkflowCommandsApi {
   return {
+    setWorkflowStatus: (input) => submitCommand<{ workflow_id: string; status: WorkflowStatus }>(client, 'workflow.set_status', '/v1/workflows/status', input),
+    testWorkflow: async (workflow_id, revision) => (await client.post<WorkflowDraftTest>('/v1/workflows/test', { workflow_id, revision })).data,
+    getWorkflowTest: async (workflow_id) => (await client.get<WorkflowDraftTest | null>('/v1/workflows/test', { workflow_id })).data,
+    canGenerateWorkflow: async () => (await client.get<{ enabled: boolean }>('/v1/workflows/generate/capability')).data.enabled,
+    generateWorkflow: async (goal) => (await client.post<{ definition: WorkflowDoc }>('/v1/workflows/generate', { goal })).data.definition,
     createWorkflow: (input) => submitCommand<CreateWorkflowResult>(client, 'workflow.create', '/v1/workflows', {
       workflow_id: input.workflow_id,
       name: input.name,

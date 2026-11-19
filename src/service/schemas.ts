@@ -507,3 +507,9 @@ export const workflowPublishCommandSchema = z.object({
   base_version: z.number().int().nonnegative(),
   publish_note: z.string().min(1).max(500),
 })
+export const workflowTestSchema = z.strictObject({ workflow_id: identifier, revision: z.number().int().positive() })
+export const workflowStatusSchema = z.strictObject({
+  workflow_id: identifier, operation_id: operationId,
+  status: z.enum(['active', 'disabled']), expected_status: z.enum(['active', 'disabled']),
+})
+export const workflowGenerateSchema = z.strictObject({ goal: z.string().trim().min(1).max(2000) })

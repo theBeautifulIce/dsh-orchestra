@@ -12,6 +12,7 @@ import { PanelCommandButton, UnknownState } from './shell.tsx'
 import { taskAutonomyLabel, taskCardStatus, taskOriginLabel, taskStatusView } from './tasks-screen.tsx'
 import { TASK_INSPECTOR_CSS } from './task-workspace-styles.ts'
 import { ActivityList } from './activity-screen.tsx'
+import { ExecutionHistory } from './execution-history.tsx'
 import { ArtifactContent } from './artifact-content.tsx'
 import { TaskPlanBrief } from './task-plan-form.tsx'
 import { TaskRunSteps, formatTaskDate, runDuration, usePinnedWorkflow } from './task-run-steps.tsx'
@@ -32,7 +33,7 @@ export type TaskDetailScreenProps = {
 }
 type DetailData = { task: TaskSummary; runs: RunSummary[]; next: string | null }
 const TASK_TABS = ['概览', '运行', '编排', '事件'] as const
-const RUN_TABS = ['步骤', '结果', '证据', '活动'] as const
+const RUN_TABS = ['步骤', '结果', '证据', '事件'] as const
 type TaskTab = (typeof TASK_TABS)[number]
 type RunTab = (typeof RUN_TABS)[number]
 
@@ -56,9 +57,17 @@ export function TaskDetailScreen({
   const [runSelection, setRunSelection] = useState<RunSummary>()
   const [showRun, setShowRun] = useState(Boolean(initialRunId))
   const close = useRef<HTMLButtonElement>(null)
+  const dialog = useRef<HTMLDialogElement>(null)
   const body = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { close.current?.focus({ preventScroll: true }) }, [])
+  useEffect(() => {
+    const element = dialog.current
+    if (!element) return
+    if (typeof element.showModal === 'function') element.showModal()
+    else element.setAttribute('open', '')
+    close.current?.focus({ preventScroll: true })
+    return () => { if (element.open && typeof element.close === 'function') element.close() }
+  }, [])
   useEffect(() => {
     setShowRun(Boolean(initialRunId))
     setRunSelection(undefined)
@@ -88,7 +97,8 @@ export function TaskDetailScreen({
   const taskState = task ? taskCardStatus(task) : null
   const latest = data?.runs.find((item) => item.run_id === task?.current_run_id) ?? data?.runs[0]
   const run = data?.runs.find((item) => item.run_id === runSelection?.run_id) ?? runSelection
-  const resetScroll = () => { body.current?.closest('aside')?.scrollTo?.({ top: 0, behavior: 'instant' }) }
+  const resetScroll = () => { if (body.current) body.current.scrollTop = 0 }
+  const closeDetail = () => { dialog.current?.close?.(); onBack() }
   const returnToTask = () => { setShowRun(false); resetScroll() }
   const openRun = (selected: RunSummary) => {
     setRunSelection(selected)
@@ -96,14 +106,14 @@ export function TaskDetailScreen({
     setShowRun(true)
     resetScroll()
   }
-  return <aside id="task-inspector" className="task-inspector" aria-labelledby="task-detail-title"
-    onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); onBack() } }}>
+  return <dialog ref={dialog} id="task-inspector" className="task-inspector" aria-labelledby="task-detail-title"
+    onCancel={(event) => { event.preventDefault(); closeDetail() }}>
     <style>{TASK_INSPECTOR_CSS}</style>
     <header className="task-inspector-top">
       <div className="task-inspector-heading">
         <div><p className="task-inspector-kicker">{showRun ? '这次运行' : '任务'}</p>
           <h2 id="task-detail-title" style={titleStyle}>{task?.title || '任务详情'}</h2></div>
-        <button ref={close} type="button" onClick={onBack} style={quietButtonStyle} aria-label="关闭任务详情">关闭</button>
+        <button ref={close} type="button" onClick={closeDetail} style={quietButtonStyle} aria-label="关闭任务详情">关闭</button>
       </div>
       {task && <div className="task-inspector-badges">
         <span className="task-type-badge">{taskOriginLabel(showRun && run ? run : task)}</span>
@@ -134,11 +144,12 @@ export function TaskDetailScreen({
         {taskTab === '概览' && <TaskOverview data={data} latest={latest} api={api} reloadVersion={reloadVersion} commands={taskCommands}
           triggerCommands={triggerCommands} onArchiveChanged={onArchiveChanged} onOpenRun={openRun} />}
         {taskTab === '编排' && <TaskOrchestration api={api} task={data.task} run={latest} reloadVersion={reloadVersion} />}
-        {taskTab === '事件' && <ActivityList api={api} taskId={taskId} reloadVersion={reloadVersion} />}
+        {taskTab === '事件' && <><h3>任务事件</h3><ActivityList api={api} taskId={taskId} reloadVersion={reloadVersion} />
+          <ExecutionHistory api={api} taskId={taskId} reloadVersion={reloadVersion} /></>}
       </>}
       {data && taskTab === '运行' && <div hidden={showRun}><RunHistory data={data} api={api} selectedRunId={run?.run_id} onOpenRun={openRun} /></div>}
     </div>
-  </aside>
+  </dialog>
 }
 
 function TaskOverview({ data, latest, api, reloadVersion, commands, triggerCommands, onArchiveChanged, onOpenRun }: {
@@ -237,7 +248,7 @@ function TaskTriggerCard({ api, task, commands, reloadVersion }: {
   return <div className="task-drawer-card task-schedule-card">
     <dl className="task-run-facts">
       <div><dt>{scheduled ? '排期' : '事件类型'}</dt><dd>{scheduled ? `每天 ${trigger.daily_time}` : trigger.event_type}</dd></div>
-      <div><dt>{scheduled ? '下一次唤醒' : '触发器状态'}</dt><dd>{!trigger.enabled ? '已暂停'
+      <div><dt>{scheduled ? '下次触发' : '触发器状态'}</dt><dd>{!trigger.enabled ? '已暂停'
         : scheduled ? (trigger.next_fire_at ? formatTaskDate(trigger.next_fire_at, zone) : '暂无排期') : '等待匹配事件'}</dd></div>
       {zone && <div><dt>时区</dt><dd>{zone}</dd></div>}
       {trigger.last_fired_at && <div><dt>上次触发</dt><dd>{formatTaskDate(trigger.last_fired_at, zone)}</dd></div>}
@@ -305,12 +316,13 @@ function TaskOrchestration({ api, task, run, reloadVersion }: { api: ResourcesAp
     return () => { current = false }
   }, [api, run?.run_id, reloadVersion, retry])
   return <section className="task-drawer-section">
-    <header><h3>这次运行怎么走</h3><span className="task-type-badge">{taskAutonomyLabel(task)}</span></header>
+    <header><h3>运行拓扑与步骤</h3><span className="task-type-badge">{taskAutonomyLabel(task)}</span></header>
     {failed && <ReadError onRetry={() => setRetry((n) => n + 1)} />}
     {!failed && run && !nodes && <p role="status" style={mutedStyle}>正在读取执行步骤…</p>}
     {workflow?.error && <p role="status" style={mutedStyle}>固定版本流程定义暂时不可读取。</p>}
-    {(nodes || !run) && <TaskRunSteps key={run?.run_id ?? 'planned'} nodes={nodes ?? []} doc={workflow?.doc} run={run} compact
-      renderEvidence={(node) => <section><h4>证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} /></section>} />}
+    {(nodes || !run) && <TaskRunSteps key={run?.run_id ?? 'planned'} nodes={nodes ?? []} doc={workflow?.doc} run={run}
+      renderEvidence={(node) => <><ExecutionHistory key={node.node_run_id} api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} />
+        <section><h4>执行证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} /></section></>} />}
     {workflow?.doc && <details className="task-flow-graph">
       <summary>查看固定流程图 · {workflow.doc.name}</summary>
       <WorkflowCanvasView definition={workflow.definition} readOnly runtimeCompact canvasId="task-drawer-flow" runtimeNodes={nodes} />
@@ -420,14 +432,16 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot }: RunDetai
       </dl>
     </div>}
     {tab === '结果' && <RunResult api={api} run={run} reloadVersion={reloadVersion} />}
-    {tab === '活动' && <ActivityList api={api} runId={run.run_id} reloadVersion={reloadVersion} />}
+    {tab === '事件' && <><ActivityList api={api} runId={run.run_id} reloadVersion={reloadVersion} />
+      <ExecutionHistory api={api} runId={run.run_id} reloadVersion={reloadVersion} /></>}
     {(tab === '步骤' || tab === '证据') && <>
       {failed && <ReadError onRetry={() => setRetry((value) => value + 1)} />}
       {!failed && !nodes && <p role="status" style={mutedStyle}>正在读取执行步骤…</p>}
       {nodes && tab === '步骤' && <section>
         <h3 style={sectionTitleStyle}>执行步骤 · {run.total}</h3>
         <p style={mutedStyle}><RunStatusLabel status={run.status} displayStatus={run.display_status} />{run.settling ? ' · 正在收尾' : ''}</p>
-        {nodes.length ? <ol style={stepListStyle}>{nodes.map((node) => <li key={node.node_run_id}><NodeRow node={node} /></li>)}</ol>
+        {nodes.length ? <ol style={stepListStyle}>{nodes.map((node) => <li key={node.node_run_id}><NodeRow node={node} />
+          <NodeHistoryDisclosure api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} /></li>)}</ol>
           : <p style={mutedStyle}>这次运行没有执行步骤。</p>}
       </section>}
       {nodes && tab === '证据' && <EvidenceList api={api} nodes={nodes} reloadVersion={reloadVersion} />}
@@ -523,6 +537,14 @@ function NodeRow({ node }: { node: NodeRunView }) {
       {assignment.settings_revision != null && <p style={mutedStyle}>按用户配置 · 修订 {assignment.settings_revision}</p>}
     </div>}
   </article>
+}
+
+function NodeHistoryDisclosure(props: { api: ResourcesApi; nodeId: string; reloadVersion: number }) {
+  const [open, setOpen] = useState(false)
+  return <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>查看智能体执行日志</summary>
+    {open && <ExecutionHistory {...props} />}
+  </details>
 }
 
 /** 心跳超阈值只加提示，不动节点状态：状态文字一个字不改。 */

@@ -1,5 +1,6 @@
 // 流程草稿编辑屏：只改草稿；保存与发布都走控制面命令，结果一律凭回执确认。
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { WorkflowDraftTest } from '../../service/commands/workflows.ts'
 import { ApiError } from '../api/client.ts'
 import type { WorkflowView } from '../api/types.ts'
 import type {
@@ -20,7 +21,7 @@ export type WorkflowEditorProps = {
 const DEFINITION_NOTE = '画布和智能体改的是同一份定义，保存都走 workflow.update'
 const CONFLICT_TEXT = '草稿已被别的修订改动，这次改动没有生效。你的草稿还在，请重新加载后再保存。'
 
-type Busy = 'opening' | 'saving' | 'publishing' | null
+type Busy = 'opening' | 'saving' | 'testing' | 'publishing' | null
 
 type ReceiptState = {
   title: string
@@ -46,6 +47,16 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
   const [quality, setQuality] = useState<CommandValidationIssue[]>([])
   const [parseError, setParseError] = useState<string | null>(null)
   const [note, setNote] = useState('')
+  const [tested, setTested] = useState<WorkflowDraftTest | null>(null)
+  const workflowId = workflow.workflow.workflow_id
+  useEffect(() => {
+    let active = true
+    setTested(null)
+    if (draftRevision !== null) void commands.getWorkflowTest?.(workflowId).then((result) => {
+      if (active) setTested((previous) => previous ?? result)
+    }).catch(() => {})
+    return () => { active = false }
+  }, [commands, workflowId, draftRevision])
 
   // 画布与 JSON 抽屉共用同一份定义：抽屉里的 JSON 文本是唯一真源，画布只是它的另一种画法。
   const parsed = useMemo(() => parseForCanvas(text), [text])
@@ -83,7 +94,18 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
     [workflow.current, draft],
   )
   const targetVersion = (workflow.workflow.current_version ?? 0) + 1
-  const publishBlocked = structuralIssues.length > 0
+  const validated = (tested?.revision === draftRevision && tested?.passed) === true
+  const criticalApprovals = workflow.critical_approval_count ?? 0
+  const publishBlocked = structuralIssues.length > 0 || (commands.testWorkflow !== undefined && (!validated || criticalApprovals > 0))
+
+  async function quickTest() {
+    if (!commands.testWorkflow || !draft || dirty || busy !== null) return
+    setBusy('testing')
+    setCommandError(null)
+    try { setTested(await commands.testWorkflow(workflowId, draft.revision)); onRefresh() }
+    catch (error) { setTested(null); reportError(error) }
+    finally { setBusy(null) }
+  }
 
   function markDirty(value: string) {
     dirtyRef.current = true
@@ -162,7 +184,7 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
   }
 
   async function publish() {
-    if (!draft || busy !== null) return
+    if (!draft || busy !== null || dirty || publishBlocked) return
     const trimmedNote = note.trim()
     if (trimmedNote.length < 1 || trimmedNote.length > 500) {
       setCommandError('发布说明要写 1–500 字')
@@ -223,25 +245,28 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
     onRefresh()
   }
 
-  return <section aria-labelledby="workflow-editor-title" style={cardStyle}>
-    <h2 id="workflow-editor-title" style={sectionTitleStyle}>草稿编辑</h2>
-    {draft === null ? (
+  return <section aria-labelledby="workflow-editor-title" className="ops-surface">
+    <header className="ops-surface-head">
       <div>
-        <p style={mutedStyle}>当前没有未发布草稿。</p>
-        <button type="button" style={buttonStyle} disabled={busy !== null} onClick={() => { void openDraft() }}>打开草稿</button>
+        <h2 id="workflow-editor-title">{draft ? '草稿画布' : '版本编辑'}</h2>
+        {draft && <p className="ops-meta">
+          修订 {draft.revision} · 基线 {draft.based_on_version === null ? '尚未发布' : `v${draft.based_on_version}`}
+          {dirty && ' · 有未保存的改动'}
+        </p>}
       </div>
-    ) : (
-      <div>
-        <p style={mutedStyle}>
-          草稿修订 {draft.revision}；基线 {draft.based_on_version === null ? '尚未发布' : `v${draft.based_on_version}`}
-          {draft.definition_hash ? `；定义摘要 ${draft.definition_hash}` : ''}
-        </p>
+      {draft ? <button type="button" className="ops-button ops-button--primary" disabled={busy !== null} onClick={() => { void save() }}>保存草稿</button>
+        : <button type="button" className="ops-button ops-button--primary" disabled={busy !== null} onClick={() => { void openDraft() }}>打开草稿</button>}
+    </header>
+    {(draft || receipt || conflict || commandError) && <div className="ops-inset ops-stack">
+    {draft && (
+      <>
         <WorkflowCanvasView
           definition={parsed.ok ? parsed.value : null}
           readOnly={false}
           onChange={(next) => markDirty(JSON.stringify(next, null, 2))}
           canvasId="draft-canvas"
           inspectNodes
+          workspace
         />
         <details data-definition-drawer="true" style={drawerStyle}>
           <summary style={sectionTitleStyle}>流程定义 JSON 抽屉</summary>
@@ -256,14 +281,27 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
           <p style={mutedStyle}>{DEFINITION_NOTE}</p>
         </details>
         {parseError && <p role="alert" style={errorTextStyle}>定义 JSON 解析失败：{parseError}</p>}
-        <button type="button" style={buttonStyle} disabled={busy !== null} onClick={() => { void save() }}>保存草稿</button>
-        {dirty && <p style={mutedStyle}>有未保存的改动。</p>}
-      </div>
+      </>
     )}
-    <ValidationGroups title="结构校验" issues={structuralIssues} tone="error" emptyText="结构校验没有发现问题。" />
-    <ValidationGroups title="计划质量意见" issues={qualityIssues} tone="warning" emptyText="计划质量意见：没有项目。" />
+    {(structuralIssues.length > 0 || qualityIssues.length > 0) && <div>
+      <ValidationGroups title="结构校验" issues={structuralIssues} tone="error" emptyText="结构校验没有发现问题。" />
+      <ValidationGroups title="计划质量意见" issues={qualityIssues} tone="warning" emptyText="计划质量意见：没有项目。" />
+    </div>}
     {draft !== null && (
-      <div style={{ marginTop: 18 }}>
+      <div className="ops-workflow-controls">
+        {commands.testWorkflow && <section>
+          <h3 style={sectionTitleStyle}>快速测试</h3>
+          <p style={mutedStyle}>检查结构和工具，演练节点依赖流转。</p>
+          <button type="button" className="ops-button" style={{ marginTop: 7 }} disabled={dirty || busy !== null} onClick={() => { void quickTest() }}>
+            {busy === 'testing' ? '正在测试…' : '运行快速测试'}
+          </button>
+          {dirty ? <p>请先保存修改再测试。</p> : tested?.revision === draft.revision && <div role="status">
+            <p>{tested.passed ? '测试通过' : '测试未通过'} · 修订 {tested.revision} · {new Date(tested.tested_at).toLocaleString()}</p>
+            {tested.passed ? <ol>{tested.order.map((step) => <li key={step.node_id}>{step.title}</li>)}</ol>
+              : <ul>{tested.issues.errors.map((item, index) => <li key={index}>{item.message} <code>{item.path}</code></li>)}</ul>}
+          </div>}
+        </section>}
+        <section>
         <h3 style={sectionTitleStyle}>发布</h3>
         <PublishConfirm
           targetVersion={targetVersion}
@@ -279,13 +317,17 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
           placeholder="这次发布改了什么"
           onChange={(event) => setNote(event.target.value)}
         />
-        {publishBlocked && <p style={mutedStyle}>有结构错误时发布按钮不可点。</p>}
+        {structuralIssues.length > 0 && <p style={mutedStyle}>发布前须修复结构错误。</p>}
+        {commands.testWorkflow && !validated && <p style={mutedStyle}>当前草稿须通过快速测试后才能发布。</p>}
+        {commands.testWorkflow && criticalApprovals > 0 && <p style={mutedStyle}>仍有 {criticalApprovals} 项最高优先级审批待处理。</p>}
         <button
           type="button"
-          style={buttonStyle}
-          disabled={busy !== null || publishBlocked}
+          className="ops-button ops-button--primary"
+          style={{ marginTop: 7 }}
+          disabled={busy !== null || dirty || publishBlocked}
           onClick={() => { void publish() }}
         >确认发布</button>
+        </section>
       </div>
     )}
     {conflict && (
@@ -296,17 +338,17 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
     )}
     {commandError && <p role="alert" style={errorTextStyle}>{commandError}</p>}
     {receipt && (
-      <div style={receiptStyle}>
-        <h3 style={sectionTitleStyle}>{receipt.title}回执</h3>
-        <p style={mutedStyle}>{receipt.summary}</p>
+      <details style={receiptStyle}>
+        <summary><strong>{receipt.title}回执</strong> · {receipt.summary}</summary>
         <dl style={detailGridStyle}>
           <dt>operation_id</dt><dd>{receipt.outcome.operation_id}</dd>
           <dt>kind</dt><dd>{receipt.outcome.kind}</dd>
           <dt>回执状态</dt><dd>{receipt.outcome.receipt?.status ?? '未取到回执'}</dd>
           <dt>重放</dt><dd>{receipt.outcome.replayed ? '是（同一 operation_id 的原回执）' : '否'}</dd>
         </dl>
-      </div>
+      </details>
     )}
+    </div>}
   </section>
 }
 
@@ -372,10 +414,14 @@ export function PublishConfirm({
   affectsOnlyNewRuns: boolean
 }) {
   return <div style={confirmStyle}>
-    <p>发布到 v{targetVersion}</p>
-    <ul>{changes.map((change) => <li key={change}>{change}</li>)}</ul>
-    <p>{addsIrreversible ? '这次新增了不可逆节点' : '这次没有新增不可逆节点'}</p>
-    <p>{affectsOnlyNewRuns ? '只影响之后新建的 run' : '会影响在途的 run'}</p>
+    <div className="ops-actions"><strong>发布到 v{targetVersion}</strong>
+      <span className="ops-meta">{affectsOnlyNewRuns ? '只影响之后新建的运行' : '会影响进行中的运行'}</span>
+    </div>
+    {addsIrreversible && <p role="status" style={{ color: COLOR.warning, margin: '4px 0' }}>这次新增了不可逆节点</p>}
+    <details><summary>版本变更</summary>
+      <ul>{changes.map((change) => <li key={change}>{change}</li>)}</ul>
+      {!addsIrreversible && <p>这次没有新增不可逆节点</p>}
+    </details>
   </div>
 }
 
@@ -470,14 +516,14 @@ function describeChanges(
   return { lines, addsIrreversible }
 }
 
-const cardStyle = { minWidth: 0, padding: 18, border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface } as const
 const sectionTitleStyle = { margin: 0, fontSize: 16 } as const
-const drawerStyle = { marginTop: 12, padding: '10px 12px', border: `1px solid ${COLOR.line}`, borderRadius: 9, background: COLOR.surface } as const
+const drawerStyle = { padding: '7px 9px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface } as const
 const groupTitleStyle = { margin: '10px 0 4px', fontSize: 14 } as const
 const mutedStyle = { margin: '6px 0 0', color: COLOR.inkMuted, fontSize: FONT_PX.body } as const
 const labelStyle = { display: 'block', margin: '12px 0 4px', fontSize: FONT_PX.body } as const
 const editorStyle = {
   width: '100%',
+  boxSizing: 'border-box',
   minHeight: 220,
   padding: 12,
   borderRadius: 8,
@@ -489,6 +535,7 @@ const editorStyle = {
 } as const
 const inputStyle = {
   width: '100%',
+  boxSizing: 'border-box',
   minHeight: 34,
   padding: '0 8px',
   borderRadius: 7,
@@ -500,6 +547,6 @@ const inputStyle = {
 const buttonStyle = { minHeight: 36, justifySelf: 'start' as const, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' } as const
 const conflictStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: 14, color: COLOR.danger, background: '#fff1f0', borderRadius: 8 } as const
 const errorTextStyle = { margin: '10px 0 0', padding: 12, color: COLOR.danger, background: '#fff1f0', borderRadius: 8, fontSize: FONT_PX.body } as const
-const receiptStyle = { marginTop: 18, padding: 14, border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.canvas } as const
-const confirmStyle = { margin: '10px 0 0', padding: 12, borderRadius: 8, background: COLOR.canvas, fontSize: FONT_PX.body } as const
+const receiptStyle = { padding: '7px 9px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.canvas } as const
+const confirmStyle = { margin: '5px 0 0', fontSize: FONT_PX.body } as const
 const detailGridStyle = { display: 'grid', gridTemplateColumns: '150px minmax(0, 1fr)', gap: '8px 12px', margin: '12px 0 0', fontSize: FONT_PX.body } as const

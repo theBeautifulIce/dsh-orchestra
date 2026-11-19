@@ -11,7 +11,7 @@ import { COLOR, FONT_PX } from './tokens.ts'
 const REASON_LABEL: Record<NonNullable<TaskTriggerOccurrence['reason']>, string> = {
   task_archived: '任务已归档',
   previous_run_active: '上次运行还未结束',
-  unresolved_effects: '有待核实的历史副作用',
+  unresolved_effects: '历史外部操作待核验',
   workflow_inactive: '绑定的流程目前不可用',
 }
 

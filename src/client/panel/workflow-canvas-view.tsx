@@ -32,6 +32,7 @@ export type WorkflowCanvasViewProps = {
   inspectNodes?: boolean
   runtimeNodes?: readonly Pick<NodeRunView, 'node_id' | 'status' | 'status_label'>[]
   runtimeCompact?: boolean
+  workspace?: boolean
 }
 
 const NODE_WIDTH = 160
@@ -46,7 +47,7 @@ type DragState =
   | { kind: 'link'; fromNodeId: string }
 
 export function WorkflowCanvasView({
-  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeCompact = false,
+  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeCompact = false, workspace = false,
 }: WorkflowCanvasViewProps) {
   const compact = readOnly && runtimeCompact
   const doc = useMemo(() => readCanvasDoc(definition), [definition])
@@ -65,15 +66,15 @@ export function WorkflowCanvasView({
   const dragRef = useRef<DragState>({ kind: 'none' })
 
   const size = useMemo(() => {
-    let width = compact ? NODE_WIDTH : MIN_CANVAS_WIDTH
-    let height = compact ? NODE_HEIGHT : MIN_CANVAS_HEIGHT
-    const padding = compact ? 32 : 120
+    let width = compact || workspace ? NODE_WIDTH : MIN_CANVAS_WIDTH
+    let height = workspace ? (readOnly ? 130 : 220) : compact ? NODE_HEIGHT : MIN_CANVAS_HEIGHT
+    const padding = workspace ? 44 : compact ? 32 : 120
     for (const node of doc?.nodes ?? []) {
       width = Math.max(width, node.position.x + NODE_WIDTH + padding)
       height = Math.max(height, node.position.y + NODE_HEIGHT + padding)
     }
     return { width, height }
-  }, [compact, doc])
+  }, [compact, doc, readOnly, workspace])
 
   function emit(next: CanvasDoc) {
     if (readOnlyRef.current) return
@@ -231,14 +232,14 @@ export function WorkflowCanvasView({
 
   const nodes = doc?.nodes ?? []
   const edges = doc?.edges ?? []
-  const selected = nodes.find((node) => node.node_id === selectedId)
+  const selected = nodes.find((node) => node.node_id === selectedId) ?? (workspace ? nodes[0] : undefined)
   const runtimeByNode = new Map(runtimeNodes?.map((node) => [node.node_id, node]))
 
   return <div data-canvas-id={canvasId ?? 'workflow-canvas'} data-canvas-root="true" data-canvas-readonly={readOnly ? 'true' : 'false'} style={rootStyle}>
-    {!compact && <div style={toolbarStyle}>
+    {!compact && <div style={workspace ? workspaceToolbar : toolbarStyle}>
       <div>
-        <h3 style={sectionTitleStyle}>节点条</h3>
-        <p style={mutedStyle}>按住节点拖到画布空白处就新建一个节点。</p>
+        {!workspace && <><h3 style={sectionTitleStyle}>节点条</h3>
+          <p style={mutedStyle}>按住节点拖到画布空白处就新建一个节点。</p></>}
         <div style={paletteStyle}>
           {CANVAS_NODE_TYPES.map((type) => (
             <button
@@ -248,6 +249,7 @@ export function WorkflowCanvasView({
               aria-label={`拖出${NODE_TYPE_LABEL[type] ?? type}节点`}
               aria-disabled={readOnly || !doc ? 'true' : 'false'}
               disabled={readOnly || !doc}
+              title="拖到画布添加节点"
               onMouseDown={(event) => startPalette(event, type)}
               style={paletteButtonStyle}
             >
@@ -268,20 +270,20 @@ export function WorkflowCanvasView({
         >
           整理
         </button>
-        <p style={mutedStyle}>{readOnly ? '已发布版本只读，不能改。' : '整理按拓扑序重排节点位置。'}</p>
+        {!workspace && <p style={mutedStyle}>{readOnly ? '已发布版本只读，不能改。' : '整理按拓扑序重排节点位置。'}</p>}
       </div>
     </div>}
     {alert && <p role="alert" data-canvas-alert="true" style={alertStyle}>{alert}</p>}
     {doc === null && <p style={mutedStyle}>流程定义 JSON 还没解析成对象，画布暂时是空的。</p>}
-    <div style={inspectNodes ? inspectionLayout : undefined}>
-    <div style={viewportStyle}>
+    <div className={workspace && inspectNodes ? 'ops-workflow-stage' : undefined} style={inspectNodes && !workspace ? inspectionLayout : undefined}>
+    <div style={workspace ? workspaceViewport : viewportStyle}>
       <div
         ref={canvasRef}
         data-canvas-surface="true"
         aria-label="流程画布"
         role="group"
         onDoubleClick={handleDoubleClick}
-        style={{ ...surfaceStyle, width: size.width, height: size.height }}
+        style={{ ...surfaceStyle, ...(workspace ? workspaceSurface : {}), width: size.width, height: size.height }}
       >
         <svg width={size.width} height={size.height} style={edgeLayerStyle} aria-hidden="true">
           {edges.map((edge) => {
@@ -296,7 +298,7 @@ export function WorkflowCanvasView({
               y1={from.position.y + NODE_HEIGHT / 2}
               x2={to.position.x}
               y2={to.position.y + NODE_HEIGHT / 2}
-              stroke={COLOR.line}
+              stroke={workspace ? '#8c9ebb' : COLOR.line}
               strokeWidth={2}
             />
           })}
@@ -313,9 +315,12 @@ export function WorkflowCanvasView({
             aria-label={`节点 ${node.node_id} ${node.title}`}
             aria-disabled={readOnly ? 'true' : 'false'}
             onMouseDown={(event) => startMove(event, node)}
-            style={nodeStyle}
+            style={{ ...nodeStyle, left: node.position.x, top: node.position.y, ...(workspace ? {
+              boxSizing: 'border-box', cursor: readOnly ? 'default' : 'move',
+              borderColor: selected === node ? '#83a9dc' : '#d2deec', background: selected === node ? '#edf5ff' : COLOR.surface,
+            } : {}) }}
           >
-            {inspectNodes ? <button type="button" aria-pressed={selectedId === node.node_id}
+            {inspectNodes ? <button type="button" aria-pressed={selected === node}
               onClick={() => setSelectedId(node.node_id)}
               style={nodeSelectStyle}>{node.title}</button> : <span style={nodeTitleStyle}>{node.title}</span>}
             <span style={nodeMetaStyle}>
@@ -359,8 +364,14 @@ export function WorkflowCanvasView({
       </>}
     </aside>}
     </div>
-    <div>
-      <h3 style={sectionTitleStyle}>连线（{edges.length}）</h3>
+    <div hidden={workspace && readOnly}>
+      {workspace ? <details><summary>连线（{edges.length}）</summary>{renderEdges()}</details> : <>
+        <h3 style={sectionTitleStyle}>连线（{edges.length}）</h3>{renderEdges()}</>}
+    </div>
+  </div>
+
+  function renderEdges() {
+    return <>
       {edges.length === 0
         ? <p style={mutedStyle}>还没有连线。</p>
         : <ul style={edgeListStyle}>
@@ -385,15 +396,16 @@ export function WorkflowCanvasView({
             </li>
           ))}
         </ul>}
-    </div>
-  </div>
+    </>
+  }
 }
 
 const rootStyle = { display: 'grid', gap: 12 } as const
 const toolbarStyle = { display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'flex-start' } as const
+const workspaceToolbar = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between' } as const
 const sectionTitleStyle = { margin: '0 0 4px', fontSize: 14 } as const
 const mutedStyle = { margin: '0 0 6px', color: COLOR.inkMuted, fontSize: FONT_PX.helper } as const
-const paletteStyle = { display: 'flex', flexWrap: 'wrap', gap: 6, maxWidth: 460 } as const
+const paletteStyle = { display: 'flex', flexWrap: 'wrap', gap: 5 } as const
 const paletteButtonStyle = {
   minHeight: 30,
   padding: '0 10px',
@@ -428,6 +440,8 @@ const surfaceStyle = {
   backgroundImage: 'linear-gradient(to right, #f1f2f4 1px, transparent 1px), linear-gradient(to bottom, #f1f2f4 1px, transparent 1px)',
   backgroundSize: '40px 40px',
 } as const
+const workspaceViewport = { ...viewportStyle, maxHeight: 400, padding: 12, background: '#f5f8fc' } as const
+const workspaceSurface = { backgroundImage: 'radial-gradient(#cad6e6 1px, transparent 1px)', backgroundSize: '18px 18px' } as const
 const edgeLayerStyle = { position: 'absolute', left: 0, top: 0, pointerEvents: 'none' } as const
 const nodeStyle = {
   position: 'absolute',

@@ -82,7 +82,7 @@ export function TaskRunSteps({ nodes, doc, run, compact = false, onOpenRun, rend
       </header>
       {run?.scheduled_for && <div className="task-flow-trigger-record">
         <span className="task-type-badge">触发</span>
-        <div><strong>定时唤醒</strong><p>计划时间 <time dateTime={run.scheduled_for}>{formatTaskDate(run.scheduled_for)}</time></p></div>
+        <div><strong>定时触发</strong><p>计划时间 <time dateTime={run.scheduled_for}>{formatTaskDate(run.scheduled_for)}</time></p></div>
         <span>已记录</span>
       </div>}
       {active && <p className="task-flow-current">当前关注 · {active.title}</p>}
@@ -106,8 +106,8 @@ export function TaskRunSteps({ nodes, doc, run, compact = false, onOpenRun, rend
         })}
       </ol>
     </section>
-    <aside className="task-step-inspector" aria-label="这一步的现场">
-      <header className="task-flow-section-head"><strong>这一步的现场</strong>
+    <aside className="task-step-inspector" aria-label="步骤执行详情">
+      <header className="task-flow-section-head"><strong>步骤执行详情</strong>
         {selected && <span>{steps.indexOf(selected) + 1} / {steps.length}</span>}
       </header>
       {selected
@@ -127,15 +127,17 @@ function StepInspection({ step, doc, onOpenRun, renderEvidence }: {
   const outgoing = doc?.edges.filter((edge) => edge.from === step.nodeId).map((edge) => name(edge.to))
   const assignment = node?.model_assignment
   const model = assignment?.usage
+  const contract = step.definition?.raw.contract as { description?: unknown } | undefined
   return <div className="task-step-inspect-body">
     <h3>{step.title}</h3>
     <p>{NODE_TYPE_LABEL[step.type] ?? step.type} · {nodePhase(node?.status ?? null).label}{node && ` · 第 ${node.attempt} 次尝试`}</p>
     {node?.started_at && <p>开始于 <time dateTime={node.started_at}>{formatTaskDate(node.started_at)}</time></p>}
-    <section><h4>结果</h4><p>{node?.status_label ?? '尚无执行记录'}</p>
+    {typeof contract?.description === 'string' && <section><h4>步骤职责</h4><p>{contract.description}</p></section>}
+    <section><h4>状态与结果</h4><p>{node?.status_label ?? '尚无执行记录'}</p>
       {node?.hang_reason && <p>{node.hang_reason}</p>}
-      {node && node.active_decision_ids.length > 0 && <p>{node.active_decision_ids.length} 项决定待处理</p>}
+      {node && node.active_decision_ids.length > 0 && <p>{node.active_decision_ids.length} 项待审批</p>}
     </section>
-    {step.definition && <section><h4>输入与后续</h4><dl className="task-step-dependencies">
+    {step.definition && <section><h4>节点依赖</h4><dl className="task-step-dependencies">
       <dt>上游</dt><dd>{incoming?.join('、') || '流程入口'}</dd>
       <dt>下游</dt><dd>{outgoing?.join('、') || '无后续节点'}</dd>
     </dl></section>}

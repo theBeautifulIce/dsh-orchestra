@@ -273,6 +273,6 @@ describe('决定命令客户端', () => {
     expect(posted).toBeDefined()
     expect(Object.keys(posted!.body)).not.toContain('side_effect_verified_none')
     expect(posted!.body).toMatchObject({ decisionId: 'd1', revision: 1 })
-    expect(VERIFY_BANNER).toBe('签字只表示人接下了后果，不表示副作用已消失')
+    expect(VERIFY_BANNER).toBe('人工签认记录责任接管。外部操作是否发生仍以核验证据为准。')
   })
 })

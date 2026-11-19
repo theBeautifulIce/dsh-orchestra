@@ -46,11 +46,11 @@ export function deriveAttention(input: AttentionInput): { attention: Attention; 
     const minutes = age === null ? null : Math.max(1, Math.floor(age / 60))
     return {
       attention: 'decision',
-      attention_reason: minutes === null ? `有 ${input.openDecisionCount} 个决定等你处理` : `有决定已等你 ${minutes} 分钟`,
+      attention_reason: minutes === null ? `${input.openDecisionCount} 项待审批` : `${input.openDecisionCount} 项待审批，最早已等待 ${minutes} 分钟`,
     }
   }
   if (input.unverifiedCount > 0) {
-    return { attention: 'unverified', attention_reason: `有 ${input.unverifiedCount} 笔副作用待核实` }
+    return { attention: 'unverified', attention_reason: `${input.unverifiedCount} 项外部操作待核验` }
   }
   if (input.currentRunStatus === 'failed' || input.currentRunStatus === 'failed_with_unverified') {
     return { attention: 'failed', attention_reason: '最近一次运行未成功' }

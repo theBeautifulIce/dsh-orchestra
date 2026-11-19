@@ -2,6 +2,7 @@
 import { OrchError } from '../../core/errors.ts'
 import { type Db } from '../../infra/sqlite/driver.ts'
 import { withReadTx } from './read-tx.ts'
+import { describeEvent } from './execution-history.ts'
 
 export const EVENTS_LIMIT_MAX = 200
 
@@ -26,9 +27,11 @@ export function listEventHistory(db: Db, opts: { beforeSeq?: number; runId?: str
     const rows = tx.all<{
       seq: number; event_id: string; type: string; occurred_at: string
       run_id: string | null; node_run_id: string | null; decision_id: string | null
-    }>('SELECT seq, event_id, type, occurred_at, run_id, node_run_id, decision_id FROM events WHERE '
+      payload_redacted: string | null
+    }>('SELECT seq, event_id, type, occurred_at, run_id, node_run_id, decision_id, '
+      + 'CASE WHEN LENGTH(payload_redacted) <= 512000 THEN payload_redacted END AS payload_redacted FROM events WHERE '
       + conditions.join(' AND ') + ' ORDER BY seq DESC LIMIT ?', [...params, limit + 1])
-    const items = rows.slice(0, limit)
+    const items = rows.slice(0, limit).map(({ payload_redacted, ...row }) => ({ ...row, details: describeEvent(row.type, payload_redacted) }))
     return { items, next_before_seq: rows.length > limit ? items.at(-1)?.seq ?? null : null, as_of_seq }
   })
 }

@@ -15,12 +15,41 @@ import {
   type PublishContext,
   type ValidationReport,
   type WorkflowDoc,
+  type ValidationIssue,
 } from '../../core/workflow-doc.ts'
 import { definitionHashOf } from '../workflows.ts'
 import { assertOperationId, requestHashOf, runIdempotentCommand } from './idempotency.ts'
 import type { WorkflowDefinition, WorkflowNodeDef } from '../../core/workflow-def.ts'
+import type { ToolRegistry } from '../../executor/tools.ts'
 
 export type WorkflowScope = 'reusable' | 'task_local'
+export type WorkflowStatus = 'active' | 'disabled'
+export type SetWorkflowStatusParams = {
+  workflowId: string
+  status: WorkflowStatus
+  expectedStatus: WorkflowStatus
+  actor: string
+  now: string
+  operationId: string
+}
+
+export function setWorkflowStatus(tx: Tx, p: SetWorkflowStatusParams) {
+  const operationId = assertOperationId(p.operationId)
+  const kind = 'workflow.set_status'
+  const requestHash = requestHashOf(kind, { workflow_id: p.workflowId, status: p.status, expected_status: p.expectedStatus })
+  const { result, replayed } = runIdempotentCommand(tx, { kind, operationId, requestHash, now: p.now }, () => {
+    const row = readWorkflow(tx, p.workflowId)
+    if (!row) throw new OrchError('WORKFLOW_NOT_FOUND', '工作流不存在')
+    if (row.status !== p.expectedStatus) throw new OrchError('STALE_GENERATION', 'Workflow 状态已改变，请刷新后重试')
+    if (row.status !== p.status) {
+      tx.run('UPDATE workflows SET status = ?, updated_at = ?, updated_by = ? WHERE workflow_id = ?',
+        [p.status, p.now, p.actor, p.workflowId])
+      appendEvent(tx, { type: 'workflow.status_changed', payload: { workflow_id: p.workflowId, from: row.status, to: p.status } })
+    }
+    return { workflow_id: p.workflowId, status: p.status }
+  })
+  return { ...result, replayed }
+}
 
 type WorkflowRow = {
   workflow_id: string
@@ -43,7 +72,7 @@ type DraftRow = {
 const readWorkflow = (tx: Tx, workflowId: string): WorkflowRow | undefined =>
   tx.get<WorkflowRow>('SELECT workflow_id, name, status, current_version, scope, owner_task_id FROM workflows WHERE workflow_id = ?', [workflowId])
 
-const readDraft = (tx: Tx, workflowId: string): DraftRow | undefined =>
+const readDraft = (tx: Pick<Tx, 'get'>, workflowId: string): DraftRow | undefined =>
   tx.get<DraftRow>('SELECT workflow_id, revision, doc_json, based_on_version, definition_hash, published_version FROM workflow_drafts WHERE workflow_id = ?', [workflowId])
 
 const readVersionDoc = (tx: Tx, workflowId: string, version: string): WorkflowDoc | null => {
@@ -340,7 +369,84 @@ export type PublishResult = {
 }
 
 /** 规格 6.2：步骤 2–9 同笔事务，任何一步失败整笔回滚 */
-export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): PublishResult {
+type DraftTestPolicy = { requireTest?: boolean; tools?: ToolRegistry }
+
+function checkDraftTools(doc: WorkflowDoc, registry?: ToolRegistry): ValidationIssue[] {
+  return doc.nodes.flatMap((node, index) => {
+    if (node.type !== 'agent' || !node.config || typeof node.config !== 'object') return []
+    const tools = node.config.tools as { allow?: unknown; deny?: unknown } | undefined
+    const deny = Array.isArray(tools?.deny) ? tools.deny : []
+    const allow = Array.isArray(tools?.allow) ? tools.allow : []
+    return allow.filter((tool) => typeof tool === 'string' && !deny.includes(tool) && registry?.lookup(tool)?.capability !== 'read_only')
+      .map((tool) => ({ code: 'TOOL_UNAVAILABLE', path: `/nodes/${index}/config/tools/allow`, message: `工具 ${tool} 在当前宿主不可用于只读执行` }))
+  })
+}
+
+export type WorkflowDraftTest = {
+  revision: number
+  passed: boolean
+  tested_at: string
+  issues: ValidationReport
+  order: { node_id: string; title: string; type: string }[]
+}
+
+export function countWorkflowCriticalApprovals(tx: Pick<Tx, 'get'>, workflowId: string): number {
+  return tx.get<{ count: number }>(`SELECT COUNT(*) AS count FROM decisions d JOIN runs r ON r.run_id = d.run_id
+    WHERE r.workflow_id = ? AND d.priority = 'critical' AND d.status IN ('pending','acknowledged','blocked_for_human')`, [workflowId])?.count ?? 0
+}
+
+export function getWorkflowDraftTest(tx: Pick<Tx, 'get'>, workflowId: string): WorkflowDraftTest | null {
+  const draft = readDraft(tx, workflowId)
+  if (!draft || draft.published_version !== null) return null
+  const row = latestDraftTest(tx, workflowId, draft.revision, JSON.parse(draft.doc_json) as WorkflowDoc)
+  return row ? JSON.parse(row.result_json) as WorkflowDraftTest : null
+}
+
+function latestDraftTest(tx: Pick<Tx, 'get'>, workflowId: string, revision: number, doc: WorkflowDoc) {
+  return tx.get<{ result_json: string; passed: 0 | 1 }>(
+    'SELECT result_json,passed FROM workflow_draft_tests WHERE workflow_id=? AND revision=? AND definition_hash=? ORDER BY test_id DESC LIMIT 1',
+    [workflowId, revision, draftHash(doc)],
+  )
+}
+
+function rehearsalOrder(doc: WorkflowDoc) {
+  const picked = new Set<string>()
+  const prerequisites = new Map<string, string[]>()
+  for (const edge of doc.edges) {
+    const prior = prerequisites.get(edge.to) ?? []
+    prior.push(edge.from)
+    prerequisites.set(edge.to, prior)
+  }
+  // Each step emits a synthetic completion only after its declared predecessors.
+  const order = []
+  for (let i = 0; i < doc.nodes.length; i++) {
+    const node = doc.nodes.find((item) => !picked.has(item.node_id) && (prerequisites.get(item.node_id) ?? []).every((id) => picked.has(id)))
+    if (!node) break
+    picked.add(node.node_id)
+    order.push({ node_id: node.node_id, title: node.title, type: node.type })
+  }
+  return order
+}
+
+export function testWorkflowDraft(tx: Tx, p: { workflowId: string; revision: number; now: string }, ctx: PublishContext, tools?: ToolRegistry): WorkflowDraftTest {
+  const draft = readDraft(tx, p.workflowId)
+  if (!draft || draft.published_version !== null || draft.revision !== p.revision) {
+    throw new OrchError('WORKFLOW_REVISION_CONFLICT', '草稿已更新，请保存并刷新后再测试')
+  }
+  const doc = JSON.parse(draft.doc_json) as WorkflowDoc
+  const problems = [...validatePublishLayer(doc, ctx), ...checkDraftTools(doc, tools)]
+  const order = problems.length === 0 ? rehearsalOrder(doc) : []
+  if (problems.length === 0 && order.length !== doc.nodes.length) {
+    problems.push({ path: '/nodes', code: 'WORKFLOW_GRAPH_CYCLE', message: '演练未能完成所有步骤' })
+  }
+  const result: WorkflowDraftTest = { revision: draft.revision, passed: problems.length === 0, tested_at: p.now, issues: toReport(problems), order }
+  tx.run('INSERT INTO workflow_draft_tests (workflow_id,revision,definition_hash,passed,result_json,tested_at) VALUES (?,?,?,?,?,?)',
+    [p.workflowId, draft.revision, draftHash(doc), result.passed ? 1 : 0, JSON.stringify(result), p.now])
+  appendEvent(tx, { type: 'workflow.draft_tested', payload: { workflow_id: p.workflowId, revision: p.revision, status: result.passed ? 'passed' : 'failed' } })
+  return result
+}
+
+export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext, policy: DraftTestPolicy = {}): PublishResult {
   if (typeof p.note !== 'string' || p.note.trim().length === 0 || p.note.length > 500) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '发布说明必须是 1–500 字', { publish_note: p.note })
   }
@@ -382,13 +488,20 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext): Pub
     const allow = (tools as Record<string, unknown>).allow
     if (Array.isArray(allow)) assertNoMemoryWriteTool(allow.filter((name): name is string => typeof name === 'string'))
   }
-  const issues = validatePublishLayer(doc, ctx)
+  const issues = [...validatePublishLayer(doc, ctx), ...(policy.requireTest || policy.tools ? checkDraftTools(doc, policy.tools) : [])]
   if (issues.length > 0) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '定义没有通过发布层校验', {
       errors: toReport(issues).errors,
       total: issues.length,
       truncated: issues.length > 100,
     })
+  }
+  if (policy.requireTest) {
+    if (latestDraftTest(tx, p.workflowId, p.revision, doc)?.passed !== 1) {
+      throw new OrchError('CONFIRMATION_REQUIRED', '当前草稿修订须通过快速测试后才能发布')
+    }
+    const count = countWorkflowCriticalApprovals(tx, p.workflowId)
+    if (count > 0) throw new OrchError('CONFIRMATION_REQUIRED', '该 Workflow 仍有最高优先级审批待处理', { critical_approval_count: count })
   }
 
   const version = String(base + 1)
@@ -477,6 +590,7 @@ export function publishWorkflowCommand(
   tx: Tx,
   p: PublishParams & { operationId: string },
   ctx: PublishContext,
+  policy?: DraftTestPolicy,
 ): PublishResult & { replayed: boolean } {
   assertOperationId(p.operationId)
   const requestHash = requestHashOf('workflow.publish', {
@@ -490,7 +604,7 @@ export function publishWorkflowCommand(
     operationId: p.operationId,
     requestHash,
     now: p.now,
-  }, () => publishDraft(tx, p, ctx))
+  }, () => publishDraft(tx, p, ctx, policy))
   return { ...result, replayed }
 }
 

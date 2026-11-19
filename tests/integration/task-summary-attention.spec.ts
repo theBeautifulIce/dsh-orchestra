@@ -65,13 +65,13 @@ describe('任务摘要的待核实计数', () => {
     const listed = summaryOf(db, 't1')
     expect(listed.unverified_count).toBe(1)
     expect(listed.attention).toBe('unverified')
-    expect(listed.attention_reason).toBe('有 1 笔副作用待核实')
+    expect(listed.attention_reason).toBe('1 项外部操作待核验')
     expect(listed.max_side_effect_level).toBe('compensable')
 
     const single = getTaskSummary(db, 't1', NOW_MS)
     expect(single.unverified_count).toBe(1)
     expect(single.attention).toBe('unverified')
-    expect(single.attention_reason).toBe('有 1 笔副作用待核实')
+    expect(single.attention_reason).toBe('1 项外部操作待核验')
   })
 
   it('verified_none 结算后：unverified_count=0，注意力不再落在 unverified', () => {

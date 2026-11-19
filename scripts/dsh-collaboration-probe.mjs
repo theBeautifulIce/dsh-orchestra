@@ -79,6 +79,7 @@ async function verifyInDsh(context) {
         config: { tools: { allow: [TOOL] }, pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }] },
       }], edges: [{ from: 'trigger', to: 'verify' }],
     } })
+    assert.equal((await call('/v1/workflows/test', { workflow_id: FLOW, revision: draft.revision })).passed, true)
     await call('/v1/workflows/publish', {
       workflow_id: FLOW, base_version: 0, revision: draft.revision, publish_note: '隔离验收', operation_id: uuidv7(),
     })

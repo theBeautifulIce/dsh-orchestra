@@ -80,7 +80,7 @@ export function PanelApp(props: PanelAppProps) {
   if (route === 'overview') {
     screen = <OverviewScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onNavigate={setRoute} />
   } else if (route === 'tasks') {
-    screen = <div className={taskId ? 'task-workspace task-workspace--open' : 'task-workspace'}>
+    screen = <div className="task-workspace">
       <TaskListScreen api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
         <TaskTriggerManager api={api} commands={triggerCommands} onChanged={() => setReloadVersion((version) => version + 1)} />
       } onSelectTask={(id, trigger, runId) => {
@@ -88,12 +88,6 @@ export function PanelApp(props: PanelAppProps) {
         setTaskRunId(runId)
         setTaskId(id)
       }} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
-      {taskId && <TaskDetailScreen key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
-        setTaskId(null)
-        taskTrigger.current?.focus({ preventScroll: true })
-      }} taskCommands={taskCommands} triggerCommands={triggerCommands} onArchiveChanged={() => setReloadVersion((version) => version + 1)}
-        onOpenMemory={props.memoryEnabled ? () => { setTaskId(null); setRoute('memory') } : undefined}
-        reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
     </div>
   } else if (route === 'decisions') {
     screen = <DecisionInbox api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
@@ -103,22 +97,23 @@ export function PanelApp(props: PanelAppProps) {
     screen = <ActivityScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'collaboration' && props.collaborationEnabled) {
     screen = <CollaborationScreen client={props.client} reloadVersion={reloadVersion} onSnapshot={onSnapshot}
-      onOpenRun={(task, run) => { taskTrigger.current = null; setTaskId(task); setTaskRunId(run); setRoute('tasks') }} />
+      onOpenRun={(task, run) => { setTaskId(task); setTaskRunId(run) }} />
   } else if (route === 'memory') {
     screen = props.additionalScreens?.memory
       ?? <MemoryPanel api={api} recovery={memoryRecovery} memoryEnabled={props.memoryEnabled}
         reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} />
   } else if (route === 'settings') {
-    screen = <>{props.additionalScreens?.settings
+    screen = <section className="ops-page"><h1>设置</h1><div className="ops-context-grid">{props.additionalScreens?.settings
       ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={props.snapshotStale} streamStatus={streamStatus} />}
       {props.modelRoutingEnabled && <ModelRoutingSettings client={props.client} />}
-    </>
+    </div></section>
   } else if (route === 'workflows') {
-    screen = workflowId
-      ? <WorkflowCanvas api={api} workflowId={workflowId} onBack={() => setWorkflowId(null)}
-          onOpenRun={(task, run) => { taskTrigger.current = null; setTaskId(task); setTaskRunId(run); setWorkflowId(null); setRoute('tasks') }}
-          reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} />
-      : <WorkflowListScreen api={api} onSelectWorkflow={setWorkflowId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} />
+    screen = <>
+      <div hidden={workflowId !== null}><WorkflowListScreen api={api} onSelectWorkflow={setWorkflowId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} /></div>
+      {workflowId && <WorkflowCanvas key={workflowId} api={api} workflowId={workflowId} onBack={() => setWorkflowId(null)}
+          onOpenRun={(task, run) => { taskTrigger.current = null; setTaskId(task); setTaskRunId(run) }}
+          reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} />}
+    </>
   } else {
     screen = props.additionalScreens?.[route] ?? <div role="status" style={pendingStyle}>此页面尚未接入真实数据。</div>
   }
@@ -131,7 +126,14 @@ export function PanelApp(props: PanelAppProps) {
     snapshotStale={props.snapshotStale || streamStatus === 'stale'}
     streamStatus={streamStatus}
     collaborationEnabled={props.collaborationEnabled}
-  >{screen}</PanelShell>
+  >{screen}
+    {taskId && <TaskDetailScreen key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
+      setTaskId(null)
+      taskTrigger.current?.focus({ preventScroll: true })
+    }} taskCommands={taskCommands} triggerCommands={triggerCommands} onArchiveChanged={() => setReloadVersion((version) => version + 1)}
+      onOpenMemory={props.memoryEnabled ? () => { setTaskId(null); setRoute('memory') } : undefined}
+      reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
+  </PanelShell>
 }
 
 const pendingStyle = { padding: 24, border: `1px solid ${COLOR.line}`, borderRadius: 9, color: COLOR.inkMuted, fontSize: FONT_PX.body }

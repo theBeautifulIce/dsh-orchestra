@@ -2,6 +2,7 @@ import type { ApiClient, ApiResult } from './client.ts'
 import type { TaskLane, TaskOrigin } from '../../core/task-workspace.ts'
 import type { TaskPlanView } from '../../service/task-planning.ts'
 import type { TaskTriggerView } from '../../core/task-trigger.ts'
+import type { ExecutionEntry } from '../../service/queries/execution-history.ts'
 import type {
   ArtifactContentMode, ArtifactContentView, ArtifactView, AttestationView, DecisionView, EventView, EvidenceView, LedgerVerify, MemoryBatchView, NodeRunView,
   OperationRow, RunArtifact, RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem, WorkflowVersionView, WorkflowView,
@@ -16,7 +17,7 @@ export type ListDecisionsParams = { run_id?: string; status?: string; limit?: nu
 export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; query?: string; owner_task_id?: string }
 export type ListEventsParams = { from_seq?: number; limit?: number; cursor?: string }
 export type ListMemoryBatchesParams = { task_id?: string; limit?: number; cursor?: string }
-export type ActivityItem = Pick<EventView, 'seq' | 'event_id' | 'type' | 'occurred_at' | 'run_id' | 'node_run_id' | 'decision_id'>
+export type ActivityItem = Pick<EventView, 'seq' | 'event_id' | 'type' | 'occurred_at' | 'run_id' | 'node_run_id' | 'decision_id'> & { details?: ExecutionEntry['details'] }
 export type EffectReview = {
   node_run_id: string; run_id: string; revision: number
   evidence: Array<{ evidence_id: string; tool: string; exit_code: number; finished_at: string }>
@@ -70,6 +71,8 @@ export function createResourcesApi(client: ApiClient) {
       client.get('/v1/events', compact(params)),
     listActivity: (params: { run_id?: string; task_id?: string; before_seq?: number; limit?: number } = {}): Promise<ApiResult<{ items: ActivityItem[]; next_before_seq: number | null }>> =>
       client.get('/v1/activity', compact(params)),
+    listExecutionHistory: (params: { run_id?: string; task_id?: string; node_run_id?: string; before?: number }): Promise<ApiResult<{ items: ExecutionEntry[]; next_before: number | null }>> =>
+      client.get('/v1/execution-history', compact(params)),
     listWorkflows: (params: ListWorkflowsParams = {}): Promise<ApiResult<Page<WorkflowListItem>>> =>
       client.get('/v1/workflows', compact(params)),
     getWorkflow: (workflow_id: string): Promise<ApiResult<WorkflowView>> =>

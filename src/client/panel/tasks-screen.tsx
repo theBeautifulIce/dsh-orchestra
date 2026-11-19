@@ -12,7 +12,7 @@ import { UnknownState } from './shell.tsx'
 import { TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
 
 const ATTENTION_LABEL: Record<string, string> = {
-  decision: '等你决定', unverified: '待核实', failed: '运行未成功', orphaned: '等待接手', running: '进行中', none: '无待处理事项',
+  decision: '待审批', unverified: '待核验', failed: '执行失败', orphaned: '待接管', running: '执行中', none: '无待处理事项',
 }
 const STATUS_LABEL: Record<string, string> = {
   reserved: '已接收', queued: '排队中', running: '进行中', waiting: '等待中', succeeded: '已完成', failed: '未成功', cancelled: '已取消',
