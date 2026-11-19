@@ -4,6 +4,8 @@
 
 本轮处理一份外部代码审计提出的 6 条 P1（另有 3 条 P2 本轮未处理）。用户决定：六条 P1 全部修完、**提交代码但不派独立审计子代理**，只写「本轮修复与证据」文档并更新台账，正式门禁审计的候选提交之后再定。
 
+本轮产出提交：**`fea8008`（`fix(s5): close six P1 reliability findings from external audit`）**，已推送到 `origin/main`；基线是 `de7936f`。下列所有改动、迁移与测试文件都在这个提交里。
+
 ### 已交付（相对 de7936f）
 
 - **P1-01 派发与准入分离**：新根运行只在 `workflows.status='active'` 时放行（`FORBIDDEN`）；已启动的运行只认自己固定的 `workflow_id + version + content_hash`，流程被停用或后来发新版本都不改变它的派发内容；运行期工具撤权是独立错误码 `TOOL_NOT_ALLOWED`，且用户可见（排队节点写 `dispatch.failed` 事件、运行转 failed、任务进待处理车道）。改动在 `src/service/task-planning.ts`（新增 `PINNED_VERSION_SELECT`、`toolViolations()`）、`src/service/task-trigger-dispatch.ts`。
@@ -17,9 +19,9 @@
 
 ### 验证记录
 
-- `pnpm typecheck` 通过；`pnpm test` → Test Files **126 passed (126)**，Tests **1418 passed | 1 skipped (1419)**；`pnpm build` 通过（ESM `lib/index.js` 751.38 kB / gzip 186.06 kB）；`git diff --check` 通过。
+- `pnpm typecheck` 通过；`pnpm test` → Test Files **126 passed (126)**，Tests **1417 passed | 2 skipped (1419)**（`pnpm check` 一次跑完 typecheck + test + build，全绿）；`pnpm build` 通过（ESM `lib/index.js` 751.38 kB / gzip 186.06 kB）；`git diff --check` 通过。
 - 新增回归测试：`tests/integration/task-plan-dispatch-after-disable.spec.ts`（4）、`memory-lease-renewal.spec.ts`（4）、`task-local-root.spec.ts`（8）、`task-run-binding.spec.ts`（9）、`run-acceptance.spec.ts`（11）、`task-trigger-execution-readiness.spec.ts`（4）、`tests/client/task-status-view.spec.ts`（4）。
-- `node --no-warnings scripts/gate-check.ts` 目前 **exit 1**，原因是工作树脏（门记录不能对着脏树签）。这是本轮不签门、候选之后再定门禁的必然结果；提交后工作树干净，G1–G4 的既有签署仍需按各自候选提交复核。
+- `node --no-warnings scripts/gate-check.ts` 目前 **exit 1**。提交 `fea8008` 之前的原因是工作树脏（门记录不能对着脏树签）；提交之后工作树已干净，但仍 exit 1，原因是**先于本轮存在的候选漂移**：G1–G4 绑定的 round-71 候选提交是 `32517a5`，而 `codebasemap.md` 在其后的 `9ee9e2b` 被改过，门检查报「审计报告的候选提交之后，候选文件又被改过，不能复用这份报告：codebasemap.md」（判定逻辑 `scripts/gate-check.ts:2889-2894`）。本轮提交没有碰 `codebasemap.md`，所以这条失败与本轮改动无关，G1–G4 需要按各自候选重新走审计与签署。
 
 ### 未完成及接手顺序
 
