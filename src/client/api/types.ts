@@ -5,7 +5,7 @@ import type { DecisionView } from '../../service/queries/decisions.ts'
 import type { UnverifiedEffectView } from '../../service/queries/effects.ts'
 import type { WorkflowListItem, WorkflowVersionView, WorkflowView } from '../../service/queries/workflows.ts'
 import type { EvidenceView } from '../../service/queries/evidence.ts'
-import type { ArtifactView } from '../../service/queries/artifacts.ts'
+import type { ArtifactContentMode, ArtifactContentView, ArtifactView, RunArtifact } from '../../service/queries/artifacts.ts'
 import type { AttestationView } from '../../service/queries/attestations.ts'
 import type { LedgerVerify } from '../../service/queries/verify_ledger.ts'
 import type { OperationRow } from '../../service/queries/get_operation.ts'
@@ -13,7 +13,7 @@ import type { OperationRow } from '../../service/queries/get_operation.ts'
 export type {
   TaskSummary, RunSummary, NodeRunView, DecisionView, UnverifiedEffectView,
   WorkflowListItem, WorkflowVersionView, WorkflowView, EvidenceView, ArtifactView, AttestationView,
-  LedgerVerify,
+  LedgerVerify, RunArtifact, ArtifactContentMode, ArtifactContentView,
   OperationRow,
 }
 

@@ -242,6 +242,8 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
   }
   appendEvent(tx, {
     type: 'decision.resolved',
+    runId: current.run_id,
+    decisionId: req.decisionId,
     payload: {
       decisionId: req.decisionId,
       revision: req.revision + 1,

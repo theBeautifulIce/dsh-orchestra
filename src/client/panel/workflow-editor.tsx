@@ -241,8 +241,9 @@ export function WorkflowEditor({ commands, workflow, onRefresh }: WorkflowEditor
           readOnly={false}
           onChange={(next) => markDirty(JSON.stringify(next, null, 2))}
           canvasId="draft-canvas"
+          inspectNodes
         />
-        <details open data-definition-drawer="true" style={drawerStyle}>
+        <details data-definition-drawer="true" style={drawerStyle}>
           <summary style={sectionTitleStyle}>流程定义 JSON 抽屉</summary>
           <label htmlFor="workflow-definition-editor" style={labelStyle}>流程定义 JSON</label>
           <textarea

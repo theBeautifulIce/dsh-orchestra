@@ -42,9 +42,11 @@ export type SpawnParams = {
   toolPolicy: unknown
   // 节点执行永远开新会话；把这条意图放进协议，不能只靠宿主默认行为。
   inheritHistory: false
+  modelRef?: string
+  actionGeneration?: number
 }
 
-export type SpawnResult = { sessionId: string; agentId: string }
+export type SpawnResult = { sessionId: string; agentId: string; effectiveModelRef?: string }
 
 export type SubscribeParams = { executorAgentId: string; attempt: number; fromSeq: number }
 
@@ -71,8 +73,10 @@ export function bridgeHostAgentFactory(client: BridgeClient): HostAgentFactory {
         outputSchema: input.outputSchema,
         toolPolicy: input.toolPolicy,
         inheritHistory: false,
+        ...(input.modelRef ? { modelRef: input.modelRef } : {}),
+        ...(input.actionGeneration !== undefined ? { actionGeneration: input.actionGeneration } : {}),
       })
-      return { agentId: res.agentId, sessionId: res.sessionId }
+      return res
     },
   }
 }
@@ -166,7 +170,7 @@ export class BridgeClient {
     executorAgentId: string
     attempt: number
     callId: string
-    result: { exitCode: number; stdout: string; stderr: string }
+    result: { exitCode: number; stdout: string; stderr: string; evidenceId?: string }
   }): Promise<void> {
     await this.transport.request('executor.toolResult', params)
   }

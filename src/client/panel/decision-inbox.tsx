@@ -10,7 +10,10 @@ const KIND_LABEL: Record<string, string> = {
   pre_execution: '执行前确认', action_overrun: '操作范围确认', abandon_ack: '停止后确认', verify_human: '人工核验',
   audit_result: '结果复核', rule_ambiguous: '规则待澄清', startup_unknown: '启动状态待确认', report_contradicted: '结果不一致',
 }
-const STATUS_LABEL: Record<string, string> = { pending: '待处理', acknowledged: '已接手', blocked_for_human: '等你处理' }
+const STATUS_LABEL: Record<string, string> = { pending: '待处理', acknowledged: '已接手', blocked_for_human: '等你处理', resolved: '已处理' }
+const DECISION_OPTIONS: Readonly<Record<string, string>> = { approved: '批准执行', rejected: '拒绝执行' }
+const APPROVER_LABEL: Readonly<Record<string, string>> = { human: '人工', either: '人工或授权执行主体', agent: '授权执行主体' }
+const EXPIRY_LABEL: Readonly<Record<string, string>> = { auto_resolve: '按已记录的规则自动处理', escalate_only: '升级给人工', none: '无自动动作' }
 
 // 服务端没给的字段一律写明「服务端未提供」，面板不替它编。
 const NOT_PROVIDED = '服务端未提供'
@@ -52,6 +55,7 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
+  const [history, setHistory] = useState(false)
   const lastReload = useRef(reloadVersion)
   const [selected, setSelected] = useState<string[]>([])
   const [developerView, setDeveloperView] = useState(false)
@@ -70,7 +74,7 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
     let current = true
     setLoading(true)
     setFailed(false)
-    void api.listDecisions({ limit: 50, cursor }).then((result) => {
+    void api.listDecisions({ limit: 50, cursor, status: history ? 'resolved' : undefined }).then((result) => {
       if (!current) return
       setItems((previous) => cursor ? [...previous, ...result.data.items] : result.data.items)
       setNextCursor(result.data.next_cursor)
@@ -81,7 +85,7 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [api, cursor, retry, reloadVersion, onSnapshot])
+  }, [api, cursor, retry, history, reloadVersion, onSnapshot])
 
   function refresh() { setCursor(undefined); setRetry((value) => value + 1) }
 
@@ -117,12 +121,13 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
     }
   }
 
-  async function resolveDecision(decision: DecisionView, resolution: string) {
+  async function resolveDecision(decision: DecisionView, resolution: string, confirm?: boolean) {
     if (!commands) return
     setBusy(true)
     setCardNotice(decision.decision_id, null)
     try {
-      await commands.resolveDecision({ decisionId: decision.decision_id, revision: decision.current_revision, resolution })
+      await commands.resolveDecision({ decisionId: decision.decision_id, revision: decision.current_revision, resolution,
+        ...(decision.content_hash ? { contentHash: decision.content_hash } : {}), confirm })
       setCardNotice(decision.decision_id, { text: `已按 ${resolution} 处理。`, tone: 'ok' })
       refresh()
     } catch (error) {
@@ -163,13 +168,21 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
       <h1 id="decision-inbox-title" style={titleStyle}>等你决定</h1>
       <p style={mutedStyle}>这里列出当前仍开放的决定事项。页面只展示已保存的信息，不推测缺失的策略。</p>
     </header>
+    <div role="group" aria-label="决定视图" style={{ display: 'flex', gap: 8 }}>
+      {[false, true].map((value) => <button type="button" key={String(value)} aria-pressed={value === history}
+        style={{ ...buttonStyle, background: value === history ? '#edf3fa' : COLOR.surface }} onClick={() => {
+          setItems([]); setSelected([]); setNextCursor(null); setCursor(undefined); setHistory(value); setRetry((version) => version + 1)
+        }}>{value ? '已处理' : '待处理'}</button>)}
+    </div>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-      <h2 style={sectionTitleStyle}>待处理事项</h2>
+      <h2 style={sectionTitleStyle}>{history ? '处理记录' : '待处理事项'}</h2>
       <button type="button" onClick={refresh} disabled={loading} style={buttonStyle}>{loading ? '正在更新…' : '刷新'}</button>
     </div>
     <div style={toolbarStyle}>
+      {!history && <>
       <span style={mutedStyle}>已选 {selected.length} 条</span>
       <button type="button" onClick={() => { void acknowledgeSelected() }} disabled={!commands || busy || selected.length === 0} style={buttonStyle}>批量接手</button>
+      </>}
       <label style={toggleStyle}>
         <input
           type="checkbox"
@@ -183,18 +196,18 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
     {notice && <p role={notice.tone === 'error' ? 'alert' : 'status'} style={notice.tone === 'error' ? errorTextStyle : mutedStyle}>{notice.text}</p>}
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={refresh} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取决定事项…</p>}
-    {!loading && !failed && items.length === 0 && <div style={emptyStyle}>{COPY.emptyDecisions}</div>}
+    {!loading && !failed && items.length === 0 && <div style={emptyStyle}>{history ? '还没有已处理的决定。' : COPY.emptyDecisions}</div>}
     {!failed && sorted.map((decision) => <DecisionCard
       key={decision.decision_id}
       decision={decision}
-      commands={commands}
+      commands={history ? undefined : commands}
       developerView={developerView}
       selected={selected.includes(decision.decision_id)}
       busy={busy}
       notice={cardNotices[decision.decision_id]}
       onToggle={() => toggleSelected(decision.decision_id)}
       onAcknowledge={() => { void acknowledgeDecision(decision) }}
-      onResolve={(resolution) => { void resolveDecision(decision, resolution) }}
+      onResolve={(resolution, confirm) => { void resolveDecision(decision, resolution, confirm) }}
     />)}
     {nextCursor && !failed && <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>}
   </section>
@@ -251,16 +264,18 @@ function DecisionCard(props: {
   notice?: Notice
   onToggle: () => void
   onAcknowledge: () => void
-  onResolve: (resolution: string) => void
+  onResolve: (resolution: string, confirm?: boolean) => void
 }) {
   const { decision } = props
   const kind = KIND_LABEL[decision.kind]
   const status = STATUS_LABEL[decision.status]
   const resolutions = decision.allowed_resolutions ?? []
   const missing = decision.projection_missing ?? []
+  const [choice, setChoice] = useState<{ resolution: string; revision: number } | null>(null)
+  const confirmedChoice = choice?.revision === decision.current_revision && resolutions.includes(choice.resolution) ? choice : null
   // 记忆审批卡：卡上的两个按钮由服务端给的标签与 resolution 组成，前端不猜。
   const memoryCard = useMemo(() => readMemoryApprovalCard(decision.payload), [decision.payload])
-  if (memoryCard) {
+  if (memoryCard && decision.status !== 'resolved') {
     return <MemoryApprovalCardView
       decision={decision}
       card={memoryCard}
@@ -280,17 +295,15 @@ function DecisionCard(props: {
     </div>
     {decision.priority && <p style={mutedStyle}>优先级：{decision.priority}</p>}
     <dl style={detailGridStyle}>
-      <dt>为什么卡</dt><dd>{decision.priority_reason ?? NOT_PROVIDED}</dd>
-      <dt>你能选什么</dt><dd>{resolutions.length > 0 ? resolutions.join(' / ') : NOT_PROVIDED}</dd>
-      <dt>需要什么证据</dt><dd>{decision.required_evidence && decision.required_evidence.length > 0 ? decision.required_evidence.join('、') : NOT_PROVIDED}</dd>
-      <dt>过期会怎样</dt><dd>{decision.expires_at ? `记录的截止时间：${formatDate(decision.expires_at)}；截止后的处理方式尚未提供` : NOT_PROVIDED}</dd>
-    </dl>
-    <dl style={detailGridStyle}>
       <dt>说明</dt><dd>{decision.target_summary ?? '说明暂不可用'}</dd>
-      <dt>为什么需要处理</dt><dd>{decision.priority_reason ?? '处理原因暂不可用'}</dd>
-      <dt>可选处理</dt><dd>{decision.allowed_resolutions?.join(' / ') ?? '操作选项尚未接入'}</dd>
-      <dt>需要的证据</dt><dd>{decision.required_evidence?.join('、') ?? '证据要求尚未接入'}</dd>
-      <dt>过期会怎样</dt><dd>{decision.expires_at ? `记录的截止时间：${formatDate(decision.expires_at)}；截止后的处理方式尚未提供` : '没有记录截止时间，也没有过期处理规则'}</dd>
+      <dt>为什么卡</dt><dd>{decision.priority_reason ?? NOT_PROVIDED}</dd>
+      {decision.approver && <><dt>谁能处理</dt><dd>{APPROVER_LABEL[decision.approver] ?? decision.approver}</dd></>}
+      <dt>你能选什么</dt><dd>{resolutions.length > 0 ? resolutions.map((value) => DECISION_OPTIONS[value] ?? value).join(' / ') : NOT_PROVIDED}</dd>
+      <dt>需要什么证据</dt><dd>{decision.required_evidence && decision.required_evidence.length > 0 ? decision.required_evidence.join('、') : NOT_PROVIDED}</dd>
+      <dt>过期会怎样</dt><dd>{decision.expires_at ? formatDate(decision.expires_at) + ' · ' + (EXPIRY_LABEL[decision.expiry_effect ?? ''] ?? '截止后的处理方式尚未提供') : NOT_PROVIDED}</dd>
+      {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{DECISION_OPTIONS[decision.closed_reason ?? ''] ?? decision.closed_reason ?? NOT_PROVIDED}</dd></>}
+      {decision.status === 'resolved' && decision.resolved_by && <><dt>处理人</dt><dd>{decision.resolved_by}</dd></>}
+      {decision.status === 'resolved' && decision.decided_at && <><dt>处理时间</dt><dd>{formatDate(decision.decided_at)}</dd></>}
     </dl>
     {props.developerView && <dl style={detailGridStyle}>
       <dt>决定 ID</dt><dd>{decision.decision_id}</dd>
@@ -300,7 +313,7 @@ function DecisionCard(props: {
     {decision.confirm_required && <p style={warningStyle}>处理前需要再次确认。</p>}
     {missing.length > 0 && <p style={mutedStyle}>部分决策信息尚未持久化，当前无法提供安全的处理选项。</p>}
     {missing.length > 0 && <p style={mutedStyle}>服务端未持久化的字段：{missing.join('、')}</p>}
-    <div style={actionStyle}>
+    {decision.status !== 'resolved' && <div style={actionStyle}>
       <label style={toggleStyle}>
         <input
           type="checkbox"
@@ -318,13 +331,24 @@ function DecisionCard(props: {
           type="button"
           aria-label={`按 ${resolution} 处理`}
           title={`按 ${resolution} 处理`}
-          onClick={() => props.onResolve(resolution)}
+          onClick={() => {
+            if (decision.confirm_required) setChoice({ resolution, revision: decision.current_revision })
+            else props.onResolve(resolution)
+          }}
           disabled={!props.commands || props.busy}
           style={buttonStyle}
-        >{resolution}</button>)
+        >{DECISION_OPTIONS[resolution] ?? resolution}</button>)
         : <button type="button" disabled style={buttonStyle}>处理</button>}
-    </div>
-    {resolutions.length === 0 && <p style={mutedStyle}>服务端没有给出可选项，这里不替你编。</p>}
+    </div>}
+    {confirmedChoice && <div role="group" aria-label="再次确认这条决定" style={actionStyle}>
+      <strong>确认{DECISION_OPTIONS[confirmedChoice.resolution] ?? confirmedChoice.resolution}？</strong>
+      <button type="button" disabled={!props.commands || props.busy} style={buttonStyle} onClick={() => {
+        setChoice(null)
+        props.onResolve(confirmedChoice.resolution, true)
+      }}>确认处理</button>
+      <button type="button" style={buttonStyle} onClick={() => setChoice(null)}>取消</button>
+    </div>}
+    {decision.status !== 'resolved' && resolutions.length === 0 && <p style={mutedStyle}>服务端没有给出可选项，这里不替你编。</p>}
     {props.notice && (
       <p role={props.notice.tone === 'error' ? 'alert' : 'status'} style={props.notice.tone === 'error' ? errorTextStyle : mutedStyle}>
         {props.notice.text}

@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { COLOR, FONT_PX } from './tokens.ts'
+import type { NodeRunView } from '../api/types.ts'
 import {
   CANVAS_NODE_TYPES,
   MULTI_OUT_TYPES,
@@ -28,6 +29,9 @@ export type WorkflowCanvasViewProps = {
   onChange?: (definition: Record<string, unknown>) => void
   /** 给测试与页面区分多块画布用。 */
   canvasId?: string
+  inspectNodes?: boolean
+  runtimeNodes?: readonly Pick<NodeRunView, 'node_id' | 'status' | 'status_label'>[]
+  runtimeCompact?: boolean
 }
 
 const NODE_WIDTH = 160
@@ -41,9 +45,13 @@ type DragState =
   | { kind: 'palette'; nodeType: string }
   | { kind: 'link'; fromNodeId: string }
 
-export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }: WorkflowCanvasViewProps) {
+export function WorkflowCanvasView({
+  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeCompact = false,
+}: WorkflowCanvasViewProps) {
+  const compact = readOnly && runtimeCompact
   const doc = useMemo(() => readCanvasDoc(definition), [definition])
   const [alert, setAlert] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   // 拖拽与连线跨事件发生：引用里始终放最新的定义、回调与只读标记。
   const docRef = useRef<CanvasDoc | null>(doc)
@@ -57,14 +65,15 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
   const dragRef = useRef<DragState>({ kind: 'none' })
 
   const size = useMemo(() => {
-    let width = MIN_CANVAS_WIDTH
-    let height = MIN_CANVAS_HEIGHT
+    let width = compact ? NODE_WIDTH : MIN_CANVAS_WIDTH
+    let height = compact ? NODE_HEIGHT : MIN_CANVAS_HEIGHT
+    const padding = compact ? 32 : 120
     for (const node of doc?.nodes ?? []) {
-      width = Math.max(width, node.position.x + NODE_WIDTH + 120)
-      height = Math.max(height, node.position.y + NODE_HEIGHT + 120)
+      width = Math.max(width, node.position.x + NODE_WIDTH + padding)
+      height = Math.max(height, node.position.y + NODE_HEIGHT + padding)
     }
     return { width, height }
-  }, [doc])
+  }, [compact, doc])
 
   function emit(next: CanvasDoc) {
     if (readOnlyRef.current) return
@@ -222,9 +231,11 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
 
   const nodes = doc?.nodes ?? []
   const edges = doc?.edges ?? []
+  const selected = nodes.find((node) => node.node_id === selectedId)
+  const runtimeByNode = new Map(runtimeNodes?.map((node) => [node.node_id, node]))
 
   return <div data-canvas-id={canvasId ?? 'workflow-canvas'} data-canvas-root="true" data-canvas-readonly={readOnly ? 'true' : 'false'} style={rootStyle}>
-    <div style={toolbarStyle}>
+    {!compact && <div style={toolbarStyle}>
       <div>
         <h3 style={sectionTitleStyle}>节点条</h3>
         <p style={mutedStyle}>按住节点拖到画布空白处就新建一个节点。</p>
@@ -259,9 +270,10 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
         </button>
         <p style={mutedStyle}>{readOnly ? '已发布版本只读，不能改。' : '整理按拓扑序重排节点位置。'}</p>
       </div>
-    </div>
+    </div>}
     {alert && <p role="alert" data-canvas-alert="true" style={alertStyle}>{alert}</p>}
     {doc === null && <p style={mutedStyle}>流程定义 JSON 还没解析成对象，画布暂时是空的。</p>}
+    <div style={inspectNodes ? inspectionLayout : undefined}>
     <div style={viewportStyle}>
       <div
         ref={canvasRef}
@@ -294,6 +306,7 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
             key={node.node_id}
             data-node-id={node.node_id}
             data-node-type={node.type}
+            data-runtime-status={runtimeByNode.get(node.node_id)?.status}
             data-node-x={node.position.x}
             data-node-y={node.position.y}
             data-node-readonly={readOnly ? 'true' : 'false'}
@@ -302,12 +315,15 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
             onMouseDown={(event) => startMove(event, node)}
             style={nodeStyle}
           >
-            <span style={nodeTitleStyle}>{node.title}</span>
+            {inspectNodes ? <button type="button" aria-pressed={selectedId === node.node_id}
+              onClick={() => setSelectedId(node.node_id)}
+              style={nodeSelectStyle}>{node.title}</button> : <span style={nodeTitleStyle}>{node.title}</span>}
             <span style={nodeMetaStyle}>
-              {NODE_TYPE_LABEL[node.type] ?? node.type}
-              {MULTI_OUT_TYPES.has(node.type) ? ' · 可多条出边' : ''}
+              {runtimeNodes ? runtimeByNode.get(node.node_id)?.status_label || '尚无运行记录' : <>
+                {NODE_TYPE_LABEL[node.type] ?? node.type}{MULTI_OUT_TYPES.has(node.type) ? ' · 可多条出边' : ''}
+              </>}
             </span>
-            <button
+            {!compact && <><button
               type="button"
               data-node-handle={node.node_id}
               aria-label={`从 ${node.node_id} 拉出连线`}
@@ -327,10 +343,21 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
               style={deleteStyle}
             >
               ×
-            </button>
+            </button></>}
           </div>
         ))}
       </div>
+    </div>
+    {inspectNodes && <aside style={inspectionPanel} aria-label="节点详情">
+      <h3 style={sectionTitleStyle}>节点详情</h3>
+      {!selected && <p style={mutedStyle}>点选画布中的节点查看依赖。</p>}
+      {selected && <>
+        <p><strong>{selected.title}</strong></p>
+        <p style={mutedStyle}>{NODE_TYPE_LABEL[selected.type] ?? selected.type} · {selected.node_id}</p>
+        <p>上游 · {edges.filter((edge) => edge.to === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.from)?.title ?? edge.from).join('、') || '无'}</p>
+        <p>下游 · {edges.filter((edge) => edge.from === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.to)?.title ?? edge.to).join('、') || '无'}</p>
+      </>}
+    </aside>}
     </div>
     <div>
       <h3 style={sectionTitleStyle}>连线（{edges.length}）</h3>
@@ -339,8 +366,11 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
         : <ul style={edgeListStyle}>
           {edges.map((edge) => (
             <li key={`${edge.from}->${edge.to}`} data-edge-row={`${edge.from}->${edge.to}`}>
-              <span>{edge.from} → {edge.to}{edge.route?.priority === undefined ? '' : ` （优先级 ${edge.route.priority}）`}</span>
-              <button
+              <span>{compact ? nodes.find((node) => node.node_id === edge.from)?.title ?? edge.from : edge.from}
+                {' → '}
+                {compact ? nodes.find((node) => node.node_id === edge.to)?.title ?? edge.to : edge.to}
+                {edge.route?.priority === undefined ? '' : ` （优先级 ${edge.route.priority}）`}</span>
+              {!compact && <button
                 type="button"
                 data-edge-delete-from={edge.from}
                 data-edge-delete-to={edge.to}
@@ -351,7 +381,7 @@ export function WorkflowCanvasView({ definition, readOnly, onChange, canvasId }:
                 style={edgeDeleteStyle}
               >
                 删除
-              </button>
+              </button>}
             </li>
           ))}
         </ul>}
@@ -414,6 +444,9 @@ const nodeStyle = {
   cursor: 'move',
 } as const
 const nodeTitleStyle = { fontSize: FONT_PX.body, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } as const
+const nodeSelectStyle = { ...nodeTitleStyle, background: 'transparent', border: 0, color: COLOR.link, textAlign: 'left', cursor: 'pointer', padding: 0 } as const
+const inspectionLayout = { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(120px, 24%)', gap: 10, minWidth: 0 }
+const inspectionPanel = { padding: 10, borderRadius: 8, border: `1px solid ${COLOR.line}`, minWidth: 0, overflowWrap: 'anywhere' } as const
 const nodeMetaStyle = { color: COLOR.inkMuted, fontSize: FONT_PX.helper } as const
 const handleStyle = {
   position: 'absolute',

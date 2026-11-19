@@ -26,6 +26,9 @@ export type PanelHostStatus = {
   protocolMismatch?: boolean
   phase?: string
   streamStatus?: StreamStatus
+  memoryEnabled?: boolean
+  modelRoutingEnabled?: boolean
+  collaborationEnabled?: boolean
 }
 
 /** 宿主正式入口：把 API 客户端、事件流与面板组装起来，外部宿主一行接入。 */
@@ -56,13 +59,16 @@ export function PanelHost(props: PanelHostProps): ReactElement {
   // 真实状态只有一个来源：探测 /health。连不上的项一律留空，设置屏显示「未知」。
   const probe = useCallback(() => {
     let cancelled = false
-    void client.get<{ ok?: boolean; phase?: string; epoch?: number }>('/health').then((result) => {
+    void client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; model_routing_enabled?: boolean; collaboration_enabled?: boolean }>('/health').then((result) => {
       if (cancelled) return
       setStatus((previous) => ({
         ...previous,
         serviceConnected: true,
         protocolMismatch: false,
         phase: typeof result.data.phase === 'string' ? result.data.phase : previous.phase,
+        memoryEnabled: result.data.memory_enabled === true,
+        modelRoutingEnabled: result.data.model_routing_enabled === true,
+        collaborationEnabled: result.data.collaboration_enabled === true,
       }))
     }).catch((error: unknown) => {
       if (cancelled) return
@@ -116,6 +122,9 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     protocolMismatch={status.protocolMismatch ?? false}
     snapshotStale={status.streamStatus === 'stale'}
     initialRoute={props.initialRoute}
+    memoryEnabled={status.memoryEnabled === true && status.serviceConnected === true}
+    modelRoutingEnabled={status.modelRoutingEnabled}
+    collaborationEnabled={status.collaborationEnabled}
     createEventStream={createEventStream}
     additionalScreens={{ settings: settingsScreen }}
   />

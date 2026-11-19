@@ -13,7 +13,8 @@ import { ToolRegistry } from '../../src/executor/tools.ts'
 import { ReadOnlyToolRunner, type HostRunner } from '../../src/executor/tools.ts'
 import { runNode } from '../../src/executor/run-node.ts'
 import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
-import { BridgeClient, type BridgeTransport } from '../../src/executor/bridge.ts'
+import { BridgeClient, bridgeHostAgentFactory, type BridgeTransport } from '../../src/executor/bridge.ts'
+import { getNode } from '../../src/service/queries/nodes.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { submitCancel, sweepNow } from '../../src/service/commands/runtime.ts'
 import { fakeAgentBridge, fakeAgentClient, type AgentToolStep } from '../fixtures/agent-bridge.ts'
@@ -104,6 +105,47 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 describe('生产路径跑通单节点', () => {
+  it.each([true, false])('模型仅在宿主回读一致后才发送指令（confirmed=%s）', async (confirmed) => {
+    const { dir, orchestra, release, registry, runner } = await setup([{ tool: 'ro.echo' }])
+    try {
+      const base = fakeAgentBridge({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })
+      const calls: string[] = []
+      const bridge = new BridgeClient({
+        request: async (method, params) => {
+          calls.push(method)
+          if (method === 'executor.spawn') {
+            expect(params).toMatchObject({ modelRef: 'approved/reasoner', attempt: 1, inheritHistory: false })
+            return { agentId: 'agent_1', sessionId: 'session_model', effectiveModelRef: confirmed ? 'approved/reasoner' : 'default' } as never
+          }
+          return base.request(method, params)
+        },
+        listen: (params, signal) => base.listen(params, signal),
+      })
+      const run = runNode({ runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, runner, bridge,
+        agents: bridgeHostAgentFactory(bridge), modelRouting: {
+          profiles: [{ ref: 'approved/fast', capacity: 'routine' }, { ref: 'approved/reasoner', capacity: 'complex' }],
+          recommend: (context) => {
+            expect(context).toMatchObject({ taskId: 't1', runId: 'r1', nodeId: 'check', actionGeneration: 1 })
+            return { complexity: 'complex', reason: '需要多步独立复核' }
+          },
+        },
+      }, { nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }], now: NOW, ownerEpoch: 1, leaseTtlMs: 600000 })
+      if (confirmed) await expect(run).resolves.toMatchObject({ final_status: 'done' })
+      else {
+        await expect(run).rejects.toMatchObject({ code: 'PROTOCOL_VERSION_MISMATCH' })
+        expect(nodeRow(orchestra.db).status).toBe('blocked_pre')
+        expect(calls).toContain('executor.dispose')
+      }
+      expect(calls.includes('executor.send')).toBe(confirmed)
+      expect(getNode(orchestra.db, 'nrun_1').model_assignment).toMatchObject({ model_ref: 'approved/reasoner',
+        state: confirmed ? 'confirmed' : 'rejected', complexity: 'complex' })
+    } finally {
+      await release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('commands.cancel 经注册表 abort 正在跑的 runNode，节点落 timing_out', async () => {
     const { dir, orchestra, release } = await setupCommands()
     const running = orchestra.commands.runNode({

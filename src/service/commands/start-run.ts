@@ -1,9 +1,10 @@
 // src/service/commands/start-run.ts —— 起运行：版本必填、自治档位落任务、operation_id 幂等。
 import { OrchError } from '../../core/errors.ts'
+import type { TaskOrigin } from '../../core/task-workspace.ts'
 import { inTx } from '../../infra/db/tx.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import type { Db, Tx } from '../../infra/sqlite/driver.ts'
-import { AUTONOMY_LEVELS, createRun, type Autonomy, type CreateRunResult } from '../runs.ts'
+import { AUTONOMY_LEVELS, createRun, createRunInTx, type Autonomy, type CreateRunResult } from '../runs.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 
 export type EscalationRule = {
@@ -19,6 +20,7 @@ export type StartRunParams = {
   taskTitle: string
   input?: Record<string, unknown>
   autonomy?: Autonomy
+  triggerKind?: TaskOrigin
   escalations?: readonly EscalationRule[]
   operationId: string
   nodeIds?: string[]
@@ -34,6 +36,15 @@ export type StartRunResult = {
   workflow_version: string
   autonomy: Autonomy
   replayed: boolean
+}
+
+/** Only a committed trigger occurrence can start another run for the stable task. */
+export function startTriggeredRunInTx(tx: Tx, catalog: WorkflowCatalog, triggerId: string, params: StartRunParams): StartRunResult {
+  const created = createRunInTx(tx, catalog, { ...params, escalations: validateEscalations(params.escalations) }, triggerId)
+  return {
+    task_id: created.task_id, run_id: created.run_id, workflow_id: created.workflow_id,
+    workflow_version: created.workflow_version, autonomy: created.autonomy, replayed: false,
+  }
 }
 
 const ESCALATION_KINDS = ['node_type', 'action_category', 'workflow_version_publish'] as const
@@ -98,6 +109,7 @@ export function startRun(db: Db, catalog: WorkflowCatalog, p: StartRunParams): S
       nodeIds: p.nodeIds,
       taskId: p.taskId,
       autonomy,
+      triggerKind: p.triggerKind,
       escalations,
       operationId: p.operationId,
       now: p.now,

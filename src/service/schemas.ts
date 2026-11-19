@@ -4,6 +4,7 @@
 import { z } from 'zod'
 import { UUID_V7_RE } from './commands/idempotency.ts'
 import { OrchError } from '../core/errors.ts'
+import { TASK_ORIGINS } from '../core/task-workspace.ts'
 
 // 边界集中在这里，改一处就够。
 // 区间按「不破坏现有行为」取：租约上界 120000ms 对着现有默认 30s 与动作超时 120s 留了余量。
@@ -199,11 +200,17 @@ export const startRunSchema = z.looseObject({
     .transform((value) => String(value)),
   nodeIds: z.array(identifier).max(LIMITS.nodeIdsMaxCount).optional(),
   autonomy: z.enum(['autonomous', 'assisted', 'supervised']).optional(),
+  triggerKind: z.enum(TASK_ORIGINS).optional(),
   escalations: z.array(z.looseObject({
     kind: z.enum(['node_type', 'action_category', 'workflow_version_publish']),
     value: z.string().min(1).max(LIMITS.identifierMaxLength),
   })).max(64).optional(),
   operationId: identifier,
+})
+
+export const taskArchiveSchema = z.strictObject({
+  task_id: identifier, archived: z.boolean(), expected_archived_at: z.iso.datetime().nullable(),
+  operation_id: z.string().regex(UUID_V7_RE),
 })
 
 export const RESOLUTIONS = [

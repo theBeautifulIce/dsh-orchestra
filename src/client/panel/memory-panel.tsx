@@ -49,6 +49,7 @@ const NEXT_STEP: Record<string, string> = {
 export type MemoryPanelProps = {
   api: ResourcesApi
   recovery?: MemoryRecoveryApi
+  memoryEnabled?: boolean
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
   /** 跳到「等你决定」去看同一张审批卡。 */
@@ -69,7 +70,7 @@ function recoveryError(error: unknown): string {
   return describeDecisionError(error)
 }
 
-export function MemoryPanel({ api, recovery, reloadVersion = 0, onSnapshot, onOpenDecisions }: MemoryPanelProps) {
+export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, onSnapshot, onOpenDecisions }: MemoryPanelProps) {
   const [batches, setBatches] = useState<MemoryBatchView[]>([])
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -222,11 +223,10 @@ export function MemoryPanel({ api, recovery, reloadVersion = 0, onSnapshot, onOp
         })}
     </section>
 
-    {/* ④ 要不要现在记：只给提示，不在这里发任何写命令。 */}
     <section aria-labelledby="memory-q4-title" style={blockStyle}>
       <h2 id="memory-q4-title" style={sectionTitleStyle}>要不要现在记</h2>
       {!latest
-        ? <p style={mutedStyle}>记录这次任务</p>
+        ? <p style={mutedStyle}>{memoryEnabled === false ? '当前宿主尚未启用记忆整理。' : '记录这次任务可以从已成功任务的「结果」发起。'}</p>
         : <>
           {latest.status === 'failed' || latest.status === 'declined'
             ? <>

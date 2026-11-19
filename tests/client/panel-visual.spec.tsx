@@ -94,15 +94,13 @@ function apiFrom(handler: (query: FakeQuery) => FakeReply | Promise<FakeReply>) 
 describe('S5-J 视觉硬门槛', () => {
   it('门槛① 面板源码的字号字面量只剩棘轮清单里的历史项，新代码必须走 tokens.ts', () => {
     // 历史存量（迁移到 tokens.ts 之前不许新增；迁移后要同步改这份清单）：
-    // decision-inbox.tsx:288,289 / memory-panel.tsx / shell.tsx:96 / task-detail-screen.tsx:100
-    // tasks-screen.tsx:90,138 / unverified-effects.tsx:151,152 / workflow-canvas-view.tsx:364
+    // decision-inbox.tsx:288,289 / memory-panel.tsx / shell.tsx:96
+    // unverified-effects.tsx:151,152 / workflow-canvas-view.tsx:364
     // workflow-canvas.tsx:110 / workflow-editor.tsx:473,475 / workflow-list.tsx:163,164
     const legacyFontLiterals: Record<string, number[]> = {
       'decision-inbox.tsx': [16, 16],
       'memory-panel.tsx': [16],
       'shell.tsx': [16],
-      'task-detail-screen.tsx': [16],
-      'tasks-screen.tsx': [16, 16],
       'unverified-effects.tsx': [16, 16],
       'workflow-canvas-view.tsx': [14],
       'workflow-canvas.tsx': [16],
@@ -118,7 +116,7 @@ describe('S5-J 视觉硬门槛', () => {
     }
     for (const values of Object.values(actual)) values.sort((a, b) => a - b)
     // 扫描器确实在工作（不是空壳断言）
-    expect(found.length).toBeGreaterThanOrEqual(15)
+    expect(found.length).toBeGreaterThanOrEqual(12)
     // 新增一个字面量就红：清单必须与源码逐项对上
     expect(actual).toEqual(legacyFontLiterals)
     // 本次新增的设置屏不得带字号字面量

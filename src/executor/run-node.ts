@@ -7,7 +7,7 @@ import type { Report } from '../core/report.ts'
 import type { Db } from '../infra/sqlite/driver.ts'
 import { withTx } from '../infra/sqlite/driver.ts'
 import { transitionNode, DEFAULT_VERIFY_TIMEOUT_MS } from '../service/commands/node-state.ts'
-import { appendNodeRunEvent } from '../infra/db/ledger.ts'
+import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { loadNodeRun } from '../service/commands/lease.ts'
 import { acquireNodeRun, renewNodeLease, submitReport, type RuntimeDeps } from '../service/commands/runtime.ts'
 import { buildInstruction, checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
@@ -16,6 +16,10 @@ import type { BridgeClient } from './bridge.ts'
 import { AgentLifecycle } from './agent-lifecycle.ts'
 import { canTransition } from '../core/state-machine.ts'
 import type { ClockProvider } from '../core/clock.ts'
+import { selectExecutionModel, type ModelAssignment, type ModelRouting } from './model-routing.ts'
+import type { Tx } from '../infra/sqlite/driver.ts'
+import { getTaskPlanRecommendation } from '../service/task-planning.ts'
+import { readModelRoutingSettings } from '../service/model-routing-settings.ts'
 
 export type RunNodeParams = {
   nodeRunId: string
@@ -67,6 +71,8 @@ export type RunNodeDeps = {
   spillDir?: string
   // 外部取消信号：只用于把取消请求送进当前 attempt，不改变账本状态
   cancelSignal?: AbortSignal
+  /** Trusted host routing. Incoming execution requests cannot set a model. */
+  modelRouting?: ModelRouting
 }
 
 export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunNodeResult> {
@@ -193,17 +199,28 @@ async function runNodeActions(
   let spawnUnknown = false
   let spawnRejected = false
   let stopFailure: unknown = null
+  let assignment: ModelAssignment | undefined
   try {
     // spawn 回包失败时也可能已经在宿主建了会话；放进 try，外层 catch 至少能 markBlocked，
     // finally 再按 agentId 做有界释放，不能把节点留在 dispatched。
     let spawnTask: Promise<Awaited<ReturnType<typeof createExecutorAgent>>> | null = null
     try {
+      if (deps.modelRouting) {
+        try {
+          assignment = chooseModelForAttempt(deps, p, generation, deps.modelRouting)
+        } catch (error) {
+          if (error instanceof OrchError) throw error
+          throw new OrchError('FORBIDDEN', '当前节点无法取得可信的模型分配建议')
+        }
+      }
       spawnTask = createExecutorAgent(deps.agents, deps.registry, {
         nodeRunId: p.nodeRunId,
         attempt: p.attempt,
         input: p.input,
         outputSchema: p.outputSchema,
         toolPolicy: policy,
+        modelRef: assignment?.model_ref,
+        ...(deps.modelRouting ? { actionGeneration: generation } : {}),
       })
       agent = await withTimeout(
         spawnTask,
@@ -215,14 +232,14 @@ async function runNodeActions(
     } catch (err) {
       // 宿主明确拒绝（4xx 类错误）：没有副作用，落 blocked_pre，不冒充“启动结果未知”。
       // 超时/传输错误才可能是“会话已建但回包丢了”，落 startup_unknown 交人工核。
-      if (isDeterministicSpawnFailure(err)) {
+      if (!spawnTask || isDeterministicSpawnFailure(err)) {
         withTx(deps.db, (tx) => {
           const row = loadNodeRun(tx, p.nodeRunId)
-          if (row.status === 'dispatched') {
+          if (row.status === 'dispatched' && row.attempt === p.attempt && row.action_generation === generation) {
             transitionNode(tx, deps.secret, {
               nodeRunId: p.nodeRunId, from: 'dispatched', to: 'blocked_pre',
-              attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'agent_spawn_rejected',
-              verifyHuman: { reason: 'agent_spawn_rejected', missing: [] },
+              attempt: row.attempt, revision: row.revision, now: nowAt(), reason: spawnTask ? 'agent_spawn_rejected' : 'model_assignment_unavailable',
+              verifyHuman: { reason: spawnTask ? 'agent_spawn_rejected' : 'model_assignment_unavailable', missing: [] },
             })
           }
         })
@@ -233,7 +250,7 @@ async function runNodeActions(
       // 也不能留在 dispatched。按规格落 startup_unknown，交给 sweep/人工核副作用。
       withTx(deps.db, (tx) => {
         const row = loadNodeRun(tx, p.nodeRunId)
-        if (row.status === 'dispatched') {
+        if (row.status === 'dispatched' && row.attempt === p.attempt && row.action_generation === generation) {
           transitionNode(tx, deps.secret, {
             nodeRunId: p.nodeRunId, from: 'dispatched', to: 'startup_unknown',
             attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'agent_spawn_unknown',
@@ -253,9 +270,26 @@ async function runNodeActions(
       throw err
     }
     const created = agent
+    if (assignment && created.effectiveModelRef !== assignment.model_ref) {
+      const selected = assignment
+      withTx(deps.db, (tx) => {
+        const row = loadNodeRun(tx, p.nodeRunId)
+        if (row.status !== 'dispatched' || row.attempt !== p.attempt || row.action_generation !== generation) return
+        recordModel(tx, deps.secret, row, selected, 'rejected')
+        transitionNode(tx, deps.secret, { nodeRunId: row.node_run_id, from: 'dispatched', to: 'blocked_pre',
+          attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'model_assignment_unconfirmed',
+          verifyHuman: { reason: 'model_assignment_unconfirmed', missing: [] } })
+      })
+      spawnRejected = true
+      throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主未确认采用指定模型，执行请求未发送')
+    }
     // started 是状态迁移不是完成上报：没过证据门的上报不该用来推进状态
     withTx(deps.db, (tx) => {
       const row = loadNodeRun(tx, p.nodeRunId)
+      if (assignment) {
+        if (row.attempt !== p.attempt || row.action_generation !== generation) throw new OrchError('STALE_GENERATION', '执行模型确认已过期')
+        recordModel(tx, deps.secret, row, assignment, 'confirmed')
+      }
       transitionNode(tx, deps.secret, {
         nodeRunId: p.nodeRunId, from: 'dispatched', to: 'started',
         attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'executor_started',
@@ -280,6 +314,22 @@ async function runNodeActions(
       spillDir: deps.spillDir ?? join(tmpdir(), 'dsh-orchestra-bridge'),
     })
     const envelope = await lifecycle.run(deps.cancelSignal ?? new AbortController().signal)
+    if (envelope.modelUse) {
+      if (!assignment || envelope.modelUse.model_ref !== assignment.model_ref) {
+        throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主的实际模型回执与派发模型不一致')
+      }
+      const usage = envelope.modelUse
+      const selected = assignment
+      withTx(deps.db, (tx) => {
+        const row = loadNodeRun(tx, p.nodeRunId)
+        if (row.attempt !== p.attempt || row.action_generation !== generation) {
+          throw new OrchError('STALE_GENERATION', '执行模型回执已过期')
+        }
+        recordModel(tx, deps.secret, row, { ...selected,
+          usage: { provider: usage.provider, model: usage.model, observed_request_headers: usage.observed_request_headers },
+        }, 'confirmed', 'executor.model_used')
+      })
+    }
     // 取消请求可能刚好落在报告与收口之间：此时不能再把 done 写进账本。
     if (deps.cancelSignal?.aborted) {
       throw new OrchError('SERVICE_UNAVAILABLE', '节点执行已被取消', { nodeRunId: p.nodeRunId, attempt: p.attempt })
@@ -377,6 +427,35 @@ async function runNodeActions(
       await bestEffortReleaseAgent(deps, agent.agentId, p.nodeRunId, p.attempt)
     }
   }
+}
+
+function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: number, routing: ModelRouting): ModelAssignment {
+  return withTx(deps.db, (tx) => {
+    const row = loadNodeRun(tx, p.nodeRunId)
+    if (row.status !== 'dispatched' || row.attempt !== p.attempt || row.action_generation !== generation) {
+      throw new OrchError('STALE_GENERATION', '模型分配对应的执行尝试已失效')
+    }
+    const run = tx.get<{ task_id: string; workflow_id: string | null; workflow_version: string | null }>(
+      'SELECT task_id, workflow_id, CAST(workflow_version AS TEXT) AS workflow_version FROM runs WHERE run_id = ?', [row.run_id],
+    )
+    if (!run) throw new OrchError('NOT_FOUND', '模型分配找不到对应运行')
+    const context = { taskId: run.task_id, runId: row.run_id, nodeId: row.node_id, nodeRunId: row.node_run_id,
+      attempt: row.attempt, actionGeneration: generation, workflowId: run.workflow_id, workflowVersion: run.workflow_version }
+    const proposed = getTaskPlanRecommendation(deps.db, context) ?? routing.recommend(context)
+    const settings = readModelRoutingSettings(tx)
+    const preferred = settings.mapping[proposed.complexity]
+    const assignment = selectExecutionModel(routing.profiles, preferred ? { ...proposed, preferredModel: preferred } : proposed)
+    if (preferred) assignment.settings_revision = settings.revision
+    recordModel(tx, deps.secret, row, assignment, 'selected')
+    return assignment
+  })
+}
+
+function recordModel(tx: Tx, secret: string, row: ReturnType<typeof loadNodeRun>, assignment: ModelAssignment,
+  state: 'selected' | 'confirmed' | 'rejected', type = `executor.model_${state}`): void {
+  const payload = { ...assignment, state, attempt: row.attempt, action_generation: row.action_generation }
+  appendNodeRunEvent(tx, secret, row.node_run_id, type, payload)
+  appendEvent(tx, { type, runId: row.run_id, nodeRunId: row.node_run_id, payload: { state } })
 }
 
 // 建 Agent 成功、lifecycle 尚未建立就失败：不能把宿主会话留成孤儿。

@@ -11,12 +11,14 @@ import type { ClockProvider } from '../core/clock.ts'
 import type { ToolPolicy } from './session.ts'
 import type { ToolRegistry, ReadOnlyToolRunner } from './tools.ts'
 import type { ExecutorAgent } from './session.ts'
+import { readModelUse, type ModelUse } from './model-routing.ts'
 
 const DEFAULT_STOP_RPC_TIMEOUT_MS = 2_000
 
 export type AgentReportEnvelope = {
   report: unknown
   evidence: unknown | null
+  modelUse?: ModelUse & { model_ref: string }
 }
 
 export type AgentLifecycleDeps = {
@@ -285,17 +287,26 @@ export class AgentLifecycle {
         executorAgentId: this.agentId,
         attempt: this.deps.attempt,
         callId: result.callId,
-        result: { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr },
+        result: { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr,
+          ...(result.trace ? { evidenceId: result.trace.executionId } : {}) },
       })
       return
     }
     if (!this.reportSeen && isReportEnvelope(payload)) {
+      const raw = (payload as Record<string, unknown>).model_use
+      let modelUse: AgentReportEnvelope['modelUse']
+      if (raw !== undefined) {
+        const usage = readModelUse(raw)
+        const modelRef = (raw as { model_ref?: unknown } | null)?.model_ref
+        if (!usage || typeof modelRef !== 'string') throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主的模型请求回执格式不合法')
+        modelUse = { ...usage, model_ref: modelRef }
+      }
       this.reportSeen = true
       const report = payload.report
       // 不能在这里 await flush：本条事件的 ACK 要等 onEvent 返回后由消费器推进，
       // 在 onEvent 里等确认位会自我等待到超时。交给后台追平，run() 仍等确认后再收口。
       void this.flush(5_000).then((persisted) => {
-        if (persisted) this.waiter?.resolve({ report, evidence: this.collector.lastEvidence })
+        if (persisted) this.waiter?.resolve({ report, evidence: this.collector.lastEvidence, modelUse })
         else this.waiter?.reject(new OrchError('SERVICE_UNAVAILABLE', 'Agent 报告未落账，不能收口', {
           lastSeq: this.buffer.lastSeq, cursor: this.ledger.handled(),
         }))

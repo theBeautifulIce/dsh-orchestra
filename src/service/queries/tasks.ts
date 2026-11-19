@@ -1,4 +1,6 @@
 import { OrchError } from '../../core/errors.ts'
+import type { TaskLane, TaskOrigin } from '../../core/task-workspace.ts'
+import type { Autonomy } from '../runs.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
@@ -25,12 +27,24 @@ export type TaskSummary = {
   attention: Attention
   attention_reason: string | null
   updated_at: string
+  archived_at: string | null
+  trigger_kind: TaskOrigin | null
+  next_trigger_at?: string | null
+  trigger_enabled?: boolean | null
+  autonomy: Autonomy
+  lane?: TaskLane
+  current_run_status: string | null
 }
 
 export type ListTaskParams = {
   status?: string
   attention?: Attention
   query?: string
+  lane?: TaskLane
+  trigger_kind?: TaskOrigin | 'unknown'
+  archived?: boolean
+  updated_from?: string
+  updated_before?: string
   limit?: number
   cursor?: string
   now?: number
@@ -89,11 +103,19 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     attention: attention.attention,
     attention_reason: attention.attention_reason,
     updated_at: String(row.updated_at),
+    archived_at: nullableString(row.archived_at),
+    trigger_kind: row.trigger_kind as TaskOrigin | null,
+    next_trigger_at: nullableString(row.next_trigger_at),
+    trigger_enabled: row.trigger_enabled === null || row.trigger_enabled === undefined ? null : row.trigger_enabled === 1,
+    autonomy: row.autonomy as Autonomy,
+    lane: row.lane as TaskLane,
+    current_run_status: currentRunStatus,
   }
 }
 
 const TASK_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_version, t.status, t.display_status,
-  t.current_run_id, t.session_id, t.updated_at,
+  t.current_run_id, t.session_id, t.updated_at, t.archived_at, t.trigger_kind, t.autonomy,
+  tr.next_fire_at AS next_trigger_at, tr.enabled AS trigger_enabled,
   (SELECT COUNT(*) FROM runs r WHERE r.task_id = t.task_id) AS run_count,
   (SELECT r.status FROM runs r WHERE r.run_id = t.current_run_id) AS current_run_status,
   (SELECT COUNT(*) FROM decisions d WHERE d.run_id = t.current_run_id
@@ -108,7 +130,7 @@ const TASK_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_versio
   (SELECT MIN(n.heartbeat_at) FROM node_runs n WHERE n.run_id = t.current_run_id
     AND n.heartbeat_at IS NOT NULL AND n.status NOT IN ('done','failed','timeout','abandoned_unverified',
       'failed_with_unverified','orphaned','superseded','cancelled')) AS oldest_active_heartbeat_at
-FROM tasks t`
+FROM tasks t LEFT JOIN task_triggers tr ON tr.task_id = t.task_id`
 
 // The CASE ordering mirrors deriveAttention() and attentionWeight(); keep the SQL projection in sync with those display helpers.
 const TASK_ATTENTION_CTE = `WITH task_metrics AS (${TASK_SELECT}), task_attention AS (
@@ -132,19 +154,58 @@ const TASK_ATTENTION_CTE = `WITH task_metrics AS (${TASK_SELECT}), task_attentio
       ELSE 1
     END AS attention_weight
   FROM task_metrics
+), task_workspace AS (
+  SELECT *, CASE
+    WHEN attention IN ('decision','unverified','failed','orphaned') OR status IN ('paused','orphaned','failed','failed_with_unverified') THEN 'attention'
+    WHEN trigger_enabled = 1 AND (current_run_status IS NULL OR current_run_status IN ('succeeded','cancelled')) THEN 'upcoming'
+    WHEN status IN ('succeeded','succeeded_with_unverified','cancelled') THEN 'finished'
+    WHEN status IN ('reserved','queued') THEN 'upcoming'
+    WHEN attention = 'running' OR status IN ('running','settling','waiting') THEN 'running'
+    ELSE 'upcoming' END AS lane,
+    COALESCE(archived_at, updated_at) AS sort_at,
+    CASE WHEN archived_at IS NULL THEN attention_weight ELSE 1 END AS sort_weight
+  FROM task_attention
 )`
+
+export type WorkspaceOverview = {
+  lanes: Record<TaskLane, number>
+  open_decisions: number
+  unverified_effects: number
+}
+
+export function getWorkspaceOverview(db: Db): { item: WorkspaceOverview; as_of_seq: number } {
+  return withReadTx(db, (ctx) => {
+    const lanes: WorkspaceOverview['lanes'] = { upcoming: 0, running: 0, attention: 0, finished: 0 }
+    const counts = ctx.tx.all<{ lane: TaskLane; count: number }>(
+      TASK_ATTENTION_CTE + ' SELECT lane, COUNT(*) AS count FROM task_workspace WHERE archived_at IS NULL GROUP BY lane',
+    )
+    for (const row of counts) lanes[row.lane] = row.count
+    const decisions = ctx.tx.get<{ count: number }>("SELECT COUNT(*) AS count FROM decisions WHERE status IN ('pending','acknowledged','blocked_for_human')")
+    const effects = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM node_runs n WHERE ' + UNVERIFIED_EFFECT)
+    return { item: { lanes, open_decisions: decisions?.count ?? 0, unverified_effects: effects?.count ?? 0 }, as_of_seq: ctx.as_of_seq }
+  })
+}
 
 export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items: TaskSummary[]; next_cursor: string | null; as_of_seq: number } {
   const limit = params.limit ?? 50
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > TASKS_LIMIT_MAX) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 ' + String(TASKS_LIMIT_MAX) + ' 条', { limit })
-  const filter = { status: params.status ?? null, attention: params.attention ?? null, query: params.query ?? null }
+  const filter = {
+    status: params.status ?? null, attention: params.attention ?? null, query: params.query ?? null,
+    lane: params.lane ?? null, trigger_kind: params.trigger_kind ?? null, archived: params.archived === true,
+    updated_from: params.updated_from ?? null, updated_before: params.updated_before ?? null,
+  }
   return withReadTx(db, (ctx) => {
     const now = params.now ?? Date.now()
-    const where: string[] = []
+    const where = [filter.archived ? 'archived_at IS NOT NULL' : 'archived_at IS NULL']
     const values: unknown[] = []
     if (filter.status) { where.push('status = ?'); values.push(filter.status) }
     if (filter.attention) { where.push('attention = ?'); values.push(filter.attention) }
+    if (filter.lane) { where.push('lane = ?'); values.push(filter.lane) }
+    if (filter.trigger_kind === 'unknown') where.push('trigger_kind IS NULL')
+    else if (filter.trigger_kind) { where.push('trigger_kind = ?'); values.push(filter.trigger_kind) }
+    if (filter.updated_from) { where.push('updated_at >= ?'); values.push(filter.updated_from) }
+    if (filter.updated_before) { where.push('updated_at < ?'); values.push(filter.updated_before) }
     if (filter.query) {
       where.push('(instr(lower(title), lower(?)) > 0 OR instr(lower(task_id), lower(?)) > 0)')
       values.push(filter.query, filter.query)
@@ -157,13 +218,12 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
       if (separator < 1 || !Number.isInteger(lastWeight) || lastWeight < 1 || lastWeight > 6 || !lastUpdatedAt) {
         throw new OrchError('CURSOR_EXPIRED', '游标里的任务位置不合法，请重新加载', { task_id: cursor.last_id })
       }
-      where.push('(attention_weight < ? OR (attention_weight = ? AND (updated_at < ? OR (updated_at = ? AND task_id < ?))))')
+      where.push('(sort_weight < ? OR (sort_weight = ? AND (sort_at < ? OR (sort_at = ? AND task_id < ?))))')
       values.push(lastWeight, lastWeight, lastUpdatedAt, lastUpdatedAt, cursor.last_id)
     }
-    const rows = ctx.tx.all<TaskRow & { attention: Attention; attention_weight: number }>(
-      TASK_ATTENTION_CTE + ' SELECT * FROM task_attention'
-      + (where.length ? ' WHERE ' + where.join(' AND ') : '')
-      + ' ORDER BY attention_weight DESC, updated_at DESC, task_id DESC LIMIT ?',
+    const rows = ctx.tx.all<TaskRow & { sort_weight: number; sort_at: string }>(
+      TASK_ATTENTION_CTE + ' SELECT * FROM task_workspace WHERE ' + where.join(' AND ')
+      + ' ORDER BY sort_weight DESC, sort_at DESC, task_id DESC LIMIT ?',
       [...values, limit + 1],
     )
     const hasMore = rows.length > limit
@@ -171,7 +231,7 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
     const items = page.map((row) => taskSummary(row, now))
     const last = page[page.length - 1]
     const nextCursor = hasMore && last
-      ? encodeCursor(makeCursor('tasks', filter, `${last.attention_weight}\t${last.updated_at}`, last.task_id, ctx.as_of_seq, now))
+      ? encodeCursor(makeCursor('tasks', filter, `${last.sort_weight}\t${last.sort_at}`, last.task_id, ctx.as_of_seq, now))
       : null
     return { items, next_cursor: nextCursor, as_of_seq: ctx.as_of_seq }
   })
@@ -179,7 +239,7 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
 
 export function getTaskSummarySnapshot(db: Db, taskId: string, now = Date.now()): { item: TaskSummary; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
-    const row = ctx.tx.get<TaskRow>(TASK_SELECT + ' WHERE t.task_id = ?', [taskId])
+    const row = ctx.tx.get<TaskRow>(TASK_ATTENTION_CTE + ' SELECT * FROM task_workspace WHERE task_id = ?', [taskId])
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个任务', { task_id: taskId })
     return { item: taskSummary(row, now), as_of_seq: ctx.as_of_seq }
   })

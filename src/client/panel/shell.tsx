@@ -4,10 +4,13 @@ import { COLOR, FONT_PX } from './tokens.ts'
 import type { StreamStatus } from '../api/sse.ts'
 
 export const PANEL_ROUTES = [
+  { id: 'overview', label: '总览' },
   { id: 'tasks', label: '任务' },
   { id: 'decisions', label: '等你决定' },
   { id: 'effects', label: '待核实' },
   { id: 'workflows', label: '流程' },
+  { id: 'activity', label: '发生过的' },
+  { id: 'collaboration', label: '协作核验' },
   { id: 'memory', label: '记忆' },
   { id: 'settings', label: '设置' },
 ] as const
@@ -20,6 +23,7 @@ export type PanelShellProps = {
   protocolMismatch?: boolean
   snapshotStale?: boolean
   streamStatus?: StreamStatus
+  collaborationEnabled?: boolean
   children?: ReactNode
 }
 
@@ -66,7 +70,7 @@ export function PanelShell(props: PanelShellProps) {
     <aside aria-label="主导航" style={sidebarStyle}>
       <div style={brandStyle}>Orchestra</div>
       <nav aria-label="主菜单" style={{ display: 'grid', gap: 4 }}>
-        {PANEL_ROUTES.map((route) => <button
+        {PANEL_ROUTES.filter((route) => route.id !== 'collaboration' || props.collaborationEnabled).map((route) => <button
           key={route.id}
           type="button"
           aria-current={props.activeRoute === route.id ? 'page' : undefined}

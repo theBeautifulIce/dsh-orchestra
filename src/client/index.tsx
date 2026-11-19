@@ -42,8 +42,8 @@ export { contrastRatio, relativeLuminance, TEXT_PAIRS } from './panel/contrast.t
 export type { ApiClient, ApiResult, FetchLike } from './api/client.ts'
 export type { EventStreamOptions, Invalidation, StreamStatus } from './api/sse.ts'
 export type {
-  ArtifactView, AttestationView, DecisionView, EventView, EvidenceView, LedgerVerify, MemoryApprovalCard,
+  ArtifactContentMode, ArtifactContentView, ArtifactView, AttestationView, DecisionView, EventView, EvidenceView, LedgerVerify, MemoryApprovalCard,
   MemoryApprovalCardButton, MemoryApprovalCardItem, MemoryBatchStatus, MemoryBatchView, MemoryItemStatus,
-  MemoryItemView, NodeRunView, OperationRow, RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem,
+  MemoryItemView, NodeRunView, OperationRow, RunArtifact, RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem,
   WorkflowVersionView, WorkflowView,
 } from './api/types.ts'

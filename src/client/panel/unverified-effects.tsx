@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
+import type { ApiClient } from '../api/client.ts'
 import type { UnverifiedEffectView } from '../api/types.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
+import { EffectEvidenceReview } from './effect-evidence-review.tsx'
 
 export const VERIFY_BANNER = '签字只表示人接下了后果，不表示副作用已消失'
 const EFFECT_LABEL: Record<string, string> = { pure: '只读', compensable: '可补偿', irreversible: '不可逆' }
 const STATUS_LABEL: Record<string, string> = {
   running: '正在做', completed: '已完成', failed: '失败', blocked: '卡住了',
   waiting: '等待中', cancelled: '已取消', indeterminate_side_effect: '副作用情况待核实',
+  abandoned_unverified: '已停止跟踪，副作用待核实', failed_with_unverified: '未成功，副作用待核实',
 }
 
 // 当前读模型没有来源列的字段一律写「未知」，不用别的值顶替。
@@ -19,9 +22,10 @@ export type UnverifiedEffectsProps = {
   api: ResourcesApi
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
+  client?: ApiClient
 }
 
-export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot }: UnverifiedEffectsProps) {
+export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot, client }: UnverifiedEffectsProps) {
   const [items, setItems] = useState<UnverifiedEffectView[]>([])
   const [cursor, setCursor] = useState<string | undefined>()
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -80,12 +84,14 @@ export function UnverifiedEffects({ api, reloadVersion = 0, onSnapshot }: Unveri
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={refresh} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取待核实事项…</p>}
     {!loading && !failed && items.length === 0 && <div style={emptyStyle}>{COPY.emptyEffects}</div>}
-    {!failed && items.map((effect) => <EffectCard key={effect.node_run_id} effect={effect} developerView={developerView} />)}
+    {!failed && items.map((effect) => <EffectCard key={effect.node_run_id} effect={effect} developerView={developerView}>
+      {client && <EffectEvidenceReview api={api} client={client} nodeId={effect.node_run_id} onResolved={refresh} />}
+    </EffectCard>)}
     {nextCursor && !failed && <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>}
   </section>
 }
 
-function EffectCard({ effect, developerView }: { effect: UnverifiedEffectView; developerView: boolean }) {
+function EffectCard({ effect, developerView, children }: { effect: UnverifiedEffectView; developerView: boolean; children?: React.ReactNode }) {
   const level = EFFECT_LABEL[effect.side_effect_policy]
   const age = effect.age_seconds === null ? '时长未知' : `已等待 ${effect.age_seconds} 秒`
   return <article style={cardStyle}>
@@ -104,7 +110,8 @@ function EffectCard({ effect, developerView }: { effect: UnverifiedEffectView; d
       <dt>签认状态</dt><dd>{effect.resolved ? '已有处理记录' : '尚无处理记录'}</dd>
       {developerView && <><dt>节点运行 ID</dt><dd>{effect.node_run_id}</dd></>}
     </dl>
-    <table style={tableStyle}>
+    {children}
+    {developerView && <><table style={tableStyle}>
       <thead>
         <tr>
           <th scope="col">运行</th>
@@ -137,7 +144,7 @@ function EffectCard({ effect, developerView }: { effect: UnverifiedEffectView; d
         </tr>
       </tbody>
     </table>
-    <p style={mutedStyle}>动作摘要、停止时刻、最后执行阶段和已验证证据在当前读模型里没有来源列，列里显示「未知」。</p>
+    <p style={mutedStyle}>读模型未提供的字段显示「未知」。</p></>}
   </article>
 }
 

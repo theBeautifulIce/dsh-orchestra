@@ -1,4 +1,5 @@
 import { OrchError } from '../../core/errors.ts'
+import { MODEL_COMPLEXITIES, readModelUse, type ModelAssignment } from '../../executor/model-routing.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { withReadTx, type ReadCtx } from './read-tx.ts'
 
@@ -41,6 +42,7 @@ export type NodeRunView = {
   node_run_id: string
   run_id: string
   node_id: string
+  title?: string
   node_type: string
   attempt: number
   status: string
@@ -68,15 +70,17 @@ export type NodeRunView = {
   created_at: string
   updated_at: string
   active_decision_ids: string[]
+  model_assignment?: ModelAssignment & { state: 'selected' | 'confirmed' | 'rejected' }
 }
 
 type NodeRow = Record<string, unknown> & { node_run_id: string; status: string; run_id: string }
 
-function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], executionIds: string[]): NodeRunView {
+function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], executionIds: string[], model?: NodeRunView['model_assignment'], title?: string): NodeRunView {
   return {
     node_run_id: String(row.node_run_id),
     run_id: String(row.run_id),
     node_id: String(row.node_id ?? ''),
+    ...(title ? { title } : {}),
     node_type: String(row.node_type ?? ''),
     attempt: Number(row.attempt ?? 0),
     status: String(row.status),
@@ -106,7 +110,24 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     created_at: String(row.created_at ?? ''),
     updated_at: String(row.updated_at ?? ''),
     active_decision_ids: decisionIds,
+    ...(model ? { model_assignment: model } : {}),
   }
+}
+
+function modelAssignment(ctx: ReadCtx, row: NodeRow): NodeRunView['model_assignment'] {
+  const model = ctx.tx.get<{ payload: string }>(
+    "SELECT payload FROM node_run_events WHERE node_run_id = ? AND type IN ('executor.model_selected','executor.model_confirmed','executor.model_rejected','executor.model_used')"
+    + " AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.attempt') = ? AND json_extract(payload, '$.action_generation') = ? END"
+    + ' ORDER BY seq DESC LIMIT 1', [row.node_run_id, Number(row.attempt), Number(row.action_generation)],
+  )
+  if (!model) return undefined
+  const payload = JSON.parse(model.payload) as NonNullable<NodeRunView['model_assignment']>
+  if (!MODEL_COMPLEXITIES.includes(payload.complexity) || typeof payload.model_ref !== 'string' || typeof payload.reason !== 'string'
+    || !['selected', 'confirmed', 'rejected'].includes(payload.state)) return undefined
+  const usage = payload.state === 'confirmed' ? readModelUse(payload.usage) : undefined
+  const settingsRevision = payload.settings_revision
+  return { model_ref: payload.model_ref, complexity: payload.complexity, reason: payload.reason, state: payload.state,
+    ...(usage ? { usage } : {}), ...(Number.isSafeInteger(settingsRevision) && settingsRevision! > 0 ? { settings_revision: settingsRevision } : {}) }
 }
 
 function activeDecisions(ctx: ReadCtx, nodeRunId: string): string[] {
@@ -123,26 +144,40 @@ function nodeExecutionIds(ctx: ReadCtx, nodeRunId: string, attempt: number): str
   ).map((row) => row.execution_id)
 }
 
-function runSettling(ctx: ReadCtx, runId: string): boolean {
-  const row = ctx.tx.get<{ settling: number }>('SELECT settling FROM runs WHERE run_id = ?', [runId])
-  return Number(row?.settling ?? 0) === 1
+function runDisplay(ctx: ReadCtx, runId: string) {
+  const row = ctx.tx.get<{ settling: number; doc_json: string | null }>(
+    'SELECT r.settling, w.doc_json FROM runs r LEFT JOIN workflow_versions w'
+    + ' ON w.workflow_id = r.workflow_id AND w.version = r.workflow_version WHERE r.run_id = ?', [runId],
+  )
+  if (!row) throw new OrchError('NOT_FOUND', '没找到这次运行', { run_id: runId })
+  const titles = new Map<string, string>()
+  if (row.doc_json) {
+    // A legacy or damaged document cannot supply display labels for the execution facts.
+    try {
+      const doc = JSON.parse(row.doc_json) as { nodes?: { node_id?: string; title?: string }[] } | null
+      if (Array.isArray(doc?.nodes)) {
+        for (const node of doc.nodes) {
+          if (typeof node?.node_id === 'string' && typeof node.title === 'string') titles.set(node.node_id, node.title)
+        }
+      }
+    } catch { /* Keep the persisted node IDs as labels. */ }
+  }
+  return { settling: row.settling === 1, titles }
 }
 
 export function listNodes(db: Db, runId: string, limit = 100): { items: NodeRunView[]; as_of_seq: number } {
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
   return withReadTx(db, (ctx) => {
-    if (!ctx.tx.get('SELECT run_id FROM runs WHERE run_id = ?', [runId])) {
-      throw new OrchError('NOT_FOUND', '没找到这次运行', { run_id: runId })
-    }
+    const { settling, titles } = runDisplay(ctx, runId)
     const rows = ctx.tx.all<NodeRow>(
       'SELECT n.*, (SELECT a.attestation_id FROM attestations a WHERE a.node_run_id = n.node_run_id AND a.attempt = n.attempt '
       + 'ORDER BY a.created_at DESC, a.attestation_id DESC LIMIT 1) AS attestation_id '
       + 'FROM node_runs n WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit],
     )
-    const settling = runSettling(ctx, runId)
     const items = rows.map((row) => toNodeView(
       row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
+      modelAssignment(ctx, row), titles.get(String(row.node_id)),
     ))
     return { items, as_of_seq: ctx.as_of_seq }
   })
@@ -156,9 +191,11 @@ export function getNodeSnapshot(db: Db, nodeRunId: string): { item: NodeRunView;
       + 'FROM node_runs n WHERE n.node_run_id = ?', [nodeRunId],
     )
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个执行节点', { node_run_id: nodeRunId })
+    const { settling, titles } = runDisplay(ctx, row.run_id)
     return {
       item: toNodeView(
-        row, runSettling(ctx, row.run_id), activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
+        row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
+        modelAssignment(ctx, row), titles.get(String(row.node_id)),
       ),
       as_of_seq: ctx.as_of_seq,
     }

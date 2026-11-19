@@ -11,9 +11,14 @@ import { createRun, reserveTask } from './service/runs.ts'
 import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
 import { requireCapability } from './core/config.ts'
 import { startRun } from './service/commands/start-run.ts'
+import { setTaskArchive } from './service/commands/task-archive.ts'
+import { createTaskTriggerHost } from './service/task-triggers.ts'
+import { createTriggerDispatchPump, type ResolveTriggerNodeSpecs } from './service/task-trigger-dispatch.ts'
+export type { ResolveTriggerNodeSpecs, TriggerRunReady } from './service/task-trigger-dispatch.ts'
+export type { TaskTriggerCreate, TaskTriggerOccurrence, TaskTriggerView } from './core/task-trigger.ts'
 import { acknowledgeDecision, resolveDecision } from './service/commands/decisions.ts'
 import { requestHashOf, runIdempotentCommand } from './service/commands/idempotency.ts'
-import { resolveEffect } from './service/commands/effects.ts'
+import { inspectEffectEvidence, resolveEffect } from './service/commands/effects.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
@@ -23,10 +28,10 @@ import { wakeOnEvent } from './service/commands/wait.ts'
 import { propagateRunCancellation } from './service/commands/subworkflow.ts'
 import { resolveRecoveryUncertain } from './service/commands/recovery.ts'
 import { listRecoveryUncertain } from './service/queries/recovery.ts'
-import { listTaskSummaries, getTaskSummarySnapshot } from './service/queries/tasks.ts'
+import { listTaskSummaries, getTaskSummarySnapshot, getWorkspaceOverview } from './service/queries/tasks.ts'
 import { listRuns, getRun } from './service/queries/runs.ts'
 import { listNodes, getNodeSnapshot } from './service/queries/nodes.ts'
-import { getArtifactSnapshot } from './service/queries/artifacts.ts'
+import { getArtifactContent, getArtifactSnapshot, listRunArtifacts } from './service/queries/artifacts.ts'
 import { getAttestationSnapshot } from './service/queries/attestations.ts'
 import { getDecisionSnapshot, listDecisions } from './service/queries/decisions.ts'
 import { getEvidenceSnapshot } from './service/queries/evidence.ts'
@@ -34,7 +39,7 @@ import { verifyLedgerSnapshot } from './service/queries/verify_ledger.ts'
 import { getWorkflowSnapshot, getWorkflowVersionSnapshot, listWorkflowSummaries as listWorkflowQuery } from './service/queries/workflows.ts'
 import { listUnverifiedEffects } from './service/queries/effects.ts'
 import { listMemoryBatches } from './service/queries/memory-batches.ts'
-import { listEvents as listEventPage } from './service/queries/list_events.ts'
+import { listEvents as listEventPage, listEventHistory } from './service/queries/list_events.ts'
 import { getOperationSnapshot } from './service/queries/get_operation.ts'
 import { inTx } from './infra/db/tx.ts'
 import type { NodeCommands, ServerDeps } from './service/server.ts'
@@ -49,6 +54,43 @@ import {
   type RunNodeDeps, type RunNodeParams, type RunNodeResult,
 } from './executor/run-node.ts'
 import { bridgeHostAgentFactory } from './executor/bridge.ts'
+import { createDshExecutor, createDshPlanningCallback } from './executor/dsh-host.ts'
+import { createCollaborationHost, type CollaborationHost } from './service/collaboration.ts'
+import { callDshCollaboration } from './service/dsh-collaboration.ts'
+import { createModelRoutingSettingsHost } from './service/model-routing-settings.ts'
+export type { ModelRouting, ModelRoutingContext, ModelComplexity, ModelRecommendation, ModelProfile } from './executor/model-routing.ts'
+export { createDshExecutor, createDshPlanningCallback, type DshExecutionModel } from './executor/dsh-host.ts'
+export { ReadOnlyToolRunner, ToolRegistry } from './executor/tools.ts'
+
+/** Mount inside DSH's Cordis context with a host-authorized parent and model catalog. */
+export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrchestra>[0], 'executor'> & {
+  dsh: Parameters<typeof createDshExecutor>[0]
+  dshPlanner?: Omit<Parameters<typeof createDshPlanningCallback>[0], 'context'>
+  tools: Pick<RunNodeDeps, 'registry' | 'runner'>
+}) {
+  const { dsh, dshPlanner, tools, ...serviceOptions } = options
+  let collaboration: CollaborationHost | undefined
+  const host = createDshExecutor({ ...dsh, ...(serviceOptions.collaboration ? {
+    collaboration: (binding, input) => {
+      if (!collaboration) throw new OrchError('SERVICE_UNAVAILABLE', '核验服务尚未就绪')
+      return callDshCollaboration(collaboration, binding, input)
+    },
+  } : {}) })
+  try {
+    const service = await serveOrchestra({
+      ...serviceOptions,
+      ...(dshPlanner ? { planning: { propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }) } } : {}),
+      executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
+    })
+    collaboration = service.collaboration
+    return { ...service, close: async () => {
+      try { await service.close() } finally { await host.close() }
+    } }
+  } catch (error) {
+    await host.close()
+    throw error
+  }
+}
 import type { HostAgentFactory } from './executor/session.ts'
 import { ExecutionCancels } from './service/execution-cancels.ts'
 import {
@@ -58,6 +100,7 @@ import { loadConfig } from './core/config.ts'
 import { SystemClock } from './core/clock.ts'
 import { randomUUID } from 'node:crypto'
 import { createMemoryHost, type MemoryHostOptions } from './service/memory-host.ts'
+import { createTaskPlanningHost, resolveApprovedPlanNodeSpecs, type TaskPlanningOptions } from './service/task-planning.ts'
 export type { MemoryHostOptions, MemoryPluginWriter } from './service/memory-host.ts'
 
 export const name = 'dsh-orchestra'
@@ -65,6 +108,9 @@ export const version = '0.1.0'
 
 export { inspectMemoryRecovery, resolveMemoryRecovery } from './service/commands/memory-recovery.ts'
 export { createMemoryRuntime, type MemoryRuntimeOptions } from './service/commands/memory-runtime.ts'
+export { registerRunArtifact, type RegisterRunArtifact } from './service/artifact-store.ts'
+export { getTaskPlanRecommendation, type TaskPlanningOptions, type TaskPlanProposal } from './service/task-planning.ts'
+export { createCollaborationHost, type CollaborationBinding, type CollaborationHost } from './service/collaboration.ts'
 export type { MemoryRecoveryRequest, MemoryWriteEvidence } from './service/commands/memory-recovery.ts'
 export type { InspectMemoryWrite, MemoryWriteInspection } from './service/commands/memory-ports.ts'
 
@@ -72,6 +118,8 @@ export type OrchestraOptions = {
   dbFile: string
   secret: string
   phase: Phase
+  planning?: TaskPlanningOptions
+  collaboration?: boolean
   log?: Logger
   // 生产执行器：装配了就开 /v1/node-runs/run，没装配时该路由明确报未配置（审计 F-01）
   // agents 省略时由 bridge.spawn 兜底，生产路径不靠外部顺手塞一个宿主工厂。
@@ -198,10 +246,15 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       workflowVersion: b.workflowVersion,
       nodeIds: b.nodeIds,
       autonomy: b.autonomy,
+      triggerKind: b.triggerKind,
       escalations: b.escalations,
       operationId: b.operationId,
       now: b.now,
     }),
+    setTaskArchive: (body, actor, now) => {
+      requireCapability(opts.phase, 'panel')
+      return setTaskArchive(db, body, actor, now)
+    },
     acknowledgeDecision: (b) => inTx(db, (tx) => acknowledgeDecision(tx, b)),
     resolveDecision: ({ operationId, now, ...b }) => inTx(db, (tx) => {
       const apply = () => {
@@ -397,11 +450,12 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 // 供宿主接进 DSH：返回 endpoint 与关闭句柄
 export async function serveOrchestra(opts: OrchestraOptions & {
   memory?: MemoryHostOptions
+  resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs
   asOfSeq: ServerDeps['asOfSeq']
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
-}): Promise<{ orchestra: Orchestra; endpoint: string; close: () => Promise<void> }> {
+}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; close: () => Promise<void> }> {
   const log = opts.log ?? nullLogger
   // 并发闸在生产装配这一层建：配置里的 execution.concurrency 与 human_slots 在这里真正生效。
   // 配置读不到时退回默认定值（并发 3、人工名额 1），不让一个可选配置文件挡住服务启动。
@@ -409,19 +463,49 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   // 服务启动顺序固定：文件锁 → epoch → 打开服务库 → 迁移 → 起服务（第四轮审计 M3）
   const service = await openServiceOrchestra({ ...opts, scheduler })
   const orchestra = service.orchestra
+  const collaboration = opts.collaboration ? createCollaborationHost(orchestra.db, opts.secret) : undefined
+  const modelSettings = opts.executor?.modelRouting && createModelRoutingSettingsHost(orchestra.db, opts.executor.modelRouting.profiles)
+  const taskTriggers = opts.phase === 'S5' ? createTaskTriggerHost(orchestra.db, orchestra.catalog) : undefined
+  const triggerResolver = taskTriggers ? opts.resolveTriggerNodeSpecs : undefined
+  const registry = opts.executor?.registry
+  const planResolver = registry && (opts.phase === 'S5' || opts.phase === 'S6')
+    ? (run: Parameters<typeof resolveApprovedPlanNodeSpecs>[3]) => resolveApprovedPlanNodeSpecs(orchestra.db, orchestra.catalog, registry, run)
+    : undefined
+  const triggerDispatch = (triggerResolver || planResolver) && createTriggerDispatchPump(
+    orchestra.db,
+    triggerResolver,
+    (run, nodes) => orchestra.commands.dispatch({ runId: run.run_id, nodes, now: new Date().toISOString() }),
+    (error) => log.error('运行自动派发失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }),
+    planResolver,
+  )
+  const tickTaskTriggers = () => {
+    try {
+      taskTriggers?.tick(new Date().toISOString(), (error) => {
+        log.error('任务触发器推进失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' })
+      })
+      triggerDispatch?.tick()
+    } catch (error) {
+      log.error('任务触发器读扫描失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' })
+    }
+  }
   let memory: ReturnType<typeof createMemoryHost> | undefined
   // 维护扫描：租约过期、围栏宽限到点，2 秒一轮；失败只记日志，下一轮继续
   const sweepTimer = setInterval(() => {
     try {
       sweepNow(orchestra.runtime, new Date().toISOString())
       memory?.resume()
+      collaboration?.sweep(new Date().toISOString())
     } catch (err) {
       log.error('维护扫描失败', { err: err instanceof Error ? err.message : String(err) })
     }
+    tickTaskTriggers()
   }, 2000)
   sweepTimer.unref?.()
   let server: Awaited<ReturnType<typeof startServer>>
   try {
+    if (opts.planning) requireCapability(opts.phase, 'panel')
+    if (collaboration) requireCapability(opts.phase, 'panel')
+    const planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, opts.planning)
     if (opts.memory) {
       requireCapability(opts.phase, 'memory')
       memory = createMemoryHost(orchestra.db, opts.secret, opts.memory, (error) => {
@@ -437,13 +521,17 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       listEvents: opts.listEvents,
       queries: {
         listEvents: (fromSeq, limit) => listEventPage(orchestra.db, { fromSeq, limit }),
+        listEventHistory: (params) => listEventHistory(orchestra.db, params),
         listTaskSummaries: (params) => listTaskSummaries(orchestra.db, params),
         getTaskSummary: (taskId, now) => getTaskSummarySnapshot(orchestra.db, taskId, now),
+        getWorkspaceOverview: () => getWorkspaceOverview(orchestra.db),
         listRuns: (query) => listRuns(orchestra.db, query),
         getRun: (runId) => getRun(orchestra.db, runId),
         listNodes: (runId, limit) => listNodes(orchestra.db, runId, limit),
         getNode: (nodeRunId) => getNodeSnapshot(orchestra.db, nodeRunId),
         getArtifact: (artifactId, now) => getArtifactSnapshot(orchestra.db, artifactId, now),
+        getArtifactContent: (runId, artifactId, mode, now) => getArtifactContent(orchestra.db, runId, artifactId, mode, now),
+        listRunArtifacts: (runId, now) => listRunArtifacts(orchestra.db, runId, now),
         getAttestation: (attestationId) => getAttestationSnapshot(orchestra.db, attestationId),
         listDecisions: (params) => listDecisions(orchestra.db, params),
         getDecision: (decisionId) => getDecisionSnapshot(orchestra.db, decisionId),
@@ -454,6 +542,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getWorkflowVersion: (workflowId, version) => getWorkflowVersionSnapshot(orchestra.db, workflowId, version),
         getOperation: (operationId, now) => getOperationSnapshot(orchestra.db, operationId, now),
         listUnverifiedEffects: (params) => listUnverifiedEffects(orchestra.db, params),
+        inspectEffectEvidence: (nodeRunId) => inspectEffectEvidence(orchestra.db, opts.secret, nodeRunId),
         listMemoryBatches: (params) => listMemoryBatches(orchestra.db, { ...params, recoveryEnabled: memory !== undefined }),
       },
       appendLedgerEvent: opts.appendLedgerEvent,
@@ -462,9 +551,14 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         resolveDecision: (request) => memory?.resolveApproval(request) ?? orchestra.commands.resolveDecision(request),
       },
       memory,
+      planning,
+      collaboration,
+      modelSettings,
+      taskTriggers,
       log,
     })
     memory?.resume()
+    tickTaskTriggers()
   } catch (err) {
     clearInterval(sweepTimer)
     await service.release()
@@ -473,14 +567,17 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   return {
     orchestra,
     endpoint: server.endpoint,
+    collaboration,
     close: async () => {
       clearInterval(sweepTimer)
+      const closingTriggerDispatch = triggerDispatch?.close()
       try {
         await server.close()
       } finally {
         // 先停入口，再把在跑与排队的任务收干净，最后才释放服务锁。
         await memory?.close()
         await scheduler.close({ drain: true })
+        await closingTriggerDispatch
         await service.release()
       }
     },

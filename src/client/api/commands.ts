@@ -1,4 +1,19 @@
-import { ApiError, unwrap, type FetchLike } from './client.ts'
+import { ApiError, unwrap, type ApiClient, type FetchLike } from './client.ts'
+import type { OperationRow } from './types.ts'
+
+/** For inbox-backed commands, look up the original operation if the response was lost. */
+export async function postWithOperationReceipt(client: ApiClient, path: string, kind: string, body: { operation_id: string } & Record<string, unknown>): Promise<void> {
+  try {
+    await client.post(path, body)
+  } catch (error) {
+    if (!(error instanceof ApiError) || !['OPERATION_TIMEOUT', 'OPERATION_OUTCOME_UNKNOWN', 'SERVICE_UNAVAILABLE'].includes(error.code)) throw error
+    try {
+      const { data } = await client.get<OperationRow>('/v1/operations/get', { operation_id: body.operation_id })
+      if (data.status === 'applied' && data.kind === kind) return
+    } catch { /* Missing or unreachable receipt leaves the outcome unknown. */ }
+    throw new ApiError('OPERATION_OUTCOME_UNKNOWN', '操作结果暂不可确认，请刷新查看回执', true, { operation_id: body.operation_id })
+  }
+}
 
 export type SubmitResult<T = unknown, Receipt = unknown> =
   | { replayed: false; receipt: T }

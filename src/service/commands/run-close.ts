@@ -72,6 +72,11 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
     [terminalStatus, now, now, runId],
   )
   if (res.changes !== 1) return null
+  tx.run(
+    'UPDATE tasks SET status = ?, display_status = NULL, updated_at = ?, revision = revision + 1 '
+    + 'WHERE current_run_id = ? AND EXISTS (SELECT 1 FROM task_triggers t WHERE t.task_id = tasks.task_id)',
+    [terminalStatus, now, runId],
+  )
   // cancelled 只说明“按要求停了”，不说明副作用都已核实：
   // 把失败与未核实节点一并写进终态事件，调用方不必再去翻节点账本才能发现风险。
   appendEvent(tx, {

@@ -1,15 +1,22 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
-import type { ResourcesApi } from '../api/resources.ts'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import type { ListTasksParams, ResourcesApi } from '../api/resources.ts'
 import type { TaskSummary } from '../api/types.ts'
+import { TASK_LANES, type TaskLane } from '../../core/task-workspace.ts'
+import { TaskFlowView } from './task-flow-view.tsx'
+import { TaskPlanForm } from './task-plan-form.tsx'
+import { TaskStartForm } from './task-start-form.tsx'
+import type { TaskCommands } from '../api/task-commands.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
+import { TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
 
 const ATTENTION_LABEL: Record<string, string> = {
   decision: '等你决定', unverified: '待核实', failed: '运行未成功', orphaned: '等待接手', running: '进行中', none: '无待处理事项',
 }
 const STATUS_LABEL: Record<string, string> = {
   reserved: '已接收', queued: '排队中', running: '进行中', waiting: '等待中', succeeded: '已完成', failed: '未成功', cancelled: '已取消',
+  paused: '已暂停', settling: '正在收尾', orphaned: '等待接手',
 }
 const EFFECT_LABEL: Record<string, string> = { pure: '只读步骤', compensable: '可能需要补偿', irreversible: '涉及不可逆操作' }
 
@@ -26,23 +33,57 @@ export function unverifiedStatusView(status: string): { label: string; tone: str
 
 export type TaskListScreenProps = {
   api: ResourcesApi
-  onSelectTask: (taskId: string) => void
+  onSelectTask: (taskId: string, trigger: HTMLButtonElement, runId?: string) => void
+  selectedTaskId?: string | null
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
+  commands?: TaskCommands
+  triggerManager?: ReactNode
 }
 
 /** 任务状态文案与色板：display_status 优先，未验证终态走独立文案。 */
-function statusView(task: TaskSummary): { label: string | undefined; tone: string | undefined } {
-  const key = UNVERIFIED_STATUS[task.status] ? task.status : task.display_status
-  const unverified = UNVERIFIED_STATUS[key]
+export function taskStatusView(status: string, displayStatus = status): { label: string | undefined; tone: string | undefined } {
+  const unverified = UNVERIFIED_STATUS[status] ?? UNVERIFIED_STATUS[displayStatus]
   if (unverified) return { label: unverified.label, tone: unverified.tone }
-  if (task.display_status !== task.status) return { label: task.display_status, tone: undefined }
-  return { label: STATUS_LABEL[task.status], tone: undefined }
+  return { label: STATUS_LABEL[displayStatus] ?? STATUS_LABEL[status], tone: undefined }
 }
 
-export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapshot }: TaskListScreenProps) {
+export function taskCardStatus(task: TaskSummary) {
+  if (task.lane === 'upcoming' && task.trigger_enabled === true) {
+    return { label: task.trigger_kind === 'scheduled' ? '已排期' : '等待事件', tone: COLOR.link }
+  }
+  return taskStatusView(task.status, task.display_status)
+}
+
+const VIEWS = [{ id: 'board', label: '看板' }, { id: 'flow', label: '流程' }, { id: 'list', label: '列表' }] as const
+const ORIGINS = { manual: '人工', scheduled: '定时', event: '事件触发', continuous: '持续' } as const
+const AUTONOMY = { autonomous: '自主执行', assisted: '协助执行', supervised: '人工监督' } as const
+const ABSOLUTE_STATUSES = ['reserved', 'queued', 'running', 'waiting', 'paused', 'succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'cancelled']
+
+export const taskOriginLabel = ({ trigger_kind }: { trigger_kind?: TaskSummary['trigger_kind'] }) => trigger_kind ? ORIGINS[trigger_kind] : '来源未记录'
+export const taskAutonomyLabel = (task: TaskSummary) => AUTONOMY[task.autonomy] ?? '自治档位未知'
+
+function taskColumn(task: TaskSummary): TaskLane {
+  if (task.lane) return task.lane
+  if (task.open_decision_count > 0 || task.unverified_count > 0
+    || ['decision', 'unverified', 'failed', 'orphaned'].includes(task.attention)
+    || ['paused', 'orphaned', 'failed', 'failed_with_unverified'].includes(task.status)) return 'attention'
+  if (['succeeded', 'succeeded_with_unverified', 'cancelled'].includes(task.status)) return 'finished'
+  if (['reserved', 'queued'].includes(task.status)) return 'upcoming'
+  if (task.attention === 'running' || ['running', 'settling', 'waiting'].includes(task.status)) return 'running'
+  return 'upcoming'
+}
+
+export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
-  const [query, setQuery] = useState('')
+  const [view, setView] = useState<(typeof VIEWS)[number]['id']>('board')
+  const [filter, setFilter] = useState<Omit<ListTasksParams, 'cursor' | 'limit'>>({})
+  const [status, setStatus] = useState('')
+  const [period, setPeriod] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [dateInvalid, setDateInvalid] = useState(false)
+  const [startOpen, setStartOpen] = useState(false)
   const [cursor, setCursor] = useState<string | undefined>()
   const [items, setItems] = useState<TaskSummary[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -54,7 +95,6 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
   useEffect(() => {
     if (lastReloadVersion.current === reloadVersion) return
     lastReloadVersion.current = reloadVersion
-    setItems([])
     setCursor(undefined)
     setNextCursor(null)
     setReload((value) => value + 1)
@@ -64,7 +104,7 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
     let current = true
     setLoading(true)
     setError(false)
-    void api.listTasks({ limit: 50, cursor, query: query || undefined }).then((result) => {
+    void api.listTasks({ limit: 50, cursor, ...filter }).then((result) => {
       if (!current) return
       setItems((previous) => cursor ? mergeByTaskId(previous, result.data.items) : result.data.items)
       setNextCursor(result.data.next_cursor)
@@ -76,14 +116,26 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [api, cursor, query, reload, onSnapshot])
+  }, [api, cursor, filter, reload, onSnapshot])
+
+  function updateFilter(next: Partial<ListTasksParams>) {
+    setCursor(undefined)
+    setNextCursor(null)
+    setItems([])
+    setLoading(true)
+    setFilter((current) => ({ ...current, ...next }))
+  }
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    setCursor(undefined)
-    const nextQuery = search.trim()
-    if (nextQuery === query) setReload((n) => n + 1)
-    setQuery(nextQuery)
+    updateFilter({ query: search.trim() || undefined })
+  }
+
+  function changePeriod(value: string, from = dateFrom, to = dateTo) {
+    setPeriod(value)
+    const invalid = value === 'custom' && Boolean(from && to && from > to)
+    setDateInvalid(invalid)
+    if (!invalid) updateFilter(dateBounds(value, from, to))
   }
 
   function refresh() {
@@ -91,24 +143,60 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
     setReload((n) => n + 1)
   }
 
-  const heading = query ? `“${query}”的任务` : '全部任务'
-  return <section aria-labelledby="tasks-title" style={{ display: 'grid', gap: 20 }}>
-    <header style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'end', justifyContent: 'space-between', gap: 16 }}>
+  const grouped: Record<TaskLane, TaskSummary[]> = { upcoming: [], running: [], attention: [], finished: [] }
+  for (const task of items) grouped[taskColumn(task)].push(task)
+  return <section className="task-list" aria-labelledby="tasks-title">
+    <style>{TASK_WORKSPACE_CSS}</style>
+    <header className="task-page-header">
       <div>
-        <p style={kickerStyle}>工作区</p>
-        <h1 id="tasks-title" style={titleStyle}>任务</h1>
-        <p style={mutedStyle}>查看每项工作的进展、待处理事项和最近一次运行。</p>
+      <h1 id="tasks-title" style={titleStyle}>{filter.archived ? '归档箱' : '任务'}</h1>
+      <p style={mutedStyle}>{filter.archived ? '归档任务仍可查看运行记录、结果与证据，也可以取回。' : '点开任务，在右侧查看步骤、结果和证据。'}</p>
       </div>
-      <form onSubmit={submitSearch} style={{ display: 'flex', gap: 8 }} role="search">
+      {!filter.archived && <div className="task-page-actions">
+        {commands && <button type="button" aria-expanded={startOpen} onClick={() => setStartOpen(!startOpen)} style={buttonStyle}>从流程新建任务</button>}
+        {triggerManager}
+      </div>}
+    </header>
+    {!filter.archived && commands && startOpen && <TaskStartForm api={api} commands={commands} onCreated={refresh} />}
+    {!filter.archived && commands && <div className="task-plan-entry"><TaskPlanForm api={api} commands={commands} onStarted={refresh} /></div>}
+    <div className="task-toolbar">
+      <label>状态 <select value={status} onChange={(event) => {
+        const value = event.target.value
+        setStatus(value)
+        updateFilter({ lane: value.startsWith('lane:') ? value.slice(5) as TaskLane : undefined,
+          status: value && !value.startsWith('lane:') ? value : undefined })
+      }}>
+        <option value="">全部状态</option>
+        <optgroup label="看板分组">{TASK_LANES.map(({ id, label }) => <option key={id} value={`lane:${id}`}>{label}</option>)}</optgroup>
+        <optgroup label="执行状态">{ABSOLUTE_STATUSES.map((id) => <option key={id} value={id}>{taskStatusView(id).label}</option>)}</optgroup>
+      </select></label>
+      <label>更新时间 <select value={period} onChange={(event) => changePeriod(event.target.value)}>
+        <option value="">全部时间</option><option value="today">今天</option><option value="7">近 7 天</option>
+        <option value="30">近 30 天</option><option value="custom">自选时间段</option>
+      </select></label>
+      {period === 'custom' && <div className="task-date-range">
+        <label>从 <input type="date" aria-label="开始日期" value={dateFrom} onChange={(event) => { setDateFrom(event.target.value); changePeriod('custom', event.target.value, dateTo) }} /></label>
+        <label>至 <input type="date" aria-label="结束日期" value={dateTo} onChange={(event) => { setDateTo(event.target.value); changePeriod('custom', dateFrom, event.target.value) }} /></label>
+      </div>}
+      <button type="button" className="task-archive-toggle" style={quietButtonStyle}
+        onClick={() => updateFilter({ archived: filter.archived ? undefined : '1' })}>{filter.archived ? '返回任务' : '归档箱'}</button>
+    </div>
+    {dateInvalid && <p role="alert" style={mutedStyle}>开始日期应早于或等于结束日期。</p>}
+    <div className="task-toolbar task-viewbar">
+      <label>类型 <select value={filter.trigger_kind ?? ''} onChange={(event) => updateFilter({ trigger_kind: (event.target.value || undefined) as ListTasksParams['trigger_kind'] })}>
+        <option value="">全部类型</option>{Object.entries(ORIGINS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+        <option value="unknown">来源未记录</option>
+      </select></label>
+      <span>{filter.query ? `“${filter.query}”` : '已加载'} · {items.length} 项任务</span>
+      <form onSubmit={submitSearch} className="task-search" role="search">
         <label style={visuallyHidden} htmlFor="task-search">搜索任务</label>
         <input id="task-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索任务名称" style={searchInputStyle} />
         <button type="submit" style={buttonStyle}>搜索</button>
       </form>
-    </header>
-
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-      <h2 style={{ fontSize: 16, margin: 0 }}>{heading}</h2>
       <button type="button" onClick={refresh} disabled={loading} style={quietButtonStyle}>{loading ? '正在更新…' : '刷新'}</button>
+      {!filter.archived && <div className="task-view-group" role="group" aria-label="任务视图">
+        {VIEWS.map(({ id, label }) => <button type="button" key={id} aria-pressed={view === id} onClick={() => setView(id)}>{label}</button>)}
+      </div>}
     </div>
 
     {error && <div role="alert" style={errorStyle}>
@@ -116,14 +204,49 @@ export function TaskListScreen({ api, onSelectTask, reloadVersion = 0, onSnapsho
       <button type="button" onClick={refresh} style={quietButtonStyle}>{COPY.retry}</button>
     </div>}
     {loading && <p role="status" style={mutedStyle}>正在读取任务…</p>}
-    {!loading && !error && items.length === 0 && <div style={emptyStyle}>{COPY.emptyTasks}</div>}
-    {!error && items.length > 0 && <div style={{ display: 'grid', gap: 10 }}>
-      {items.map((task) => <TaskRow key={task.task_id} task={task} onSelect={() => onSelectTask(task.task_id)} />)}
-    </div>}
+    {!loading && !error && items.length === 0 && <div style={emptyStyle}>{filter.archived ? '归档箱没有符合条件的任务。' : Object.values(filter).some(Boolean) ? '没有符合筛选条件的任务。' : COPY.emptyTasks}</div>}
+    {(!loading || items.length > 0) && !filter.archived && view === 'board' && <div className="task-board-scroll"><div className="task-board">
+      {TASK_LANES.map(({ id, label }) => <section key={id} className="task-column" data-task-column={id} aria-labelledby={`tasks-${id}`}>
+        <h2 id={`tasks-${id}`} className="task-column-title">{label}<span>{grouped[id].length}</span></h2>
+        {grouped[id].length === 0 && <p className="task-column-empty">暂无任务</p>}
+        {grouped[id].map((task) => <TaskCard key={task.task_id} task={task} selected={task.task_id === selectedTaskId} compact={Boolean(selectedTaskId)}
+          onSelect={(trigger) => onSelectTask(task.task_id, trigger)} />)}
+      </section>)}
+    </div></div>}
+    {items.length > 0 && (filter.archived || view === 'list') && <TaskTable tasks={items} archived={Boolean(filter.archived)} selectedTaskId={selectedTaskId} onSelect={onSelectTask} />}
+    {items.length > 0 && !filter.archived && view === 'flow' && <TaskFlowView api={api} tasks={items} onOpenTask={onSelectTask} reloadVersion={reloadVersion + reload} />}
     {nextCursor && !error && <div style={{ display: 'flex', justifyContent: 'center' }}>
       <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>
     </div>}
   </section>
+}
+
+function dateBounds(period: string, from: string, to: string): Pick<ListTasksParams, 'updated_from' | 'updated_before'> {
+  if (period === 'custom') {
+    const end = to ? new Date(`${to}T00:00:00`) : null
+    if (end) end.setDate(end.getDate() + 1)
+    return { updated_from: from ? new Date(`${from}T00:00:00`).toISOString() : undefined, updated_before: end?.toISOString() }
+  }
+  if (!period) return { updated_from: undefined, updated_before: undefined }
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  start.setDate(start.getDate() - (period === 'today' ? 0 : Number(period) - 1))
+  return { updated_from: start.toISOString(), updated_before: end.toISOString() }
+}
+
+function TaskTable({ tasks, archived, selectedTaskId, onSelect }: { tasks: TaskSummary[]; archived: boolean; selectedTaskId?: string | null; onSelect: TaskListScreenProps['onSelectTask'] }) {
+  return <div className="task-table-scroll"><table className="task-table" aria-label={archived ? '归档任务' : '任务列表'}>
+    <thead><tr><th scope="col">任务</th><th scope="col">状态</th><th scope="col">关注事项</th><th scope="col">运行</th><th scope="col">{archived ? '归档时间' : '更新时间'}</th></tr></thead>
+    <tbody>{tasks.map((task) => <tr key={task.task_id} data-selected={selectedTaskId === task.task_id || undefined}>
+      <td><button className="task-link" type="button" onClick={(event) => onSelect(task.task_id, event.currentTarget)}>{task.title || '未命名任务'}</button>
+        <small>{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</small></td>
+      <td>{taskCardStatus(task).label ?? <UnknownState value={task.status} />}</td>
+      <td>{task.attention_reason ?? '—'}</td><td>{task.run_count} 次</td>
+      <td>{archived && task.archived_at ? new Date(task.archived_at).toLocaleString() : formatDate(task.updated_at)}</td>
+    </tr>)}</tbody>
+  </table></div>
 }
 
 /**
@@ -148,39 +271,50 @@ function mergeByTaskId(previous: TaskSummary[], incoming: TaskSummary[]): TaskSu
   return merged
 }
 
-function TaskRow({ task, onSelect }: { task: TaskSummary; onSelect: () => void }) {
+function TaskCard({ task, selected, compact, onSelect }: {
+  task: TaskSummary; selected: boolean; compact: boolean; onSelect: (trigger: HTMLButtonElement) => void
+}) {
   const attention = ATTENTION_LABEL[task.attention]
-  const { label: status, tone } = statusView(task)
+  const { label: status, tone } = taskCardStatus(task)
   const hasUnverified = task.unverified_count > 0
-  return <article style={rowStyle}>
-    <button type="button" onClick={onSelect} title={task.title} style={taskTitleStyle}>{task.title || '未命名任务'}</button>
-    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 16px', color: COLOR.inkMuted, fontSize: FONT_PX.helper }}>
-      <span style={tone ? { color: tone } : undefined}>{status ?? <UnknownState value={task.status} />}</span>
-      {tone && hasUnverified && <span style={{ color: tone, border: `1px solid ${tone}`, borderRadius: 999, padding: '0 6px' }}>{task.unverified_count} {COPY.unverifiedBadge}</span>}
-      <span>{attention ? <strong style={{ color: task.attention === 'none' ? COLOR.inkMuted : COLOR.warning }}>{attention}</strong> : <UnknownState value={task.attention} />}</span>
-      <span>{task.run_count} 次运行</span>
-      {task.max_side_effect_level && <strong style={{ color: task.max_side_effect_level === 'irreversible' ? COLOR.danger : COLOR.inkMuted }}>
-        {EFFECT_LABEL[task.max_side_effect_level] ?? <UnknownState value={task.max_side_effect_level} />}
-      </strong>}
-      {task.open_decision_count > 0 && <span>{task.open_decision_count} 项{COPY.awaitingDecision}</span>}
-      {hasUnverified && !tone && <span>{task.unverified_count} 项待核实</span>}
-      {hasUnverified && <span style={{ color: COLOR.warning }}>{COPY.pendingIrreversible}</span>}
-      <time dateTime={task.updated_at}>{formatDate(task.updated_at)}</time>
+  const actionable = task.open_decision_count > 0 || hasUnverified || taskColumn(task) === 'attention'
+  return <article className="task-card" data-selected={selected || undefined}>
+    <div className="task-card-status">
+      <span style={tone ? { color: tone } : undefined}>{status ?? <UnknownState value={task.display_status || task.status} />}</span>
+      {task.workflow_version !== null && <span>v{task.workflow_version}</span>}
     </div>
-    {task.attention_reason && <p style={{ margin: '8px 0 0', fontSize: FONT_PX.body }}>{task.attention_reason}</p>}
+    <h3 className="task-card-title"><button type="button" onClick={(event) => onSelect(event.currentTarget)} title={task.title} style={compact ? compactTitleStyle : taskTitleStyle}
+      aria-expanded={selected} aria-controls={selected ? 'task-inspector' : undefined}>{task.title || '未命名任务'}</button></h3>
+    <p className="task-card-type">{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</p>
+    {task.attention_reason && <p className="task-card-reason">{task.attention_reason}</p>}
+    {actionable && <div className="task-card-attention">
+      {task.open_decision_count > 0 && <strong>{task.open_decision_count} 项{COPY.awaitingDecision}</strong>}
+      {hasUnverified && <strong><span style={{ color: tone }}>{task.unverified_count} {tone ? COPY.unverifiedBadge : '项待核实'}</span></strong>}
+      {!task.open_decision_count && !hasUnverified && attention && <strong>{attention}</strong>}
+      {hasUnverified && <span>{COPY.pendingIrreversible}</span>}
+    </div>}
+    <div className="task-card-meta">
+      <span>{task.run_count} 次运行</span>
+      {task.max_side_effect_level && task.max_side_effect_level !== 'pure' && <span style={{ color: task.max_side_effect_level === 'irreversible' ? COLOR.danger : COLOR.inkMuted }}>
+        {EFFECT_LABEL[task.max_side_effect_level] ?? <UnknownState value={task.max_side_effect_level} />}
+      </span>}
+      <time dateTime={task.updated_at} title={formatDate(task.updated_at)}>{formatDate(task.updated_at)}</time>
+    </div>
   </article>
 }
 
 function formatDate(value: string): string {
   const date = new Date(value)
-  return Number.isNaN(date.valueOf()) ? '更新时间未知' : `更新于 ${date.toLocaleString()}`
+  return Number.isNaN(date.valueOf()) ? '更新时间未知' : `更新于 ${date.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })} ${date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`
 }
 
-const kickerStyle = { margin: '0 0 5px', color: COLOR.inkMuted, fontSize: FONT_PX.helper, letterSpacing: '.04em' } as const
 const titleStyle = { margin: 0, fontSize: FONT_PX.title, lineHeight: 1.3 } as const
 const mutedStyle = { margin: '6px 0 0', color: COLOR.inkMuted, fontSize: FONT_PX.body } as const
-const rowStyle = { minWidth: 0, border: `1px solid ${COLOR.line}`, borderRadius: 9, padding: '16px 18px', background: COLOR.surface } as const
-const taskTitleStyle = { display: 'block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, margin: '0 0 10px', padding: 0, border: 0, background: 'transparent', color: COLOR.link, font: `600 16px system-ui, sans-serif`, textAlign: 'left' as const, cursor: 'pointer' }
+const taskTitleStyle = { display: 'block', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const,
+  padding: 0, border: 0, background: 'transparent', color: COLOR.ink, fontSize: FONT_PX.body, fontWeight: 650,
+  lineHeight: 1.5, textAlign: 'left' as const, cursor: 'pointer' }
+const compactTitleStyle = { ...taskTitleStyle, display: '-webkit-box', whiteSpace: 'normal' as const,
+  WebkitBoxOrient: 'vertical' as const, WebkitLineClamp: 2 }
 const searchInputStyle = { minWidth: 0, width: 240, height: 38, padding: '0 11px', border: `1px solid ${COLOR.line}`, borderRadius: 7, color: COLOR.ink, fontSize: FONT_PX.body }
 const buttonStyle = { minHeight: 38, padding: '0 14px', border: 0, borderRadius: 7, background: COLOR.ink, color: '#ffffff', fontSize: FONT_PX.menu, cursor: 'pointer' } as const
 const quietButtonStyle = { minHeight: 36, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' } as const

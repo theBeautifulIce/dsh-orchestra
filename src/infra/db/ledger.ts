@@ -78,7 +78,7 @@ export function appendNodeRunEvent(tx: Tx, secret: string, nodeRunIdValue: strin
   return { seq, hash }
 }
 
-export function readChain(tx: Tx, nodeRunIdValue: string): ChainRow[] {
+export function readChain(tx: Pick<Tx, 'all'>, nodeRunIdValue: string): ChainRow[] {
   return tx.all<ChainRow>('SELECT node_run_id, seq, type, prev_hash, hash, payload FROM node_run_events WHERE node_run_id = ? ORDER BY seq ASC', [nodeRunIdValue])
 }
 

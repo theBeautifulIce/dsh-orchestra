@@ -2,14 +2,18 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { OrchError, failEnvelope, okEnvelope, toOrchError } from '../core/errors.ts'
 import { sha256Hex } from '../core/canonical.ts'
+import { TASK_LANES, TASK_ORIGINS, type TaskLane, type TaskOrigin } from '../core/task-workspace.ts'
+import type { SetTaskArchive } from './commands/task-archive.ts'
+import { taskTriggerCreateSchema, taskTriggerEnabledSchema, taskTriggerEventSchema, type TaskTriggerHost } from './task-triggers.ts'
 import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
-import type { ListTaskParams, TaskSummary } from './queries/tasks.ts'
+import type { ListTaskParams, TaskSummary, WorkspaceOverview } from './queries/tasks.ts'
+import type { listEventHistory } from './queries/list_events.ts'
 import type { RunSummary } from './queries/runs.ts'
 import type { NodeRunView } from './queries/nodes.ts'
-import type { ArtifactView } from './queries/artifacts.ts'
+import type { ArtifactView, RunArtifact, getArtifactContent } from './queries/artifacts.ts'
 import type { AttestationView } from './queries/attestations.ts'
 import type { DecisionView, ListDecisionParams } from './queries/decisions.ts'
 import type { EvidenceView } from './queries/evidence.ts'
@@ -23,7 +27,7 @@ import {
   acknowledgeDecisionSchema, cancelRunSchema, cancelSchema, compensateSettleSchema, compensateStartSchema, confirmStartSchema, createRunSchema, dispatchSchema, effectResolveSchema,
   ledgerEventSchema, leaseSchema, memoryInspectSchema, memoryRecoverySchema, memoryStartSchema, parseBody, recoveryResolveSchema,
   renewSchema, reportSchema, resolveDecisionSchema, runNodeSchema, startRunSchema, waitEventSchema, workflowLoadSchema,
-  taskReserveSchema, workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
+  taskReserveSchema, taskArchiveSchema, workflowCreateCommandSchema, workflowOpenDraftCommandSchema, workflowUpdateCommandSchema, workflowPublishCommandSchema,
 } from './schemas.ts'
 import type { ApplyResult } from '../core/report.ts'
 import type { CancelOutcome } from './commands/cancel.ts'
@@ -34,9 +38,12 @@ import type { LoadWorkflowResult } from './workflows.ts'
 import type { CreateRunResult } from './runs.ts'
 import type { StartRunResult } from './commands/start-run.ts'
 import type { acknowledgeDecision, Resolution } from './commands/decisions.ts'
-import type { EffectResolutionResult, EvidenceSource, ResolutionBasis } from './commands/effects.ts'
+import type { inspectEffectEvidence, EffectResolutionResult, EvidenceSource, ResolutionBasis } from './commands/effects.ts'
 import type { Actor } from './decision/approver.ts'
 import type { MemoryHost } from './memory-host.ts'
+import { planConfirmSchema, planInputSchema, type TaskPlanningHost } from './task-planning.ts'
+import { collaborationReviewSchema, collaborationScopeSchema, type CollaborationHost } from './collaboration.ts'
+import { modelRoutingSettingsSchema, type ModelRoutingSettingsHost } from './model-routing-settings.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
 import type { ToolPolicy } from '../executor/session.ts'
@@ -58,23 +65,34 @@ export type ServerDeps = {
   // 生产路径的节点命令；缺省时这几条路由一律 404，老测试不受影响
   commands?: NodeCommands
   memory?: MemoryHost
+  planning?: TaskPlanningHost
+  collaboration?: CollaborationHost
+  modelSettings?: ModelRoutingSettingsHost
+  taskTriggers?: TaskTriggerHost
 }
 
 export type ServerQueries = {
   listEvents: (fromSeq: number, limit: number) => { rows: unknown[]; as_of_seq: number }
+  listEventHistory: (params: Parameters<typeof listEventHistory>[1]) => ReturnType<typeof listEventHistory>
   listTaskSummaries: (params: ListTaskParams) => { items: TaskSummary[]; next_cursor: string | null; as_of_seq: number }
   getTaskSummary: (taskId: string, now: number) => { item: TaskSummary; as_of_seq: number }
-  listRuns: (opts: { task_id?: string; limit?: number }) => { items: RunSummary[]; as_of_seq: number }
+  getWorkspaceOverview: () => { item: WorkspaceOverview; as_of_seq: number }
+  listRuns: (opts: { task_id?: string; workflow_id?: string; limit?: number; cursor?: string }) => {
+    items: RunSummary[]; next_cursor?: string | null; as_of_seq: number
+  }
   getRun: (runId: string) => RunSummary
   listNodes: (runId: string, limit?: number) => { items: NodeRunView[]; as_of_seq: number }
   getNode: (nodeRunId: string) => { item: NodeRunView; as_of_seq: number }
   getArtifact: (artifactId: string, now: number) => { item: ArtifactView; as_of_seq: number }
+  getArtifactContent?: (runId: string, artifactId: string, mode: Parameters<typeof getArtifactContent>[3], now: number) => ReturnType<typeof getArtifactContent>
+  listRunArtifacts: (runId: string, now: number) => { items: RunArtifact[]; has_more: boolean; as_of_seq: number }
   getAttestation: (attestationId: string) => { item: AttestationView; as_of_seq: number }
   listDecisions: (params: ListDecisionParams) => { items: DecisionView[]; next_cursor: string | null; as_of_seq: number }
   getDecision: (decisionId: string) => { item: DecisionView; as_of_seq: number }
   getEvidence: (evidenceId: string) => { item: EvidenceView; as_of_seq: number }
   verifyLedger: () => { item: LedgerVerify; as_of_seq: number }
   listUnverifiedEffects: (params: ListEffectsParams) => { items: UnverifiedEffectView[]; next_cursor: string | null; as_of_seq: number }
+  inspectEffectEvidence: (nodeRunId: string) => ReturnType<typeof inspectEffectEvidence>
   listMemoryBatches: (params: ListMemoryBatchesParams) => MemoryBatchPage
   listWorkflows: (params: ListWorkflowParams) => { items: WorkflowListItem[]; next_cursor: string | null; as_of_seq: number }
   getWorkflow: (workflowId: string) => { item: WorkflowView; as_of_seq: number }
@@ -118,10 +136,12 @@ export type NodeCommands = {
     workflowVersion: string
     nodeIds?: string[]
     autonomy?: 'autonomous' | 'assisted' | 'supervised'
+    triggerKind?: TaskOrigin
     escalations?: { kind: 'node_type' | 'action_category' | 'workflow_version_publish'; value: string }[]
     operationId: string
     now: string
   }) => StartRunResult
+  setTaskArchive?: (body: SetTaskArchive, actor: string, now: string) => { task_id: string; archived_at: string | null }
   // 裁决收口：批准人、confirm_required 与 revision 都由服务层判
   acknowledgeDecision: (body: Parameters<typeof acknowledgeDecision>[1]) => ReturnType<typeof acknowledgeDecision>
   resolveDecision: (body: {
@@ -255,6 +275,14 @@ const intParam = (url: URL, name: string, fallback: number): number => {
   return n
 }
 
+function taskDateParam(url: URL, name: string): string | undefined {
+  const value = stringParam(url, name, 30)
+  if (value === undefined) return undefined
+  const time = Date.parse(value)
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '任务日期格式无效')
+  return value
+}
+
 function stringParam(url: URL, name: string, maxLength = 256): string | undefined {
   const value = url.searchParams.get(name)
   if (value === null) return undefined
@@ -269,16 +297,117 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
   const requestNow = serverNow(deps)
   try {
     if (req.method === 'GET' && url.pathname === '/health') {
-      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { ok: true, phase: deps.phase, epoch: deps.epoch }))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), {
+        ok: true, phase: deps.phase, epoch: deps.epoch, memory_enabled: Boolean(deps.memory),
+        collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
+      }))
       return
     }
     const actor = authenticate(req, deps.secret)
 
+    if (req.method === 'GET' && url.pathname === '/v1/settings/model-routing' && deps.modelSettings) {
+      const { item, as_of_seq } = deps.modelSettings.get()
+      sendJson(res, 200, okEnvelope(as_of_seq, item))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/settings/model-routing' && deps.modelSettings) {
+      const body = parseBody(modelRoutingSettingsSchema, await readJsonBody(req), '保存模型分配')
+      const result = await queue.run(() => deps.modelSettings!.save(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/collaboration/scopes' && deps.collaboration) {
+      const { as_of_seq, items } = deps.collaboration.listScopes(actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, { items }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/collaboration/scopes/get' && deps.collaboration) {
+      const { as_of_seq, item } = deps.collaboration.getScope(stringParam(url, 'scope_id', 128) ?? '', actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, item))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/collaboration/scopes' && deps.collaboration) {
+      const body = parseBody(collaborationScopeSchema, await readJsonBody(req), '建立协作范围')
+      const result = await queue.run(() => deps.collaboration!.createScope(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/collaboration/review' && deps.collaboration) {
+      const body = parseBody(collaborationReviewSchema, await readJsonBody(req), '处理核验请求')
+      const result = await queue.run(() => deps.collaboration!.review(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/task-plans/capability') {
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), { enabled: deps.planning?.enabled === true }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/task-plans/get' && deps.planning) {
+      const { view, as_of_seq } = deps.planning.get(stringParam(url, 'plan_id', 64) ?? '', actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, view))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/task-plans/by-task' && deps.planning) {
+      const { item, as_of_seq } = deps.planning.getForTask(stringParam(url, 'task_id', 256) ?? '', actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, item))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-plans' && deps.planning) {
+      const input = parseBody(planInputSchema, await readJsonBody(req), '任务规划目标')
+      const { view, as_of_seq } = await deps.planning.propose(input, actor, requestNow)
+      sendJson(res, 200, okEnvelope(as_of_seq, view))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-plans/confirm' && deps.planning) {
+      const input = parseBody(planConfirmSchema, await readJsonBody(req), '任务计划确认')
+      const result = await queue.run(() => deps.planning!.confirm(input, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+
+    if (req.method === 'GET' && url.pathname === '/v1/task-triggers' && deps.taskTriggers) {
+      const { as_of_seq, items } = deps.taskTriggers.list(stringParam(url, 'task_id', 128))
+      sendJson(res, 200, okEnvelope(as_of_seq, { items }))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-triggers' && deps.taskTriggers) {
+      const body = parseBody(taskTriggerCreateSchema, await readJsonBody(req), '登记任务触发规则')
+      const item = await queue.run(() => deps.taskTriggers!.create(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), item))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-triggers/enabled' && deps.taskTriggers) {
+      const body = parseBody(taskTriggerEnabledSchema, await readJsonBody(req), '切换任务触发规则')
+      const item = await queue.run(() => deps.taskTriggers!.setEnabled(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), item))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-triggers/event' && deps.taskTriggers) {
+      const body = parseBody(taskTriggerEventSchema, await readJsonBody(req), '接收任务触发事件')
+      const result = await queue.run(() => deps.taskTriggers!.emit(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/workspace/overview' && deps.queries) {
+      const result = deps.queries.getWorkspaceOverview()
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/tasks') {
       if (deps.queries) {
         const attentionRaw = stringParam(url, 'attention', 24)
         if (attentionRaw !== undefined && !(ATTENTION_ORDER as readonly string[]).includes(attentionRaw)) {
           throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'attention 过滤值无效', { attention: attentionRaw })
+        }
+        const lane = stringParam(url, 'lane', 24)
+        const trigger = stringParam(url, 'trigger_kind', 24)
+        const archive = stringParam(url, 'archived', 1)
+        const from = taskDateParam(url, 'updated_from')
+        const before = taskDateParam(url, 'updated_before')
+        if ((lane && !TASK_LANES.some((item) => item.id === lane))
+          || (trigger && trigger !== 'unknown' && !(TASK_ORIGINS as readonly string[]).includes(trigger))
+          || (archive !== undefined && archive !== '0' && archive !== '1') || (from && before && from >= before)) {
+          throw new OrchError('PAYLOAD_SCHEMA_INVALID', '任务筛选值无效')
         }
         const result = deps.queries.listTaskSummaries({
           limit: Math.min(intParam(url, 'limit', 50), 100),
@@ -286,6 +415,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
           status: stringParam(url, 'status', 64),
           query: stringParam(url, 'query', 200),
           attention: attentionRaw as Attention | undefined,
+          lane: lane as TaskLane | undefined, trigger_kind: trigger as TaskOrigin | 'unknown' | undefined,
+          archived: archive === '1', updated_from: from, updated_before: before,
           now: Date.parse(requestNow),
         })
         sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
@@ -293,6 +424,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         const limit = Math.min(intParam(url, 'limit', 50), 200)
         sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: deps.listTasks(limit) }))
       }
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/tasks/archive' && deps.commands?.setTaskArchive) {
+      const body = parseBody(taskArchiveSchema, await readJsonBody(req), '归档或取回任务')
+      const result = await queue.run(() => deps.commands!.setTaskArchive!(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/tasks/get' && deps.queries) {
@@ -303,8 +440,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     if (req.method === 'GET' && url.pathname === '/v1/runs' && deps.queries) {
       const taskId = stringParam(url, 'task_id', 256)
-      const result = deps.queries.listRuns({ task_id: taskId, limit: Math.min(intParam(url, 'limit', 50), 100) })
-      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items }))
+      const workflowId = stringParam(url, 'workflow_id', 128)
+      const result = deps.queries.listRuns({ task_id: taskId, workflow_id: workflowId,
+        limit: Math.min(intParam(url, 'limit', 50), 100), cursor: stringParam(url, 'cursor', 4096) })
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor ?? null }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/runs/get' && deps.queries) {
@@ -326,6 +465,24 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     if (req.method === 'GET' && url.pathname === '/v1/artifacts/get' && deps.queries) {
       const result = deps.queries.getArtifact(stringParam(url, 'artifact_id', 256) ?? '', Date.parse(requestNow))
       sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/artifacts/content' && deps.queries?.getArtifactContent) {
+      res.setHeader('cache-control', 'private, no-store')
+      res.setHeader('x-content-type-options', 'nosniff')
+      const runId = stringParam(url, 'run_id')
+      const artifactId = stringParam(url, 'artifact_id')
+      const mode = stringParam(url, 'mode', 8)
+      if (!runId || !artifactId || (mode !== 'preview' && mode !== 'download')) {
+        throw new OrchError('PAYLOAD_SCHEMA_INVALID', '需要有效的运行编号、产物编号和读取方式')
+      }
+      const { item, as_of_seq } = deps.queries.getArtifactContent(runId, artifactId, mode, Date.parse(requestNow))
+      sendJson(res, 200, okEnvelope(as_of_seq, item))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/artifacts' && deps.queries) {
+      const result = deps.queries.listRunArtifacts(stringParam(url, 'run_id', 256) ?? '', Date.parse(requestNow))
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, has_more: result.has_more }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/attestations/get' && deps.queries) {
@@ -388,6 +545,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
       return
     }
+    if (req.method === 'GET' && url.pathname === '/v1/effects/review' && deps.queries) {
+      const result = deps.queries.inspectEffectEvidence(stringParam(url, 'node_run_id', 256) ?? '')
+      sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/effects/unverified' && deps.queries) {
       const result = deps.queries.listUnverifiedEffects({
         run_id: stringParam(url, 'run_id', 256),
@@ -396,6 +558,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         now: Date.parse(requestNow),
       })
       sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/activity' && deps.queries) {
+      const { as_of_seq, ...data } = deps.queries.listEventHistory({ runId: stringParam(url, 'run_id', 256), taskId: stringParam(url, 'task_id', 256),
+        beforeSeq: intParam(url, 'before_seq', Number.MAX_SAFE_INTEGER), limit: Math.min(intParam(url, 'limit', 40), 100) })
+      sendJson(res, 200, okEnvelope(as_of_seq, data))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/events') {
@@ -543,6 +711,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         workflowVersion: body.workflowVersion,
         nodeIds: body.nodeIds,
         autonomy: body.autonomy,
+        triggerKind: body.triggerKind,
         escalations: body.escalations,
         operationId: body.operationId,
         now: requestNow,

@@ -7,9 +7,14 @@ import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { CURSOR_TTL_MS, decodeCursor, encodeCursor, makeCursor } from '../../src/service/queries/cursor.ts'
-import { listEvents } from '../../src/service/queries/list_events.ts'
+import { listEvents, listEventHistory } from '../../src/service/queries/list_events.ts'
 import { listTasks } from '../../src/service/queries/list_tasks.ts'
+import { listTaskSummaries, getTaskSummary, getWorkspaceOverview } from '../../src/service/queries/tasks.ts'
+import { listRuns } from '../../src/service/queries/runs.ts'
+import { setTaskArchive } from '../../src/service/commands/task-archive.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 import { getOperation } from '../../src/service/queries/get_operation.ts'
+import { listRunArtifacts } from '../../src/service/queries/artifacts.ts'
 import { verifyLedger } from '../../src/service/queries/verify_ledger.ts'
 
 const SECRET = 'query-secret'
@@ -46,6 +51,56 @@ const codeOf = (fn: () => unknown): string => {
   try { fn() } catch (err) { if (err instanceof OrchError) return err.code; throw err }
   throw new Error('本应抛错却通过了')
 }
+
+it('按运行列出产物，报告保留期限且不暴露来源路径', () => {
+  const db = seeded()
+  const now = '2026-11-18T00:00:00.000Z'
+  const earlier = '2026-11-17T00:00:00.000Z'
+  withTx(db, (tx) => {
+    tx.run("INSERT INTO runs (run_id, task_id, status, created_at, updated_at) VALUES ('r2','t1','succeeded',?,?)", [now, now])
+    tx.run('INSERT INTO artifacts (artifact_id,run_id,uri,sha256,retain_until,created_at) VALUES (?,?,?,?,?,?)',
+      ['old', 'r1', 'file:///private/a', 'hash-a', earlier, earlier])
+    tx.run('INSERT INTO artifacts (artifact_id,run_id,uri,sha256,retain_until,created_at) VALUES (?,?,?,?,?,?)',
+      ['new', 'r1', 'file:///private/b', 'hash-b', null, now])
+    tx.run('INSERT INTO artifacts (artifact_id,run_id,uri,sha256,retain_until,created_at) VALUES (?,?,?,?,?,?)',
+      ['other', 'r2', 'file:///private/c', 'hash-c', null, now])
+  })
+  const result = listRunArtifacts(db, 'r1', Date.parse(now))
+  expect(result.items).toEqual([
+    { artifact_id: 'new', run_id: 'r1', sha256: 'hash-b', retain_until: null, created_at: now, expired: false },
+    { artifact_id: 'old', run_id: 'r1', sha256: 'hash-a', retain_until: earlier, created_at: earlier, expired: true },
+  ])
+  expect(result.has_more).toBe(false)
+  expect(result.as_of_seq).toBe(3)
+  expect(codeOf(() => listRunArtifacts(db, 'missing'))).toBe('NOT_FOUND')
+})
+
+it('任务类型、时间和归档都是服务端筛选，归档回执重放且历史保留', () => {
+  const db = seeded()
+  const now = '2026-11-18T00:00:00.000Z'
+  withTx(db, (tx) => {
+    tx.run("UPDATE tasks SET trigger_kind = 'scheduled', current_run_id = 'r1' WHERE task_id = 't1'")
+    tx.run("UPDATE tasks SET trigger_kind = 'event' WHERE task_id = 't2'")
+    tx.run("UPDATE runs SET workflow_id = 'flow-test', workflow_version = 1 WHERE run_id = 'r1'")
+    tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = 'n1'")
+  })
+  expect(listTaskSummaries(db, { trigger_kind: 'scheduled', updated_from: '2026-11-13T01:00:00.000Z',
+    updated_before: '2026-11-13T02:00:00.000Z', lane: 'running' }).items.map((task) => task.task_id)).toEqual(['t1'])
+  expect(listTaskSummaries(db, { trigger_kind: 'unknown' }).items.map((task) => task.task_id)).toEqual(['t3'])
+  const archive = { task_id: 't1', archived: true, expected_archived_at: null, operation_id: uuidv7() }
+  expect(setTaskArchive(db, archive, 'usr', now).archived_at).toBe(now)
+  expect(setTaskArchive(db, archive, 'usr', now).archived_at).toBe(now)
+  expect(listTaskSummaries(db).items.map((task) => task.task_id)).not.toContain('t1')
+  expect(listTaskSummaries(db, { archived: true }).items.map((task) => task.task_id)).toEqual(['t1'])
+  expect(getWorkspaceOverview(db).item.lanes).toEqual({ upcoming: 0, running: 2, attention: 0, finished: 0 })
+  expect(listRuns(db, { workflow_id: 'flow-test' }).items.map((run) => run.task_title)).toEqual(['任务1'])
+  expect(getTaskSummary(db, 't1')).toMatchObject({ status: 'running', run_count: 1, current_run_id: 'r1' })
+  expect(codeOf(() => setTaskArchive(db, { ...archive, operation_id: uuidv7() }, 'usr', now))).toBe('STALE_GENERATION')
+  expect(setTaskArchive(db, { ...archive, archived: false, expected_archived_at: now, operation_id: uuidv7() }, 'usr', now).archived_at).toBeNull()
+  const log = listEventHistory(db, { runId: 'r1', limit: 1 })
+  expect(log.items.map((item) => item.type)).toEqual(['task.restored'])
+  expect(listEventHistory(db, { runId: 'r1', beforeSeq: log.next_before_seq! }).items.map((item) => item.type)).toEqual(['task.archived'])
+})
 
 describe('事件分页', () => {
   it('按 seq 升序，as_of_seq 是最大 seq', () => {

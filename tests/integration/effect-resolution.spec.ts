@@ -9,6 +9,7 @@ import { OrchError } from '../../src/core/errors.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import {
   resolveEffect,
+  inspectEffectEvidence,
   type EffectResolveRequest,
   type EffectResolutionResult,
   type ResolutionBasis,
@@ -85,6 +86,17 @@ function addEvidence(db: any, over: {
     }
   })
 }
+
+it('只把可用于结算的当前尝试证据提供给面板', () => {
+  const db = setup({ status: 'done' })
+  addEvidence(db)
+  addEvidence(db, { executionId: EXEC_ID_2, toolSeq: 2, withEvent: false })
+  expect(inspectEffectEvidence(db, TEST_SECRET, 'nr1').item).toMatchObject({
+    revision: 1, evidence: [{ evidence_id: EXEC_ID, tool: 'ro.echo' }],
+  })
+  settle(db, { basis: 'evidence', evidenceId: EXEC_ID })
+  expect(inspectEffectEvidence(db, TEST_SECRET, 'nr1').item.evidence).toEqual([])
+})
 
 /** 直接造一张已收口的 decision：状态与 payload 是结算判据要看的字段 */
 function addDecision(db: any, over: {

@@ -11,7 +11,8 @@ import { OrchError } from '../../core/errors.ts'
 import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
 import { appendEvent, appendNodeRunEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { assertOperationId, runIdempotentCommand } from './idempotency.ts'
-import { type Tx } from '../../infra/sqlite/driver.ts'
+import { type Db, type Tx } from '../../infra/sqlite/driver.ts'
+import { withReadTx } from '../queries/read-tx.ts'
 import { type Actor } from '../decision/approver.ts'
 
 /** 幂等回执里的命令身份（附录 §4 步骤 1、§11） */
@@ -119,7 +120,7 @@ function fail(code: GateFailure['code'], message: string, details?: Record<strin
   return { ok: false, failure: { code, message, details } }
 }
 
-function loadNode(tx: Tx, nodeRunId: string): SettlementNode | undefined {
+function loadNode(tx: Pick<Tx, 'get'>, nodeRunId: string): SettlementNode | undefined {
   return tx.get<SettlementNode>(
     'SELECT node_run_id, run_id, node_id, attempt, status, revision, side_effect_policy, side_effect_verified_none, stop_evidence'
     + ' FROM node_runs WHERE node_run_id = ?',
@@ -127,7 +128,7 @@ function loadNode(tx: Tx, nodeRunId: string): SettlementNode | undefined {
   )
 }
 
-function loadResolution(tx: Tx, nodeRunId: string): ResolutionRow | undefined {
+function loadResolution(tx: Pick<Tx, 'get'>, nodeRunId: string): ResolutionRow | undefined {
   return tx.get<ResolutionRow>(
     'SELECT node_run_id, run_id, resolution_basis, evidence_id, decision_id, stop_evidence, resolved_at'
     + ' FROM unverified_resolutions WHERE node_run_id = ?',
@@ -159,7 +160,7 @@ function parsePayload(text: string | null | undefined): Record<string, unknown> 
  * 判定口径只有这一份，人工裁决也走它（附录 §0、§2.1）。
  */
 function checkSystemEvidence(
-  tx: Tx,
+  tx: Pick<Tx, 'get' | 'all'>,
   secret: string,
   node: SettlementNode,
   executionId: string,
@@ -247,6 +248,24 @@ function checkSystemEvidence(
     })
   }
   return { ok: true, row }
+}
+
+export function inspectEffectEvidence(db: Db, secret: string, nodeRunId: string) {
+  return withReadTx(db, ({ tx, as_of_seq }) => {
+    const node = loadNode(tx, nodeRunId)
+    if (!node) throw new OrchError('NOT_FOUND', '没找到目标节点')
+    const evidence: Array<{ evidence_id: string; tool: string; exit_code: number; finished_at: string }> = []
+    if (node.side_effect_policy !== 'pure' && BASIS_STATUSES.evidence.includes(node.status) && !loadResolution(tx, nodeRunId)) {
+      const rows = tx.all<{ execution_id: string }>('SELECT execution_id FROM tool_executions WHERE node_run_id = ? AND attempt = ?'
+        + ' AND finished_at IS NOT NULL ORDER BY tool_seq DESC LIMIT 10', [nodeRunId, node.attempt])
+      for (const row of rows) {
+        const gate = checkSystemEvidence(tx, secret, node, row.execution_id, 'run_tool')
+        if (gate.ok && gate.row.finished_at) evidence.push({ evidence_id: row.execution_id, tool: gate.row.tool,
+          exit_code: gate.row.exit_code, finished_at: gate.row.finished_at })
+      }
+    }
+    return { item: { node_run_id: node.node_run_id, run_id: node.run_id, revision: node.revision, evidence }, as_of_seq }
+  })
 }
 
 /** 结算写入口只放行人，或带 orchestra.audit 能力位的 Agent（附录 §5） */

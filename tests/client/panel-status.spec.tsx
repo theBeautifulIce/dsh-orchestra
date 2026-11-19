@@ -49,7 +49,7 @@ describe('WP-A 面板侧 G5 门禁', () => {
   it('Q-02 分页途中插入新任务时按 task_id 去重，后页覆盖前页', async () => {
     const first = taskSummary({ task_id: 't1', title: '任务一', status: 'running', display_status: 'running' })
     const staleSecond = taskSummary({ task_id: 't2', title: '任务二（旧）', status: 'running', display_status: 'running' })
-    const freshSecond = taskSummary({ task_id: 't2', title: '任务二（已更新）', status: 'succeeded', display_status: 'succeeded' })
+    const freshSecond = taskSummary({ task_id: 't2', title: '任务二（已更新）', status: 'succeeded', display_status: 'succeeded', attention: 'none' })
     const third = taskSummary({ task_id: 't3', title: '任务三', status: 'running', display_status: 'running' })
     const { api } = apiFrom((query) => {
       const cursor = query.params.get('cursor')
@@ -66,13 +66,12 @@ describe('WP-A 面板侧 G5 门禁', () => {
 
     const rows = view.findAll('article')
     expect(rows.length).toBe(3)
-    // 同 task_id 不出现重复行，后页整条覆盖前页，首次出现的位置不变。
+    // 同 task_id 不重复。后页提供的终态会把任务移到最近完成，运行列中的其他任务仍保持顺序。
     expect(rows.map((row) => row.textContent ?? '').filter((text) => text.includes('任务二')).length).toBe(1)
     expect(view.text()).toContain('任务二（已更新）')
     expect(view.text()).not.toContain('任务二（旧）')
-    expect(rows[0]?.textContent ?? '').toContain('任务一')
-    expect(rows[1]?.textContent ?? '').toContain('任务二（已更新）')
-    expect(rows[2]?.textContent ?? '').toContain('任务三')
+    expect(view.findAll('[data-task-column="running"] article h3').map((row) => row.textContent)).toEqual(['任务一', '任务三'])
+    expect(view.findAll('[data-task-column="finished"] article h3').map((row) => row.textContent)).toEqual(['任务二（已更新）'])
     view.unmount()
   })
 
@@ -171,6 +170,8 @@ describe('WP-A 面板侧 G5 门禁', () => {
     const view = await renderPanel(<TaskDetailScreen api={api} taskId="t1" onBack={noop} />)
     await view.flush()
 
+    await view.click(view.findAll('button').find((button) => button.textContent === '完整运行')!)
+    await view.flush()
     const notice = /心跳已停 (\d+) 秒/.exec(view.text())
     expect(notice).not.toBeNull()
     const seconds = Number(notice?.[1] ?? '0')
@@ -193,6 +194,8 @@ describe('WP-A 面板侧 G5 门禁', () => {
       return { ok: true, data: {} }
     })
     const freshView = await renderPanel(<TaskDetailScreen api={fresh.api} taskId="t1" onBack={noop} />)
+    await freshView.flush()
+    await freshView.click(freshView.findAll('button').find((button) => button.textContent === '完整运行')!)
     await freshView.flush()
     expect(freshView.text()).not.toContain('心跳已停')
     freshView.unmount()

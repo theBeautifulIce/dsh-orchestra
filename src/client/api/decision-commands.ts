@@ -12,7 +12,7 @@ export const DECISION_COMMAND_KINDS: readonly DecisionCommandKind[] = ['decision
 
 export type DecisionAcknowledgeInput = { decisionId: string; revision: number }
 
-export type DecisionResolveInput = { decisionId: string; revision: number; resolution: string; actorId?: string }
+export type DecisionResolveInput = { decisionId: string; revision: number; resolution: string; actorId?: string; contentHash?: string; confirm?: boolean }
 
 export type DecisionAcknowledgeResult = { decisionId: string; revision: number; status?: string }
 
@@ -117,6 +117,8 @@ export function createDecisionCommandsApi(client: ApiClient): DecisionCommandsAp
         decisionId: input.decisionId,
         revision: input.revision,
         resolution: input.resolution,
+        ...(input.contentHash ? { contentHash: input.contentHash } : {}),
+        ...(input.confirm === true ? { confirm: true } : {}),
         actor: { kind: 'human', id: input.actorId ?? 'panel' },
       },
     ),

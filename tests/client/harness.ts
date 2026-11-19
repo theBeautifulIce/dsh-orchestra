@@ -98,6 +98,10 @@ export function taskSummary(over: Partial<TaskSummary> = {}): TaskSummary {
     attention: 'running',
     attention_reason: '任务仍在执行',
     updated_at: '2026-11-17T10:00:00.000Z',
+    archived_at: null,
+    trigger_kind: null,
+    autonomy: 'autonomous',
+    current_run_status: 'running',
     ...over,
   }
 }

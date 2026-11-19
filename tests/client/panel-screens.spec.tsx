@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi, type ResourcesApi } from '../../src/client/api/resources.ts'
 import { COPY } from '../../src/client/panel/copy.ts'
+import { PanelApp } from '../../src/client/panel/app.tsx'
 import { DecisionInbox } from '../../src/client/panel/decision-inbox.tsx'
 import { PanelCommandButton, PanelShell } from '../../src/client/panel/shell.tsx'
 import { TaskListScreen } from '../../src/client/panel/tasks-screen.tsx'
@@ -13,8 +14,10 @@ import {
   decisionView,
   deferred,
   effectView,
+  nodeRunView,
   page,
   renderPanel,
+  runSummary,
   taskSummary,
   workflowItem,
   type FakeQuery,
@@ -69,12 +72,12 @@ describe('任务列表页', () => {
   it('服务端给了不认得的状态时显示未知提示而不是空白', async () => {
     const { api } = apiFrom(() => ({
       ok: true,
-      data: page([taskSummary({ status: 'paused', display_status: 'paused' })]),
+      data: page([taskSummary({ status: 'future-status', display_status: 'future-status' })]),
     }))
     const view = await renderPanel(<TaskListScreen api={api} onSelectTask={noop} />)
     await view.flush()
     expect(view.text()).toContain(COPY.oldPanel)
-    expect(view.text()).toContain('paused')
+    expect(view.text()).toContain('future-status')
     expect(view.byRole('status').length).toBeGreaterThan(0)
     view.unmount()
   })
@@ -99,6 +102,70 @@ describe('任务列表页', () => {
     expect(view.text()).toContain('涉及不可逆操作')
     expect(view.text()).toContain('有 5 笔副作用待核实')
     expect(view.text()).toContain('待核实')
+    view.unmount()
+  })
+
+  it('把真实状态分到四列，已收尾但待核实的任务仍在需要你', async () => {
+    const { api } = apiFrom(() => ({ ok: true, data: page([
+      taskSummary({ task_id: 'q', title: '下一项', status: 'queued', display_status: 'queued' }),
+      taskSummary({ task_id: 'r', title: '正在跑' }),
+      taskSummary({ task_id: 'u', title: '仍待核实', status: 'succeeded_with_unverified', unverified_count: 1, attention: 'unverified' }),
+      taskSummary({ task_id: 's', title: '已交付', status: 'succeeded', display_status: 'succeeded', attention: 'none' }),
+    ]) }))
+    const view = await renderPanel(<TaskListScreen api={api} onSelectTask={noop} />)
+    await view.flush()
+    expect(view.findAll('[data-task-column]').map((column) => [column.getAttribute('data-task-column'), column.querySelector('button')?.textContent])).toEqual([
+      ['upcoming', '下一项'], ['running', '正在跑'], ['attention', '仍待核实'], ['finished', '已交付'],
+    ])
+    view.unmount()
+  })
+
+  it('详情保留看板，按运行加载产物并核对对应节点的系统证据', async () => {
+    const task = taskSummary({ title: '交付复核', run_count: 2 })
+    const service = createFakeService(({ path, params }) => {
+      if (path === '/v1/tasks') return { ok: true, data: page([task]) }
+      if (path === '/v1/tasks/get') return { ok: true, data: task }
+      if (path === '/v1/runs') return { ok: true, data: { items: [runSummary({ total: 1 }), runSummary({ run_id: 'r2' })] } }
+      if (path === '/v1/node-runs' && params.get('run_id') === 'r1') return { ok: true, data: { items: [
+        nodeRunView({ node_id: '核对清单', execution_ids: ['ev1', 'wrong'], execution_count: 2 }),
+      ] } }
+      if (path === '/v1/artifacts' && params.get('run_id') === 'r1') return { ok: true, data: {
+        items: [{ artifact_id: '交付清单', sha256: 'hash', created_at: task.updated_at }], has_more: false,
+      } }
+      if (path === '/v1/evidence/get') return { ok: true, data: {
+        evidence_id: params.get('evidence_id'), node_run_id: 'nr1', run_id: params.get('evidence_id') === 'ev1' ? 'r1' : 'r2',
+        attempt: 1, strength: 'strong', source: 'run_tool', tool: 'ro.verify', exit_code: 0, observed_at: task.updated_at,
+      } }
+      return { ok: false, error: { code: 'NOT_FOUND', message: 'missing', retryable: false } }
+    })
+    const view = await renderPanel(<PanelApp client={createApiClient('http://panel.test', service.fetcher)} serviceConnected />)
+    await view.flush()
+    const card = view.findAll('button').find((button) => button.textContent === task.title) as HTMLButtonElement
+    card.focus()
+    await view.click(card)
+    await view.flush()
+    const inspector = view.container.querySelector('#task-inspector')!
+    expect(view.container.contains(card)).toBe(true)
+    expect(card.getAttribute('aria-expanded')).toBe('true')
+    const tab = (label: string) => Array.from(inspector.querySelectorAll('button')).find((button) => button.textContent === label)!
+    await view.click(tab('完整运行'))
+    await view.flush()
+    expect(inspector.textContent).toContain('核对清单')
+    await view.click(tab('结果'))
+    await view.flush()
+    expect(inspector.textContent).toContain('交付清单')
+    await view.click(tab('证据'))
+    expect(service.calls.some((call) => call.path === '/v1/evidence/get')).toBe(false)
+    const summaries = inspector.querySelectorAll('summary')
+    await view.click(summaries[0]!)
+    await view.click(summaries[1]!)
+    await view.flush()
+    expect(inspector.textContent).toContain('系统证据（账本已核验）· ro.verify · 退出码 0')
+    expect(inspector.textContent).toContain('暂时无法确认这条系统证据')
+    await view.click(tab('关闭'))
+    expect(view.container.querySelector('#task-inspector')).toBeNull()
+    expect(document.activeElement).toBe(card)
+    expect(service.calls.filter((call) => call.path === '/v1/tasks')).toHaveLength(1)
     view.unmount()
   })
 })

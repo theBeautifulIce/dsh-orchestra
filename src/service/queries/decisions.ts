@@ -19,12 +19,15 @@ export type DecisionView = {
   confirm_required: boolean
   created_at: string
   decided_at: string | null
+  resolved_by?: string | null
   // These fields are intentionally nullable until their policy is persisted by the command layer.
   priority: string | null
   priority_reason: string | null
   allowed_resolutions: string[] | null
   required_evidence: string[] | null
   target_summary: string | null
+  approver?: string | null
+  expiry_effect?: string | null
   projection_missing: string[]
 }
 
@@ -47,8 +50,21 @@ function parsePayload(raw: unknown): { payload: unknown; missing: boolean } {
   try { return { payload: JSON.parse(raw) as unknown, missing: false } } catch { return { payload: null, missing: true } }
 }
 
-function toDecisionView(row: DecisionRow): DecisionView {
+const DECISION_SELECT = 'SELECT decision_id, run_id, node_run_id, kind, status, revision, closed_reason, payload_json, content_hash, '
+  + 'expires_at, confirm_required, created_at, decided_at, resolved_by, priority, priority_reason, expiry_effect, approver, '
+  + "EXISTS (SELECT 1 FROM node_runs n WHERE n.node_run_id = d.node_run_id AND n.blocked_decision_id = d.decision_id AND n.status = 'blocked_pre') AS blocked_pre FROM decisions d"
+
+function toDecisionView(row: DecisionRow, now = Date.now()): DecisionView {
   const parsed = parsePayload(row.payload_json)
+  const payload = parsed.payload !== null && typeof parsed.payload === 'object' ? parsed.payload as Record<string, unknown> : {}
+  const asText = (value: unknown) => typeof value === 'string' && value.trim() ? value.slice(0, 500) : null
+  const priority = asText(row.priority)
+  const priorityReason = asText(row.priority_reason)
+  const target = asText(payload.target_summary) ?? asText(payload.title) ?? asText(payload.summary)
+  const required = Array.isArray(payload.required_evidence) ? payload.required_evidence.filter((item): item is string => typeof item === 'string').slice(0, 12) : null
+  const canResolve = row.kind === 'pre_execution' && ['pending', 'acknowledged', 'blocked_for_human'].includes(String(row.status)) && row.blocked_pre === 1
+    && (row.approver === 'human' || row.approver === 'either') && (typeof row.expires_at !== 'string' || Date.parse(row.expires_at) > now)
+  const allowed = canResolve ? ['approved', 'rejected'] : null
   return {
     decision_id: row.decision_id,
     run_id: row.run_id,
@@ -63,23 +79,19 @@ function toDecisionView(row: DecisionRow): DecisionView {
     confirm_required: Number(row.confirm_required ?? 0) === 1,
     created_at: row.created_at,
     decided_at: typeof row.decided_at === 'string' ? row.decided_at : null,
-    priority: null,
-    priority_reason: null,
-    allowed_resolutions: null,
-    required_evidence: null,
-    target_summary: null,
-    projection_missing: [
-      'priority', 'priority_reason', 'allowed_resolutions', 'required_evidence', 'target_summary',
-      ...(parsed.missing ? ['payload'] : []),
-    ],
+    resolved_by: asText(row.resolved_by),
+    priority, priority_reason: priorityReason, allowed_resolutions: allowed, required_evidence: required, target_summary: target,
+    approver: asText(row.approver), expiry_effect: asText(row.expiry_effect),
+    projection_missing: Object.entries({ priority, priority_reason: priorityReason, allowed_resolutions: allowed,
+      required_evidence: required, target_summary: target, ...(parsed.missing ? { payload: null } : {}) })
+      .filter(([, value]) => value === null).map(([field]) => field),
   }
 }
 
 export function getDecisionSnapshot(db: Db, decisionId: string): { item: DecisionView; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const row = ctx.tx.get<DecisionRow>(
-      'SELECT decision_id, run_id, node_run_id, kind, status, revision, closed_reason, payload_json, content_hash, '
-      + 'expires_at, confirm_required, created_at, decided_at FROM decisions WHERE decision_id = ?',
+      DECISION_SELECT + ' WHERE decision_id = ?',
       [decisionId],
     )
     if (!row) throw new OrchError('NOT_FOUND', '没找到这条裁决', { decision_id: decisionId })
@@ -110,14 +122,13 @@ export function listDecisions(db: Db, params: ListDecisionParams = {}): {
       values.push(cursor.last_key, cursor.last_key, cursor.last_id)
     }
     const rows = ctx.tx.all<DecisionRow>(
-      'SELECT decision_id, run_id, node_run_id, kind, status, revision, closed_reason, payload_json, content_hash, '
-      + 'expires_at, confirm_required, created_at, decided_at FROM decisions'
+      DECISION_SELECT
       + (where.length ? ' WHERE ' + where.join(' AND ') : '')
       + ' ORDER BY created_at DESC, decision_id DESC LIMIT ?',
       [...values, limit + 1],
     )
     const hasMore = rows.length > limit
-    const page = (hasMore ? rows.slice(0, limit) : rows).map(toDecisionView)
+    const page = (hasMore ? rows.slice(0, limit) : rows).map((row) => toDecisionView(row, params.now))
     const last = page[page.length - 1]
     const next_cursor = hasMore && last
       ? encodeCursor(makeCursor('decisions', filter, last.created_at, last.decision_id, ctx.as_of_seq, params.now))
