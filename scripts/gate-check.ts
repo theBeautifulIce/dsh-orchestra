@@ -1,6 +1,6 @@
 // 门记录校验：读 S*.md 里的 GateArtifact，核字段、结论规则、必过项清单、证据文件哈希与四个哈希的原像（规格 11.3 行 978-986）
-// 用法：node --no-warnings scripts/gate-check.ts [可选：门记录路径…]；无参依次校验 G1–G4
-// 默认列表抽成常量：注册新门时测试能固定住默认路径，不靠 CLI 字符串碰运气（审计 P2）
+// 用法：node --no-warnings scripts/gate-check.ts [可选：门记录路径…]；无参按 defaultGatePaths 校验
+// G1–G4 是无参检查的固定路径，G5 由当前工作树与 HEAD 历史决定。
 export const DEFAULT_GATE_PATHS = ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md']
 //
 // 哈希口径（门记录里的值都能重算，不是手写数）：
@@ -9,7 +9,7 @@ export const DEFAULT_GATE_PATHS = ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs
 //   evidence_index_hash = SHA256(canonical_json([{id, file, sha256}]，按 id 升序))，sha256 是证据文件当前字节的 SHA256
 //   invariants_hash     = SHA256(canonical_json([{id, statement, evidence_ids}]，按 id 升序))
 //   body_hash           = SHA256(正文归一化文本)，归一化只把两个自锚点与反引号里的 64 位 sha256 换成占位符
-// 候选范围 = GATE_SPECS[gate].scopeBase..HEAD 的改动，排除 docs/gates 与 docs/audits（记录本身不进候选）。
+// 候选范围 = GATE_SPECS[gate].scopeBase..HEAD 的改动，按 GATE_CANDIDATE_EXCLUDES 排除路径。
 // 防重签口径（第三轮审计 R3-05…R3-09）：
 //   producer 必须是 human（规格 11.3 行 981，G1 到 G5 的主 artifact 由人手工跑）
 //   必过项与证据是固定映射（evidenceMap），换绑证据重签会被挡住
@@ -18,8 +18,8 @@ export const DEFAULT_GATE_PATHS = ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs
 //   audit_round / audit_report 指向本轮独立审计，审计报告必须已在 HEAD
 //   门记录本身必须在 HEAD 里（改了没提交不算数），工作树脏文件（含 docs/gates）一律不许签
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { relative, resolve } from 'node:path'
 import MarkdownIt from 'markdown-it'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
 import { parseAuditVerdict, verdictProblems, VERDICT_BEGIN, VERDICT_END } from '../src/core/audit-verdict.ts'
@@ -49,6 +49,19 @@ export type GateSpec = {
   // 词法解析器退成兜底；没要求裁决块的旧门才走词法路径
   requireVerdict?: boolean
 }
+
+// 门记录独立于候选范围，后续签门不会改变前序门的候选哈希。
+// handoff 是活文档，每次收尾都会改（审计 F-02）。
+const GATE_CANDIDATE_EXCLUDES = [
+  'docs/gates/G1.md',
+  'docs/gates/G2.md',
+  'docs/gates/G3.md',
+  'docs/gates/G4.md',
+  'docs/gates/G5.md',
+  'docs/audits',
+  'docs/reviews',
+  'handoff.md',
+] as const
 
 export const GATE_SPECS: Record<string, GateSpec> = {
   G1: {
@@ -107,8 +120,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: '623939d4c0a7123835b525287035588ee291ccbe',
     requireVerdict: true,
-    // handoff 是活文档，每次收尾都会改；它进候选范围会让门哈希随一次文档更新失效（审计 F-02）
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: [...GATE_CANDIDATE_EXCLUDES],
     prevGate: null,
     gateFile: 'docs/gates/G1.md',
   },
@@ -196,7 +208,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: '4f3ada7',
     requireVerdict: true,
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: [...GATE_CANDIDATE_EXCLUDES],
     prevGate: 'G1',
     gateFile: 'docs/gates/G2.md',
   },
@@ -283,7 +295,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: 'c296d72',
     requireVerdict: true,
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: [...GATE_CANDIDATE_EXCLUDES],
     prevGate: 'G2',
     gateFile: 'docs/gates/G3.md',
   },
@@ -350,7 +362,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: '9fbecdd',
     requireVerdict: true,
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: [...GATE_CANDIDATE_EXCLUDES],
     prevGate: 'G3',
     gateFile: 'docs/gates/G4.md',
   },
@@ -602,7 +614,7 @@ export const GATE_SPECS: Record<string, GateSpec> = {
     },
     scopeBase: '6d4ca1a',
     requireVerdict: true,
-    excludes: ['docs/gates/G1.md', 'docs/gates/G2.md', 'docs/gates/G3.md', 'docs/gates/G4.md', 'docs/gates/G5.md', 'docs/audits', 'docs/reviews', 'handoff.md'],
+    excludes: [...GATE_CANDIDATE_EXCLUDES],
     prevGate: 'G4',
     gateFile: 'docs/gates/G5.md',
   },
@@ -2954,6 +2966,13 @@ export function verifyGateRecord(text: string, opts: { root?: string; allowDirty
     }
   }
   const gate = String(artifact.gate)
+  if (opts.path) {
+    const recordPath = relative(root, resolve(root, opts.path)).replace(/\\/g, '/')
+    const registered = Object.entries(GATE_SPECS).find(([, gateSpec]) => gateSpec.gateFile === recordPath)
+    if (registered && registered[0] !== gate) {
+      throw new Error('门记录路径与 GateArtifact 门号不符：' + recordPath + ' 应为 ' + registered[0] + '，实际 ' + gate)
+    }
+  }
   const spec = GATE_SPECS[gate]
   if (!spec) throw new Error('没有这道门的校验规格: ' + gate)
   const gotIds = items.map((i) => i.id)
@@ -3018,8 +3037,14 @@ export function verifyGateRecord(text: string, opts: { root?: string; allowDirty
   return { gate, artifactHash: expect, bodyHash: body, items: items.length, evidence: evidence.entries.length }
 }
 
-// G5 门检查入口：G5.md 尚未签门，默认门列表仍只有 G1-G4；签门后由 lead 把 G5.md 并进 DEFAULT_GATE_PATHS。
 export const G5_GATE_PATH = 'docs/gates/G5.md';
+
+export function defaultGatePaths(root: string): string[] {
+  // G5 一旦进入 HEAD 可达历史，即使被删，无参检查也必须报告缺失。
+  const hasG5 = existsSync(resolve(root, G5_GATE_PATH)) ||
+    git(root, ['log', '-1', '--full-history', '--format=%H', 'HEAD', '--', ':(top,literal)' + G5_GATE_PATH]).length > 0
+  return hasG5 ? [...DEFAULT_GATE_PATHS, G5_GATE_PATH] : [...DEFAULT_GATE_PATHS]
+}
 
 export function verifyG5GateRecord(
   text: string,
@@ -3034,10 +3059,7 @@ export function verifyG5GateRecord(
   return verifyGateRecord(text, opts);
 }
 if (process.argv[1] && /gate-check\.ts$/.test(process.argv[1].replace(/\\/g, '/'))) {
-  // 无参默认把三道门都验完：只查 G1 会让 G2/G3 的正文与证据悄悄漂移（S3 审计 P0-3）
-  const paths = process.argv.length > 2
-    ? process.argv.slice(2)
-    : DEFAULT_GATE_PATHS
+  const paths = process.argv.length > 2 ? process.argv.slice(2) : defaultGatePaths(process.cwd())
   for (const path of paths) {
     try {
       const out = verifyGateRecord(readFileSync(path, 'utf8'), { path })
