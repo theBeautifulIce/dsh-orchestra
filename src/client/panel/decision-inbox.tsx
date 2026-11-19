@@ -1,3 +1,5 @@
+import { ReworkPanel } from './rework-panel.tsx'
+import type { ReworkApi } from '../api/rework.ts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { DecisionView, MemoryApprovalCard } from '../api/types.ts'
@@ -41,6 +43,8 @@ export function sortDecisions(items: DecisionView[]): DecisionView[] {
 
 export type DecisionInboxProps = {
   api: ResourcesApi
+  rework?: ReworkApi
+  reworkPlannerEnabled?: boolean
   commands?: DecisionCommandsApi
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
@@ -48,7 +52,7 @@ export type DecisionInboxProps = {
 
 type Notice = { text: string; tone: 'ok' | 'error' }
 
-export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: DecisionInboxProps) {
+export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, reloadVersion = 0, onSnapshot }: DecisionInboxProps) {
   const [items, setItems] = useState<DecisionView[]>([])
   const [cursor, setCursor] = useState<string | undefined>()
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -167,6 +171,7 @@ export function DecisionInbox({ api, commands, reloadVersion = 0, onSnapshot }: 
       <h1 id="decision-inbox-title">审批中心</h1>
       <button type="button" onClick={refresh} disabled={loading} className="ops-button">{loading ? '正在更新…' : '刷新'}</button>
     </header>
+    {rework && <ReworkPanel api={api} commands={rework} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
     <div className="ops-toolbar">
     <div role="group" aria-label="决定视图" className="ops-tabs">
       {[false, true].map((value) => <button type="button" key={String(value)} aria-pressed={value === history}

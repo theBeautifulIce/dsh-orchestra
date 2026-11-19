@@ -56,9 +56,21 @@ export class WorkflowCatalog {
   private readonly phase: Phase
   private readonly db?: Db
 
-  constructor(phase: Phase, db?: Db) {
+  private readonly isReadOnlyTool?: (tool: string) => boolean
+
+  constructor(phase: Phase, db?: Db, isReadOnlyTool?: (tool: string) => boolean) {
     this.phase = phase
     this.db = db
+    this.isReadOnlyTool = isReadOnlyTool
+  }
+
+  initialAgentEffect(node: WorkflowNodeDef): 'pure' | 'compensable' | 'irreversible' {
+    if (node.type !== 'agent' || node.side_effect_policy === undefined) return 'compensable'
+    if (node.side_effect_policy !== 'pure') return node.side_effect_policy
+    const denied = new Set(node.tools?.deny ?? [])
+    const allowed = (node.tools?.allow ?? []).filter(tool => !denied.has(tool))
+    // Only the host registry can corroborate a publisher's pure declaration.
+    return this.isReadOnlyTool && allowed.every(this.isReadOnlyTool) ? 'pure' : 'compensable'
   }
 
   // 启动时把已落库的定义装回内存；落库内容同样过阶段校验，旧库里的越界定义不能借重启复活

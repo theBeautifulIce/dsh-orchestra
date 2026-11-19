@@ -47,3 +47,7 @@ export type {
   MemoryItemView, NodeRunView, OperationRow, RunArtifact, RunSummary, TaskSummary, UnverifiedEffectView, WorkflowListItem,
   WorkflowVersionView, WorkflowView,
 } from './api/types.ts'
+
+export { createReworkApi } from './api/rework.ts'
+export type { ReworkApi, ReworkRequestInput, ReworkReviewInput } from './api/rework.ts'
+export { ReworkPanel } from './panel/rework-panel.tsx'

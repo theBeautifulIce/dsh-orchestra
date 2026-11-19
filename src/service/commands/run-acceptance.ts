@@ -80,12 +80,12 @@ const ARTIFACT_LOOKUP = 'SELECT a.artifact_id AS artifact_id, a.sha256 AS sha256
   + 'n.node_id AS node_id, n.run_id AS node_run_run_id '
   + 'FROM artifacts a JOIN artifact_contents c ON c.artifact_id = a.artifact_id '
   + 'LEFT JOIN node_runs n ON n.node_run_id = c.node_run_id '
-  + 'WHERE a.run_id = ? AND c.file_name = ?'
+  + 'WHERE a.run_id = ? AND c.file_name = ? AND n.replacement_node_run_id IS NULL'
 
 const TOOL_LOOKUP = 'SELECT t.execution_id AS execution_id, t.node_run_id AS node_run_id, t.attempt AS attempt, '
   + 't.tool AS tool, t.exit_code AS exit_code, t.finished_at AS finished_at '
   + 'FROM tool_executions t JOIN node_runs n ON n.node_run_id = t.node_run_id '
-  + 'WHERE n.run_id = ? AND n.node_id = ? AND t.tool = ? ORDER BY t.attempt ASC, t.tool_seq ASC'
+  + 'WHERE n.run_id = ? AND n.node_id = ? AND t.tool = ? AND n.replacement_node_run_id IS NULL AND t.attempt=n.attempt ORDER BY t.tool_seq ASC'
 
 const ACCEPTANCE_ROW_LOOKUP = 'SELECT evidence_json FROM run_acceptance_results '
   + 'WHERE run_id = ? AND plan_id = ? AND content_hash = ? AND deliverable_key = ?'

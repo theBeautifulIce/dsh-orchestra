@@ -1,4 +1,5 @@
 // src/service/commands/lease.ts —— 租约与心跳（规格 4.9 行 425-429、12.3 行 1063）
+import { assertReworkExecutionAllowed } from '../rework-runtime.ts'
 import { OrchError, proposedError } from '../../core/errors.ts'
 import { uuidv7 } from '../../core/ids.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
@@ -58,6 +59,7 @@ export type AcquireLeaseResult = {
 
 // queued → leased → dispatched 同一笔事务；每次派发 Ga 加一，首次为 1，不重置（规格 4.3 行 311）
 export function acquireLease(tx: Tx, secret: string, params: AcquireLeaseParams): AcquireLeaseResult {
+  assertReworkExecutionAllowed(tx,params.nodeRunId)
   const row = loadNodeRun(tx, params.nodeRunId)
   // 租约是进入执行链的唯一入口：链已断的节点不许再派发执行，
   // 否则执行器会继续往坏账本上追加事件，把断链事实洗掉（评审 P1-1 的执行侧旁路）。

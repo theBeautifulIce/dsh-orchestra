@@ -1,4 +1,5 @@
 // src/service/commands/node-state.ts —— 节点状态迁移（规格 4.3 行 309-311、3.5 行 176）
+import { assertReworkExecutionAllowed } from '../rework-runtime.ts'
 import { OrchError, proposedError } from '../../core/errors.ts'
 import { canTransition } from '../../core/state-machine.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
@@ -36,6 +37,7 @@ export const DEFAULT_VERIFY_TIMEOUT_MS = 120000
 
 // 迁移必须合法，且 CAS 条件里带 revision 与 attempt
 export function transitionNode(tx: Tx, secret: string, params: TransitionParams): void {
+  if (['started','done'].includes(params.to)) assertReworkExecutionAllowed(tx,params.nodeRunId,params.to === 'done')
   // 断链闸门：transitionNode 走自己的 CAS，不经过 applyTransition，闸门必须两边都装（S2 r68 P1-1）
   assertChainIntact(tx, secret, params.nodeRunId)
   // 控制节点没有宿主执行实例，只能走 applyTransition；这条入口是执行器/上报那条路径。

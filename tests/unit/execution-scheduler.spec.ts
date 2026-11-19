@@ -218,9 +218,11 @@ describe('dispatcher 与调度器接线', () => {
     // 只假造 dispatcher 用到的那几次查表：节点行要能被认出是 agent 节点
     const fakeDb = {
       raw: {
-        prepare: () => ({
-          all: () => rows,
-          get: (id: string) => (id === 'nr1' || id === 'nr2' ? { node_type: 'agent' } : undefined),
+        prepare: (sql: string) => ({
+          all: () => sql.includes("status = 'queued'") ? rows : [],
+          get: (id: string) => sql.includes('FROM node_runs') && (id === 'nr1' || id === 'nr2')
+            ? { node_run_id: id, run_id: 'run1', node_id: 'check', node_type: 'agent', status: 'queued', replacement_node_run_id: null }
+            : undefined,
         }),
         exec: () => {},
       },

@@ -45,6 +45,7 @@ export type TaskListScreenProps = {
   onSnapshot?: (asOfSeq: number) => void
   commands?: TaskCommands
   triggerManager?: ReactNode
+  reworkEnabled?: boolean
 }
 
 /** 任务状态文案与色板：display_status 优先，未验证终态走独立文案。 */
@@ -86,7 +87,7 @@ function taskColumn(task: TaskSummary): TaskLane {
   return 'upcoming'
 }
 
-export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager }: TaskListScreenProps) {
+export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
   const [view, setView] = useState<(typeof VIEWS)[number]['id']>('board')
   const [filter, setFilter] = useState<Omit<ListTasksParams, 'cursor' | 'limit'>>({})
@@ -226,7 +227,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
       </section>)}
     </div></div>}
     {items.length > 0 && (filter.archived || view === 'list') && <TaskTable tasks={items} archived={Boolean(filter.archived)} selectedTaskId={selectedTaskId} onSelect={onSelectTask} />}
-    {items.length > 0 && !filter.archived && view === 'flow' && <TaskFlowView api={api} tasks={items} onOpenTask={onSelectTask} reloadVersion={reloadVersion + reload} />}
+    {items.length > 0 && !filter.archived && view === 'flow' && <TaskFlowView reworkEnabled={reworkEnabled} api={api} tasks={items} onOpenTask={onSelectTask} reloadVersion={reloadVersion + reload} />}
     {nextCursor && !error && <div style={{ display: 'flex', justifyContent: 'center' }}>
       <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>
     </div>}

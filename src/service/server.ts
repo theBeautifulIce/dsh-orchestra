@@ -45,6 +45,10 @@ import type { Actor } from './decision/approver.ts'
 import type { MemoryHost } from './memory-host.ts'
 import { planConfirmSchema, planInputSchema, type TaskPlanningHost } from './task-planning.ts'
 import { collaborationReviewSchema, collaborationScopeSchema, type CollaborationHost } from './collaboration.ts'
+import { reworkRequestSchema, reworkReviewSchema, type ReworkHost } from './rework-coordinator.ts'
+import { deliveryHoldSchema, type createDeliveryReviewHost } from './delivery-review.ts'
+import { localPlanInput, localPlanApproval, type createReworkPlanningHost } from './rework-planning.ts'
+import { reworkInspectionInput, type createReworkInspectionHost } from './rework-inspection.ts'
 import { modelRoutingSettingsSchema, type ModelRoutingSettingsHost } from './model-routing-settings.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
@@ -69,6 +73,10 @@ export type ServerDeps = {
   memory?: MemoryHost
   planning?: TaskPlanningHost
   collaboration?: CollaborationHost
+  rework?: ReworkHost
+  delivery?: ReturnType<typeof createDeliveryReviewHost>
+  localPlanning?: ReturnType<typeof createReworkPlanningHost>
+  inspection?: ReturnType<typeof createReworkInspectionHost>
   modelSettings?: ModelRoutingSettingsHost
   taskTriggers?: TaskTriggerHost
   workflowGenerator?: (input: { goal: string }, signal: AbortSignal) => Promise<unknown>
@@ -309,10 +317,79 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), {
         ok: true, phase: deps.phase, epoch: deps.epoch, memory_enabled: Boolean(deps.memory),
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
+        rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
       }))
       return
     }
     const actor = authenticate(req, deps.secret)
+
+    if (req.method === 'POST' && deps.inspection && url.pathname === '/v1/rework/inspect') {
+      const body = parseBody(reworkInspectionInput, await readJsonBody(req), '主脑检查指定成果')
+      const result = await deps.inspection.inspect(body, actor, requestNow)
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'GET' && deps.inspection && url.pathname === '/v1/rework/inspections') {
+      const { items, as_of_seq } = deps.inspection.list(stringParam(url, 'run_id') ?? '', actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, { items }))
+      return
+    }
+
+    if (req.method === 'GET' && deps.rework && url.pathname === '/v1/rework') {
+      const { items, as_of_seq } = deps.rework.list(actor, stringParam(url, 'run_id'))
+      sendJson(res, 200, okEnvelope(as_of_seq, { items }))
+      return
+    }
+    if (req.method === 'GET' && deps.rework && url.pathname === '/v1/rework/get') {
+      const { item, as_of_seq } = deps.rework.get(stringParam(url, 'request_id') ?? '', actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, { item }))
+      return
+    }
+    if (req.method === 'POST' && deps.rework && url.pathname === '/v1/rework/request') {
+      const body = parseBody(reworkRequestSchema, await readJsonBody(req), '提出成果修改意见')
+      const result = await queue.run(() => deps.rework!.request(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'POST' && deps.rework && url.pathname === '/v1/rework/review') {
+      const body = parseBody(reworkReviewSchema, await readJsonBody(req), '审核成果修改')
+      const result = await queue.run(() => deps.rework!.review(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'GET' && deps.delivery && url.pathname === '/v1/rework/holds') {
+      const { items, as_of_seq } = deps.delivery.list(actor, stringParam(url, 'run_id'))
+      sendJson(res, 200, okEnvelope(as_of_seq, { items }))
+      return
+    }
+    if (req.method === 'POST' && deps.delivery && url.pathname === '/v1/rework/hold') {
+      const body = parseBody(deliveryHoldSchema, await readJsonBody(req), '设置人工成果留验')
+      const result = await queue.run(() => deps.delivery!.change(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'GET' && deps.localPlanning && url.pathname === '/v1/rework/topology') {
+      const { as_of_seq, ...view } = deps.localPlanning.topology(stringParam(url, 'run_id') ?? '', actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, view))
+      return
+    }
+    if (req.method === 'GET' && deps.localPlanning && url.pathname === '/v1/rework/plan') {
+      const { plan, as_of_seq } = deps.localPlanning.get(stringParam(url, 'request_id') ?? '', actor)
+      sendJson(res, 200, okEnvelope(as_of_seq, { plan }))
+      return
+    }
+    if (req.method === 'POST' && deps.localPlanning && url.pathname === '/v1/rework/plan') {
+      const body = parseBody(localPlanInput, await readJsonBody(req), '生成局部返工方案')
+      const result = await deps.localPlanning.propose(body, actor, requestNow)
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
+    if (req.method === 'POST' && deps.localPlanning && url.pathname === '/v1/rework/plan/approve') {
+      const body = parseBody(localPlanApproval, await readJsonBody(req), '批准局部返工方案')
+      const result = await queue.run(() => deps.localPlanning!.approve(body, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
 
     if (req.method === 'GET' && url.pathname === '/v1/settings/model-routing' && deps.modelSettings) {
       const { item, as_of_seq } = deps.modelSettings.get()

@@ -1,3 +1,4 @@
+import { resolvePinnedNodeId } from '../rework-extra-steps.ts'
 // src/service/commands/apply-report.ts —— applyReport 六步收口（规格 4.2 行 286-305）
 import { OrchError } from '../../core/errors.ts'
 import { isReportRegistryState, type ApplyResult, type Report } from '../../core/report.ts'
@@ -141,7 +142,7 @@ function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): App
       current,
     })
   }
-  return catalog.policyFor(run.workflow_id ?? 'default', run.workflow_version, row.node_id)
+  return catalog.policyFor(run.workflow_id ?? 'default', run.workflow_version, resolvePinnedNodeId(tx, row.node_run_id))
 }
 
 /**

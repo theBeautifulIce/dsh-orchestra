@@ -1,10 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import { PHASE_CAPABILITIES } from '../../src/core/config.ts'
+import { WorkflowCatalog } from '../../src/service/workflows.ts'
 import { assertCommandAllowed, assertDefinitionAllowed, type WorkflowDefinition } from '../../src/core/workflow-def.ts'
 
 const def = (type: string): WorkflowDefinition => ({
   workflow_version: 'wf1',
   nodes: [{ node_id: 'n1', type: type as any }],
+})
+
+it('requires both a signed pure declaration and a read-only host registry to authorize pure rework', () => {
+  const catalog = new WorkflowCatalog('S5', undefined, tool => tool === 'inspect')
+  const agent = { node_id: 'analyze', type: 'agent' as const, tools: { allow: ['inspect'] } }
+  expect(catalog.initialAgentEffect(agent)).toBe('compensable')
+  expect(catalog.initialAgentEffect({ ...agent, side_effect_policy: 'pure' })).toBe('pure')
+  expect(catalog.initialAgentEffect({ ...agent, side_effect_policy: 'pure', tools: { allow: ['upload'] } })).toBe('compensable')
+  expect(new WorkflowCatalog('S5').initialAgentEffect({ ...agent, side_effect_policy: 'pure' })).toBe('compensable')
+  expect(catalog.initialAgentEffect({ ...agent, side_effect_policy: 'irreversible' })).toBe('irreversible')
 })
 
 describe('加载期阶段拒', () => {

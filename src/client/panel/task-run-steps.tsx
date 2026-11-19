@@ -1,7 +1,8 @@
+import { currentAttempts } from './runtime-topology.ts'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { NodeRunView, RunSummary } from '../api/types.ts'
-import { readCanvasDoc, NODE_TYPE_LABEL, type CanvasDoc, type CanvasNode } from './workflow-canvas-nodes.tsx'
+import { readCanvasDoc, NODE_TYPE_LABEL, topologicalOrder, type CanvasDoc, type CanvasNode } from './workflow-canvas-nodes.tsx'
 
 type Step = { id: string; nodeId: string; title: string; type: string; attempt: NodeRunView | null; definition?: CanvasNode }
 
@@ -23,20 +24,14 @@ export function nodePhase(status: string | null): { label: string; tone: string 
   return { label: status, tone: 'waiting' }
 }
 
-function newestAttempts(nodes: readonly NodeRunView[]) {
-  const newest = new Map<string, NodeRunView>()
-  for (const node of nodes) {
-    const previous = newest.get(node.node_id)
-    if (!previous || node.attempt > previous.attempt) newest.set(node.node_id, node)
-  }
-  return newest
-}
-
 function stepsFor(nodes: readonly NodeRunView[], doc?: CanvasDoc | null): Step[] {
-  const actual = newestAttempts(nodes)
+  const actual = currentAttempts(nodes)
   const documented = new Map(doc?.nodes.map((node) => [node.node_id, node]))
   if (actual.size) {
-    return Array.from(actual.values(), (node) => ({
+    const order = doc ? topologicalOrder(doc) : null
+    const rank = new Map(order?.ok ? order.order.map((id, index) => [id, index]) : [])
+    const ordered = Array.from(actual.values()).sort((a, b) => (rank.get(a.node_id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.node_id) ?? Number.MAX_SAFE_INTEGER))
+    return ordered.map((node) => ({
       id: node.node_run_id, nodeId: node.node_id, title: node.title || documented.get(node.node_id)?.title || node.node_id,
       type: node.node_type, attempt: node, definition: documented.get(node.node_id),
     }))
@@ -132,6 +127,7 @@ function StepInspection({ step, doc, onOpenRun, renderEvidence }: {
     <h3>{step.title}</h3>
     <p>{NODE_TYPE_LABEL[step.type] ?? step.type} · {nodePhase(node?.status ?? null).label}{node && ` · 第 ${node.attempt} 次尝试`}</p>
     {node?.started_at && <p>开始于 <time dateTime={node.started_at}>{formatTaskDate(node.started_at)}</time></p>}
+    {step.definition?.raw.runtime_step != null && <p>运行中新增 · 来源角色：{String((step.definition.raw.runtime_step as { source_title: string }).source_title)}</p>}
     {typeof contract?.description === 'string' && <section><h4>步骤职责</h4><p>{contract.description}</p></section>}
     <section><h4>状态与结果</h4><p>{node?.status_label ?? '尚无执行记录'}</p>
       {node?.hang_reason && <p>{node.hang_reason}</p>}

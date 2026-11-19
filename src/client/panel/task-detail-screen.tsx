@@ -1,3 +1,6 @@
+import { runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
+import { ReworkPanel } from './rework-panel.tsx'
+import type { ReworkApi } from '../api/rework.ts'
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client.ts'
 import type { TaskCommands } from '../api/task-commands.ts'
@@ -26,6 +29,8 @@ export type TaskDetailScreenProps = {
   onBack: () => void
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
+  rework?: ReworkApi
+  reworkPlannerEnabled?: boolean
   taskCommands?: TaskCommands
   triggerCommands?: Pick<ReturnType<typeof createTaskTriggerCommands>, 'setEnabled'>
   onArchiveChanged?: () => void
@@ -46,7 +51,7 @@ const NODE_TERMINAL_STATUSES = new Set([
 ])
 
 export function TaskDetailScreen({
-  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory,
+  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory,
 }: TaskDetailScreenProps) {
   const [data, setData] = useState<DetailData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -136,14 +141,16 @@ export function TaskDetailScreen({
       {failed && <ReadError onRetry={() => setReload((n) => n + 1)} />}
       {showRun && <div className="task-inspector-back"><button className="task-quiet-button" type="button" onClick={returnToTask}>返回任务</button></div>}
       {showRun && task && run && <>
+        {rework && <ReworkPanel api={api} commands={rework} runId={run.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
         <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
       </>}
       {!showRun && data && <>
+        {taskTab === '概览' && latest && rework && <ReworkPanel api={api} commands={rework} runId={latest.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
         {taskTab === '概览' && <TaskOverview data={data} latest={latest} api={api} reloadVersion={reloadVersion} commands={taskCommands}
           triggerCommands={triggerCommands} onArchiveChanged={onArchiveChanged} onOpenRun={openRun} />}
-        {taskTab === '编排' && <TaskOrchestration api={api} task={data.task} run={latest} reloadVersion={reloadVersion} />}
+        {taskTab === '编排' && <TaskOrchestration reworkEnabled={Boolean(rework)} api={api} task={data.task} run={latest} reloadVersion={reloadVersion} />}
         {taskTab === '事件' && <><h3>任务事件</h3><ActivityList api={api} taskId={taskId} reloadVersion={reloadVersion} />
           <ExecutionHistory api={api} taskId={taskId} reloadVersion={reloadVersion} /></>}
       </>}
@@ -302,7 +309,7 @@ function RunRows({ runs, selectedRunId, onOpenRun }: { runs: readonly RunSummary
   </button>)}</div>
 }
 
-function TaskOrchestration({ api, task, run, reloadVersion }: { api: ResourcesApi; task: TaskSummary; run?: RunSummary; reloadVersion: number }) {
+function TaskOrchestration({ api, task, run, reloadVersion, reworkEnabled }: { api: ResourcesApi; task: TaskSummary; run?: RunSummary; reloadVersion: number; reworkEnabled?: boolean }) {
   const workflow = usePinnedWorkflow(api, run ? run.workflow_id : task.workflow_id, run ? run.workflow_version : task.workflow_version)
   const [nodes, setNodes] = useState<NodeRunView[]>()
   const [failed, setFailed] = useState(false)
@@ -315,17 +322,21 @@ function TaskOrchestration({ api, task, run, reloadVersion }: { api: ResourcesAp
       .catch(() => { if (current) setFailed(true) })
     return () => { current = false }
   }, [api, run?.run_id, reloadVersion, retry])
+  const topology = useRunTopology(api, run?.run_id, Boolean(reworkEnabled), reloadVersion + retry)
+  const runtimeDoc = runtimeCanvasDoc(workflow?.definition, topology.data)
   return <section className="task-drawer-section">
     <header><h3>运行拓扑与步骤</h3><span className="task-type-badge">{taskAutonomyLabel(task)}</span></header>
     {failed && <ReadError onRetry={() => setRetry((n) => n + 1)} />}
     {!failed && run && !nodes && <p role="status" style={mutedStyle}>正在读取执行步骤…</p>}
     {workflow?.error && <p role="status" style={mutedStyle}>固定版本流程定义暂时不可读取。</p>}
-    {(nodes || !run) && <TaskRunSteps key={run?.run_id ?? 'planned'} nodes={nodes ?? []} doc={workflow?.doc} run={run}
+    {(nodes || !run) && <TaskRunSteps key={run?.run_id ?? 'planned'} nodes={nodes ?? []} doc={runtimeDoc} run={run}
       renderEvidence={(node) => <><ExecutionHistory key={node.node_run_id} api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} />
         <section><h4>执行证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} /></section></>} />}
-    {workflow?.doc && <details className="task-flow-graph">
-      <summary>查看固定流程图 · {workflow.doc.name}</summary>
-      <WorkflowCanvasView definition={workflow.definition} readOnly runtimeCompact canvasId="task-drawer-flow" runtimeNodes={nodes} />
+    {topology.loading && <p role="status">正在读取本次运行拓扑…</p>}
+    {topology.failed && <p role="alert">运行拓扑读取失败，请刷新后重试。</p>}
+    {workflow?.doc && !topology.failed && !topology.loading && <details className="task-flow-graph">
+      <summary>{reworkEnabled && run ? '查看本次运行流程图' : '查看固定流程图'} · {workflow.doc.name}</summary>
+      <WorkflowCanvasView definition={workflow.definition} readOnly runtimeCompact inspectNodes runtimeTopology={topology.data} canvasId="task-drawer-flow" runtimeNodes={nodes} />
     </details>}
   </section>
 }

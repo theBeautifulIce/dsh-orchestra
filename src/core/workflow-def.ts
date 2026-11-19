@@ -28,6 +28,7 @@ export type SubworkflowNodeConfig = {
 export type WorkflowNodeDef = {
   node_id: string
   type: NodeType
+  side_effect_policy?: 'pure' | 'compensable' | 'irreversible'
   tools?: { allow?: string[]; deny?: string[] }
   // 节点自带的通过条件；和模板条件取 AND（规格 6.1 行 837）
   pass_conditions?: PassCondition[]
@@ -139,6 +140,9 @@ function assertSubworkflowConfig(node: WorkflowNodeDef): void {
 // 控制配置只能长在对应类型的节点上：agent/parallel/decision 带上它就是定义被写错了。
 // 旧定义里若还带着请求体形态的 control，也在这里拒掉，避免“看起来配了、实际没生效”。
 function assertControlConfigShape(node: WorkflowNodeDef): void {
+  if (node.side_effect_policy !== undefined && (node.type !== 'agent' || !['pure','compensable','irreversible'].includes(node.side_effect_policy))) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '智能体步骤的副作用声明无效', { node_id: node.node_id })
+  }
   const raw = node as WorkflowNodeDef & { control?: unknown }
   if (raw.control !== undefined) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '控制节点配置必须写成 wait / subworkflow 字段，不接受 control', {

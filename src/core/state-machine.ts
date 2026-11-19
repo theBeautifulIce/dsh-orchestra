@@ -110,6 +110,7 @@ export type TransitionTrigger =
   | 'continue-tracking'
   | 'uphold-report'
   | 'uphold-decision'
+  | 'rework-input-invalidated'
 
 // 迁移守卫的上下文。除状态/目标/触发出处外，其余字段只服务具体规则。
 export type TransitionContext = {
@@ -121,6 +122,7 @@ export type TransitionContext = {
   hangReason: 'report_contradicted' | null
   sideEffectVerifiedNone: boolean
   controlCompletion?: boolean
+  reworkAuthorized?: boolean
 }
 
 export type TransitionRule = {
@@ -205,6 +207,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   { id: 'M-60', from: ['startup_unknown', 'indeterminate_side_effect'], to: ['superseded', 'failed'], trigger: 'uphold-decision', allowHung: true },
   { id: 'M-61', from: ['startup_unknown'], to: ['stopping'], trigger: 'confirm-started-with-tool', requires: (c) => c.hasToolCall },
   // 未派发就取消：不立围栏、不产生新 attempt，直接作废；补上此前只在取消 CAS 里放行的缺口
+  { id: 'M-66', from: ['queued', 'leased', 'dispatched', 'started', 'verifying'], to: ['superseded'], trigger: 'rework-input-invalidated', requires: (c) => c.reworkAuthorized === true && c.sideEffectVerifiedNone },
   { id: 'M-62', from: ['queued', 'leased'], to: ['superseded'], trigger: 'cancel-before-dispatch' },
 ]
 
@@ -273,7 +276,7 @@ export const MIGRATION_CASE_IDS = [
   'M-31', 'M-32', 'M-33', 'M-34', 'M-35', 'M-36', 'M-37', 'M-38', 'M-39', 'M-40',
   'M-41', 'M-42', 'M-43', 'M-44', 'M-45', 'M-46', 'M-47', 'M-48', 'M-49', 'M-50',
   'M-51', 'M-52', 'M-53', 'M-54', 'M-55', 'M-56', 'M-57', 'M-58', 'M-59', 'M-60',
-  'M-61', 'M-62', 'M-63', 'M-64', 'M-65',
+  'M-61', 'M-62', 'M-63', 'M-64', 'M-65', 'M-66',
 ] as const
 
 export function allows(rule: TransitionRule, ctx: TransitionContext): boolean {
