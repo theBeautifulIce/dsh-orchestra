@@ -1,6 +1,12 @@
 # dsh-orchestra 接手指引（handoff）
 
-## 2026-11-19 当前接手点 · S5 第二轮候选与签署依赖
+## 2026-11-19 当前接手点 · G1–G5 待授权签署
+
+本地分支 `codex/s5-g5-acceptance` 的签署依赖修复已冻结在 `2f07617a2cfe1b5b8a069c0b1b3d73aad24549ce`。五份绑定该候选的独审报告在 `4580aab18a11380d6ae45625e7c84e4c334d4247`。本轮全量测试 1564 项通过、3 项跳过，G5 的 73 份证据全部重放通过，另有 29 份故障证据各重放两次、逐份与 HEAD 一致。
+
+正式工作树仍保留 G1–G4 的历史签署，默认门检查拒绝复用旧候选，G5 待首次签发。授权人从[五门签署操作单](docs/reviews/G1-G5-signing-dependencies.md)接手，按 G1 到 G5 的顺序逐门签署、提交，在同一提交上完成五门联检。产品任务“让新用户在目标 DSH 找到本次运行和成果”待下一轮。
+
+## 2026-11-19 历史接手点 · S5 第二轮候选与签署依赖
 
 在本地分支 `codex/s5-g5-acceptance` 上冻结的实现、测试和证据候选为 `417cd9706cac7ff826dd8afdaeb5cddb977833ee`。该候选从 `a21e813684a06934048b9ac3300e9c38016cbac8` 接手。先读[本轮执行单及复跑记录](docs/reviews/S5-round2-execution.md)、[73 项矩阵](docs/reviews/S5-g5-item-map.md)和[第二轮独审](docs/audits/S5-independent-audit-round2.md)。
 
