@@ -6,7 +6,7 @@ import { appendEvent } from '../infra/db/ledger.ts'
 import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand, UUID_V7_RE } from './commands/idempotency.ts'
 import { readStrongEvidence } from './queries/evidence.ts'
-import { closeRun } from './commands/run-close.ts'
+import { closeRun, isRunTerminal } from './commands/run-close.ts'
 import { reviewOwnership } from './delivery-review.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { propagateRunCancellation } from './commands/subworkflow.ts'
@@ -370,7 +370,7 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
       return withReadTx(db, ({ tx, as_of_seq }) => {
         const request = loadReworkRequest(tx, requestId)
         access(tx, request, actor)
-        return { item: { request, attempts: tx.all<ReworkAttempt>('SELECT * FROM rework_attempts WHERE request_id=? ORDER BY round_no', [requestId]), reviews: tx.all<ReworkReview>('SELECT * FROM rework_reviews WHERE request_id=? ORDER BY created_at,review_id', [requestId]), impacts: tx.all<{
+        return { item: { request, dispatch_blocks: tx.all<{node_id:string;node_run_id:string;reason:string;message:string;created_at:string;resolved_at:string|null}>('SELECT node_id,node_run_id,reason,message,created_at,resolved_at FROM rework_dispatch_blocks WHERE request_id=? ORDER BY created_at,node_run_id',[requestId]), attempts: tx.all<ReworkAttempt>('SELECT * FROM rework_attempts WHERE request_id=? ORDER BY round_no', [requestId]), reviews: tx.all<ReworkReview>('SELECT * FROM rework_reviews WHERE request_id=? ORDER BY created_at,review_id', [requestId]), impacts: tx.all<{
               node_id: string
               node_run_id: string
               replacement_node_run_id: string | null
@@ -389,12 +389,16 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
               status: string
               cancel_requested_at: string | null
             }>('SELECT status,cancel_requested_at FROM runs WHERE run_id=?', [row.run_id])
-            if (!run || run.cancel_requested_at || ['cancelled', 'failed', 'succeeded', 'succeeded_with_unverified'].includes(run.status))
+            if (!run || run.cancel_requested_at || isRunTerminal(run.status)) {
               tx.run("UPDATE rework_requests SET status='cancelled',revision=revision+1,updated_at=? WHERE request_id=?", [now, row.request_id])
+              event(tx, loadReworkRequest(tx, row.request_id), 'cancelled')
+            }
             else if (run.status !== 'running')
               continue
-            else if (now >= row.expires_at && row.status !== 'escalated')
+            else if (now >= row.expires_at && row.status !== 'escalated') {
               tx.run("UPDATE rework_requests SET status='escalated',revision=revision+1,updated_at=? WHERE request_id=?", [now, row.request_id])
+              event(tx, loadReworkRequest(tx, row.request_id), 'expired')
+            }
             else if (row.status === 'scheduled' && row.new_node_run_id && loadNode(tx, row.new_node_run_id).status === 'done') {
               const results = tx.all<{
                 artifact_id: string
@@ -411,6 +415,8 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
               }
               else {
                 tx.run("UPDATE rework_requests SET status='escalated',revision=revision+1,updated_at=? WHERE request_id=?", [now, row.request_id])
+                appendEvent(tx, { type: 'rework.recovery_blocked', runId: row.run_id, nodeRunId: row.new_node_run_id,
+                  payload: { request_id: row.request_id, reason: 'expected_one_revision_artifact', count: results.length } })
               }
             }
             else if (row.status === 'scheduled' && row.new_node_run_id && ['failed', 'timeout', 'orphaned', 'abandoned_unverified', 'failed_with_unverified', 'indeterminate_side_effect'].includes(loadNode(tx, row.new_node_run_id).status)) {

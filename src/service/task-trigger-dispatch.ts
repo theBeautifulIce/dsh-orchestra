@@ -1,4 +1,4 @@
-import { MANUAL_REWORK_ELIGIBLE } from './rework-dispatch-specs.ts'
+import { MANUAL_REWORK_ELIGIBLE, recordManualDispatchBlock } from './rework-dispatch-specs.ts'
 import { OrchError } from '../core/errors.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 import { failQueuedNode, type NodeSpec } from './dispatcher.ts'
@@ -132,21 +132,24 @@ export function createTriggerDispatchPump(
         const resolver = source === 'manual' ? options?.resolveManual : source === 'plan' ? resolvePlan : resolve
         if (!resolver) continue
         const markDispatched = () => { try { markTriggerDispatched(db, run.run_id, clock()) } catch (error) { onError(error) } }
-        const markFailed = (reason: string) => { try { markTriggerResolveFailed(db, run.run_id, reason, clock()) } catch (error) { onError(error) } }
+        const markFailed = (reason: string, failure?: unknown) => { try {
+          if(source==='manual') withTx(db,tx=>recordManualDispatchBlock(tx,run.run_id,reason,failure,clock()))
+          else markTriggerResolveFailed(db, run.run_id, reason, clock())
+        } catch (error) { onError(error) } }
         const work = resolveBounded(run, resolver).then(async (specs) => {
           if (shutdown.signal.aborted) return
+          // Recheck before either dispatch or diagnostics: a pause/cancel is not a resolver failure.
+          if (!db.raw.prepare("SELECT 1 FROM runs WHERE run_id = ? AND status = 'running' AND cancel_requested_at IS NULL").get(run.run_id)) return
           // 解析不出规格不是"没事发生"：原因要落到就绪态里，不能被静默吞掉
           if (!specs || Object.keys(specs).length === 0) { markFailed('resolver_returned_no_specs'); return }
-          // Recheck after async host resolution because a separate command could have paused or cancelled the run.
-          if (!db.raw.prepare("SELECT 1 FROM runs WHERE run_id = ? AND status = 'running' AND cancel_requested_at IS NULL").get(run.run_id)) return
           await dispatch(run, specs)
           markDispatched()
         }).catch((error: unknown) => {
           if (shutdown.signal.aborted) return
-          markFailed(resolveFailureReason(error))
+          markFailed(resolveFailureReason(error),error)
           onError(error)
           // 权限阻断要落成用户可见状态：节点收失败、运行收失败，任务进待处理车道
-          if (isPermissionDenied(error)) blockRunOnPermissionDenied(run, error)
+          if (source !== 'manual' && isPermissionDenied(error)) blockRunOnPermissionDenied(run, error)
         }).finally(() => { active.delete(run.run_id) })
         active.set(run.run_id, work)
       }

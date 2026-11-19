@@ -249,4 +249,3 @@ async function main(bin) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === self) await main(process.argv[2])
-

@@ -4,7 +4,13 @@ import type { OperationRow } from './types.ts'
 import type { ReworkRequest, ReworkAttempt, ReworkReview as ReviewRecord } from '../../service/rework-coordinator.ts'
 import type { InspectionInput, InspectionResult, ReworkInspection } from '../../service/rework-inspection.ts'
 export type ReworkItem = ReworkRequest
-export type ReworkDetail = { request: ReworkRequest; attempts: ReworkAttempt[]; reviews: ReviewRecord[]; impacts?: Array<{ node_id: string; node_run_id: string; replacement_node_run_id: string | null; reason: string; released_at: string | null }> }
+export type ReworkDetail = {
+  request: ReworkRequest
+  attempts: ReworkAttempt[]
+  reviews: ReviewRecord[]
+  impacts?: Array<{ node_id: string; node_run_id: string; replacement_node_run_id: string | null; reason: string; released_at: string | null }>
+  dispatch_blocks?: Array<{ node_id: string; node_run_id: string; reason: string; message: string; resolved_at: string | null }>
+}
 
 export type RunTopology = {
   edges: Array<{ from: string; to: string }>
@@ -49,4 +55,3 @@ export function createReworkApi(client: ApiClient) {
   }
 }
 export type ReworkApi = ReturnType<typeof createReworkApi>
-

@@ -94,4 +94,3 @@ it('resolves persisted lineage after restart and refuses expanded direct tool or
  withTx(db,tx=>tx.run("UPDATE rework_local_plans SET proposal_json=json_set(proposal_json,'$.insert_steps',json('[]')) WHERE approved_by IS NOT NULL"))
  expect(()=>withTx(db,tx=>extraStepInstruction(tx,clone))).toThrow(/claims/)
 })
-
