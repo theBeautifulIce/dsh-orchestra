@@ -54,3 +54,24 @@
 - 旧前置证据的双次注入发现 G1 的 G-14 和 G2 的 ev-g2-01、ev-g2-10、ev-g2-14 已变化。已用实际输出归档。G2-14 现在对同一时钟显式断言 2.000 秒原期限 < 2.500 秒扫描 < 4.000 秒续租期限，同时验证零过期和节点完成。
 - 主代理运行 `pnpm check` 退出 0。类型检查、Vitest 和构建均通过，140 个测试文件中 139 个通过、1 个整文件条件跳过，1562 个用例通过、2 个跳过。一个是 G1 正式签署与预签互斥分支，另一个是需要真实插件上下文的 Q-63 面板用例，已由真实插件探针单独运行。
 - 前置签署仍有跨门依赖。按现行规格，G1–G4 的候选范围包含未来的 `docs/gates/G5.md`；提交或更新该记录会改变前置门的候选树，而 G5 又引用 G4 的 artifact。请门规范维护者及授权签署人确定如何在同一提交树上验证整条链。当前保留既有规格和四份签署记录。第五节产品任务待下一轮。
+
+## 冻结复跑
+
+冻结候选 `417cd9706cac7ff826dd8afdaeb5cddb977833ee`。在干净提交上执行 `node --no-warnings scripts/gen-g5-evidence.ts --out-root tmp/s5-round2-frozen-all`，73 项全部逐项回放、73 份临时证据、0 失败、0 缺口，退出 0。Q-27 的冻结复跑为 67.587 ms。G-06、G-11、G-12 分别用 `scripts/fault-inject.ts --case <编号> --out <独立临时目录>` 重放，退出均为 0；G-11 和 G-12 与 Git 中归档字节完全一致，G-06 只差本次生成的 `tex_` 执行 ID。
+
+同提交的 `pnpm gate` 检查四道已签旧门，均拒绝复用绑定旧候选的报告，首条变化路径为 `.gitattributes`，退出 1。冻结候选的前置独审另跑 41 文件、725 用例通过、1 个互斥分支跳过，并将 29 份注入证据各重跑两遍，与冻结 HEAD 一致。技术裁决与新候选绑定见 [S1 第 72 轮](../audits/S1-independent-audit-round72.md)、[S2 第 73 轮](../audits/S2-independent-audit-round73.md)、[S3 第 24 轮](../audits/S3-independent-audit-round24.md)、[S4 第 4 轮](../audits/S4-independent-audit-round4.md)及 [S5 第 2 轮](../audits/S5-independent-audit-round2.md)。
+
+冻结后再次执行 `pnpm check`，类型、测试、构建均退出 0，1561 通过、3 跳过。另用 Vitest JSON reporter 记录一次并发全量运行，1560 通过、4 跳过；逐例清单为 G1 签署态互斥用例、外部服务 Q-63、Q-26 节点分页性能和 Q-27 任务列表性能。性能测试会按当次实测值决定是否跳过，全量数字不抵扣专测。冻结生成器的独立 Q-26 实测 get_run 5.383 ms、节点分页 20.991 ms，Q-27 为 67.587 ms，三项断言均执行。S5 独审另跑 Q-27 为 66.926 ms，Q-63 真实插件联验退出 0。
+
+## 冻结提交的变更文件
+
+完整清单可用 `git diff --name-status a21e813..417cd97` 查看，以下按修改原因定位。
+
+| 用途 | 变更文件 |
+| --- | --- |
+| 成果切换身份与竞态 | `src/client/panel/artifact-content.tsx`、`rework-panel.tsx`；`tests/client/artifact-content.spec.tsx`、`rework-panel.spec.tsx` |
+| 查询快照、终态、节点标签、万任务性能和触发信息 | `src/service/queries/tasks.ts`；`tests/integration/queries.spec.ts`、`run-close.spec.ts`、`task-summary-attention.spec.ts`、`task-triggers.spec.ts`；`tests/client/panel-status.spec.tsx`、`tests/fixtures/node-status-labels.ts` |
+| 命令重发、超时与受限宿主 | `src/service/commands/idempotency.ts`、`src/service/sweep.ts`、`tests/integration/sweep.spec.ts`；`scripts/verify-panel-db-isolation.mjs`、`verify-panel-db-isolation-wsl.sh`、`tests/fixtures/panel-isolation-entry.tsx` 和该脚本的 LF 检出规则 `.gitattributes` |
+| 记忆并发、输入、评估、审批与恢复 | `src/service/memory-host.ts`、`scripts/verify-memory-plugin-recovery.ts`；`tests/integration/memory-start.spec.ts`、`memory-runtime.spec.ts`、`memory-approval.spec.ts`；`tests/fixtures/memory-start-writer.ts`、`tests/client/memory-recovery-acceptance.spec.tsx` |
+| 故障注入与旧门数据 | `scripts/fault-inject.ts`；`docs/gates/evidence/G1/G-14.md`，G2 下的 `ev-g2-01.md`、`ev-g2-10.md`、`ev-g2-14.md` |
+| G5 证据与审计索引 | `docs/gates/evidence/G5/` 新增本执行单 15 个 Q 编号对应的 Markdown 文件，更新 `Q-27.md`；`docs/orchestra-audit-ledger.md`、`docs/reviews/S5-g5-item-map.md` 和本执行单 |
