@@ -29,6 +29,9 @@ type InboxRow = {
  */
 export const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
+/** 当前登记为 running，兼容历史账本中的在途状态。 */
+export const IN_FLIGHT_COMMAND_STATUSES = ['running', 'pending', 'in_progress', 'in_flight'] as const
+
 export function assertOperationId(value: unknown): string {
   if (typeof value !== 'string' || !UUID_V7_RE.test(value)) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'operation_id 必须是 UUIDv7（小写带连字符）', {
@@ -70,7 +73,7 @@ export function runIdempotentCommand<T>(
       const receipt = JSON.parse(existing.receipt_json) as { result: T }
       return { result: receipt.result, replayed: true }
     }
-    if (existing.status === 'running') {
+    if (IN_FLIGHT_COMMAND_STATUSES.some((status) => status === existing.status)) {
       throw new OrchError('COMMAND_BUSY', '同一个 operation_id 还在处理中', { operation_id: p.operationId })
     }
     throw new OrchError('OPERATION_ID_CONFLICT', '这条命令已经以别的结果收口', {

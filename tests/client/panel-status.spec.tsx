@@ -7,6 +7,7 @@ import { COPY } from '../../src/client/panel/copy.ts'
 import { TaskDetailScreen } from '../../src/client/panel/task-detail-screen.tsx'
 import { TaskListScreen } from '../../src/client/panel/tasks-screen.tsx'
 import { COLOR } from '../../src/client/panel/tokens.ts'
+import { NODE_STATUS_LABELS } from '../fixtures/node-status-labels.ts'
 import {
   createFakeService,
   nodeRunView,
@@ -217,6 +218,39 @@ describe('WP-A 面板侧 G5 门禁', () => {
     const title = view.findAll('button').find((button) => button.textContent === rawTitle)
     expect(title).toBeDefined()
     expect(title?.getAttribute('title')).toBe(rawTitle)
+    view.unmount()
+  })
+
+  it('Q-31 完整运行逐行显示 20 种节点状态文案，并保留运行状态文案', async () => {
+    const task = taskSummary({ current_run_id: 'r1', status: 'running', display_status: 'running', run_count: 3 })
+    const run = runSummary({ run_id: 'r1', status: 'running', display_status: 'running', total: NODE_STATUS_LABELS.length })
+    const succeeded = runSummary({ run_id: 'r2', status: 'succeeded', display_status: 'succeeded' })
+    const failed = runSummary({ run_id: 'r3', status: 'failed', display_status: 'failed' })
+    const nodes = NODE_STATUS_LABELS.map(({ status, status_label }) =>
+      nodeRunView({ node_run_id: 'nr-' + status, node_id: 'node-' + status, title: '步骤 ' + status, status, status_label }),
+    )
+    const { api } = apiFrom((query) => {
+      if (query.path === '/v1/tasks/get') return { ok: true, data: task }
+      if (query.path === '/v1/runs') return { ok: true, data: { items: [run, succeeded, failed] } }
+      if (query.path === '/v1/node-runs') return { ok: true, data: { items: nodes } }
+      return { ok: true, data: {} }
+    })
+    const view = await renderPanel(<TaskDetailScreen api={api} taskId="t1" onBack={noop} />)
+    await view.flush()
+    await view.click(view.findAll('button').find((button) => button.textContent === '完整运行')!)
+    await view.flush()
+
+    const heading = view.findAll('h3').find((element) => element.textContent === '执行步骤 · 20')
+    const steps = heading?.closest('section')
+    expect(steps?.querySelector('p')?.textContent).toBe('进行中')
+    const rows = [...(steps?.querySelectorAll('ol > li > article > div:first-child') ?? [])]
+    expect(rows.map((row) => [row.querySelector('strong')?.textContent, row.querySelector('span')?.textContent]))
+      .toEqual(NODE_STATUS_LABELS.map(({ status, status_label }) => ['步骤 ' + status, status_label]))
+    expect(new Set(rows.map((row) => row.querySelector('span')?.textContent)).size).toBe(20)
+    await view.click(view.findAll('button').find((button) => button.textContent === '返回任务')!)
+    await view.click(view.findAll('button').find((button) => button.textContent === '运行 · 3')!)
+    expect(view.findAll('.task-run-history button > span:nth-child(2)').map((element) => element.textContent))
+      .toEqual(['进行中', '已完成', '未成功'])
     view.unmount()
   })
 })

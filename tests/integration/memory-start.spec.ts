@@ -2,12 +2,15 @@
 // 规格 9.4：同 key 重发返回同一个记忆 run 与 attempt；同源换 key 撞活跃批次报 MEMORY_RUN_ACTIVE；
 // 源运行没成功收口就拒；run、节点、批次与映射在同一笔事务里提交。
 import { describe, expect, it } from 'vitest'
+import { rmSync } from 'node:fs'
+import { Worker } from 'node:worker_threads'
 import { OrchError } from '../../src/core/errors.ts'
+import { serveOrchestra } from '../../src/index.ts'
 import { findMemoryNode, memoryGraphOrder } from '../../src/core/memory-graph-schema.ts'
 import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
-import { MEMORY_WORKFLOW_ID, saveMemoryProposal, startMemoryRun } from '../../src/service/commands/memory.ts'
+import { MEMORY_WORKFLOW_ID, saveMemoryProposal, startMemoryRun, type MemoryRunStartResult } from '../../src/service/commands/memory.ts'
 import type { MemoryItemInput } from '../../src/core/memory-canonical.ts'
-import { countOf, freshLedger } from '../fixtures/ledger.ts'
+import { countOf, freshLedger, TEST_SECRET } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-18T03:00:00.000Z'
 const OP_A = '0192c3a4-5b6d-7e8f-9a0b-1c2d3e4f5061'
@@ -218,6 +221,69 @@ describe('memory_start_run 发起与幂等', () => {
     expect(again.attempt).toBe(first.attempt)
     reopened.raw.close()
   })
+
+  it('Q-43c 两个独立写者同时发起同键 → 只建一条 run 和映射，重启仍命中', async () => {
+    const { db, file, dir } = freshLedger()
+    seedSourceRun(db)
+    db.raw.close()
+    const boot = () => serveOrchestra({
+      dbFile: file, secret: TEST_SECRET, phase: 'S5',
+      asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
+      appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }),
+      memory: {
+        prepareItems: async () => ({ items: [] }),
+        judge: async () => { throw new Error('空提议不调用裁判') },
+        plugin: {
+          protocol: 1,
+          writeMemory: async () => { throw new Error('空提议不调用写端') },
+          fenceAndInspect: async () => { throw new Error('空提议不进入恢复') },
+        },
+      },
+    })
+    const barrier = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT)
+    const params = { source_run_id: 'run_src_1', request_key: 'req_concurrent', reason: '整理记忆', now: NOW }
+    const workers = [OP_A, OP_B].map((operation_id, index) => new Worker(
+      new URL('../fixtures/memory-start-writer.ts', import.meta.url),
+      { workerData: { file, params: { ...params, operation_id }, barrier, first: index === 0 } },
+    ))
+    type WriterResult = { result: MemoryRunStartResult; contended: boolean }
+    const calls = workers.map((worker) => new Promise<WriterResult>((resolve, reject) => {
+      worker.once('message', resolve)
+      worker.once('error', reject)
+      worker.once('exit', (code) => reject(new Error(`记忆写者提前退出（${code}）`)))
+    }))
+    try {
+      const [first, second] = await Promise.all(calls)
+      if (!first || !second) throw new Error('未收齐两位记忆写者的结果')
+      expect(first.result.replayed).toBe(false)
+      expect(second.contended).toBe(true)
+      expect(second.result).toEqual({ ...first.result, replayed: true })
+      // 服务启动并关闭后用同一文件重启，经公开入口发起新的 operation 验证持久映射。
+      const previous = await boot()
+      await previous.close()
+      const restarted = await boot()
+      try {
+        const { now: _, ...request } = params
+        const response = await fetch(restarted.endpoint + '/v1/memory/runs/start', {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestra-secret': TEST_SECRET },
+          body: JSON.stringify({ ...request, operation_id: OP_C }),
+        })
+        expect(response.status).toBe(200)
+        const { data: replay } = await response.json() as { data: MemoryRunStartResult }
+        expect(replay).toEqual({ ...first.result, replayed: true })
+        const db = restarted.orchestra.db
+        expect(memoryRunCount(db)).toBe(1)
+        expect(countOf(db, 'memory_batches')).toBe(1)
+        expect(db.raw.prepare('SELECT source_run_id, request_key, memory_run_id FROM memory_run_requests').all())
+          .toEqual([{ source_run_id: params.source_run_id, request_key: params.request_key, memory_run_id: replay.memory_run_id }])
+      } finally {
+        await restarted.close()
+      }
+    } finally {
+      await Promise.all(workers.map((worker) => worker.terminate()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 12_000)
 
   it('校验通过后同目标重复保存 → 记为 skipped，不重复落条目', () => {
     const { db } = freshLedger()

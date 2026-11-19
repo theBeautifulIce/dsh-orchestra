@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { OrchError } from '../../src/core/errors.ts'
-import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
+import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { CURSOR_TTL_MS, decodeCursor, encodeCursor, makeCursor } from '../../src/service/queries/cursor.ts'
@@ -11,12 +11,14 @@ import { listEvents, listEventHistory } from '../../src/service/queries/list_eve
 import { listExecutionHistory } from '../../src/service/queries/execution-history.ts'
 import { listTasks } from '../../src/service/queries/list_tasks.ts'
 import { listTaskSummaries, getTaskSummary, getWorkspaceOverview } from '../../src/service/queries/tasks.ts'
-import { listRuns } from '../../src/service/queries/runs.ts'
+import { getRun, listRuns } from '../../src/service/queries/runs.ts'
 import { setTaskArchive } from '../../src/service/commands/task-archive.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { getOperation } from '../../src/service/queries/get_operation.ts'
 import { listRunArtifacts } from '../../src/service/queries/artifacts.ts'
 import { verifyLedger } from '../../src/service/queries/verify_ledger.ts'
+import { listNodes } from '../../src/service/queries/nodes.ts'
+import { NODE_STATUS_LABELS } from '../fixtures/node-status-labels.ts'
 
 const SECRET = 'query-secret'
 const dirs: string[] = []
@@ -52,6 +54,101 @@ const codeOf = (fn: () => unknown): string => {
   try { fn() } catch (err) { if (err instanceof OrchError) return err.code; throw err }
   throw new Error('本应抛错却通过了')
 }
+
+it('Q-03 get_run 读途中有独立写者提交时，运行、计数、前十节点及全局水位仍同一快照', () => {
+  const db = seeded()
+  const beforeTime = '2026-11-13T04:00:00.000Z'
+  const afterTime = '2026-11-13T05:00:00.000Z'
+  const doneIds = Array.from({ length: 10 }, (_, i) => 'done-' + i)
+  withTx(db, (tx) => {
+    tx.run("INSERT INTO runs (run_id, task_id, status, created_at, updated_at) VALUES ('r2','t2','running',?,?)",
+      [beforeTime, beforeTime])
+    appendEvent(tx, { type: 'task.run_started', runId: 'r1', payload: {} })
+    appendEvent(tx, { type: 'task.run_started', runId: 'r2', payload: {} })
+    doneIds.forEach((id, i) => tx.run(
+      'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, created_at, updated_at) '
+      + "VALUES (?, 'r1', ?, ?, 'agent', 'done', 1, ?, ?)", [id, id, i + 2, beforeTime, beforeTime],
+    ))
+  })
+  const eventHead = (connection: Db, runId?: string) => {
+    const statement = connection.raw.prepare(runId
+      ? 'SELECT MAX(seq) AS seq FROM events WHERE run_id = ?'
+      : 'SELECT MAX(seq) AS seq FROM events')
+    return (statement.get(...(runId ? [runId] : [])) as { seq: number }).seq
+  }
+  const beforeSeq = eventHead(db)
+  const beforeRunSeq = eventHead(db, 'r1')
+  expect(beforeSeq).toBeGreaterThan(beforeRunSeq)
+
+  const writer = openDb(db.file)
+  closers.push(writer.raw)
+  const prototype = Object.getPrototypeOf(db.raw) as Db['raw']
+  const prepare = prototype.prepare
+  let committedSeq: number | undefined
+  // 只在真实 SQLite 读出 run 行后插入同步屏障。持有快照的读取尚未返回，写方用另一条连接提交。
+  const barrier = vi.spyOn(prototype, 'prepare').mockImplementation(function (this: Db['raw'], sql: string) {
+    const statement = prepare.call(this, sql)
+    if (sql.includes('FROM runs r JOIN tasks t') && sql.endsWith(' WHERE r.run_id = ?')) {
+      expect(this).not.toBe(writer.raw)
+      expect(this).not.toBe(db.raw)
+      const get = statement.get.bind(statement)
+      vi.spyOn(statement, 'get').mockImplementationOnce((...params) => {
+        const run = get(...params)
+        withTx(writer, (tx) => {
+          tx.run("UPDATE runs SET status = 'succeeded', revision = 2, updated_at = ? WHERE run_id = 'r1'", [afterTime])
+          tx.run("UPDATE node_runs SET status = 'done', revision = 2, updated_at = ? WHERE node_run_id = 'n1'", [afterTime])
+          appendEvent(tx, { type: 'run.terminal', runId: 'r1', payload: { status: 'succeeded' } })
+          appendEvent(tx, { type: 'task.updated', runId: 'r2', payload: {} })
+        })
+        committedSeq = eventHead(writer)
+        return run
+      })
+    }
+    return statement
+  })
+  let during: ReturnType<typeof getRun>
+  try {
+    during = getRun(db, 'r1')
+  } finally {
+    barrier.mockRestore()
+  }
+
+  expect(committedSeq).toBeGreaterThan(beforeSeq)
+  expect(during).toMatchObject({
+    run_id: 'r1', status: 'running', revision: 1,
+    counts: [{ status: 'done', count: 10 }, { status: 'started', count: 1 }],
+    total: 11, last_event_seq: beforeRunSeq, as_of_seq: beforeSeq,
+  })
+  const topBefore = doneIds.toReversed()
+  expect(during.top_nodes.map((node) => [node.node_run_id, node.status])).toEqual(topBefore.map((id) => [id, 'done']))
+
+  const after = getRun(db, 'r1')
+  const afterRunSeq = eventHead(db, 'r1')
+  expect(after.as_of_seq).toBeGreaterThan(afterRunSeq)
+  expect(after).toMatchObject({
+    status: 'succeeded', revision: 2, counts: [{ status: 'done', count: 11 }],
+    total: 11, last_event_seq: afterRunSeq, as_of_seq: committedSeq,
+  })
+  expect(after.top_nodes.map((node) => node.node_run_id)).toEqual(['n1', ...topBefore.slice(0, 9)])
+  expect(after.top_nodes[0]).toMatchObject({ status: 'done', revision: 2 })
+})
+
+it('Q-31 list_nodes 逐一投影 20 种节点状态及独立文案', () => {
+  const db = seeded()
+  const now = '2026-11-13T04:00:00.000Z'
+  withTx(db, (tx) => {
+    tx.run("INSERT INTO runs (run_id, task_id, status, created_at, updated_at) VALUES ('r2','t2','running',?,?)", [now, now])
+    NODE_STATUS_LABELS.forEach(({ status }, index) => {
+      tx.run(
+        'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, created_at, updated_at) '
+        + "VALUES (?, 'r2', ?, ?, 'agent', ?, 1, ?, ?)", ['nr-' + status, 'node-' + status, index + 1, status, now, now],
+      )
+    })
+  })
+  const { items } = listNodes(db, 'r2')
+  expect(items.map(({ status, status_label }) => ({ status, status_label }))).toEqual(NODE_STATUS_LABELS)
+  expect(new Set(items.map((item) => item.status_label)).size).toBe(20)
+})
 
 it('执行日志按任务和节点隔离，展示工具与报告摘要而不返回原始调用参数', () => {
   const db = seeded()

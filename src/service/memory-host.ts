@@ -46,7 +46,14 @@ export function createMemoryHost(db: Db, secret: string, options: MemoryHostOpti
       async writeMemory({ items, ...scope }) {
         const approved = items.map((item) => ({ ...item, content_hash: contentHash(item) }))
         const expected = new Map(approved.map((item) => [item.client_key, item.content_hash]))
-        const entries = await getWriter().writeMemory({ ...scope, items: approved })
+        const writer = getWriter()
+        const entries = await writer.writeMemory({ ...scope, items: approved }).catch((error: unknown) => {
+          // The protocol 1 Go client exposes this specific transaction rejection as an Error message.
+          if (error instanceof Error && error.message === '/orchestra-memory/write 失败：governed content hash conflict') {
+            throw new OrchError('MEMORY_APPLY_CONFLICT', '同一批次条目键已绑定不同内容', { batch_id: scope.batch_id })
+          }
+          throw error
+        })
         if (!Array.isArray(entries) || entries.some((entry) => expected.get(entry.client_key) !== entry.content_hash)) {
           throw new OrchError('MEMORY_APPLY_CONFLICT', '插件回执与已批准条目的哈希不符')
         }

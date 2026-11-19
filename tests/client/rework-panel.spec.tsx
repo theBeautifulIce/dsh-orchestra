@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { ApiError, createApiClient, type ApiClient } from '../../src/client/api/client.ts'
 import { createReworkApi, type ReworkItem } from '../../src/client/api/rework.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
+import type { ArtifactContentView, RunArtifact } from '../../src/client/api/types.ts'
 import { ReworkPanel, LineComparison } from '../../src/client/panel/rework-panel.tsx'
-import { renderPanel, nodeRunView } from './harness.ts'
+import { deferred, renderPanel, nodeRunView, type PanelView } from './harness.ts'
 
 const oldHash = 'a'.repeat(64), newHash = 'b'.repeat(64)
 const request = { request_id: 'rw1', run_id: 'r1', requester_actor: 'human', target_node_run_id: 'old', target_attempt: 1, source_artifact_id: 'v1', source_artifact_hash: oldHash, reason: '缺少时间字段', expected_result: '补充真实采集时间', suggested_scope: 'targeted_revision', status: 'awaiting_review', revision: 3, round_no: 1, max_rounds: 3, new_node_run_id: 'new', updated_at: '2026-11-19' } as ReworkItem
@@ -32,7 +34,266 @@ async function fill(element: Element, value: string) {
   })
 }
 
+function version(artifact_id: string, source_node_run_id: string, text: string) {
+  const metadata: RunArtifact = {
+    artifact_id, run_id: 'r1', source_node_run_id, sha256: createHash('sha256').update(text).digest('hex'),
+    expired: false, retain_until: null, file_name: 'report.txt', size_bytes: Buffer.byteLength(text), created_at: '2026-11-19',
+  }
+  return { metadata, text }
+}
+
+const source = version('source', 'old', '原始成果')
+const revisionA = version('A', 'new', '内容 A')
+const revisionB = version('B', 'new', '内容 B')
+const updateSource = version('source', 'old', '更新后的原始成果')
+type Version = ReturnType<typeof version>
+function content({ metadata, text }: Version, mode: string | number | undefined = 'preview'): ArtifactContentView {
+  const identity = { file_name: metadata.file_name!, sha256: metadata.sha256, size_bytes: metadata.size_bytes! }
+  return mode === 'download'
+    ? { ...identity, kind: 'download', base64: Buffer.from(text).toString('base64') }
+    : { ...identity, kind: 'preview', text, truncated: false }
+}
+
+function versionsFixture({ before = source, a = revisionA, b = revisionB, form = false, locked = false } = {}) {
+  const versions = [before, a, b]
+  const item = { ...request, source_artifact_id: before.metadata.artifact_id, source_artifact_hash: before.metadata.sha256 }
+  const history = {
+    request: item, attempts: locked ? [{ attempt_id: 'attempt1', round_no: 1, result_artifact_id: a.metadata.artifact_id,
+      result_artifact_hash: a.metadata.sha256, source_artifact_id: before.metadata.artifact_id }] : [],
+    reviews: [],
+  }
+  const { client, posts } = clientFor(item)
+  const get = client.get
+  const read = vi.fn(async (selected: Version, mode: string | number | undefined) => content(selected, mode))
+  const reads: unknown[] = []
+  client.get = async <T,>(path: string, query?: Record<string, string | number | undefined>) => {
+    let data: unknown
+    switch (path) {
+      case '/v1/rework/get': data = { item: history }; break
+      case '/v1/artifacts': data = { items: versions.map(v => v.metadata), has_more: false }; break
+      case '/v1/rework/holds': data = { items: [{ run_id: 'r1', node_id: 'n1', node_run_id: 'old', status: 'held' }] }; break
+      case '/v1/artifacts/content': {
+        reads.push(query)
+        const selected = versions.find(v => v.metadata.artifact_id === query?.artifact_id && v.metadata.run_id === query?.run_id)
+        if (!selected) throw new Error('没有对应的产物')
+        data = await read(selected, query?.mode)
+        break
+      }
+      default: return get<T>(path, query)
+    }
+    return { data: data as T, as_of_seq: 9 }
+  }
+  const panel = <ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)} runId={form ? 'r1' : undefined} plannerEnabled={form} />
+  return { panel, posts, read, reads }
+}
+
+function openDetails(view: PanelView, title: string) {
+  const summary = view.findAll('summary').find(el => el.textContent === title)!
+  const details = summary.parentElement as HTMLDetailsElement
+  details.open = true
+  return details
+}
+
+function button(inElement: ParentNode, label: string) {
+  return Array.from(inElement.querySelectorAll('button')).find(el => el.textContent === label)!
+}
+
+async function selectFormArtifact(details: HTMLDetailsElement, artifactId: string) {
+  const [node, artifact] = details.querySelectorAll('select')
+  if (node!.value !== 'old') await fill(node!, 'old')
+  await fill(artifact!, artifactId)
+  return artifact!
+}
+
 describe('成果审核与返工', () => {
+  it('invalidates a displayed same-name preview and binds the hold acceptance, feedback and inspection to B', async () => {
+    const a = version('A', 'old', '内容 A')
+    const b = version('B', 'old', '内容 B')
+    const fixture = versionsFixture({ a, b, form: true })
+    const view = await renderPanel(fixture.panel)
+    const save = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const createObjectURL = vi.fn((_blob: Blob) => 'blob:report')
+    const cleanup = vi.spyOn(window, 'setTimeout')
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = vi.fn()
+    })
+    try {
+      const form = openDetails(view, '审核成果或提出修改')
+      await selectFormArtifact(form, 'A')
+      await view.click(button(form, '预览内容'))
+      expect(form.querySelector('pre')?.textContent).toBe('内容 A')
+      const select = await selectFormArtifact(form, 'B')
+      const observed = {
+        title: form.querySelector('section')?.getAttribute('aria-label'),
+        label: select.selectedOptions[0]?.textContent,
+        text: form.querySelector('pre')?.textContent,
+      }
+      await view.click(button(form, '通过成果验收'))
+      const [criteria, reason, expected] = form.querySelectorAll('textarea')
+      await fill(criteria!, '核对 B 的内容')
+      await view.click(button(form, '请主脑检查成果'))
+      await fill(reason!, '记录对 B 的意见')
+      await fill(expected!, '保留正确内容')
+      await view.click(button(form, '要求修改'))
+      expect(fixture.posts).toMatchObject([
+        { path: '/v1/rework/hold', body: { action: 'accept', run_id: 'r1', node_run_id: 'old', artifact_id: 'B', sha256: b.metadata.sha256 } },
+        { path: '/v1/rework/inspect', body: { run_id: 'r1', target_node_run_id: 'old', source_artifact_id: 'B', source_artifact_hash: b.metadata.sha256, expected_revision: 7, criteria: '核对 B 的内容' } },
+        { path: '/v1/rework/request', body: { run_id: 'r1', target_node_run_id: 'old', source_artifact_id: 'B', source_artifact_hash: b.metadata.sha256, expected_revision: 7 } },
+      ])
+      expect(observed).toMatchObject({ title: 'report.txt的内容', text: undefined })
+      expect(observed.label).toContain('B')
+      expect(observed.label).toContain(b.metadata.sha256.slice(0, 12))
+      await view.click(button(form, '预览内容'))
+      expect(form.querySelector('pre')?.textContent).toBe('内容 B')
+      await view.click(button(form, '下载产物'))
+      expect(save.mock.instances[0]).toMatchObject({ download: 'report.txt', href: 'blob:report' })
+      expect(createObjectURL.mock.calls[0]?.[0]).toMatchObject({ size: b.metadata.size_bytes })
+      expect(fixture.reads).toEqual([
+        { run_id: 'r1', artifact_id: 'A', mode: 'preview' },
+        { run_id: 'r1', artifact_id: 'B', mode: 'preview' },
+        { run_id: 'r1', artifact_id: 'B', mode: 'download' },
+      ])
+    } finally {
+      const timerIndex = cleanup.mock.calls.findIndex(([, ms]) => ms === 1000)
+      if (timerIndex >= 0) window.clearTimeout(cleanup.mock.results[timerIndex]?.value)
+      cleanup.mockRestore()
+      vi.unstubAllGlobals()
+      save.mockRestore()
+      view.unmount()
+    }
+  })
+
+  it.each(['preview', 'error'] as const)('keeps B visible when the pending A %s arrives last', async (outcome) => {
+    const a = version('A', 'old', '内容 A')
+    const b = version('B', 'old', '内容 B')
+    const fixture = versionsFixture({ a, b, form: true })
+    const pendingA = deferred<ArtifactContentView>()
+    fixture.read.mockReturnValueOnce(pendingA.promise)
+    const view = await renderPanel(fixture.panel)
+    try {
+      const form = openDetails(view, '审核成果或提出修改')
+      await selectFormArtifact(form, 'A')
+      await view.click(button(form, '预览内容'))
+      await selectFormArtifact(form, 'B')
+      // Read B immediately, then let A finish after it.
+      await view.click(button(form, '预览内容'))
+      if (outcome === 'preview') pendingA.resolve(content(a))
+      else pendingA.reject(new Error('仅 A 的错误'))
+      await view.flush()
+      expect(form.querySelector('[role="alert"]')).toBeNull()
+      expect(form.querySelector('pre')?.textContent).toBe('内容 B')
+      expect(fixture.reads).toEqual([
+        { run_id: 'r1', artifact_id: 'A', mode: 'preview' },
+        { run_id: 'r1', artifact_id: 'B', mode: 'preview' },
+      ])
+    } finally { view.unmount() }
+  })
+
+  it.each(['before', 'after'] as const)('removes a completed comparison when the %s side changes', async (side) => {
+    const fixture = versionsFixture()
+    const view = await renderPanel(fixture.panel)
+    try {
+      const details = openDetails(view, '修改前后成果与版本')
+      await view.click(button(details, '逐行对比修改'))
+      expect(details.querySelector('tbody')?.textContent).toContain('原始成果内容 A')
+      const updated = side === 'before' ? versionsFixture({ before: updateSource }) : fixture
+      if (side === 'before') {
+        await view.rerender(updated.panel)
+        await view.flush()
+      } else {
+        const select = details.querySelector('select')!
+        await fill(select, 'B')
+      }
+      expect(details.querySelector('table')).toBeNull()
+      await view.click(button(details, '逐行对比修改'))
+      expect(details.querySelector('tbody')?.textContent).toContain(side === 'before' ? '更新后的原始成果内容 A' : '原始成果内容 B')
+      if (side === 'after') {
+        const select = details.querySelector('select')!
+        expect(select.options[0]?.textContent).not.toBe(select.options[1]?.textContent)
+        await fill(view.findAll('textarea')[0]!, '审核本轮 B')
+        await view.click(button(view.container, '通过验收'))
+        expect(fixture.posts[0]).toMatchObject({ path: '/v1/rework/review', body: {
+          request_id: 'rw1', expected_revision: 3, action: 'accept', artifact_id: 'B', artifact_hash: revisionB.metadata.sha256,
+        } })
+      }
+    } finally { view.unmount() }
+  })
+
+  it.each(['before', 'after'] as const)('ignores stale comparison results and failures when the %s side changes and changes back', async (side) => {
+    const fixture = versionsFixture()
+    const updated = versionsFixture({ before: updateSource })
+    const first = deferred<ArtifactContentView>()
+    const second = deferred<ArtifactContentView>()
+    const current = deferred<ArtifactContentView>()
+    // The baseline can prevent the second request from starting at all.
+    void second.promise.catch(() => {})
+    fixture.read.mockReturnValueOnce(first.promise)
+    const view = await renderPanel(fixture.panel)
+    try {
+      const details = openDetails(view, '修改前后成果与版本')
+      await view.click(button(details, '逐行对比修改'))
+      if (side === 'before') {
+        updated.read.mockReturnValueOnce(second.promise)
+        await view.rerender(updated.panel)
+        await view.flush()
+      } else {
+        fixture.read.mockReturnValueOnce(second.promise)
+        await fill(details.querySelector('select')!, 'B')
+      }
+      // The abandoned comparison must not disable comparison of the current pair.
+      await view.click(button(details, '逐行对比修改'))
+      if (side === 'before') {
+        await view.rerender(fixture.panel)
+        await view.flush()
+      } else {
+        await fill(details.querySelector('select')!, 'A')
+      }
+      fixture.read.mockReturnValueOnce(current.promise)
+      await view.click(button(details, '逐行对比修改'))
+      first.resolve({ ...content(source), kind: 'preview', text: '第一次的旧对比', truncated: false })
+      second.reject(new Error('被替换对比的错误'))
+      await view.flush()
+      expect(details.querySelector('table')).toBeNull()
+      expect(view.text()).not.toContain('被替换对比的错误')
+      expect(button(details, '逐行对比修改').disabled).toBe(true)
+      current.resolve(content(source))
+      await view.flush()
+      expect(details.querySelector('tbody')?.textContent).toContain('原始成果内容 A')
+      expect(button(details, '逐行对比修改').disabled).toBe(false)
+      expect(fixture.reads).toHaveLength(side === 'before' ? 4 : 6)
+      expect(updated.reads).toHaveLength(side === 'before' ? 2 : 0)
+    } finally { view.unmount() }
+  })
+
+  it('checks the content filename on both sides of the comparison', async () => {
+    const fixture = versionsFixture()
+    fixture.read.mockResolvedValueOnce({ ...content(source), file_name: 'unexpected.txt' })
+    const view = await renderPanel(fixture.panel)
+    try {
+      const details = openDetails(view, '修改前后成果与版本')
+      await view.click(button(details, '逐行对比修改'))
+      expect(details.querySelector('table')).toBeNull()
+      expect(view.text()).toContain('成果版本已变化')
+    } finally { view.unmount() }
+  })
+
+  it('preserves the single revised version bound by the service attempt', async () => {
+    const fixture = versionsFixture({ locked: true })
+    const view = await renderPanel(fixture.panel)
+    try {
+      const details = openDetails(view, '修改前后成果与版本')
+      expect(details.querySelector('select')).toBeNull()
+      expect(details.textContent).toContain(revisionA.metadata.sha256)
+      expect(details.textContent).not.toContain(revisionB.metadata.sha256)
+      await view.click(button(details, '逐行对比修改'))
+      expect(fixture.reads).toEqual([
+        { run_id: 'r1', artifact_id: 'source', mode: 'preview' },
+        { run_id: 'r1', artifact_id: 'A', mode: 'preview' },
+      ])
+    } finally { view.unmount() }
+  })
+
   it('separates quality acceptance and pins the revised artifact and CAS revision', async () => {
     const { client, posts } = clientFor()
     const view = await renderPanel(<ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)} />)
