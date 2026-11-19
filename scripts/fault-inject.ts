@@ -1558,7 +1558,7 @@ async function caseEvG215(): Promise<InjectionResult> {
   }
 }
 
-export async function runCase(name: InjectionCase): Promise<InjectionResult> {
+export async function runCase(name: string): Promise<InjectionResult> {
   switch (name) {
     case 'G-01': return caseG01()
     case 'G-02': return caseG02()
@@ -1591,11 +1591,13 @@ export async function runCase(name: InjectionCase): Promise<InjectionResult> {
     case 'ev-g2-14': return caseEvG214()
     case 'ev-g2-15': return caseEvG215()
   }
+  throw new Error(`Unknown fault injection case ID: ${JSON.stringify(name)}`)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const idx = process.argv.indexOf('--case')
-  const name = (idx >= 0 ? process.argv[idx + 1] : 'G-01') as InjectionCase
+  const name = idx >= 0 ? process.argv[idx + 1] : 'G-01'
+  if (name === undefined) throw new Error('Missing fault injection case ID after --case')
   const out = await runCase(name)
   const gate = name === 'G-11' ? 'G5' : ['G-03', 'G-04', 'G-05', 'G-07', 'ev-g2-01', 'ev-g2-02', 'ev-g2-03', 'ev-g2-04', 'ev-g2-05', 'ev-g2-06', 'ev-g2-07', 'ev-g2-08', 'ev-g2-09', 'ev-g2-10', 'ev-g2-11', 'ev-g2-12', 'ev-g2-13', 'ev-g2-14', 'ev-g2-15'].includes(name) ? 'G2' : 'G1'
   // --out 只是给复现守卫用的：把证据写到临时目录，别把工作树弄脏（S2 第三十五轮 P1-1）
