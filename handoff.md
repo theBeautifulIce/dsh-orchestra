@@ -1,8 +1,10 @@
 # dsh-orchestra 接手指引（handoff）
 
-## 2026-11-19 当前接手点 · 跨节点反馈与受限局部规划（实施基线 bd15daa）
+## 2026-11-19 当前接手点 · 跨节点反馈与受限局部规划
 
 本节对应从 `bd15daaeafbd3ab6f707ebe375314e7ccd3dfad5` 开始的跨节点返工批次。R01–R20 的实际测试名称、迁移、命令与复现步骤见[返工设计与证据](docs/design/rework-orchestration.md)。
+
+审计候选为 `925e2e5b95bacdd04a652c84697351c6380c7496`。独立复测 94 项通过。P0、P1 均为 0。既有 P2 是自然语言规划在缺少候选时自动生成流程的端到端回归缺口。双视口视觉检查通过。干净候选的 `pnpm gate` 仍因历史 `codebasemap.md` 候选漂移返回 1，G5 未签。详见[独立局部审查、实测和候选文件清单](docs/audits/S5-rework-development-audit-2026-11-19.md)。
 
 ### 已实现的行为
 
