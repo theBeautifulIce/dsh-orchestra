@@ -1,8 +1,11 @@
 import { expect, it } from 'vitest'
+import { sha256Hex } from '../../src/core/canonical.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { createCollaborationHost, type CollaborationBinding } from '../../src/service/collaboration.ts'
+import { callDshCollaboration } from '../../src/service/dsh-collaboration.ts'
+import { startServer } from '../../src/service/server.ts'
 import { freshLedger, TEST_SECRET } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-18T01:00:00.000Z'
@@ -13,10 +16,11 @@ const actor = 'human:lead'
 const source = { node_run_id: 'source', attempt: 1, action_generation: 1 }
 const target = { node_run_id: 'target', attempt: 1, action_generation: 2 }
 const outsider = { node_run_id: 'outsider', attempt: 1, action_generation: 1 }
+const replacementNode = { node_run_id: 'replacement', attempt: 3, action_generation: 4 }
 
-function seedMembers(db: Db) {
+function seedMembers(db: Db, nodes = [source, target, outsider]) {
   withTx(db, (tx) => {
-    for (const node of [source, target, outsider]) {
+    for (const node of nodes) {
       const task = 'task-' + node.node_run_id
       const run = 'run-' + node.node_run_id
       tx.run("INSERT INTO tasks (task_id,title,status,created_at,updated_at) VALUES (?,?,'running',?,?)", [task, task, NOW, NOW])
@@ -105,6 +109,8 @@ it('跨任务发现经过主脑授权、接收、独立核验和采纳，且不�
     const afterRestart = createCollaborationHost(reopened, TEST_SECRET)
     expect(afterRestart.review({ ...authorize, operation_id: uuidv7(), expected_revision: 5, action: 'adopt', note: '已采纳作为交付缺口。' }, actor, CHECKED))
       .toMatchObject({ status: 'completed', adoption: 'adopted', revision: 6 })
+    expect(() => afterRestart.reassignVerification({ operation_id: uuidv7(), request_id: requestId, expected_revision: 6,
+      target_node_run_id: outsider.node_run_id, note: '试图改派已完成核验' }, actor, CHECKED)).toThrow(/未结核验/)
     expect(afterRestart.getScope(scope.scope_id, actor).item).toMatchObject({
       members: [{ task_id: 'task-source' }, { task_id: 'task-target' }],
       findings: [{ evidence_id: sourceProof }], requests: [{ evidence_id: targetProof, adoption: 'adopted' }],
@@ -116,6 +122,95 @@ it('跨任务发现经过主脑授权、接收、独立核验和采纳，且不�
     expect(db.raw.prepare("SELECT status, revision FROM node_runs WHERE node_run_id = 'target'").get()).toMatchObject({ status: 'started', revision: 0 })
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toMatchObject({ n: 3 })
   } finally {
+    reopened?.raw.close()
+    db.raw.close()
+  }
+})
+
+it('主理人改派失效的签收，撤回与新投递在重启后仍可追溯并隔离旧接收方', async () => {
+  const { db } = freshLedger()
+  let reopened: Db | undefined
+  let server: Awaited<ReturnType<typeof startServer>> | undefined
+  const now = new Date().toISOString()
+  const owner = 'service:' + sha256Hex(TEST_SECRET).slice(0, 8)
+  try {
+    seedMembers(db, [source, target, outsider, replacementNode])
+    const host = createCollaborationHost(db, TEST_SECRET)
+    const scope = host.createScope({ operation_id: uuidv7(), title: '含候补的核验范围',
+      node_run_ids: [source.node_run_id, target.node_run_id, replacementNode.node_run_id], ttl_minutes: 60 }, owner, now)
+    const sourceProof = toolReceipt(db, source, 1, now)
+    const finding = host.reportFinding(source, { scope_id: scope.scope_id, title: '附件', summary: '索引缺少附件', evidence_id: sourceProof }, now)
+    const propose = { finding_id: finding.finding_id, target_node_run_id: target.node_run_id, question: '独立核对留存索引', ttl_minutes: 10 }
+    const original = host.requestVerification(source, propose, now)
+    const authorize = { operation_id: uuidv7(), request_id: original.request_id, expected_revision: 1, action: 'authorize' as const, note: '授权核验' }
+    host.review(authorize, owner, now)
+    host.handle(target, { operation_id: uuidv7(), request_id: original.request_id, expected_revision: 2, action: 'delivered' }, now)
+    const accept = { operation_id: uuidv7(), request_id: original.request_id, expected_revision: 3, action: 'accept' as const }
+    host.handle(target, accept, now)
+    const oldProof = toolReceipt(db, target, 1, now)
+    const earlyProof = toolReceipt(db, replacementNode, 1, now)
+    const reassign = { operation_id: uuidv7(), request_id: original.request_id, expected_revision: 4,
+      target_node_run_id: replacementNode.node_run_id, note: '前一执行节点失效' }
+    expect(() => host.reassignVerification(reassign, owner, now)).toThrow(/无法继续/)
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET status = 'failed' WHERE node_run_id = ?", [target.node_run_id]))
+    expect(host.getScope(scope.scope_id, owner, now).item.requests[0]).toMatchObject({ reassignment_candidates: [replacementNode.node_run_id] })
+    expect(() => host.reassignVerification(reassign, actor, now)).toThrow(/不存在/)
+    expect(() => host.reassignVerification({ ...reassign, expected_revision: 3 }, owner, now)).toThrow(/新状态/)
+    expect(() => host.reassignVerification({ ...reassign, target_node_run_id: outsider.node_run_id }, owner, now)).toThrow(/未加入/)
+    expect(() => host.reassignVerification({ ...reassign, target_node_run_id: source.node_run_id }, owner, now)).toThrow(/独立接收方/)
+    expect(() => host.reassignVerification(reassign, owner, original.expires_at)).toThrow(/超过时限/)
+    expect(host.listInbox(replacementNode, now).items).toEqual([])
+
+    server = await startServer({ secret: TEST_SECRET, phase: 'S5', epoch: db.epoch, asOfSeq: () => 0,
+      listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => ({ seq: 0, event_id: 'unused' }), now: () => now, collaboration: host })
+    const url = server.endpoint + '/v1/collaboration/reassign'
+    const post = () => fetch(url, { method: 'POST', headers: { 'x-orchestra-secret': TEST_SECRET, 'content-type': 'application/json' },
+      body: JSON.stringify(reassign) })
+    const responses = await Promise.all([post(), post()])
+    expect(responses.map(({ status }) => status)).toEqual([200, 200])
+    const [result, replay] = await Promise.all(responses.map(async (response) => (await response.json() as {
+      data: ReturnType<typeof host.reassignVerification>
+    }).data))
+    expect(result).toEqual(replay)
+    const { withdrawn, replacement } = result!
+    expect(withdrawn).toMatchObject({ request_id: original.request_id, status: 'withdrawn', withdrawn_from_status: 'accepted',
+      accepted_at: now, delivered_at: now, target_attempt: target.attempt, target_generation: target.action_generation,
+      replacement_request_id: replacement.request_id, authorization_note: authorize.note, revision: 5 })
+    expect(replacement).toMatchObject({ status: 'authorized', revision: 1, scope_id: scope.scope_id, finding_id: finding.finding_id,
+      replaces_request_id: original.request_id, target_attempt: replacementNode.attempt, target_generation: replacementNode.action_generation,
+      question: original.question, expires_at: original.expires_at, authorization_note: reassign.note })
+    expect(() => host.reassignVerification({ ...reassign, operation_id: uuidv7() }, owner, now)).toThrow(/新状态/)
+    expect(() => host.reassignVerification({ ...reassign, note: '已变更' }, owner, now)).toThrow(/不同的请求/)
+
+    // Even if the old executor comes back, withdrawn deliveries and cached accept receipts are fenced.
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET status = 'started' WHERE node_run_id = ?", [target.node_run_id]))
+    expect(host.listInbox(target, now).items).toEqual([])
+    expect(() => host.handle(target, accept, now)).toThrow(/已撤回/)
+    expect(() => host.handle(target, { ...accept, operation_id: uuidv7(), expected_revision: 1, request_id: replacement.request_id,
+      action: 'delivered' }, now)).toThrow(/接收方/)
+    expect(host.requestVerification(source, propose, now)).toEqual(withdrawn)
+
+    reopened = openDb(db.file)
+    const restarted = createCollaborationHost(reopened, TEST_SECRET)
+    expect(restarted.reassignVerification(reassign, owner, now)).toEqual(result)
+    const tool = (message: unknown) => callDshCollaboration(restarted, replacementNode, message)
+    expect(tool({ action: 'inbox' })).toMatchObject({ items: [{ request: { request_id: replacement.request_id, status: 'authorized' } }] })
+    expect(tool({ request_id: replacement.request_id, expected_revision: 1, action: 'delivered' })).toMatchObject({ status: 'delivered' })
+    expect(tool({ request_id: replacement.request_id, expected_revision: 2, action: 'accept' })).toMatchObject({ status: 'accepted' })
+    const complete = { request_id: replacement.request_id, expected_revision: 3, action: 'complete', result: '重新核对留存索引', verdict: 'confirmed' }
+    for (const proof of [oldProof, sourceProof, earlyProof]) {
+      expect(() => tool({ ...complete, evidence_id: proof })).toThrow(/独立执行/)
+    }
+    const newProof = toolReceipt(reopened, replacementNode, 2, new Date().toISOString())
+    expect(tool({ ...complete, evidence_id: newProof })).toMatchObject({ status: 'completed', evidence_id: newProof })
+    expect(restarted.sweep(original.expires_at)).toBe(0)
+    expect(restarted.listOutgoing(source).items[0]?.requests).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'withdrawn' }), expect.objectContaining({ status: 'completed', evidence_id: newProof }),
+    ]))
+    expect(reopened.raw.prepare("SELECT type FROM events WHERE type IN ('collaboration.withdrawn','collaboration.reassigned') ORDER BY seq").all().map((row) => row.type))
+      .toEqual(['collaboration.withdrawn', 'collaboration.reassigned'])
+  } finally {
+    await server?.close()
     reopened?.raw.close()
     db.raw.close()
   }

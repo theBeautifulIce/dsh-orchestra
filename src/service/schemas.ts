@@ -221,6 +221,7 @@ export const RESOLUTIONS = [
 
 export const resolveDecisionSchema = z.looseObject({
   operation_id: z.string().regex(UUID_V7_RE).optional(),
+  confirm_challenge: z.string().min(1).max(4096).optional(),
   decisionId: identifier,
   revision: z.number().int().positive(),
   resolution: z.enum(RESOLUTIONS),

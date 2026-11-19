@@ -426,6 +426,7 @@ describe('记忆审批卡', () => {
           decision_id: 'dec-mem',
           kind: 'audit_result',
           payload: approvalCardPayload(),
+          allowed_resolutions: ['approved', 'rejected'],
         })]) }
       }
       if (query.path === '/v1/decisions/resolve') return { ok: true, data: { decisionId: 'dec-mem', revision: 2 } }
@@ -443,8 +444,8 @@ describe('记忆审批卡', () => {
       decisionId: 'dec-mem',
       revision: 1,
       resolution: 'approved',
-      actor: { kind: 'human', id: 'panel' },
     })
+    expect(resolves[0]!.body).not.toHaveProperty('actor')
     view.unmount()
   })
 
@@ -455,6 +456,7 @@ describe('记忆审批卡', () => {
           decision_id: 'dec-mem',
           kind: 'audit_result',
           payload: approvalCardPayload(),
+          allowed_resolutions: ['approved', 'rejected'],
         })]) }
       }
       if (query.path === '/v1/decisions/resolve') return { ok: true, data: { decisionId: 'dec-mem', revision: 2 } }

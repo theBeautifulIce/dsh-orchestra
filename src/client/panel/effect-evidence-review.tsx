@@ -23,11 +23,15 @@ export function EffectEvidenceReview({ api, client, nodeId, onResolved }: {
     finally { setBusy(false) }
   }
   async function confirm() {
-    if (!review?.evidence.some((item) => item.evidence_id === evidenceId)) return
+    const evidence = review?.evidence.find((item) => item.evidence_id === evidenceId)
+    if (!review || !evidence) return
+    const basis = evidence.verdict === 'not_applied'
+      ? { basis: 'verified_none', stop_evidence: evidenceId }
+      : { basis: 'evidence', evidence_id: evidenceId }
     setBusy(true)
     try {
       await postWithOperationReceipt(client, '/v1/effects/resolve', 'effect.resolve', {
-        node_run_id: review.node_run_id, run_id: review.run_id, basis: 'evidence', evidence_source: 'run_tool', evidence_id: evidenceId,
+        node_run_id: review.node_run_id, run_id: review.run_id, ...basis, evidence_source: 'run_tool',
         expected: { revision: review.revision }, operation_id: newOperationId(),
       })
       setReview(null)
@@ -44,7 +48,7 @@ export function EffectEvidenceReview({ api, client, nodeId, onResolved }: {
     {review?.evidence.map((item) => <label key={item.evidence_id} style={hint}>
       <input type="radio" name={`verify-${nodeId}`} value={item.evidence_id} checked={evidenceId === item.evidence_id}
         onChange={() => setEvidenceId(item.evidence_id)} disabled={busy} />
-      {item.tool} · 退出码 {item.exit_code} · {new Date(item.finished_at).toLocaleString()} · {item.evidence_id}
+      {item.verdict === 'not_applied' ? '已核实未发生' : '已核实已发生'} · {item.tool} · {new Date(item.finished_at).toLocaleString()} · {item.evidence_id}
     </label>)}
     {evidenceId && review && <PanelCommandButton style={control} disabled={busy} onClick={() => { void confirm() }}>用所选证据记录核实</PanelCommandButton>}
     {notice && <p style={hint} role="status">{notice}</p>}

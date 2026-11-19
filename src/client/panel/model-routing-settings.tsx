@@ -8,23 +8,29 @@ import { PanelCommandButton } from './shell.tsx'
 const PATH = '/v1/settings/model-routing'
 const LEVELS = [['routine', '常规'], ['standard', '中等'], ['complex', '复杂']] as const
 
-export function ModelRoutingSettings({ client }: { client: ApiClient }) {
+export function ModelRoutingSettings({ client, reloadVersion = 0, onSnapshot }: {
+  client: ApiClient; reloadVersion?: number; onSnapshot?: (seq: number) => void
+}) {
   const [saved, setSaved] = useState<ModelRoutingSettingsView>()
   const [draft, setDraft] = useState<ModelRoutingSettingsView['mapping']>()
   const [reload, setReload] = useState(0)
+  const [loadedVersion, setLoadedVersion] = useState<number>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState(false)
   useEffect(() => {
     let active = true
-    void client.get<ModelRoutingSettingsView>(PATH).then(({ data }) => {
-      if (active) { setSaved(data); setDraft(data.mapping) }
+    void client.get<ModelRoutingSettingsView>(PATH).then(({ data, as_of_seq }) => {
+      if (active) {
+        setSaved(data); setDraft(data.mapping); setLoadedVersion(reloadVersion)
+        onSnapshot?.(as_of_seq)
+      }
     }).catch(() => { if (active) { setError(true); setMessage('模型配置暂时无法读取。') } })
     return () => { active = false }
-  }, [client, reload])
+  }, [client, onSnapshot, reload, reloadVersion])
 
   async function save() {
-    if (!saved || !draft || busy) return
+    if (!saved || !draft || busy || loadedVersion !== reloadVersion) return
     setBusy(true); setMessage(''); setError(false)
     try {
       await postWithOperationReceipt(client, PATH, 'model_routing.save', {
@@ -57,7 +63,7 @@ export function ModelRoutingSettings({ client }: { client: ApiClient }) {
         </label>
       })}
       <div style={{ display: 'flex', gap: 8 }}>
-        <PanelCommandButton type="submit" className="ops-button ops-button--primary" disabled={busy || LEVELS.every(([level]) => saved.mapping[level] === draft[level])}>保存模型分配</PanelCommandButton>
+        <PanelCommandButton type="submit" className="ops-button ops-button--primary" disabled={busy || loadedVersion !== reloadVersion || LEVELS.every(([level]) => saved.mapping[level] === draft[level])}>保存模型分配</PanelCommandButton>
         <button type="button" className="ops-button" disabled={busy} onClick={() => { setError(false); setMessage(''); setReload((value) => value + 1) }}>重新读取</button>
       </div>
     </form> : !error && <p role="status">正在读取宿主模型…</p>}

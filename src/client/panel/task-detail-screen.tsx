@@ -19,7 +19,7 @@ import { ExecutionHistory } from './execution-history.tsx'
 import { ArtifactContent } from './artifact-content.tsx'
 import { TaskPlanBrief } from './task-plan-form.tsx'
 import { TaskRunSteps, formatTaskDate, runDuration, usePinnedWorkflow } from './task-run-steps.tsx'
-import { NodeEvidence } from './task-run-evidence.tsx'
+import { NodeEffectFacts, NodeEvidence } from './task-run-evidence.tsx'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
 
 export type TaskDetailScreenProps = {
@@ -35,6 +35,7 @@ export type TaskDetailScreenProps = {
   triggerCommands?: Pick<ReturnType<typeof createTaskTriggerCommands>, 'setEnabled'>
   onArchiveChanged?: () => void
   onOpenMemory?: () => void
+  onOpenDecision?: (id: string) => void
 }
 type DetailData = { task: TaskSummary; runs: RunSummary[]; next: string | null }
 const TASK_TABS = ['概览', '运行', '编排', '事件'] as const
@@ -51,7 +52,7 @@ const NODE_TERMINAL_STATUSES = new Set([
 ])
 
 export function TaskDetailScreen({
-  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory,
+  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision,
 }: TaskDetailScreenProps) {
   const [data, setData] = useState<DetailData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -142,7 +143,7 @@ export function TaskDetailScreen({
       {showRun && <div className="task-inspector-back"><button className="task-quiet-button" type="button" onClick={returnToTask}>返回任务</button></div>}
       {showRun && task && run && <>
         {rework && <ReworkPanel api={api} commands={rework} runId={run.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
-        <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+        <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision} />
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
       </>}
@@ -150,7 +151,8 @@ export function TaskDetailScreen({
         {taskTab === '概览' && latest && rework && <ReworkPanel api={api} commands={rework} runId={latest.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
         {taskTab === '概览' && <TaskOverview data={data} latest={latest} api={api} reloadVersion={reloadVersion} commands={taskCommands}
           triggerCommands={triggerCommands} onArchiveChanged={onArchiveChanged} onOpenRun={openRun} />}
-        {taskTab === '编排' && <TaskOrchestration reworkEnabled={Boolean(rework)} api={api} task={data.task} run={latest} reloadVersion={reloadVersion} />}
+        {taskTab === '编排' && <TaskOrchestration reworkEnabled={Boolean(rework)} api={api} task={data.task} run={latest} reloadVersion={reloadVersion}
+          onOpenDecision={onOpenDecision} />}
         {taskTab === '事件' && <><h3>任务事件</h3><ActivityList api={api} taskId={taskId} reloadVersion={reloadVersion} />
           <ExecutionHistory api={api} taskId={taskId} reloadVersion={reloadVersion} /></>}
       </>}
@@ -309,7 +311,9 @@ function RunRows({ runs, selectedRunId, onOpenRun }: { runs: readonly RunSummary
   </button>)}</div>
 }
 
-function TaskOrchestration({ api, task, run, reloadVersion, reworkEnabled }: { api: ResourcesApi; task: TaskSummary; run?: RunSummary; reloadVersion: number; reworkEnabled?: boolean }) {
+function TaskOrchestration({ api, task, run, reloadVersion, reworkEnabled, onOpenDecision }: {
+  api: ResourcesApi; task: TaskSummary; run?: RunSummary; reloadVersion: number; reworkEnabled?: boolean; onOpenDecision?: (id: string) => void
+}) {
   const workflow = usePinnedWorkflow(api, run ? run.workflow_id : task.workflow_id, run ? run.workflow_version : task.workflow_version)
   const [nodes, setNodes] = useState<NodeRunView[]>()
   const [failed, setFailed] = useState(false)
@@ -331,7 +335,7 @@ function TaskOrchestration({ api, task, run, reloadVersion, reworkEnabled }: { a
     {workflow?.error && <p role="status" style={mutedStyle}>固定版本流程定义暂时不可读取。</p>}
     {(nodes || !run) && <TaskRunSteps key={run?.run_id ?? 'planned'} nodes={nodes ?? []} doc={runtimeDoc} run={run}
       renderEvidence={(node) => <><ExecutionHistory key={node.node_run_id} api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} />
-        <section><h4>执行证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} /></section></>} />}
+        <section><h4>执行证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} /></section></>} />}
     {topology.loading && <p role="status">正在读取本次运行拓扑…</p>}
     {topology.failed && <p role="alert">运行拓扑读取失败，请刷新后重试。</p>}
     {workflow?.doc && !topology.failed && !topology.loading && <details className="task-flow-graph">
@@ -412,11 +416,11 @@ function ArchiveAction({ task, commands, onChange }: { task: TaskSummary; comman
   </div>
 }
 
-type RunDetailsProps = Pick<TaskDetailScreenProps, 'api' | 'onSnapshot'> & {
+type RunDetailsProps = Pick<TaskDetailScreenProps, 'api' | 'onSnapshot' | 'onOpenDecision'> & {
   run: RunSummary; task: TaskSummary; tab: RunTab; reloadVersion: number
 }
 
-function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot }: RunDetailsProps) {
+function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDecision }: RunDetailsProps) {
   const [nodes, setNodes] = useState<NodeRunView[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
@@ -451,11 +455,11 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot }: RunDetai
       {nodes && tab === '步骤' && <section>
         <h3 style={sectionTitleStyle}>执行步骤 · {run.total}</h3>
         <p style={mutedStyle}><RunStatusLabel status={run.status} displayStatus={run.display_status} />{run.settling ? ' · 正在收尾' : ''}</p>
-        {nodes.length ? <ol style={stepListStyle}>{nodes.map((node) => <li key={node.node_run_id}><NodeRow node={node} />
+        {nodes.length ? <ol style={stepListStyle}>{nodes.map((node) => <li key={node.node_run_id}><NodeRow node={node} onOpenDecision={onOpenDecision} />
           <NodeHistoryDisclosure api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} /></li>)}</ol>
           : <p style={mutedStyle}>这次运行没有执行步骤。</p>}
       </section>}
-      {nodes && tab === '证据' && <EvidenceList api={api} nodes={nodes} reloadVersion={reloadVersion} />}
+      {nodes && tab === '证据' && <EvidenceList api={api} nodes={nodes} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} />}
       {nodes && run.total > nodes.length && <p style={mutedStyle}>显示 {nodes.length} / {run.total} 个步骤</p>}
     </>}
   </>
@@ -495,14 +499,16 @@ function RunResult({ api, run, reloadVersion }: { api: ResourcesApi; run: RunSum
   </>
 }
 
-function EvidenceList({ api, nodes, reloadVersion }: { api: ResourcesApi; nodes: NodeRunView[]; reloadVersion: number }) {
-  const evidenced = nodes.filter((node) => node.execution_ids?.length || node.attestation_id)
+function EvidenceList({ api, nodes, reloadVersion, onOpenDecision }: {
+  api: ResourcesApi; nodes: NodeRunView[]; reloadVersion: number; onOpenDecision?: (id: string) => void
+}) {
+  const evidenced = nodes.filter((node) => node.status === 'done' || node.verified_effect || node.execution_ids?.length || node.attestation_id)
   return <section>
     <h3 style={sectionTitleStyle}>证据记录</h3>
     {evidenced.length === 0 && <p style={mutedStyle}>这次运行尚无关联证据。</p>}
     {evidenced.map((node) => <section key={node.node_run_id} style={cardStyle}>
       <h4 style={evidenceHeadingStyle}>{node.title || node.node_id} · 第 {node.attempt} 次尝试</h4>
-      <NodeEvidence api={api} node={node} reloadVersion={reloadVersion} />
+      <NodeEvidence api={api} node={node} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} />
     </section>)}
   </section>
 }
@@ -525,7 +531,7 @@ function PendingNotices({ task }: { task: TaskSummary }) {
   return <p style={attentionStyle}>{parts.join(' · ')}</p>
 }
 
-function NodeRow({ node }: { node: NodeRunView }) {
+function NodeRow({ node, onOpenDecision }: { node: NodeRunView; onOpenDecision?: (id: string) => void }) {
   const heartbeat = heartbeatNotice(node)
   const assignment = node.model_assignment
   const model = assignment?.usage
@@ -536,11 +542,13 @@ function NodeRow({ node }: { node: NodeRunView }) {
     </div>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 8, color: COLOR.inkMuted, fontSize: FONT_PX.helper }}>
       <span>第 {node.attempt} 次尝试</span>
-      {node.execution_count > 0 && <span>{node.execution_count} 条工具执行记录（未验证）</span>}
+      {node.execution_count > 0 && <span>{node.execution_count} 条工具执行记录</span>}
       {node.active_decision_ids.length > 0 && <span>{node.active_decision_ids.length} 项{COPY.awaitingDecision}</span>}
       {heartbeat && <span style={{ color: COLOR.warning }}>{heartbeat}</span>}
       {node.projection_missing.length > 0 && <span>部分信息暂不可用</span>}
     </div>
+    {(node.declared_effect || node.verified_effect || node.status === 'done') &&
+      <NodeEffectFacts node={node} onOpenDecision={onOpenDecision} />}
     {node.hang_reason && <p style={{ margin: '8px 0 0', fontSize: FONT_PX.body }}>{node.hang_reason}</p>}
     {assignment && <div style={mutedStyle}>
       <strong>{model ? '实际执行模型' : assignment.state === 'confirmed' ? '宿主确认模型' : assignment.state === 'rejected' ? '模型未获宿主确认' : '拟用模型'} · {model ? `${model.provider} / ${model.model}` : assignment.model_ref}</strong>

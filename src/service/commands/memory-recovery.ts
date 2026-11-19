@@ -141,7 +141,7 @@ function event(tx: Tx, secret: string, batch: Batch, node: NodeRunRow, type: str
   appendEvent(tx, { runId: batch.memory_run_id, nodeRunId: node.node_run_id, type, payload })
 }
 
-export function pauseMemoryWrite(tx: Tx, secret: string, node: NodeRunRow, batchId: string, now: string): void {
+export function pauseMemoryWrite(tx: Tx, secret: string, node: NodeRunRow, batchId: string, now: string, error?: OrchError): void {
   applyTransition(tx, secret, {
     nodeRunId: node.node_run_id, attempt: node.attempt, from: ['started'], to: 'indeterminate_side_effect',
     ruleId: 'M-50', expectedRevision: node.revision, actionGeneration: node.action_generation, now,
@@ -149,7 +149,10 @@ export function pauseMemoryWrite(tx: Tx, secret: string, node: NodeRunRow, batch
   releaseLease(tx, { nodeRunId: node.node_run_id, now })
   runCas(tx, "UPDATE runs SET status = 'paused', revision = revision + 1, updated_at = ? WHERE run_id = ? AND status IN ('running','settling','paused')",
     [now, node.run_id], { rows: 1, what: 'pause memory recovery' })
-  appendEvent(tx, { type: 'memory.apply.outcome_unknown', runId: node.run_id, nodeRunId: node.node_run_id, payload: { batch_id: batchId } })
+  appendEvent(tx, {
+    type: 'memory.apply.outcome_unknown', runId: node.run_id, nodeRunId: node.node_run_id,
+    payload: { batch_id: batchId, ...(error ? { error_code: error.code } : {}) },
+  })
 }
 
 function inspectionView(tx: Tx, secret: string, record: Recovery) {

@@ -7,6 +7,24 @@ import { MEMORY_PORT_CAPABILITIES, MEMORY_TOOL_PREFIX } from '../core/memory-gra
 export type ToolCapability = 'read_only' | 'mutating' | 'compensating'
 export type SideEffectPolicy = 'pure' | 'compensable' | 'irreversible'
 
+export type EffectVerdict = 'applied' | 'not_applied'
+export type EffectVerificationTarget = {
+  workflow_definition_hash: string
+  node_id: string
+  node_run_id: string
+  run_id: string
+  attempt: number
+}
+export type EffectVerifier = {
+  id: string
+  workflowDefinitionHash: string
+  nodeId: string
+  cwd?: string
+  /** Interpret the actual read-only tool output for this specific action instance. */
+  verify: (target: Readonly<EffectVerificationTarget>, output: { stdout: string; stderr: string }) =>
+    { verdict: EffectVerdict; reference: string } | null
+}
+
 export type ToolDescriptor = {
   name: string
   capability: ToolCapability
@@ -14,6 +32,7 @@ export type ToolDescriptor = {
   command: { bin: string; args: string[] }
   // 补偿描述符：mutating 工具要声明 compensable 就必须给，而且要可执行
   compensation?: { tool: string; args: string[]; verify: { command: string; args: string[] } }
+  effectVerifier?: EffectVerifier
 }
 
 export type MemoryPort = {
@@ -59,6 +78,9 @@ export class ToolRegistry {
   private readonly tools = new Map<string, ToolDescriptor>()
 
   register(descriptor: ToolDescriptor): void {
+    if (descriptor.effectVerifier && descriptor.capability !== 'read_only') {
+      throw new OrchError('SIDE_EFFECT_UNDECLARED', '副作用核实器必须是只读工具', { tool: descriptor.name })
+    }
     this.tools.set(descriptor.name, descriptor)
   }
 

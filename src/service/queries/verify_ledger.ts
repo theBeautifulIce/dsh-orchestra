@@ -12,6 +12,11 @@ export type LedgerGap = {
 }
 
 export type LedgerVerify = {
+  valid: boolean
+  /** node_run_events 的链内 seq，与全局快照 as_of_seq 属于不同序列。 */
+  first_bad_event_seq: number | null
+  broken_node_run_id: string | null
+  reason: string | null
   ok: boolean
   chains: number
   entries: number
@@ -121,12 +126,18 @@ export function verifyLedgerSnapshot(db: Db, secret: string): { item: LedgerVeri
       }
     }
 
+    const firstGap = gaps[0] ?? null
+    const valid = firstGap === null
     return {
       item: {
-        ok: gaps.length === 0,
+        valid,
+        first_bad_event_seq: firstGap && firstGap.seq > 0 ? firstGap.seq : null,
+        broken_node_run_id: firstGap?.node_run_id ?? null,
+        reason: firstGap?.reason ?? null,
+        ok: valid,
         chains: ids.size,
         entries,
-        break: gaps[0] ?? null,
+        break: firstGap,
         gaps,
       },
       as_of_seq: ctx.as_of_seq,

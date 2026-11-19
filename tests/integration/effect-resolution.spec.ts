@@ -7,6 +7,8 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { OrchError } from '../../src/core/errors.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
+import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
+import { ReadOnlyToolRunner, ToolRegistry, type EffectVerdict } from '../../src/executor/tools.ts'
 import {
   resolveEffect,
   inspectEffectEvidence,
@@ -17,12 +19,18 @@ import {
 import { openDecision, resolveDecision } from '../../src/service/commands/decisions.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
 import { listUnverifiedEffects } from '../../src/service/queries/effects.ts'
+import { getNodeSnapshot } from '../../src/service/queries/nodes.ts'
+import { getEvidenceSnapshot } from '../../src/service/queries/evidence.ts'
+import { getAttestationSnapshot } from '../../src/service/queries/attestations.ts'
+import { confirmStartup } from '../../src/service/commands/confirm-start.ts'
+import { createWorkflow, publishDraft, publishContextFor } from '../../src/service/commands/workflows.ts'
 import { verifyLedger } from '../../src/service/queries/verify_ledger.ts'
 
 const NOW = '2026-11-18T03:00:00.000Z'
 const CMD = 'c'.repeat(64)
 const EXEC_ID = 'tex_exec_effect_0001'
 const EXEC_ID_2 = 'tex_exec_effect_0002'
+const WORKFLOW_HASH = 'a'.repeat(64)
 
 type NodeOverrides = {
   status?: string
@@ -37,6 +45,7 @@ function setup(over: NodeOverrides = {}): any {
   const { db } = freshLedger()
   seed(db)
   withTx(db, (tx) => {
+    tx.run('UPDATE runs SET workflow_definition_hash = ? WHERE run_id = ?', [WORKFLOW_HASH, 'r1'])
     tx.run(
       'UPDATE node_runs SET status = ?, attempt = ?, revision = ?, side_effect_policy = ?, side_effect_verified_none = ?, stop_evidence = ? WHERE node_run_id = ?',
       [
@@ -60,16 +69,20 @@ function addEvidence(db: any, over: {
   toolSeq?: number
   finishedAt?: string | null
   withEvent?: boolean
+  verdict?: EffectVerdict | null
+  exitCode?: number
+  proofRunId?: string
 } = {}): void {
   const executionId = over.executionId ?? EXEC_ID
   const attempt = over.attempt ?? 1
   const toolSeq = over.toolSeq ?? 1
   const finishedAt = over.finishedAt === undefined ? NOW : over.finishedAt
+  const exitCode = over.exitCode ?? 0
   withTx(db, (tx) => {
     tx.run(
       "INSERT INTO tool_executions (node_run_id, attempt, tool_seq, tool, execution_id, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at)"
-      + " VALUES ('nr1', ?, ?, 'ro.echo', ?, 0, 'h', NULL, ?, ?, ?)",
-      [attempt, toolSeq, executionId, CMD, NOW, finishedAt],
+      + " VALUES ('nr1', ?, ?, 'ro.echo', ?, ?, 'h', NULL, ?, ?, ?)",
+      [attempt, toolSeq, executionId, exitCode, CMD, NOW, finishedAt],
     )
     if (over.withEvent !== false) {
       appendNodeRunEvent(tx, TEST_SECRET, 'nr1', 'tool_finished', {
@@ -77,11 +90,15 @@ function addEvidence(db: any, over: {
         attempt,
         tool_seq: toolSeq,
         execution_id: executionId,
-        exit_code: 0,
+        exit_code: exitCode,
         stdout_hash: 'h',
         stderr_hash: null,
         command_hash: CMD,
         finished_at: finishedAt,
+        ...(over.verdict === null ? {} : { effect_proof: {
+          workflow_definition_hash: WORKFLOW_HASH, node_id: 'n1', node_run_id: 'nr1', run_id: over.proofRunId ?? 'r1', attempt,
+          verifier_id: 'read-transaction/v1', verdict: over.verdict ?? 'applied', reference_hash: 'b'.repeat(64),
+        } }),
       })
     }
   })
@@ -485,7 +502,7 @@ describe('副作用结算：读模型、run 终态与账本（附录 §7）', ()
 
   it('human_not_applied_settles_verified_none', () => {
     const db = setup({ status: 'failed' })
-    addEvidence(db)
+    addEvidence(db, { verdict: 'not_applied' })
     const decisionId = 'dec_eff_human'
     withTx(db, (tx) => openDecision(tx, {
       decisionId,
@@ -530,4 +547,177 @@ describe('副作用结算：读模型、run 终态与账本（附录 §7）', ()
     expect(resolutionRows(db)).toHaveLength(0)
     expect(nodeEffectEvents(db)).toBe(0)
   })
+})
+
+it('拒绝非零退出、无业务结论及错误动作实例，人工裁决也不能用自报结论结算', () => {
+  const db = setup({ status: 'failed_with_unverified' })
+  addEvidence(db, { verdict: null })
+  addEvidence(db, { executionId: EXEC_ID_2, toolSeq: 2, exitCode: 1 })
+  addEvidence(db, { executionId: 'tex_wrong', toolSeq: 3, proofRunId: 'another-run' })
+  const notApplied = 'tex_not_applied'
+  addEvidence(db, { executionId: notApplied, toolSeq: 4, verdict: 'not_applied' })
+  expect(inspectEffectEvidence(db, TEST_SECRET, 'nr1').item.evidence).toMatchObject([{ evidence_id: notApplied, verdict: 'not_applied' }])
+  for (const evidenceId of [EXEC_ID, EXEC_ID_2, 'tex_wrong', notApplied]) {
+    expectCode(() => settle(db, { basis: 'evidence', evidenceId }), 'RESOLUTION_NOT_AVAILABLE')
+  }
+  const decisionId = addDecision(db, { payload: { effect_verdict: 'applied', evidence_ids: [notApplied] } })
+  expectCode(() => settle(db, { basis: 'decision', decisionId, expected: { revision: 1, decisionRevision: 1 } }), 'RESOLUTION_NOT_AVAILABLE')
+  expect(resolutionRows(db)).toHaveLength(0)
+  expect(listUnverifiedEffects(db).items).toHaveLength(1)
+  expect(settle(db, { basis: 'verified_none', stopEvidence: notApplied })).toMatchObject({ resolution_basis: 'verified_none' })
+})
+
+it('宿主只能从固定动作的真实成功输出为当前尝试签发业务证据', async () => {
+  const db = setup({ status: 'failed_with_unverified' })
+  try {
+    const registry = new ToolRegistry()
+    registry.register({
+      name: 'read-transaction', capability: 'read_only', command: { bin: 'check-reference', args: ['--lookup'] },
+      effectVerifier: {
+        id: 'transaction-receipt/v1', workflowDefinitionHash: WORKFLOW_HASH, nodeId: 'n1',
+        verify: (target, { stdout }) => {
+          const record = JSON.parse(stdout) as { reference: string; state: string }
+          const reference = `${target.run_id}/${target.node_run_id}/${target.attempt}`
+          return record.reference === reference && record.state === 'committed' ? { verdict: 'applied', reference } : null
+        },
+      },
+    })
+    let reference = 'r1/other-node/1'
+    let exitCode = 0
+    const runner = new ReadOnlyToolRunner(registry, {
+      readonlyAvailable: () => true,
+      async run({ bin, args }) {
+        expect([bin, ...args]).toEqual(['check-reference', '--lookup'])
+        return { exitCode, stdout: JSON.stringify({ reference, state: 'committed' }), stderr: '' }
+      },
+    }, '.')
+    const collector = new EvidenceCollector({ db, secret: TEST_SECRET, registry, runner, policy: { allow: ['read-transaction'] },
+      allowedTools: ['read-transaction'], nodeRunId: 'nr1', attempt: 1, executorAgentId: 'verifier-host', nowAt: () => NOW })
+    const collect = (callId: string, cwd = '.') => collector.collect({ callId, tool: 'read-transaction', args: ['--untrusted'], cwd, timeoutMs: 100 })
+    await collect('foreign')
+    reference = 'r1/nr1/1'
+    await collect('other-cwd', './other')
+    exitCode = 3
+    await collect('failed')
+    expect(inspectEffectEvidence(db, TEST_SECRET, 'nr1').item.evidence).toEqual([])
+    exitCode = 0
+    const receipt = await collect('matched')
+    const evidenceId = receipt.trace!.executionId
+    expect(inspectEffectEvidence(db, TEST_SECRET, 'nr1').item.evidence).toMatchObject([{ evidence_id: evidenceId, verdict: 'applied' }])
+    expect(settle(db, { basis: 'evidence', evidenceId })).toMatchObject({ resolution_basis: 'evidence', evidence_id: evidenceId })
+  } finally {
+    db.raw.close()
+  }
+})
+
+it('Q-08 / Q-30 投影关联版本的外部操作声明、既有结算及决定，并保留证据缺失事实', () => {
+  const db = setup({ status: 'done' })
+  try {
+    addEvidence(db, { verdict: null })
+    const workflowId = 'effect-projection'
+    const title = '外部操作'
+    const user = 'human:owner'
+    withTx(db, (tx) => {
+      createWorkflow(tx, { workflowId, name: title, actor: user, now: NOW, definition: { name: title, nodes: [
+        { node_id: 'start', type: 'trigger', title: '入口', position: { x: 0, y: 0 } },
+        { node_id: 'n1', type: 'agent', title, position: { x: 100, y: 0 }, contract: { declared_effect: 'not_applied' } },
+      ], edges: [{ from: 'start', to: 'n1' }] } })
+      const published = publishDraft(tx, { workflowId, revision: 1, baseVersion: 0, actor: user, now: NOW, note: title },
+        publishContextFor(tx, new Set(['agent'])))
+      tx.run('UPDATE runs SET workflow_id = ?, workflow_version = ?, workflow_definition_hash = ? WHERE run_id = ?',
+        [workflowId, published.version, published.definition_hash, 'r1'])
+    })
+    expect(getNodeSnapshot(db, 'nr1').item).toMatchObject({
+      declared_effect: 'not_applied', verified_effect: null, evidence_state: 'none', evidence_strength: null, execution_ids: [EXEC_ID],
+    })
+    expect(getNodeSnapshot(db, 'nr1').item.evidence_state_reason).toBeTruthy()
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = 'nr1'"))
+    expect(getNodeSnapshot(db, 'nr1').item).toMatchObject({ evidence_state: 'not_required', evidence_strength: null })
+    const decision = addDecision(db)
+    withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET side_effect_policy = 'irreversible' WHERE node_run_id = 'nr1'")
+      tx.run("INSERT INTO unverified_resolutions (node_run_id, run_id, resolution_basis, evidence_id, resolved_at) VALUES ('nr1','r1','evidence',?,?)",
+        [EXEC_ID, NOW])
+    })
+    expect(getNodeSnapshot(db, 'nr1').item).toMatchObject({
+      declared_effect: 'not_applied', verified_effect: 'applied', evidence_state: 'settled', evidence_strength: null, effect_decision_id: decision,
+    })
+    expect(settle(db, { basis: 'evidence', evidenceId: EXEC_ID })).toMatchObject({ replayed: true, evidence_id: EXEC_ID })
+  } finally {
+    db.raw.close()
+  }
+})
+
+it.each(['applied', 'not_applied'] as const)('Q-32 人工裁决用宿主确认的 %s 证据同事务结算', async (verdict) => {
+  const db = setup({ status: 'failed_with_unverified' })
+  try {
+    const registry = new ToolRegistry()
+    const reference = 'r1/nr1/1'
+    registry.register({
+      name: 'read-transaction', capability: 'read_only', command: { bin: 'receipt-check', args: [] },
+      effectVerifier: {
+        id: 'transaction-receipt/v1', workflowDefinitionHash: WORKFLOW_HASH, nodeId: 'n1',
+        verify: (target, { stdout }) => {
+          const [observedReference, state] = stdout.split(' ')
+          if (observedReference !== `${target.run_id}/${target.node_run_id}/${target.attempt}`) return null
+          if (state === 'committed') return { verdict: 'applied', reference: observedReference }
+          if (state === 'cancelled-before-commit') return { verdict: 'not_applied', reference: observedReference }
+          return null
+        },
+      },
+    })
+    const runner = new ReadOnlyToolRunner(registry, {
+      readonlyAvailable: () => true,
+      run: async () => ({ exitCode: 0, stdout: reference + ' ' + (verdict === 'applied' ? 'committed' : 'cancelled-before-commit'), stderr: '' }),
+    }, '.')
+    const collector = new EvidenceCollector({ db, secret: TEST_SECRET, registry, runner, policy: { allow: ['read-transaction'] },
+      allowedTools: ['read-transaction'], nodeRunId: 'nr1', attempt: 1, executorAgentId: 'verifier-host', nowAt: () => NOW })
+    const receipt = await collector.collect({ callId: 'check', tool: 'read-transaction', args: [], cwd: '.', timeoutMs: 100 })
+    const evidenceId = receipt.trace!.executionId
+    const decisionId = 'dec-effect'
+    withTx(db, (tx) => openDecision(tx, { decisionId, runId: 'r1', nodeRunId: 'nr1', kind: 'verify_human', createdAt: NOW }))
+    const approve = (declared: EffectVerdict) => withTx(db, (tx) => resolveDecision(tx, TEST_SECRET, {
+      decisionId, revision: 1, resolution: 'approved', confirm: true, now: NOW, actor: { kind: 'human', id: 'human:auditor' },
+      payload: { effect_verdict: declared, evidence_ids: [evidenceId] },
+    }))
+    expectCode(() => approve(verdict === 'applied' ? 'not_applied' : 'applied'), 'RESOLUTION_NOT_AVAILABLE')
+    expect(db.raw.prepare('SELECT status, revision FROM decisions WHERE decision_id = ?').get(decisionId))
+      .toMatchObject({ status: 'pending', revision: 1 })
+    expect(resolutionRows(db)).toHaveLength(0)
+    expect(listUnverifiedEffects(db).items).toHaveLength(1)
+    expect(approve(verdict)).toMatchObject({ closedReason: 'approved' })
+    if (verdict === 'applied') {
+      expect(resolutionRows(db)).toMatchObject([{ resolution_basis: 'decision', decision_id: decisionId, evidence_id: null, stop_evidence: null }])
+      expect(JSON.parse(String(db.raw.prepare('SELECT payload_json FROM decisions WHERE decision_id = ?').get(decisionId)?.payload_json)))
+        .toMatchObject({ evidence_ids: [evidenceId] })
+    } else {
+      expect(resolutionRows(db)).toMatchObject([{ resolution_basis: 'verified_none', decision_id: null, evidence_id: null, stop_evidence: evidenceId }])
+      expect(nodeRow(db)).toMatchObject({ side_effect_verified_none: 1, stop_evidence: evidenceId })
+    }
+    expect(listUnverifiedEffects(db).items).toHaveLength(0)
+    expect(getNodeSnapshot(db, 'nr1').item).toMatchObject({ effect_decision_id: decisionId, verified_effect: verdict })
+  } finally {
+    db.raw.close()
+  }
+})
+
+it('Q-33 真实人工启动确认只由人证读取入口返回，不进入业务证据或结算', () => {
+  const db = setup({ status: 'startup_unknown' })
+  try {
+    const result = confirmStartup(db, TEST_SECRET, { nodeRunId: 'nr1', attempt: 1, now: NOW, attested: true, actor: 'human:auditor' })
+    expect(result.trigger).toBe('confirm-started-attested')
+    const id = result.attestation_id!
+    expect(getAttestationSnapshot(db, id).item).toMatchObject({ attestation_id: id, action_start_source: 'human_attested',
+      classification: '人证，不是系统证据' })
+    expectCode(() => getEvidenceSnapshot(db, TEST_SECRET, id), 'NOT_FOUND')
+    expect(getNodeSnapshot(db, 'nr1').item).toMatchObject({
+      attestation_id: id, action_start_source: 'human_attested', evidence_strength: null, evidence_state: 'none', verified_effect: null,
+    })
+    expect(inspectEffectEvidence(db, TEST_SECRET, 'nr1').item.evidence).toEqual([])
+    expectCode(() => settle(db, { basis: 'evidence', evidenceId: id, expected: { revision: nodeRow(db).revision } }), 'RESOLUTION_NOT_AVAILABLE')
+    expect(resolutionRows(db)).toHaveLength(0)
+    expect(listUnverifiedEffects(db).items).toHaveLength(1)
+  } finally {
+    db.raw.close()
+  }
 })

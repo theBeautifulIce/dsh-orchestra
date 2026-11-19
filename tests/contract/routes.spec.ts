@@ -7,12 +7,15 @@ import { openServiceOrchestra } from '../../src/index.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { startServer } from '../../src/service/server.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type HostRunner } from '../../src/executor/tools.ts'
+import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { bindRunVersion } from '../fixtures/ledger.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
 import { enterWaiting } from '../../src/service/commands/wait.ts'
 import { fakeAgentClient } from '../fixtures/agent-bridge.ts'
 import { TEST_CLOCK } from '../fixtures/clock.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
+import { getDecisionSnapshot } from '../../src/service/queries/decisions.ts'
 
 const SECRET = 'routes-secret'
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -29,7 +32,12 @@ async function boot(withExecutor = false, nowProvider?: () => string) {
   const registry = new ToolRegistry()
   registry.register({ name: 'ro.echo', capability: 'read_only', command: { bin: 'echo', args: ['ok'] } })
   const host: HostRunner = { readonlyAvailable: () => true, run: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '' }) }
-  const agents: HostAgentFactory = { create: async () => ({ agentId: 'agent_1', sessionId: 'sess_1' }) }
+  const spawnedSessions: string[] = []
+  const agents: HostAgentFactory = { create: async () => {
+    const sessionId = 'sess_1'
+    spawnedSessions.push(sessionId)
+    return { agentId: 'agent_1', sessionId }
+  } }
   const bridge = fakeAgentClient({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })
   const executor = withExecutor ? { registry, agents, bridge, runner: new ReadOnlyToolRunner(registry, host, dir) } : undefined
   const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: SECRET, phase: 'S2', ...(executor ? { executor } : {}) })
@@ -48,7 +56,7 @@ async function boot(withExecutor = false, nowProvider?: () => string) {
     commands: orchestra.commands,
   })
   closers.push(async () => { await svc.close(); await service.release() })
-  return { endpoint: svc.endpoint, orchestra }
+  return { endpoint: svc.endpoint, orchestra, spawnedSessions }
 }
 
 const post = (url: string, body: unknown) => fetch(url, {
@@ -316,6 +324,164 @@ describe('起运行与裁决收口路由', () => {
       decisionId: 'd-route', revision: 1, resolution: 'approved', actor: { kind: 'human', id: 'human:test' },
     })
     expect(stale.status).toBe(409)
+  })
+
+  it('Q-34 节点会话标识不能替代面板凭证，认证主体落到 resolved_by', async () => {
+    const { endpoint, orchestra, spawnedSessions } = await boot(true)
+    expect((await post(endpoint + '/v1/workflows/load', {
+      workflow_version: '1', pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
+      nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo'], deny: [] } }],
+    })).status).toBe(200)
+    bindRunVersion(orchestra.db, orchestra.catalog, 1, 'r1')
+    expect((await post(endpoint + '/v1/node-runs/run', {
+      nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, ownerEpoch: 1, leaseTtlMs: 60000, leaseRenewIntervalMs: 5000,
+      tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+    })).status).toBe(200)
+    expect(spawnedSessions).toHaveLength(1)
+    const childSession = spawnedSessions[0]!
+    withTx(orchestra.db, (tx) => openDecision(tx, {
+      decisionId: 'd-panel-only', runId: 'r1', nodeRunId: null, kind: 'pre_execution', approver: 'either',
+    }))
+    const url = endpoint + '/v1/decisions/resolve'
+    const request = { decisionId: 'd-panel-only', revision: 1, resolution: 'approved',
+      actor: { kind: 'human', id: childSession } }
+    const denied = await fetch(url, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestra-secret': String(childSession) },
+      body: JSON.stringify(request),
+    })
+    expect(denied.status).toBe(401)
+    expect(getDecisionSnapshot(orchestra.db, request.decisionId).item).toMatchObject({ status: 'pending', current_revision: 1 })
+    expect((await post(url, request)).status).toBe(200)
+    expect(getDecisionSnapshot(orchestra.db, request.decisionId).item).toMatchObject({ status: 'resolved', resolved_by: /^service:[0-9a-f]{8}$/ })
+  })
+
+  it('Q-15 高风险裁决预检、请求绑定、过期、CAS 与回执优先', async () => {
+    let now = NOW
+    const { endpoint, orchestra } = await boot(false, () => now)
+    withTx(orchestra.db, (tx) => {
+      openDecision(tx, { decisionId: 'd-confirm', runId: 'r1', nodeRunId: null,
+        kind: 'pre_execution', approver: 'human', confirmRequired: true })
+      openDecision(tx, { decisionId: 'd-other', runId: 'r1', nodeRunId: null,
+        kind: 'rule_ambiguous', approver: 'human' })
+    })
+    const request = { operation_id: uuidv7(), decisionId: 'd-confirm', revision: 1, resolution: 'approved', payload: { note: 'original' } }
+    const submit = (body: Record<string, unknown>) => post(endpoint + '/v1/decisions/resolve', body)
+    const failure = async (body: Record<string, unknown>, code: string) => {
+      const res = await submit(body)
+      expect(res.status).toBe(409)
+      const response = await res.json() as { error: { code: string; details: { confirm_challenge?: string } } }
+      expect(response.error.code).toBe(code)
+      return response.error.details
+    }
+    const receipt = () => orchestra.db.raw.prepare('SELECT * FROM inbox WHERE operation_id = ?').get(request.operation_id)
+    const decision = () => getDecisionSnapshot(orchestra.db, 'd-confirm', Date.parse(now)).item
+    const eventCount = () => orchestra.db.raw.prepare('SELECT COUNT(*) AS n FROM events').get()?.n
+    const eventsBefore = eventCount()
+    const details = await failure({ ...request, confirm: true }, 'CONFIRMATION_REQUIRED')
+    const { confirm_challenge } = await failure(request, 'CONFIRMATION_REQUIRED')
+    expect(typeof confirm_challenge).toBe('string')
+    expect(details.confirm_challenge).not.toBe(confirm_challenge)
+    expect(receipt()).toBeUndefined()
+    expect(eventCount()).toBe(eventsBefore)
+    expect(decision()).toMatchObject({ status: 'pending', current_revision: 1 })
+    expect(decision()).not.toHaveProperty('confirm_challenge')
+
+    const apply = { ...request, confirm_challenge }
+    for (const changed of [
+      { operation_id: uuidv7() }, { decisionId: 'd-other' }, { resolution: 'rejected' }, { payload: { note: 'changed' } },
+      { confirm_challenge: 'tampered' },
+    ]) await failure({ ...apply, ...changed }, 'CONFIRMATION_MISMATCH')
+    await failure({ ...apply, revision: 2 }, 'DECISION_REVISION_CONFLICT')
+    now = new Date(Date.parse(NOW) + 120_000).toISOString()
+    await failure(apply, 'CONFIRMATION_EXPIRED')
+    expect(receipt()).toBeUndefined()
+    expect(eventCount()).toBe(eventsBefore)
+
+    now = NOW
+    orchestra.db.raw.prepare("UPDATE decisions SET revision=2 WHERE decision_id='d-confirm'").run()
+    await failure(apply, 'DECISION_REVISION_CONFLICT')
+    const updated = { ...request, revision: 2 }
+    const fresh = await failure(updated, 'CONFIRMATION_REQUIRED')
+    const ok = await submit({ ...updated, confirm_challenge: fresh.confirm_challenge })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ data: { decisionId: 'd-confirm', revision: 3, replayed: false } })
+    expect(receipt()).toMatchObject({ status: 'applied' })
+    const eventsAfter = eventCount()
+    now = new Date(Date.parse(NOW) + 120_000).toISOString()
+    expect(await (await submit({ ...updated, confirm_challenge: fresh.confirm_challenge })).json())
+      .toMatchObject({ data: { decisionId: 'd-confirm', revision: 3, replayed: true } })
+    await failure({ ...updated, resolution: 'rejected' }, 'OPERATION_ID_CONFLICT')
+    expect(eventCount()).toBe(eventsAfter)
+  })
+
+  it('Q-11 受限、过期和无公共命令的裁决投影空选项，命令拒绝该处置', async () => {
+    const { endpoint, orchestra } = await boot()
+    withTx(orchestra.db, (tx) => {
+      for (const [id, kind] of [['a-expired', 'pre_execution'], ['a-review', 'verify_human'], ['a-conflict', 'report_contradicted']] as const) {
+        openDecision(tx, { decisionId: id, runId: 'r1', nodeRunId: null, kind,
+          approver: 'human', ...(id === 'a-expired' ? { expiresAt: NOW } : {}) })
+      }
+    })
+    for (const decisionId of ['a-expired', 'a-review', 'a-conflict']) {
+      expect(getDecisionSnapshot(orchestra.db, decisionId, Date.parse(NOW)).item).toMatchObject({
+        allowed_resolutions: [], resolution_unavailable_reason: expect.any(String),
+      })
+      const res = await post(endpoint + '/v1/decisions/resolve', { decisionId, revision: 1, resolution: 'approved' })
+      expect(await res.json()).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
+    }
+  })
+
+  it.each([
+    ['verify_human', 'applied', 'decision'],
+    ['action_overrun', 'not_applied', 'verified_none'],
+  ] as const)('Q-11 / Q-32 %s 兼容带核验证据的 HTTP 裁决，拒绝缺失或错误作用域', async (kind, verdict, basis) => {
+    const { endpoint, orchestra } = await boot()
+    const { db } = orchestra
+    const hash = 'c'.repeat(64)
+    const decisionId = 'effect-decision'
+    withTx(db, (tx) => {
+      tx.run('UPDATE runs SET workflow_definition_hash = ? WHERE run_id = ?', [hash, 'r1'])
+      tx.run("UPDATE node_runs SET status='failed_with_unverified', side_effect_policy='irreversible' WHERE node_run_id='nrun_1'")
+      tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, side_effect_policy, created_at, updated_at) VALUES ('foreign','r1','other',2,'agent',1,'failed_with_unverified',1,'irreversible',?,?)", [NOW, NOW])
+      openDecision(tx, { decisionId, runId: 'r1', nodeRunId: 'nrun_1', kind, approver: 'human', createdAt: NOW })
+    })
+    async function checkedExecution(nodeRunId: string, nodeId: string) {
+      const reference = `r1/${nodeRunId}/1`
+      const registry = new ToolRegistry()
+      registry.register({ name: 'read-receipt', capability: 'read_only', command: { bin: 'receipt-check', args: [] }, effectVerifier: {
+        id: 'receipt/v1', workflowDefinitionHash: hash, nodeId,
+        verify: (target, { stdout }) => stdout === `${target.run_id}/${target.node_run_id}/${target.attempt}` ? { verdict, reference: stdout } : null,
+      } })
+      const runner = new ReadOnlyToolRunner(registry, {
+        readonlyAvailable: () => true, run: async () => ({ exitCode: 0, stdout: reference, stderr: '' }),
+      }, '.')
+      const collector = new EvidenceCollector({ db, secret: SECRET, registry, runner, policy: { allow: ['read-receipt'] },
+        allowedTools: ['read-receipt'], nodeRunId, attempt: 1, executorAgentId: 'trusted-verifier', nowAt: () => NOW })
+      const result = await collector.collect({ callId: 'read', tool: 'read-receipt', args: [], cwd: '.', timeoutMs: 100 })
+      return result.trace!.executionId
+    }
+    const foreignEvidence = await checkedExecution('foreign', 'other')
+    const evidence = await checkedExecution('nrun_1', 'check')
+    const command = { operation_id: uuidv7(), decisionId, revision: 1, resolution: 'approved' }
+    const submit = (payload?: Record<string, unknown>) => post(endpoint + '/v1/decisions/resolve', { ...command, payload })
+    const receipt = () => db.raw.prepare('SELECT * FROM inbox WHERE operation_id=?').get(command.operation_id)
+    const settled = () => db.raw.prepare('SELECT resolution_basis, decision_id, stop_evidence FROM unverified_resolutions WHERE node_run_id=?').get('nrun_1')
+    expect(getDecisionSnapshot(db, decisionId).item).toMatchObject({ allowed_resolutions: [], resolution_unavailable_reason: expect.stringContaining('系统核验证据') })
+    for (const payload of [undefined, { effect_verdict: verdict, evidence_ids: [foreignEvidence] }]) {
+      const rejected = await submit(payload)
+      expect(rejected.ok).toBe(false)
+      expect(await rejected.json()).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
+      expect(getDecisionSnapshot(db, decisionId).item).toMatchObject({ status: 'pending', current_revision: 1 })
+      expect(settled()).toBeUndefined()
+      expect(receipt()).toBeUndefined()
+    }
+    const payload = { effect_verdict: verdict, evidence_ids: [evidence] }
+    expect(await (await submit(payload)).json()).toMatchObject({ data: { decisionId, revision: 2, replayed: false } })
+    expect(settled()).toEqual({ resolution_basis: basis, decision_id: verdict === 'applied' ? decisionId : null,
+      stop_evidence: verdict === 'not_applied' ? evidence : null })
+    expect(getDecisionSnapshot(db, decisionId).item).toMatchObject({ status: 'resolved', current_revision: 2 })
+    expect(receipt()).toMatchObject({ status: 'applied' })
+    expect(await (await submit(payload)).json()).toMatchObject({ data: { replayed: true } })
   })
 
   it('补偿开始与收口都有生产路由，收口保留原节点状态', async () => {

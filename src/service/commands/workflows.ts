@@ -7,7 +7,8 @@
 import { type Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import { OrchError } from '../../core/errors.ts'
-import { assertNoMemoryWriteTool } from '../../core/memory-graph.ts'
+import { assertNoMemoryWriteToolOnSurface } from '../../core/memory-graph.ts'
+import { resolveTaskSessionToolPolicy } from '../../executor/session.ts'
 import {
   validatePublishLayer,
   validateSaveLayer,
@@ -17,7 +18,7 @@ import {
   type WorkflowDoc,
   type ValidationIssue,
 } from '../../core/workflow-doc.ts'
-import { definitionHashOf } from '../workflows.ts'
+import { definitionHashOf, type WorkflowCatalog } from '../workflows.ts'
 import { assertOperationId, requestHashOf, runIdempotentCommand } from './idempotency.ts'
 import type { WorkflowDefinition, WorkflowNodeDef } from '../../core/workflow-def.ts'
 import type { ToolRegistry } from '../../executor/tools.ts'
@@ -370,7 +371,7 @@ export type PublishResult = {
 }
 
 /** 规格 6.2：步骤 2–9 同笔事务，任何一步失败整笔回滚 */
-type DraftTestPolicy = { requireTest?: boolean; tools?: ToolRegistry }
+type DraftTestPolicy = { requireTest?: boolean; tools?: ToolRegistry; catalog?: Pick<WorkflowCatalog, 'validateDefinition'> }
 
 function checkDraftTools(doc: WorkflowDoc, registry?: ToolRegistry): ValidationIssue[] {
   return doc.nodes.flatMap((node, index) => {
@@ -481,13 +482,18 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext, poli
   }
 
   const doc = JSON.parse(draft.doc_json) as WorkflowDoc
-  // Reject direct memory mutation at publish time, before a version row is created.
+  // 发布时检查执行器工具清单、Agent 声明和宿主的固定会话模板。
+  assertNoMemoryWriteToolOnSurface(policy.tools?.list().map((tool) => tool.name) ?? [], 'executor')
+  resolveTaskSessionToolPolicy()
   for (const node of doc.nodes) {
-    if (node.type !== 'agent' || !node.config || typeof node.config !== 'object') continue
-    const tools = node.config.tools
-    if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue
-    const allow = (tools as Record<string, unknown>).allow
-    if (Array.isArray(allow)) assertNoMemoryWriteTool(allow.filter((name): name is string => typeof name === 'string'))
+    if (node.type !== 'agent') continue
+    for (const tools of [node.config?.tools, node.config?.toolPolicy]) {
+      if (!tools || typeof tools !== 'object' || Array.isArray(tools)) continue
+      const allow = (tools as Record<string, unknown>).allow
+      if (Array.isArray(allow)) {
+        assertNoMemoryWriteToolOnSurface(allow.filter((name): name is string => typeof name === 'string'), 'workflow')
+      }
+    }
   }
   const issues = [...validatePublishLayer(doc, ctx), ...(policy.requireTest || policy.tools ? checkDraftTools(doc, policy.tools) : [])]
   if (issues.length > 0) {
@@ -499,7 +505,7 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext, poli
   }
   if (policy.requireTest) {
     if (latestDraftTest(tx, p.workflowId, p.revision, doc)?.passed !== 1) {
-      throw new OrchError('CONFIRMATION_REQUIRED', '当前草稿修订须通过快速测试后才能发布')
+      throw new OrchError('CONFIRMATION_REQUIRED', '当前草稿修订须通过结构与模拟流转测试后才能发布')
     }
     const count = countWorkflowCriticalApprovals(tx, p.workflowId)
     if (count > 0) throw new OrchError('CONFIRMATION_REQUIRED', '该 Workflow 仍有最高优先级审批待处理', { critical_approval_count: count })
@@ -507,6 +513,7 @@ export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext, poli
 
   const version = String(base + 1)
   const runtime = runtimeProjection(p.workflowId, version, doc)
+  policy.catalog?.validateDefinition(runtime)
   const definitionHash = definitionHashOf(runtime)
   const basedOn = base === 0 ? null : String(base)
   tx.run(

@@ -8,6 +8,7 @@ import { DecisionInbox } from '../../src/client/panel/decision-inbox.tsx'
 import { PanelCommandButton, PanelShell } from '../../src/client/panel/shell.tsx'
 import { TaskListScreen } from '../../src/client/panel/tasks-screen.tsx'
 import { UnverifiedEffects } from '../../src/client/panel/unverified-effects.tsx'
+import { NodeEffectFacts, NodeEvidence } from '../../src/client/panel/task-run-evidence.tsx'
 import { WorkflowListScreen } from '../../src/client/panel/workflow-list.tsx'
 import {
   createFakeService,
@@ -82,12 +83,14 @@ describe('任务列表页', () => {
     view.unmount()
   })
 
-  it('真实数据把运行次数、待决定和待核实数量显示出来', async () => {
+  it('看板与列表显示待审批、最长等待、最高风险和最后心跳', async () => {
     const { api } = apiFrom(() => ({
       ok: true,
       data: page([taskSummary({
         run_count: 3,
         open_decision_count: 2,
+        oldest_open_decision_age_seconds: 123,
+        max_heartbeat_age_ms: 7000,
         unverified_count: 5,
         attention: 'unverified',
         attention_reason: '有 5 笔副作用待核实',
@@ -100,8 +103,16 @@ describe('任务列表页', () => {
     expect(view.text()).toContain('2 项待审批')
     expect(view.text()).toContain('5 项待核实')
     expect(view.text()).toContain('涉及不可逆操作')
+    expect(view.text()).toContain('最长等待 2 分 3 秒')
+    expect(view.text()).toContain('最久未更新的心跳 7 秒前')
     expect(view.text()).toContain('有 5 笔副作用待核实')
     expect(view.text()).toContain('待核实')
+    await view.click(view.findAll('button').find((button) => button.textContent === '列表')!)
+    const row = view.findAll('tbody tr')[0]!
+    expect(row.textContent).toContain('2 项待审批')
+    expect(row.textContent).toContain('最长等待 2 分 3 秒')
+    expect(row.textContent).toContain('涉及不可逆操作')
+    expect(row.textContent).toContain('最久未更新的心跳 7 秒前')
     view.unmount()
   })
 
@@ -283,6 +294,58 @@ describe('等你决定页', () => {
 })
 
 describe('待核实页', () => {
+  it('Q-33 人工签认只按人证查询，在节点证据栏保留分类且不显示已验证', async () => {
+    const id = 'att_host_confirmed'
+    const { api, service } = apiFrom(({ path, params }) => {
+      if (path !== '/v1/attestations/get' || params.get('attestation_id') !== id) throw new Error(path)
+      return { ok: true, data: { attestation_id: id, claim: 'action_started', attested_by: 'human:auditor',
+        attested_at: '2026-11-18T00:00:00.000Z', action_start_source: 'human_attested', classification: '人证，不是系统证据', summary: null } }
+    })
+    const view = await renderPanel(<NodeEvidence api={api} node={nodeRunView({ attestation_id: id, action_start_source: 'human_attested' })} reloadVersion={0} />)
+    await view.click(view.findAll('summary').find((summary) => summary.textContent === '人工签认')!)
+    await view.flush()
+    expect(view.text()).toContain('人证，不是系统证据')
+    expect(view.text()).not.toContain('已验证')
+    expect(service.calls.map((query) => query.path)).toEqual(['/v1/attestations/get'])
+    view.unmount()
+  })
+
+  it('Q-29 停止观察仍待核实，可直接打开关联决定', async () => {
+    const stoppedAt = '2026-11-18T00:00:00.000Z'
+    const decisionId = 'effect-approval'
+    const service = createFakeService(({ path, params }) => {
+      if (path === '/v1/effects/unverified') return { ok: true, data: page([effectView({ stopped_at: stoppedAt, decision_id: decisionId })]) }
+      if (path === '/v1/decisions/get' && params.get('decision_id') === decisionId) {
+        return { ok: true, data: decisionView({ decision_id: decisionId, target_summary: '对应对账决定' }) }
+      }
+      throw new Error(path)
+    })
+    const view = await renderPanel(<PanelApp initialRoute="effects" serviceConnected client={createApiClient('http://panel.test', service.fetcher)} />)
+    await view.flush()
+    expect(view.text()).toContain(new Date(stoppedAt).toLocaleString())
+    expect(view.text()).toContain('未验证')
+    await view.click(view.findAll('button').find((button) => button.textContent === '查看相关决定')!)
+    await view.flush()
+    expect(view.text()).toContain('对应对账决定')
+    view.unmount()
+  })
+
+  it('Q-08 / Q-30 声明不一致可打开相关决定，完成但欠业务证据会说明原因', async () => {
+    const seen: string[] = []
+    const view = await renderPanel(<>
+      <NodeEffectFacts node={nodeRunView({ declared_effect: 'not_applied', verified_effect: 'applied', evidence_state: 'settled',
+        effect_decision_id: 'related-effect' })} onOpenDecision={(id) => seen.push(id)} />
+      <NodeEffectFacts node={nodeRunView({ status: 'done', evidence_state: 'none', evidence_state_reason: '尚无外部操作证据' })} />
+      <NodeEffectFacts node={nodeRunView({ status: 'done', evidence_state: 'not_required', evidence_state_reason: '只读策略无需核实' })} />
+    </>)
+    expect(view.text()).toContain('声明与核实结果不一致')
+    expect(view.text()).toContain('尚无外部操作证据')
+    expect(view.text()).toContain('只读策略无需核实')
+    await view.click(view.findAll('button').find((button) => button.textContent === '查看相关决定')!)
+    expect(seen).toEqual(['related-effect'])
+    view.unmount()
+  })
+
   it('读取过程中显示正在读取，读完后显示待核实卡片', async () => {
     const gate = deferred<FakeReply>()
     const { api } = apiFrom(() => gate.promise)

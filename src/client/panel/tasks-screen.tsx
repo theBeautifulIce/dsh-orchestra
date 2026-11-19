@@ -256,7 +256,11 @@ function TaskTable({ tasks, archived, selectedTaskId, onSelect }: { tasks: TaskS
       <td><button className="task-link" type="button" onClick={(event) => onSelect(task.task_id, event.currentTarget)}>{task.title || '未命名任务'}</button>
         <small>{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</small></td>
       <td>{taskCardStatus(task).label ?? <UnknownState value={task.status} />}</td>
-      <td>{task.attention_reason ?? '—'}</td><td>{task.run_count} 次</td>
+      <td>{task.attention_reason ?? '—'}
+        <small>{task.open_decision_count} 项{COPY.awaitingDecision}</small>
+        <small><TaskWaitAndHeartbeat task={task} /></small>
+        <small><TaskRisk level={task.max_side_effect_level} /></small>
+      </td><td>{task.run_count} 次</td>
       <td>{archived && task.archived_at ? new Date(task.archived_at).toLocaleString() : formatDate(task.updated_at)}</td>
     </tr>)}</tbody>
   </table></div>
@@ -308,12 +312,33 @@ function TaskCard({ task, selected, compact, onSelect }: {
     </div>}
     <div className="task-card-meta">
       <span>{task.run_count} 次运行</span>
-      {task.max_side_effect_level && task.max_side_effect_level !== 'pure' && <span style={{ color: task.max_side_effect_level === 'irreversible' ? COLOR.danger : COLOR.inkMuted }}>
-        {EFFECT_LABEL[task.max_side_effect_level] ?? <UnknownState value={task.max_side_effect_level} />}
-      </span>}
+      <TaskRisk level={task.max_side_effect_level} />
+      <TaskWaitAndHeartbeat task={task} />
       <time dateTime={task.updated_at} title={formatDate(task.updated_at)}>{formatDate(task.updated_at)}</time>
     </div>
   </article>
+}
+
+function TaskRisk({ level }: { level: TaskSummary['max_side_effect_level'] }) {
+  if (!level) return null
+  return <span style={{ color: level === 'irreversible' ? COLOR.danger : COLOR.inkMuted }}>
+    {EFFECT_LABEL[level] ?? <UnknownState value={level} />}
+  </span>
+}
+
+function TaskWaitAndHeartbeat({ task }: { task: TaskSummary }) {
+  const { oldest_open_decision_age_seconds: wait, max_heartbeat_age_ms: heartbeat } = task
+  return <>
+    {wait != null && <span>最长等待 {formatAge(wait)}</span>}
+    {heartbeat != null && <span>{wait != null && ' · '}最久未更新的心跳 {formatAge(heartbeat / 1000)}前</span>}
+  </>
+}
+
+function formatAge(seconds: number): string {
+  if (seconds > 0 && seconds < 1) return '不足 1 秒'
+  if (seconds < 60) return `${Math.floor(seconds)} 秒`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分 ${Math.floor(seconds % 60)} 秒`
+  return `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds / 60) % 60} 分`
 }
 
 function formatDate(value: string): string {

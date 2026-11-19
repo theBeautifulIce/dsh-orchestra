@@ -518,9 +518,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
    * 没有可复用的合适流程时：生成任务专属流程（task_local），再基于它产出一份完整计划。
    * 预留任务 + 建流程 + 发布 + 落计划在同一笔事务里：失败不留孤儿流程，也不留悬空预留任务。
    */
-  const proposeAuto = async (
-    brief: PlanInput, actor: string, now: string, reason: string,
-  ): Promise<ReturnType<typeof get>> => {
+  const proposeAuto = async (brief: PlanInput, actor: string, now: string): Promise<ReturnType<typeof get>> => {
     const generator = options?.workflowGenerator
     if (!generator) {
       throw new OrchError('VERDICT_UNSUPPORTED', '主脑判定没有可用流程，但服务端没有装配流程生成能力')
@@ -542,7 +540,10 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     if (outcome.kind !== 'proposal') {
       throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑没有基于新生成的流程产出完整计划')
     }
-    const proposal: TaskPlanProposal = { ...outcome.proposal, workflow_id: workflowId, workflow_version: '1' }
+    const { proposal } = outcome
+    if (proposal.workflow_id !== autoCandidate.workflowId || proposal.workflow_version !== autoCandidate.version) {
+      throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑返回的计划没有选择本次生成的流程版本')
+    }
     const quality = evaluate(brief, proposal, autoCandidate)
     const hash = planHash({ brief, proposal, quality }, workflowHash)
     const id = uuidv7()
@@ -555,11 +556,11 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       })
       const test = testWorkflowDraft(tx, { workflowId, revision: 1, now }, ctx, registry)
       if (!test.passed) {
-        throw new OrchError('WORKFLOW_VALIDATION_FAILED', '自动生成的流程没有通过快速测试', { issues: test.issues.errors.slice(0, 12) })
+        throw new OrchError('WORKFLOW_VALIDATION_FAILED', '自动生成的流程未通过结构与模拟流转测试', { issues: test.issues.errors.slice(0, 12) })
       }
       const result = publishDraft(tx, {
         workflowId, revision: 1, baseVersion: 0, note: '自动生成的任务专属流程', actor, now,
-      }, ctx, registry ? { requireTest: true, tools: registry } : { requireTest: true })
+      }, ctx, { requireTest: true, tools: registry, catalog })
       tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
         + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now, reserved.task_id, workflowId])
@@ -600,11 +601,11 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       // 候选池里一个都没有：走自动生成；没有生成能力就还是让调用方先去发布流程
       if (choices.length === 0) {
         if (!options.workflowGenerator) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '请先发布至少一个可复用流程')
-        return proposeAuto(brief, actor, now, '候选池里没有可复用的流程')
+        return proposeAuto(brief, actor, now)
       }
       const outcome = await askPlanner(brief, choices.map((item) => item.workflow))
       // 主脑判定候选池里没有一个适合这次任务：走同一条自动生成路径
-      if (outcome.kind === 'no_candidate') return proposeAuto(brief, actor, now, outcome.reason)
+      if (outcome.kind === 'no_candidate') return proposeAuto(brief, actor, now)
       const proposal = outcome.proposal
       const selected = choices.find(({ workflow }) => workflow.workflowId === proposal.workflow_id && workflow.version === proposal.workflow_version)
       const quality = evaluate(brief, proposal, selected?.workflow)

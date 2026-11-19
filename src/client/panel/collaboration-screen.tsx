@@ -8,13 +8,15 @@ import { COLOR, FONT_PX } from './tokens.ts'
 
 type Summary = ReturnType<CollaborationHost['listScopes']>['items'][number]
 type ScopeDetail = ReturnType<CollaborationHost['getScope']>['item']
-type Action = 'authorize' | 'deny' | 'adopt' | 'dismiss'
+type Action = 'authorize' | 'deny' | 'adopt' | 'dismiss' | 'reassign'
 const LABELS: Record<string, string> = {
   proposed: '待授权', authorized: '已授权，等接收方读取', delivered: '已送达', accepted: '已接手',
-  completed: '核验完成', rejected: '接收方拒绝', denied: '主理人拒绝', expired: '已到期',
+  completed: '核验完成', rejected: '接收方拒绝', denied: '主理人拒绝', expired: '已到期', withdrawn: '已撤回',
   confirmed: '已证实', refuted: '已反证', inconclusive: '证据未能定论', adopted: '已采纳', dismissed: '未采纳',
 }
-const ACTIONS: Record<Action, string> = { authorize: '授权核验', deny: '拒绝请求', adopt: '采纳结论', dismiss: '不采纳结论' }
+const ACTIONS: Record<Action, string> = {
+  authorize: '授权核验', deny: '拒绝请求', adopt: '采纳结论', dismiss: '不采纳结论', reassign: '重新指派',
+}
 
 export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenRun }: {
   client: ApiClient; reloadVersion: number; onSnapshot: (seq: number) => void; onOpenRun: (task: string, run: string) => void
@@ -31,6 +33,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
   const [minutes, setMinutes] = useState(60)
   const [review, setReview] = useState<{ id: string; revision: number; action: Action }>()
   const [note, setNote] = useState('')
+  const [replacement, setReplacement] = useState('')
   const scopeId = selected || scopes?.[0]?.scope_id
 
   useEffect(() => {
@@ -74,7 +77,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
           { title: title.trim(), node_run_ids: memberIds, ttl_minutes: minutes }, () => { setTitle(''); setMembers('') })
       }}>
         <label>范围名称 <input required maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-        <label>参与节点运行 ID <textarea required placeholder="以空格或换行分隔至少两个 ID" value={members} onChange={(event) => setMembers(event.target.value)} /></label>
+        <label>参与节点运行 ID（可含候补接收方） <textarea required placeholder="以空格或换行分隔至少两个 ID" value={members} onChange={(event) => setMembers(event.target.value)} /></label>
         <label>有效分钟数 <input type="number" required min={1} max={10_080} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} /></label>
         <PanelCommandButton type="submit" disabled={busy || memberIds.length < 2 || memberIds.length > 16}>保存范围</PanelCommandButton>
       </form>
@@ -92,24 +95,41 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
         <h2 style={{ margin: 0, fontSize: FONT_PX.section }}>{finding.title}</h2>
         <p>{finding.summary}</p><p>原始系统证据 <code>{finding.evidence_id}</code></p>
         {shown.requests.filter((request) => request.finding_id === finding.finding_id).map((request) => {
-          const actions: Action[] = request.status === 'proposed' ? ['authorize', 'deny']
+          const candidates = request.reassignment_candidates
+          const actions: Action[] = request.status === 'proposed' ? candidates === null ? ['authorize', 'deny'] : ['deny']
             : request.status === 'completed' && request.adoption === null ? ['adopt', 'dismiss'] : []
-          return <section key={request.request_id} style={{ borderTop: `1px solid ${COLOR.line}`, marginTop: 10, paddingTop: 10 }}>
-            <strong>{LABELS[request.status] ?? request.status}</strong><p>{request.question}</p>
+          if (candidates?.length) actions.push('reassign')
+          return <section id={request.request_id} key={request.request_id} style={{ borderTop: `1px solid ${COLOR.line}`, marginTop: 10, paddingTop: 10 }}>
+            <strong>{LABELS[request.status] ?? request.status}</strong>
+            {request.withdrawn_from_status && <span> · 撤回前{LABELS[request.withdrawn_from_status]}</span>}
+            <p>{request.question}</p>
             <p>接收节点 <code>{request.target_node_run_id}</code></p>
+            {request.target_attempt !== null && <p>执行轮次 {request.target_attempt} · 代次 {request.target_generation}</p>}
+            {request.replacement_request_id && <p><a href={'#' + request.replacement_request_id}>查看重新指派的请求</a></p>}
+            {request.replaces_request_id && <p><a href={'#' + request.replaces_request_id}>查看已撤回的请求</a></p>}
+            {candidates?.length === 0 && <p>当前协作范围内没有可用的替代接收方。</p>}
             {request.authorization_note && <p>派发记录 · {request.authorization_note}</p>}
             {request.result && <p>{LABELS[request.verdict ?? '']} · {request.result} · <code>{request.evidence_id}</code></p>}
             {request.adoption && <p>{LABELS[request.adoption]} · {request.adoption_note}</p>}
             {actions.map((action) => <PanelCommandButton key={action} disabled={busy} onClick={() => {
-              setReview({ id: request.request_id, revision: request.revision, action }); setNote('')
+              setReview({ id: request.request_id, revision: request.revision, action }); setNote(''); setReplacement('')
             }}>{ACTIONS[action]}</PanelCommandButton>)}
-            {review?.id === request.request_id && review.revision === request.revision && <form style={form} onSubmit={(event) => {
+            {review?.id === request.request_id && review.revision === request.revision && actions.includes(review.action) && <form style={form} onSubmit={(event) => {
               event.preventDefault()
-              void command('/v1/collaboration/review', 'collaboration.review', { request_id: review.id,
-                expected_revision: review.revision, action: review.action, note: note.trim() }, () => setReview(undefined))
+              const base = { request_id: review.id, expected_revision: review.revision, note: note.trim() }
+              if (review.action === 'reassign') {
+                void command('/v1/collaboration/reassign', 'collaboration.reassign', { ...base, target_node_run_id: replacement }, () => setReview(undefined))
+              } else {
+                void command('/v1/collaboration/review', 'collaboration.review', { ...base, action: review.action }, () => setReview(undefined))
+              }
             }}>
+              {review.action === 'reassign' && <label>新接收节点 <select required value={replacement} onChange={(event) => setReplacement(event.target.value)}>
+                <option value="">选择接收节点</option>
+                {candidates?.map((id) => <option key={id} value={id}>{id}</option>)}
+              </select></label>}
               <label>处理理由 <textarea required maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label>
-              <PanelCommandButton type="submit" disabled={busy || !note.trim()}>确认{ACTIONS[review.action]}</PanelCommandButton>
+              <PanelCommandButton type="submit" disabled={busy || !note.trim()
+                || (review.action === 'reassign' && !candidates?.includes(replacement))}>确认{ACTIONS[review.action]}</PanelCommandButton>
             </form>}
           </section>
         })}

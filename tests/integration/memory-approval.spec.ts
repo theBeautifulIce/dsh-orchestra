@@ -442,6 +442,17 @@ describe('记忆审批卡：批准之后不许偷偷改', () => {
     f.db.raw.close()
   })
 
+  it('批准后不能改非正文元数据或通过修改 client_key 换序', () => {
+    const f = approved()
+    for (const assignment of ["title = '改过的标题'", "client_key = 'zz_moved'"]) {
+      const message = errorMessage(() => withTx(f.db, (tx) => {
+        tx.run("UPDATE memory_items SET " + assignment + " WHERE batch_id = ? AND client_key = 'item_1'", [f.batch_id])
+      }))
+      expect(message).toContain('MEMORY_APPLY_BINDING_INVALID')
+    }
+    f.db.raw.close()
+  })
+
   it('批准后新增行 → MEMORY_APPLY_BINDING_INVALID', () => {
     const f = approved()
     const message = errorMessage(() => withTx(f.db, (tx) => {

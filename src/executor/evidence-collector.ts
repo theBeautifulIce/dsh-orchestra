@@ -7,7 +7,7 @@ import { appendNodeRunEvent } from '../infra/db/ledger.ts'
 import type { ClockProvider } from '../core/clock.ts'
 import {
   assertCommandHash, assertToolsAuthorized, commandHashOf, resolveInside,
-  type ReadOnlyToolRunner, type StrongEvidence, type ToolRegistry,
+  type EffectVerificationTarget, type EffectVerifier, type ReadOnlyToolRunner, type RunToolResult, type StrongEvidence, type ToolRegistry,
 } from './tools.ts'
 import type { ToolPolicy } from './session.ts'
 import { toolExecutionId } from '../core/ids.ts'
@@ -34,6 +34,22 @@ type OutboxRow = {
   status: 'pending' | 'completed' | 'failed'
   request_hash: string
   result_json: string | null
+}
+
+type VerificationTarget = EffectVerificationTarget & { action_generation: number }
+
+function verifyEffectOutput(verifier: EffectVerifier, target: VerificationTarget, output: RunToolResult) {
+  if (output.evidence.exitCode !== 0) return null
+  const { action_generation: _generation, ...scope } = target
+  try {
+    const result = verifier.verify({ ...scope }, { stdout: output.stdout, stderr: output.stderr })
+    if (!result || (result.verdict !== 'applied' && result.verdict !== 'not_applied')
+      || typeof result.reference !== 'string' || !result.reference.trim()) return null
+    return { ...scope, verifier_id: verifier.id, verdict: result.verdict, reference_hash: sha256Hex(result.reference) }
+  } catch {
+    // The tool still ran. A verifier that cannot interpret the output issues no business proof.
+    return null
+  }
 }
 
 export type EvidenceCollectorDeps = {
@@ -166,6 +182,8 @@ export class EvidenceCollector {
     const startedAt = startSample ? new Date(startSample.wallClockMs).toISOString() : this.deps.nowAt()
     const descriptor = this.deps.registry.require(call.tool)
     const cwd = resolveInside(this.deps.runner.root, call.cwd)
+    const verifier = descriptor.effectVerifier
+    const target = verifier && this.loadVerificationTarget()
     withTx(this.deps.db, (tx) => {
       tx.run('UPDATE node_runs SET tool_start_at = ?, updated_at = ? WHERE node_run_id = ?', [startedAt, startedAt, this.deps.nodeRunId])
       appendNodeRunEvent(tx, this.deps.secret, this.deps.nodeRunId, 'tool_started', {
@@ -190,6 +208,9 @@ export class EvidenceCollector {
       out.evidence,
       commandHashOf(descriptor.command.bin, descriptor.command.args, cwd, this.deps.runner.root),
     )
+    const effectProof = verifier && target && target.workflow_definition_hash === verifier.workflowDefinitionHash
+      && target.node_id === verifier.nodeId && cwd === resolveInside(this.deps.runner.root, verifier.cwd ?? '.')
+      ? verifyEffectOutput(verifier, target, out) : null
     this.lastEvidenceValue = { ...out.evidence }
     const trace: ToolTraceEntry = {
       tool: call.tool,
@@ -206,6 +227,10 @@ export class EvidenceCollector {
       trace, evidence: out.evidence,
     }
     withTx(this.deps.db, (tx) => {
+      const activeProof = effectProof && tx.get(
+        'SELECT 1 FROM node_runs WHERE node_run_id = ? AND attempt = ? AND action_generation = ?',
+        [this.deps.nodeRunId, this.deps.attempt, target?.action_generation],
+      ) ? { effect_proof: effectProof } : {}
       tx.run(
         'INSERT INTO tool_executions (node_run_id, attempt, tool_seq, tool, execution_id, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
@@ -227,6 +252,7 @@ export class EvidenceCollector {
         started_at: startedAt,
         finished_at: finishedAt,
         duration_ns: startSample && endSample ? Math.max(0, endSample.monotonicNs - startSample.monotonicNs) : null,
+        ...activeProof,
       })
       tx.run(
         'UPDATE bridge_tool_outbox SET status = ?, result_json = ?, updated_at = ? WHERE node_run_id = ? AND attempt = ? AND executor_agent_id = ? AND call_id = ?',
@@ -234,6 +260,13 @@ export class EvidenceCollector {
       )
     })
     return result
+  }
+
+  private loadVerificationTarget(): VerificationTarget | undefined {
+    return this.deps.db.raw.prepare(`SELECT r.workflow_definition_hash,n.node_id,n.node_run_id,n.run_id,n.attempt,n.action_generation
+      FROM node_runs n JOIN runs r ON r.run_id = n.run_id WHERE n.node_run_id = ? AND n.attempt = ?
+      AND n.side_effect_policy <> 'pure' AND r.workflow_definition_hash IS NOT NULL`)
+      .get(this.deps.nodeRunId, this.deps.attempt) as VerificationTarget | undefined
   }
 
   private nextToolSeq(): number {

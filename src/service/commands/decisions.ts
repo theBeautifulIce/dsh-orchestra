@@ -1,5 +1,6 @@
 // src/service/commands/decisions.ts —— 八种 decision 的生成、查重与收口（S3 Task 3，规格 3.6）
 import { OrchError } from '../../core/errors.ts'
+import type { DecisionPriority } from '../../core/decision-priority.ts'
 import type { DecisionKind } from '../../core/state-machine.ts'
 import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
 import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
@@ -59,6 +60,7 @@ export type DecisionDraft = {
   approver?: string
   // 升级规则命中时置 1，批准动作必须带 confirm
   confirmRequired?: boolean
+  priority?: { level: DecisionPriority; reason: string }
 }
 
 export function activeDecision(tx: Tx, runId: string, kind: DecisionKind, nodeRunId: string | null): { decision_id: string } | undefined {
@@ -93,9 +95,19 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
     workflowId: typeof payload.workflow_id === 'string' ? payload.workflow_id : undefined,
     workflowVersion: typeof payload.workflow_version === 'string' ? payload.workflow_version : undefined,
   })
+  const context = tx.get<{ side_effect_policy: string | null; node_status: string | null; autonomy: string }>(
+    `SELECT n.side_effect_policy, n.status AS node_status, t.autonomy
+    FROM runs r JOIN tasks t ON t.task_id = r.task_id
+    LEFT JOIN node_runs n ON n.run_id = r.run_id AND n.node_run_id = ? WHERE r.run_id = ?`, [draft.nodeRunId, draft.runId],
+  )
+  const priority = draft.priority ?? decisionPriority(draft.kind, context?.side_effect_policy, approver, confirmRequired)
+  const expiresByEscalation = context?.node_status === 'blocked_post' || (context && timeoutDisposition(context.autonomy) === 'hold_for_human')
+  const expiry = draft.kind === 'report_contradicted'
+    ? { effect: 'none', reason: '报告冲突只由人工裁决。' }
+    : expiresByEscalation ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' } : undefined
   tx.run(
-    'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, approver, confirm_required, created_at) ' +
-      "VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?)",
+    'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, approver, '
+    + "confirm_required, created_at, priority, priority_reason, expiry_effect, expiry_effect_reason) VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       draft.decisionId,
       draft.runId,
@@ -107,8 +119,20 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
       approver,
       confirmRequired ? 1 : 0,
       draft.createdAt ?? new Date().toISOString(),
+      priority.level, priority.reason, expiry?.effect ?? null, expiry?.reason ?? null,
     ],
   )
+}
+
+function decisionPriority(kind: DecisionKind, sideEffectPolicy: string | null | undefined, approver: string, confirmRequired: boolean): {
+  level: DecisionPriority; reason: string
+} {
+  if (sideEffectPolicy === 'irreversible' && approver === 'human' && ['pre_execution', 'verify_human', 'action_overrun'].includes(kind)) {
+    return { level: 'critical', reason: '不可逆操作需要人工审批或核实。' }
+  }
+  if (kind === 'report_contradicted') return { level: 'high', reason: '执行报告与已记录裁决冲突，需要人工处理。' }
+  if (confirmRequired) return { level: 'high', reason: '任务升级规则要求二次确认。' }
+  return { level: 'normal', reason: '按常规审批流程处理。' }
 }
 
 /**
@@ -152,6 +176,7 @@ export type ResolveDecisionRequest = {
   revision: number
   resolution: Resolution
   now: string
+  requireEffectSettlement?: boolean
   payload?: Record<string, unknown>
   // 批准人校验：actor 必须由命令入口给出，不能从卡类型反推
   actor?: Actor
@@ -262,7 +287,12 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
     : undefined
   // 副作用结算：人工裁决收口的同一笔事务里落结算行（附录 §4）。
   // 裁决说「已发生」→ decision 分支；说「没发生」→ verified_none 分支（事件带 decision_id）。
-  if (closing) settleDecisionOutcome(tx, secret, { decisionId: req.decisionId, now: req.now })
+  if (closing) {
+    const settled = settleDecisionOutcome(tx, secret, { decisionId: req.decisionId, now: req.now })
+    if (req.requireEffectSettlement && !settled) {
+      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '裁决需要绑定当前运行与尝试的系统核验证据')
+    }
+  }
   // 裁决卡收口后，若所有节点都已到终态，run 也要在同一笔事务里收口。
   if (closing) closeRun(tx, secret, current.run_id, req.now)
   return {

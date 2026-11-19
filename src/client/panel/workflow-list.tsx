@@ -142,7 +142,7 @@ export function WorkflowListScreen({ api, onSelectWorkflow, reloadVersion = 0, o
     {failed && <div role="alert" className="ops-empty"><span>{COPY.queryFailed} </span><button type="button" onClick={refresh} className="ops-button">{COPY.retry}</button></div>}
     {loading && items.length === 0 && <p role="status" className="ops-empty">正在读取流程…</p>}
     {!loading && !failed && items.length === 0 && <p className="ops-empty">{query || status ? '没有符合条件的 Workflow。' : '当前没有已保存的流程'}</p>}
-    {!failed && items.length > 0 && <div className="ops-table-scroll">
+    {items.length > 0 && <div className="ops-table-scroll">
       <table className="ops-table ops-table--wide" aria-label="Workflow 列表">
         <thead><tr><th scope="col">名称</th><th scope="col">启用状态</th><th scope="col">版本</th><th scope="col">步骤</th>
           <th scope="col">活跃任务</th><th scope="col">最近发布</th><th scope="col">操作</th></tr></thead>

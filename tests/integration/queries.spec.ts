@@ -188,19 +188,24 @@ describe('游标', () => {
 })
 
 describe('账本校验与回执', () => {
-  it('链完好 ok=true，条目数对得上', () => {
+  it('账本完好返回 valid=true 与空断链位置，条目数对得上', () => {
     const db = seeded()
-    expect(verifyLedger(db, SECRET)).toEqual({ ok: true, chains: 1, entries: 2, break: null, gaps: [] })
+    expect(verifyLedger(db, SECRET)).toEqual({
+      valid: true, first_bad_event_seq: null, broken_node_run_id: null, reason: null,
+      ok: true, chains: 1, entries: 2, break: null, gaps: [],
+    })
   })
 
-  it('改一条 payload → ok=false 且 break.seq 指到那条', () => {
+  it('篡改账本返回 valid=false 与 first_bad_event_seq 对应的链内位置', () => {
     const db = seeded()
     // 只追加触发器在位时账本改不动：要模拟篡改，先卸掉触发器（等于绕过应用直接改库）
     db.raw.exec('DROP TRIGGER trg_node_run_events_no_update')
     db.raw.prepare("UPDATE node_run_events SET payload = '{\"a\":9}' WHERE node_run_id = 'n1' AND seq = 2").run()
     const out = verifyLedger(db, SECRET)
-    expect(out.ok).toBe(false)
-    expect(out.break?.seq).toBe(2)
+    expect(out).toMatchObject({
+      valid: false, first_bad_event_seq: 2, broken_node_run_id: 'n1', reason: expect.any(String),
+      ok: false, break: { node_run_id: 'n1', seq: 2 },
+    })
   })
 
   it('回执：有则返回、无则 NOT_FOUND、过期则 OPERATION_EXPIRED', () => {

@@ -8,7 +8,7 @@ const LABELS: Readonly<Record<string, string>> = {
   'run.created': '创建运行', 'run.closed': '结束运行', 'decision.created': '创建审批', 'decision.resolved': '记录审批结果',
   'artifact.registered': '登记交付产物',
   'task_plan.proposed': '生成待确认任务计划',
-  'workflow.draft_tested': '完成 Workflow 快速测试', 'workflow.published': '发布 Workflow 版本',
+  'workflow.draft_tested': '完成流程结构与模拟流转测试', 'workflow.published': '发布 Workflow 版本',
   'workflow.status_changed': '变更 Workflow 启用状态',
   'run.terminal': '结束运行', 'task.run_started': '任务启动运行', 'task.trigger_created': '配置任务触发器',
   'task.trigger_enabled': '启用任务触发器', 'task.trigger_paused': '暂停任务触发器',
@@ -22,6 +22,8 @@ const LABELS: Readonly<Record<string, string>> = {
   'collaboration.authorized': '授权独立核验',
   'collaboration.delivered': '核验请求已送达',
   'collaboration.accepted': '接收方已接手',
+  'collaboration.withdrawn': '撤回原核验请求',
+  'collaboration.reassigned': '重新指派核验',
   'collaboration.completed': '独立核验完成',
   'collaboration.adopted': '主理人采纳核验结论',
 }
