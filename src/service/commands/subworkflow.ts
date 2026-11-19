@@ -420,7 +420,7 @@ export function createSubworkflowRun(
   def.nodes.forEach((n, idx) => {
     // 副作用等级在子节点创建时就要明确写下，不靠 DDL 默认值：
     // 等待节点是纯控制节点，其余节点在真正执行前按保守值 compensable 落库。
-    const policy: SideEffectPolicy = n.type === 'wait' ? 'pure' : 'compensable'
+    const policy: SideEffectPolicy = n.type === 'wait' ? 'pure' : catalog.initialAgentEffect(n)
     tx.run(
       'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation, rearm_generation, side_effect_policy, created_at, updated_at) '
       + 'VALUES (?, ?, ?, ?, ?, 1, ?, 0, 0, 0, ?, ?, ?)',

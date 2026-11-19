@@ -1,10 +1,10 @@
+import { currentAttempts, runtimeCanvasDoc, type RuntimeAttempt, type RunTopology } from './runtime-topology.ts'
 // 流程画布视图：草稿可拖动 / 连线 / 增删，已发布只读。
 // 画布只认一份定义：definition 由外部给，改动通过 onChange 把新定义交回去，
 // 画布内部不另存一份「自己的」定义，所以画布和 JSON 抽屉永远同步。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { COLOR, FONT_PX } from './tokens.ts'
-import type { NodeRunView } from '../api/types.ts'
 import {
   CANVAS_NODE_TYPES,
   MULTI_OUT_TYPES,
@@ -13,7 +13,6 @@ import {
   canConnect,
   clampCoordinate,
   nextNodeIdentity,
-  readCanvasDoc,
   routeForNewEdge,
   serializeCanvasDoc,
   type CanvasDoc,
@@ -30,11 +29,13 @@ export type WorkflowCanvasViewProps = {
   /** 给测试与页面区分多块画布用。 */
   canvasId?: string
   inspectNodes?: boolean
-  runtimeNodes?: readonly Pick<NodeRunView, 'node_id' | 'status' | 'status_label'>[]
+  runtimeNodes?: readonly RuntimeAttempt[]
+  runtimeTopology?: RunTopology | null
   runtimeCompact?: boolean
   workspace?: boolean
 }
 
+const REWORK_STATUS: Record<string, string> = { proposed: '等待授权', needs_human_approval: '等待人工授权', scheduled: '等待返工', awaiting_review: '等待重新验收', escalated: '等待处理', closed: '验收通过', declined: '未批准', cancelled: '已取消' }
 const NODE_WIDTH = 160
 const NODE_HEIGHT = 56
 const MIN_CANVAS_WIDTH = 1100
@@ -47,10 +48,11 @@ type DragState =
   | { kind: 'link'; fromNodeId: string }
 
 export function WorkflowCanvasView({
-  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeCompact = false, workspace = false,
+  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeTopology, runtimeCompact = false, workspace = false,
 }: WorkflowCanvasViewProps) {
   const compact = readOnly && runtimeCompact
-  const doc = useMemo(() => readCanvasDoc(definition), [definition])
+  const doc = useMemo(() => runtimeCanvasDoc(definition, readOnly ? runtimeTopology : null), [definition, readOnly, runtimeTopology])
+  const nodeHeight = readOnly && runtimeTopology ? 108 : NODE_HEIGHT
   const [alert, setAlert] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
@@ -71,10 +73,10 @@ export function WorkflowCanvasView({
     const padding = workspace ? 44 : compact ? 32 : 120
     for (const node of doc?.nodes ?? []) {
       width = Math.max(width, node.position.x + NODE_WIDTH + padding)
-      height = Math.max(height, node.position.y + NODE_HEIGHT + padding)
+      height = Math.max(height, node.position.y + nodeHeight + padding)
     }
     return { width, height }
-  }, [compact, doc, readOnly, workspace])
+  }, [compact, doc, readOnly, workspace, nodeHeight])
 
   function emit(next: CanvasDoc) {
     if (readOnlyRef.current) return
@@ -233,7 +235,7 @@ export function WorkflowCanvasView({
   const nodes = doc?.nodes ?? []
   const edges = doc?.edges ?? []
   const selected = nodes.find((node) => node.node_id === selectedId) ?? (workspace ? nodes[0] : undefined)
-  const runtimeByNode = new Map(runtimeNodes?.map((node) => [node.node_id, node]))
+  const runtimeByNode = currentAttempts(runtimeNodes ?? [])
 
   return <div data-canvas-id={canvasId ?? 'workflow-canvas'} data-canvas-root="true" data-canvas-readonly={readOnly ? 'true' : 'false'} style={rootStyle}>
     {!compact && <div style={workspace ? workspaceToolbar : toolbarStyle}>
@@ -294,11 +296,13 @@ export function WorkflowCanvasView({
               key={`${edge.from}->${edge.to}`}
               data-edge-from={edge.from}
               data-edge-to={edge.to}
+              data-runtime-edge={edge.raw.runtime_added ? 'true' : undefined}
               x1={from.position.x + NODE_WIDTH}
-              y1={from.position.y + NODE_HEIGHT / 2}
+              y1={from.position.y + nodeHeight / 2}
               x2={to.position.x}
-              y2={to.position.y + NODE_HEIGHT / 2}
-              stroke={workspace ? '#8c9ebb' : COLOR.line}
+              y2={to.position.y + nodeHeight / 2}
+              stroke={edge.raw.runtime_added ? COLOR.link : workspace ? '#8c9ebb' : COLOR.line}
+              strokeDasharray={edge.raw.runtime_added ? '6 3' : undefined}
               strokeWidth={2}
             />
           })}
@@ -309,13 +313,16 @@ export function WorkflowCanvasView({
             data-node-id={node.node_id}
             data-node-type={node.type}
             data-runtime-status={runtimeByNode.get(node.node_id)?.status}
+            data-runtime-attempt={runtimeByNode.get(node.node_id)?.attempt}
+            data-runtime-added={node.raw.runtime_step ? 'true' : undefined}
+            data-runtime-held={runtimeTopology?.held_node_ids.includes(node.node_id) ? 'true' : undefined}
             data-node-x={node.position.x}
             data-node-y={node.position.y}
             data-node-readonly={readOnly ? 'true' : 'false'}
             aria-label={`节点 ${node.node_id} ${node.title}`}
             aria-disabled={readOnly ? 'true' : 'false'}
             onMouseDown={(event) => startMove(event, node)}
-            style={{ ...nodeStyle, left: node.position.x, top: node.position.y, ...(workspace ? {
+            style={{ ...nodeStyle, height: nodeHeight, left: node.position.x, top: node.position.y, ...(workspace ? {
               boxSizing: 'border-box', cursor: readOnly ? 'default' : 'move',
               borderColor: selected === node ? '#83a9dc' : '#d2deec', background: selected === node ? '#edf5ff' : COLOR.surface,
             } : {}) }}
@@ -328,6 +335,10 @@ export function WorkflowCanvasView({
                 {NODE_TYPE_LABEL[node.type] ?? node.type}{MULTI_OUT_TYPES.has(node.type) ? ' · 可多条出边' : ''}
               </>}
             </span>
+            {runtimeNodes && runtimeByNode.get(node.node_id)?.attempt != null && <span style={nodeMetaStyle}>第 {runtimeByNode.get(node.node_id)?.attempt} 次执行</span>}
+            {node.raw.runtime_step != null && <span style={nodeMetaStyle}>来源角色：{String((node.raw.runtime_step as {source_title: string}).source_title)}</span>}
+            {runtimeTopology?.held_node_ids.includes(node.node_id) && <span style={{ ...nodeMetaStyle, color: COLOR.warning }}>等待返工或验收</span>}
+            {runtimeTopology?.requests.filter(r => r.target_node_id === node.node_id).slice(-1).map(r => <span key={r.request_id} style={{ ...nodeMetaStyle, color: COLOR.warning }}>成果反馈 · 第 {r.round_no} 轮</span>)}
             {!compact && <><button
               type="button"
               data-node-handle={node.node_id}
@@ -359,6 +370,10 @@ export function WorkflowCanvasView({
       {selected && <>
         <p><strong>{selected.title}</strong></p>
         <p style={mutedStyle}>{NODE_TYPE_LABEL[selected.type] ?? selected.type} · {selected.node_id}</p>
+        {runtimeByNode.get(selected.node_id) && <p>{runtimeByNode.get(selected.node_id)?.status_label} · 第 {runtimeByNode.get(selected.node_id)?.attempt ?? '未知'} 次执行</p>}
+        {selected.raw.runtime_step != null && <><p>来源角色：{String((selected.raw.runtime_step as {source_title: string}).source_title)}</p><p>{String((selected.raw.runtime_step as {instruction: string}).instruction)}</p></>}
+        {runtimeTopology?.requests.filter(r => r.target_node_id === selected.node_id).map(r => <p key={r.request_id}>反馈 {r.request_id} · 第 {r.round_no} 轮 · {REWORK_STATUS[r.status] ?? r.status}</p>)}
+        {runtimeTopology?.held_node_ids.includes(selected.node_id) && <p>受影响步骤：等待返工或验收</p>}
         <p>上游 · {edges.filter((edge) => edge.to === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.from)?.title ?? edge.from).join('、') || '无'}</p>
         <p>下游 · {edges.filter((edge) => edge.from === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.to)?.title ?? edge.to).join('、') || '无'}</p>
       </>}

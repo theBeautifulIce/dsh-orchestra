@@ -1,4 +1,6 @@
 // src/service/commands/run-close.ts —— 运行终态收口（规格 4.8 行 403）
+import { hasUnresolvedRework } from '../rework-runtime.ts'
+import { hasDeliveryReviewHold } from '../delivery-review.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
@@ -33,6 +35,7 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
   if (!run || RUN_TERMINAL.includes(run.status as RunTerminal) || run.status === 'paused') {
     return null
   }
+  if (!run.cancel_requested_at && (hasUnresolvedRework(tx,runId) || hasDeliveryReviewHold(tx,runId))) return null
   refreshRunSettling(tx, runId, now)
   const nodes = tx.all<NodeRow>(
     `SELECT node_run_id, status, replacement_node_run_id, (${UNVERIFIED_EFFECT}) AS unverified FROM node_runs n WHERE run_id = ?`,

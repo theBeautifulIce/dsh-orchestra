@@ -1,3 +1,4 @@
+import { resolvePinnedNodeId } from '../service/rework-extra-steps.ts'
 // src/executor/run-node.ts —— 单节点执行主链（规格 5.2 行 442-449）
 // 生产路径的顺序固定：租约 → 建执行器 → 上报 started → 只读工具出强证据 → 核命令哈希 → 进 verifying → 上报 done。
 import { join } from 'node:path'
@@ -5,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { OrchError } from '../core/errors.ts'
 import type { Report } from '../core/report.ts'
 import type { Db } from '../infra/sqlite/driver.ts'
-import { withTx } from '../infra/sqlite/driver.ts'
+import { makeTx, withTx } from '../infra/sqlite/driver.ts'
 import { transitionNode, DEFAULT_VERIFY_TIMEOUT_MS } from '../service/commands/node-state.ts'
 import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { loadNodeRun } from '../service/commands/lease.ts'
@@ -20,6 +21,7 @@ import { selectExecutionModel, type ModelAssignment, type ModelRouting } from '.
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { getTaskPlanRecommendation } from '../service/task-planning.ts'
 import { readModelRoutingSettings } from '../service/model-routing-settings.ts'
+import { executionFeedbackContext } from '../service/rework-execution.ts'
 
 export type RunNodeParams = {
   nodeRunId: string
@@ -176,7 +178,7 @@ function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
     })
   }
   // 旧 run 的 workflow_id 为空，归到 default 命名空间；新 run 必须按自己的 workflow_id 取工具授权
-  const def = deps.runtime.catalog.toolPolicyFor(workflowId, row.workflow_version, row.node_id)
+  const def = deps.runtime.catalog.toolPolicyFor(workflowId, row.workflow_version, resolvePinnedNodeId(makeTx(deps.db.raw), p.nodeRunId))
   return { allow: def.allow, deny: def.deny, declaredPolicy: 'pure' }
 }
 
@@ -295,6 +297,8 @@ async function runNodeActions(
         attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'executor_started',
       })
     })
+    const feedback = ['S5','S6'].includes(deps.runtime.phase)
+      ? executionFeedbackContext(deps.db, deps.runtime.catalog, p.nodeRunId, nowAt(), p.input) : null
     lifecycle = new AgentLifecycle({
       db: deps.db,
       secret: deps.secret,
@@ -306,7 +310,7 @@ async function runNodeActions(
       nodeRunId: p.nodeRunId,
       attempt: p.attempt,
       agent,
-      instruction: nodeInstruction(p),
+      instruction: nodeInstruction(p, feedback),
       timeoutMs: actionTimeoutMs,
       idleTimeoutMs: 5_000,
       nowAt,
@@ -439,7 +443,7 @@ function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: 
       'SELECT task_id, workflow_id, CAST(workflow_version AS TEXT) AS workflow_version FROM runs WHERE run_id = ?', [row.run_id],
     )
     if (!run) throw new OrchError('NOT_FOUND', '模型分配找不到对应运行')
-    const context = { taskId: run.task_id, runId: row.run_id, nodeId: row.node_id, nodeRunId: row.node_run_id,
+    const context = { taskId: run.task_id, runId: row.run_id, nodeId: resolvePinnedNodeId(tx, row.node_run_id), nodeRunId: row.node_run_id,
       attempt: row.attempt, actionGeneration: generation, workflowId: run.workflow_id, workflowVersion: run.workflow_version }
     const proposed = getTaskPlanRecommendation(deps.db, context) ?? routing.recommend(context)
     const settings = readModelRoutingSettings(tx)
@@ -506,12 +510,16 @@ async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRu
 }
 
 // 发给 Agent 的任务文本只描述节点与输出约束；完成与否仍由服务端收口。
-function nodeInstruction(p: RunNodeParams): string {
+function nodeInstruction(p: RunNodeParams, feedback: ReturnType<typeof executionFeedbackContext> | null): string {
   return [
     buildInstruction({ nodeId: p.nodeId, outputSchema: p.outputSchema }),
     // 指令里只列本次节点真正允许的清单，避免把 Agent 引向随后必被拒绝的工具。
     '可用只读工具：' + p.tools.map((tool) => tool.command).join(', '),
     '节点输入：' + JSON.stringify(p.input ?? null),
+    ...(feedback ? [
+      '本次运行的成果与修订上下文：' + JSON.stringify(feedback),
+      '宿主提供 orchestra_rework 时可读取 inputs 中的成果。交付文本请用 publish 登记。revision 要求先读取原成果，按保留要求修订同名文件。review 要求核对候选版本，取得本次执行证据并完成验收后再提交报告。plan_instruction 是本次获批的局部修订要求。工具权限以宿主为准。',
+    ] : []),
   ].join('\n')
 }
 

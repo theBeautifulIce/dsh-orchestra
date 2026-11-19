@@ -1,3 +1,4 @@
+import { rememberManualDispatchSpecs, resolveManualReworkSpecs } from './service/rework-dispatch-specs.ts'
 // src/index.ts —— DSH 插件入口 + 生产装配（规格 12.5 行 1088-1092）
 import { existsSync } from 'node:fs'
 import { OrchError } from './core/errors.ts'
@@ -66,6 +67,11 @@ import { bridgeHostAgentFactory } from './executor/bridge.ts'
 import { createDshExecutor, createDshPlanningCallback } from './executor/dsh-host.ts'
 import { createCollaborationHost, type CollaborationHost } from './service/collaboration.ts'
 import { callDshCollaboration } from './service/dsh-collaboration.ts'
+import { createReworkHost, type ReworkHost } from './service/rework-coordinator.ts'
+import { createDeliveryReviewHost } from './service/delivery-review.ts'
+import { createReworkPlanningHost, type ReworkPlanner } from './service/rework-planning.ts'
+import { callDshRework } from './service/dsh-rework.ts'
+import { createReworkInspectionHost } from './service/rework-inspection.ts'
 import { createModelRoutingSettingsHost } from './service/model-routing-settings.ts'
 export type { ModelRouting, ModelRoutingContext, ModelComplexity, ModelRecommendation, ModelProfile } from './executor/model-routing.ts'
 export { createDshExecutor, createDshPlanningCallback, type DshExecutionModel } from './executor/dsh-host.ts'
@@ -79,7 +85,14 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
 }) {
   const { dsh, dshPlanner, tools, ...serviceOptions } = options
   let collaboration: CollaborationHost | undefined
-  const host = createDshExecutor({ ...dsh, ...(serviceOptions.collaboration ? {
+  let installed: { db: Db; feedback: ReworkHost } | undefined
+  const host = createDshExecutor({ ...dsh,
+    ...(serviceOptions.phase === 'S5' || serviceOptions.phase === 'S6' ? {
+      rework(binding, input) {
+        if (!installed) throw new OrchError('SERVICE_UNAVAILABLE', '成果审核服务尚未就绪')
+        return callDshRework(installed.db, installed.feedback, binding, input)
+      },
+    } : {}), ...(serviceOptions.collaboration ? {
     collaboration: (binding, input) => {
       if (!collaboration) throw new OrchError('SERVICE_UNAVAILABLE', '核验服务尚未就绪')
       return callDshCollaboration(collaboration, binding, input)
@@ -92,6 +105,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
       generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal) : undefined
     const service = await serveOrchestra({
       ...serviceOptions,
+      ...(dshPlanner ? { reworkPlanner: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'rework') } : {}),
       ...(dshPlanner ? { planning: {
         propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }),
         ...(workflowGenerator ? { workflowGenerator } : {}),
@@ -100,6 +114,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
       executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
     })
     collaboration = service.collaboration
+    if (service.rework) installed = { db: service.orchestra.db, feedback: service.rework }
     return { ...service, close: async () => {
       try { await service.close() } finally { await host.close() }
     } }
@@ -175,7 +190,8 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   }
   const db = opts.db ?? openDb(opts.dbFile)
   applySteps(db, loadSteps(defaultMigrationsDir()))
-  const catalog = new WorkflowCatalog(opts.phase, db)
+  const registry = opts.executor?.registry
+  const catalog = new WorkflowCatalog(opts.phase, db, registry ? name => registry.lookup(name)?.capability === 'read_only' : undefined)
   // 定义落库是跨重启的事实来源：不先把已签发的版本装回内存，重启后同版本会被当成新定义（第六轮审计 P1-1）
   catalog.hydrate()
   // 生产时钟：墙钟与单调钟同时取样，漂移超过 2 秒就判不确定（规格 3.4 行 171）
@@ -384,6 +400,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       return { ...out, terminalStatus, outcome }
     }),
     dispatch: async (b) => {
+      if (registry && ['S5','S6'].includes(opts.phase)) inTx(db, tx => rememberManualDispatchSpecs(tx, opts.secret, catalog, registry, b.runId, b.nodes, b.now))
       // 控制节点（wait / subworkflow）不需要宿主执行器：只跑它们的工作流在无执行器进程里也能推进。
       // 只有 agent 节点必须要有执行器；parallel / decision 没有执行实现，交给 dispatcher 明确拒绝。
       const agentNodes = db.raw.prepare(
@@ -475,6 +492,7 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 
 // 供宿主接进 DSH：返回 endpoint 与关闭句柄
 export async function serveOrchestra(opts: OrchestraOptions & {
+  reworkPlanner?: ReworkPlanner
   memory?: MemoryHostOptions
   workflowGenerator?: ServerDeps['workflowGenerator']
   resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs
@@ -482,7 +500,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
-}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; close: () => Promise<void> }> {
+}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; rework?: ReworkHost; close: () => Promise<void> }> {
   const log = opts.log ?? nullLogger
   // 并发闸在生产装配这一层建：配置里的 execution.concurrency 与 human_slots 在这里真正生效。
   // 配置读不到时退回默认定值（并发 3、人工名额 1），不让一个可选配置文件挡住服务启动。
@@ -491,6 +509,10 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const service = await openServiceOrchestra({ ...opts, scheduler })
   const orchestra = service.orchestra
   const collaboration = opts.collaboration ? createCollaborationHost(orchestra.db, opts.secret) : undefined
+  const rework = opts.phase === 'S5' || opts.phase === 'S6' ? createReworkHost(orchestra.db, opts.secret, { clock: orchestra.runtime.clock }) : undefined
+  const delivery = rework && createDeliveryReviewHost(orchestra.db, opts.secret)
+  const localPlanning = rework && createReworkPlanningHost(orchestra.db, opts.secret, opts.reworkPlanner)
+  const inspection = rework && createReworkInspectionHost(orchestra.db, opts.secret, rework, opts.reworkPlanner)
   const modelSettings = opts.executor?.modelRouting && createModelRoutingSettingsHost(orchestra.db, opts.executor.modelRouting.profiles)
   const taskTriggers = opts.phase === 'S5'
     ? createTaskTriggerHost(orchestra.db, orchestra.catalog, { executorReady: () => Boolean(opts.resolveTriggerNodeSpecs) })
@@ -500,13 +522,16 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const planResolver = registry && (opts.phase === 'S5' || opts.phase === 'S6')
     ? (run: Parameters<typeof resolveApprovedPlanNodeSpecs>[3]) => resolveApprovedPlanNodeSpecs(orchestra.db, orchestra.catalog, registry, run)
     : undefined
-  const triggerDispatch = (triggerResolver || planResolver) && createTriggerDispatchPump(
+  const manualResolver = registry && ['S5','S6'].includes(opts.phase)
+    ? (run: Parameters<typeof resolveManualReworkSpecs>[4]) => resolveManualReworkSpecs(orchestra.db, opts.secret, orchestra.catalog, registry, run)
+    : undefined
+  const triggerDispatch = (triggerResolver || planResolver || manualResolver) && createTriggerDispatchPump(
     orchestra.db,
     triggerResolver,
     (run, nodes) => orchestra.commands.dispatch({ runId: run.run_id, nodes, now: new Date().toISOString() }),
     (error) => log.error('运行自动派发失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }),
     planResolver,
-    { secret: opts.secret },
+    { secret: opts.secret, resolveManual: manualResolver },
   )
   const tickTaskTriggers = () => {
     try {
@@ -525,6 +550,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       sweepNow(orchestra.runtime, new Date().toISOString())
       memory?.resume()
       collaboration?.sweep(new Date().toISOString())
+      rework?.recover(new Date().toISOString())
     } catch (err) {
       log.error('维护扫描失败', { err: err instanceof Error ? err.message : String(err) })
     }
@@ -588,12 +614,14 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       memory,
       planning,
       collaboration,
+      rework, delivery, localPlanning, inspection,
       modelSettings,
       workflowGenerator: opts.workflowGenerator,
       taskTriggers,
       log,
     })
     memory?.resume()
+    rework?.recover(new Date().toISOString())
     tickTaskTriggers()
   } catch (err) {
     clearInterval(sweepTimer)
@@ -604,6 +632,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     orchestra,
     endpoint: server.endpoint,
     collaboration,
+    rework,
     close: async () => {
       clearInterval(sweepTimer)
       const closingTriggerDispatch = triggerDispatch?.close()

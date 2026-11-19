@@ -1,3 +1,4 @@
+import { MANUAL_REWORK_ELIGIBLE } from './rework-dispatch-specs.ts'
 import { OrchError } from '../core/errors.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 import { failQueuedNode, type NodeSpec } from './dispatcher.ts'
@@ -22,6 +23,7 @@ export type TriggerDispatchOptions = {
   now?: () => string
   /** 节点链签名密钥：写节点事件、收口运行都要用 */
   secret?: string
+  resolveManual?: ResolveTriggerNodeSpecs
 }
 
 const PARALLEL_RUNS = 4
@@ -76,7 +78,7 @@ export function createTriggerDispatchPump(
     }
   }
 
-  function ready(after: string): (TriggerRunReady & { source: 'trigger' | 'plan' })[] {
+  function ready(after: string): (TriggerRunReady & { source: 'trigger' | 'plan' | 'manual' })[] {
     return db.raw.prepare(`
       WITH candidates AS (
         SELECT r.run_id, 'trigger' AS source FROM task_trigger_occurrences o JOIN runs r ON r.root_run_id = o.run_id
@@ -84,6 +86,10 @@ export function createTriggerDispatchPump(
         UNION ALL
         SELECT o.run_id, 'plan' AS source FROM task_plans p JOIN start_run_operations o ON o.operation_id = p.launch_operation_id
         WHERE ?
+        UNION ALL
+        SELECT r.run_id, 'manual' AS source FROM runs r
+        WHERE ? AND EXISTS(SELECT 1 FROM rework_dispatch_specs s WHERE s.run_id=r.run_id)
+          AND ${MANUAL_REWORK_ELIGIBLE}
       )
       SELECT r.run_id, r.task_id, r.workflow_id, CAST(r.workflow_version AS TEXT) AS workflow_version, c.source
       FROM candidates c JOIN runs r ON r.run_id = c.run_id
@@ -91,7 +97,7 @@ export function createTriggerDispatchPump(
         AND r.cancel_requested_at IS NULL AND r.workflow_id IS NOT NULL AND r.workflow_version IS NOT NULL
         AND EXISTS (SELECT 1 FROM node_runs n WHERE n.run_id = r.run_id AND n.status = 'queued')
       ORDER BY r.run_id LIMIT 8
-    `).all(resolve ? 1 : 0, resolvePlan ? 1 : 0, after) as (TriggerRunReady & { source: 'trigger' | 'plan' })[]
+    `).all(resolve ? 1 : 0, resolvePlan ? 1 : 0, options?.resolveManual ? 1 : 0, after) as (TriggerRunReady & { source: 'trigger' | 'plan' | 'manual' })[]
   }
 
   async function resolveBounded(run: TriggerRunReady, resolveSpecs: ResolveTriggerNodeSpecs) {
@@ -123,7 +129,7 @@ export function createTriggerDispatchPump(
         if (active.size >= PARALLEL_RUNS) break
         cursor = run.run_id
         if (active.has(run.run_id)) continue
-        const resolver = source === 'plan' ? resolvePlan : resolve
+        const resolver = source === 'manual' ? options?.resolveManual : source === 'plan' ? resolvePlan : resolve
         if (!resolver) continue
         const markDispatched = () => { try { markTriggerDispatched(db, run.run_id, clock()) } catch (error) { onError(error) } }
         const markFailed = (reason: string) => { try { markTriggerResolveFailed(db, run.run_id, reason, clock()) } catch (error) { onError(error) } }

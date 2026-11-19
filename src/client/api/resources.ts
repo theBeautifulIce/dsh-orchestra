@@ -28,6 +28,9 @@ const compact = (params: Record<string, string | number | undefined>) => params
 /** Typed read-only API surface used by the panel; transport and envelope handling stay in ApiClient. */
 export function createResourcesApi(client: ApiClient) {
   return {
+    getReworkTopology: (run_id: string) => client.get<import('./rework.ts').RunTopology>('/v1/rework/topology', { run_id }),
+    listRework: (run_id?: string) => client.get<{ items: import('./rework.ts').ReworkItem[] }>('/v1/rework', { run_id }),
+    getRework: (request_id: string) => client.get<{ item: import('./rework.ts').ReworkDetail }>('/v1/rework/get', { request_id }),
     getWorkspaceOverview: () => client.get<import('../../service/queries/tasks.ts').WorkspaceOverview>('/v1/workspace/overview'),
     listTasks: (params: ListTasksParams = {}): Promise<ApiResult<Page<TaskSummary>>> =>
       client.get('/v1/tasks', compact(params)),

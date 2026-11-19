@@ -8,6 +8,7 @@ import {
   chooseBranch, evaluatePolicy,
   type BranchChoice, type BranchEdge, type PolicyCondition, type PolicyOutcome,
 } from '../../core/policy.ts'
+import { assertReworkExecutionAllowed } from '../rework-runtime.ts'
 import { openDecision } from './decisions.ts'
 
 export type TransitionPatch = Readonly<Record<string, string | number | null>>
@@ -124,6 +125,8 @@ export type TransitionRequest = {
  * - 受影响行数必须恰为 1，否则抛 STALE_GENERATION，由调用方事务整体回滚。
  */
 export function applyTransition(tx: Tx, secret: string, req: TransitionRequest): void {
+  if (['started','done'].includes(req.to)) assertReworkExecutionAllowed(tx,req.nodeRunId,req.to === 'done')
+  if (req.ruleId === 'M-66' && !tx.get("SELECT 1 FROM rework_impacts i JOIN rework_requests r USING(request_id) WHERE i.node_run_id=? AND i.released_at IS NULL AND r.status = 'authorized'", [req.nodeRunId])) throw new OrchError('FORBIDDEN','rework invalidation requires persisted authority')
   if (req.from.length === 0) {
     throw new OrchError('STALE_GENERATION', '迁移缺少来源状态', { nodeRunId: req.nodeRunId })
   }
@@ -250,6 +253,7 @@ export type CreateNodeRunRequest = {
   attempt: number
   originNodeRunId: string
   previousActionGeneration?: number
+  reworkRequestId?: string
   now: string
 }
 
@@ -262,7 +266,11 @@ export function createNodeRun(tx: Tx, req: CreateNodeRunRequest): void {
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'attempt 必须从 1 开始', { attempt: req.attempt })
   }
   if (req.originNodeRunId) {
-    const origin = tx.get<{ hang_reason: string | null }>('SELECT hang_reason FROM node_runs WHERE node_run_id = ?', [req.originNodeRunId])
+    const origin = tx.get<{ hang_reason: string | null; status: string; run_id: string; node_id: string; node_type: string; attempt: number; seq: number }>('SELECT hang_reason,status,run_id,node_id,node_type,attempt,seq FROM node_runs WHERE node_run_id = ?', [req.originNodeRunId])
+    if (origin?.status === 'done' && (!req.reworkRequestId || !tx.get("SELECT 1 FROM rework_requests r LEFT JOIN rework_impacts i ON i.request_id=r.request_id AND i.node_run_id=? WHERE r.request_id=? AND ((r.target_node_run_id=? AND r.status='authorized') OR (i.node_run_id IS NOT NULL AND r.status IN ('authorized','awaiting_review')))",[req.originNodeRunId,req.reworkRequestId,req.originNodeRunId]))) throw new OrchError('FORBIDDEN','completed attempts require dedicated persisted rework authority')
+    if (req.reworkRequestId && origin && (origin.run_id !== req.runId || origin.node_id !== req.nodeId || origin.node_type !== req.nodeType || origin.seq !== req.seq || req.attempt !== origin.attempt + 1)) {
+      throw new OrchError('STALE_GENERATION', 'rework successor identity must match its origin')
+    }
     if (origin?.hang_reason) {
       throw new OrchError('STALE_HANG', '旧 attempt 挂在冲突上，新 attempt 要被挡住', {
         originNodeRunId: req.originNodeRunId,
@@ -276,7 +284,7 @@ export function createNodeRun(tx: Tx, req: CreateNodeRunRequest): void {
     [req.newNodeRunId, req.runId, req.nodeId, req.seq, req.nodeType, req.attempt, req.originNodeRunId, req.now, req.now, req.previousActionGeneration ?? 0],
   )
   const res = tx.run(
-    'UPDATE node_runs SET replacement_node_run_id = ?, updated_at = ? WHERE node_run_id = ? AND replacement_node_run_id IS NULL',
+    'UPDATE node_runs SET replacement_node_run_id = ?, updated_at = ?' + (req.reworkRequestId ? ', revision = revision + 1' : '') + ' WHERE node_run_id = ? AND replacement_node_run_id IS NULL',
     [req.newNodeRunId, req.now, req.originNodeRunId],
   )
   if (res.changes !== 1) {

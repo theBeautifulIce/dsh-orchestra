@@ -1,7 +1,11 @@
+import { resolvePinnedNodeId } from './rework-extra-steps.ts'
 // src/service/dispatcher.ts —— 主脑派发：把 run 下排队的节点交给生产执行器（审计 F-01）
 // 评审 P1：agent 执行是长时间任务，不许占着写队列的名额；并发闸由装配层统一注入。
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
+import { runtimeEdges } from './rework-edges.ts'
+import { reworkBlocksNode, isCandidateReviewer } from './rework-runtime.ts'
+import { makeTx } from '../infra/sqlite/driver.ts'
 import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
 import { TERMINAL_STATUSES } from '../core/state-machine.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
@@ -116,19 +120,21 @@ type Readiness =
 
 // 前置按「有效行」判定：M-60 重试会换行（旧行 superseded、新行 attempt+1），
 // 只看第一行会把已 done 的新行当成没跑（S3 r21 P2-5b）
-function effectiveStatus(db: DispatchDeps['db'], runId: string, nodeId: string): string | null {
+function effectiveStatus(db: DispatchDeps['db'], runId: string, nodeId: string, consumerId?: string): string | null {
   const row = db.raw.prepare(
-    'SELECT status FROM node_runs WHERE run_id = ? AND node_id = ? ORDER BY attempt DESC, seq DESC LIMIT 1',
-  ).get(runId, nodeId) as { status: string } | undefined
-  return row?.status ?? null
+    'SELECT node_run_id,status FROM node_runs WHERE run_id = ? AND node_id = ? ORDER BY attempt DESC, seq DESC LIMIT 1',
+  ).get(runId, nodeId) as { node_run_id: string;status: string } | undefined
+  if (row && consumerId && row.status === 'done' && isCandidateReviewer(makeTx(db.raw),consumerId,row.node_run_id)) return 'done'
+  return row && reworkBlocksNode(makeTx(db.raw),row.node_run_id) ? 'rework_held' : row?.status ?? null
 }
 
 function readinessOf(db: DispatchDeps['db'], runId: string, nodeId: string, preds: ReadonlyMap<string, string[]>): Readiness {
+  const consumer = db.raw.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC LIMIT 1').get(runId,nodeId) as {node_run_id:string} | undefined
   const missing: string[] = []
   const failed: string[] = []
   const waiting: string[] = []
   for (const pred of preds.get(nodeId) ?? []) {
-    const status = effectiveStatus(db, runId, pred)
+    const status = effectiveStatus(db, runId, pred, consumer?.node_run_id)
     if (status === null) missing.push(pred)
     else if (SUCCESS_STATUS.has(status)) continue
     else if (BLOCKED_TERMINAL.has(status)) failed.push(pred)
@@ -158,7 +164,7 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
       def = undefined
     }
   }
-  for (const edge of def?.edges ?? []) {
+  for (const edge of runtimeEdges(makeTx(deps.db.raw), p.runId, def?.edges ?? [])) {
     const list = preds.get(edge.to) ?? []
     list.push(edge.from)
     preds.set(edge.to, list)
@@ -166,6 +172,7 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
   const rows: typeof all = []
   const settled: DispatchOutcome[] = []
   for (const row of all) {
+    if (reworkBlocksNode(makeTx(deps.db.raw),row.node_run_id)) continue
     const readiness = readinessOf(deps.db, p.runId, row.node_id, preds)
     if (readiness.ready) {
       rows.push(row)
@@ -211,7 +218,8 @@ async function dispatchOne(
   if (run?.cancel_requested_at) {
     return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'skipped', reason: 'run_cancelled' }
   }
-  const spec = p.nodes[row.node_id]
+  const roleId = resolvePinnedNodeId(makeTx(deps.db.raw), row.node_run_id)
+  const spec = p.nodes[roleId]
   if (!spec) {
     return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'skipped', reason: 'no_node_spec' }
   }
@@ -448,7 +456,8 @@ function resolveControlConfig(
       workflow_version: run!.workflow_version,
     })
   }
-  const declared = def.nodes.find((item) => item.node_id === row.node_id)
+  const roleId = resolvePinnedNodeId(makeTx(deps.db.raw), row.node_run_id)
+  const declared = def.nodes.find((item) => item.node_id === roleId)
   if (!declared) {
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '节点不在已签名的工作流定义里', {
       runId: p.runId,

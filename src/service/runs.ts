@@ -244,7 +244,8 @@ export function createRunInTx(
       created_at: p.now,
       updated_at: p.now,
     })
-    const nodes = insertNodeRunsInTx(tx, runIdValue, picked.map((n) => ({ node_id: n.node_id, node_type: n.type })), p.now)
+    const nodes = insertNodeRunsInTx(tx, runIdValue, picked.map((n) =>
+      ({ node_id: n.node_id, node_type: n.type, effect: catalog.initialAgentEffect(n) })), p.now)
     appendEvent(tx, {
       type: triggerId ? 'task.run_started' : 'task.created',
       runId: runIdValue,
@@ -296,7 +297,7 @@ export function insertRunInTx(tx: Tx, row: RunRowInput): void {
   )
 }
 
-export type NodeRunInput = { node_id: string; node_type: string }
+export type NodeRunInput = { node_id: string; node_type: string; effect?: 'pure' | 'compensable' | 'irreversible' }
 
 /** 事务内建 node_run 行：seq 按给定顺序从 1 开始 */
 export function insertNodeRunsInTx(tx: Tx, runId: string, nodes: readonly NodeRunInput[], now: string): CreatedNodeRun[] {
@@ -305,9 +306,9 @@ export function insertNodeRunsInTx(tx: Tx, runId: string, nodes: readonly NodeRu
     const id = newNodeRunId()
     const seq = idx + 1
     tx.run(
-      'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation, rearm_generation, created_at, updated_at) '
-      + 'VALUES (?, ?, ?, ?, ?, 1, ?, 0, 0, 0, ?, ?)',
-      [id, runId, node.node_id, seq, node.node_type, 'queued', now, now],
+      'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, action_generation, rearm_generation, side_effect_policy, created_at, updated_at) '
+      + 'VALUES (?, ?, ?, ?, ?, 1, ?, 0, 0, 0, ?, ?, ?)',
+      [id, runId, node.node_id, seq, node.node_type, 'queued', node.effect ?? 'compensable', now, now],
     )
     created.push({ node_run_id: id, node_id: node.node_id, seq, node_type: node.node_type, status: 'queued' })
   })

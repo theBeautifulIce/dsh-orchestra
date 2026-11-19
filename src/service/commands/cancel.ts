@@ -49,6 +49,7 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
       nodeRunId: params.nodeRunId,
       from: ['queued', 'leased'],
       to: 'superseded',
+      ruleId: 'M-62',
       attempt: params.attempt,
       now: params.now,
       expectedRevision: params.revision,

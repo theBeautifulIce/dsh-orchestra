@@ -1,3 +1,5 @@
+import { runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
+import { ReworkPanel } from './rework-panel.tsx'
 import { useEffect, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { NodeRunView, RunSummary, TaskSummary } from '../api/types.ts'
@@ -7,8 +9,8 @@ import { NodeEvidence } from './task-run-evidence.tsx'
 import { taskAutonomyLabel, taskCardStatus, taskOriginLabel, taskStatusView } from './tasks-screen.tsx'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
 
-export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion }: {
-  api: ResourcesApi; tasks: TaskSummary[]; onOpenTask: (taskId: string, trigger: HTMLButtonElement, runId?: string) => void; reloadVersion: number
+export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnabled }: {
+  api: ResourcesApi; tasks: TaskSummary[]; onOpenTask: (taskId: string, trigger: HTMLButtonElement, runId?: string) => void; reloadVersion: number; reworkEnabled?: boolean
 }) {
   const [selection, setSelection] = useState('')
   const selected = tasks.find((task) => task.task_id === selection)
@@ -28,12 +30,12 @@ export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion }: {
       </button>)}
     </nav>
     <TaskRunFlow key={`${selected.task_id}:${selected.current_run_id ?? ''}:${selected.workflow_version ?? ''}`}
-      api={api} task={selected} reloadVersion={reloadVersion} onOpenTask={(trigger, runId) => onOpenTask(selected.task_id, trigger, runId)} />
+      reworkEnabled={reworkEnabled} api={api} task={selected} reloadVersion={reloadVersion} onOpenTask={(trigger, runId) => onOpenTask(selected.task_id, trigger, runId)} />
   </div>
 }
 
-function TaskRunFlow({ api, task, reloadVersion, onOpenTask }: {
-  api: ResourcesApi; task: TaskSummary; reloadVersion: number; onOpenTask: (trigger: HTMLButtonElement, runId?: string) => void
+function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
+  api: ResourcesApi; task: TaskSummary; reworkEnabled?: boolean; reloadVersion: number; onOpenTask: (trigger: HTMLButtonElement, runId?: string) => void
 }) {
   const [run, setRun] = useState<RunSummary>()
   const [nodes, setNodes] = useState<NodeRunView[]>()
@@ -57,6 +59,8 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask }: {
 
   const workflow = usePinnedWorkflow(api, task.current_run_id ? run?.workflow_id : task.workflow_id,
     task.current_run_id ? run?.workflow_version : task.workflow_version)
+  const topology = useRunTopology(api, task.current_run_id ?? undefined, Boolean(reworkEnabled), reloadVersion + retry)
+  const runtimeDoc = runtimeCanvasDoc(workflow?.definition, topology.data)
   const outcome = run ? taskStatusView(run.status, run.display_status).label ?? run.status : null
   const duration = runDuration(run?.started_at, run?.ended_at)
   const hasRun = Boolean(task.current_run_id)
@@ -79,14 +83,17 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask }: {
     {runError && <p role="alert" className="task-flow-empty">运行信息读取失败。<button className="task-quiet-button" type="button" onClick={() => setRetry((n) => n + 1)}>重试</button></p>}
     {nodeError && <p role="alert" className="task-flow-empty">执行步骤读取失败。<button className="task-quiet-button" type="button" onClick={() => setRetry((n) => n + 1)}>重试</button></p>}
     {hasRun && !nodes && !nodeError && <p role="status" className="task-flow-empty">正在读取执行步骤…</p>}
-    {(!hasRun || nodes) && <TaskRunSteps nodes={nodes ?? []} doc={workflow?.doc} run={run}
+    {(!hasRun || nodes) && <TaskRunSteps nodes={nodes ?? []} doc={runtimeDoc} run={run}
       onOpenRun={run ? (trigger) => onOpenTask(trigger, run.run_id) : undefined}
       renderEvidence={(node) => <><ExecutionHistory key={node.node_run_id} api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} />
         <section><h4>执行证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} /></section></>} />}
+    {reworkEnabled && task.current_run_id && <ReworkPanel api={api} runId={task.current_run_id} reloadVersion={reloadVersion} compact />}
     {workflow?.error && <p className="task-flow-empty" role="status">当前固定版本的流程定义暂时不可读取。</p>}
-    {workflow?.doc && <details className="task-flow-graph">
-      <summary>查看固定流程图 · {workflow.doc.name || '流程'} v{run?.workflow_version ?? task.workflow_version}</summary>
-      <WorkflowCanvasView definition={workflow.definition} readOnly runtimeCompact canvasId="task-run-flow" runtimeNodes={nodeError ? undefined : nodes} />
+    {topology.loading && <p role="status">正在读取本次运行拓扑…</p>}
+    {topology.failed && <p role="alert">运行拓扑读取失败，请刷新后重试。</p>}
+    {workflow?.doc && !topology.failed && !topology.loading && <details className="task-flow-graph">
+      <summary>{reworkEnabled ? '查看本次运行流程图' : '查看固定流程图'} · {workflow.doc.name || '流程'} v{run?.workflow_version ?? task.workflow_version}</summary>
+      <WorkflowCanvasView definition={workflow.definition} readOnly runtimeCompact inspectNodes runtimeTopology={topology.data} canvasId="task-run-flow" runtimeNodes={nodeError ? undefined : nodes} />
     </details>}
   </section>
 }

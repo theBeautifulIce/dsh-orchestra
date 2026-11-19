@@ -1,4 +1,4 @@
-// M-01…M-65 逐条用例：每条规则都有正例，终态源、挂起源、错误触发与错误目标都被拒。
+// M-01…M-66 逐条用例：每条规则都有正例，终态源、挂起源、错误触发与错误目标都被拒。
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import {
@@ -18,35 +18,41 @@ function contextFor(rule: TransitionRule): TransitionContext {
           : rule.id === 'M-29' || rule.id === 'M-30' ? 'already_stopped'
             : null,
     hangReason: rule.allowHung ? 'report_contradicted' : null,
-    sideEffectVerifiedNone: rule.id === 'M-18',
+    sideEffectVerifiedNone: rule.id === 'M-18' || rule.id === 'M-66',
+    reworkAuthorized: rule.id === 'M-66',
     controlCompletion: rule.id === 'M-63' || rule.id === 'M-64' || rule.id === 'M-65',
   }
 }
 
-describe('M-01…M-65 迁移用例', () => {
-  it('65 个迁移 id 全覆盖，且没有表外规则', () => {
+describe('M-01…M-66 迁移用例', () => {
+  it('66 个迁移 id 全覆盖，且没有表外规则', () => {
     const ids = [
       ...TRANSITIONS.map((rule) => rule.id),
       ...CREATION_RULES.map((rule) => rule.id),
       HANG_GUARD.id,
     ]
-    expect(new Set(ids).size).toBe(65)
+    expect(new Set(ids).size).toBe(66)
     expect([...ids].sort()).toEqual([...MIGRATION_CASE_IDS].sort())
   })
 
   it('迁移表本身被改动时固定清单必须失败', () => {
     // 只遍历 TRANSITIONS 自己时，把来源改掉测试也会跟着改；这里固定整表指纹。
-    const canonical = JSON.stringify(TRANSITIONS.map((rule) => ({
+    const original = TRANSITIONS.filter(rule => rule.id !== 'M-66')
+    const canonical = JSON.stringify(original.map((rule) => ({
       id: rule.id, from: rule.from, to: rule.to, trigger: rule.trigger,
       allowHung: rule.allowHung === true, allowTerminal: rule.allowTerminal === true,
       hasRequires: typeof rule.requires === 'function',
     })))
     expect(createHash('sha256').update(canonical).digest('hex'))
       .toBe('3090dc470b16d12c04fbcb31064d0a107382ccd07ce6d94984a74a9fc5c360a6')
-    expect(TRANSITIONS).toHaveLength(62)
-    expect(TRANSITIONS.reduce((n, rule) => n + rule.from.length, 0)).toBe(126)
-    expect(TRANSITIONS.reduce((n, rule) => n + rule.to.length, 0)).toBe(75)
-    expect(TRANSITIONS.filter((rule) => rule.requires).length).toBe(13)
+    expect(original).toHaveLength(62)
+    expect(original.reduce((n, rule) => n + rule.from.length, 0)).toBe(126)
+    expect(original.reduce((n, rule) => n + rule.to.length, 0)).toBe(75)
+    expect(original.filter((rule) => rule.requires).length).toBe(13)
+    expect(TRANSITIONS.find(rule => rule.id === 'M-66')).toMatchObject({
+      from: ['queued','leased','dispatched','started','verifying'],
+      to: ['superseded'], trigger: 'rework-input-invalidated',
+    })
   })
 
   for (const rule of TRANSITIONS) {

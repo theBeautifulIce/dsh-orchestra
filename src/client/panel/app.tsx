@@ -1,3 +1,4 @@
+import { createReworkApi } from '../api/rework.ts'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ApiClient } from '../api/client.ts'
 import { createResourcesApi } from '../api/resources.ts'
@@ -31,12 +32,15 @@ export type PanelAppProps = {
   memoryEnabled?: boolean
   modelRoutingEnabled?: boolean
   collaborationEnabled?: boolean
+  reworkEnabled?: boolean
+  reworkPlannerEnabled?: boolean
   initialRoute?: PanelRoute
   createEventStream?: (onInvalidate: (type: string) => void, onStatus: (status: StreamStatus) => void) => EventStream
   additionalScreens?: Partial<Record<Exclude<PanelRoute, 'tasks'>, ReactNode>>
 }
 
 export function PanelApp(props: PanelAppProps) {
+  const rework = useMemo(() => props.reworkEnabled ? createReworkApi(props.client) : undefined, [props.client, props.reworkEnabled])
   const api = useMemo(() => createResourcesApi(props.client), [props.client])
   // 控制面写命令客户端：流程新建、草稿保存、发布都走同一套命令与回执。
   const commands = useMemo(() => createWorkflowCommandsApi(props.client), [props.client])
@@ -81,7 +85,7 @@ export function PanelApp(props: PanelAppProps) {
     screen = <OverviewScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onNavigate={setRoute} />
   } else if (route === 'tasks') {
     screen = <div className="task-workspace">
-      <TaskListScreen api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
+      <TaskListScreen reworkEnabled={props.reworkEnabled} api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
         <TaskTriggerManager api={api} commands={triggerCommands} onChanged={() => setReloadVersion((version) => version + 1)} />
       } onSelectTask={(id, trigger, runId) => {
         taskTrigger.current = trigger
@@ -90,7 +94,7 @@ export function PanelApp(props: PanelAppProps) {
       }} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
     </div>
   } else if (route === 'decisions') {
-    screen = <DecisionInbox api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+    screen = <DecisionInbox rework={rework} reworkPlannerEnabled={props.reworkPlannerEnabled} api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'effects') {
     screen = <UnverifiedEffects api={api} client={props.client} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'activity') {
@@ -127,7 +131,7 @@ export function PanelApp(props: PanelAppProps) {
     streamStatus={streamStatus}
     collaborationEnabled={props.collaborationEnabled}
   >{screen}
-    {taskId && <TaskDetailScreen key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
+    {taskId && <TaskDetailScreen rework={rework} reworkPlannerEnabled={props.reworkPlannerEnabled} key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
       setTaskId(null)
       taskTrigger.current?.focus({ preventScroll: true })
     }} taskCommands={taskCommands} triggerCommands={triggerCommands} onArchiveChanged={() => setReloadVersion((version) => version + 1)}
