@@ -5,7 +5,7 @@ import type { ResourcesApi } from '../api/resources.ts'
 import type { ReworkApi, ReworkScope, ReworkPlan, ReviewHold, ReworkItem, ReworkDetail } from '../api/rework.ts'
 import type { NodeRunView, RunArtifact } from '../api/types.ts'
 import type { ReworkInspection } from '../../service/rework-inspection.ts'
-import { ArtifactContent } from './artifact-content.tsx'
+import { ArtifactContent, artifactContentKey, matchesArtifactContent } from './artifact-content.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
 
 const labels: Record<string, string> = { proposed: '等待授权', evaluating: '正在评估', needs_human_approval: '等待人工授权', authorized: '已授权', scheduled: '等待返工', executing: '正在返工', awaiting_review: '等待重新验收', accepted: '验收通过', closed: '已完成', declined: '未批准', escalated: '等待人工处理', cancelled: '已取消' }
@@ -31,9 +31,9 @@ export function ReworkPanel({ api, commands, runId, reloadVersion = 0, plannerEn
     {loading && <p role="status">正在读取返工记录…</p>}
     {failed && <p role="alert">返工记录读取失败。<button type="button" onClick={() => setRetry(n => n + 1)}>重试</button></p>}
     {!loading && !failed && items.length === 0 && <p>暂无返工记录。</p>}
-    {items.map(item => compact ? <p key={item.request_id}>{item.target_node_run_id} · {labels[item.status] ?? item.status} · 第 {item.round_no} 轮 · {item.reason}</p>
+    {items.filter(item => !runId || item.run_id === runId).map(item => compact ? <p key={item.request_id}>{item.target_node_run_id} · {labels[item.status] ?? item.status} · 第 {item.round_no} 轮 · {item.reason}</p>
       : <ReworkCard key={item.request_id + ':' + item.revision} api={api} item={item} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />)}
-    {runId && commands && !compact && <ReworkRequestForm api={api} runId={runId} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />}
+    {runId && commands && !compact && <ReworkRequestForm key={runId} api={api} runId={runId} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />}
   </section>
 }
 
@@ -43,6 +43,18 @@ function errorText(error: unknown): string {
     return error.message + (operation ? ` · 回执编号 ${operation}` : '')
   }
   return error instanceof Error ? error.message : '操作未完成'
+}
+
+function artifactVersionLabel(artifact: RunArtifact): string {
+  const version = artifact.sha256.slice(0, 12) + ' · ' + artifact.artifact_id
+  return artifact.file_name ? artifact.file_name + ' · ' + version : version
+}
+
+type Comparison = {
+  key: string
+  pending?: boolean
+  result?: { before: string; after: string; truncated: boolean }
+  notice?: string
 }
 
 function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
@@ -56,7 +68,6 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
   const [history, setHistory] = useState<ReworkDetail>()
   const [plan, setPlan] = useState<ReworkPlan | null>(null)
-  const [comparison, setComparison] = useState<{ before: string; after: string; truncated: boolean }>()
   const [terminationConfirm, setTerminationConfirm] = useState(false)
   useEffect(() => {
     let live = true
@@ -65,11 +76,20 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
     if (plannerEnabled && commands) void commands.getPlan(item.request_id).then(({ data }) => { if (live) setPlan(data.plan) }).catch(() => {})
     return () => { live = false }
   }, [api, item.request_id, item.run_id, commands, plannerEnabled])
-  const old = artifacts.find(a => a.artifact_id === item.source_artifact_id)
+  const old = artifacts.find(a => a.run_id === item.run_id && a.artifact_id === item.source_artifact_id && a.sha256 === item.source_artifact_hash)
   const currentAttempt = history?.attempts.find(a => a.round_no === item.round_no)
-  const candidates = artifacts.filter(a => a.source_node_run_id === item.new_node_run_id && (!currentAttempt?.result_artifact_id || a.artifact_id === currentAttempt.result_artifact_id))
+  const review = item.status === 'awaiting_review'
+  const candidates = review && !history ? [] : artifacts.filter(a =>
+    a.run_id === item.run_id && a.source_node_run_id === item.new_node_run_id
+    && (!currentAttempt?.result_artifact_id || (a.artifact_id === currentAttempt.result_artifact_id && a.sha256 === currentAttempt.result_artifact_hash)))
   const [selected, setSelected] = useState('')
   const revised = candidates.find(a => a.artifact_id === selected) ?? candidates[0]
+  const left = old && !old.expired && old.file_name ? old : undefined
+  const right = revised && !revised.expired && revised.file_name ? revised : undefined
+  const comparisonKey = JSON.stringify([left && artifactContentKey(left), right && artifactContentKey(right)])
+  const [comparison, setComparison] = useState<Comparison>({ key: comparisonKey })
+  if (comparison.key !== comparisonKey) setComparison({ key: comparisonKey })
+  const interactionBusy = busy || comparison.pending
   async function act(action: 'authorize' | 'reject' | 'reject_final' | 'accept' | 'request_changes' | 'escalate') {
     if (!canWrite || !commands) return
     setBusy(true); setNotice('')
@@ -93,16 +113,24 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
     finally { setBusy(false) }
   }
   async function compare() {
-    if (!old || !revised) return
-    setBusy(true)
+    if (!left || !right) return
+    // Returning to the same pair must not reactivate its earlier request.
+    const reading = { key: comparisonKey, pending: true }
+    setComparison(reading)
     try {
-      const [before, after] = await Promise.all([api.getArtifactContent(item.run_id, old.artifact_id, 'preview'), api.getArtifactContent(item.run_id, revised.artifact_id, 'preview')])
-      if (before.data.kind !== 'preview' || after.data.kind !== 'preview' || before.data.sha256 !== old.sha256 || after.data.sha256 !== revised.sha256) throw new Error('成果版本已变化，请刷新')
-      setComparison({ before: before.data.text, after: after.data.text, truncated: before.data.truncated || after.data.truncated })
-    } catch (e) { setNotice(errorText(e)) } finally { setBusy(false) }
+      const [{ data: before }, { data: after }] = await Promise.all([
+        api.getArtifactContent(left.run_id, left.artifact_id, 'preview'),
+        api.getArtifactContent(right.run_id, right.artifact_id, 'preview'),
+      ])
+      if (before.kind !== 'preview' || after.kind !== 'preview'
+        || !matchesArtifactContent(before, left) || !matchesArtifactContent(after, right)) throw new Error('成果版本已变化，请刷新')
+      const result = { before: before.text, after: after.text, truncated: before.truncated || after.truncated }
+      setComparison(current => current === reading ? { key: comparisonKey, result } : current)
+    } catch (error) {
+      setComparison(current => current === reading ? { key: comparisonKey, notice: errorText(error) } : current)
+    }
   }
   const pending = ['proposed', 'needs_human_approval'].includes(item.status)
-  const review = item.status === 'awaiting_review'
   const escalated = item.status === 'escalated'
   const mayDecline = (pending || escalated) && history?.attempts.length === 0
   return <article style={box} aria-label={'返工 ' + item.request_id}>
@@ -119,15 +147,16 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
     <details><summary>修改前后成果与版本</summary>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 12 }}>
         <section><h4>修改前</h4><p>{item.source_artifact_id}</p><code style={hash}>{item.source_artifact_hash}</code>{old && <ArtifactContent api={api} artifact={old} />}</section>
-        <section><h4>修订成果</h4>{candidates.length > 1 && <label>选择修订成果<select value={revised?.artifact_id ?? ''} onChange={e => setSelected(e.target.value)}>{candidates.map(a => <option key={a.artifact_id} value={a.artifact_id}>{a.file_name ?? a.artifact_id}</option>)}</select></label>}
+        <section><h4>修订成果</h4>{candidates.length > 1 && <label>选择修订成果<select value={revised?.artifact_id ?? ''} onChange={e => setSelected(e.target.value)}>{candidates.map(a => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a)}</option>)}</select></label>}
           {revised ? <><p>{revised.artifact_id}</p><code style={hash}>{revised.sha256}</code><ArtifactContent api={api} artifact={revised} /></> : <p>尚无修订成果。</p>}</section>
       </div><p>验收绑定所选修订成果及其哈希。</p>
-      <button type="button" disabled={busy || !old || !revised} onClick={() => void compare()}>逐行对比修改</button>
-      {comparison && <>{comparison.truncated && <p>仅对比内容预览，完整成果请分别下载核对。</p>}<LineComparison before={comparison.before} after={comparison.after} /></>}
+      <button type="button" disabled={interactionBusy || !left || !right} onClick={() => void compare()}>逐行对比修改</button>
+      {comparison.notice && <p role="status">{comparison.notice}</p>}
+      {comparison.result && <>{comparison.result.truncated && <p>仅对比内容预览，完整成果请分别下载核对。</p>}<LineComparison before={comparison.result.before} after={comparison.result.after} /></>}
     </details>
     {history?.impacts && history.impacts.length > 0 && <section><h4>受影响步骤</h4><ul>{history.impacts.map(i => <li key={i.node_run_id}>{i.node_id} · {i.released_at ? '已恢复' : '等待返工或验收'}{i.replacement_node_run_id ? ` · 后续执行 ${i.replacement_node_run_id}` : ''}</li>)}</ul></section>}
     <details><summary>返工与验收历史</summary>{history ? <><ol>{history.attempts.map(a => <li key={a.attempt_id}>第 {a.round_no} 轮 · {labels[a.status] ?? a.status}<p>{a.feedback}</p><p>{a.source_artifact_id} → {a.result_artifact_id ?? '等待修订成果'}</p><p>{a.created_at}</p></li>)}</ol><ol>{history.reviews.map(r => <li key={r.review_id}>第 {r.round_no} 轮 · {r.reviewer_actor} · {r.action === 'accept' ? '验收通过' : r.action === 'request_changes' ? '要求修改' : r.action === 'authorize' ? '授权返工' : r.action === 'reject' ? '不批准' : '升级处理'}<p>{r.note}</p>{r.artifact_id && <p>验收版本 {r.artifact_id} · {r.artifact_hash}</p>}<p>{r.created_at}</p></li>)}</ol></> : <p>尚未读取历史。</p>}</details>
-    {commands && (pending || review || escalated) && <fieldset disabled={!canWrite || busy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
+    {commands && (pending || review || escalated) && <fieldset disabled={!canWrite || interactionBusy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
       <label style={field}>具体修改意见或处理说明<textarea value={note} onChange={e => setNote(e.target.value)} rows={3} /></label>
       <div style={actions}>{pending && <button type="button" disabled={!note.trim() || item.suggested_scope === 'replan_subgraph'} onClick={() => void act('authorize')}>授权返工</button>}
         {review && <><button type="button" disabled={!revised || !note.trim()} onClick={() => void act('accept')}>通过验收</button><button type="button" disabled={!note.trim()} onClick={() => void act('request_changes')}>要求修改</button></>}
@@ -147,7 +176,7 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
       </section>}
     </fieldset>}
     {notice && <p role="status">{notice}</p>}
-    {unknownOperation && commands && <button type="button" disabled={busy} onClick={async () => { setBusy(true); try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${data.status}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } finally { setBusy(false) } }}>查询原操作回执</button>}
+    {unknownOperation && commands && <button type="button" disabled={interactionBusy} onClick={async () => { setBusy(true); try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${data.status}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } finally { setBusy(false) } }}>查询原操作回执</button>}
   </article>
 }
 
@@ -199,7 +228,7 @@ function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled }: 
   }
   return <details><summary>审核成果或提出修改</summary><fieldset disabled={busy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
     <label style={field}>来源节点<select value={nodeId} onChange={e => { setNodeId(e.target.value); setArtifactId('') }}><option value="">选择节点</option>{nodes.map(n => <option key={n.node_run_id} value={n.node_run_id}>{n.title || n.node_id} · 第 {n.attempt} 次 · {n.status_label}</option>)}</select></label>
-    <label style={field}>成果版本<select value={artifactId} onChange={e => setArtifactId(e.target.value)}><option value="">选择成果</option>{artifacts.filter(a => a.source_node_run_id === nodeId).map(a => <option key={a.artifact_id} value={a.artifact_id}>{a.file_name || a.artifact_id} · {a.sha256.slice(0, 12)}</option>)}</select></label>
+    <label style={field}>成果版本<select value={artifactId} onChange={e => setArtifactId(e.target.value)}><option value="">选择成果</option>{artifacts.filter(a => a.source_node_run_id === nodeId).map(a => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a)}</option>)}</select></label>
     {artifact && <ArtifactContent api={api} artifact={artifact} />}
     <div style={actions}><button type="button" disabled={!canWrite || !node || held} onClick={() => void submit('hold')}>等待人工验收后结束</button><button type="button" disabled={!canWrite || !held || !artifact} onClick={() => void submit('accept')}>通过成果验收</button><button type="button" disabled={!canWrite || !held} onClick={() => void submit('withdraw')}>撤销留验</button></div>
     {held && <p role="status">此节点等待人工验收，运行暂不结束。</p>}

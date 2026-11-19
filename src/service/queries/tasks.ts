@@ -4,7 +4,7 @@ import type { Autonomy } from '../runs.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
-import { deriveAttention, maxSideEffectLevel, DELIVERY_ACCEPTANCE, type Attention, type DeliveryAcceptance, type SideEffectLevel } from './attention.ts'
+import { attentionWeight, deriveAttention, maxSideEffectLevel, DELIVERY_ACCEPTANCE, type Attention, type DeliveryAcceptance, type SideEffectLevel } from './attention.ts'
 import { withReadTx } from './read-tx.ts'
 
 const TASKS_LIMIT_MAX = 100
@@ -131,74 +131,72 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
   }
 }
 
-const TASK_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_version, t.status, t.display_status,
+const OPEN_DECISIONS = `FROM decisions d WHERE d.run_id = t.current_run_id
+  AND d.status IN ('pending','acknowledged','blocked_for_human')`
+const UNVERIFIED_NODES = `FROM node_runs n WHERE n.run_id = t.current_run_id AND ${UNVERIFIED_EFFECT}`
+const ORPHANED_NODES = `FROM node_runs n WHERE n.run_id = t.current_run_id
+  AND n.status = 'orphaned' AND n.replacement_node_run_id IS NULL`
+const RUN_ACCEPTANCE = `FROM run_acceptance_results a WHERE a.run_id = t.current_run_id`
+const CURRENT_RUN_JOINS = `LEFT JOIN runs r ON r.run_id = t.current_run_id
+  LEFT JOIN task_triggers tr ON tr.task_id = t.task_id`
+const TASK_LANE = `CASE
+  WHEN attention_weight >= 3 OR status IN ('paused','orphaned','failed','failed_with_unverified') THEN 'attention'
+  WHEN trigger_enabled = 1 AND (current_run_status IS NULL OR current_run_status IN ('succeeded','cancelled')) THEN 'upcoming'
+  WHEN status IN ('succeeded','succeeded_with_unverified','cancelled') THEN 'finished'
+  WHEN status IN ('reserved','queued') THEN 'upcoming'
+  WHEN attention_weight = 2 OR status IN ('running','settling','waiting') THEN 'running'
+  ELSE 'upcoming' END`
+
+// Only facts that affect rank, lane or filters are read before the page limit.
+// The precedence matches deriveAttention(), including execution failure before delivery failure.
+const TASK_ATTENTION_CTE = `WITH task_attention AS (
+  SELECT t.task_id, t.title, t.status, t.updated_at, t.archived_at, t.trigger_kind,
+    r.status AS current_run_status, tr.enabled AS trigger_enabled,
+    CASE
+      WHEN EXISTS (SELECT 1 ${OPEN_DECISIONS}) THEN 6
+      WHEN EXISTS (SELECT 1 ${UNVERIFIED_NODES}) THEN 5
+      WHEN r.status IN ('failed','failed_with_unverified') THEN 4
+      WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'failed') THEN 4
+      WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'unverifiable') THEN 5
+      WHEN r.status = 'orphaned' OR EXISTS (SELECT 1 ${ORPHANED_NODES}) THEN 3
+      WHEN t.status = 'running' OR r.status NOT IN
+        ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled') THEN 2
+      ELSE 1
+    END AS attention_weight
+  FROM tasks t ${CURRENT_RUN_JOINS}
+), task_workspace AS (
+  SELECT *, COALESCE(archived_at, updated_at) AS sort_at,
+    CASE WHEN archived_at IS NULL THEN attention_weight ELSE 1 END AS sort_weight
+  FROM task_attention
+)`
+
+// Hydrate only the materialized page while keeping the rank, counts and event waterline in the same read snapshot.
+const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_version, t.status, t.display_status,
   t.current_run_id, t.session_id, t.updated_at, t.archived_at, t.trigger_kind, t.autonomy,
-  tr.next_fire_at AS next_trigger_at, tr.enabled AS trigger_enabled,
+  tr.next_fire_at AS next_trigger_at, tr.enabled AS trigger_enabled, r.status AS current_run_status, p.lane, p.sort_at, p.sort_weight,
   (SELECT COUNT(*) FROM runs r WHERE r.task_id = t.task_id) AS run_count,
-  (SELECT r.status FROM runs r WHERE r.run_id = t.current_run_id) AS current_run_status,
-  (SELECT CASE
-    WHEN (SELECT COUNT(*) FROM run_acceptance_results r WHERE r.run_id = t.current_run_id) = 0 THEN
-      CASE WHEN EXISTS (SELECT 1 FROM start_run_operations o JOIN task_plans p
-        ON p.launch_operation_id = o.operation_id WHERE o.run_id = t.current_run_id)
-        THEN 'pending' ELSE 'not_applicable' END
-    WHEN EXISTS (SELECT 1 FROM run_acceptance_results r WHERE r.run_id = t.current_run_id
-      AND r.outcome = 'failed') THEN 'failed'
-    WHEN EXISTS (SELECT 1 FROM run_acceptance_results r WHERE r.run_id = t.current_run_id
-      AND r.outcome = 'unverifiable') THEN 'unverifiable'
-    ELSE 'passed'
-  END) AS delivery_acceptance,
-  (SELECT COUNT(*) FROM decisions d WHERE d.run_id = t.current_run_id
-    AND d.status IN ('pending','acknowledged','blocked_for_human')) AS open_decision_count,
-  (SELECT MIN(d.created_at) FROM decisions d WHERE d.run_id = t.current_run_id
-    AND d.status IN ('pending','acknowledged','blocked_for_human')) AS oldest_open_decision_at,
-  (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id
-    AND ${UNVERIFIED_EFFECT}) AS unverified_count,
-  (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id
-    AND n.status = 'orphaned' AND n.replacement_node_run_id IS NULL) AS orphaned_node_count,
+  CASE
+    WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'failed') THEN 'failed'
+    WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'unverifiable') THEN 'unverifiable'
+    WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE}) THEN 'passed'
+    WHEN EXISTS (SELECT 1 FROM start_run_operations o JOIN task_plans plan
+      ON plan.launch_operation_id = o.operation_id WHERE o.run_id = t.current_run_id) THEN 'pending'
+    ELSE 'not_applicable'
+  END AS delivery_acceptance,
+  (SELECT COUNT(*) ${OPEN_DECISIONS}) AS open_decision_count,
+  (SELECT MIN(d.created_at) ${OPEN_DECISIONS}) AS oldest_open_decision_at,
+  (SELECT COUNT(*) ${UNVERIFIED_NODES}) AS unverified_count,
+  (SELECT COUNT(*) ${ORPHANED_NODES}) AS orphaned_node_count,
   (SELECT GROUP_CONCAT(DISTINCT n.side_effect_policy) FROM node_runs n WHERE n.run_id = t.current_run_id) AS side_effect_levels,
   (SELECT MIN(n.heartbeat_at) FROM node_runs n WHERE n.run_id = t.current_run_id
     AND n.heartbeat_at IS NOT NULL AND n.status NOT IN ('done','failed','timeout','abandoned_unverified',
       'failed_with_unverified','orphaned','superseded','cancelled')) AS oldest_active_heartbeat_at
-FROM tasks t LEFT JOIN task_triggers tr ON tr.task_id = t.task_id`
-
-// The CASE ordering mirrors deriveAttention() and attentionWeight(); keep the SQL projection in sync with those display helpers.
-const TASK_ATTENTION_CTE = `WITH task_metrics AS (${TASK_SELECT}), task_attention AS (
-  SELECT task_metrics.*,
-    CASE
-      WHEN open_decision_count > 0 THEN 'decision'
-      WHEN unverified_count > 0 THEN 'unverified'
-      WHEN current_run_status IN ('failed','failed_with_unverified') THEN 'failed'
-      WHEN delivery_acceptance = 'unverifiable' THEN 'unverified'
-      WHEN delivery_acceptance = 'failed' THEN 'failed'
-      WHEN current_run_status = 'orphaned' OR orphaned_node_count > 0 THEN 'orphaned'
-      WHEN status = 'running' OR (current_run_status IS NOT NULL AND current_run_status NOT IN
-        ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) THEN 'running'
-      ELSE 'none'
-    END AS attention,
-    CASE
-      WHEN open_decision_count > 0 THEN 6
-      WHEN unverified_count > 0 THEN 5
-      WHEN current_run_status IN ('failed','failed_with_unverified') THEN 4
-      WHEN delivery_acceptance = 'unverifiable' THEN 5
-      WHEN delivery_acceptance = 'failed' THEN 4
-      WHEN current_run_status = 'orphaned' OR orphaned_node_count > 0 THEN 3
-      WHEN status = 'running' OR (current_run_status IS NOT NULL AND current_run_status NOT IN
-        ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled')) THEN 2
-      ELSE 1
-    END AS attention_weight
-  FROM task_metrics
-), task_workspace AS (
-  SELECT *, CASE
-    WHEN attention IN ('decision','unverified','failed','orphaned') OR status IN ('paused','orphaned','failed','failed_with_unverified') THEN 'attention'
-    WHEN trigger_enabled = 1 AND (current_run_status IS NULL OR current_run_status IN ('succeeded','cancelled')) THEN 'upcoming'
-    WHEN status IN ('succeeded','succeeded_with_unverified','cancelled') THEN 'finished'
-    WHEN status IN ('reserved','queued') THEN 'upcoming'
-    WHEN attention = 'running' OR status IN ('running','settling','waiting') THEN 'running'
-    ELSE 'upcoming' END AS lane,
-    COALESCE(archived_at, updated_at) AS sort_at,
-    CASE WHEN archived_at IS NULL THEN attention_weight ELSE 1 END AS sort_weight
-  FROM task_attention
-)`
+FROM (SELECT *, ${TASK_LANE} AS lane FROM task_page) p
+JOIN tasks t ON t.task_id = p.task_id ${CURRENT_RUN_JOINS}`
+const TASK_PAGE_START = TASK_ATTENTION_CTE + `, task_page AS MATERIALIZED (
+  SELECT task_id, sort_at, sort_weight, status, current_run_status, trigger_enabled, attention_weight
+  FROM task_workspace WHERE `
+const TASK_PAGE_ORDER = ' ORDER BY sort_weight DESC, sort_at DESC, task_id DESC'
 
 export type WorkspaceOverview = {
   lanes: Record<TaskLane, number>
@@ -209,9 +207,8 @@ export type WorkspaceOverview = {
 export function getWorkspaceOverview(db: Db): { item: WorkspaceOverview; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const lanes: WorkspaceOverview['lanes'] = { upcoming: 0, running: 0, attention: 0, finished: 0 }
-    const counts = ctx.tx.all<{ lane: TaskLane; count: number }>(
-      TASK_ATTENTION_CTE + ' SELECT lane, COUNT(*) AS count FROM task_workspace WHERE archived_at IS NULL GROUP BY lane',
-    )
+    const counts = ctx.tx.all<{ lane: TaskLane; count: number }>(TASK_ATTENTION_CTE +
+      ` SELECT ${TASK_LANE} AS lane, COUNT(*) AS count FROM task_workspace WHERE archived_at IS NULL GROUP BY lane`)
     for (const row of counts) lanes[row.lane] = row.count
     const decisions = ctx.tx.get<{ count: number }>("SELECT COUNT(*) AS count FROM decisions WHERE status IN ('pending','acknowledged','blocked_for_human')")
     const effects = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM node_runs n WHERE ' + UNVERIFIED_EFFECT)
@@ -233,8 +230,8 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
     const where = [filter.archived ? 'archived_at IS NOT NULL' : 'archived_at IS NULL']
     const values: unknown[] = []
     if (filter.status) { where.push('status = ?'); values.push(filter.status) }
-    if (filter.attention) { where.push('attention = ?'); values.push(filter.attention) }
-    if (filter.lane) { where.push('lane = ?'); values.push(filter.lane) }
+    if (filter.attention) { where.push('attention_weight = ?'); values.push(attentionWeight(filter.attention)) }
+    if (filter.lane) { where.push(`(${TASK_LANE}) = ?`); values.push(filter.lane) }
     if (filter.trigger_kind === 'unknown') where.push('trigger_kind IS NULL')
     else if (filter.trigger_kind) { where.push('trigger_kind = ?'); values.push(filter.trigger_kind) }
     if (filter.updated_from) { where.push('updated_at >= ?'); values.push(filter.updated_from) }
@@ -255,8 +252,8 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
       values.push(lastWeight, lastWeight, lastUpdatedAt, lastUpdatedAt, cursor.last_id)
     }
     const rows = ctx.tx.all<TaskRow & { sort_weight: number; sort_at: string }>(
-      TASK_ATTENTION_CTE + ' SELECT * FROM task_workspace WHERE ' + where.join(' AND ')
-      + ' ORDER BY sort_weight DESC, sort_at DESC, task_id DESC LIMIT ?',
+      TASK_PAGE_START + where.join(' AND ') + TASK_PAGE_ORDER + ' LIMIT ?) '
+      + TASK_SUMMARY_SELECT + ' ORDER BY p.sort_weight DESC, p.sort_at DESC, p.task_id DESC',
       [...values, limit + 1],
     )
     const hasMore = rows.length > limit
@@ -272,7 +269,7 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
 
 export function getTaskSummarySnapshot(db: Db, taskId: string, now = Date.now()): { item: TaskSummary; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
-    const row = ctx.tx.get<TaskRow>(TASK_ATTENTION_CTE + ' SELECT * FROM task_workspace WHERE task_id = ?', [taskId])
+    const row = ctx.tx.get<TaskRow>(TASK_PAGE_START + 'task_id = ?) ' + TASK_SUMMARY_SELECT, [taskId])
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个任务', { task_id: taskId })
     return { item: taskSummary(row, now), as_of_seq: ctx.as_of_seq }
   })

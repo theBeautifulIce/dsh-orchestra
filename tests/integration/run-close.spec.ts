@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
-import { withTx } from '../../src/infra/sqlite/driver.ts'
+import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
+import { refreshRunSettling } from '../../src/service/commands/parallel.ts'
+import { getRun } from '../../src/service/queries/runs.ts'
+import { rmSync } from 'node:fs'
 
 const SECRET = TEST_SECRET
 
@@ -13,7 +16,7 @@ function setup() {
   return db
 }
 
-function setNode(db: any, patch: Record<string, string | number | null>): void {
+function setNode(db: Db, patch: Record<string, string | number | null>): void {
   const cols = Object.keys(patch).map((key) => `${key} = ?`).join(', ')
   withTx(db, (tx) => tx.run(`UPDATE node_runs SET ${cols} WHERE node_run_id = 'nr1'`, Object.values(patch)))
 }
@@ -29,6 +32,31 @@ describe('运行终态收口', () => {
     expect(runStatus(db)).toBe('succeeded')
     const count = (db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE type='run.terminal'").get() as { n: number }).n
     expect(count).toBe(1)
+  })
+
+  it('Q-04 已成功运行保留 succeeded，仍有未结算动作的运行保留独立标记', () => {
+    const { db, dir } = freshLedger()
+    try {
+      seed(db)
+      setNode(db, { status: 'done', side_effect_policy: 'pure' })
+      expect(withTx(db, (tx) => closeRun(tx, SECRET, 'r1', NOW))).toBe('succeeded')
+      withTx(db, (tx) => {
+        // 模拟已收口的历史记录遗留 settling。
+        tx.run("UPDATE runs SET settling = 1 WHERE run_id = 'r1'")
+        tx.run("INSERT INTO runs (run_id, task_id, status, created_at, updated_at) VALUES ('r2','t1','running',?,?)", [NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, side_effect_policy, created_at, updated_at) "
+          + "VALUES ('parent','r2','parent',1,'agent','waiting',1,'pure',?,?)", [NOW, NOW])
+        tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, parent_node_run_id, side_effect_policy, created_at, updated_at) "
+          + "VALUES ('child','r2','child',2,'agent','started',1,'parent','irreversible',?,?)", [NOW, NOW])
+        expect(refreshRunSettling(tx, 'r2', NOW)).toEqual({ settling: true, pending: ['child'] })
+      })
+
+      expect(getRun(db, 'r1')).toMatchObject({ status: 'succeeded', display_status: 'succeeded', settling: true })
+      expect(getRun(db, 'r2')).toMatchObject({ status: 'running', display_status: 'running', settling: true })
+    } finally {
+      db.raw.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('有失败子节点 → failed', () => {

@@ -1454,7 +1454,7 @@ async function caseEvG213(): Promise<InjectionResult> {
 // ev-g2-14：长动作心跳——动作 3 秒、租约 2 秒、500 毫秒续租，2.5 秒扫描不判过期（第五轮审计 P2-1）
 async function caseEvG214(): Promise<InjectionResult> {
   const secret = 'ev-g2-14-secret'
-  const boot = await bootHttp(secret, { delayMs: 3000 })
+  const boot = await bootHttp(secret, { delayMs: 3000, now: () => EV_NOW })
   const before = dumpProduction(boot.file)
   await postJson(boot.endpoint, '/v1/workflows/load', {
     workflow_version: '15', pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
@@ -1472,9 +1472,21 @@ async function caseEvG214(): Promise<InjectionResult> {
   const midNode = boot.db.raw.prepare('SELECT status, lease_expires_at, tool_start_at FROM node_runs WHERE node_run_id = ?').get(nodeRunId)
   const dispatched = await pending
   const nodeRows = boot.db.raw.prepare('SELECT node_run_id, status, attempt, revision, lease_expires_at FROM node_runs ORDER BY node_run_id ASC').all()
+  const acquired = boot.db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id = ? AND type = 'lease_acquired'").get(nodeRunId)
   const expired = boot.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE type = 'lease_expired'").get() as { n: number }
   const events = boot.db.raw.prepare('SELECT seq, type FROM node_run_events ORDER BY seq ASC').all()
   await boot.close()
+  const initialExpiry = (JSON.parse(String(acquired?.payload ?? '{}')) as { expires_at?: string }).expires_at
+  const renewedExpiry = String(midNode?.lease_expires_at)
+  const scanMs = Date.parse(swept.scanned_at)
+  const initialMs = Date.parse(initialExpiry ?? '')
+  if (initialMs !== Date.parse(EV_NOW) + 2000 || !(initialMs < scanMs && scanMs < Date.parse(renewedExpiry))) {
+    throw new Error(`扫描未落在原租约与续租期限之间：${initialExpiry} < ${swept.scanned_at} < ${renewedExpiry}`)
+  }
+  if (midNode?.status !== 'started' || swept.lease_expired.length !== 0 || expired.n !== 0
+    || dispatched.status !== 200 || dispatched.body?.data?.[0]?.status !== 'done') {
+    throw new Error('长动作在扫描时应仍为 started、无租约过期，最终 HTTP 派发应返回 done')
+  }
   const after = dumpProduction(boot.file)
   return {
     case: 'ev-g2-14',
@@ -1483,6 +1495,7 @@ async function caseEvG214(): Promise<InjectionResult> {
     reconcile: '派发 HTTP=' + String(dispatched.status) + ' 返回=' + JSON.stringify(dispatched.body?.data ?? dispatched.body)
       + '；2.5 秒扫描=' + JSON.stringify(swept)
       + '；扫描时节点=' + JSON.stringify(midNode)
+      + `；同钟核对（原租约到期 < 扫描 < 续租后到期）：${initialExpiry} < ${swept.scanned_at} < ${renewedExpiry}`
       + '；lease_expired 条数=' + String(expired.n)
       + '；节点行=' + JSON.stringify(nodeRows)
       + '；节点事件=' + JSON.stringify(events),

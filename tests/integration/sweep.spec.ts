@@ -8,6 +8,11 @@ import { sweep } from '../../src/service/sweep.ts'
 import { ScriptedClock } from '../../src/core/clock.ts'
 import { transitionNode } from '../../src/service/commands/node-state.ts'
 import { TEST_CLOCK } from '../fixtures/clock.ts'
+import { rmSync } from 'node:fs'
+import { uuidv7 } from '../../src/core/ids.ts'
+import { setTaskArchive } from '../../src/service/commands/task-archive.ts'
+import { requestHashOf } from '../../src/service/commands/idempotency.ts'
+import { getOperationSnapshot } from '../../src/service/queries/get_operation.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 const GRACE = '2026-11-13T03:00:30.000Z'
@@ -372,6 +377,57 @@ describe('维护扫描：围栏撤销、租约过期、判定时限', () => {
     expect(JSON.parse(inflight.receipt_json).error.code).toBe('OPERATION_TIMEOUT')
     const done = db.raw.prepare("SELECT receipt_json FROM inbox WHERE operation_id='op_done'").get() as { receipt_json: string | null }
     expect(done.receipt_json).toBeNull()
+  })
+
+  it.each(['running', 'in_flight'])('Q-36 在途命令 %s 同哈希重发忙，满 10 分钟由维护扫描拒绝且不归档', (status) => {
+    const { db, dir } = freshLedger()
+    try {
+      seed(db)
+      const clock = new ScriptedClock('boot-command', { wallClockMs: Date.parse(NOW), monotonicNs: 0 })
+      const actor = 'panel-user'
+      const operationId = uuidv7()
+      const request = { task_id: 't1', archived: true, expected_archived_at: null, operation_id: operationId }
+      const requestHash = requestHashOf('task.archive', { task_id: 't1', expected_archived_at: null, actor })
+      // 命令登记和业务同事务，夹具直接写已存在的在途记录，重发及维护走实际入口。
+      withTx(db, (tx) => tx.run(
+        "INSERT INTO inbox (kind, operation_id, request_hash, status, created_at) VALUES ('task.archive', ?, ?, ?, ?)",
+        [operationId, requestHash, status, NOW],
+      ))
+      const nowMs = () => clock.sample().wallClockMs
+      const now = () => new Date(nowMs()).toISOString()
+      const inbox = () => db.raw.prepare('SELECT status, request_hash FROM inbox WHERE operation_id = ?').get(operationId)
+      const effects = () => db.raw.prepare(
+        "SELECT archived_at, (SELECT COUNT(*) FROM events WHERE type = 'task.archived') AS archive_events,"
+        + " (SELECT COUNT(*) FROM events WHERE type = 'command.applied') AS applied_events FROM tasks WHERE task_id = 't1'",
+      ).get()
+      const unchanged = { archived_at: null, archive_events: 0, applied_events: 0 }
+
+      tick(clock, 10 * 60_000 - 1)
+      expect(() => setTaskArchive(db, request, actor, now())).toThrow(expect.objectContaining({ code: 'COMMAND_BUSY' }))
+      expect(sweep(db, TEST_SECRET, { clock, now: now() }).operations_timed_out).toBe(0)
+      expect(inbox()).toEqual({ status, request_hash: requestHash })
+      expect(effects()).toEqual(unchanged)
+
+      tick(clock, 1)
+      expect(sweep(db, TEST_SECRET, { clock, now: now() }).operations_timed_out).toBe(1)
+      const { item } = getOperationSnapshot(db, operationId, nowMs())
+      expect(item).toMatchObject({ status: 'rejected', completed_at: now() })
+      expect(JSON.parse(item.receipt_json!)).toMatchObject({ error: { code: 'OPERATION_TIMEOUT' } })
+      expect(() => setTaskArchive(db, request, actor, now())).toThrow(expect.objectContaining({ code: 'OPERATION_ID_CONFLICT' }))
+      expect(sweep(db, TEST_SECRET, { clock, now: now() }).operations_timed_out).toBe(0)
+      expect(inbox()).toEqual({ status: 'rejected', request_hash: requestHash })
+      expect(effects()).toEqual(unchanged)
+
+      // 新操作 ID 的同一业务请求可以归档，证明前面的无写入来自在途保护。
+      const newId = uuidv7()
+      expect(setTaskArchive(db, { ...request, operation_id: newId }, actor, now())).toEqual({ task_id: 't1', archived_at: now() })
+      const applied = getOperationSnapshot(db, newId, nowMs()).item
+      expect(JSON.parse(applied.receipt_json!)).toMatchObject({ request_hash: requestHash })
+      expect(effects()).toEqual({ archived_at: now(), archive_events: 1, applied_events: 1 })
+    } finally {
+      db.raw.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('子运行以真实成功终态收口但父节点仍 waiting：维护扫描推进父节点', () => {

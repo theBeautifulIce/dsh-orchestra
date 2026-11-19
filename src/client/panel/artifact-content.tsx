@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { ArtifactContentMode, ArtifactContentView, RunArtifact } from '../api/types.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
@@ -22,18 +22,31 @@ function saveArtifact(artifact: Download): void {
   }
 }
 
-export function ArtifactContent({ api, artifact }: { api: ResourcesApi; artifact: RunArtifact }) {
+export function artifactContentKey(artifact: RunArtifact): string {
+  return JSON.stringify([artifact.run_id, artifact.artifact_id, artifact.sha256, artifact.file_name])
+}
+
+export function matchesArtifactContent(content: ArtifactContentView, artifact: RunArtifact): boolean {
+  return content.sha256 === artifact.sha256 && content.file_name === artifact.file_name
+}
+
+type ArtifactContentProps = { api: ResourcesApi; artifact: RunArtifact }
+
+export function ArtifactContent({ api, artifact }: ArtifactContentProps) {
+  if (artifact.expired) return <p style={noteStyle}>已超过保留期限。仍可查看登记记录。</p>
+  if (!artifact.file_name) return <p style={noteStyle}>这份产物仅有登记记录，内容尚未入库。</p>
+  return <ArtifactContentReader key={artifactContentKey(artifact)} api={api} artifact={artifact} />
+}
+
+function ArtifactContentReader({ api, artifact }: ArtifactContentProps) {
   const [pending, setPending] = useState<ArtifactContentMode | null>(null)
   const [preview, setPreview] = useState<Preview | null>(null)
   const [notice, setNotice] = useState('')
   const active = useRef(false)
-  useEffect(() => {
+  useLayoutEffect(() => {
     active.current = true
     return () => { active.current = false }
   }, [])
-
-  if (artifact.expired) return <p style={noteStyle}>已超过保留期限。仍可查看登记记录。</p>
-  if (!artifact.file_name) return <p style={noteStyle}>这份产物仅有登记记录，内容尚未入库。</p>
 
   async function load(mode: ArtifactContentMode) {
     setNotice('')
@@ -41,7 +54,7 @@ export function ArtifactContent({ api, artifact }: { api: ResourcesApi; artifact
     try {
       const { data } = await api.getArtifactContent(artifact.run_id, artifact.artifact_id, mode)
       if (!active.current) return
-      if (data.kind !== mode || data.sha256 !== artifact.sha256 || data.file_name !== artifact.file_name) {
+      if (data.kind !== mode || !matchesArtifactContent(data, artifact)) {
         throw new Error('返回的内容与登记记录不一致，请刷新')
       }
       if (data.kind === 'preview') setPreview(data)

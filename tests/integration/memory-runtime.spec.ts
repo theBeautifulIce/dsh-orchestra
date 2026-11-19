@@ -4,13 +4,16 @@
  * 覆盖：固定图推进、节点/run 事件、批次落库、评估端口失败口径、inspect_batch 证据口径、
  * 受控写失败口径、幂等、崩溃续跑、租约失效、终态收口、审批卡复用同一 decision_id。
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { Buffer } from 'node:buffer'
+import { dirname, join } from 'node:path'
 import { TEST_SECRET, countOf, freshLedger } from '../fixtures/ledger.ts'
 import { inTx } from '../../src/infra/db/tx.ts'
-import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
+import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { findMemoryNode, memoryGraphOrder } from '../../src/core/memory-graph-schema.ts'
 import { OrchError } from '../../src/core/errors.ts'
-import type { MemoryItemInput } from '../../src/core/memory-canonical.ts'
+import { canonicalItem, canonicalProposal, MEMORY_LIMITS, proposalHash, type MemoryItemInput } from '../../src/core/memory-canonical.ts'
+import { canonicalJson } from '../../src/core/canonical.ts'
 import { startMemoryRun } from '../../src/service/commands/memory.ts'
 import { resolveMemoryApproval } from '../../src/service/commands/memory-approval.ts'
 import { inspectMemoryRecovery, resolveMemoryRecovery } from '../../src/service/commands/memory-recovery.ts'
@@ -149,6 +152,57 @@ function nodeStatus(db: Db, runId: string, nodeId: string): string | undefined {
   )?.status
 }
 
+function itemBytes(entry: MemoryItemInput): number {
+  return Buffer.byteLength(canonicalJson(canonicalItem(entry)), 'utf8')
+}
+
+function batchBytes(entries: MemoryItemInput[]): number {
+  return Buffer.byteLength(canonicalJson(canonicalProposal(entries)), 'utf8')
+}
+
+function utf8SizedItem(key: string, bytes: number): MemoryItemInput {
+  const candidate = item(key, { content: '', tags: ['乙', '甲', '乙'] })
+  const remaining = bytes - itemBytes(candidate)
+  return { ...candidate, content: '界'.repeat(Math.floor(remaining / 3)) + 'a'.repeat(remaining % 3) }
+}
+
+function externalWriteFixture(ledger: Db) {
+  const file = join(dirname(ledger.file), 'external-memory.db')
+  const writer = openDb(file)
+  writer.raw.exec('CREATE TABLE entries (batch_id TEXT, client_key TEXT, item_id TEXT PRIMARY KEY, content TEXT)')
+  const writeMemory = vi.fn<MemoryWriteGoverned>(async (input) => {
+    // 回执逆序返回，让逐项绑定断言能发现按数组位置而非 client_key 写回账本的错误。
+    const applied = withTx(writer, (tx) => input.items.map((entry) => {
+      const itemId = `stored_${entry.client_key}`
+      tx.run('INSERT INTO entries VALUES (?, ?, ?, ?)', [input.batch_id, entry.client_key, itemId, entry.content])
+      return { client_key: entry.client_key, item_id: itemId }
+    })).reverse()
+    return { applied, applied_count: applied.length, skipped_count: 0, applied_item_ids: applied.map((entry) => entry.item_id) }
+  })
+  return {
+    writeMemory,
+    read(batchId: string) {
+      const reader = openDb(file, { readonly: true })
+      try {
+        return all(reader, 'SELECT client_key, item_id, content FROM entries WHERE batch_id = ? ORDER BY client_key', batchId)
+      } finally {
+        reader.raw.close()
+      }
+    },
+    close: () => writer.raw.close(),
+  }
+}
+
+const boundaryCount = Array.from({ length: MEMORY_LIMITS.items }, (_, index) => item(`count_${index}`))
+const boundaryItem = utf8SizedItem('wide', MEMORY_LIMITS.itemBytes)
+const nearBatchItems = Array.from({ length: 5 }, (_, index) =>
+  utf8SizedItem(`wide_${index}`, Math.floor(MEMORY_LIMITS.batchBytes / 5) - 2))
+const batchTail = nearBatchItems.pop()!
+const boundaryBatch = [...nearBatchItems, {
+  ...batchTail,
+  content: batchTail.content + 'a'.repeat(MEMORY_LIMITS.batchBytes - batchBytes([...nearBatchItems, batchTail])),
+}]
+
 describe('记忆 run 运行驱动', () => {
   it('节点严格按固定图顺序与节点类型建出来，不引入图外节点', () => {
     const { db } = freshLedger()
@@ -215,23 +269,78 @@ describe('记忆 run 运行驱动', () => {
     expect(nodeStatus(db, started.memory_run_id, 'mem_prepare')).toBe('failed')
   })
 
-  it('裁判返回非 JSON 时批次 failed、无审批卡、无写入、剩余 proposed 全部 skipped', async () => {
+  it.each([
+    { name: '批量条数超限', items: [...boundaryCount, item('extra')], code: 'MEMORY_BATCH_TOO_LARGE', message: /超过 20 条/ },
+    { name: '批量规范化 UTF-8 总字节超限', items: [...boundaryBatch.slice(0, -1), { ...boundaryBatch.at(-1)!, content: boundaryBatch.at(-1)!.content + 'a' }], code: 'MEMORY_BATCH_TOO_LARGE', message: /这一批.*太大/ },
+    { name: '单项规范化 UTF-8 超 64 KiB', items: [item('valid'), { ...boundaryItem, content: boundaryItem.content + 'a' }], code: 'MEMORY_BATCH_TOO_LARGE', message: /有一条.*太大/ },
+    { name: 'client_key 重复', items: [item('same'), item('same', { title: '不同条目' })], code: 'MEMORY_PROPOSAL_INVALID', message: /client_key 不能重复/ },
+    { name: '禁用的 L3', items: [item('valid'), { ...item('wrong_layer'), layer: 'L3' }], code: 'MEMORY_PROPOSAL_INVALID', message: /layer 非法/ },
+  ])('Q-45 mem_prepare $name → 返回对应错误，且无部分提议', async ({ items, code, message }) => {
+    const { db } = freshLedger()
+    try {
+      const started = startRun(db)
+      const judge = vi.fn(async () => judgeBody('approve', ['valid']))
+      const writeCalls: WriteCall[] = []
+      const deps = makeDeps(db, { items, judge, writeCalls })
+      const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
+
+      expect(result).toMatchObject({ status: 'failed', error_code: code })
+      const prepare = result.steps.find((step) => step.node_id === 'mem_prepare')
+      expect(prepare).toMatchObject({ status: 'failed', detail: { error_code: code, error_message: expect.stringMatching(message) } })
+      expect(countOf(db, 'memory_batches')).toBe(0)
+      expect(countOf(db, 'memory_items')).toBe(0)
+      expect(countOf(db, 'memory_evaluations')).toBe(0)
+      expect(countOf(db, 'decisions')).toBe(0)
+      expect(judge).not.toHaveBeenCalled()
+      expect(writeCalls).toHaveLength(0)
+    } finally {
+      db.raw.close()
+    }
+  })
+
+  it.each([
+    { name: '条数恰好达上限', items: boundaryCount, measure: () => boundaryCount.length, limit: MEMORY_LIMITS.items },
+    { name: '单项恰好 64 KiB', items: [boundaryItem], measure: () => itemBytes(boundaryItem), limit: MEMORY_LIMITS.itemBytes },
+    { name: '批次正文恰好达字节上限', items: boundaryBatch, measure: () => batchBytes(boundaryBatch), limit: MEMORY_LIMITS.batchBytes },
+  ])('Q-45 mem_prepare $name → 完整保存有效提议', async ({ items, measure, limit }) => {
+    expect(measure()).toBe(limit)
+    const { db } = freshLedger()
+    try {
+      const started = startRun(db)
+      const deps = makeDeps(db, { items, judge: async () => judgeBody('needs_user', items.map((entry) => entry.client_key)) })
+      const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
+      expect(result.steps.find((step) => step.node_id === 'mem_prepare')?.status).toBe('done')
+      expect(all(db, 'SELECT client_key, content FROM memory_items WHERE batch_id = ? ORDER BY client_key', started.batch_id))
+        .toEqual(canonicalProposal(items).map(({ client_key, content }) => ({ client_key, content })))
+      expect(one(db, 'SELECT proposal_hash FROM memory_batches WHERE batch_id = ?', started.batch_id))
+        .toEqual({ proposal_hash: proposalHash(items) })
+    } finally {
+      db.raw.close()
+    }
+  })
+
+  it.each([
+    { name: '非 JSON', response: 'not-json' },
+    { name: '缺 items', response: JSON.stringify({ summary: '测试评估', duration_ms: 12, model: { provider: 'test', name: 'judge', prompt_version: 'v1' } }) },
+    { name: 'verdict=maybe', response: judgeBody('maybe', ['item_1']) },
+  ])('Q-47 裁判返回 $name → 批次 failed，余下提议跳过且不写入', async ({ response }) => {
     const { db } = freshLedger()
     const started = startRun(db)
     const writeCalls: WriteCall[] = []
-    const deps = makeDeps(db, { judge: async () => 'not-json', writeCalls })
+    const deps = makeDeps(db, { judge: async () => response, writeCalls })
     const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
 
     expect(result.status).toBe('failed')
     expect(result.error_code).toBe('MEMORY_EVAL_INVALID_OUTPUT')
     expect(countOf(db, 'decisions')).toBe(0)
     expect(writeCalls.length).toBe(0)
-    const batch = one<{ status: string; error_code: string | null }>(
+    const batch = one<{ status: string; outcome: string; error_code: string | null }>(
       db,
-      'SELECT status, error_code FROM memory_batches WHERE batch_id = ?',
+      'SELECT status, outcome, error_code FROM memory_batches WHERE batch_id = ?',
       started.batch_id,
     )
     expect(batch?.status).toBe('failed')
+    expect(batch?.outcome).toBe('failed')
     expect(batch?.error_code).toBe('MEMORY_EVAL_INVALID_OUTPUT')
     const items = all<{ status: string }>(
       db,
@@ -240,6 +349,7 @@ describe('记忆 run 运行驱动', () => {
     )
     expect(items.length).toBe(1)
     expect(items[0]?.status).toBe('skipped')
+    db.raw.close()
   })
 
   it('评估端口三种失败口径可区分：超时、不可用、开关关闭', async () => {
@@ -318,23 +428,32 @@ describe('记忆 run 运行驱动', () => {
     expect((error as { code?: string }).code).toBe('MEMORY_BATCH_NOT_FOUND')
   })
 
-  it('needs_user 时不生成审批卡、走 mem_report_blocked 且 run 收口为 succeeded', async () => {
+  it('Q-48 needs_user → 批次 blocked，零审批卡、零写端调用、外部存储零条目', async () => {
     const { db } = freshLedger()
-    const started = startRun(db)
-    const deps = makeDeps(db, { judge: async () => judgeBody('needs_user', ['item_1']) })
-    const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
+    const external = externalWriteFixture(db)
+    try {
+      const started = startRun(db)
+      const deps = makeDeps(db, { judge: async () => judgeBody('needs_user', ['item_1']), writeMemory: external.writeMemory })
+      const result = await advanceMemoryRuntime(deps, { memory_run_id: started.memory_run_id, now: NOW })
 
-    expect(result.status).toBe('completed')
-    expect(result.steps.map((step) => step.node_id)).toEqual([
-      'mem_trigger',
-      'mem_prepare',
-      'mem_check',
-      'mem_route',
-      'mem_report_blocked',
-    ])
-    expect(result.batch_status).toBe('blocked')
-    expect(result.terminal).toBe('succeeded')
-    expect(countOf(db, 'decisions')).toBe(0)
+      expect(result.status).toBe('completed')
+      expect(result.steps.map((step) => step.node_id)).toEqual([
+        'mem_trigger',
+        'mem_prepare',
+        'mem_check',
+        'mem_route',
+        'mem_report_blocked',
+      ])
+      expect(result.batch_status).toBe('blocked')
+      expect(result.terminal).toBe('succeeded')
+      expect(one(db, 'SELECT outcome FROM memory_batches WHERE batch_id = ?', started.batch_id)).toEqual({ outcome: 'blocked' })
+      expect(countOf(db, 'decisions')).toBe(0)
+      expect(external.writeMemory).toHaveBeenCalledTimes(0)
+      expect(external.read(started.batch_id)).toHaveLength(0)
+    } finally {
+      external.close()
+      db.raw.close()
+    }
   })
 
   it('全 reject 时走 mem_report_empty，run 收口为 succeeded', async () => {
@@ -454,6 +573,67 @@ describe('记忆 run 运行驱动', () => {
     expect(rows[0]?.approved_content_hash).toBe(rows[0]?.content_hash)
     const pairs = JSON.parse(batch?.approved_item_hashes_json ?? '[]') as Array<[string, string]>
     expect(pairs).toEqual([['item_1', rows[0]?.content_hash]])
+  })
+
+  it('Q-49 人批准混合 verdict → 受控写逐项对齐目标 ID，其余 skipped，批次 written', async () => {
+    const { db } = freshLedger()
+    const external = externalWriteFixture(db)
+    try {
+      const started = startRun(db)
+      const items = [item('a_approved'), item('b_skipped'), item('c_merged', { action: 'update', target_id: 'target_c' })]
+      const reply = {
+        ...JSON.parse(judgeBody('approve', [])),
+        items: [
+          { client_key: 'a_approved', verdict: 'approve', reason: '保留', confidence: 0.9 },
+          { client_key: 'b_skipped', verdict: 'reject', reason: '跳过', confidence: 0.9 },
+          { client_key: 'c_merged', verdict: 'merge', reason: '合并', confidence: 0.9 },
+        ],
+      }
+      const deps = makeDeps(db, { items, judge: async () => JSON.stringify(reply), writeMemory: external.writeMemory })
+      const run = { memory_run_id: started.memory_run_id }
+      expect(await advanceMemoryRuntime(deps, { ...run, now: NOW })).toMatchObject({ status: 'blocked', batch_status: 'awaiting_human' })
+      expect(external.writeMemory).not.toHaveBeenCalled()
+      expect(external.read(started.batch_id)).toEqual([])
+      const card = one<{ decision_id: string; revision: number; content_hash: string }>(
+        db, "SELECT decision_id, revision, content_hash FROM decisions WHERE run_id = ? AND status = 'pending'", started.memory_run_id,
+      )!
+      const approval = inTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
+        batch_id: started.batch_id,
+        decision_id: card.decision_id,
+        revision: card.revision,
+        contentHash: card.content_hash,
+        resolution: 'approved',
+        now: LATER,
+        actor: { kind: 'human', id: 'tester' },
+      }))
+      expect(approval).toMatchObject({ batch_status: 'approved', approved_count: 2, skipped_count: 1 })
+
+      expect(await advanceMemoryRuntime(deps, { ...run, now: LATER })).toMatchObject({ status: 'completed', batch_status: 'applied' })
+      const apply = one<{ node_run_id: string }>(db, "SELECT node_run_id FROM node_runs WHERE run_id = ? AND node_id = 'mem_apply'", started.memory_run_id)
+      expect(external.writeMemory).toHaveBeenCalledExactlyOnceWith({
+        batch_id: started.batch_id,
+        decision_id: card.decision_id,
+        node_run_id: apply?.node_run_id,
+        run_id: started.memory_run_id,
+        source_run_id: SOURCE_RUN,
+        items: [items[0], items[2]],
+      })
+      expect(external.read(started.batch_id)).toEqual([
+        { client_key: 'a_approved', item_id: 'stored_a_approved', content: items[0]!.content },
+        { client_key: 'c_merged', item_id: 'stored_c_merged', content: items[2]!.content },
+      ])
+      expect(all(db, 'SELECT client_key, verdict, status, applied_item_id FROM memory_items WHERE batch_id = ? ORDER BY client_key', started.batch_id))
+        .toEqual([
+          { client_key: 'a_approved', verdict: 'approve', status: 'applied', applied_item_id: 'stored_a_approved' },
+          { client_key: 'b_skipped', verdict: 'reject', status: 'skipped', applied_item_id: null },
+          { client_key: 'c_merged', verdict: 'merge', status: 'applied', applied_item_id: 'stored_c_merged' },
+        ])
+      expect(one(db, 'SELECT outcome, applied_count FROM memory_batches WHERE batch_id = ?', started.batch_id))
+        .toEqual({ outcome: 'written', applied_count: 2 })
+    } finally {
+      external.close()
+      db.raw.close()
+    }
   })
 
   it('inspect_batch 口径齐全，evidence_id 记进节点事件', async () => {

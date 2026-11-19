@@ -6,10 +6,17 @@
 //   （approved_proposal_hash=proposal_hash(items)、approved_item_hashes_json=[client_key, content_hash] 对、
 //   decided_at、decision_id 回写）；批准后改正文/改哈希/增删行都被 030 迁移的触发器拒绝；
 // - 人拒绝：批次 declined，不写快照；审批卡 24 小时过期：批次 expired；两条路都不碰 apply。
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
+import { memoryCopy } from '../../src/client/panel/memory-panel.tsx'
+import type { MemoryBatchView } from '../../src/client/api/types.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 import { contentHash, proposalHash, type MemoryItemInput } from '../../src/core/memory-canonical.ts'
 import { buildApprovalCard, type ApprovalCard, type EvalItem } from '../../src/core/memory-eval.ts'
 import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
+import { serveOrchestra } from '../../src/index.ts'
 import { saveMemoryProposal, startMemoryRun } from '../../src/service/commands/memory.ts'
 import {
   expireMemoryApproval,
@@ -327,6 +334,107 @@ describe('记忆审批卡：批准落库', () => {
 })
 
 describe('记忆审批卡：拒绝与过期', () => {
+  it('Q-51 跨过 24 小时后生产维护扫描关卡 → 拒绝迟到批准，API 和面板呈现过期且未写入', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'memory-approval-expiry-'))
+    const writeMemory = vi.fn(async () => { throw new Error('过期审批卡不允许调用写端') })
+    const proposed = item('expiry_item')
+    let service: Awaited<ReturnType<typeof serveOrchestra>> | undefined
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    vi.setSystemTime(new Date(NOW))
+    try {
+      service = await serveOrchestra({
+        dbFile: join(dir, 'orchestra.db'), secret: TEST_SECRET, phase: 'S5',
+        asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
+        appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }),
+        memory: {
+          prepareItems: async () => ({ items: [proposed] }),
+          judge: async () => JSON.stringify({
+            items: [{ client_key: proposed.client_key, verdict: 'approve', reason: '保留', confidence: 0.95 }],
+            summary: '建议写入', duration_ms: 1, model: { provider: 'fixture', name: 'fixture', prompt_version: '1' },
+          }),
+          plugin: {
+            protocol: 1,
+            fenceAndInspect: async () => { throw new Error('过期审批卡不应进入恢复') },
+            writeMemory,
+          },
+        },
+      })
+      const { orchestra: { db }, endpoint } = service
+      const sourceRunId = 'run_expiring_source'
+      const taskId = 'task_expiring_source'
+      withTx(db, (tx) => {
+        tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES (?, '源任务', 'running', 1, ?, ?)", [taskId, NOW, NOW])
+        tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, status, revision, created_at, updated_at) VALUES (?, ?, 'wf', 1, 'succeeded', 1, ?, ?)", [sourceRunId, taskId, NOW, NOW])
+      })
+      const headers = { 'content-type': 'application/json', 'x-orchestra-secret': TEST_SECRET }
+      const request = (path: string, body?: object) => fetch(endpoint + path, {
+        headers, method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined,
+      })
+      const start = await request('/v1/memory/runs/start', {
+        source_run_id: sourceRunId, request_key: 'expiry', reason: '记忆审批', operation_id: uuidv7(),
+      })
+      expect(start.status).toBe(200)
+      const { data: { batch_id: batchId, memory_run_id: memoryRunId } } = await start.json() as {
+        data: { batch_id: string; memory_run_id: string }
+      }
+      await expect.poll(() => batchOf(db, batchId)?.status).toBe('awaiting_human')
+      const decisionId = batchOf(db, batchId).decision_id!
+      const decision = decisionOf(db, decisionId)
+      expect(decision.status).toBe('pending')
+      expect(Date.parse(decision.expires_at!) - Date.parse(NOW)).toBe(24 * 60 * 60 * 1000)
+      const decisionPath = '/v1/decisions/get?decision_id=' + encodeURIComponent(decisionId)
+      const activePath = '/v1/decisions?run_id=' + encodeURIComponent(memoryRunId)
+      expect(await (await request(decisionPath)).json()).toMatchObject({ data: { allowed_resolutions: ['approved', 'rejected'] } })
+
+      const expiresAt = Date.parse(decision.expires_at!)
+      vi.setSystemTime(expiresAt - 2001)
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(batchOf(db, batchId).status).toBe('awaiting_human')
+      expect(decisionOf(db, decisionId).status).toBe('pending')
+
+      const approve = (revision: number) => request('/v1/decisions/resolve', {
+        decisionId, revision, contentHash: decision.content_hash, resolution: 'approved', operation_id: uuidv7(),
+      })
+      vi.setSystemTime(expiresAt)
+      const due = await approve(decision.revision)
+      expect(due.status).toBe(422)
+      expect(await due.json()).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
+      expect(batchOf(db, batchId).status).toBe('awaiting_human')
+
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(batchOf(db, batchId)).toMatchObject({ status: 'expired', outcome: 'expired', approved_proposal_hash: null, approved_item_hashes_json: null })
+      expect(itemsOf(db, batchId)).toEqual([expect.objectContaining({ client_key: proposed.client_key, status: 'skipped', approved_content_hash: null })])
+      const expired = decisionOf(db, decisionId)
+      // DC4 / §8 / S5 effect-resolution addendum: expired is the conclusion, persisted as resolved/expired_final.
+      expect(expired).toMatchObject({ status: 'resolved', closed_reason: 'expired_final', revision: decision.revision + 1 })
+      expect(Date.parse(expired.decided_at!)).toBeGreaterThanOrEqual(expiresAt)
+
+      const late = await approve(expired.revision)
+      expect(late.status).toBe(409)
+      expect(await late.json()).toMatchObject({ error: { code: 'DECISION_REVISION_CONFLICT' } })
+      expect(await (await request(decisionPath)).json()).toMatchObject({ data: {
+        decision_id: decisionId, current_revision: expired.revision, status: 'resolved', closed_reason: 'expired_final', allowed_resolutions: [],
+      } })
+      expect(await (await request(activePath)).json()).toMatchObject({ data: { items: [] } })
+      expect(await (await request(activePath + '&status=resolved')).json()).toMatchObject({ data: { items: [expect.objectContaining({
+        decision_id: decisionId, status: 'resolved', closed_reason: 'expired_final', allowed_resolutions: [],
+      })] } })
+      const batchResponse = await request('/v1/memory/batches?task_id=' + encodeURIComponent(taskId))
+      expect(batchResponse.status).toBe(200)
+      const { data: { items: [batch] } } = await batchResponse.json() as { data: { items: MemoryBatchView[] } }
+      expect(batch).toMatchObject({ batch_id: batchId, decision_id: decisionId, status: 'expired', outcome: 'expired', allowed_resolutions: null,
+        pending_count: 0, applied_count: 0, skipped_count: 1, items: [{ client_key: proposed.client_key, status: 'skipped' }] })
+      expect(memoryCopy(batch!)).toEqual({ text: '超过 24 小时没确认，这次没写', tone: 'warn' })
+      expect(writeMemory).not.toHaveBeenCalled()
+      expect(countOf(db, 'decisions')).toBe(1)
+    } finally {
+      try { await service?.close() } finally {
+        vi.useRealTimers()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  })
+
   it('拒绝 → 批次 declined，不写快照，也不写记忆', () => {
     const f = setup()
     writeVerdicts(f.db, f.batch_id)

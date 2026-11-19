@@ -9,7 +9,7 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
 import { createTaskTriggerHost, nextDailyFire } from '../../src/service/task-triggers.ts'
 import type { ResolveTriggerNodeSpecs } from '../../src/service/task-trigger-dispatch.ts'
-import { getTaskSummarySnapshot } from '../../src/service/queries/tasks.ts'
+import { getTaskSummarySnapshot, listTaskSummaries } from '../../src/service/queries/tasks.ts'
 
 const SECRET = 'task-triggers-integration-secret'
 const NOW = '2026-11-18T00:59:00.000Z'
@@ -93,7 +93,9 @@ it('同一任务累积真实运行，重启幂等且不并行启动第二次', a
       expect(closeRun(tx, SECRET, first.run_id, dueNext)).toBe('succeeded')
     })
     expect(db.raw.prepare('SELECT status FROM tasks WHERE task_id = ?').get(rule.task_id)).toMatchObject({ status: 'succeeded' })
-    expect(getTaskSummarySnapshot(db, rule.task_id).item).toMatchObject({ status: 'succeeded', lane: 'upcoming', next_trigger_at: dueThird })
+    const summary = getTaskSummarySnapshot(db, rule.task_id).item
+    expect(summary).toMatchObject({ status: 'succeeded', lane: 'upcoming', next_trigger_at: dueThird })
+    expect(listTaskSummaries(db, { trigger_kind: 'scheduled' }).items).toEqual([summary])
     await service.close()
     service = undefined
 

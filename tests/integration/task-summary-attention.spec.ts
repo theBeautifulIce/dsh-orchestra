@@ -6,6 +6,7 @@ import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { appendEvent } from '../../src/infra/db/ledger.ts'
 import { getTaskSummary, listTaskSummaries } from '../../src/service/queries/tasks.ts'
+import { openDecision } from '../../src/service/commands/decisions.ts'
 
 const NOW = '2026-11-17T10:00:00.000Z'
 const NOW_MS = Date.parse(NOW)
@@ -133,4 +134,74 @@ describe('任务摘要的待核实计数', () => {
     expect(settled.unverified_count).toBe(0)
     expect(settled.attention).not.toBe('unverified')
   })
+})
+
+it('Q-01 待裁决任务在运行中任务前，同档任务按更新时间倒序', () => {
+  const db = ledger()
+  const tasks = [
+    { id: 'z-decision-old', updated: '2026-11-17T10:01:00.000Z', decision: true },
+    { id: 'a-running-new', updated: '2026-11-17T10:04:00.000Z', decision: false },
+    { id: 'z-running-old', updated: '2026-11-17T10:03:00.000Z', decision: false },
+    { id: 'a-decision-new', updated: '2026-11-17T10:02:00.000Z', decision: true },
+  ]
+  for (const { id, updated, decision } of tasks) {
+    seedTaskWithEffect(db, { taskId: id, runId: 'run-' + id, nodeRunId: 'node-' + id, title: id })
+    withTx(db, (tx) => {
+      tx.run('UPDATE tasks SET updated_at = ? WHERE task_id = ?', [updated, id])
+      tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = ?", ['node-' + id])
+      if (decision) openDecision(tx, { decisionId: 'decision-' + id, runId: 'run-' + id,
+        nodeRunId: null, kind: 'rule_ambiguous', createdAt: updated })
+    })
+  }
+
+  const { items } = listTaskSummaries(db)
+  expect(items.map((item) => [item.task_id, item.attention])).toEqual([
+    ['a-decision-new', 'decision'],
+    ['z-decision-old', 'decision'],
+    ['a-running-new', 'running'],
+    ['z-running-old', 'running'],
+  ])
+  const first = listTaskSummaries(db, { limit: 1 })
+  expect(first.items.map((item) => item.task_id)).toEqual(['a-decision-new'])
+  expect(first.next_cursor).toBeTruthy()
+  const next = listTaskSummaries(db, { limit: 3, cursor: first.next_cursor! })
+  expect(next.items.map((item) => item.task_id)).toEqual(['z-decision-old', 'a-running-new', 'z-running-old'])
+  expect(next.next_cursor).toBeNull()
+  expect(next.as_of_seq).toBe(first.as_of_seq)
+  expect(() => listTaskSummaries(db, { attention: 'decision', cursor: first.next_cursor! }))
+    .toThrow(expect.objectContaining({ code: 'CURSOR_FILTER_MISMATCH' }))
+})
+
+it('任务摘要分页后保留精确待裁决聚合、风险、心跳与归档筛选', () => {
+  const db = ledger()
+  seedTaskWithEffect(db, { taskId: 'running', runId: 'r1', nodeRunId: 'n1', title: 'Sample running' })
+  seedTaskWithEffect(db, { taskId: 'decision', runId: 'r2', nodeRunId: 'n2', title: 'Sample decision' })
+  const recent = '2026-11-17T09:59:45.000Z'
+  const oldest = '2026-11-17T09:56:00.000Z'
+  withTx(db, (tx) => {
+    openDecision(tx, { decisionId: 'first', runId: 'r2', nodeRunId: null, kind: 'rule_ambiguous', createdAt: oldest })
+    openDecision(tx, { decisionId: 'second', runId: 'r2', nodeRunId: null, kind: 'audit_result', createdAt: recent })
+    tx.run("UPDATE node_runs SET side_effect_policy = 'irreversible', heartbeat_at = ? WHERE node_run_id = 'n2'", [recent])
+    tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = 'n1'")
+    tx.run("INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, side_effect_policy, heartbeat_at, created_at, updated_at) "
+      + "VALUES ('n3','r2','n3',2,'agent','done',1,'pure',?,?,?)", [oldest, NOW, NOW])
+  })
+
+  const selected = listTaskSummaries(db, { limit: 1, now: NOW_MS, attention: 'decision', lane: 'attention', status: 'running', query: 'sample' })
+  expect(selected.items).toEqual([getTaskSummary(db, 'decision', NOW_MS)])
+  expect(selected.items[0]).toMatchObject({
+    task_id: 'decision', open_decision_count: 2, oldest_open_decision_age_seconds: 240,
+    unverified_count: 1, max_side_effect_level: 'irreversible', max_heartbeat_age_ms: 15_000,
+  })
+  expect(selected.next_cursor).toBeNull()
+
+  withTx(db, (tx) => {
+    tx.run("UPDATE tasks SET archived_at = ? WHERE task_id = 'decision'", [recent])
+    tx.run("UPDATE tasks SET archived_at = ? WHERE task_id = 'running'", [NOW])
+  })
+  const archived = listTaskSummaries(db, { archived: true, query: 'sample' })
+  expect(archived.items.map((item) => [item.task_id, item.attention, item.lane])).toEqual([
+    ['running', 'running', 'running'], ['decision', 'decision', 'attention'],
+  ])
+  expect(listTaskSummaries(db, { archived: true, attention: 'decision', limit: 1 }).items.map((item) => item.task_id)).toEqual(['decision'])
 })
