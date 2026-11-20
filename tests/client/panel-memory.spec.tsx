@@ -130,6 +130,21 @@ describe('记忆面板的十二句状态文案', () => {
 })
 
 describe('记忆屏的四问', () => {
+  it('按更新时间展示最近批次，展开同名键时只显示所选批次的来源', async () => {
+    const { api } = memoryService([
+      memoryBatch({ batch_id: 'old', attempt: 8, items: [memoryItem({ source: '历史项目' })] }),
+      memoryBatch({ batch_id: 'new', attempt: 1, applied_count: 1, updated_at: '2026-11-20T00:00:00Z',
+        items: [memoryItem({ source: '本次项目' })] }),
+    ])
+    const view = await renderPanel(<MemoryPanel api={api} />)
+    try {
+      await view.flush()
+      expect(view.text()).toContain('最近批次 · 写了 1 条')
+      await view.click(view.findAll('button').filter((button) => button.textContent === '展开看全文与来源')[1]!)
+      expect(view.text()).toContain('本次项目')
+      expect(view.text()).not.toContain('历史项目')
+    } finally { view.unmount() }
+  })
   it('AC2 没有批次时四个问题都有回答，并提示这次可以记', async () => {
     const { api } = memoryService([])
     const view = await renderPanel(<MemoryPanel api={api} />)

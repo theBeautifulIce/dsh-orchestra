@@ -25,17 +25,26 @@
 // 本文件只测量、不修实现；未达标项的根因与最小修复建议写在 docs/reviews/S5-perf-budget.md。
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import os from 'node:os'
+import { join, parse, relative, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { freshLedger } from '../fixtures/ledger.ts'
-import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
+import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
+import { appendEvent } from '../../src/infra/db/ledger.ts'
+import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
+import { sha256Hex } from '../../src/core/canonical.ts'
+import { serveOrchestra } from '../../src/index.ts'
 import { getRun } from '../../src/service/queries/runs.ts'
 import { listNodes } from '../../src/service/queries/nodes.ts'
 import { listTaskSummaries } from '../../src/service/queries/tasks.ts'
+import { listEvents } from '../../src/service/queries/list_events.ts'
+import { assessPerfReport, PERF_BUDGETS, PERF_ROUNDS, PERF_WARMUP, type PerfRoute, type PerfStatement } from '../../scripts/perf-budget-evidence.ts'
 
-const WARMUP_ROUNDS = 5
-const MEASURE_ROUNDS = 30
+const WARMUP_ROUNDS = PERF_WARMUP
+const MEASURE_ROUNDS = PERF_ROUNDS
+const strictEvidenceDir = process.env.ORCHESTRA_PERF_EVIDENCE_DIR
 
 const BASE_TS = '2026-11-18T00:00:00.000Z'
 const Q26_RUN_ID = 'perf-run-q26'
@@ -148,7 +157,7 @@ function timeCalibration(): number {
 }
 
 // 同步测量：wall 记总耗时，cpu 记本线程在 SQLite 上花掉的 CPU 时间。
-function measure(fn: () => void): Stats {
+function measure(fn: () => void, record?: (sample: number, index: number) => void): Stats {
   for (let i = 0; i < WARMUP_ROUNDS; i += 1) fn()
   const samples: number[] = []
   let userUs = 0
@@ -160,6 +169,7 @@ function measure(fn: () => void): Stats {
     const wall = performance.now() - started
     const cpu = process.threadCpuUsage(cpuBefore)
     samples.push(wall)
+    record?.(wall, i)
     userUs += cpu.user
     sysUs += cpu.system
   }
@@ -292,7 +302,7 @@ function seedQ26(db: Db): void {
 
 // Q-27 数据集：10000 个任务，每个任务一个当前 run，每个 run 两个 node_run，
 // 每 20 个 run 挂一张待处理决定，让 attention 权重落在不同分支上。
-function seedQ27(db: Db): void {
+function seedQ27(db: Db, includePlanReceipts = false): void {
   withTx(db, (tx) => {
     const run = (sql: string, params: unknown[]): void => {
       tx.run(sql, params)
@@ -301,6 +311,8 @@ function seedQ27(db: Db): void {
     const runRows: unknown[][] = []
     const nodeRows: unknown[][] = []
     const decisionRows: unknown[][] = []
+    const startOperations: unknown[][] = []
+    const plans: unknown[][] = []
     for (let i = 1; i <= Q27_TASK_COUNT; i += 1) {
       const id = pad(i, 5)
       const taskId = 'perf-t-' + id
@@ -325,6 +337,10 @@ function seedQ27(db: Db): void {
           'perf-dec-' + id, runId, null, 'verify_human', 'pending', 1, null, '{}', ts(i), null,
         ])
       }
+      if (includePlanReceipts) {
+        startOperations.push(['perf-op-' + id, taskId, runId, ts(i)])
+        if (i % 21 === 0) plans.push(['perf-plan-' + id, 'bench', '{}', '{}', '{}', 'hash-' + id, 'perf-op-' + id, ts(i)])
+      }
     }
     insertRows(
       run, 'tasks',
@@ -346,6 +362,8 @@ function seedQ27(db: Db): void {
       'decision_id, run_id, node_run_id, kind, status, revision, closed_reason, payload_json, created_at, decided_at',
       decisionRows,
     )
+    insertRows(run, 'start_run_operations', 'operation_id, task_id, run_id, created_at', startOperations)
+    insertRows(run, 'task_plans', 'plan_id, created_by, input_json, proposal_json, quality_json, content_hash, launch_operation_id, created_at', plans)
   })
 }
 
@@ -444,7 +462,7 @@ function assertBudget(
   ctx.skip(reason)
 }
 
-describe('S5 · G5 性能预算（Q-26 / Q-27）', () => {
+describe.runIf(!strictEvidenceDir)('S5 · G5 性能预算（Q-26 / Q-27）', () => {
   beforeAll(() => {
     q26 = freshLedger()
     q27 = freshLedger()
@@ -554,3 +572,244 @@ describe('S5 · G5 性能预算（Q-26 / Q-27）', () => {
     assertBudget(ctx, { key: 'q27_list_tasks', label: 'Q-27 list_tasks（首屏 50 条 / 1 万任务）', budgetMs: BUDGET_LIST_TASKS_P95_MS })
   }, 120_000)
 })
+
+function captureQueries<T>(db: Db, read: () => T) {
+  const prototype = Object.getPrototypeOf(db.raw) as Db['raw']
+  const prepare = prototype.prepare
+  const captured = new Map<string, Omit<PerfStatement, 'plan'>>()
+  let value: T
+  prototype.prepare = function (this: Db['raw'], sql: string) {
+    const stmt = prepare.call(this, sql)
+    for (const method of ['all', 'get'] as const) {
+      const execute = stmt[method]
+      Object.defineProperty(stmt, method, { value: (...args: unknown[]) => {
+        const key = method + ':' + sql
+        const prior = captured.get(key)
+        if (prior) prior.calls++
+        else {
+          const bindings = args.map((arg) => {
+            if (typeof arg === 'number' || typeof arg === 'string' || arg === null) return arg
+            throw new Error('Unexpected production SQL parameter in benchmark: ' + typeof arg)
+          })
+          captured.set(key, { sql, method, bindings, calls: 1 })
+        }
+        return Reflect.apply(execute, stmt, args)
+      } })
+    }
+    return stmt
+  }
+  try {
+    value = read()
+  } finally {
+    prototype.prepare = prepare
+  }
+
+  const reader = openDb(db.file, { readonly: true })
+  try {
+    const statements: PerfStatement[] = [...captured.values()].map((entry) => ({
+      ...entry, plan: reader.raw.prepare('EXPLAIN QUERY PLAN ' + entry.sql).all(...entry.bindings) as PerfStatement['plan'],
+    }))
+    return { value, statements }
+  } finally {
+    reader.raw.close()
+  }
+}
+
+function gitSnapshot() {
+  const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8' }).trim()
+  return { commit: git(['rev-parse', 'HEAD']), clean: git(['status', '--porcelain', '--untracked-files=normal']) === '' }
+}
+
+type HttpEnvelope = {
+  ok: boolean
+  as_of_seq: number
+  data: { items?: Array<Record<string, unknown>>; total?: number; top_nodes?: unknown[]; next_cursor?: string }
+  error?: { code: string }
+}
+
+async function probeRoutes(q26Db: Db, q27Db: Db, configPath: string) {
+  const secret = 'synthetic-t07-reads'
+  const start = (db: Db) => serveOrchestra({
+    dbFile: db.file, phase: 'S6', configPath, secret,
+    asOfSeq: () => (db.raw.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').get() as { seq: number }).seq,
+    listTasks: () => { throw new Error('legacy listTasks executed') },
+    listEvents: () => { throw new Error('legacy listEvents executed') },
+    appendLedgerEvent: () => { throw new Error('unexpected ledger writes') },
+  })
+  const read = async (endpoint: string, path: string) => {
+    const started = performance.now()
+    const response = await fetch(endpoint + path, { headers: { 'x-orchestra-secret': secret }, signal: AbortSignal.timeout(15_000) })
+    const raw = await response.text()
+    const body = JSON.parse(raw) as HttpEnvelope
+    return { body, timing: { path: path.split('?')[0]!, status: response.status as 200,
+      size: body.data?.total ?? body.data?.items?.length ?? 0, as_of_seq: body.as_of_seq,
+      elapsed_ms: performance.now() - started, bytes: Buffer.byteLength(raw) } }
+  }
+  const q27Server = await start(q27Db)
+  let q26Server: Awaited<ReturnType<typeof start>> | undefined
+  try {
+    q26Server = await start(q26Db)
+    const tasks = await read(q27Server.endpoint, '/v1/tasks')
+    const q26Endpoint = q26Server.endpoint
+    const run = await read(q26Endpoint, '/v1/runs/get?run_id=' + Q26_RUN_ID)
+    const nodes = await read(q26Endpoint, '/v1/node-runs?limit=200&run_id=' + Q26_RUN_ID)
+    const otherNodes = await read(q26Endpoint, '/v1/node-runs?limit=200&run_id=perf-disjoint-run')
+    const events = await read(q26Endpoint, '/v1/events?from_seq=0&limit=200')
+    const nextEvents = await read(q26Endpoint, '/v1/events?limit=200&cursor=' + events.body.data.next_cursor)
+    const mixedEvents = await read(q26Endpoint, '/v1/events?from_seq=0&cursor=' + events.body.data.next_cursor)
+    const filtered = await read(q27Server.endpoint, '/v1/tasks?status=running')
+    const cursor = filtered.body.data.next_cursor
+    const nextTasks = await read(q27Server.endpoint, '/v1/tasks?status=running&cursor=' + cursor)
+    const wrongFilter = await read(q27Server.endpoint, '/v1/tasks?status=succeeded&cursor=' + cursor)
+    const wrongKind = await read(q26Endpoint, '/v1/events?cursor=' + cursor)
+    const filteredItems = [...filtered.body.data.items ?? [], ...nextTasks.body.data.items ?? []]
+    const eventItems = [...events.body.data.items ?? [], ...nextEvents.body.data.items ?? []]
+    const checks = {
+      filtered_task_paging: Boolean(cursor && filteredItems.length === 100
+        && new Set(filteredItems.map((row) => row.task_id)).size === 100 && filteredItems.every((row) => row.status === 'running')),
+      task_cursor_scope: wrongFilter.body.error?.code === 'CURSOR_FILTER_MISMATCH' && wrongKind.body.error?.code === 'CURSOR_FILTER_MISMATCH',
+      event_cursor_exclusive: mixedEvents.body.error?.code === 'PAYLOAD_SCHEMA_INVALID',
+      event_cursor_paging: eventItems.length === 400 && eventItems.every((row, i) => row.seq === i + 1)
+        && eventItems.every((row) => Number(row.seq) <= events.body.as_of_seq) && nextEvents.body.as_of_seq >= events.body.as_of_seq,
+      disjoint_node_run: otherNodes.body.data.items?.length === 1
+        && otherNodes.body.data.items[0]?.node_run_id === 'perf-disjoint-node',
+    }
+    expect([tasks, run, nodes, events].every(({ body, timing }) => body.ok && timing.status === 200)).toBe(true)
+    expect(run.body.data.top_nodes).toHaveLength(10)
+    return { http: { list_tasks: tasks.timing, get_run: run.timing, list_nodes: nodes.timing, list_events: events.timing }, checks }
+  } finally {
+    try { await q26Server?.close() } finally { await q27Server.close() }
+  }
+}
+
+function seedCounts(q26Db: Db, q27Db: Db) {
+  const count = (db: Db, table: string, where = '') => (db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table} ${where}`).get() as { n: number }).n
+  return {
+    q27_tasks: count(q27Db, 'tasks'), q27_runs: count(q27Db, 'runs'), q27_nodes: count(q27Db, 'node_runs'),
+    q27_decisions: count(q27Db, 'decisions'), q27_start_receipts: count(q27Db, 'start_run_operations'), q27_plans: count(q27Db, 'task_plans'),
+    q26_nodes: count(q26Db, 'node_runs', "WHERE run_id = 'perf-run-q26'"),
+    q26_events: count(q26Db, 'events'), q26_decisions: count(q26Db, 'decisions'),
+    q26_executions: count(q26Db, 'tool_executions'), q26_attestations: count(q26Db, 'attestations'),
+  }
+}
+
+function measureQ27Writes(current: Db) {
+  const dir = mkdtempSync(join(os.tmpdir(), 'orchestra-t07-old-'))
+  const before = openDb(join(dir, 'orchestra.db'))
+  try {
+    const migrations = loadSteps(defaultMigrationsDir())
+    applySteps(before, migrations.filter(({ version }) => version < 59))
+    const seedOldAt = performance.now()
+    seedQ27(before, true)
+    const seedBeforeMs = performance.now() - seedOldAt
+    const migrateAt = performance.now()
+    applySteps(before, migrations)
+    const backfillMs = performance.now() - migrateAt
+    const seedCurrentAt = performance.now()
+    seedQ27(current, true)
+    const seedAfterMs = performance.now() - seedCurrentAt
+    const count = before.raw.prepare('SELECT COUNT(*) AS rows FROM task_attention_order').get() as { rows: number }
+    expect(count.rows).toBe(Q27_TASK_COUNT)
+    return { q27_seed_before_ms: seedBeforeMs, q27_seed_after_ms: seedAfterMs, q27_backfill_ms: backfillMs, q27_backfill_rows: count.rows }
+  } finally {
+    before.raw.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+it.runIf(Boolean(strictEvidenceDir))('S6 T07 · 生产四路读取、原始样本和 SQL 计划', async () => {
+  const dir = resolve(strictEvidenceDir!)
+  const relativeDir = relative(resolve('tmp'), dir)
+  if (!relativeDir || relativeDir.startsWith('..') || parse(relativeDir).root) throw new Error('Use a fresh evidence directory under tmp/')
+  mkdirSync(dir, { recursive: true })
+  const checkpoint = join(dir, 'checkpoints.ndjson')
+  const snapshot = gitSnapshot()
+  const startAt = new Date().toISOString()
+  writeFileSync(checkpoint, JSON.stringify({ stage: 'start', started_at: startAt, ...snapshot, pid: process.pid }) + '\n', { flag: 'wx' })
+  const record = (event: object) => appendFileSync(checkpoint, JSON.stringify(event) + '\n')
+  const own26 = freshLedger()
+  const own27 = freshLedger()
+  try {
+    seedQ26(own26.db)
+    const write_cost = measureQ27Writes(own27.db)
+    withTx(own27.db, (tx) => appendEvent(tx, { type: 'perf.seeded' }))
+    withTx(own26.db, (tx) => {
+      tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('perf-disjoint-run','perf-task-q26','succeeded',1,?,?)", [BASE_TS, BASE_TS])
+      tx.run("INSERT INTO node_runs (node_run_id,run_id,node_id,seq,status,node_type,revision,created_at,updated_at) VALUES ('perf-disjoint-node','perf-disjoint-run','unrelated',1,'done','agent',1,?,?)", [BASE_TS, BASE_TS])
+    })
+    const seedStats = seedCounts(own26.db, own27.db)
+    record({ stage: 'seeded', seeds: seedStats, write_cost })
+
+    const cases = {
+      list_tasks: { db: own27.db, read: () => { const r = listTaskSummaries(own27.db); return { size: r.items.length, as_of_seq: r.as_of_seq } } },
+      get_run: { db: own26.db, read: () => { const r = getRun(own26.db, Q26_RUN_ID); return { size: r.total, as_of_seq: r.as_of_seq } } },
+      list_nodes: { db: own26.db, read: () => { const r = listNodes(own26.db, Q26_RUN_ID, NODE_PAGE_SIZE); return { size: r.items.length, as_of_seq: r.as_of_seq } } },
+      list_events: { db: own26.db, read: () => { const r = listEvents(own26.db, { fromSeq: 0, limit: 200 }); return { size: r.rows.length, as_of_seq: r.as_of_seq } } },
+    }
+    const config = { ...JSON.parse(readFileSync(resolve('orchestra.config.json'), 'utf8')), phase: 'S6' }
+    const configBytes = JSON.stringify(config)
+    const configPath = join(dir, 'isolated-config.json')
+    writeFileSync(configPath, configBytes, { flag: 'wx' })
+    const q26Sqlite = (own26.db.raw.prepare('SELECT sqlite_version() AS version').get() as { version: string }).version
+    const disk = statfsSync(own26.dir)
+    const baseTables = (own26.db.raw.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as { name: string }[]).map(({ name }) => name)
+    const pnpm = process.env.npm_config_user_agent?.match(/^pnpm\/(\S+)/)?.[1]
+      ?? process.env.ORCHESTRA_PERF_PNPM_VERSION
+    if (!pnpm) throw new Error('Run through pnpm exec or record pnpm --version in ORCHESTRA_PERF_PNPM_VERSION')
+    const isolatedRuntime = { node: process.version, sqlite: q26Sqlite, pnpm,
+      disk: `${parse(own26.dir).root} type=${disk.type} block=${disk.bsize} free=${disk.bavail}`,
+      cpu: `${os.cpus().length} × ${os.cpus()[0]?.model ?? 'unknown'}`, config_sha256: sha256Hex(configBytes),
+    }
+    record({ stage: 'runtime', ...isolatedRuntime })
+
+    // SQL interception is only used during diagnostic reads, outside the timed loop.
+    const routeKeys = Object.keys(cases) as PerfRoute[]
+    const captured = routeKeys.map((key) => [key, captureQueries(cases[key].db, cases[key].read)] as const)
+    const filteredTask = captureQueries(own27.db, () => listTaskSummaries(own27.db, { status: 'running' }))
+    if (!filteredTask.value.next_cursor) throw new Error('filtered task seed has no second page')
+    const filteredPage2 = captureQueries(own27.db, () => listTaskSummaries(own27.db, { status: 'running', cursor: filteredTask.value.next_cursor! }))
+    const filtered_task_statements = [...filteredTask.statements, ...filteredPage2.statements]
+    record({ stage: 'plans', captured, filtered_task_statements })
+
+    const busyBefore = cpuSnapshot()
+    timeCalibration()
+    const calibrationBefore = timeCalibration()
+    const measured = new Map(routeKeys.map((key) => {
+      const samples: number[] = []
+      measure(cases[key].read, (ms, round) => { samples.push(ms); record({ stage: 'sample', route: key, round: round + 1, ms }) })
+      return [key, samples]
+    }))
+    const calibrationAfter = timeCalibration()
+    const busyAfter = cpuSnapshot()
+    const { http, checks } = await probeRoutes(own26.db, own27.db, configPath)
+    const end = gitSnapshot()
+    const raw = {
+      schema_version: 1, completed: true,
+      candidate: { commit: snapshot.commit, clean_start: snapshot.clean, clean_end: end.clean, end_commit: end.commit },
+      environment: { ...isolatedRuntime, start_at: startAt, end_at: new Date().toISOString(),
+        busy_fraction: busyCoresBetween(busyBefore, busyAfter) / os.cpus().length,
+        calibration_before_ms: calibrationBefore, calibration_after_ms: calibrationAfter },
+      seeds: seedStats, warmups: WARMUP_ROUNDS, write_cost,
+      cases: Object.fromEntries(captured.map(([key, capture]) => [key, {
+        ...capture.value, path: PERF_BUDGETS[key].route, http: http[key], samples_ms: measured.get(key), statements: capture.statements,
+      }])),
+      checks, filtered_task_statements, base_tables: baseTables,
+    }
+    const bytes = JSON.stringify(raw, null, 2) + '\n'
+    const evidence = join(dir, 'perf-report.json')
+    writeFileSync(evidence, bytes, { flag: 'wx' })
+    writeFileSync(evidence + '.sha256', sha256Hex(bytes) + '\n', { flag: 'wx' })
+    const verdict = assessPerfReport(raw)
+    record({ stage: 'verdict', ...verdict })
+    console.log('[T07] ' + JSON.stringify({ evidence, ...verdict }))
+    expect(verdict.errors).toEqual([])
+  } catch (error) {
+    record({ stage: 'failed', message: String(error) })
+    throw error
+  } finally {
+    for (const fixture of [own26, own27]) {
+      fixture.db.raw.close()
+      rmSync(fixture.dir, { recursive: true, force: true })
+    }
+  }
+}, 600_000)

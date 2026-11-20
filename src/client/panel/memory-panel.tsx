@@ -54,6 +54,7 @@ export type MemoryPanelProps = {
   onSnapshot?: (asOfSeq: number) => void
   /** 跳到「等你决定」去看同一张审批卡。 */
   onOpenDecisions?: () => void
+  onOpenTasks?: () => void
 }
 
 type Notice = { text: string; tone: 'ok' | 'error' }
@@ -70,7 +71,7 @@ function recoveryError(error: unknown): string {
   return describeDecisionError(error)
 }
 
-export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, onSnapshot, onOpenDecisions }: MemoryPanelProps) {
+export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, onSnapshot, onOpenDecisions, onOpenTasks }: MemoryPanelProps) {
   const [batches, setBatches] = useState<MemoryBatchView[]>([])
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -100,13 +101,14 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
   const latest = useMemo(() => {
     if (batches.length === 0) return undefined
     return [...batches].sort((a, b) =>
-      (b.attempt - a.attempt)
-      || ((Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0))
+      ((Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0))
       || b.created_at.localeCompare(a.created_at))[0]
   }, [batches])
 
   // ① 已经写进去的条目。
-  const writtenItems = useMemo(() => batches.flatMap((batch) => batch.items.filter((item) => item.status === 'applied')), [batches])
+  const writtenItems = useMemo(() => batches.flatMap((batch) => batch.items
+    .filter((item) => item.status === 'applied')
+    .map((item) => ({ item, key: JSON.stringify([batch.batch_id, item.client_key]) }))), [batches])
   // ② 还有什么没定。
   const awaitingBatches = useMemo(() => batches.filter((batch) => batch.status === 'awaiting_human'), [batches])
   const pendingTotal = useMemo(() => awaitingBatches.reduce((sum, batch) => sum + batch.pending_count, 0), [awaitingBatches])
@@ -149,6 +151,7 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
     <header className="ops-page-header">
       <div>
         <h1 id="memory-panel-title">记忆管理</h1>
+        <p className="ops-meta">把一次成功任务中值得复用的经验整理成条目，例如已验证的发布步骤。你可以检查提议和来源，批准后才写入记忆插件。</p>
         {latest && <p className="ops-meta">最近批次 · {memoryCopy(latest).text}</p>}
       </div>
       <label style={toggleStyle}>
@@ -166,16 +169,16 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
       {writtenItems.length === 0
         ? <p style={mutedStyle}>这次还没有记下东西。</p>
         : <ul style={listStyle}>
-          {writtenItems.map((item) => <li key={item.client_key} style={itemStyle}>
+          {writtenItems.map(({ item, key }) => <li key={key} style={itemStyle}>
             <p style={itemTitleStyle}>{item.title}</p>
             <p style={mutedStyle}>层：{item.layer}</p>
             <p style={mutedStyle}>{item.digest}</p>
             <button
               type="button"
-              onClick={() => setOpenedItem(openedItem === item.client_key ? null : item.client_key)}
+              onClick={() => setOpenedItem(openedItem === key ? null : key)}
               style={buttonStyle}
-            >{openedItem === item.client_key ? '收起' : '展开看全文与来源'}</button>
-            {openedItem === item.client_key && <div style={detailStyle}>
+            >{openedItem === key ? '收起' : '展开看全文与来源'}</button>
+            {openedItem === key && <div style={detailStyle}>
               <p style={mutedStyle}>全文：{item.content ?? NOT_PROVIDED}</p>
               <p style={mutedStyle}>来源：{item.source ?? NOT_PROVIDED}</p>
             </div>}
@@ -228,7 +231,9 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
     <section aria-labelledby="memory-q4-title" style={blockStyle}>
       <h2 id="memory-q4-title" style={sectionTitleStyle}>整理状态</h2>
       {!latest
-        ? <p style={mutedStyle}>{memoryEnabled === false ? '当前宿主尚未启用记忆整理。' : '记录这次任务可以从已成功任务的「结果」发起。'}</p>
+        ? <div><p style={mutedStyle}>{memoryEnabled === false ? '当前连接无法发起记忆整理。请在设置中查看宿主连接状态。' : '要记录这次任务的经验，打开成功运行的「结果」，选择「整理为记忆」，写下希望保留的内容。'}</p>
+            {memoryEnabled && onOpenTasks && <button type="button" onClick={onOpenTasks} style={buttonStyle}>去任务中选择一次成功运行</button>}
+          </div>
         : <>
           {latest.status === 'failed' || latest.status === 'declined'
             ? <>

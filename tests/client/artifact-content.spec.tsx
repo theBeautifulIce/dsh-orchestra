@@ -75,6 +75,7 @@ it('ignores the first A errors and results while the current A loads after A →
 
 it.each([
   [{ expired: true }, '已超过保留期限'],
+  [{ retain_until: 'invalid old timestamp' }, '保留期限未通过校验'],
   [{ file_name: undefined }, '仅有登记记录'],
 ] as const)('keeps the artifact content unavailable for %j', async (change, message) => {
   const pending = deferred<FakeReply>()
@@ -91,6 +92,29 @@ it.each([
     expect(service.calls).toHaveLength(1)
     await view.rerender(<ArtifactContent api={api} artifact={artifact} />)
     expect(view.findAll('pre')).toHaveLength(0)
+  } finally { view.unmount() }
+})
+
+it('removes downloaded preview text and actions at the deadline even without a new metadata response', async () => {
+  const now = Date.parse('2026-11-19T01:00:00.000Z')
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+  const timers = vi.spyOn(window, 'setTimeout')
+  const expiring = { ...artifact, retain_until: new Date(now + 5_000).toISOString() }
+  const service = createFakeService(() => preview('到期后应从界面移除'))
+  const api = createResourcesApi(createApiClient('http://artifact.test', service.fetcher))
+  const view = await renderPanel(<ArtifactContent api={api} artifact={expiring} />)
+  try {
+    await view.click(view.findAll('button')[0]!)
+    expect(view.findAll('pre')[0]?.textContent).toContain('到期后应从界面移除')
+    const index = timers.mock.calls.findIndex(([, ms]) => ms === 5_000)
+    const tick = timers.mock.calls[index]?.[0]
+    if (typeof tick !== 'function') throw new Error('Expiry timer was not scheduled')
+    clock.mockReturnValue(now + 5_000)
+    tick()
+    await view.flush()
+    expect(view.findAll('button, pre')).toHaveLength(0)
+    expect(view.text()).toContain('已超过保留期限')
+    expect(service.calls).toHaveLength(1)
   } finally { view.unmount() }
 })
 

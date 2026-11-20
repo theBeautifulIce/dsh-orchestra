@@ -1,12 +1,15 @@
 import { runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
 import { ReworkPanel } from './rework-panel.tsx'
 import type { ReworkApi } from '../api/rework.ts'
+import type { ModelEscalationApi } from '../api/model-escalation.ts'
+import { ModelEscalation } from './model-escalation.tsx'
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client.ts'
 import type { TaskCommands } from '../api/task-commands.ts'
 import type { createTaskTriggerCommands } from '../api/task-trigger-commands.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
 import type { TaskTriggerView } from '../../core/task-trigger.ts'
+import { MODEL_LEVELS } from '../../executor/model-routing.ts'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { NodeRunView, RunSummary, TaskSummary } from '../api/types.ts'
 import { COPY } from './copy.ts'
@@ -30,6 +33,7 @@ export type TaskDetailScreenProps = {
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
   rework?: ReworkApi
+  modelEscalation?: ModelEscalationApi
   reworkPlannerEnabled?: boolean
   taskCommands?: TaskCommands
   triggerCommands?: Pick<ReturnType<typeof createTaskTriggerCommands>, 'setEnabled'>
@@ -52,7 +56,7 @@ const NODE_TERMINAL_STATUSES = new Set([
 ])
 
 export function TaskDetailScreen({
-  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision,
+  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision,
 }: TaskDetailScreenProps) {
   const [data, setData] = useState<DetailData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -143,7 +147,7 @@ export function TaskDetailScreen({
       {showRun && <div className="task-inspector-back"><button className="task-quiet-button" type="button" onClick={returnToTask}>返回任务</button></div>}
       {showRun && task && run && <>
         {rework && <ReworkPanel api={api} commands={rework} runId={run.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
-        <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision} />
+        <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} modelEscalation={modelEscalation} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision} />
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
       </>}
@@ -380,8 +384,8 @@ function StartMemory({ runId, commands, onOpenMemory }: { runId: string; command
     {state === 'done'
       ? <><p role="status">已取得整理回执，可在记忆页查看批次状态。</p><button type="button" style={quietButtonStyle} onClick={onOpenMemory}>查看记忆批次</button></>
       : <form onSubmit={(event) => { event.preventDefault(); void submit() }} style={{ display: 'grid', gap: 8, marginTop: 8 }}>
-        <label>整理理由 <textarea value={reason} required maxLength={500} disabled={state === 'busy' || state === 'unknown'} onChange={(event) => setReason(event.target.value)} /></label>
-        <p style={mutedStyle}>整理结果会进入评估和审批流程。</p>
+        <label>希望下次复用什么？ <textarea value={reason} required maxLength={500} placeholder="例如：保留这次核对数据口径的步骤和验证依据" disabled={state === 'busy' || state === 'unknown'} onChange={(event) => setReason(event.target.value)} /></label>
+        <p style={mutedStyle}>系统会从本次运行提议记忆条目。请在审批中心核对，获批条目的写入结果可在「记忆」中查看。</p>
         {state === 'error' && <p role="alert">{errorText}</p>}
         {state === 'unknown' && <p role="status">结果暂不可确认。再次查询会保留原回执编号。</p>}
         <PanelCommandButton type="submit" disabled={state === 'busy' || !reason.trim()}>{state === 'unknown' ? '查询或重试' : '发起整理'}</PanelCommandButton>
@@ -416,11 +420,11 @@ function ArchiveAction({ task, commands, onChange }: { task: TaskSummary; comman
   </div>
 }
 
-type RunDetailsProps = Pick<TaskDetailScreenProps, 'api' | 'onSnapshot' | 'onOpenDecision'> & {
+type RunDetailsProps = Pick<TaskDetailScreenProps, 'api' | 'onSnapshot' | 'onOpenDecision' | 'modelEscalation'> & {
   run: RunSummary; task: TaskSummary; tab: RunTab; reloadVersion: number
 }
 
-function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDecision }: RunDetailsProps) {
+function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDecision, modelEscalation }: RunDetailsProps) {
   const [nodes, setNodes] = useState<NodeRunView[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
@@ -456,6 +460,7 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
         <h3 style={sectionTitleStyle}>执行步骤 · {run.total}</h3>
         <p style={mutedStyle}><RunStatusLabel status={run.status} displayStatus={run.display_status} />{run.settling ? ' · 正在收尾' : ''}</p>
         {nodes.length ? <ol style={stepListStyle}>{nodes.map((node) => <li key={node.node_run_id}><NodeRow node={node} onOpenDecision={onOpenDecision} />
+          {modelEscalation && node.node_type === 'agent' && node.model_assignment && <ModelEscalation api={modelEscalation} node={node} reloadVersion={reloadVersion} />}
           <NodeHistoryDisclosure api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} /></li>)}</ol>
           : <p style={mutedStyle}>这次运行没有执行步骤。</p>}
       </section>}
@@ -552,7 +557,7 @@ function NodeRow({ node, onOpenDecision }: { node: NodeRunView; onOpenDecision?:
     {node.hang_reason && <p style={{ margin: '8px 0 0', fontSize: FONT_PX.body }}>{node.hang_reason}</p>}
     {assignment && <div style={mutedStyle}>
       <strong>{model ? '实际执行模型' : assignment.state === 'confirmed' ? '宿主确认模型' : assignment.state === 'rejected' ? '模型未获宿主确认' : '拟用模型'} · {model ? `${model.provider} / ${model.model}` : assignment.model_ref}</strong>
-      <p style={mutedStyle}>{({ routine: '常规', standard: '中等', complex: '复杂' })[assignment.complexity]} · {assignment.reason}</p>
+      <p style={mutedStyle}>{MODEL_LEVELS[assignment.complexity].label} · {assignment.reason}</p>
       {assignment.settings_revision != null && <p style={mutedStyle}>按用户配置 · 修订 {assignment.settings_revision}</p>}
     </div>}
   </article>

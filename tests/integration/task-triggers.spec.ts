@@ -20,14 +20,30 @@ const workflowId = 'trigger_test_flow'
 const node = (node_id: string, type: string) => ({ node_id, type, title: node_id, position: { x: 0, y: 0 }, config: {} })
 const definition = { name: '发布流程', nodes: [node('trigger', 'trigger'), node('read', 'agent')], edges: [{ from: 'trigger', to: 'read' }] }
 
-async function boot(dir: string, resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs) {
+async function boot(dir: string, resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs, phase: 'S5' | 'S6' = 'S5') {
   return serveOrchestra({
-    dbFile: join(dir, 'orchestra.sqlite'), secret: SECRET, phase: 'S5',
+    dbFile: join(dir, 'orchestra.sqlite'), secret: SECRET, phase,
     asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }),
     resolveTriggerNodeSpecs,
   })
 }
+
+it('S6 retains trigger routes and requires a passing test for the exact draft before publishing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-s6-stage-'))
+  const service = await boot(dir, undefined, 'S6')
+  try {
+    const query = await fetch(service.endpoint + '/v1/task-triggers', { headers: HEADERS })
+    expect(query.status).toBe(200)
+    expect(await query.json()).toMatchObject({ ok: true, data: { items: [] } })
+    const commands = service.orchestra.commands
+    commands.createWorkflow({ workflowId, name: definition.name, scope: 'reusable', definition, actor: 'tester', now: NOW, operationId: uuidv7() })
+    const input = { workflowId, revision: 1, baseVersion: 0, note: 'stage regression', actor: 'tester', now: NOW, operationId: uuidv7() }
+    expect(() => commands.publishWorkflow(input)).toThrow(expect.objectContaining({ code: 'CONFIRMATION_REQUIRED' }))
+    expect(commands.testWorkflowDraft({ workflowId, revision: 1, now: NOW }).passed).toBe(true)
+    expect(commands.publishWorkflow(input)).toMatchObject({ version: '1' })
+  } finally { await service.close(); rmSync(dir, { recursive: true, force: true }) }
+})
 
 function publish(service: Awaited<ReturnType<typeof boot>>) {
   service.orchestra.commands.createWorkflow({

@@ -7,7 +7,11 @@ import { withTx } from '../infra/sqlite/driver.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from './workflows.ts'
 import { assertWorkflowUsable } from './commands/workflows.ts'
+import { requireRunIntake } from './trial-access.ts'
+import { requireTrialFlow } from './trial-circles.ts'
 import { requestHashOf, runIdempotentCommand } from './commands/idempotency.ts'
+import { isReleaseWorkflow, RELEASE_WORKFLOW_ID } from '../core/wf-release-v1.ts'
+import { releaseRunAuthority } from './release-authority.ts'
 
 export type Autonomy = 'autonomous' | 'assisted' | 'supervised'
 export const AUTONOMY_LEVELS: readonly Autonomy[] = ['autonomous', 'assisted', 'supervised']
@@ -104,6 +108,7 @@ export function createRunInTx(
   p: CreateRunParams,
   triggerId?: string,
   trusted?: TrustedTaskLocalAuthority,
+  releaseAuthority?: symbol,
 ): CreateRunResult {
   const autonomy = p.autonomy ?? 'autonomous'
   if (!AUTONOMY_LEVELS.includes(autonomy)) {
@@ -115,6 +120,9 @@ export function createRunInTx(
   }
   const def = p.workflowId === undefined ? catalog.get(p.workflowVersion) : catalog.get(p.workflowId, p.workflowVersion)
   const workflowId = workflowIdOf(def)
+  if (isReleaseWorkflow(workflowId) && (releaseAuthority !== releaseRunAuthority || workflowId !== RELEASE_WORKFLOW_ID || triggerId || p.nodeIds)) {
+    throw new OrchError('FORBIDDEN', '发布流程只能从专用受信入口整体启动')
+  }
   // task_local 只能作为所属任务的子流程出现，不许当独立根工作流起（审计 P2-1：
   // 客户端自报 task id 不是授权凭据，根入口拿不到可信的 owner 上下文）
   // 服务端可信编排路径是唯一例外：凭据里的 owner 必须与登记的 owner_task_id 一致，否则照样拒
@@ -286,6 +294,8 @@ export type RunRowInput = {
 
 /** 事务内建 run 行：createRun 与记忆发起共用，保证 run 与业务写入同一笔事务提交 */
 export function insertRunInTx(tx: Tx, row: RunRowInput): void {
+  requireRunIntake(tx)
+  requireTrialFlow(tx, row.workflow_id, row.workflow_definition_hash)
   const rootRunId = row.root_run_id ?? row.run_id
   const depth = row.subworkflow_depth ?? 0
   tx.run(

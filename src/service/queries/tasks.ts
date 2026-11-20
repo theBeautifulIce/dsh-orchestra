@@ -1,4 +1,5 @@
 import { OrchError } from '../../core/errors.ts'
+import { readReleaseGateCard, type ReleaseGateCardState } from '../release-workflow.ts'
 import type { TaskLane, TaskOrigin } from '../../core/task-workspace.ts'
 import type { Autonomy } from '../runs.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
@@ -139,37 +140,6 @@ const ORPHANED_NODES = `FROM node_runs n WHERE n.run_id = t.current_run_id
 const RUN_ACCEPTANCE = `FROM run_acceptance_results a WHERE a.run_id = t.current_run_id`
 const CURRENT_RUN_JOINS = `LEFT JOIN runs r ON r.run_id = t.current_run_id
   LEFT JOIN task_triggers tr ON tr.task_id = t.task_id`
-const TASK_LANE = `CASE
-  WHEN attention_weight >= 3 OR status IN ('paused','orphaned','failed','failed_with_unverified') THEN 'attention'
-  WHEN trigger_enabled = 1 AND (current_run_status IS NULL OR current_run_status IN ('succeeded','cancelled')) THEN 'upcoming'
-  WHEN status IN ('succeeded','succeeded_with_unverified','cancelled') THEN 'finished'
-  WHEN status IN ('reserved','queued') THEN 'upcoming'
-  WHEN attention_weight = 2 OR status IN ('running','settling','waiting') THEN 'running'
-  ELSE 'upcoming' END`
-
-// Only facts that affect rank, lane or filters are read before the page limit.
-// The precedence matches deriveAttention(), including execution failure before delivery failure.
-const TASK_ATTENTION_CTE = `WITH task_attention AS (
-  SELECT t.task_id, t.title, t.status, t.updated_at, t.archived_at, t.trigger_kind,
-    r.status AS current_run_status, tr.enabled AS trigger_enabled,
-    CASE
-      WHEN EXISTS (SELECT 1 ${OPEN_DECISIONS}) THEN 6
-      WHEN EXISTS (SELECT 1 ${UNVERIFIED_NODES}) THEN 5
-      WHEN r.status IN ('failed','failed_with_unverified') THEN 4
-      WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'failed') THEN 4
-      WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'unverifiable') THEN 5
-      WHEN r.status = 'orphaned' OR EXISTS (SELECT 1 ${ORPHANED_NODES}) THEN 3
-      WHEN t.status = 'running' OR r.status NOT IN
-        ('succeeded','succeeded_with_unverified','failed','failed_with_unverified','orphaned','cancelled') THEN 2
-      ELSE 1
-    END AS attention_weight
-  FROM tasks t ${CURRENT_RUN_JOINS}
-), task_workspace AS (
-  SELECT *, COALESCE(archived_at, updated_at) AS sort_at,
-    CASE WHEN archived_at IS NULL THEN attention_weight ELSE 1 END AS sort_weight
-  FROM task_attention
-)`
-
 // Hydrate only the materialized page while keeping the rank, counts and event waterline in the same read snapshot.
 const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_version, t.status, t.display_status,
   t.current_run_id, t.session_id, t.updated_at, t.archived_at, t.trigger_kind, t.autonomy,
@@ -180,7 +150,7 @@ const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflo
     WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'unverifiable') THEN 'unverifiable'
     WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE}) THEN 'passed'
     WHEN EXISTS (SELECT 1 FROM start_run_operations o JOIN task_plans plan
-      ON plan.launch_operation_id = o.operation_id WHERE o.run_id = t.current_run_id) THEN 'pending'
+      ON plan.launch_operation_id = o.operation_id WHERE o.task_id = t.task_id AND o.run_id = t.current_run_id) THEN 'pending'
     ELSE 'not_applicable'
   END AS delivery_acceptance,
   (SELECT COUNT(*) ${OPEN_DECISIONS}) AS open_decision_count,
@@ -191,28 +161,29 @@ const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflo
   (SELECT MIN(n.heartbeat_at) FROM node_runs n WHERE n.run_id = t.current_run_id
     AND n.heartbeat_at IS NOT NULL AND n.status NOT IN ('done','failed','timeout','abandoned_unverified',
       'failed_with_unverified','orphaned','superseded','cancelled')) AS oldest_active_heartbeat_at
-FROM (SELECT *, ${TASK_LANE} AS lane FROM task_page) p
+FROM task_page p
 JOIN tasks t ON t.task_id = p.task_id ${CURRENT_RUN_JOINS}`
-const TASK_PAGE_START = TASK_ATTENTION_CTE + `, task_page AS MATERIALIZED (
-  SELECT task_id, sort_at, sort_weight, status, current_run_status, trigger_enabled, attention_weight
-  FROM task_workspace WHERE `
+const TASK_PAGE_START = `WITH task_page AS MATERIALIZED (
+  SELECT task_id, sort_at, sort_weight, lane FROM task_attention_order WHERE `
 const TASK_PAGE_ORDER = ' ORDER BY sort_weight DESC, sort_at DESC, task_id DESC'
 
 export type WorkspaceOverview = {
   lanes: Record<TaskLane, number>
   open_decisions: number
   unverified_effects: number
+  release_gate?: ReleaseGateCardState
 }
 
-export function getWorkspaceOverview(db: Db): { item: WorkspaceOverview; as_of_seq: number } {
+export function getWorkspaceOverview(db: Db, includeRelease = false): { item: WorkspaceOverview; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const lanes: WorkspaceOverview['lanes'] = { upcoming: 0, running: 0, attention: 0, finished: 0 }
-    const counts = ctx.tx.all<{ lane: TaskLane; count: number }>(TASK_ATTENTION_CTE +
-      ` SELECT ${TASK_LANE} AS lane, COUNT(*) AS count FROM task_workspace WHERE archived_at IS NULL GROUP BY lane`)
+    const counts = ctx.tx.all<{ lane: TaskLane; count: number }>(
+      'SELECT lane, COUNT(*) AS count FROM task_attention_order WHERE archived = 0 GROUP BY lane')
     for (const row of counts) lanes[row.lane] = row.count
     const decisions = ctx.tx.get<{ count: number }>("SELECT COUNT(*) AS count FROM decisions WHERE status IN ('pending','acknowledged','blocked_for_human')")
     const effects = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM node_runs n WHERE ' + UNVERIFIED_EFFECT)
-    return { item: { lanes, open_decisions: decisions?.count ?? 0, unverified_effects: effects?.count ?? 0 }, as_of_seq: ctx.as_of_seq }
+    return { item: { lanes, open_decisions: decisions?.count ?? 0, unverified_effects: effects?.count ?? 0,
+      ...(includeRelease ? { release_gate: readReleaseGateCard(ctx.tx) } : {}) }, as_of_seq: ctx.as_of_seq }
   })
 }
 
@@ -227,29 +198,31 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
   }
   return withReadTx(db, (ctx) => {
     const now = params.now ?? Date.now()
-    const where = [filter.archived ? 'archived_at IS NOT NULL' : 'archived_at IS NULL']
-    const values: unknown[] = []
+    const where = ['archived = ?']
+    const values: unknown[] = [filter.archived ? 1 : 0]
     if (filter.status) { where.push('status = ?'); values.push(filter.status) }
     if (filter.attention) { where.push('attention_weight = ?'); values.push(attentionWeight(filter.attention)) }
-    if (filter.lane) { where.push(`(${TASK_LANE}) = ?`); values.push(filter.lane) }
+    if (filter.lane) { where.push('lane = ?'); values.push(filter.lane) }
     if (filter.trigger_kind === 'unknown') where.push('trigger_kind IS NULL')
     else if (filter.trigger_kind) { where.push('trigger_kind = ?'); values.push(filter.trigger_kind) }
     if (filter.updated_from) { where.push('updated_at >= ?'); values.push(filter.updated_from) }
     if (filter.updated_before) { where.push('updated_at < ?'); values.push(filter.updated_before) }
     if (filter.query) {
-      where.push('(instr(lower(title), lower(?)) > 0 OR instr(lower(task_id), lower(?)) > 0)')
+      where.push(`EXISTS (SELECT 1 FROM tasks search
+        WHERE search.task_id = task_attention_order.task_id AND
+          (instr(lower(search.title), lower(?)) > 0 OR instr(lower(search.task_id), lower(?)) > 0))`)
       values.push(filter.query, filter.query)
     }
     if (params.cursor) {
-      const cursor = decodeCursor(params.cursor, 'tasks', filter)
+      const cursor = decodeCursor(params.cursor, 'tasks', filter, now)
       const separator = cursor.last_key.indexOf('\t')
       const lastWeight = Number(cursor.last_key.slice(0, separator))
       const lastUpdatedAt = cursor.last_key.slice(separator + 1)
       if (separator < 1 || !Number.isInteger(lastWeight) || lastWeight < 1 || lastWeight > 6 || !lastUpdatedAt) {
         throw new OrchError('CURSOR_EXPIRED', '游标里的任务位置不合法，请重新加载', { task_id: cursor.last_id })
       }
-      where.push('(sort_weight < ? OR (sort_weight = ? AND (sort_at < ? OR (sort_at = ? AND task_id < ?))))')
-      values.push(lastWeight, lastWeight, lastUpdatedAt, lastUpdatedAt, cursor.last_id)
+      where.push('(sort_weight, sort_at, task_id) < (?, ?, ?)')
+      values.push(lastWeight, lastUpdatedAt, cursor.last_id)
     }
     const rows = ctx.tx.all<TaskRow & { sort_weight: number; sort_at: string }>(
       TASK_PAGE_START + where.join(' AND ') + TASK_PAGE_ORDER + ' LIMIT ?) '

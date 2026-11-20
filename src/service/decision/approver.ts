@@ -35,7 +35,12 @@ export function defaultApprover(kind: DecisionKind, actionCategory?: string): Ap
 
 export function assertApprover(p: ApproverCheck): void {
   const approver = validateApprover(p.approver)
-  if (approver === 'either') return
+  if (approver === 'either') {
+    if (p.actor.kind === 'agent' && (p.evidenceProducers ?? []).includes(p.actor.id)) {
+      throw new OrchError('FORBIDDEN', 'Agent 不能批准自己产出的证据', { approver, actor: p.actor.id })
+    }
+    return
+  }
   if (approver === 'human') {
     if (p.actor.kind !== 'human') {
       throw new OrchError('FORBIDDEN', '这张 decision 只能由人批准', { approver, actor: p.actor.kind })

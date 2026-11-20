@@ -6,6 +6,8 @@ import { deepFreeze } from '../core/freeze.ts'
 import { mergePassConditions, type PassCondition } from '../core/policy.ts'
 import { assertDefinitionAllowed, SUBWORKFLOW_MAX_DEPTH, type WorkflowDefinition, type WorkflowNodeDef } from '../core/workflow-def.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
+import { checkToolPolicy, resolveToolSet } from '../executor/session.ts'
+import { ToolRegistry } from '../executor/tools.ts'
 
 // 旧版本号没有工作流命名空间：读旧库、旧 run、旧 API 全部归到这个默认空间
 export const DEFAULT_WORKFLOW_ID = 'default'
@@ -57,11 +59,13 @@ export class WorkflowCatalog {
   private readonly db?: Db
 
   private readonly isReadOnlyTool?: (tool: string) => boolean
+  private readonly registry?: ToolRegistry
 
-  constructor(phase: Phase, db?: Db, isReadOnlyTool?: (tool: string) => boolean) {
+  constructor(phase: Phase, db?: Db, isReadOnlyTool?: (tool: string) => boolean, registry?: ToolRegistry) {
     this.phase = phase
     this.db = db
     this.isReadOnlyTool = isReadOnlyTool
+    this.registry = registry
   }
 
   initialAgentEffect(node: WorkflowNodeDef): 'pure' | 'compensable' | 'irreversible' {
@@ -130,7 +134,7 @@ export class WorkflowCatalog {
   }
 
   requireWorkflowCapability(workflowId: string | undefined): void {
-    if (workflowId === 'wf_release_v1') requireCapability(this.phase, 'release')
+    if (workflowId === 'wf_release_v1' || workflowId === 'wf_gate_check_v1') requireCapability(this.phase, 'release')
   }
 
   load(def: WorkflowDefinition): LoadWorkflowResult {
@@ -138,6 +142,7 @@ export class WorkflowCatalog {
     // 调用方之后再改原对象（哪怕改嵌套的 tools.allow）也影响不到目录里的定义（第二次意见 P1 问题 A）
     const snapshot = snapshotOf(def)
     this.validateDefinition(snapshot)
+    if (this.phase === 'S6') this.checkRegisteredTools(snapshot)
     const workflowId = workflowIdOf(snapshot)
     const key = String(snapshot.workflow_version)
     assertDefinitionIdentity(workflowId, key)
@@ -186,6 +191,20 @@ export class WorkflowCatalog {
     // 子流程尚未发布的合法顺序（先父后子）交给派发期的强校验，不在这里误拒。
     this.assertSubworkflowClosure(workflowId, key)
     return summarize(workflowId, snapshot)
+  }
+
+  private checkRegisteredTools(def: WorkflowDefinition): void {
+    const registry = this.registry ?? new ToolRegistry()
+    const verify = (policy: WorkflowNodeDef['tools']) => {
+      if (policy && resolveToolSet(registry, policy).some(tool => tool.capability !== 'read_only')) {
+        throw new OrchError('VERIFIER_TOOL_POLICY_MUTATING', '核验工具必须由宿主登记为只读')
+      }
+    }
+    verify(def.verifier?.toolPolicy)
+    for (const node of def.nodes) {
+      checkToolPolicy(registry, { ...node.tools, declaredPolicy: node.side_effect_policy })
+      verify(node.verifier?.toolPolicy)
+    }
   }
 
   /**

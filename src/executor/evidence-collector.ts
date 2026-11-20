@@ -2,7 +2,9 @@
 // 工具调用的 outbox 先落 pending，再执行；崩溃后 pending 不许盲目重跑，completed 只重发结果。
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
-import { withTx, type Db } from '../infra/sqlite/driver.ts'
+import { requireTrialTool } from '../service/trial-circles.ts'
+import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
+import { assertLeaseValid, loadNodeRun } from '../service/commands/lease.ts'
 import { appendNodeRunEvent } from '../infra/db/ledger.ts'
 import type { ClockProvider } from '../core/clock.ts'
 import {
@@ -62,6 +64,7 @@ export type EvidenceCollectorDeps = {
   nodeRunId: string
   attempt: number
   executorAgentId: string
+  lease?: { lease_id: string; action_generation: number }
   nowAt: () => string
   clock?: ClockProvider
 }
@@ -80,10 +83,24 @@ export type ToolTraceEntry = {
 export class EvidenceCollector {
   private readonly trace: ToolTraceEntry[] = []
   private readonly deps: EvidenceCollectorDeps
+  private readonly lease: EvidenceCollectorDeps['lease']
   private lastEvidenceValue: StrongEvidence | null = null
 
   constructor(deps: EvidenceCollectorDeps) {
     this.deps = deps
+    const current = deps.lease ?? deps.db.raw.prepare(
+      'SELECT lease_id,action_generation FROM node_runs WHERE node_run_id=? AND attempt=? AND lease_id IS NOT NULL',
+    ).get(deps.nodeRunId, deps.attempt) as EvidenceCollectorDeps['lease']
+    this.lease = current
+  }
+
+  private checkAuthority(tx: Tx): void {
+    const row = loadNodeRun(tx, this.deps.nodeRunId)
+    if (row.attempt !== this.deps.attempt || (this.lease && (row.lease_id !== this.lease.lease_id
+      || row.action_generation !== this.lease.action_generation || !['started', 'verifying'].includes(row.status)))) {
+      throw new OrchError('STALE_GENERATION', '本次工具执行的授权已变化')
+    }
+    if (this.lease) assertLeaseValid(row, this.deps.nowAt())
   }
 
   get traceEntries(): ToolTraceEntry[] {
@@ -109,6 +126,7 @@ export class EvidenceCollector {
         })
       }
       if (existing.status === 'completed' && existing.result_json) {
+        // A committed receipt belongs to this exact attempt, agent and call ID. Replay performs no new tool action.
         const stored = parseStoredResult(existing.result_json, call.callId)
         if (stored.evidence) this.lastEvidenceValue = { ...stored.evidence }
         if (stored.trace && !this.trace.some((entry) => entry.executionId === stored.trace?.executionId)) {
@@ -150,6 +168,7 @@ export class EvidenceCollector {
   private insertPending(call: ToolCallPayload, requestHash: string): void {
     const now = this.deps.nowAt()
     withTx(this.deps.db, (tx) => {
+      this.checkAuthority(tx)
       tx.run(
         'INSERT INTO bridge_tool_outbox (node_run_id, attempt, executor_agent_id, call_id, tool, request_hash, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)',
         [this.deps.nodeRunId, this.deps.attempt, this.deps.executorAgentId, call.callId, call.tool, requestHash, 'pending', now, now],
@@ -185,6 +204,8 @@ export class EvidenceCollector {
     const verifier = descriptor.effectVerifier
     const target = verifier && this.loadVerificationTarget()
     withTx(this.deps.db, (tx) => {
+      this.checkAuthority(tx)
+      requireTrialTool(tx, call.tool, cwd, descriptor.capability, this.deps.nodeRunId)
       tx.run('UPDATE node_runs SET tool_start_at = ?, updated_at = ? WHERE node_run_id = ?', [startedAt, startedAt, this.deps.nodeRunId])
       appendNodeRunEvent(tx, this.deps.secret, this.deps.nodeRunId, 'tool_started', {
         tool: call.tool,
@@ -211,7 +232,6 @@ export class EvidenceCollector {
     const effectProof = verifier && target && target.workflow_definition_hash === verifier.workflowDefinitionHash
       && target.node_id === verifier.nodeId && cwd === resolveInside(this.deps.runner.root, verifier.cwd ?? '.')
       ? verifyEffectOutput(verifier, target, out) : null
-    this.lastEvidenceValue = { ...out.evidence }
     const trace: ToolTraceEntry = {
       tool: call.tool,
       toolSeq: seq,
@@ -221,12 +241,20 @@ export class EvidenceCollector {
       stderrHash: out.evidence.stderrHash,
       commandHash: out.evidence.commandHash,
     }
-    this.trace.push(trace)
     const result: CollectedToolResult = {
       callId: call.callId, exitCode: out.evidence.exitCode, stdout: out.stdout, stderr: out.stderr,
       trace, evidence: out.evidence,
     }
-    withTx(this.deps.db, (tx) => {
+    const stale = withTx(this.deps.db, (tx) => {
+      try { this.checkAuthority(tx) } catch (error) {
+        if (!(error instanceof OrchError)) throw error
+        appendNodeRunEvent(tx, this.deps.secret, this.deps.nodeRunId, 'tool_result_late', {
+          attempt: this.deps.attempt, call_id: call.callId, execution_id: executionId, tool: call.tool,
+          exit_code: trace.exitCode, stdout_hash: trace.stdoutHash, stderr_hash: trace.stderrHash,
+          command_hash: trace.commandHash, finished_at: finishedAt, reason: error.code,
+        })
+        return error
+      }
       const activeProof = effectProof && tx.get(
         'SELECT 1 FROM node_runs WHERE node_run_id = ? AND attempt = ? AND action_generation = ?',
         [this.deps.nodeRunId, this.deps.attempt, target?.action_generation],
@@ -259,6 +287,9 @@ export class EvidenceCollector {
         ['completed', JSON.stringify({ result, trace, evidence: out.evidence }), finishedAt, this.deps.nodeRunId, this.deps.attempt, this.deps.executorAgentId, call.callId],
       )
     })
+    if (stale) throw stale
+    this.lastEvidenceValue = { ...out.evidence }
+    this.trace.push(trace)
     return result
   }
 

@@ -2,6 +2,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { canonicalJson, hmacSha256Hex, sha256Hex } from '../../core/canonical.ts'
 import { OrchError } from '../../core/errors.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
+import { appendEvent } from '../../infra/db/ledger.ts'
 import type { ResolveDecisionRequest } from '../commands/decisions.ts'
 import { assertOperationId, runIdempotentCommand } from '../commands/idempotency.ts'
 import { DECISION_CHOICE_COLUMNS, isEffectDecision, panelDecisionOptions, panelDecisionRestriction, type DecisionChoiceContext } from './choices.ts'
@@ -12,6 +13,7 @@ const CHALLENGE_TTL_MS = 120_000
 export type DecisionCommandRequest = ResolveDecisionRequest & {
   operationId?: string
   confirmChallenge?: string
+  bindActor?: boolean
 }
 
 export type DecisionCommandResult = { decisionId: string; revision: number; replayed?: boolean }
@@ -62,6 +64,7 @@ export function runDecisionCommand(
   const requestHash = sha256Hex(canonicalJson({
     command: KIND, target: { decision_id: decisionId }, expected: { revision },
     payload: { resolution, payload, contentHash, evidenceProducers, confirm },
+    ...(input.bindActor ? { actor: { kind: actor?.kind, id: actor?.id } } : {}),
   }))
   const read = () => tx.get<DecisionChoiceContext & { revision: number; confirm_required: number }>(
     'SELECT d.revision, d.confirm_required, d.kind, d.status, d.approver, d.expires_at, '
@@ -92,7 +95,7 @@ export function runDecisionCommand(
   let confirmed = false
   let requireEffectSettlement = false
   const outcome = runIdempotentCommand(tx, {
-    kind: KIND, operationId, requestHash, legacyRequestHash, now: input.now,
+    kind: KIND, operationId, requestHash, legacyRequestHash: input.bindActor ? undefined : legacyRequestHash, now: input.now,
     beforeApply: () => {
       const current = read()
       if (input.confirmChallenge) {
@@ -111,7 +114,19 @@ export function runDecisionCommand(
         issue(secret, binding, now)
       }
     },
-  }, () => apply(confirmed, requireEffectSettlement))
+  }, () => {
+    const result = apply(confirmed, requireEffectSettlement)
+    const scope = tx.get<{ run_id: string; node_run_id: string | null }>('SELECT run_id, node_run_id FROM decisions WHERE decision_id = ?', [decisionId])!
+    const evidence = tx.all<{ evidence_id: string }>(
+      'SELECT evidence_id FROM memory_write_recoveries WHERE (decision_id = ? OR abandon_ack_id = ?) AND evidence_id IS NOT NULL'
+      + ' UNION SELECT evidence_id FROM unverified_resolutions WHERE decision_id = ? AND evidence_id IS NOT NULL ORDER BY evidence_id',
+      [decisionId, decisionId, decisionId],
+    )
+    appendEvent(tx, { type: 'decision.command_audited', runId: scope.run_id, nodeRunId: scope.node_run_id,
+      decisionId, payload: { operation_id: operationId, actor_id: actor?.id ?? null, actor_kind: actor?.kind ?? null,
+        resolution, result: 'applied', occurred_at: input.now, evidence_ids: evidence.map(row => row.evidence_id) } })
+    return result
+  })
   // Successful execution consumes this challenge by committing its operation receipt.
   // All later submissions hit that same receipt before evaluating the challenge.
   return { ...outcome.result, replayed: outcome.replayed }

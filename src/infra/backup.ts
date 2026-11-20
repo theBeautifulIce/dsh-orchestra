@@ -1,7 +1,8 @@
 // 备份、校验与恢复：备份到独立目录并附 manifest；恢复只写新文件，不碰线上库（规格 12.3 G-15）
 import { createHash } from 'node:crypto'
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { closeSync, constants, copyFileSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync,
+  readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { OrchError } from '../core/errors.ts'
 import { openDb } from './sqlite/driver.ts'
 
@@ -17,8 +18,26 @@ const TABLES = ['service_meta', 'tasks', 'runs', 'node_runs', 'events', 'node_ru
 
 export function sha256File(file: string): string {
   const hash = createHash('sha256')
-  hash.update(readFileSync(file))
+  const buffer = Buffer.allocUnsafe(64 * 1024)
+  const fd = openSync(file, 'r')
+  try {
+    let length: number
+    while ((length = readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, length))
+  } finally { closeSync(fd) }
   return hash.digest('hex')
+}
+
+function checkPath(path: string) {
+  for (let at = resolve(path); ; at = dirname(at)) {
+    if (lstatSync(at, { throwIfNoEntry: false })?.isSymbolicLink()) throw new OrchError('FORBIDDEN', '备份与恢复需要真实文件路径')
+    if (at === dirname(at)) break
+  }
+}
+
+function requireFresh(file: string) {
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    if (lstatSync(file + suffix, { throwIfNoEntry: false })) throw new OrchError('FORBIDDEN', '输出位置已被使用，请选择独立新目标')
+  }
 }
 
 function tableDigest(db: { raw: { prepare: (sql: string) => { all: () => unknown[] } } }, name: string): { rows: number; sha256: string } {
@@ -29,31 +48,38 @@ function tableDigest(db: { raw: { prepare: (sql: string) => { all: () => unknown
 }
 
 export function backup(dbFile: string, destDir: string): BackupManifest {
+  checkPath(dbFile)
+  checkPath(destDir)
   mkdirSync(destDir, { recursive: true })
-  // 先把 WAL 落盘再复制，避免 copy 到半截事务
-  const live = openDb(dbFile)
-  try {
-    live.raw.exec('PRAGMA wal_checkpoint(TRUNCATE)')
-  } finally {
-    live.raw.close()
-  }
   const copy = join(destDir, 'orchestra.db')
-  copyFileSync(dbFile, copy)
-  const db = openDb(copy, { readonly: true })
+  requireFresh(copy)
+  requireFresh(join(destDir, 'manifest.json'))
+  const staging = mkdtempSync(join(destDir, '.backup-'))
+  const snapshot = join(staging, 'orchestra.db')
   try {
-    const tables = TABLES.map((name) => ({ name, ...tableDigest(db, name) }))
-    const manifest: BackupManifest = { created_at: new Date().toISOString(), db_file: 'orchestra.db', db_sha256: sha256File(copy), tables }
-    writeFileSync(join(destDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
+    // VACUUM INTO reads one committed SQLite snapshot, including committed WAL pages.
+    const live = openDb(dbFile, { readonly: true })
+    try { live.raw.prepare('VACUUM INTO ?').run(snapshot) } finally { live.raw.close() }
+    const db = openDb(snapshot, { readonly: true })
+    let tables
+    try { tables = TABLES.map((name) => ({ name, ...tableDigest(db, name) })) } finally { db.raw.close() }
+    const manifest: BackupManifest = { created_at: new Date().toISOString(), db_file: 'orchestra.db', db_sha256: sha256File(snapshot), tables }
+    writeFileSync(join(staging, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
+    linkSync(snapshot, copy)
+    linkSync(join(staging, 'manifest.json'), join(destDir, 'manifest.json'))
     return manifest
-  } finally {
-    db.raw.close()
-  }
+  } finally { rmSync(staging, { recursive: true, force: true }) }
 }
 
 export function verifyBackup(dir: string): BackupManifest {
+  checkPath(join(dir, 'manifest.json'))
+  checkPath(join(dir, 'orchestra.db'))
   let manifest: BackupManifest
   try {
     manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as BackupManifest
+    if (manifest.db_file !== 'orchestra.db' || !/^[a-f0-9]{64}$/.test(manifest.db_sha256)
+      || !Array.isArray(manifest.tables) || manifest.tables.length !== TABLES.length
+      || !TABLES.every((name) => manifest.tables.some((table) => table.name === name))) throw new Error('Invalid manifest')
   } catch {
     throw new OrchError('SERVICE_UNAVAILABLE', '备份缺清单或清单坏了', { dir, table: '(manifest)' })
   }
@@ -82,9 +108,18 @@ export function verifyBackup(dir: string): BackupManifest {
 }
 
 export function restore(dir: string, targetFile: string): void {
-  verifyBackup(dir)
+  const manifest = verifyBackup(dir)
+  checkPath(targetFile)
+  requireFresh(targetFile)
+  if (resolve(dirname(targetFile)) === resolve(dir)) throw new OrchError('FORBIDDEN', '恢复需要独立目录')
   mkdirSync(dirname(targetFile), { recursive: true })
-  copyFileSync(join(dir, 'orchestra.db'), targetFile)
+  const staging = mkdtempSync(join(dirname(targetFile), '.restore-'))
+  try {
+    const copy = join(staging, 'orchestra.db')
+    copyFileSync(join(dir, 'orchestra.db'), copy, constants.COPYFILE_EXCL)
+    if (sha256File(copy) !== manifest.db_sha256) throw new OrchError('SERVICE_UNAVAILABLE', '恢复副本与已校验的清单不一致')
+    linkSync(copy, targetFile)
+  } finally { rmSync(staging, { recursive: true, force: true }) }
 }
 
 export function listBackups(root: string): string[] {

@@ -27,6 +27,7 @@ export type PanelHostStatus = {
   streamStatus?: StreamStatus
   memoryEnabled?: boolean
   modelRoutingEnabled?: boolean
+  modelEscalationEnabled?: boolean
   collaborationEnabled?: boolean
   reworkEnabled?: boolean
   reworkPlannerEnabled?: boolean
@@ -62,15 +63,16 @@ export function PanelHost(props: PanelHostProps): ReactElement {
   const probe = useCallback(async (): Promise<boolean> => {
     const generation = ++probeGeneration.current
     try {
-      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; model_routing_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean }>('/health')
+      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; model_routing_enabled?: boolean; model_escalation_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean }>('/health')
       if (generation !== probeGeneration.current) return false
       setStatus((previous) => ({
         ...previous,
         serviceConnected: true,
         protocolMismatch: false,
         phase: typeof result.data.phase === 'string' ? result.data.phase : previous.phase,
-        memoryEnabled: result.data.memory_enabled === true,
+        memoryEnabled: typeof result.data.memory_enabled === 'boolean' ? result.data.memory_enabled : undefined,
         modelRoutingEnabled: result.data.model_routing_enabled === true,
+        modelEscalationEnabled: result.data.model_escalation_enabled === true,
         collaborationEnabled: result.data.collaboration_enabled === true,
         reworkEnabled: result.data.rework_enabled === true,
         reworkPlannerEnabled: result.data.rework_planner_enabled === true,
@@ -112,10 +114,11 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     serviceConnected={status.serviceConnected ?? false}
     protocolMismatch={status.protocolMismatch ?? false}
     initialRoute={props.initialRoute}
-    memoryEnabled={status.memoryEnabled === true && status.serviceConnected === true}
+    memoryEnabled={status.serviceConnected ? status.memoryEnabled : false}
     modelRoutingEnabled={status.modelRoutingEnabled}
     collaborationEnabled={status.collaborationEnabled}
     reworkEnabled={status.reworkEnabled}
+    modelEscalationEnabled={status.modelEscalationEnabled}
     reworkPlannerEnabled={status.reworkPlannerEnabled}
     createEventStream={createEventStream}
     servicePhase={status.phase}

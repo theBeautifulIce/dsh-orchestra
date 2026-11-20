@@ -5,6 +5,7 @@ import type { WorkspaceOverview } from '../../service/queries/tasks.ts'
 import { ActivityList } from './activity-screen.tsx'
 import type { PanelRoute } from './shell.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { GateCard } from './gate-card.tsx'
 
 type OverviewProps = { api: ResourcesApi; reloadVersion: number; onSnapshot: (seq: number) => void; onNavigate: (route: PanelRoute) => void }
 
@@ -28,6 +29,7 @@ export function OverviewScreen({ api, reloadVersion, onSnapshot, onNavigate }: O
     <header><h1 id="overview-title">总览</h1></header>
     {failed && <p role="alert">总览读取失败。 <button type="button" style={buttonStyle} onClick={() => refresh((value) => value + 1)}>重试</button></p>}
     {!failed && !data && <p role="status">正在读取总览…</p>}
+    {data?.summary.release_gate && <GateCard state={data.summary.release_gate} />}
     {data && lanes && <div style={statsStyle}>
       <button type="button" style={statStyle} onClick={() => onNavigate('tasks')}>
         <strong>{lanes.upcoming + lanes.running + lanes.attention + lanes.finished}</strong><span>未归档任务</span>

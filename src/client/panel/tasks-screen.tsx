@@ -46,6 +46,7 @@ export type TaskListScreenProps = {
   commands?: TaskCommands
   triggerManager?: ReactNode
   reworkEnabled?: boolean
+  collaborationEnabled?: boolean
 }
 
 /** 任务状态文案与色板：display_status 优先，未验证终态走独立文案。 */
@@ -87,7 +88,7 @@ function taskColumn(task: TaskSummary): TaskLane {
   return 'upcoming'
 }
 
-export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled }: TaskListScreenProps) {
+export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
   const [view, setView] = useState<(typeof VIEWS)[number]['id']>('board')
   const [filter, setFilter] = useState<Omit<ListTasksParams, 'cursor' | 'limit'>>({})
@@ -170,8 +171,8 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
         {triggerManager}
       </div>}
     </header>
-    {!filter.archived && commands && startOpen && <TaskStartForm api={api} commands={commands} onCreated={refresh} />}
-    {!filter.archived && commands && <div className="task-plan-entry"><TaskPlanForm api={api} commands={commands} onStarted={refresh} /></div>}
+    {!filter.archived && commands && startOpen && <TaskStartForm api={api} commands={commands} onCreated={refresh} onOpenRun={onSelectTask} collaborationEnabled={collaborationEnabled} />}
+    {!filter.archived && commands && <div className="task-plan-entry"><TaskPlanForm api={api} commands={commands} onStarted={refresh} onOpenRun={onSelectTask} /></div>}
     <div className="task-toolbar">
       <label>状态 <select value={status} onChange={(event) => {
         const value = event.target.value

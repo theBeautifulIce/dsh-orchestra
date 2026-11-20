@@ -34,7 +34,7 @@ export function createTaskCommands(client: ApiClient) {
     },
     async start(input: { operationId: string; title: string; workflowId: string; version: string; autonomy: string }) {
       try {
-        return (await client.post<{ task_id: string }>('/v1/runs/start', {
+        return (await client.post<{ task_id: string; run_id?: string }>('/v1/runs/start', {
           taskTitle: input.title, workflowId: input.workflowId, workflowVersion: input.version, autonomy: input.autonomy,
           triggerKind: 'manual', operationId: input.operationId,
         })).data

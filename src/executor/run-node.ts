@@ -9,7 +9,7 @@ import type { Db } from '../infra/sqlite/driver.ts'
 import { makeTx, withTx } from '../infra/sqlite/driver.ts'
 import { transitionNode, DEFAULT_VERIFY_TIMEOUT_MS } from '../service/commands/node-state.ts'
 import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
-import { loadNodeRun } from '../service/commands/lease.ts'
+import { loadNodeRun, releaseLease } from '../service/commands/lease.ts'
 import { acquireNodeRun, renewNodeLease, submitReport, type RuntimeDeps } from '../service/commands/runtime.ts'
 import { buildInstruction, checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
 import { assertToolsAuthorized, type ReadOnlyToolRunner, type StrongEvidence, type ToolRegistry } from './tools.ts'
@@ -18,12 +18,17 @@ import { AgentLifecycle } from './agent-lifecycle.ts'
 import { canTransition } from '../core/state-machine.ts'
 import type { ClockProvider } from '../core/clock.ts'
 import { selectExecutionModel, type ModelAssignment, type ModelRouting } from './model-routing.ts'
+import { requireTrialFlow } from '../service/trial-circles.ts'
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { getTaskPlanRecommendation } from '../service/task-planning.ts'
 import { readModelRoutingSettings } from '../service/model-routing-settings.ts'
 import { executionFeedbackContext } from '../service/rework-execution.ts'
+import { getEscalatedModel, noteAgentStopped, type createModelEscalationHost } from '../service/model-escalation.ts'
+import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 
 export type RunNodeParams = {
+  /** Controlled by the dedicated release entrypoint. */
+  releaseCheckCwd?: string
   nodeRunId: string
   nodeId: string
   attempt: number
@@ -75,6 +80,7 @@ export type RunNodeDeps = {
   cancelSignal?: AbortSignal
   /** Trusted host routing. Incoming execution requests cannot set a model. */
   modelRouting?: ModelRouting
+  modelEscalation?: Pick<ReturnType<typeof createModelEscalationHost>, 'prepare'>
 }
 
 export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunNodeResult> {
@@ -83,6 +89,9 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
   }
   // 工具策略只从服务端加载过的定义取：请求体给什么不算数（第五轮审计 P1-2）
   const policy = policyForNodeRun(deps, p)
+  if (policy.allow?.includes(RELEASE_CHECK_WORKFLOW_ID) && !p.releaseCheckCwd) {
+    throw new OrchError('FORBIDDEN', '发布检查工具只能由已授权的隔离发布运行调用')
+  }
   // 前向路径只接只读工具；有副作用的动作走补偿或不可逆流程（规格 4.7 行 396）
   const derived = checkToolPolicy(deps.registry, policy)
   if (derived !== 'pure') {
@@ -155,6 +164,7 @@ function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
     'SELECT n.node_id AS node_id, r.workflow_id AS workflow_id, r.workflow_version AS workflow_version, r.workflow_definition_hash AS workflow_definition_hash FROM node_runs n JOIN runs r ON r.run_id = n.run_id WHERE n.node_run_id = ?',
   ).get(p.nodeRunId) as { node_id: string; workflow_id?: string | null; workflow_version?: number | null; workflow_definition_hash?: string | null } | undefined
   if (!row) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: p.nodeRunId })
+  requireTrialFlow(makeTx(deps.db.raw), row.workflow_id, row.workflow_definition_hash)
   // 节点身份以账本为准：调用方传别的 nodeId 不许借到另一份工具授权
   if (row.node_id !== p.nodeId) {
     throw new OrchError('STALE_GENERATION', 'node_id 与账本不一致，不许借别的节点授权', { nodeRunId: p.nodeRunId, ledgerNodeId: row.node_id, requestedNodeId: p.nodeId })
@@ -186,7 +196,7 @@ function policyForNodeRun(deps: RunNodeDeps, p: RunNodeParams): ToolPolicy {
 async function runNodeActions(
   deps: RunNodeDeps,
   p: RunNodeParams,
-  lease: { action_generation: number },
+  lease: { lease_id: string; action_generation: number },
   nowAt: () => string,
   policy: ToolPolicy,
   leaseState: { lost: string | null },
@@ -209,7 +219,9 @@ async function runNodeActions(
     try {
       if (deps.modelRouting) {
         try {
-          assignment = chooseModelForAttempt(deps, p, generation, deps.modelRouting)
+          await deps.modelEscalation?.prepare(p.nodeRunId, generation, nowAt())
+          deps.cancelSignal?.throwIfAborted()
+          assignment = chooseModelForAttempt(deps, p, generation, deps.modelRouting, nowAt())
         } catch (error) {
           if (error instanceof OrchError) throw error
           throw new OrchError('FORBIDDEN', '当前节点无法取得可信的模型分配建议')
@@ -220,7 +232,7 @@ async function runNodeActions(
         attempt: p.attempt,
         input: p.input,
         outputSchema: p.outputSchema,
-        toolPolicy: policy,
+        toolPolicy: p.releaseCheckCwd ? { ...policy, releaseCheckCwd: p.releaseCheckCwd } : policy,
         modelRef: assignment?.model_ref,
         ...(deps.modelRouting ? { actionGeneration: generation } : {}),
       })
@@ -288,14 +300,16 @@ async function runNodeActions(
     // started 是状态迁移不是完成上报：没过证据门的上报不该用来推进状态
     withTx(deps.db, (tx) => {
       const row = loadNodeRun(tx, p.nodeRunId)
+      const startedAt = nowAt()
       if (assignment) {
         if (row.attempt !== p.attempt || row.action_generation !== generation) throw new OrchError('STALE_GENERATION', '执行模型确认已过期')
         recordModel(tx, deps.secret, row, assignment, 'confirmed')
       }
       transitionNode(tx, deps.secret, {
         nodeRunId: p.nodeRunId, from: 'dispatched', to: 'started',
-        attempt: row.attempt, revision: row.revision, now: nowAt(), reason: 'executor_started',
+        attempt: row.attempt, revision: row.revision, now: startedAt, reason: 'executor_started',
       })
+      if (deps.modelEscalation) tx.run('UPDATE node_runs SET started_at=? WHERE node_run_id=?', [startedAt, p.nodeRunId])
     })
     const feedback = ['S5','S6'].includes(deps.runtime.phase)
       ? executionFeedbackContext(deps.db, deps.runtime.catalog, p.nodeRunId, nowAt(), p.input) : null
@@ -310,6 +324,7 @@ async function runNodeActions(
       nodeRunId: p.nodeRunId,
       attempt: p.attempt,
       agent,
+      lease,
       instruction: nodeInstruction(p, feedback),
       timeoutMs: actionTimeoutMs,
       idleTimeoutMs: 5_000,
@@ -345,6 +360,7 @@ async function runNodeActions(
     try {
       await lifecycle.stop()
       stopped = true
+      if (deps.modelEscalation) withTx(deps.db, (tx) => noteAgentStopped(tx, deps.secret, loadNodeRun(tx, p.nodeRunId), p.attempt, generation))
     } catch (stopErr) {
       stopFailure = stopErr
       throw stopErr
@@ -419,12 +435,23 @@ async function runNodeActions(
       if (!stopped) {
         try {
           await lifecycle.stop()
+          stopped = true
+          if (deps.modelEscalation) withTx(deps.db, (tx) => noteAgentStopped(tx, deps.secret, loadNodeRun(tx, p.nodeRunId), p.attempt, generation))
         } catch (stopErr) {
           if (failed === null) {
             markBlocked(deps, p, 'agent_stop_unconfirmed', nowAt())
             throw stopErr
           }
         }
+      }
+      if (stopped && deps.modelEscalation) {
+        withTx(deps.db, (tx) => {
+          const row = loadNodeRun(tx, p.nodeRunId)
+          if (row.attempt === p.attempt && row.action_generation === generation && row.lease_id
+            && ['done','blocked_post','failed','timeout'].includes(row.status)) {
+            releaseLease(tx, { nodeRunId: p.nodeRunId, now: nowAt() })
+          }
+        })
       }
     } else if (agent) {
       // lifecycle 还没建起来就失败时，Agent 可能已经 spawn；按 agentId 做一次有界兜底释放。
@@ -433,7 +460,7 @@ async function runNodeActions(
   }
 }
 
-function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: number, routing: ModelRouting): ModelAssignment {
+function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: number, routing: ModelRouting, now: string): ModelAssignment {
   return withTx(deps.db, (tx) => {
     const row = loadNodeRun(tx, p.nodeRunId)
     if (row.status !== 'dispatched' || row.attempt !== p.attempt || row.action_generation !== generation) {
@@ -450,8 +477,9 @@ function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: 
     const preferred = settings.mapping[proposed.complexity]
     const assignment = selectExecutionModel(routing.profiles, preferred ? { ...proposed, preferredModel: preferred } : proposed)
     if (preferred) assignment.settings_revision = settings.revision
-    recordModel(tx, deps.secret, row, assignment, 'selected')
-    return assignment
+    const selected = deps.modelEscalation ? getEscalatedModel(tx, deps.secret, row, routing.profiles, assignment, now) : assignment
+    recordModel(tx, deps.secret, row, selected, 'selected')
+    return selected
   })
 }
 

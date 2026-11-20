@@ -1,4 +1,5 @@
 import { createReworkApi } from '../api/rework.ts'
+import { createModelEscalationApi } from '../api/model-escalation.ts'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError, type ApiClient } from '../api/client.ts'
 import { createResourcesApi } from '../api/resources.ts'
@@ -31,6 +32,7 @@ export type PanelAppProps = {
   snapshotStale?: boolean
   memoryEnabled?: boolean
   modelRoutingEnabled?: boolean
+  modelEscalationEnabled?: boolean
   servicePhase?: string
   panelVersion?: string
   refreshServiceStatus?: () => Promise<boolean>
@@ -56,6 +58,7 @@ export function PanelApp(props: PanelAppProps) {
     },
   }), [props.client])
   const rework = useMemo(() => props.reworkEnabled ? createReworkApi(client) : undefined, [client, props.reworkEnabled])
+  const modelEscalation = useMemo(() => props.modelEscalationEnabled ? createModelEscalationApi(client) : undefined, [client, props.modelEscalationEnabled])
   const api = useMemo(() => createResourcesApi(client), [client])
   // 控制面写命令客户端：流程新建、草稿保存、发布都走同一套命令与回执。
   const commands = useMemo(() => createWorkflowCommandsApi(client), [client])
@@ -175,7 +178,7 @@ export function PanelApp(props: PanelAppProps) {
     screen = <OverviewScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onNavigate={setRoute} />
   } else if (route === 'tasks') {
     screen = <div className="task-workspace">
-      <TaskListScreen reworkEnabled={props.reworkEnabled} api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
+      <TaskListScreen reworkEnabled={props.reworkEnabled} collaborationEnabled={props.collaborationEnabled} api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
         <TaskTriggerManager api={api} commands={triggerCommands} onChanged={() => setReloadVersion((version) => version + 1)} />
       } onSelectTask={(id, trigger, runId) => {
         taskTrigger.current = trigger
@@ -196,12 +199,20 @@ export function PanelApp(props: PanelAppProps) {
   } else if (route === 'memory') {
     screen = props.additionalScreens?.memory
       ?? <MemoryPanel api={api} recovery={memoryRecovery} memoryEnabled={props.memoryEnabled}
-        reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} />
+        reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} onOpenTasks={() => setRoute('tasks')} />
   } else if (route === 'settings') {
     screen = <section className="ops-page"><h1>设置</h1><div className="ops-context-grid">{props.additionalScreens?.settings
       ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={snapshotStale} streamStatus={streamStatus}
         phase={props.servicePhase} panelVersion={props.panelVersion} onRefresh={refreshSettings} />}
       {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
+      <section className="ops-surface" aria-labelledby="memory-capability-title">
+        <header className="ops-surface-head"><h2 id="memory-capability-title">任务记忆</h2></header>
+        <div className="ops-inset">
+          <p>{!props.serviceConnected ? '服务未连接，记忆整理状态待确认。' : props.memoryEnabled === true ? '宿主已启用记忆整理。' : props.memoryEnabled === false ? '当前宿主未启用记忆整理。' : '宿主尚未报告记忆整理状态。'}</p>
+          <p>在成功任务的「结果」中发起整理。你在审批中心确认条目后，可到记忆页查看实际写入的内容和来源。</p>
+          <button type="button" className="ops-button" onClick={() => setRoute('memory')}>查看记忆与写入结果</button>
+        </div>
+      </section>
     </div></section>
   } else if (route === 'workflows') {
     screen = <>
@@ -223,7 +234,7 @@ export function PanelApp(props: PanelAppProps) {
     streamStatus={streamStatus}
     collaborationEnabled={props.collaborationEnabled}
   >{screen}
-    {taskId && <TaskDetailScreen rework={rework} reworkPlannerEnabled={props.reworkPlannerEnabled} key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
+    {taskId && <TaskDetailScreen rework={rework} modelEscalation={modelEscalation} reworkPlannerEnabled={props.reworkPlannerEnabled} key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
       setTaskId(null)
       taskTrigger.current?.focus({ preventScroll: true })
     }} taskCommands={taskCommands} triggerCommands={triggerCommands} onArchiveChanged={() => setReloadVersion((version) => version + 1)}

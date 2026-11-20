@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { TaskCommands } from '../api/task-commands.ts'
 import type { TaskPlanView } from '../../service/task-planning.ts'
+import { MODEL_LEVELS } from '../../executor/model-routing.ts'
 import { PanelCommandButton } from './shell.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
 
@@ -9,7 +10,6 @@ const checkLabels = {
   workflow: '流程版本', coverage: '目标覆盖', deliverables: '交付物验收',
   tools: '工具可用及授权', dependencies: '执行依赖', risks: '风险及应对',
 }
-const complexityLabels = { routine: '常规', standard: '中等', complex: '复杂' }
 const severityLabels = { low: '低风险', medium: '中风险', high: '高风险' }
 
 function Brief({ plan }: { plan: TaskPlanView }) {
@@ -46,8 +46,9 @@ export function TaskPlanBrief({ api, taskId }: { api: ResourcesApi; taskId: stri
   </section>
 }
 
-export function TaskPlanForm({ api, commands, onStarted }: {
+export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
   api: ResourcesApi; commands: TaskCommands; onStarted?: (taskId: string) => void
+  onOpenRun?: (taskId: string, trigger: HTMLButtonElement, runId: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const [capability, setCapability] = useState<'loading' | 'enabled' | 'unavailable' | 'error'>('loading')
@@ -126,7 +127,8 @@ export function TaskPlanForm({ api, commands, onStarted }: {
         <details>
           <summary>步骤、模型建议与风险</summary>
           <ul style={listStyle}>{plan.proposal.steps.map((step, index) => <li key={index}>
-            <strong>{step.node_id}</strong> · {step.description} · {complexityLabels[step.complexity]}。{step.model_reason}
+            <strong>{step.node_id}</strong> · {step.description} · {MODEL_LEVELS[step.complexity].label}。{step.model_reason}
+            {step.preferred_model_ref && <span> · 建议模型 {step.preferred_model_ref}</span>}
             {step.depends_on.length > 0 && <p style={descriptionStyle}>依赖 {step.depends_on.join('、')}</p>}
             {step.tools.length > 0 && <p style={descriptionStyle}>工具 {step.tools.join('、')}</p>}
           </li>)}</ul>
@@ -145,7 +147,12 @@ export function TaskPlanForm({ api, commands, onStarted }: {
           <button type="button" disabled={busy !== null} style={editStyle}
             onClick={() => { setPlan(null); setConfirmed(false); setFailure('') }}>调整目标并重新规划</button>
         </div>}
-        {plan.launch && <p role="status" style={descriptionStyle}>已建立受监督的任务运行。可在任务列表查看。</p>}
+        {plan.launch && <div>
+          <p role="status" style={descriptionStyle}>已建立受监督的任务运行。</p>
+          {onOpenRun && <button type="button" onClick={(event) => {
+            if (plan.launch) onOpenRun(plan.launch.task_id, event.currentTarget, plan.launch.run_id)
+          }}>查看本次运行</button>}
+        </div>}
       </section>}
       {failure && <p role="alert" style={{ ...descriptionStyle, color: COLOR.danger }}>{failure}</p>}
     </div>

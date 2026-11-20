@@ -10,6 +10,8 @@
 // 工件字段与脚本 GATE_FIELDS（第 27-32 行）的 20 项一一对应；工件内不放 record_hash / artifact_hash 自指字段。
 import { canonicalJson, sha256Hex } from './canonical.ts'
 import { OrchError } from './errors.ts'
+import { RELEASE_INVARIANTS, RELEASE_ITEMS, releaseHash, type ReleasePolicyResult } from './wf-release-v1.ts'
+import { z } from 'zod'
 
 /** 必过项：结论 + 指向的证据 id。 */
 export type MustPassItem = {
@@ -78,6 +80,7 @@ export type GateArtifactInput = Omit<GateArtifact, 'conclusion' | 'failed_items'
  * conclusion 当且仅当 failed_items 为空且 run_terminal 不是 failed 时才是 pass。
  */
 export function buildGateArtifact(input: GateArtifactInput): GateArtifact {
+  if (input.gate === 'G6') throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'G6 必须采用冻结证据和正式终态口径')
   for (const field of SELF_REFERENTIAL_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(input, field)) {
       throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'GateArtifact 里不能放自指哈希字段: ' + field, {
@@ -148,3 +151,61 @@ export function bodyHashOf(text: string): string {
 export function artifactHashOf(artifact: GateArtifact): string {
   return sha256Hex(canonicalJson(artifact))
 }
+
+const releaseException = z.strictObject({
+  code: z.string().min(1), type: z.enum(['proposed','accepted']), status: z.number().int().min(400).max(599), note: z.string().min(1),
+  scope: z.string().min(1), expires_at: z.iso.datetime(), compensation: z.string().min(1),
+  rollback_target: z.string().min(1), approver: z.string().regex(/^human:.+\S$/),
+})
+const releaseRollback = z.strictObject({
+  target: z.string().min(1), action: z.string().min(1), duration_s: z.number().int().positive(), verification: z.string().min(1),
+})
+const releaseGovernance = z.strictObject({
+  approver: z.string().regex(/^human:\S.*$/), approved_at: z.iso.datetime(),
+  previous_artifact_hash: z.string().regex(/^[0-9a-f]{64}$/).refine((value) => !/^0+$/.test(value)),
+  audit_round: z.number().int().positive(), audit_report: z.string().min(1),
+  audit_report_sha256: z.string().regex(/^[0-9a-f]{64}$/).refine((value) => !/^0+$/.test(value)),
+  exceptions: z.array(releaseException), rollback: releaseRollback,
+})
+export type ReleaseGovernance = z.infer<typeof releaseGovernance>
+export type ReleaseArtifactOrigin =
+  | { producer: 'wf_release_v1'; gate_run_id: string; run_terminal: string }
+  | { producer: 'human' | 's5_build'; gate_run_id: null; run_terminal: 'not_applicable' }
+
+export function releaseArtifactBody(policy: ReleasePolicyResult, origin: ReleaseArtifactOrigin) {
+  const mandatory = new Set<string>(policy.must_pass_items.map(({ id }) => id))
+  const invariantIds = new Set(policy.invariants.map(({ id }) => id))
+  const complete = mandatory.size === RELEASE_ITEMS.length && policy.must_pass_items.length === RELEASE_ITEMS.length
+    && RELEASE_ITEMS.every((id) => mandatory.has(id)) && invariantIds.size === RELEASE_INVARIANTS.length
+    && policy.invariants.length === RELEASE_INVARIANTS.length && RELEASE_INVARIANTS.every((id) => invariantIds.has(id))
+  if (!complete) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'G6 判卷回执缺少必过项或不变量')
+  if (!['wf_release_v1','human','s5_build'].includes(origin.producer) || (origin.producer === 'wf_release_v1'
+    ? !origin.gate_run_id || origin.run_terminal === 'not_applicable'
+    : origin.gate_run_id !== null || origin.run_terminal !== 'not_applicable')) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'G6 工件来源与运行身份不符')
+  }
+  const must_pass_items: MustPassItem[] = [...policy.must_pass_items]
+  const failed_items = [
+    ...must_pass_items.filter((item) => item.result !== 'pass').map(({ id }) => id),
+    ...policy.invariants.filter((item) => item.result !== 'pass').map(({ id }) => id),
+  ]
+  const conclusion: 'pass' | 'fail' = failed_items.length === 0 && policy.conclusion === 'pass'
+    && (origin.producer !== 'wf_release_v1' || origin.run_terminal === 'succeeded') ? 'pass' : 'fail'
+  return { gate: 'G6' as const, schema_version: 1 as const, ...origin,
+    candidate_hash: policy.candidate_hash, change_scope_hash: policy.change_scope_hash,
+    evidence_index_hash: policy.evidence_index_hash, invariants_hash: policy.invariants_hash,
+    must_pass_items, failed_items, conclusion }
+}
+
+export function buildReleaseArtifact(body: ReturnType<typeof releaseArtifactBody>, governance: ReleaseGovernance) {
+  if (SELF_REFERENTIAL_FIELDS.some((field) => Object.hasOwn(body, field))) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'G6 工件自身哈希必须保存在外部锚点')
+  }
+  const parsed = releaseGovernance.parse(governance)
+  if (parsed.exceptions.some((exception) => Date.parse(exception.expires_at) <= Date.parse(parsed.approved_at))) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'G6 例外必须在批准时有效')
+  }
+  return { ...body, ...parsed }
+}
+
+export const releaseArtifactHashOf = (artifact: ReturnType<typeof buildReleaseArtifact>) => releaseHash(artifact)

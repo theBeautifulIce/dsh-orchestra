@@ -1,5 +1,7 @@
 // src/service/commands/subworkflow.ts —— 子流程 pin 版本、深度/环检测、子运行与取消传播（S3 Task 10）
 import { assertWorkflowUsable } from './workflows.ts'
+import { requireTrialFlow } from '../trial-circles.ts'
+import { isReleaseWorkflow, RELEASE_CHECK_WORKFLOW_ID, RELEASE_WORKFLOW_ID } from '../../core/wf-release-v1.ts'
 import { OrchError } from '../../core/errors.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from '../workflows.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
@@ -306,6 +308,9 @@ export function createSubworkflowRun(
   p: CreateSubworkflowRunParams,
 ): SubworkflowRunResult {
   const parent = loadRun(tx, p.parentRunId)
+  if (isReleaseWorkflow(p.workflowId) && (p.workflowId !== RELEASE_CHECK_WORKFLOW_ID || parent.workflow_id !== RELEASE_WORKFLOW_ID)) {
+    throw new OrchError('FORBIDDEN', '发布检查子流程只能为受信发布根运行执行')
+  }
   if (parent.status !== 'running') {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '父 run 不在运行中，不能起子流程', {
       parentRunId: p.parentRunId,
@@ -410,6 +415,7 @@ export function createSubworkflowRun(
   const childRunId = newRunId()
   const rootRunId = parent.root_run_id ?? parent.run_id
   const definitionHash = definitionHashOf(def)
+    requireTrialFlow(tx, p.workflowId, definitionHash)
   tx.run(
     'INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, workflow_definition_hash, status, revision, started_at, created_at, updated_at, '
     + 'parent_run_id, parent_node_run_id, root_run_id, subworkflow_depth, resume_from) '
@@ -725,8 +731,8 @@ export function propagateRunCancellation(
   }
 
   tx.run(
-    'UPDATE runs SET cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE run_id = ?',
-    [p.now, p.cancelResult, p.now, p.runId],
+    'UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, ?), cancel_result = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND (cancel_requested_at IS NULL OR cancel_result IS NOT ?)',
+    [p.now, p.cancelResult, p.now, p.runId, p.cancelResult],
   )
   // 运行级取消先收目标 run 自己的在跑节点，再向子 run 传播
   const ownNodes = tx.all<{
@@ -812,10 +818,6 @@ export function propagateRunCancellation(
   )
   for (const child of children) {
     if (isRunTerminal(child.status)) continue
-    tx.run(
-      'UPDATE runs SET cancel_requested_at = ?, cancel_result = ?, revision = revision + 1, updated_at = ? WHERE run_id = ?',
-      [p.now, p.cancelResult, p.now, child.run_id],
-    )
     cancelledRuns.push(child.run_id)
     const nested = propagateRunCancellation(tx, secret, { ...p, runId: child.run_id })
     cancelledRuns.push(...nested.cancelledRuns)
