@@ -1,6 +1,6 @@
 export type ChatTaskIntent = 'conversation' | 'clarify' | 'task'
 
-const request = /^(?:请(?!问|教)(?:你|帮我|替我)?|帮我|替我|麻烦(?:你|帮我)?|给我|能(?:不能|否)帮我|可(?:不可以|以)帮我|我需要你|please\b|(?:can|could|would) you\b)\s*/iu
+const request = /^(?:请(?!问|教)(?:你|帮我|替我)?|帮我|替我|麻烦(?:你|帮我)?|给我|能(?:不能|否)?帮我|可(?:不可以|以)帮我|我需要你|please\b|(?:can|could|would) you\b)\s*/iu
 const action = /(?:读取|读一下|读(?=当前|本|这)|核对|核算|算一下|计算|统计|整理|归纳|总结|汇总|复核|校对|查阅|检查|分析|比较|对比|提取|筛选|翻译|编(?:制|写|一份)|撰写|写|起草|拟定|填写|生成|制作|导出|交付|输出|列出|发送|发布|提交|删除|覆盖|清空|转账|修(?:复|正|一下)|修改|改掉|\b(?:read|review|reconcile|calculate|summarize|analyse|analyze|compare|extract|draft|write|create|compile|generate|produce|prepare|export|deliver|delete|send|publish|fix)\b)/iu
 const discussion = /(?:怎么|怎样|如何|是否|能否|为什么|教我|理解|解释|说明|评估|讨论|提供一些|给我一些|推荐|\b(?:explain|recommend|whether|how to)\b)/iu
 const deliverable = /(?:报告|清单|表格|报表|汇总表|文档|纪要|方案|计划|提纲|大纲|摘要|要点|列表|草稿|初稿|简报|结论|时间表|预算|邮件|文案|公告|通知|介绍|回复|短文|文章|周报|月报|日报|净额|总额|小计|缺陷|测试|错别字|保存|\b(?:report|checklist|table|spreadsheet|document|summary|outline|draft|brief|schedule|totals|bug|tests?)\b)/iu
@@ -20,6 +20,8 @@ const taskHeader = /^(?:完成|执行|开展|启动|做)[ \t]*(?:一?[项个件]
 const listPrefix = /^(?:\d+[.、)]|[一二三四五六七八九十]+、|[-*])\s*/u
 const taskQualifier = /^(?:先|现在|直接|立即)\s*/u
 const actionQualifiers = /^(?:(?:仅|只|独立|分别|并行)\s*)+/u
+const actionConsultation = /(?:[,，][ \t]*(?:这(?:个|种|样|么)|是指|(?:你)?(?:能|可以)做到|(?:要|该|应当|应该)(?:用|采用|选择|怎么|怎样|如何|做什么))|是(?:默认行为|规定|惯例))[^。！？!?\n]*\?/u
+const consultationOnly = /(?:我(?:们)?\s*)?只(?:是|想|是想)(?:讨论|了解(?:能力|可行性|怎么|怎样|如何)|问问)|不(?:会|需要)?实际做/u
 
 function actionIsDirect(prefix: string): boolean {
   // A concrete object or source can precede the principal action in Chinese.
@@ -63,6 +65,7 @@ export function classifyChatTask(text: string): ChatTaskIntent {
   const header = taskHeader.exec(body)
   if (header) return classifyTaskDetails(body.slice(header[0].length).replace(/^[，,：:]/u, ''))
   const details = body.replace(actionQualifiers, '')
+  if (details !== body && (actionConsultation.test(details) || consultationOnly.test(details))) return 'conversation'
   const predicate = action.exec(details)
   if (!predicate) return /^(?:处理|做一下|跟进|弄一下|办一下)/u.test(body) && body !== directive ? 'clarify' : 'conversation'
   // Arbitrary prefixes cannot turn a later example or discussed action into an assignment.
