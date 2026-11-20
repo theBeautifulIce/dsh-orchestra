@@ -25,3 +25,4 @@ pnpm pack --pack-destination <已有的输出目录>
 - 服务端在 Cordis 插件中调用 `serveDshOrchestra`。传入隔离的数据路径、实际阶段、服务密钥和账本接口，以及 DSH 上下文、按节点解析获准主会话的函数、模型目录、工具注册表和执行器。自然语言规划另提供 `dshPlanner`。按需装配 `memory` 和 `collaboration`。随包配置是 S2 样例，服务实际阶段在健康页可见。
 - 在受信工作区的 DSH 客户端适配器中调用 `registerDshOrchestraPanel(ctx, { baseUrl, fetcher, ... })`，向宿主登记页面与侧栏入口。`baseUrl` 使用服务返回的地址，`fetcher` 来自宿主已认证的传输，事件流沿用同一身份。宿主退出时调用服务的 `close()`。
 - 面板的服务与能力状态来自实际 `/health`。主脑模型、执行模型、记忆写入能力与工作区权限由宿主提供。开发用 DSH 探针使用独立 profile 和回环模型服务，便于复验模型及协作链路。
+- S6 宿主通过 `resolveHttpHuman(request)` 将经验证的当前 DSH 登录会话绑定到实际操作人。为审批、返工和协作授权提供同一受信会话，未登录时返回 `null`。值班 QQ 发送回执与当班人确认分别登记。R1/R2 可从本圈已授权流程的成功运行发起记忆提议。[值班手册](docs/runbook.md) · [试用圈](docs/trial-circles.md)

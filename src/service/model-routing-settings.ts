@@ -10,9 +10,9 @@ import { withReadTx, type ReadTx } from './queries/read-tx.ts'
 
 const modelRef = z.string().regex(MODEL_REF_RE)
 const binding = modelRef.nullable()
-const mappingSchema = z.strictObject({
-  routine: binding, standard: binding, advanced: binding.optional(), complex: binding, expert: binding.optional(),
-})
+export const legacyModelMappingSchema = z.strictObject({ routine: binding, standard: binding, complex: binding })
+const extendedModelMappingSchema = z.strictObject({ advanced: binding, expert: binding })
+const mappingSchema = legacyModelMappingSchema.extend(extendedModelMappingSchema.partial().shape)
 type ModelMapping = Record<ModelComplexity, string | null>
 const noteSchema = z.strictObject({ ref: modelRef, note: z.string().trim().max(MODEL_NOTE_MAX_LENGTH) })
 const notesSchema = z.array(noteSchema)
@@ -24,16 +24,17 @@ export const modelRoutingSettingsSchema = z.strictObject({
   model_notes: notesSchema.optional(),
 })
 
-type Row = { revision: number; mapping_json: string; model_notes_json: string; updated_by: string; updated_at: string }
+type Row = { revision: number; mapping_json: string; extended_mapping_json: string; model_notes_json: string; updated_by: string; updated_at: string }
 type CatalogProfile = ModelProfile & { provider?: string; model?: string }
 const EMPTY_MAPPING: ModelMapping = { routine: null, standard: null, advanced: null, complex: null, expert: null }
 
 export function readModelRoutingSettings(tx: ReadTx) {
-  const row = tx.get<Row>('SELECT revision, mapping_json, model_notes_json, updated_by, updated_at FROM model_routing_settings WHERE id = 1')
+  const row = tx.get<Row>('SELECT revision, mapping_json, extended_mapping_json, model_notes_json, updated_by, updated_at FROM model_routing_settings WHERE id = 1')
   if (!row) return { revision: 0, mapping: { ...EMPTY_MAPPING }, model_notes: [], updated_by: null, updated_at: null }
-  const { advanced, expert, ...legacy } = mappingSchema.parse(JSON.parse(row.mapping_json))
+  const legacy = legacyModelMappingSchema.parse(JSON.parse(row.mapping_json))
+  const extended = extendedModelMappingSchema.parse(JSON.parse(row.extended_mapping_json))
   return {
-    revision: row.revision, mapping: { ...legacy, advanced: advanced ?? null, expert: expert ?? null },
+    revision: row.revision, mapping: { ...legacy, ...extended },
     model_notes: notesSchema.parse(JSON.parse(row.model_notes_json)),
     updated_by: row.updated_by, updated_at: row.updated_at,
   }
@@ -85,10 +86,11 @@ export function createModelRoutingSettingsHost(db: Db, profiles: readonly Catalo
           throw new OrchError('RANGE_TOO_LARGE', '模型用途说明超出总容量，请缩短或清除部分说明')
         }
         const revision = current.revision + 1
-        tx.run('INSERT INTO model_routing_settings (id,revision,mapping_json,model_notes_json,updated_by,updated_at) VALUES (1,?,?,?,?,?) '
+        tx.run('INSERT INTO model_routing_settings (id,revision,mapping_json,extended_mapping_json,model_notes_json,updated_by,updated_at) VALUES (1,?,?,?,?,?,?) '
           + 'ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,mapping_json=excluded.mapping_json,'
-          + 'model_notes_json=excluded.model_notes_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at',
-        [revision, JSON.stringify(mapping), modelNotesJson, actor, now])
+          + 'extended_mapping_json=excluded.extended_mapping_json,model_notes_json=excluded.model_notes_json,'
+          + 'updated_by=excluded.updated_by,updated_at=excluded.updated_at',
+        [revision, JSON.stringify(legacy), JSON.stringify({ advanced: mapping.advanced, expert: mapping.expert }), modelNotesJson, actor, now])
         appendEvent(tx, { type: 'model_routing.updated', payload: { revision, actor, mapping, model_note_refs: [...changedRefs] } })
         return { revision }
       }).result)

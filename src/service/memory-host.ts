@@ -104,6 +104,7 @@ export function createMemoryHost(db: Db, secret: string, options: MemoryHostOpti
     resolveApproval(input: Parameters<NodeCommands['resolveDecision']>[0]) {
       const row = db.raw.prepare('SELECT batch_id, memory_run_id FROM memory_batches WHERE decision_id = ?').get(input.decisionId)
       if (!row) return undefined
+      if (input.resolution === 'approved') requireTrialMemoryApply(makeTx(db.raw))
       const { confirmChallenge, ...legacy } = input
       const legacyHash = requestHashOf('decision.resolve', { ...legacy, now: undefined })
       const out = withTx(db, (tx) => runDecisionCommand(tx, secret, input, legacyHash, true, (confirmed) => {

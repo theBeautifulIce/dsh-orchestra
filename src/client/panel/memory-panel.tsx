@@ -50,6 +50,7 @@ export type MemoryPanelProps = {
   api: ResourcesApi
   recovery?: MemoryRecoveryApi
   memoryEnabled?: boolean
+  proposalOnly?: boolean
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
   /** 跳到「等你决定」去看同一张审批卡。 */
@@ -71,7 +72,7 @@ function recoveryError(error: unknown): string {
   return describeDecisionError(error)
 }
 
-export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, onSnapshot, onOpenDecisions, onOpenTasks }: MemoryPanelProps) {
+export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reloadVersion = 0, onSnapshot, onOpenDecisions, onOpenTasks }: MemoryPanelProps) {
   const [batches, setBatches] = useState<MemoryBatchView[]>([])
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -151,7 +152,7 @@ export function MemoryPanel({ api, recovery, memoryEnabled, reloadVersion = 0, o
     <header className="ops-page-header">
       <div>
         <h1 id="memory-panel-title">记忆管理</h1>
-        <p className="ops-meta">把一次成功任务中值得复用的经验整理成条目，例如已验证的发布步骤。你可以检查提议和来源，批准后才写入记忆插件。</p>
+        <p className="ops-meta">把一次成功任务中值得复用的经验整理成条目，例如已验证的发布步骤。{proposalOnly ? '当前工作区开放提议和来源核对，写入尚未开放。' : '你可以检查提议和来源，批准后才写入记忆插件。'}</p>
         {latest && <p className="ops-meta">最近批次 · {memoryCopy(latest).text}</p>}
       </div>
       <label style={toggleStyle}>

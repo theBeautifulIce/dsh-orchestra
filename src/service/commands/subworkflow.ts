@@ -589,6 +589,13 @@ export function finishSubworkflowChild(
         child_unverified_nodes: aggregate.unverified,
         parent_side_effect_policy: inherited,
       })
+    } else if (node.status === 'superseded' && node.side_effect_policy === 'compensable' && child.status === 'cancelled' && aggregate.policy === 'pure') {
+      // A cancelled control node provisionally represents its child. Its actual pure child now has a definitive receipt.
+      const receipt = tx.get<{ seq: number }>("SELECT seq FROM events WHERE run_id=? AND type='run.terminal' AND json_extract(payload_redacted,'$.outcome')='succeeded' AND json_extract(payload_redacted,'$.status')='cancelled' LIMIT 1", [child.run_id])
+      if (receipt && !tx.get('SELECT 1 FROM runs WHERE parent_node_run_id=? AND run_id<>? LIMIT 1', [node.node_run_id,child.run_id])) {
+        tx.run("UPDATE node_runs SET side_effect_policy='pure',revision=revision+1,updated_at=? WHERE node_run_id=?", [p.now,node.node_run_id])
+        appendNodeRunEvent(tx, secret, node.node_run_id, 'subworkflow.pure_child_confirmed', { child_run_id: child.run_id, terminal_seq: receipt.seq })
+      }
     }
     return { parentNodeRunId: node.node_run_id, status: node.status }
   }

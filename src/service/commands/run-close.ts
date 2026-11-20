@@ -6,6 +6,7 @@ import { appendEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
 import { applyRunAcceptance } from './run-acceptance.ts'
+import { finishSubworkflowChild } from './subworkflow.ts'
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
 
@@ -107,5 +108,9 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
       superseded_nodes: nodes.filter((node) => node.status === 'superseded').map((node) => node.node_run_id),
     },
   })
+  // A superseded control node cannot keep an open parent from closing. Settle it before this child commit becomes visible.
+  if (tx.get("SELECT 1 FROM runs child JOIN node_runs n ON n.node_run_id=child.parent_node_run_id AND n.run_id=child.parent_run_id WHERE child.run_id=? AND n.node_type='subworkflow' AND n.status='superseded'", [runId])) {
+    finishSubworkflowChild(tx, secret, { childRunId: runId, now })
+  }
   return terminalStatus
 }

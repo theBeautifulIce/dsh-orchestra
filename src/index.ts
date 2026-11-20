@@ -16,7 +16,7 @@ import { withReadTx } from './service/queries/read-tx.ts'
 import { phaseIndex, requireCapability } from './core/config.ts'
 import { sweepIntake } from './service/trial-access.ts'
 export { createIntakeControl, type IntakeOptions } from './service/trial-access.ts'
-import { bindTrialHost, type TrialOptions } from './service/trial-circles.ts'
+import { bindTrialHost, trialAllowsMemoryApply, type TrialOptions } from './service/trial-circles.ts'
 export type { TrialOptions, TrialScope } from './service/trial-circles.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { setTaskArchive } from './service/commands/task-archive.ts'
@@ -612,6 +612,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     }
   }
   let memory: ReturnType<typeof createMemoryHost> | undefined
+  const memoryDecisionAccess = () => !memory ? false : trialAllowsMemoryApply(orchestra.db) ? true : 'proposal_only' as const
   // 维护扫描：租约过期、围栏宽限到点，2 秒一轮；失败只记日志，下一轮继续
   const sweepTimer = setInterval(() => {
     try {
@@ -665,8 +666,8 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getArtifactContent: (runId, artifactId, mode, now) => getArtifactContent(orchestra.db, runId, artifactId, mode, now),
         listRunArtifacts: (runId, now) => listRunArtifacts(orchestra.db, runId, now),
         getAttestation: (attestationId) => getAttestationSnapshot(orchestra.db, attestationId),
-        listDecisions: (params) => listDecisions(orchestra.db, { ...params, memoryEnabled: memory !== undefined }),
-        getDecision: (decisionId, now) => getDecisionSnapshot(orchestra.db, decisionId, now, memory !== undefined),
+        listDecisions: (params) => listDecisions(orchestra.db, { ...params, memoryEnabled: memoryDecisionAccess() }),
+        getDecision: (decisionId, now) => getDecisionSnapshot(orchestra.db, decisionId, now, memoryDecisionAccess()),
         getEvidence: (evidenceId) => getEvidenceSnapshot(orchestra.db, opts.secret, evidenceId),
         verifyLedger: () => verifyLedgerSnapshot(orchestra.db, opts.secret),
         listWorkflows: (params) => listWorkflowQuery(orchestra.db, params),
@@ -683,6 +684,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         resolveDecision: (request) => memory?.resolveApproval(request) ?? orchestra.commands.resolveDecision(request),
       },
       memory,
+      memoryProposalOnly: () => Boolean(memory) && (memoryDecisionAccess() === 'proposal_only' || (opts.phase === 'S6' && !opts.resolveHttpHuman)),
       planning,
       collaboration,
       rework, delivery, localPlanning, inspection, modelEscalation,

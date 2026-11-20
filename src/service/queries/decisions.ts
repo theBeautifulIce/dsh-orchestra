@@ -3,7 +3,7 @@ import { DECISION_PRIORITY_RANK, priorityRank } from '../../core/decision-priori
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx } from './read-tx.ts'
-import { DECISION_CHOICE_COLUMNS, panelDecisionOptions, type DecisionChoiceContext } from '../decision/choices.ts'
+import { DECISION_CHOICE_COLUMNS, panelDecisionOptions, type DecisionChoiceContext, type MemoryDecisionAccess } from '../decision/choices.ts'
 
 const DECISIONS_LIMIT_MAX = 100
 const PRIORITY_ORDER = "CASE priority " + Object.entries(DECISION_PRIORITY_RANK)
@@ -50,7 +50,7 @@ export type ListDecisionParams = {
   limit?: number
   cursor?: string
   now?: number
-  memoryEnabled?: boolean
+  memoryEnabled?: MemoryDecisionAccess
 }
 
 function parsePayload(raw: unknown): { payload: unknown; missing: boolean } {
@@ -62,7 +62,7 @@ const DECISION_SELECT = 'SELECT decision_id, run_id, node_run_id, kind, status, 
   + 'expires_at, confirm_required, created_at, decided_at, resolved_by, priority, priority_reason, expiry_effect, approver, '
   + DECISION_CHOICE_COLUMNS + ' FROM decisions d'
 
-function toDecisionView(row: DecisionRow, now: number, memoryEnabled: boolean): DecisionView {
+function toDecisionView(row: DecisionRow, now: number, memoryEnabled: MemoryDecisionAccess): DecisionView {
   const parsed = parsePayload(row.payload_json)
   const payload = parsed.payload !== null && typeof parsed.payload === 'object' ? parsed.payload as Record<string, unknown> : {}
   const asText = (value: unknown) => typeof value === 'string' && value.trim() ? value.slice(0, 500) : null
@@ -95,7 +95,7 @@ function toDecisionView(row: DecisionRow, now: number, memoryEnabled: boolean): 
   }
 }
 
-export function getDecisionSnapshot(db: Db, decisionId: string, now = Date.now(), memoryEnabled = false): { item: DecisionView; as_of_seq: number } {
+export function getDecisionSnapshot(db: Db, decisionId: string, now = Date.now(), memoryEnabled: MemoryDecisionAccess = false): { item: DecisionView; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const row = ctx.tx.get<DecisionRow>(
       DECISION_SELECT + ' WHERE decision_id = ?',
@@ -156,6 +156,6 @@ export function listDecisions(db: Db, params: ListDecisionParams = {}): {
       ? encodeCursor(makeCursor('decisions', filter,
         byPriority ? `${PRIORITY_CURSOR}${priorityRank(last.priority)}:${last.created_at}` : last.created_at, last.decision_id, ctx.as_of_seq, now))
       : null
-    return { items: page.map((row) => toDecisionView(row, now, params.memoryEnabled === true)), next_cursor, as_of_seq: ctx.as_of_seq }
+    return { items: page.map((row) => toDecisionView(row, now, params.memoryEnabled ?? false)), next_cursor, as_of_seq: ctx.as_of_seq }
   })
 }

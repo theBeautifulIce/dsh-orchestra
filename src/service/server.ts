@@ -77,6 +77,7 @@ export type ServerDeps = {
   // 生产路径的节点命令；缺省时这几条路由一律 404，老测试不受影响
   commands?: NodeCommands
   memory?: MemoryHost
+  memoryProposalOnly?: () => boolean
   planning?: TaskPlanningHost
   collaboration?: CollaborationHost
   rework?: ReworkHost
@@ -335,6 +336,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     if (req.method === 'GET' && url.pathname === '/health') {
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), {
         ok: true, phase: deps.phase, epoch: deps.epoch, memory_enabled: Boolean(deps.memory),
+        memory_proposal_only: deps.memoryProposalOnly?.() ?? false,
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
         rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
         model_escalation_enabled: Boolean(deps.modelEscalation),

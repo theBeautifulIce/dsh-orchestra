@@ -26,6 +26,7 @@ export type PanelHostStatus = {
   phase?: string
   streamStatus?: StreamStatus
   memoryEnabled?: boolean
+  memoryProposalOnly?: boolean
   modelRoutingEnabled?: boolean
   modelEscalationEnabled?: boolean
   collaborationEnabled?: boolean
@@ -63,7 +64,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
   const probe = useCallback(async (): Promise<boolean> => {
     const generation = ++probeGeneration.current
     try {
-      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; model_routing_enabled?: boolean; model_escalation_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean }>('/health')
+      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; memory_proposal_only?: boolean; model_routing_enabled?: boolean; model_escalation_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean }>('/health')
       if (generation !== probeGeneration.current) return false
       setStatus((previous) => ({
         ...previous,
@@ -71,6 +72,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
         protocolMismatch: false,
         phase: typeof result.data.phase === 'string' ? result.data.phase : previous.phase,
         memoryEnabled: typeof result.data.memory_enabled === 'boolean' ? result.data.memory_enabled : undefined,
+        memoryProposalOnly: result.data.memory_proposal_only === true,
         modelRoutingEnabled: result.data.model_routing_enabled === true,
         modelEscalationEnabled: result.data.model_escalation_enabled === true,
         collaborationEnabled: result.data.collaboration_enabled === true,
@@ -115,6 +117,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     protocolMismatch={status.protocolMismatch ?? false}
     initialRoute={props.initialRoute}
     memoryEnabled={status.serviceConnected ? status.memoryEnabled : false}
+    memoryProposalOnly={status.serviceConnected && status.memoryProposalOnly}
     modelRoutingEnabled={status.modelRoutingEnabled}
     collaborationEnabled={status.collaborationEnabled}
     reworkEnabled={status.reworkEnabled}

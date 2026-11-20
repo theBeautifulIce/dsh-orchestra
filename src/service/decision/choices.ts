@@ -9,13 +9,17 @@ export type DecisionChoiceContext = {
   memory_recovery: unknown
 }
 
-export function panelDecisionOptions(decision: DecisionChoiceContext, now: number, memoryEnabled: boolean): {
+export type MemoryDecisionAccess = boolean | 'proposal_only'
+export function panelDecisionOptions(decision: DecisionChoiceContext, now: number, memoryEnabled: MemoryDecisionAccess): {
   choices: Resolution[]; unavailableReason: string | null
 } {
   const unavailable = (unavailableReason: string) => ({ choices: [], unavailableReason })
   const restricted = panelDecisionRestriction(decision, now)
   if (restricted) return unavailable(restricted)
   if (isEffectDecision(decision)) return unavailable('此裁决必须提交对应节点的系统核验证据。')
+  if (memoryEnabled === 'proposal_only' && decision.kind === 'audit_result' && decision.memory_approval_status === 'awaiting_human') {
+    return { choices: ['rejected'], unavailableReason: '当前试用圈只开放记忆提议。' }
+  }
   if (decision.kind === 'pre_execution' || (decision.kind === 'audit_result' && (decision.memory_approval_status === null
     || (memoryEnabled && decision.memory_approval_status === 'awaiting_human')))) {
     return { choices: ['approved', 'rejected'], unavailableReason: null }

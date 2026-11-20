@@ -31,6 +31,7 @@ export type PanelAppProps = {
   protocolMismatch?: boolean
   snapshotStale?: boolean
   memoryEnabled?: boolean
+  memoryProposalOnly?: boolean
   modelRoutingEnabled?: boolean
   modelEscalationEnabled?: boolean
   servicePhase?: string
@@ -198,7 +199,7 @@ export function PanelApp(props: PanelAppProps) {
       onOpenRun={(task, run) => { setTaskId(task); setTaskRunId(run) }} />
   } else if (route === 'memory') {
     screen = props.additionalScreens?.memory
-      ?? <MemoryPanel api={api} recovery={memoryRecovery} memoryEnabled={props.memoryEnabled}
+      ?? <MemoryPanel api={api} recovery={memoryRecovery} memoryEnabled={props.memoryEnabled} proposalOnly={props.memoryProposalOnly}
         reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} onOpenTasks={() => setRoute('tasks')} />
   } else if (route === 'settings') {
     screen = <section className="ops-page"><h1>设置</h1><div className="ops-context-grid">{props.additionalScreens?.settings
@@ -209,7 +210,7 @@ export function PanelApp(props: PanelAppProps) {
         <header className="ops-surface-head"><h2 id="memory-capability-title">任务记忆</h2></header>
         <div className="ops-inset">
           <p>{!props.serviceConnected ? '服务未连接，记忆整理状态待确认。' : props.memoryEnabled === true ? '宿主已启用记忆整理。' : props.memoryEnabled === false ? '当前宿主未启用记忆整理。' : '宿主尚未报告记忆整理状态。'}</p>
-          <p>在成功任务的「结果」中发起整理。你在审批中心确认条目后，可到记忆页查看实际写入的内容和来源。</p>
+          <p>{props.memoryProposalOnly ? '当前工作区开放记忆提议。你可以从成功任务的「结果」整理经验，在记忆页查看建议和来源。' : '在成功任务的「结果」中发起整理。你在审批中心确认条目后，可到记忆页查看实际写入的内容和来源。'}</p>
           <button type="button" className="ops-button" onClick={() => setRoute('memory')}>查看记忆与写入结果</button>
         </div>
       </section>

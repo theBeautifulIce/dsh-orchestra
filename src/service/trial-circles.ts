@@ -67,6 +67,10 @@ export function requireTrialMemoryApply(tx: Tx) {
   requireWorkspace(tx, state)
   if (state.circle !== 'R0') deny('当前试用圈只开放记忆提议')
 }
+export function trialAllowsMemoryApply(db: Db): boolean {
+  try { requireTrialMemoryApply(makeTx(db.raw)); return true }
+  catch (error) { if (error instanceof OrchError && error.code === 'FORBIDDEN') return false; throw error }
+}
 
 function validateScope(to: Circle, scope: TrialScope, current: RecordState) {
   const ids = new Set(scope.workspaces.map((w) => w.id))
