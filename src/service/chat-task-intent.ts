@@ -21,6 +21,8 @@ const listPrefix = /^(?:\d+[.、)]|[一二三四五六七八九十]+、|[-*])\s*
 const taskQualifier = /^(?:先|现在|直接|立即)\s*/u
 const actionQualifiers = /^(?:(?:仅|只|独立|分别|并行)\s*)+/u
 const actionConsultation = /(?:[,，][ \t]*(?:这(?:个|种|样|么)|是指|(?:你)?(?:能|可以)做到|(?:要|该|应当|应该)(?:用|采用|选择|怎么|怎样|如何|做什么))|是(?:默认行为|规定|惯例))[^。！？!?\n]*\?/u
+// A question about performing the proposed work stays in chat even when it names files or deliverables.
+const asksAboutExecution = /(?:可行(?:吗|么)|(?:应该|应当|该)?(?:怎么|怎样|如何)(?:做|操作|实现|执行)|[,，]\s*(?:你)?(?:能否|能不能|能|可以|可不可以)?(?:讲讲|解释|说明)(?:一下)?(?:实现)?(?:思路|方法|做法)(?:吗|么)?)\s*\?\s*$/u
 const consultationOnly = /(?:我(?:们)?\s*)?只(?:是|想|是想)(?:讨论|了解(?:能力|可行性|怎么|怎样|如何)|问问)|不(?:会|需要)?实际做/u
 
 function actionIsDirect(prefix: string): boolean {
@@ -65,7 +67,7 @@ export function classifyChatTask(text: string): ChatTaskIntent {
   const header = taskHeader.exec(body)
   if (header) return classifyTaskDetails(body.slice(header[0].length).replace(/^[，,：:]/u, ''))
   const details = body.replace(actionQualifiers, '')
-  if (details !== body && (actionConsultation.test(details) || consultationOnly.test(details))) return 'conversation'
+  if (asksAboutExecution.test(details) || (details !== body && (actionConsultation.test(details) || consultationOnly.test(details)))) return 'conversation'
   const predicate = action.exec(details)
   if (!predicate) return /^(?:处理|做一下|跟进|弄一下|办一下)/u.test(body) && body !== directive ? 'clarify' : 'conversation'
   // Arbitrary prefixes cannot turn a later example or discussed action into an assignment.
