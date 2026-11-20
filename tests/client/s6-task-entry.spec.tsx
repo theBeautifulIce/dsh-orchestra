@@ -5,10 +5,11 @@ import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { createTaskCommands } from '../../src/client/api/task-commands.ts'
 import { CollaborationScreen } from '../../src/client/panel/collaboration-screen.tsx'
+import { PanelApp } from '../../src/client/panel/app.tsx'
 import { TaskStartForm } from '../../src/client/panel/task-start-form.tsx'
 import { TaskPlanForm } from '../../src/client/panel/task-plan-form.tsx'
 import { PanelShell } from '../../src/client/panel/shell.tsx'
-import { createFakeService, nodeRunView, page, renderPanel, runSummary, workflowItem } from './harness.ts'
+import { createFakeService, deferred, nodeRunView, page, renderPanel, runSummary, workflowItem, type FakeReply } from './harness.ts'
 
 async function change(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement, value: string) {
   await act(async () => {
@@ -151,6 +152,131 @@ it.each(['workflow', 'goal'])('opens only the confirmed task and run after a %s 
     const link = button('查看本次运行')!
     await view.click(link)
     expect(props.onOpenRun).toHaveBeenCalledWith(launch.task_id, link, launch.run_id)
+  } finally { view.unmount() }
+})
+
+it.each([
+  ['inactivity', '等待可用的规划回复超时'],
+  ['maximum', '规划已达到服务的处理时限'],
+])('announces planning, retains the form on %s timeout, and replaces the wait state on retry', async (boundary, message) => {
+  const first = deferred<FakeReply>()
+  const second = deferred<FakeReply>()
+  const submissions: unknown[] = []
+  const service = createFakeService(({ path }) => {
+    if (path === '/v1/task-plans/capability') return { ok: true, data: { enabled: true } }
+    if (path === '/v1/task-plans') return submissions.length === 1 ? first.promise : second.promise
+    throw new Error(path)
+  })
+  const client = createApiClient('http://panel.test', (input, init) => {
+    if (init?.method === 'POST') submissions.push(JSON.parse(String(init.body)))
+    return service.fetcher(input, init)
+  })
+  const view = await renderPanel(<PanelShell activeRoute="tasks" serviceConnected onNavigate={() => {}}>
+    <TaskPlanForm api={createResourcesApi(client)} commands={createTaskCommands(client)} />
+  </PanelShell>)
+  try {
+    await view.click(view.container.querySelector('summary')!)
+    await view.flush()
+    const [goal, criteria] = view.container.querySelectorAll<HTMLTextAreaElement>('textarea')
+    await change(goal!, '汇总本周项目')
+    await change(criteria!, '列出缺项\n整理成复核清单')
+    const form = view.container.querySelector('form')!
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!
+    const status = view.container.querySelector('details [role="status"]')!
+
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(submissions).toHaveLength(1)
+    expect(form.getAttribute('aria-busy')).toBe('true')
+    expect(status.textContent).toContain('正在生成计划')
+    expect(status.textContent).toContain('可能会先生成流程，再编排步骤')
+    expect(form.contains(status)).toBe(false)
+    expect(submit.disabled && goal!.disabled && criteria!.disabled).toBe(true)
+
+    await act(async () => first.resolve({ ok: false, error: {
+      code: 'OPERATION_TIMEOUT', message: '主脑规划超时', retryable: true, details: { boundary },
+    } }))
+    expect(form.getAttribute('aria-busy')).toBe('false')
+    expect(status.textContent).toBe('')
+    expect(view.byRole('alert')[0]?.textContent).toContain(message)
+    expect(view.byRole('alert')[0]?.textContent).toContain('已保留输入，可以重试')
+    expect([goal!.value, criteria!.value]).toEqual(['汇总本周项目', '列出缺项\n整理成复核清单'])
+    expect(submit.disabled || goal!.disabled || criteria!.disabled).toBe(false)
+
+    await view.click(submit)
+    expect(submissions).toEqual(Array.from({ length: 2 }, () => ({
+      goal: '汇总本周项目', requirements: ['列出缺项', '整理成复核清单'],
+    })))
+    expect(view.byRole('alert')).toEqual([])
+    expect(status.textContent).toContain('正在生成计划')
+    await act(async () => second.resolve({ ok: true, data: {
+      plan_id: 'p', content_hash: 'hash', brief: { goal: '汇总本周项目', requirements: [] },
+      proposal: { title: '复核计划', workflow_id: 'wf1', workflow_version: '3', steps: [], deliverables: [], risks: [] },
+      quality: { ready: true, checks: [] }, launch: null,
+    } }))
+    expect(view.container.querySelector('[aria-label="计划复核"] h2')?.textContent).toBe('复核计划')
+    expect(view.text()).not.toContain('正在生成计划')
+    expect(view.byRole('alert')).toEqual([])
+  } finally { view.unmount() }
+})
+
+it.each(['collapse', 'leave tasks'])('cancels an outstanding planning POST on %s and ignores its late response', async (action) => {
+  const first = deferred<FakeReply>()
+  const second = deferred<FakeReply>()
+  const signals: AbortSignal[] = []
+  const service = createFakeService(({ path }) => {
+    if (path === '/v1/task-plans/capability') return { ok: true, data: { enabled: true } }
+    if (path === '/v1/task-plans') return signals.length === 1 ? first.promise : second.promise
+    return { ok: true, data: page([]) }
+  })
+  const client = createApiClient('http://panel.test', (input, init) => {
+    if (init?.method === 'POST') signals.push(init.signal!)
+    return service.fetcher(input, init)
+  })
+  const plan = (title: string): FakeReply => ({ ok: true, data: {
+    plan_id: 'p', content_hash: 'hash', brief: { goal: title, requirements: [] },
+    proposal: { title, workflow_id: 'wf1', workflow_version: '1', steps: [], deliverables: [], risks: [] },
+    quality: { ready: true, checks: [] }, launch: null,
+  } })
+  const view = await renderPanel(<PanelApp client={client} serviceConnected initialRoute="tasks" />)
+  const button = (label: string) => view.findAll('button').find((item) => item.textContent === label)!
+  const summary = () => view.findAll('summary').find((item) => item.textContent === '用自然语言规划任务')!
+  try {
+    await view.click(summary())
+    await view.flush()
+    await change(view.container.querySelector('textarea')!, '用户输入')
+    await view.click(button('生成计划'))
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(false)
+    if (action === 'collapse') {
+      await view.click(summary())
+      await view.flush()
+    } else {
+      await view.click(button('设置'))
+    }
+    expect(signals[0]?.aborted).toBe(true)
+    if (action !== 'collapse') await view.click(button('任务'))
+    await view.click(summary())
+    await view.flush()
+    const goal = view.container.querySelector('textarea')!
+    if (action === 'collapse') {
+      expect(goal.value).toBe('用户输入')
+      expect(view.text()).toContain('已取消生成，输入已保留')
+    } else {
+      await change(goal, '用户新输入')
+    }
+    await view.click(button('生成计划'))
+    expect(signals).toHaveLength(2)
+    expect(signals[1]?.aborted).toBe(false)
+    await act(async () => first.resolve(plan('晚到旧计划')))
+    expect(view.text()).not.toContain('晚到旧计划')
+    expect(view.text()).toContain('正在生成计划')
+    expect(view.byRole('alert')).toEqual([])
+    await act(async () => second.resolve(plan('新计划')))
+    expect(view.container.querySelector('[aria-label="计划复核"] h2')?.textContent).toBe('新计划')
+    expect(view.text()).not.toContain('已取消生成')
   } finally { view.unmount() }
 })
 

@@ -1,4 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import { ApiError } from '../api/client.ts'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { TaskCommands } from '../api/task-commands.ts'
 import type { TaskPlanView } from '../../service/task-planning.ts'
@@ -11,6 +12,15 @@ const checkLabels = {
   tools: '工具可用及授权', dependencies: '执行依赖', risks: '风险及应对',
 }
 const severityLabels = { low: '低风险', medium: '中风险', high: '高风险' }
+
+function proposalFailure(error: unknown): string {
+  if (error instanceof ApiError && error.code === 'OPERATION_TIMEOUT'
+      && error.details && typeof error.details === 'object' && 'boundary' in error.details) {
+    if (error.details.boundary === 'inactivity') return '等待可用的规划回复超时。已保留输入，可以重试。'
+    if (error.details.boundary === 'maximum') return '规划已达到服务的处理时限。已保留输入，可以重试。'
+  }
+  return error instanceof Error ? error.message : '暂未生成任务计划。'
+}
 
 function Brief({ plan }: { plan: TaskPlanView }) {
   const { brief, proposal } = plan
@@ -57,7 +67,16 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
   const [plan, setPlan] = useState<TaskPlanView | null>(null)
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState<'propose' | 'start' | null>(null)
+  const proposal = useRef<AbortController | null>(null)
+  const [proposalCancelled, setProposalCancelled] = useState(false)
   const [failure, setFailure] = useState('')
+  useLayoutEffect(() => {
+    setBusy((value) => value === 'propose' ? null : value)
+    return () => {
+      proposal.current?.abort()
+      proposal.current = null
+    }
+  }, [api, commands])
   useEffect(() => {
     if (!open) return
     let current = true
@@ -70,18 +89,29 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
 
   async function propose(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (busy || !goal.trim()) return
+    if (busy || proposal.current || !goal.trim()) return
     const requirements = criteria.split('\n').map((entry) => entry.trim()).filter(Boolean)
     if (requirements.length > 12 || requirements.some((entry) => entry.length > 300)) {
       setFailure('最多 12 项要求，每项不超过 300 字。')
       return
     }
+    const request = new AbortController()
+    proposal.current = request
+    setProposalCancelled(false)
     setBusy('propose')
     setFailure('')
     setConfirmed(false)
-    try { setPlan(await commands.proposeTaskPlan(goal.trim(), requirements)) }
-    catch (error) { setFailure(error instanceof Error ? error.message : '暂未生成任务计划。') }
-    finally { setBusy(null) }
+    try {
+      const proposed = await commands.proposeTaskPlan(goal.trim(), requirements, request.signal)
+      if (proposal.current === request) setPlan(proposed)
+    } catch (error) {
+      if (proposal.current === request) setFailure(proposalFailure(error))
+    } finally {
+      if (proposal.current === request) {
+        proposal.current = null
+        setBusy(null)
+      }
+    }
   }
 
   async function start() {
@@ -96,23 +126,41 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
     finally { setBusy(null) }
   }
 
-  return <details style={panelStyle} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details style={panelStyle} onToggle={(event) => {
+    if (event.target !== event.currentTarget) return
+    const opened = event.currentTarget.open
+    if (!opened && proposal.current) {
+      proposal.current.abort()
+      proposal.current = null
+      setBusy(null)
+      setProposalCancelled(true)
+    }
+    setOpen(opened)
+  }}>
     <summary>用自然语言规划任务</summary>
     <div style={contentStyle}>
       {capability === 'loading' && <p role="status" style={descriptionStyle}>检查主脑规划服务…</p>}
       {capability === 'unavailable' && <p role="status" style={descriptionStyle}>当前宿主尚未启用主脑规划。</p>}
       {capability === 'error' && <p role="alert" style={descriptionStyle}>暂时无法获取主脑规划状态。</p>}
-      {capability === 'enabled' && !plan && <form onSubmit={(event) => { void propose(event) }} style={contentStyle}>
-        <label style={contentStyle}>要完成什么
-          <textarea required rows={3} maxLength={2000} value={goal} disabled={busy !== null}
-            placeholder="例如，复核本周项目交付清单并整理差异" onChange={(event) => setGoal(event.target.value)} />
-        </label>
-        <label style={contentStyle}>必须满足的要求（可选，每行一项）
-          <textarea rows={2} maxLength={3612} value={criteria} disabled={busy !== null}
-            onChange={(event) => setCriteria(event.target.value)} />
-        </label>
-        <PanelCommandButton type="submit" disabled={busy !== null || !goal.trim()}>{busy === 'propose' ? '正在规划…' : '生成计划'}</PanelCommandButton>
-      </form>}
+      {capability === 'enabled' && !plan && <div>
+        <form onSubmit={(event) => { void propose(event) }} style={contentStyle} aria-busy={busy === 'propose'}>
+          <label style={contentStyle}>要完成什么
+            <textarea required rows={3} maxLength={2000} value={goal} disabled={busy !== null}
+              placeholder="例如，复核本周项目交付清单并整理差异" onChange={(event) => setGoal(event.target.value)} />
+          </label>
+          <label style={contentStyle}>必须满足的要求（可选，每行一项）
+            <textarea rows={2} maxLength={3612} value={criteria} disabled={busy !== null}
+              onChange={(event) => setCriteria(event.target.value)} />
+          </label>
+          <PanelCommandButton type="submit" disabled={busy !== null || !goal.trim()}>{busy === 'propose' ? '正在规划…' : '生成计划'}</PanelCommandButton>
+        </form>
+        <div role="status" aria-atomic="true">
+          {busy === 'propose' && <p style={descriptionStyle}>
+            正在生成计划。如果没有合适的已发布流程，可能会先生成流程，再编排步骤。收起表单会取消这次生成，输入会保留。
+          </p>}
+          {proposalCancelled && <p style={descriptionStyle}>已取消生成，输入已保留。可以重新生成计划。</p>}
+        </div>
+      </div>}
       {plan && <section style={contentStyle} aria-label="计划复核">
         <h2 style={headingStyle}>{plan.proposal.title}</h2>
         <p style={descriptionStyle}>{plan.proposal.workflow_id} · 固定 v{plan.proposal.workflow_version}</p>

@@ -11,7 +11,6 @@ const QUEUE_PHASES: Record<string, { label: string; tone: string }> = {
   ready: { label: '就绪待派发', tone: 'waiting' },
   paused: { label: '已暂停', tone: 'blocked' },
   queued_unknown: { label: '排队原因未知', tone: 'waiting' },
-  queued: { label: '排队原因未记录', tone: 'waiting' },
   cancelled: { label: '已取消', tone: 'waiting' },
 }
 
@@ -30,14 +29,15 @@ export function nodeExecutionPhase(node: NodeStatus | null): { label: string; to
   if (ACTIVE_NODE_STATES.has(state)) return { label: state === 'verifying' ? '核验中' : '进行中', tone: 'active' }
   if (UNVERIFIED.has(state)) return { label: '待核实', tone: 'blocked' }
   if (FAILED.has(state)) return { label: '未成功', tone: 'failed' }
+  if (state === 'queued') return { label: node.status_label || '等待调度', tone: 'waiting' }
   if (state === 'waiting') return { label: '等待条件', tone: 'waiting' }
   if (state === 'superseded') return { label: '已被接替', tone: 'waiting' }
   return { label: node.status_label || '执行状态未知', tone: 'waiting' }
 }
 
 export function nodeExecutionLabel(node: NodeStatus): string {
-  const state = executionState(node)
-  return Object.hasOwn(QUEUE_PHASES, state) ? QUEUE_PHASES[state]!.label : node.status_label || nodeExecutionPhase(node).label
+  const state = node.execution_state
+  return state && Object.hasOwn(QUEUE_PHASES, state) ? QUEUE_PHASES[state]!.label : node.status_label || nodeExecutionPhase(node).label
 }
 
 /** Only the persisted execution projection identifies which predecessors are still blocking a node. */

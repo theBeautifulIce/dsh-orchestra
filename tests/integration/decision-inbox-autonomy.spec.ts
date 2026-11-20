@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { serveOrchestra } from '../../src/index.ts'
-import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
-import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
+import { applySteps, defaultMigrationsDir, loadSteps, type SchemaStep } from '../../src/infra/db/migrate.ts'
+import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { acknowledgeDecision, ensurePreExecutionDecision, openDecision, sweepDecisions } from '../../src/service/commands/decisions.ts'
 import { setTaskAutonomy, startRun } from '../../src/service/commands/start-run.ts'
 import { listDecisions, type DecisionView } from '../../src/service/queries/decisions.ts'
@@ -12,6 +12,12 @@ import { getTaskSummary, listTaskSummaries } from '../../src/service/queries/tas
 import { catalogFor, TEST_SECRET } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-20T00:00:00.000Z'
+const INBOX_MIGRATION = 62
+
+function applyInboxAndLaterMigrations(db: Db, migrations: SchemaStep[]) {
+  expect(applySteps(db, migrations.filter((step) => step.version <= INBOX_MIGRATION))).toEqual([INBOX_MIGRATION])
+  expect(applySteps(db, migrations)).toEqual(migrations.filter((step) => step.version > INBOX_MIGRATION).map((step) => step.version))
+}
 
 it('only routes required autonomous decisions to the approval center and task workspace', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-decision-inbox-'))
@@ -105,7 +111,7 @@ it('keeps pending and historical decisions created before the inbox migration', 
   const db = openDb(':memory:')
   try {
     const migrations = loadSteps(defaultMigrationsDir())
-    applySteps(db, migrations.filter((step) => step.version < 62))
+    applySteps(db, migrations.filter((step) => step.version < INBOX_MIGRATION))
     const run = startRun(db, catalogFor(['n1']), { workflowVersion: '1', taskTitle: '既有任务', operationId: 'op-old', now: NOW })
     withTx(db, (tx) => {
       for (const status of ['pending', 'resolved']) {
@@ -116,7 +122,7 @@ it('keeps pending and historical decisions created before the inbox migration', 
         VALUES ('legacy-audit-role', ?, 'rule_ambiguous', 'blocked_for_human', 1, ?, '{}', 'agent:auditor')`, [run.run_id, NOW])
     })
 
-    expect(applySteps(db, migrations)).toEqual([62])
+    applyInboxAndLaterMigrations(db, migrations)
     expect(listDecisions(db, { humanInbox: true }).items.map((item) => item.decision_id)).toEqual(['pending'])
     expect(listDecisions(db).items.map((item) => item.decision_id).sort()).toEqual(['legacy-audit-role', 'pending'])
     expect(listDecisions(db, { status: 'resolved' }).items.map((item) => item.decision_id)).toEqual(['resolved'])
@@ -132,7 +138,7 @@ it('moves a legacy running task with only audit-role decisions back to the runni
   const migrations = loadSteps(defaultMigrationsDir())
   let db = openDb(file)
   try {
-    applySteps(db, migrations.filter((step) => step.version < 62))
+    applySteps(db, migrations.filter((step) => step.version < INBOX_MIGRATION))
     const run = startRun(db, catalogFor(['n1']), { workflowVersion: '1', taskTitle: '进行中的审计', operationId: 'op-legacy-audit', now: NOW })
     withTx(db, (tx) => {
       tx.run("UPDATE tasks SET status = 'running' WHERE task_id = ?", [run.task_id])
@@ -155,7 +161,7 @@ it('moves a legacy running task with only audit-role decisions back to the runni
       expect(listDecisions(db, { run_id: run.run_id }).items).toMatchObject([{ decision_id: 'legacy-audit', status: 'pending' }])
     }
 
-    expect(applySteps(db, migrations)).toEqual([62])
+    applyInboxAndLaterMigrations(db, migrations)
     expectMigratedLane()
     db.raw.close()
     db = openDb(file)

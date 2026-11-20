@@ -8,6 +8,8 @@ import type { SetTaskArchive } from './commands/task-archive.ts'
 import { taskTriggerCreateSchema, taskTriggerEnabledSchema, taskTriggerEventSchema, type TaskTriggerHost } from './task-triggers.ts'
 import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
+import { callPlanningStage } from './task-planning.ts'
+import { planningSettingsSchema, planningTimeoutDefaults, withPlanningBudget, type PlanningSettingsHost } from './planning-settings.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
 import type { ListTaskParams, TaskSummary, WorkspaceOverview } from './queries/tasks.ts'
@@ -87,7 +89,9 @@ export type ServerDeps = {
   modelEscalation?: ReturnType<typeof createModelEscalationHost>
   modelSettings?: ModelRoutingSettingsHost
   taskTriggers?: TaskTriggerHost
-  workflowGenerator?: (input: { goal: string }, signal: AbortSignal) => Promise<unknown>
+  workflowGenerator?: (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) => Promise<unknown>
+  workflowGeneratorStreamProgress?: boolean
+  planningSettings?: PlanningSettingsHost
 }
 
 export type ServerQueries = {
@@ -288,6 +292,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(text)
 }
 
+async function withPlanningResponse<T>(res: ServerResponse, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const request = new AbortController()
+  const disconnected = () => request.abort(new OrchError('SERVICE_UNAVAILABLE', '规划请求已断开'))
+  res.once('close', disconnected)
+  if (res.destroyed) disconnected()
+  try { return await run(request.signal) }
+  finally {
+    res.off('close', disconnected)
+  }
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
@@ -338,6 +353,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), {
         ok: true, phase: deps.phase, epoch: deps.epoch, memory_enabled: Boolean(deps.memory),
         memory_proposal_only: deps.memoryProposalOnly?.() ?? false,
+        planning_timeouts_enabled: Boolean(deps.planningSettings),
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
         rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
         model_escalation_enabled: Boolean(deps.modelEscalation),
@@ -434,6 +450,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
 
+    if (req.method === 'GET' && url.pathname === '/v1/settings/planning-timeouts' && deps.planningSettings) {
+      human()
+      const { item, as_of_seq } = deps.planningSettings.get()
+      sendJson(res, 200, okEnvelope(as_of_seq, item))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/settings/planning-timeouts' && deps.planningSettings) {
+      const editor = human().id
+      const body = parseBody(planningSettingsSchema, await readJsonBody(req), '保存规划时限')
+      const result = await queue.run(() => deps.planningSettings!.save(body, editor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/settings/model-routing' && deps.modelSettings) {
       await deps.modelSettings.refresh?.()
       const { item, as_of_seq } = deps.modelSettings.get()
@@ -493,7 +522,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     if (req.method === 'POST' && url.pathname === '/v1/task-plans' && deps.planning) {
       const input = parseBody(planInputSchema, await readJsonBody(req), '任务规划目标')
-      const { view, as_of_seq } = await deps.planning.propose(input, actor, requestNow)
+      const planning = deps.planning
+      const { view, as_of_seq } = await withPlanningResponse(res, (signal) => planning.propose(input, actor, requestNow, signal))
       sendJson(res, 200, okEnvelope(as_of_seq, view))
       return
     }
@@ -809,9 +839,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     if (req.method === 'POST' && url.pathname === '/v1/workflows/generate' && deps.workflowGenerator) {
       const body = parseBody(workflowGenerateSchema, await readJsonBody(req), '生成 Workflow 草稿')
-      const signal = AbortSignal.timeout(45_000)
-      const proposed = await deps.workflowGenerator(body, signal)
-      signal.throwIfAborted()
+      const generate = deps.workflowGenerator
+      const budget = deps.planningSettings?.snapshot() ?? {
+        workflow: planningTimeoutDefaults.workflow_seconds * 1000, idle: planningTimeoutDefaults.idle_seconds * 1000,
+        stage: planningTimeoutDefaults.stage_seconds * 1000, request: planningTimeoutDefaults.request_seconds * 1000,
+      }
+      const proposed = await withPlanningResponse(res, (caller) => withPlanningBudget(budget.request, caller, (active) => callPlanningStage(
+        (signal, onProgress) => onProgress ? generate(body, signal, onProgress) : generate(body, signal), active,
+        { timeout: '主脑没有在时限内生成流程', failure: '主脑暂时未能生成流程' },
+        deps.workflowGeneratorStreamProgress ? budget.stage : budget.workflow,
+        deps.workflowGeneratorStreamProgress ? budget.idle : null,
+      )))
       const saved = validateSaveLayer(proposed)
       if (!saved.saved || saved.report.errors.length > 0 || saved.saved.scope === 'task_local') {
         throw new OrchError('WORKFLOW_VALIDATION_FAILED', '生成的可复用 Workflow 草稿结构不合法', { errors: saved.report.errors })
@@ -1118,6 +1156,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     throw new OrchError('NOT_FOUND', '没有这个接口', { path: url.pathname, method: req.method })
   } catch (err) {
+    if (res.destroyed) return
     const e = toOrchError(err)
     if (e.httpStatus >= 500) log.error('请求失败', { code: e.code })
     sendJson(res, e.httpStatus, failEnvelope(deps.asOfSeq(), e))
