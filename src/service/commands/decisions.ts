@@ -435,15 +435,17 @@ function decisionEscalationTime(tx: Tx, row: { decision_id: string; revision: nu
 /**
  * 维护扫描里的决策超时：满 2 小时升级，实际升级后再等 24 小时按默认动作过期。
  * 与单个受理入口共用同一套 CAS 与事件语义；supervised 只升级不自动收口，
- * report_contradicted 一律留给人裁决（规格 3.6）。
+ * report_contradicted 满 24 小时只提醒，留给人裁决（规格 3.6）。
  */
 export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptions): SweepDecisionsOutcome {
   const nowMs = Date.parse(opts.now)
+  const oneDayMs = 24 * 60 * 60 * 1000
   const blockedAfterMs = opts.blockedAfterMs ?? 2 * 60 * 60 * 1000
-  const expireAfterMs = opts.expireAfterMs ?? 24 * 60 * 60 * 1000
+  const expireAfterMs = opts.expireAfterMs ?? oneDayMs
   const rows = tx.all<{
     decision_id: string
     run_id: string
+    kind: DecisionKind
     status: string
     revision: number
     created_at: string
@@ -454,12 +456,11 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     node_status: string | null
     node_run_id: string | null
   }>(
-    'SELECT d.decision_id, d.run_id, d.status, d.revision, d.created_at, d.node_run_id, d.human_attention, d.expiry_effect, '
+    'SELECT d.decision_id, d.run_id, d.kind, d.status, d.revision, d.created_at, d.node_run_id, d.human_attention, d.expiry_effect, '
       + 'COALESCE(t.autonomy, \'autonomous\') AS autonomy, r.status AS run_status, n.status AS node_status '
       + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
       + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
-      + "WHERE d.kind <> 'report_contradicted' "
-      + 'AND NOT EXISTS (SELECT 1 FROM memory_batches b WHERE b.decision_id = d.decision_id) '
+      + 'WHERE NOT EXISTS (SELECT 1 FROM memory_batches b WHERE b.decision_id = d.decision_id) '
       + 'AND NOT EXISTS (SELECT 1 FROM memory_write_recoveries m WHERE m.decision_id = d.decision_id OR m.abandon_ack_id = d.decision_id) '
       + `AND d.status IN ${ACTIVE_STATUSES}`,
   )
@@ -471,8 +472,9 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     // run 已终态：这张卡不再有业务含义，不自动改写也不尝试收口
     if (row.run_status !== null && (RUN_TERMINAL_STATUSES as readonly string[]).includes(row.run_status)) continue
     const age = nowMs - Date.parse(row.created_at)
+    const reportConflict = row.kind === 'report_contradicted'
     // blocked_post 压在人工核验上：证据门只能由人关，自动过期会留下“卡没了、节点还卡着”的死角
-    const holdForHuman = row.node_status === 'blocked_post' || (row.human_attention === null
+    const holdForHuman = reportConflict || row.node_status === 'blocked_post' || (row.human_attention === null
       ? timeoutDisposition(row.autonomy) === 'hold_for_human'
       : row.expiry_effect === 'escalate_only')
     // 自主审计的静默卡不走人工升级，继续按现有的创建时间计时。
@@ -492,7 +494,8 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       }
       continue
     }
-    if (age >= blockedAfterMs && row.status !== 'blocked_for_human' && (row.human_attention !== 0 || holdForHuman)) {
+    const escalationAfterMs = reportConflict ? oneDayMs : blockedAfterMs
+    if (age >= escalationAfterMs && row.status !== 'blocked_for_human' && (row.human_attention !== 0 || holdForHuman)) {
       const res = tx.run(
         "UPDATE decisions SET status = 'blocked_for_human', revision = revision + 1 WHERE decision_id = ? AND revision = ? AND status IN ('pending', 'acknowledged')",
         [row.decision_id, row.revision],
@@ -500,12 +503,13 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       if (res.changes !== 1) continue
       appendEvent(tx, {
         type: 'decision.blocked',
+        ...(reportConflict && { runId: row.run_id, nodeRunId: row.node_run_id, decisionId: row.decision_id }),
         idempotencyKey: decisionEscalationKey(row.decision_id),
         payload: {
           decisionId: row.decision_id,
           revision: row.revision + 1,
           reason: 'timeout_escalated',
-          blockedAfterMs,
+          blockedAfterMs: escalationAfterMs,
           escalated_at: opts.now,
         },
       })
