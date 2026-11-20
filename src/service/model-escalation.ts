@@ -135,14 +135,15 @@ function safeOrigin(tx: ReadTx, nodeRunId: string, now: string, successorGenerat
 }
 
 /** Apply only after the established retry or rework path leases the direct successor. */
-export function getEscalatedModel(tx: Tx, secret: string, node: NodeRunRow, profiles: readonly Profile[], base: ModelAssignment, now: string): ModelAssignment {
+export function getEscalatedModel(tx: Tx, secret: string, node: NodeRunRow, profiles: readonly Profile[], base: ModelAssignment,
+  now: string, assessmentNow = now): ModelAssignment {
   const origin = safeOrigin(tx, node.node_run_id, now, node.action_generation)
   if (!origin || chainBreakOf(secret, readChain(tx, origin.node_run_id))) return base
   const opinion = latestAssessment(tx, origin.node_run_id)
   const observed = modelObservation(tx, origin)
   if (!opinion || opinion.outcome !== 'recommended' || !opinion.model_ref || !isModelIssue(opinion.classification)
     || opinion.attempt !== origin.attempt || opinion.action_generation !== origin.action_generation
-    || opinion.decided_at > now || opinion.expires_at <= now || observed?.model_ref !== opinion.previous_model_ref
+    || opinion.decided_at > assessmentNow || opinion.expires_at <= assessmentNow || observed?.model_ref !== opinion.previous_model_ref
     || !['executor.model_used','executor.model_confirmed'].includes(observed.type)) return base
   const oldProfile = profiles.find((item) => item.ref === opinion.previous_model_ref)
   const normalProfile = profiles.find((item) => item.ref === base.model_ref)
@@ -231,8 +232,14 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
   }
   return {
     enabled: Boolean(planner), assess,
+    select(tx: Tx, node: NodeRunRow, currentProfiles: readonly Profile[], base: ModelAssignment, executionNow: string) {
+      // Assessment timestamps use the host clock, while leases use the dispatch clock.
+      // A planner can commit within the dispatch clock's current whole-second bucket.
+      return getEscalatedModel(tx, secret, node, currentProfiles, base, executionNow, nowAt())
+    },
     async prepare(nodeRunId: string, generation: number, now: string) {
       if (!planner) return
+      const assessmentNow = nowAt()
       const pending = withReadTx(db, ({ tx }) => {
         const origin = safeOrigin(tx, nodeRunId, now, generation)
         if (!origin) return
@@ -246,10 +253,11 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
           expected_attempt: origin.attempt, expected_action_generation: origin.action_generation }
         const state = factsFor(tx, secret, body, owner, now, profiles, humanOnly, nodeRunId)
         const previous = latestAssessment(tx, origin.node_run_id)
-        if (!state || (previous?.fingerprint === state.fingerprint && previous.expires_at > now)) return
+        if (!state || (previous?.fingerprint === state.fingerprint && previous.decided_at <= assessmentNow
+          && previous.expires_at > assessmentNow)) return
         return { body, owner }
       })
-      if (pending) await assess(pending.body, pending.owner, now, { id: nodeRunId, generation }).catch(onError ?? (() => {}))
+      if (pending) await assess(pending.body, pending.owner, assessmentNow, { id: nodeRunId, generation }).catch(onError ?? (() => {}))
     },
     get(runId: string, nodeRunId: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {

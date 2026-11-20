@@ -127,6 +127,25 @@ it('keeps the normal model when the predecessor has no stop confirmation', async
   expect(routed()).toEqual(normal)
 })
 
+it('uses a diagnosis committed within the dispatch second without admitting future or expired opinions', async () => {
+  leaseSuccessor()
+  let assessmentAt = now
+  const committedAt = '2026-11-20T12:00:00.080Z'
+  const host = createModelEscalationHost(db, secret, profiles, async () => {
+    assessmentAt = committedAt
+    return classify()
+  }, undefined, () => assessmentAt)
+  await host.prepare('nr2', 2, now)
+  const opinion = host.get('r1', 'nr1', owner).item!
+  expect(opinion.decided_at).toBe(committedAt)
+  const select = () => withTx(db, (tx) => host.select(tx, loadNodeRun(tx, 'nr2'), profiles, normal, now))
+  expect(select()).toMatchObject({ model_ref: 'high', escalation_from: 'nr1' })
+  assessmentAt = '2026-11-20T12:00:00.079Z'
+  expect(select()).toEqual(normal)
+  assessmentAt = opinion.expires_at
+  expect(select()).toEqual(normal)
+})
+
 it('refreshes an expired opinion against the same facts at the next authorized dispatch', async () => {
   let at = now
   const planner = vi.fn(classify)
