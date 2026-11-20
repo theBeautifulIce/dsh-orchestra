@@ -27,10 +27,39 @@ const MULTI_OUT_DEGREE: ReadonlySet<WorkflowDocNodeType> = new Set(['branch', 'p
 
 const NODE_ID_RE = /^[a-z][a-z0-9_]{0,63}$/
 
+const CANVAS_LIMIT = 20000
 const PositionSchema = z.object({
-  x: z.number().int().min(0).max(20000),
-  y: z.number().int().min(0).max(20000),
+  x: z.number().int().min(0).max(CANVAS_LIMIT),
+  y: z.number().int().min(0).max(CANVAS_LIMIT),
 })
+
+// Model-generated diagrams may use a relative origin. Fit each axis separately,
+// preserving spacing whenever the diagram fits without scaling.
+export function fitGeneratedWorkflowLayout(draft: unknown): unknown {
+  const layout = z.looseObject({
+    nodes: z.array(z.looseObject({
+      position: z.object({ x: z.int(), y: z.int() }).optional(),
+    })).max(50),
+  }).safeParse(draft)
+  if (!layout.success) return draft
+  const { nodes } = layout.data
+  const positions = nodes.flatMap(node => node.position ? [node.position] : [])
+  if (positions.every(p => PositionSchema.safeParse(p).success)) return draft
+  const fitAxis = (axis: 'x' | 'y') => {
+    const values = positions.map(position => position[axis])
+    const min = Math.min(...values)
+    const max = Math.max(...values)
+    const span = max - min
+    if (span > CANVAS_LIMIT) return (value: number) => Math.round((value - min) / span * CANVAS_LIMIT)
+    const offset = min < 0 ? -min : Math.min(0, CANVAS_LIMIT - max)
+    return (value: number) => value + offset
+  }
+  const fitX = fitAxis('x')
+  const fitY = fitAxis('y')
+  return { ...layout.data, nodes: nodes.map(node => node.position
+    ? { ...node, position: { x: fitX(node.position.x), y: fitY(node.position.y) } }
+    : node) }
+}
 
 // priority 不在这里卡 0–999：越界属于图语义问题，要作为发布层 issue 返回，
 // 不能在解析阶段就把草稿判死（审计 P2-1）

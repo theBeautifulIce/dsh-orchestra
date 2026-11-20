@@ -28,14 +28,15 @@ const names = roles.map((role) => role + '核对')
 const descriptor = { name: 'ro.check', capability: 'read_only' as const, command: { bin: 'check', args: [] } }
 const goal = '分别核对十类交付内容，然后汇总审核结论'
 
-it.each(['完成', '纯成果', '成果门槛', '取消', '重启与重试', '分支失败'] as const)('十个具名分支共享一个运行与并发上限：%s', async (scenario) => {
+it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败'] as const)('十个具名分支共享一个运行与并发上限：%s', async (scenario) => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-parallel-plan-'))
   const secret = 'parallel-plan-contract-secret'
   const registry = new ToolRegistry()
-  const outputOnly = scenario === '纯成果' || scenario === '成果门槛' || scenario === '重启与重试'
+  const joinAllowsTool = scenario === '合流有工具权限但仅验收成果'
+  const outputOnly = scenario === '纯成果' || joinAllowsTool || scenario === '成果门槛' || scenario === '重启与重试'
   const blockedOutputs = scenario === '成果门槛'
   const toolsFor = (nodeId: string) => !outputOnly || (blockedOutputs && nodeId === branchIds[4]) ? [descriptor.name] : []
-  if (!outputOnly || blockedOutputs) registry.register(descriptor)
+  if (!outputOnly || blockedOutputs || joinAllowsTool) registry.register(descriptor)
   const agents = new Map<string, ReturnType<typeof fakeAgentBridge>>()
   const spawned: SpawnParams[] = []
   const joinTexts: string[] = []
@@ -138,11 +139,12 @@ it.each(['完成', '纯成果', '成果门槛', '取消', '重启与重试', '�
     workflowGenerator: async (input) => {
       expect(input.goal).toBe(goal)
       const node = (node_id: string, title: string, x: number, y: number) => ({
-        node_id, title, type: 'agent', position: { x, y }, config: { tools: { allow: toolsFor(node_id) } },
+        node_id, title, type: 'agent', position: { x, y },
+        config: { tools: { allow: joinAllowsTool && node_id === 'join_review' ? [descriptor.name] : toolsFor(node_id) } },
       })
       return { name: '交付审核', nodes: [
         { node_id: 'start', title: '开始', type: 'trigger', position: { x: 0, y: 0 } },
-        ...branchIds.map((id, i) => node(id, names[i]!, 200, 100 * i)),
+        ...branchIds.map((id, i) => node(id, names[i]!, 200, 100 * i - 100)),
         node('join_review', '汇总审核', 600, 450),
       ], edges: [
         ...branchIds.map((id) => ({ from: 'start', to: id })),
@@ -152,6 +154,7 @@ it.each(['完成', '纯成果', '成果门槛', '取消', '重启与重试', '�
     planning: { propose: async ({ workflows }) => {
       const [workflow] = workflows
       expect(workflow?.nodes.map((node) => node.dependsOn)).toEqual([...roles.map(() => []), branchIds])
+      if (joinAllowsTool) expect(workflow?.nodes.at(-1)?.toolAllow).toEqual([descriptor.name])
       return {
         title: '交付审核', workflow_id: workflow!.workflowId, workflow_version: workflow!.version,
         steps: workflow!.nodes.map((node) => ({

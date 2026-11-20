@@ -5,6 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
 import { serveOrchestra, type serveDshOrchestra } from '../../src/index.ts'
+import { OrchError } from '../../src/core/errors.ts'
 import { decisionId, uuidv7 } from '../../src/core/ids.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
@@ -26,7 +27,7 @@ type Guard = Parameters<Context['tools']['guard']>[0]
 type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 
 async function fixture(options: { profile?: string; version?: string; enabled?: false | 'desktop'; host?: string;
-  routing?: { enabled: boolean }; reportRequirements?: string[] } = {}) {
+  routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'orchestra-native-chat-'))
   const ctx = new Context()
   const agents = new Map<string, Agent>()
@@ -45,6 +46,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     deny ? 'rejected' : 'allowed-once')
   const services = new Map<string, Service>()
   const planner = vi.fn(async ({ goal, workflows }: Parameters<NonNullable<Parameters<typeof serveOrchestra>[0]['planning']>['propose']>[0]) => {
+    if (options.planningError) throw options.planningError
     if (plannerUnavailable) throw new Error('fake unavailable host')
     const workflow = workflows[0]!
     return {
@@ -176,7 +178,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
       return tool!.output.render(input, await invoke(input))
     }
     const checkTool = (name: string, parent?: symbol) => guard?.({ agent, name, signal: signal.signal, parent } as Parameters<Guard>[0])
-    return { agent, admit, admitMany, call, render, signal, checkTool, nextTurn }
+    return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn }
   }
   return { session, serve, services, planner, workflowGenerator, routes, approval, notices,
     registered: () => ({ activation: activation!, prompt: prompt!, tool: tool! }),
@@ -847,7 +849,7 @@ it('keeps approval, planning failure and terminal results in the originating DSH
     const failure = await human.admit(user('请整理这些记录并交付报告'))
     expect(failure).toMatchObject({ kind: 'enter', messages: [expect.anything(), {
       source: { kind: 'plugin:dsh-orchestra', form: 'notice' },
-      content: [{ type: 'text', text: expect.stringContaining('请刷新任务状态后再试') }],
+      content: [{ type: 'text', text: expect.stringContaining('服务恢复后，可重新发送原任务') }],
     }] })
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'SERVICE_UNAVAILABLE', retryable: true })
     test.plannerUnavailable(false)
@@ -915,6 +917,35 @@ it('keeps approval, planning failure and terminal results in the originating DSH
     expect(count(service, 'runs')).toBe(1)
   } finally { await test.close() }
 }, 16_000)
+
+it.each([
+  ['WORKFLOW_DEFINITION_INVALID', ['nodes.2.position.y'], '生成流程的布局未通过校验'],
+  ['WORKFLOW_DEFINITION_INVALID', ['nodes.2.position.y', 'nodes.2.type'], '规划模型生成的计划未通过校验'],
+  ['WORKFLOW_VALIDATION_FAILED', [], '规划模型生成的计划未通过校验'],
+] as const)('reports pre-launch %s (%j) without a nonexistent task or raw details', async (code, fields, heading) => {
+  const privateDetail = 'private provider failure with token=fixture-secret'
+  const test = await fixture({ planningError: new OrchError(code, privateDetail, { fields, planning_issue: privateDetail }) })
+  try {
+    const human = test.session('work', 'parent')
+    const assigned = user('请整理这些记录并交付报告')
+    const admission = await human.admit(assigned)
+    expect(admission).toMatchObject({ kind: 'enter', messages: [assigned, {
+      source: { kind: 'plugin:dsh-orchestra', form: 'notice', summary: `Orchestra ${heading}` },
+      content: [{ type: 'text', text: expect.stringContaining('执行尚未开始') }],
+    }] })
+    const { text, summary } = await human.invoke()
+    expect(JSON.parse(text)).toMatchObject({ state: 'error', code, message: expect.stringContaining('执行尚未开始') })
+    const card = test.registered().tool.presentResult?.({ action: 'start' }, { isError: true, content: [] })
+    expect(card).toMatchObject({ content: [{ type: 'text', text: expect.stringContaining('没有返回可显示的接单回执') }] })
+    for (const output of [JSON.stringify(admission), text, summary, JSON.stringify(card)]) {
+      expect(output).not.toMatch(/面板|\/orchestra|fixture-secret|nodes\.2|run_id|plan_id/u)
+    }
+    const service = test.services.get('parent')!
+    expect(count(service, 'task_plans')).toBe(0)
+    expect(count(service, 'runs')).toBe(0)
+    expect(count(service, 'chat_task_receipts')).toBe(0)
+  } finally { await test.close() }
+})
 
 it.each(['rejected', 'expired', 'changed'] as const)(
   'keeps a once-approved high-risk decision open when the second confirmation is %s',

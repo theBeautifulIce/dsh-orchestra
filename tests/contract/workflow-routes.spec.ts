@@ -55,7 +55,10 @@ const doc = {
 describe('工作流命令 HTTP 入口', () => {
   it('S5 生成草稿后须测试同一修订，修改后旧回执不能放行发布', async () => {
     let db!: Db
-    const base = await boot('S5', async () => doc, (opened) => { db = opened })
+    const relativeDraft = { ...doc, nodes: doc.nodes.map(node => ({
+      ...node, position: { x: node.position.x - 100, y: -100 },
+    })) }
+    const base = await boot('S5', async () => relativeDraft, (opened) => { db = opened })
     const generated = await (await post(base + '/v1/workflows/generate', { goal: '发布报告前执行系统核验' })).json() as any
     expect(generated.data.definition).toMatchObject(doc)
     const workflow_id = 'workflow-test-gate'
