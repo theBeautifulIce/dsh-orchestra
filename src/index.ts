@@ -221,7 +221,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const executor = opts.executor
   const modelEscalation = opts.phase === 'S6' && executor?.modelRouting
     ? createModelEscalationHost(db, opts.secret, executor.modelRouting.profiles, opts.reworkPlanner,
-      (error) => opts.log?.error('模型诊断失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }))
+      (error) => opts.log?.error('模型诊断失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }), undefined, true)
     : undefined
   const spillDir = executor?.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(opts.configPath)
   // 执行时限同样只能来自配置：不把 action_timeout_ms / startup_timeout_ms / verify_timeout_ms
@@ -355,6 +355,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       triggerKind: b.triggerKind,
       escalations: b.escalations,
       operationId: b.operationId,
+      startedBy: opts.phase === 'S6' ? b.startedBy : undefined,
       now: b.now,
     }),
     setTaskArchive: (body, actor, now) => {
@@ -576,10 +577,12 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const service = await openServiceOrchestra({ ...opts, scheduler })
   const orchestra = service.orchestra
   const collaboration = opts.collaboration ? createCollaborationHost(orchestra.db, opts.secret) : undefined
-  const rework = opts.phase === 'S5' || opts.phase === 'S6' ? createReworkHost(orchestra.db, opts.secret, { clock: orchestra.runtime.clock }) : undefined
-  const delivery = rework && createDeliveryReviewHost(orchestra.db, opts.secret)
-  const localPlanning = rework && createReworkPlanningHost(orchestra.db, opts.secret, opts.reworkPlanner)
-  const inspection = rework && createReworkInspectionHost(orchestra.db, opts.secret, rework, opts.reworkPlanner)
+  const humanReviewOnly = opts.phase === 'S6'
+  const rework = opts.phase === 'S5' || humanReviewOnly
+    ? createReworkHost(orchestra.db, opts.secret, { clock: orchestra.runtime.clock, humanOnly: humanReviewOnly }) : undefined
+  const delivery = rework && createDeliveryReviewHost(orchestra.db, opts.secret, humanReviewOnly)
+  const localPlanning = rework && createReworkPlanningHost(orchestra.db, opts.secret, opts.reworkPlanner, humanReviewOnly)
+  const inspection = rework && createReworkInspectionHost(orchestra.db, opts.secret, rework, opts.reworkPlanner, humanReviewOnly)
   const modelSettings = opts.executor?.modelRouting && createModelRoutingSettingsHost(orchestra.db, opts.executor.modelRouting.profiles)
   const modelEscalation = orchestra.modelEscalation
   const taskTriggers = phaseIndex(opts.phase) >= phaseIndex('S5')

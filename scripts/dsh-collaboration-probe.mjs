@@ -6,9 +6,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { uuidv7 } from '../src/core/ids.ts'
+import { probeOperator, probePhase } from './dsh-probe-identity.mjs'
 
 const self = fileURLToPath(import.meta.url)
 const PROVIDER = 'orchestra-collaboration-probe'
@@ -32,9 +33,12 @@ export function apply(context) {
 }
 
 async function verifyInDsh(context) {
-  const { serveDshOrchestra, ToolRegistry, ReadOnlyToolRunner } = await import('../lib/index.js')
+  const phase = probePhase()
+  const entry = process.env.ORCHESTRA_DSH_TEST_ENTRY
+  const { serveDshOrchestra, ToolRegistry, ReadOnlyToolRunner } = await import(entry ? pathToFileURL(entry).href : '../lib/index.js')
   const cwd = process.cwd()
   const parent = await context.agents.create({ sessionId: randomUUID(), meta: { cwd }, agentOptions: { provider: PROVIDER, model: PARENT } })
+  const operator = probeOperator(parent.agent)
   const registry = new ToolRegistry()
   registry.register({ name: TOOL, capability: 'read_only',
     command: { bin: process.execPath, args: ['-e', 'process.stdout.write("fixture: index entry missing its attachment")'] } })
@@ -51,7 +55,8 @@ async function verifyInDsh(context) {
   let service, sourceTaskId
   try {
     service = await serveDshOrchestra({
-      dbFile: join(cwd, 'orchestra.sqlite'), secret, phase: 'S5', collaboration: true, tools: { registry, runner },
+      dbFile: join(cwd, 'orchestra.sqlite'), secret, phase, collaboration: true, tools: { registry, runner },
+      ...(phase === 'S6' ? { resolveHttpHuman: operator.resolveHttpHuman } : {}),
       dsh: {
         context, parentForNode: () => parent.agent,
         models: [
@@ -64,13 +69,20 @@ async function verifyInDsh(context) {
       asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT MAX(seq) AS seq FROM events').get().seq ?? 0),
       listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => {},
     })
-    const call = async (path, body) => {
+    const call = async (path, body, bind = true) => {
+      const requestHeaders = { ...headers, ...(phase === 'S6' && bind ? operator.headers : {}) }
       const response = await fetch(new URL(path, service.endpoint),
-        body === undefined ? { headers } : { method: 'POST', headers, body: JSON.stringify(body) })
+        body === undefined ? { headers: requestHeaders } : { method: 'POST', headers: requestHeaders, body: JSON.stringify(body) })
       const receipt = await response.json()
+      if (phase === 'S6' && !bind) {
+        assert.equal(response.status, 403)
+        assert.equal(receipt.error?.code, 'FORBIDDEN')
+        return receipt.error.code
+      }
       assert.equal(receipt.ok, true, JSON.stringify(receipt.error ?? receipt))
       return receipt.data
     }
+    assert.equal((await call('/health')).phase, phase)
     const title = '真实 DSH 独立核验'
     const position = { x: 0, y: 0 }
     const draft = await call('/v1/workflows', { workflow_id: FLOW, name: title, operation_id: uuidv7(), definition: {
@@ -106,9 +118,11 @@ async function verifyInDsh(context) {
     const proposed = incoming.requests[0]
     assert.equal(proposed.target_node_run_id, targetNode.node_run_id)
     assert.equal(proposed.status, 'proposed')
-    const review = (request, action, note) => call('/v1/collaboration/review', {
+    const review = (request, action, note, bind) => call('/v1/collaboration/review', {
       request_id: request.request_id, expected_revision: request.revision, action, note, operation_id: uuidv7(),
-    })
+    }, bind)
+    const deniedWithoutBinding = phase === 'S6' ? await review(proposed, 'authorize', '未绑定测试', false) : null
+    if (phase === 'S6') assert.equal((await detail()).requests[0].status, 'proposed')
     assert.equal((await review(proposed, 'authorize', '同意独立核对')).status, 'authorized')
     assert.equal((await run(targetNode)).final_status, 'done')
     const checked = (await detail()).requests[0]
@@ -124,7 +138,10 @@ async function verifyInDsh(context) {
     assert.deepEqual(events, ['collaboration.scope_created', 'collaboration.finding_reported', 'collaboration.proposed',
       'collaboration.authorized', 'collaboration.delivered', 'collaboration.accepted', 'collaboration.completed', 'collaboration.adopted'])
     assert.deepEqual([...new Set(uses.map(({ model }) => model))], [SOURCE, TARGET])
-    return { sourceRun: source.run_id, verifierRun: target.run_id, sourceEvidence: sourceEvidence.evidence_id,
+    const scopeActor = service.orchestra.db.raw.prepare('SELECT owner_actor FROM collaboration_scopes WHERE scope_id=?').get(scope.scope_id).owner_actor
+    if (phase === 'S6') assert.equal(scopeActor, operator.id)
+    return { phase, ...(phase === 'S6' ? { identity: operator.evidence, deniedWithoutBinding, scopeActor } : {}),
+      sourceRun: source.run_id, verifierRun: target.run_id, sourceEvidence: sourceEvidence.evidence_id,
       verifierEvidence: targetEvidence.evidence_id, requestId: checked.request_id, verdict: checked.verdict, events,
       dshSessions: new Set(uses.map(({ sessionId }) => sessionId)).size }
   } finally {

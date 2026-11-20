@@ -6,9 +6,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { uuidv7 } from '../src/core/ids.ts'
+import { probeOperator, probePhase } from './dsh-probe-identity.mjs'
 
 const self = fileURLToPath(import.meta.url)
 const PROVIDER = 'orchestra-rework-probe'
@@ -33,9 +34,15 @@ export function apply(context) {
 
 
 async function verifyInDsh(context) {
-  const { serveDshOrchestra, ToolRegistry, ReadOnlyToolRunner } = await import('../lib/index.js')
+  const stage = probePhase()
+  const entry = process.env.ORCHESTRA_DSH_TEST_ENTRY
+  const { serveDshOrchestra, ToolRegistry, ReadOnlyToolRunner } = await import(entry ? pathToFileURL(entry).href : '../lib/index.js')
   const cwd = process.cwd(), secret = randomUUID(), uses = []
   const parent = await context.agents.create({ sessionId: randomUUID(), meta: { cwd }, agentOptions: { provider: PROVIDER, model: PARENT } })
+  const operator = probeOperator(parent.agent)
+  const otherSession = stage === 'S6'
+    ? await context.agents.create({ sessionId: randomUUID(), meta: { cwd }, agentOptions: { provider: PROVIDER, model: PARENT } }) : null
+  const otherOperator = otherSession ? probeOperator(otherSession.agent, 'fixture:dsh-non-owner') : null
   const registry = new ToolRegistry()
   const measurement = [
     "const { createHash } = require('node:crypto')",
@@ -52,18 +59,21 @@ async function verifyInDsh(context) {
   } }, cwd)
   let service
   try {
-    service = await serveDshOrchestra({ dbFile: join(cwd, 'orchestra.sqlite'), secret, phase: 'S5', tools: { registry, runner },
+    service = await serveDshOrchestra({ dbFile: join(cwd, 'orchestra.sqlite'), secret, phase: stage, tools: { registry, runner },
+      ...(stage === 'S6' ? { resolveHttpHuman: (req) => operator.resolveHttpHuman(req) ?? otherOperator.resolveHttpHuman(req) } : {}),
       dsh: { context, parentForNode: () => parent.agent, models: [{ ref: 'approved/source', capacity: 'routine', provider: PROVIDER, model: SOURCE }],
         recommend: () => ({ complexity: 'routine', reason: '真实返工工具验收' }), onModelUse: usage => uses.push(usage) },
       asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT MAX(seq) AS seq FROM events').get().seq ?? 0),
       listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => {} })
-    const call = async (path, body) => {
-      const response = await fetch(new URL(path, service.endpoint), { headers: { 'x-orchestra-secret': secret, 'content-type': 'application/json' },
+    const call = async (path, body, bind = true) => {
+      const response = await fetch(new URL(path, service.endpoint), { headers: { 'x-orchestra-secret': secret, 'content-type': 'application/json',
+        ...(stage === 'S6' && bind ? (bind === 'other' ? otherOperator.headers : operator.headers) : {}) },
         ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }) })
       const envelope = await response.json()
       if (!envelope.ok) throw Object.assign(new Error(path + ': ' + JSON.stringify(envelope.error)), { code: envelope.error?.code })
       return envelope.data
     }
+    assert.equal((await call('/health')).phase, stage)
     const nodes = async run => (await call('/v1/node-runs?run_id=' + run)).items
     const latest = async (run, id) => (await nodes(run)).filter(n => n.node_id === id).sort((a,b) => b.attempt-a.attempt)[0]
     const artifacts = async run => (await call('/v1/artifacts?run_id=' + run)).items
@@ -85,6 +95,15 @@ async function verifyInDsh(context) {
     const started = await call('/v1/runs/start',{workflowId:FLOW,workflowVersion:'1',taskTitle:definition.name,operationId:uuidv7()})
     const runId = started.run_id
     const c1 = await latest(runId,'c')
+    let launchActor
+    if (stage === 'S6') {
+      launchActor = service.orchestra.db.raw.prepare('SELECT started_by FROM start_run_operations WHERE run_id=?').get(runId).started_by
+      assert.equal(launchActor, operator.id)
+      const withoutOwner = (identity) => call('/v1/rework/hold',
+        { operation_id: uuidv7(), run_id: runId, node_run_id: c1.node_run_id, action: 'hold' }, identity)
+      await assert.rejects(withoutOwner(false), { code: 'FORBIDDEN' })
+      await assert.rejects(withoutOwner('other'), { code: 'FORBIDDEN' })
+    }
     await call('/v1/rework/hold',{operation_id:uuidv7(),run_id:runId,node_run_id:c1.node_run_id,action:'hold'})
     const a1 = await latest(runId,'a')
     assert.equal((await run(a1,'A1')).final_status,'done')
@@ -131,15 +150,18 @@ async function verifyInDsh(context) {
     const humanHistory=(await call('/v1/rework/get?request_id='+human.request_id)).item
     assert.equal(firstHistory.reviews.at(-1).action,'accept')
     assert.equal(humanHistory.reviews.at(-1).action,'accept')
+    if (stage === 'S6') assert.equal(humanHistory.reviews.at(-1).reviewer_actor, operator.id)
     assert.ok(uses.length>=6)
     assert.equal(new Set(uses.map(u=>u.sessionId)).size,6,'each attempt must use a fresh native DSH session')
     assert.notEqual(report1.artifact_id,report2.artifact_id)
     const preserved = '第一章：目标\n第二章：对 1 MiB 数据计算 SHA-256\n'
     assert.equal(after.text, preserved + '第三章：实测耗时 ' + baseline[2] + ' ms，采样时间 ' + new Date(Number(baseline[1])).toISOString())
-    return {runId,agentRequest:first.request_id,humanRequest:human.request_id,oldArtifact:v1.artifact_id,revisedReport:report2.artifact_id,
+    return {phase:stage,...(stage === 'S6' ? { identity: operator.evidence, launchActor, nonOwner: otherOperator.evidence,
+      deniedWithoutBinding: 'FORBIDDEN', deniedAsNonOwner: 'FORBIDDEN' } : {}),
+      runId,agentRequest:first.request_id,humanRequest:human.request_id,oldArtifact:v1.artifact_id,revisedReport:report2.artifact_id,
       nodes:all.map(n=>({id:n.node_id,attempt:n.attempt,status:n.status})),dshSessions:new Set(uses.map(u=>u.sessionId)).size,
       modelUseObservations:uses.length,sampleLatencyMs:Number(baseline[2]),status:closed.status}
-  } finally { try {await service?.close()} finally {await parent.dispose()} }
+  } finally { try { await service?.close() } finally { await Promise.all([parent.dispose(), otherSession?.dispose()]) } }
 }
 function parseToolReply(message) {
   const text=Array.isArray(message.content)?message.content.map(b=>b.text??'').join(''):message.content

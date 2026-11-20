@@ -9,6 +9,7 @@ const baseFiles = new Set([
   'package/cordis.patch.yml', 'package/orchestra.config.json',
 ])
 const migrationPath = /^package\/lib\/infra\/sqlite\/migrations\/(\d{3})_[a-z0-9_]+\.sql$/
+const guideFiles = ['docs/runbook.md', 'docs/trial-circles.md']
 
 export function inspectPackage(path: string, options: { expectedSha256?: string; previous?: boolean } = {}) {
   const archive = resolve(path)
@@ -17,7 +18,8 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
   if (options.expectedSha256 && options.expectedSha256 !== sha256) throw new Error('Archive SHA256 mismatch')
   const entries = execFileSync('tar', ['-tf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/).sort()
   if (new Set(entries).size !== entries.length
-    || entries.some((name) => !baseFiles.has(name) && name !== 'package/README.md' && !migrationPath.test(name))) {
+    || entries.some((name) => !baseFiles.has(name) && name !== 'package/README.md' &&
+      !guideFiles.some((file) => name === 'package/' + file) && !migrationPath.test(name))) {
     throw new Error('Package has duplicate or undeclared paths')
   }
   const metadata = execFileSync('tar', ['-tvf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/)

@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
 import { uuidv7 } from '../src/core/ids.ts'
+import { probeOperator, probePhase } from './dsh-probe-identity.mjs'
 
 const self = fileURLToPath(import.meta.url)
 const ROUTINE = 'route-probe-fast'
@@ -47,12 +48,14 @@ export function apply(ctx) {
 }
 
 async function executeInDsh(context) {
+  const phase = probePhase()
   const entry = process.env.ORCHESTRA_DSH_TEST_ENTRY
-  const { serveDshOrchestra, ToolRegistry, ReadOnlyToolRunner } = await import(entry ? pathToFileURL(entry).href : '../lib/index.js')
+  const { serveDshOrchestra, ToolRegistry, ReadOnlyToolRunner, registerRunArtifact } = await import(entry ? pathToFileURL(entry).href : '../lib/index.js')
   const cwd = process.cwd()
   const parent = await context.agents.create({
     sessionId: randomUUID(), meta: { cwd }, agentOptions: { provider: PROVIDER, model: PARENT },
   })
+  const operator = probeOperator(parent.agent)
   const observed = []
   const registry = new ToolRegistry()
   registry.register({ name: 'ro.probe', capability: 'read_only',
@@ -68,7 +71,8 @@ async function executeInDsh(context) {
   let service
   try {
     service = await serveDshOrchestra({
-      dbFile: join(cwd, 'orchestra.sqlite'), secret, phase: 'S5', tools: { registry, runner },
+      dbFile: join(cwd, 'orchestra.sqlite'), secret, phase, tools: { registry, runner },
+      ...(phase === 'S6' ? { resolveHttpHuman: operator.resolveHttpHuman } : {}),
       dsh: {
         context, parentForNode: () => parent.agent,
         models: [
@@ -85,14 +89,21 @@ async function executeInDsh(context) {
       asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT MAX(seq) AS seq FROM events').get().seq ?? 0),
       listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => {},
     })
-    const call = async (path, body) => {
-      const response = await fetch(new URL(path, service.endpoint), body === undefined
-        ? { headers: { 'x-orchestra-secret': secret } }
-        : { method: 'POST', headers: { 'x-orchestra-secret': secret, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const call = async (path, body, { bind = true, expectedError } = {}) => {
+      const headers = { 'x-orchestra-secret': secret, 'content-type': 'application/json',
+        ...(phase === 'S6' && bind ? operator.headers : {}) }
+      const response = await fetch(new URL(path, service.endpoint), { headers,
+        ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }) })
       const receipt = await response.json()
+      if (expectedError) {
+        assert.equal(response.status, 403, JSON.stringify(receipt))
+        assert.equal(receipt.error?.code, expectedError)
+        return receipt.error
+      }
       assert.equal(receipt.ok, true, JSON.stringify(receipt.error ?? receipt))
       return receipt.data
     }
+    assert.equal((await call('/health')).phase, phase)
     const generated = await call('/v1/workflows/generate', { goal: '先整理，再复核条目，保留只读工具回执' })
     assert.deepEqual(generated.definition, workflowDoc)
     const draft = await call('/v1/workflows', { workflow_id: FLOW, name: workflowDoc.name, operation_id: uuidv7(), definition: generated.definition })
@@ -109,9 +120,14 @@ async function executeInDsh(context) {
     assert.equal(plan.quality.ready, true, JSON.stringify(plan.quality))
     assert.equal(plan.proposal.steps[1].preferred_model_ref, 'approved/custom-expert')
     const task = await call('/v1/task-plans/confirm', { plan_id: plan.plan_id, content_hash: plan.content_hash, confirmed: true })
+    const nodePath = '/v1/node-runs?run_id=' + task.run_id
+    if (phase === 'S6') {
+      const holdNode = (await call(nodePath)).items.find(({ node_id }) => node_id === 'compare')
+      await call('/v1/rework/hold', { operation_id: uuidv7(), run_id: task.run_id, node_run_id: holdNode.node_run_id, action: 'hold' })
+    }
     let items = []
     for (let tick = 0; tick < 80; tick++) {
-      items = (await call('/v1/node-runs?run_id=' + task.run_id)).items
+      items = (await call(nodePath)).items
       if (items.length === NODES.length && items.every((item) => item.status === 'done')) break
       await delay(200)
     }
@@ -129,7 +145,33 @@ async function executeInDsh(context) {
     assert.deepEqual(observed.map((usage) => usage.model), [PREFERRED, PREFERRED_EXPERT])
     assert.deepEqual(observed.map((usage) => usage.sessionId), results.map((entry) => entry.sessionId))
     assert.equal(parent.agent.model.current().model, PARENT)
-    return { results, requests: observed, parentModel: PARENT, plan: plan.quality.checks.map((check) => check.check) }
+    let feedback
+    if (phase === 'S6') {
+      const db = service.orchestra.db
+      const compare = items.find(({ node_id }) => node_id === 'compare')
+      assert.equal(db.raw.prepare('SELECT created_by FROM task_plans WHERE plan_id=?').get(plan.plan_id).created_by, operator.id)
+      assert.equal((await call('/v1/runs/get?run_id=' + task.run_id)).status, 'running')
+      const artifact = registerRunArtifact(db, { artifactId: uuidv7(), runId: task.run_id, nodeRunId: compare.node_run_id,
+        fileName: 'fixture-review.txt', bytes: Buffer.from('Isolated fixture output for reviewer identity check') })
+      const proposal = await call('/v1/rework/request', { run_id: task.run_id, target_node_run_id: compare.node_run_id,
+        source_artifact_id: artifact.artifact_id, source_artifact_hash: artifact.sha256, expected_revision: compare.revision,
+        reason: '核对宿主审核授权', expected_result: '核对隔离验收样本', preserve_requirements: [],
+        suggested_scope: 'replan_subgraph', evidence_ids: [], operation_id: uuidv7(),
+      })
+      const review = { request_id: proposal.request_id, expected_revision: proposal.revision,
+        action: 'reject', note: '隔离测试操作者拒绝改动原成果', operation_id: uuidv7() }
+      const denied = await call('/v1/rework/review', review, { bind: false, expectedError: 'FORBIDDEN' })
+      const reviewed = await call('/v1/rework/review', review)
+      assert.equal(reviewed.status, 'declined')
+      const ledgerActor = db.raw.prepare('SELECT reviewer_actor FROM rework_reviews WHERE request_id=?').get(proposal.request_id).reviewer_actor
+      assert.equal(ledgerActor, operator.id)
+      await call('/v1/rework/hold', { operation_id: uuidv7(), run_id: task.run_id, node_run_id: compare.node_run_id,
+        action: 'accept', artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+      feedback = { identity: operator.evidence, source_artifact: 'trusted host fixture', without_host_binding: denied.code,
+        with_host_binding: reviewed.status, ledger_actor: ledgerActor }
+    }
+    return { phase, model_note_used: NOTE, results, requests: observed, parentModel: PARENT,
+      plan: plan.quality.checks.map((check) => check.check), ...(feedback ? { feedback } : {}) }
   } finally {
     try { await service?.close() } finally { await parent.dispose() }
   }
