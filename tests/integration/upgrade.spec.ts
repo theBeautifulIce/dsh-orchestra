@@ -32,6 +32,8 @@ it('检查候选窗口、旧签名、配置、路径和授权失效，拒绝影�
     expect(validateUpgradePlan(plan)).toEqual(plan)
     expect(() => validateUpgradePlan({ ...plan, mode: 'candidate' })).toThrow(/ten minutes/)
     expect(() => validateUpgradePlan({ ...plan, previous: { ...plan.previous, source_commit: plan.candidate.source_commit } })).toThrow(/signed G5/)
+    expect(() => validateUpgradePlan({ ...plan, previous_host: { source_commit: plan.previous.source_commit,
+      archive_sha256: plan.candidate.sha256, module_sha256: plan.config_sha256 } })).toThrow(/registration does not match/)
     expect(() => validateUpgradePlan({ ...plan, live_db: join(resolve('tmp'), 'external.db') })).toThrow(/boundary/)
     expect(() => validateUpgradePlan({ ...plan, approval: { ...plan.approval,
       approved_at: '2026-01-01T00:00:00.000Z' } })).toThrow(/expired/)
@@ -94,6 +96,7 @@ it('同一模型编号在旧宿主档位不足时不能回退', () => {
       [JSON.stringify({ routine: null, standard: null, complex: 'shared' }), 'tester', '2026-11-20T00:00:00Z']))
     expect(() => previousCompatibility(db, [{ ref: 'shared', capacity: 'standard' }]))
       .toThrow(/previous_catalog_missing_or_insufficient/)
+    expect(() => previousCompatibility(db)).toThrow(/previous_catalog_unverified/)
     expect(previousCompatibility(db, [{ ref: 'shared', capacity: 'complex' }])).toMatchObject({ candidate_model_bindings: 0 })
   } finally { db.raw.close() }
 })

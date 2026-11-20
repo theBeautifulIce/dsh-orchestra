@@ -23,6 +23,7 @@ import { relative, resolve } from 'node:path'
 import MarkdownIt from 'markdown-it'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
 import { parseAuditVerdict, verdictProblems, VERDICT_BEGIN, VERDICT_END } from '../src/core/audit-verdict.ts'
+import { assertG5History, G5_SIGNED_COMMIT, G6_GATE_PATH, G6_INPUT_PATH, hasG5History, verifyG6 } from './gate-g6.ts'
 
 export const GATE_FIELDS = [
   'gate', 'schema_version', 'gate_run_id', 'candidate_hash', 'change_scope_hash',
@@ -3043,7 +3044,10 @@ export function defaultGatePaths(root: string): string[] {
   // G5 一旦进入 HEAD 可达历史，即使被删，无参检查也必须报告缺失。
   const hasG5 = existsSync(resolve(root, G5_GATE_PATH)) ||
     git(root, ['log', '-1', '--full-history', '--format=%H', 'HEAD', '--', ':(top,literal)' + G5_GATE_PATH]).length > 0
-  return hasG5 ? [...DEFAULT_GATE_PATHS, G5_GATE_PATH] : [...DEFAULT_GATE_PATHS]
+  const prior = hasG5 ? [...DEFAULT_GATE_PATHS, G5_GATE_PATH] : [...DEFAULT_GATE_PATHS]
+  const hasG6 = [G6_GATE_PATH, G6_INPUT_PATH].some((file) => existsSync(resolve(root, file))
+    || git(root, ['log', '-1', '--full-history', '--format=%H', 'HEAD', '--', ':(top,literal)' + file]).length > 0)
+  return hasG6 ? [...prior, G6_GATE_PATH] : prior
 }
 
 export function verifyG5GateRecord(
@@ -3058,10 +3062,25 @@ export function verifyG5GateRecord(
   if (gate !== 'G5') throw new Error('这份门记录不是 G5 门：' + (gate || '找不到 GateArtifact'));
   return verifyGateRecord(text, opts);
 }
-if (process.argv[1] && /gate-check\.ts$/.test(process.argv[1].replace(/\\/g, '/'))) {
-  const paths = process.argv.length > 2 ? process.argv.slice(2) : defaultGatePaths(process.cwd())
+async function runGateChecks() {
+  const root = process.cwd()
+  const paths = process.argv.length > 2 ? process.argv.slice(2) : defaultGatePaths(root)
+  const historical = hasG5History(root) && git(root, ['rev-parse', 'HEAD']).toString('utf8').trim() !== G5_SIGNED_COMMIT
   for (const path of paths) {
     try {
+      const local = relative(root, resolve(path)).replace(/\\/g, '/')
+      if (local === G6_GATE_PATH) {
+        const out = await verifyG6(root, auditConclusionOf)
+        console.log('gate G6 通过（双份工件联检、' + out.evidenceCount + ' 份冻结证据核验）')
+        continue
+      }
+      if (historical && [...DEFAULT_GATE_PATHS, G5_GATE_PATH].includes(local)) {
+        const historic = git(root, ['show', G5_SIGNED_COMMIT + ':' + local]).toString('utf8').replace(/\r\n/g, '\n')
+        if (readFileSync(path, 'utf8').replace(/\r\n/g, '\n') !== historic) throw new Error('历史门工作树记录被改变')
+        assertG5History(root)
+        console.log('gate ' + local.slice(-5, -3) + ' 固定历史核验通过')
+        continue
+      }
       const out = verifyGateRecord(readFileSync(path, 'utf8'), { path })
       console.log('gate ' + out.gate + ' 通过（' + String(out.items) + ' 项必过、' + String(out.evidence) + ' 份证据哈希复核，artifact_hash=' + out.artifactHash.slice(0, 12) + '… body_hash=' + out.bodyHash.slice(0, 12) + '…）')
     } catch (err) {
@@ -3069,4 +3088,11 @@ if (process.argv[1] && /gate-check\.ts$/.test(process.argv[1].replace(/\\/g, '/'
       process.exitCode = 1
     }
   }
+}
+
+if (process.argv[1] && /gate-check\.ts$/.test(process.argv[1].replace(/\\/g, '/'))) {
+  void runGateChecks().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  })
 }

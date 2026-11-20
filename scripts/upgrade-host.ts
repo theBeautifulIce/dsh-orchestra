@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { sha256Hex, canonicalJson } from '../src/core/canonical.ts'
 import { openDb, type Db } from '../src/infra/sqlite/driver.ts'
@@ -8,10 +8,14 @@ import { UNVERIFIED_EFFECT } from '../src/infra/db/unverified-effects.ts'
 import { legacyModelMappingSchema } from '../src/service/model-routing-settings.ts'
 import { selectExecutionModel, type ModelProfile } from '../src/executor/model-routing.ts'
 import { inspectPackage } from './package-acceptance.ts'
+import { z } from 'zod'
 
 type Module = typeof import('../src/index.ts')
 type Service = Awaited<ReturnType<Module['serveOrchestra']>>
 type PackagePin = { archive: string; sha256: string }
+type PreviousHostPin = { module_sha256: string; source_commit: string; archive_sha256: string }
+type Executor = NonNullable<Parameters<Module['serveOrchestra']>[0]['executor']>
+type PreviousHostFactory = (input: { module: Module; sourceCommit: string; archiveSha256: string }) => Promise<Executor> | Executor
 export const waitWorkflow = 'upgrade_rehearsal_wait'
 const ready = 'fixture.upgrade.ready'
 
@@ -33,10 +37,34 @@ export async function loadUpgradeBuild(pin: PackagePin, stage: string, previous:
   return { module: await import(pathToFileURL(entry).href) as Module, inspected }
 }
 
-export async function bootBuild(module: Module, dbFile: string, secret: string, phase: 'S5' | 'S6', configPath?: string) {
+export async function loadPreviousHost(pin: PreviousHostPin, build: PackagePin & { source_commit: string }, module: Module, provider?: string) {
+  if (pin.source_commit !== build.source_commit || pin.archive_sha256 !== build.sha256) {
+    throw new Error('Previous host registration does not match the previous build')
+  }
+  if (!provider || !isAbsolute(provider) || !lstatSync(provider, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error('Previous host registration requires an operator-configured absolute module path')
+  }
+  if (sha256Hex(readFileSync(provider)) !== pin.module_sha256 || sha256Hex(readFileSync(build.archive)) !== build.sha256) {
+    throw new Error('Previous host module or signed build checksum mismatch')
+  }
+  const entry = pathToFileURL(provider)
+  entry.searchParams.set('sha256', pin.module_sha256)
+  const { createPreviousRehearsalExecutor } = await import(entry.href) as { createPreviousRehearsalExecutor?: PreviousHostFactory }
+  if (typeof createPreviousRehearsalExecutor !== 'function' || sha256Hex(readFileSync(provider)) !== pin.module_sha256) {
+    throw new Error('Previous host does not export a verified executor factory')
+  }
+  const executor = await createPreviousRehearsalExecutor({ module, sourceCommit: build.source_commit, archiveSha256: build.sha256 })
+  if (!executor?.bridge || !executor.registry || !executor.runner || !executor.modelRouting) {
+    throw new Error('Previous host did not assemble a model-enabled executor')
+  }
+  return executor
+}
+
+export async function bootBuild(module: Module, dbFile: string, secret: string, phase: 'S5' | 'S6', configPath?: string, executor?: Executor) {
   let service: Service | undefined
   service = await module.serveOrchestra({
     dbFile, secret, phase, configPath,
+    ...(executor ? { executor } : {}),
     asOfSeq: () => service ? head(service.orchestra.db) : 0,
     listEvents: () => { throw new Error('Fallback events route') },
     listTasks: () => { throw new Error('Fallback task listing') },
@@ -119,9 +147,10 @@ export function upgradeBlockers(db: Db, waitingRun?: string) {
 
 export async function readPreviousModelCatalog(service: Service, secret: string): Promise<readonly ModelProfile[] | undefined> {
   try {
-    const result = await request<{ profiles: ModelProfile[] }>(service, secret, '/v1/settings/model-routing')
-    if (!Array.isArray(result.profiles)) throw new Error('Old settings did not provide an approved model catalog')
-    return result.profiles
+    const result = await request<{ profiles: unknown }>(service, secret, '/v1/settings/model-routing')
+    const profiles = z.array(z.object({ ref: z.string().min(1), capacity: z.enum(['routine', 'standard', 'complex']) })).parse(result.profiles)
+    if (new Set(profiles.map(({ ref }) => ref)).size !== profiles.length) throw new Error('Previous model catalog contains duplicate references')
+    return profiles
   } catch (error) {
     if ((error as { code?: string }).code === 'NOT_FOUND') return undefined
     throw error

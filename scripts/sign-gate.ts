@@ -2,12 +2,21 @@
 // 用法：node --no-warnings scripts/sign-gate.ts docs/gates/G1.md
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { canonicalJson, sha256Hex } from '../src/core/canonical.ts'
-import { assertClean, bodyHash, candidateEntries, GATE_SPECS, verifyGateRecord, type EvidenceEntry, type InvariantEntry } from './gate-check.ts'
+import { assertClean, auditConclusionOf, bodyHash, candidateEntries, GATE_SPECS, verifyGateRecord, type EvidenceEntry, type InvariantEntry } from './gate-check.ts'
+import { G6_GATE_PATH, signG6 } from './gate-g6.ts'
 
 const path = process.argv[2] ?? 'docs/gates/G1.md'
 const root = resolve(process.cwd())
+if (relative(root, resolve(path)).replace(/\\/g, '/') === G6_GATE_PATH) {
+  void signG6(root, auditConclusionOf).then((out) => {
+    console.log('G6 门工件已从真实工作区材料重算，保存后须提交并执行联检（' + out.evidenceCount + ' 份证据）')
+  }, (error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  })
+} else {
 // 先确认候选范围干净：脏文件不进 candidate_hash，签出来的门等于没覆盖它（审计 N-09）
 assertClean(root)
 let text = readFileSync(path, 'utf8')
@@ -81,3 +90,4 @@ text = text.replace(/body_hash=[0-9a-f]{64}/, 'body_hash=' + bodyValue)
 verifyGateRecord(text, { root, path, selfCheck: true })
 writeFileSync(path, text)
 console.log('重签完成：证据 ' + String(entries.length) + ' 份，candidate=' + artifact.candidate_hash.slice(0, 12) + '…，artifact_hash=' + artifactHash.slice(0, 12) + '…，body_hash=' + bodyValue.slice(0, 12) + '…，改动文件 ' + String(paths.length) + ' 个')
+}
