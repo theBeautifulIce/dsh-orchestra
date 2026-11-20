@@ -1,7 +1,7 @@
 import { MANUAL_REWORK_ELIGIBLE, recordManualDispatchBlock } from './rework-dispatch-specs.ts'
 import { OrchError } from '../core/errors.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
-import { failQueuedNode, type NodeSpec } from './dispatcher.ts'
+import { failQueuedNode, type DispatchProgress, type NodeSpec } from './dispatcher.ts'
 import { closeRun } from './commands/run-close.ts'
 import { markTriggerDispatched, markTriggerResolveFailed } from './task-triggers.ts'
 
@@ -46,13 +46,14 @@ function isPermissionDenied(error: unknown): error is OrchError {
 export function createTriggerDispatchPump(
   db: Db,
   resolve: ResolveTriggerNodeSpecs | undefined,
-  dispatch: (run: TriggerRunReady, specs: Record<string, NodeSpec>) => Promise<unknown>,
+  dispatch: (run: TriggerRunReady, specs: Record<string, NodeSpec>, progress?: DispatchProgress) => Promise<unknown>,
   onError: (error: unknown) => void,
   resolvePlan?: ResolveTriggerNodeSpecs,
   options?: TriggerDispatchOptions,
 ) {
   const active = new Map<string, Promise<void>>()
   const shutdown = new AbortController()
+  const ticks = new EventTarget()
   const timeoutMs = options?.resolveTimeoutMs ?? RESOLVE_TIMEOUT_MS
   const clock = options?.now ?? (() => new Date().toISOString())
   const secret = options?.secret
@@ -119,7 +120,9 @@ export function createTriggerDispatchPump(
 
   return {
     tick() {
-      if (shutdown.signal.aborted || active.size >= PARALLEL_RUNS) return
+      if (shutdown.signal.aborted) return
+      ticks.dispatchEvent(new Event('tick'))
+      if (active.size >= PARALLEL_RUNS) return
       let candidates = ready(cursor)
       if (candidates.length === 0 && cursor) {
         cursor = ''
@@ -142,8 +145,10 @@ export function createTriggerDispatchPump(
           if (!db.raw.prepare("SELECT 1 FROM runs WHERE run_id = ? AND status = 'running' AND cancel_requested_at IS NULL").get(run.run_id)) return
           // 解析不出规格不是"没事发生"：原因要落到就绪态里，不能被静默吞掉
           if (!specs || Object.keys(specs).length === 0) { markFailed('resolver_returned_no_specs'); return }
-          await dispatch(run, specs)
-          markDispatched()
+          await dispatch(run, specs, source === 'plan' ? {
+            signal: shutdown.signal, ticks, now: clock, resolve: () => resolveBounded(run, resolver),
+          } : undefined)
+          if (!shutdown.signal.aborted) markDispatched()
         }).catch((error: unknown) => {
           if (shutdown.signal.aborted) return
           markFailed(resolveFailureReason(error),error)

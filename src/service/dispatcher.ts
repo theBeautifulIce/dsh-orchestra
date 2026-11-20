@@ -35,6 +35,14 @@ export type DispatchParams = {
   leaseRenewIntervalMs?: number
 }
 
+/** Internal to the approved-plan pump. Each continuation re-reads its dispatch authority. */
+export type DispatchProgress = {
+  signal: AbortSignal
+  ticks: EventTarget
+  now: () => string
+  resolve: () => Promise<Record<string, NodeSpec> | undefined>
+}
+
 /** 只认登记过的错误码：任意异常的 code 字符串不进联合类型（评审 P2-3） */
 const KNOWN_ERROR_CODES = new Set<string>([...Object.keys(ERROR_STATUS), ...Object.keys(PROPOSED_ERROR_CODES)])
 function dispatchErrorCode(err: unknown): DispatchOutcomeErrorCode {
@@ -103,14 +111,17 @@ export type DispatchDeps = {
   executionLimits?: Pick<RunNodeParams, 'actionTimeoutMs' | 'startupTimeoutMs' | 'verifyTimeoutMs'>
 }
 
-export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promise<DispatchOutcome[]> {
+type DispatchRow = { node_run_id: string; node_id: string; seq: number; attempt: number }
+type DispatchSelection = { rows: DispatchRow[]; settled: DispatchOutcome[] }
+
+function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: ReadonlySet<string>): DispatchSelection | undefined {
   const all = deps.db.raw.prepare(
     "SELECT node_run_id, node_id, seq, attempt FROM node_runs WHERE run_id = ? AND status = 'queued' ORDER BY seq ASC",
-  ).all(p.runId) as { node_run_id: string; node_id: string; seq: number; attempt: number }[]
+  ).all(p.runId) as DispatchRow[]
   // 有执行拓扑就按拓扑放行；旧定义没有 edges，保持原来的全量派发
   const runRow = deps.db.raw.prepare('SELECT workflow_id, workflow_version, status, cancel_requested_at FROM runs WHERE run_id = ?').get(p.runId) as
     { workflow_id: string; workflow_version: string; status: string; cancel_requested_at: string | null } | undefined
-  if (runRow?.cancel_requested_at || runRow?.status === 'paused') return []
+  if (runRow?.cancel_requested_at || runRow?.status === 'paused') return undefined
   // 目录里没有这个版本就退回全量派发：老装配/直接插行的 run 没有已发布定义，
   // 依赖闸只在"定义带着拓扑"时才生效
   let def: { edges?: Array<{ from: string; to: string }> } | undefined
@@ -123,10 +134,10 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
   }
   const tx = makeTx(deps.db.raw)
   const preds = runPredecessors(tx, p.runId, def?.edges ?? [])
-  const rows: typeof all = []
+  const rows: DispatchRow[] = []
   const settled: DispatchOutcome[] = []
   for (const row of all) {
-    if (reworkBlocksNode(tx, row.node_run_id)) continue
+    if (submitted?.has(row.node_run_id) || reworkBlocksNode(tx, row.node_run_id)) continue
     const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [])
     if (readiness.ready) {
       rows.push(row)
@@ -145,28 +156,98 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
       ))
     }
   }
+  return { rows, settled }
+}
+
+async function dispatchProgressively(deps: DispatchDeps, p: DispatchParams, initial: DispatchSelection, progress: DispatchProgress) {
+  const submitted = new Set<string>()
+  const inFlight = new Set<string>()
+  const outcomes: DispatchOutcome[] = []
+  let failure: { error: unknown } | undefined
+  let completion = Promise.withResolvers<void>()
+  const wake = () => completion.resolve()
+
+  // A pump tick also picks up transitions performed outside these execution promises, such as a wait waking.
+  progress.ticks.addEventListener('tick', wake)
+  progress.signal.addEventListener('abort', wake, { once: true })
+  try {
+    let selection: DispatchSelection | undefined = initial
+    let request = p
+    for (;;) {
+      for (const outcome of selection?.settled ?? []) {
+        outcomes.push(outcome)
+        submitted.add(outcome.node_run_id)
+      }
+      if (!failure && !progress.signal.aborted) {
+        for (const row of selection?.rows ?? []) {
+          submitted.add(row.node_run_id)
+          inFlight.add(row.node_run_id)
+          void dispatchOne(deps, request, row).then(
+            (outcome) => { outcomes.push(outcome) },
+            (error: unknown) => { failure ??= { error } },
+          ).finally(() => {
+            inFlight.delete(row.node_run_id)
+            wake()
+          })
+        }
+      }
+
+      const settledPredecessor = selection?.settled.some((outcome) => outcome.settlement === 'applied')
+      if (!settledPredecessor || failure || progress.signal.aborted) {
+        if (!inFlight.size) break
+        await completion.promise
+        completion = Promise.withResolvers<void>()
+      }
+
+      selection = undefined
+      if (failure || progress.signal.aborted) continue
+      try {
+        request = { ...p, now: progress.now() }
+        selection = selectReadyNodes(deps, request, submitted)
+        if (selection?.rows.length) {
+          const specs = await progress.resolve()
+          if (specs && Object.keys(specs).length) request = { ...request, nodes: specs, now: progress.now() }
+          else selection.rows = []
+        }
+      } catch (error) {
+        if (!progress.signal.aborted) failure ??= { error }
+      }
+    }
+  } finally {
+    progress.ticks.removeEventListener('tick', wake)
+    progress.signal.removeEventListener('abort', wake)
+  }
+  if (failure) throw failure.error
+  return outcomes
+}
+
+export async function dispatchRun(deps: DispatchDeps, p: DispatchParams, progress?: DispatchProgress): Promise<DispatchOutcome[]> {
+  if (progress?.signal.aborted) return []
+  const selection = selectReadyNodes(deps, p)
+  if (!selection) return []
+  const { rows, settled } = selection
   // 装配层给了执行函数，它已经带并发闸：同批节点可以一起排，谁先拿到名额谁先跑。
   // 没给执行函数（老装配/单测）时保持原来的串行次序，不凭空放并发。
-  const outcomes = deps.executeNode
-    ? await Promise.all(rows.map((row) => dispatchOne(deps, p, row)))
-    : await (async () => {
-        const out: DispatchOutcome[] = []
-        for (const row of rows) out.push(await dispatchOne(deps, p, row))
-        return out
-      })()
+  let outcomes: DispatchOutcome[]
+  if (progress && deps.executeNode) outcomes = await dispatchProgressively(deps, p, selection, progress)
+  else if (deps.executeNode) outcomes = [...settled, ...await Promise.all(rows.map((row) => dispatchOne(deps, p, row)))]
+  else {
+    outcomes = settled
+    for (const row of rows) outcomes.push(await dispatchOne(deps, p, row))
+  }
   // 这一轮跑完后收口 run：所有子节点都已终态才写，未满足条件保持原状。
   inTx(deps.db, (tx) => {
     const latest = tx.get<{ updated_at: string | null }>('SELECT MAX(updated_at) AS updated_at FROM node_runs WHERE run_id=?', [p.runId])
     const settledAt = latest?.updated_at && Date.parse(latest.updated_at) > Date.parse(p.now) ? latest.updated_at : p.now
     closeRun(tx, deps.secret, p.runId, settledAt)
   })
-  return [...settled, ...outcomes]
+  return outcomes
 }
 
 async function dispatchOne(
   deps: DispatchDeps,
   p: DispatchParams,
-  row: { node_run_id: string; node_id: string; seq: number; attempt: number },
+  row: DispatchRow,
 ): Promise<DispatchOutcome> {
   // 取消与派发可能并发：选行之后、真正执行之前再查一次取消位，
   // 避免已取消的 run 因为节点还留在 queued 又被执行一次。
