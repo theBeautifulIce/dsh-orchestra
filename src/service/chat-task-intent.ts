@@ -19,6 +19,7 @@ const objectFrame = /^(?:把|将|使用|用|按照|按|根据|基于|对照|从|
 const taskHeader = /^(?:完成|执行|开展|启动|做)[ \t]*(?:一?[项个件][ \t]*)?(?:(?:名为|名叫|称为|叫作|叫做|叫)[^，,。；;：:！？!?\n]{0,64}?的)?(?:任务|工作)[ \t]*(?=$|[，,。；;：:\n])/u
 const listPrefix = /^(?:\d+[.、)]|[一二三四五六七八九十]+、|[-*])\s*/u
 const taskQualifier = /^(?:先|现在|直接|立即)\s*/u
+const actionQualifiers = /^(?:(?:仅|只|独立|分别|并行)\s*)+/u
 
 function actionIsDirect(prefix: string): boolean {
   // A concrete object or source can precede the principal action in Chinese.
@@ -35,7 +36,7 @@ function classifyTaskDetails(details: string): ChatTaskIntent {
     .map((clause) => clause.trim().replace(listPrefix, '').trim())
   const hasAction = clauses.some((clause) => {
     if (isConversationClause(clause)) return false
-    const body = clause.replace(request, '').replace(taskQualifier, '').replace(/^(?:仅|只|独立|分别|并行)\s*/u, '')
+    const body = clause.replace(request, '').replace(taskQualifier, '').replace(actionQualifiers, '')
     const predicate = action.exec(body)
     return !!predicate && actionIsDirect(body.slice(0, predicate.index))
   })
@@ -61,10 +62,11 @@ export function classifyChatTask(text: string): ChatTaskIntent {
   if (!body) return 'conversation'
   const header = taskHeader.exec(body)
   if (header) return classifyTaskDetails(body.slice(header[0].length).replace(/^[，,：:]/u, ''))
-  const predicate = action.exec(body)
+  const details = body.replace(actionQualifiers, '')
+  const predicate = action.exec(details)
   if (!predicate) return /^(?:处理|做一下|跟进|弄一下|办一下)/u.test(body) && body !== directive ? 'clarify' : 'conversation'
   // Arbitrary prefixes cannot turn a later example or discussed action into an assignment.
-  if (!actionIsDirect(body.slice(0, predicate.index))) return 'conversation'
-  if (deliverable.test(body) || file.test(input) || localInput.test(body)) return 'task'
+  if (!actionIsDirect(details.slice(0, predicate.index))) return 'conversation'
+  if (deliverable.test(details) || file.test(input) || localInput.test(details)) return 'task'
   return 'clarify'
 }
