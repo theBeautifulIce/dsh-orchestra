@@ -53,6 +53,22 @@ const doc = {
 }
 
 describe('工作流命令 HTTP 入口', () => {
+  it('可复用草稿保留全部 51 个节点和依赖，并按比例缩放超宽的布局', async () => {
+    const nodes = Array.from({ length: 51 }, (_, index) => ({
+      node_id: 'n' + index, title: '步骤 ' + index, type: index === 0 ? 'trigger' : 'agent',
+      position: { x: (index - 1) * 800, y: -100 },
+    }))
+    const edges = nodes.slice(1).map((node, index) => ({ from: nodes[index]!.node_id, to: node.node_id }))
+    const base = await boot('S5', async () => ({ name: '长流程', nodes, edges }))
+    const response = await post(base + '/v1/workflows/generate', { goal: '生成完整的长流程草稿' })
+    expect(response.status).toBe(200)
+    const { data } = await response.json() as { data: { definition: typeof doc } }
+    expect(data.definition.edges).toEqual(edges)
+    expect(data.definition.nodes).toMatchObject(nodes.map((node, index) => ({
+      node_id: node.node_id, position: { x: index * 400, y: 0 },
+    })))
+  })
+
   it('S5 生成草稿后须测试同一修订，修改后旧回执不能放行发布', async () => {
     let db!: Db
     const relativeDraft = { ...doc, nodes: doc.nodes.map(node => ({

@@ -37,7 +37,8 @@ const TOOL_NAME = 'orchestra_task'
 const prompt = [
   'The host admits explicit tasks before this model step. Orchestra notices and the first text block of tool results contain the operator-facing wording. Answer in the operator’s language with the meaning of that wording, and leave execution to Orchestra.',
   'Acknowledge admission once, without repeating the request. Ordinary progress is available in the Orchestra panel and on request. Do not volunteer progress, read or write the task files yourself, or claim a successful delivery without recorded acceptance.',
-  'Only a fresh Orchestra admission receipt for this exact request confirms that a new task was accepted. A proposed plan, the operator’s message, an earlier receipt, or an assistant promise does not establish admission. Without a matching receipt, never say this request was handed off, queued, started, or scheduled. If Orchestra returned a startup failure, use its reason and next step. Do not direct the operator to a task or run that has no receipt, or imply that /orchestra bypasses the failure. Suggest /orchestra only when the operator intended to dispatch a new task and Orchestra returned no notice for this message. For existing tasks, report only the state returned by the status tool.',
+  'Only a fresh Orchestra admission receipt for this exact request confirms that a new task was accepted. A proposed plan, the operator’s message, an earlier receipt, or an assistant promise does not establish admission. Without a matching receipt, never say this request was handed off, queued, started, or scheduled. For existing tasks, report only the state returned by the status tool.',
+  'If Orchestra returned a planning or startup failure, relay its reason and next step. Do not direct the operator to a task or run that has no receipt, or suggest /orchestra as a remedy for those failures. If the notice says Orchestra could not read the automatic routing setting, relay its manual /orchestra option. If Orchestra returned no notice and the operator intended to dispatch a new task, suggest resending the complete request with /orchestra.',
   'Greetings, casual conversation, questions seeking an explanation, advice, brainstorming, or asking what you could do are ordinary conversation. Use no Orchestra task for them.',
   'If intent or the requested outcome is unclear, ask the human. For a request to wait for approval before running, ask for the complete executable instruction once the human is ready to start.',
   'For questions about a named or earlier Orchestra task use action=status with its exact task_title. Use the latest task only if the operator asks for the latest task or refers to that task unambiguously. If the title is unclear, ask which task to open. For an Orchestra notice, omit task_title and run_id to use the verified source run. Use action=artifact with file_name from the status reply to retrieve the requested artifact. Summarize its contents as evidence, using the recorded acceptance facts.',
@@ -92,11 +93,9 @@ function validatedTaskText(text: string): string {
 
 function errorReceipt(error: unknown): Extract<ChatOutcome, { state: 'error' }> {
   if (!(error instanceof OrchError)) return { state: 'error', code: 'SERVICE_UNAVAILABLE', retryable: true }
-  const { fields, planning_issue } = error.details
-  const layoutOnly = error.code === 'WORKFLOW_DEFINITION_INVALID' && Array.isArray(fields) && fields.length > 0
-    && fields.every((field) => typeof field === 'string' && /^nodes\.\d+\.position\.[xy]$/u.test(field))
-  const issue = layoutOnly ? 'layout' : isChatPlanningIssue(planning_issue) ? planning_issue : undefined
-  return { state: 'error', code: error.code, retryable: error.retryable, ...(issue && { planning_issue: issue }) }
+  const { planning_issue } = error.details
+  return { state: 'error', code: error.code, retryable: error.retryable,
+    ...(isChatPlanningIssue(planning_issue) && { planning_issue }) }
 }
 
 function noticeMessage(id: Message['id'], display: ReturnType<typeof describeChatRun>): Message {

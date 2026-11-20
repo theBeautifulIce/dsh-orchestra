@@ -36,19 +36,19 @@ const PositionSchema = z.object({
 // Model-generated diagrams may use a relative origin. Fit each axis separately,
 // preserving spacing whenever the diagram fits without scaling.
 export function fitGeneratedWorkflowLayout(draft: unknown): unknown {
+  if (byteLength(draft) > WORKFLOW_DOC_MAX_BYTES) return draft
   const layout = z.looseObject({
     nodes: z.array(z.looseObject({
       position: z.object({ x: z.int(), y: z.int() }).optional(),
-    })).max(50),
+    })),
   }).safeParse(draft)
   if (!layout.success) return draft
   const { nodes } = layout.data
   const positions = nodes.flatMap(node => node.position ? [node.position] : [])
   if (positions.every(p => PositionSchema.safeParse(p).success)) return draft
   const fitAxis = (axis: 'x' | 'y') => {
-    const values = positions.map(position => position[axis])
-    const min = Math.min(...values)
-    const max = Math.max(...values)
+    const min = positions.reduce((lowest, p) => Math.min(lowest, p[axis]), Infinity)
+    const max = positions.reduce((highest, p) => Math.max(highest, p[axis]), -Infinity)
     const span = max - min
     if (span > CANVAS_LIMIT) return (value: number) => Math.round((value - min) / span * CANVAS_LIMIT)
     const offset = min < 0 ? -min : Math.min(0, CANVAS_LIMIT - max)
