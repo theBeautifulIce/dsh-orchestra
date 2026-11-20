@@ -50,3 +50,12 @@ CREATE VIEW task_attention_facts AS
   LEFT JOIN runs r ON r.run_id = t.current_run_id
   LEFT JOIN task_triggers tr ON tr.task_id = t.task_id;
 ;
+
+-- Under 059, weight 6 meant the current run had an active decision. Refresh the
+-- materialized rank only where the new inbox has no active human decision.
+INSERT INTO task_attention_refresh
+  SELECT t.task_id
+  FROM task_attention_order a JOIN tasks t ON t.task_id = a.task_id
+  WHERE a.archived IN (0, 1) AND a.attention_weight = 6
+    AND NOT EXISTS (SELECT 1 FROM human_decision_inbox d WHERE d.run_id = t.current_run_id);
+;

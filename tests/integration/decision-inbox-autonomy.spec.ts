@@ -8,7 +8,7 @@ import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
 import { acknowledgeDecision, ensurePreExecutionDecision, openDecision, sweepDecisions } from '../../src/service/commands/decisions.ts'
 import { setTaskAutonomy, startRun } from '../../src/service/commands/start-run.ts'
 import { listDecisions, type DecisionView } from '../../src/service/queries/decisions.ts'
-import { getTaskSummary } from '../../src/service/queries/tasks.ts'
+import { getTaskSummary, listTaskSummaries } from '../../src/service/queries/tasks.ts'
 import { catalogFor, TEST_SECRET } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-20T00:00:00.000Z'
@@ -123,5 +123,46 @@ it('keeps pending and historical decisions created before the inbox migration', 
     expect(getTaskSummary(db, run.task_id)).toMatchObject({ attention: 'decision', lane: 'attention', open_decision_count: 1 })
   } finally {
     db.raw.close()
+  }
+})
+
+it('moves a legacy running task with only audit-role decisions back to the running lane after migration and reopen', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-legacy-decision-lane-'))
+  const file = join(dir, 'db.sqlite')
+  const migrations = loadSteps(defaultMigrationsDir())
+  let db = openDb(file)
+  try {
+    applySteps(db, migrations.filter((step) => step.version < 62))
+    const run = startRun(db, catalogFor(['n1']), { workflowVersion: '1', taskTitle: '进行中的审计', operationId: 'op-legacy-audit', now: NOW })
+    withTx(db, (tx) => {
+      tx.run("UPDATE tasks SET status = 'running' WHERE task_id = ?", [run.task_id])
+      tx.run("UPDATE runs SET status = 'running' WHERE run_id = ?", [run.run_id])
+      tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE run_id = ?", [run.run_id])
+      tx.run(`INSERT INTO decisions (decision_id, run_id, kind, status, revision, created_at, payload_json, approver)
+        VALUES ('legacy-audit', ?, 'audit_result', 'pending', 1, ?, '{}', 'agent:auditor')`, [run.run_id, NOW])
+    })
+    const taskIds = (params: Parameters<typeof listTaskSummaries>[1]) =>
+      listTaskSummaries(db, params).items.map((item) => item.task_id)
+    expect(db.raw.prepare('SELECT lane, attention_weight FROM task_attention_order WHERE task_id = ?').get(run.task_id))
+      .toEqual({ lane: 'attention', attention_weight: 6 })
+
+    function expectMigratedLane() {
+      expect(getTaskSummary(db, run.task_id)).toMatchObject({ open_decision_count: 0, attention: 'running', lane: 'running' })
+      expect(taskIds({ lane: 'running', attention: 'running' })).toEqual([run.task_id])
+      expect(taskIds({ lane: 'attention' })).toEqual([])
+      expect(taskIds({ attention: 'decision' })).toEqual([])
+      expect(listDecisions(db, { humanInbox: true }).items).toEqual([])
+      expect(listDecisions(db, { run_id: run.run_id }).items).toMatchObject([{ decision_id: 'legacy-audit', status: 'pending' }])
+    }
+
+    expect(applySteps(db, migrations)).toEqual([62])
+    expectMigratedLane()
+    db.raw.close()
+    db = openDb(file)
+    expect(applySteps(db, migrations)).toEqual([])
+    expectMigratedLane()
+  } finally {
+    db.raw.close()
+    rmSync(dir, { recursive: true, force: true })
   }
 })
