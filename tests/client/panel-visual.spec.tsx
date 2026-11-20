@@ -50,12 +50,15 @@ function scanFontLiterals(): FontLiteral[] {
   return found
 }
 
-/** 扫描面板源码里的固定宽度与最小宽度（只看数字字面量，百分比与计算值不算）。 */
+/** 扫描内联样式和 CSS 中的固定宽度与最小宽度。 */
 function scanWidthLiterals(): WidthLiteral[] {
   const found: WidthLiteral[] = []
   for (const name of PANEL_FILES) {
     const source = readFileSync(join(PANEL_DIR, name), 'utf8')
-    for (const match of source.matchAll(/(?<![A-Za-z])(minWidth|width)\s*:\s*(\d+(?:\.\d+)?)/g)) {
+    for (const match of source.matchAll(/(?<![A-Za-z-])(minWidth|width)\s*:\s*(\d+(?:\.\d+)?)(?=\s*[,}])/g)) {
+      found.push({ file: name, key: match[1] ?? 'width', value: Number(match[2]) })
+    }
+    for (const match of source.matchAll(/(?<![A-Za-z-])(min-width|width)\s*:\s*(\d+(?:\.\d+)?)px/g)) {
       found.push({ file: name, key: match[1] ?? 'width', value: Number(match[2]) })
     }
   }
@@ -205,6 +208,21 @@ describe('S5-J 视觉硬门槛', () => {
     const view = await renderPanel(<SettingsScreen />)
     const values = Array.from(view.container.querySelectorAll('dd')).map((element) => element.textContent)
     expect(values).toEqual(['未知', '未知', '未知', '未知', '未知', '未知'])
+    view.unmount()
+  })
+
+  it('面板内容可通过 Tab 聚焦，同页刷新保留滚动位置，换页回到开头', async () => {
+    const view = await renderPanel(<PanelShell activeRoute="settings" onNavigate={noop} serviceConnected>设置</PanelShell>)
+    const main = view.container.querySelector('main')!
+    expect(main.tabIndex).toBe(0)
+    main.scrollTop = 720
+    main.scrollLeft = 90
+    await view.rerender(<PanelShell activeRoute="settings" onNavigate={noop} serviceConnected>新设置</PanelShell>)
+    expect(main.scrollTop).toBe(720)
+    expect(main.scrollLeft).toBe(90)
+    await view.rerender(<PanelShell activeRoute="memory" onNavigate={noop} serviceConnected>记忆</PanelShell>)
+    expect(main.scrollTop).toBe(0)
+    expect(main.scrollLeft).toBe(0)
     view.unmount()
   })
 

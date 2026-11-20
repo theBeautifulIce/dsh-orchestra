@@ -1,6 +1,32 @@
-import { FONT_PX } from './tokens.ts'
+import { COLOR, FONT_PX } from './tokens.ts'
 
 export const PANEL_LAYOUT_CSS = `
+.ops-panel-viewport {
+  display: flex; flex: 1 1 auto; flex-direction: column;
+  block-size: 100dvh; max-block-size: 100%; min-block-size: 0; min-inline-size: 0;
+  container-type: inline-size; container-name: orchestra-panel;
+}
+.ops-shell { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.ops-shell-sidebar {
+  box-sizing: border-box; flex: none; width: 236px; min-height: 0; min-width: 0;
+  padding: 22px 14px; overflow: auto; scrollbar-gutter: stable;
+  border-right: 1px solid ${COLOR.line};
+}
+.ops-shell-brand { padding: 4px 10px 22px; }
+.ops-shell-sidebar nav { display: grid; gap: 4px; }
+.ops-shell-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.ops-shell-main > header, .ops-shell-main > [role=status] { flex: none; }
+.ops-shell-main > main {
+  flex: 1; min-width: 0; min-height: 0; overflow: auto;
+  scrollbar-gutter: stable; overscroll-behavior: contain;
+}
+.ops-shell-main > main:focus-visible { outline: 2px solid #225fba; outline-offset: -2px; }
+.ops-panel-content-inner { box-sizing: border-box; max-width: 1780px; margin-inline: auto; }
+.ops-panel-protocol-error {
+  flex: 1; min-height: 0; overflow: auto; display: grid;
+  align-content: safe center; justify-content: safe center;
+  padding: 24px; text-align: center; overflow-wrap: anywhere;
+}
 .ops-page { display: grid; align-content: start; gap: 12px; min-width: 0; }
 .ops-page-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px 14px; min-width: 0; }
 .ops-page h1 { margin: 0; font-size: ${FONT_PX.title}px; line-height: 1.3; letter-spacing: -.02em; overflow-wrap: anywhere; }
@@ -39,6 +65,9 @@ export const PANEL_LAYOUT_CSS = `
 .ops-tabs [aria-pressed=true] { color: #1e55a1; border-bottom-color: #225fba; }
 .ops-stack { display: grid; gap: 10px; min-width: 0; align-content: start; }
 .ops-context-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); align-items: start; gap: 10px; }
+.ops-settings-page { width: 100%; max-width: 1100px; margin-inline: auto; }
+.ops-settings-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.ops-settings-section fieldset { min-width: 0; }
 .ops-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr)); align-items: start; gap: 10px; }
 .ops-card-grid:empty { display: none; }
 .ops-inset { padding: 10px 12px; }
@@ -54,18 +83,18 @@ export const PANEL_LAYOUT_CSS = `
 .ops-workflow-controls > section > :first-child { margin-top: 0; }
 .ops-workflow-controls ol, .ops-workflow-controls ul { padding-left: 20px; }
 .ops-shell-main:not([data-panel-route=tasks]) { background: #f4f7fb; }
-.ops-shell-main[data-panel-route=tasks] > main { padding: 28px 32px 80px; }
-.ops-shell-main:not([data-panel-route=tasks]) > main { padding: 16px 22px 36px; }
-@media (max-width: 980px) {
-  .ops-shell:not([data-panel-route=tasks]) > aside { flex-basis: 164px !important; width: 164px !important; padding: 11px 8px !important; }
+.ops-shell-main[data-panel-route=tasks] .ops-panel-content-inner { padding: 28px 32px 80px; }
+.ops-shell-main:not([data-panel-route=tasks]) .ops-panel-content-inner { padding: 16px 22px 36px; }
+@container orchestra-panel (max-width: 980px) {
+  .ops-shell-sidebar { width: 164px; padding: 11px 8px; }
 }
-@media (max-width: 680px) {
-  .ops-shell:not([data-panel-route=tasks]) { flex-direction: column; }
-  .ops-shell:not([data-panel-route=tasks]) > aside { width: 100% !important; flex-basis: auto !important; border-right: 0 !important; padding: 5px 8px !important; }
-  .ops-shell:not([data-panel-route=tasks]) > aside > div { padding: 4px !important; }
-  .ops-shell:not([data-panel-route=tasks]) > aside nav { display: flex !important; overflow: auto; }
-  .ops-shell:not([data-panel-route=tasks]) > aside nav button { white-space: nowrap; }
-  .ops-shell-main:not([data-panel-route=tasks]) > main { padding: 10px 10px 24px; }
+@container orchestra-panel (max-width: 680px) {
+  .ops-shell { flex-direction: column; }
+  .ops-shell-sidebar { width: 100%; padding: 5px 8px; border-right: 0; overflow: visible; scrollbar-gutter: auto; }
+  .ops-shell-brand { padding: 4px; }
+  .ops-shell-sidebar nav { display: flex; overflow-x: auto; }
+  .ops-shell-sidebar nav button { white-space: nowrap; }
+  .ops-shell-main[data-panel-route] .ops-panel-content-inner { padding: 10px 10px 24px; }
   .ops-workflow-stage { grid-template-columns: minmax(0, 1fr); }
   .ops-table th, .ops-table td { padding: 7px 8px; }
 }

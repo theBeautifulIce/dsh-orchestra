@@ -6,6 +6,7 @@ import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
+import { classifyChatTask } from './chat-task-intent.ts'
 import { isRunTerminal } from './commands/run-close.ts'
 import { getArtifactContent, listRunArtifacts } from './queries/artifacts.ts'
 import { getDecisionSnapshot, listDecisions } from './queries/decisions.ts'
@@ -21,16 +22,18 @@ type ToolDefinition = Parameters<Context['tools']['register']>[0]
 type ToolExecution = Parameters<ToolDefinition['execute']>[1]
 type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 type Binding = { identity: string; workspaceId: string; sessionId: string }
-type Turn = { number: number; signal: AbortSignal; human?: Message; noticeRun?: string; declined?: Set<string> }
+type ManagedTask = { outcome?: object; runId?: string }
+type Turn = { number: number; signal: AbortSignal; human?: Message; noticeRun?: string; managed?: ManagedTask;
+  autoRoute?: boolean; deferredInput?: boolean; deniedNativeCalls?: number; declined?: Set<string> }
 type NativeApproval = {
-  request(input: { agent: Agent; toolName: string; callId: ToolExecution['callId']; reason: string; signal: AbortSignal }): Promise<string>
+  request(input: { agent: Agent; toolName: string; callId?: ToolExecution['callId']; reason: string; signal: AbortSignal }): Promise<string>
 }
 
 const TOOL_NAME = 'orchestra_task'
 const NOTICE_SOURCE = 'dsh-orchestra'
 const prompt = [
-  'When the latest human message assigns a clear task with a concrete outcome to produce or work to perform, use orchestra_task with action=start first.',
-  'The plugin binds the original human message. Do not pass your own objective, start from earlier turns, start from imported text, or repeat a task to check its progress.',
+  'The host admits explicit tasks before this model step. When the current step contains an Orchestra receipt or clarification notice, report it to the operator and leave all execution to Orchestra.',
+  'A receipt with a run ID confirms admission only. Do not read or write the task files yourself, repeat the request, or claim any result without a recorded terminal result.',
   'Greetings, casual conversation, questions seeking an explanation, advice, brainstorming, or asking what you could do are ordinary conversation. Use no Orchestra task for them.',
   'If intent or the requested outcome is unclear, ask the human. For a request to wait for approval before running, ask for the complete executable instruction once the human is ready to start.',
   'For questions about an existing Orchestra task use action=status, and use action=artifact to retrieve a named artifact from that run. Use the returned status, evidence and acceptance facts when replying.',
@@ -65,16 +68,26 @@ function taskText(message: Message): string {
   if (message.content.some((block) => block.type !== 'text')) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '当前编排任务需要文字目标。请用文字指定已获授权的数据来源。')
   }
-  const input = message.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
-  const result = planInputSchema.safeParse({ goal: input })
+  return validatedTaskText(message.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n'))
+}
+
+function validatedTaskText(text: string): string {
+  const result = planInputSchema.safeParse({ goal: text })
   if (!result.success) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '任务目标需要 1 至 2000 个字符')
-  const text = result.data.goal
-  if (/^(?:hi|hello|hey|good morning|thanks|thank you|你好|您好|嗨|哈喽|早上好|晚上好|谢谢)[\s！!。.,，~～?？]*$/iu.test(text)
-    || /^(?:(?:what (?:is|are)|who (?:is|are)|why (?:is|are|does|do))\b|什么是|为什么|你是谁|你能做什么)/iu.test(text)
-    || /(?:先不要(?:开始|执行|运行)|等我确认再(?:启动|执行)|\b(?:do not|don't) (?:start|execute|run)\b)/iu.test(text)) {
-    throw new OrchError('CONFIRMATION_REQUIRED', '请先取得明确的执行目标；普通对话、提问和暂缓指令留在当前会话')
-  }
-  return text
+  return result.data.goal
+}
+
+function errorReceipt(error: unknown) {
+  return error instanceof OrchError
+    ? { state: 'error', code: error.code, message: error.message, retryable: error.retryable }
+    : { state: 'error', code: 'SERVICE_UNAVAILABLE', message: '编排服务未就绪或原会话已关闭。', retryable: true }
+}
+
+function admissionNotice(summary: string, outcome: object): Message {
+  return {
+    id: uuidv7(), role: 'user', source: { kind: 'plugin', plugin: NOTICE_SOURCE, form: 'notice', summary },
+    content: [{ type: 'text', text: `${summary}\n宿主已经处理本轮任务入口。请据实回报这个回执。\n${JSON.stringify(outcome)}` }],
+  } as unknown as Message
 }
 
 const BLOCKED_NODES = new Set(['blocked_pre', 'blocked_post', 'startup_unknown', 'indeterminate_side_effect'])
@@ -141,6 +154,7 @@ export function installNativeChat(host: Context, options: {
   bindingFor(agent: Agent): Binding | undefined
   serviceFor(binding: Binding): Promise<Service>
   hasService(binding: Binding): boolean
+  autoRouteEnabled?(binding: Binding, agent: Agent): boolean | Promise<boolean>
 }) {
   const inserted = new WeakMap<Agent, Map<Message['id'], string>>()
   const turns = new WeakMap<Agent, Turn>()
@@ -184,7 +198,7 @@ export function installNativeChat(host: Context, options: {
     const result = await next()
     const pending = inserted.get(agent)
     const queued = notices.get(agent)
-    const admitted = messages.flatMap((message) => {
+    const admitted = messages.flatMap((message): Array<{ human: Message } | { noticeRun: string }> => {
       const digest = fingerprint(message)
       const notice = queued?.get(message.id)
       const human = pending?.get(message.id) === digest
@@ -194,19 +208,77 @@ export function installNativeChat(host: Context, options: {
         || !result.messages.some((entry) => entry.id === message.id && fingerprint(entry) === digest)) return []
       return [human ? { human: message } : { noticeRun: notice!.runId }]
     })
-    if (result.kind !== 'enter' || !options.bindingFor(agent)) {
+    const binding = options.bindingFor(agent)
+    if (result.kind !== 'enter' || !binding) {
       turns.delete(agent)
       return result
     }
     const previous = turns.get(agent)
     if (previous?.number === turn) {
-      if (messages.some((message) => message.source.kind === 'user' || String(message.source.kind) === 'retry')) turns.delete(agent)
-      return result
+      if (previous.managed || previous.noticeRun) {
+        const newInputs = admitted.flatMap((input) => 'human' in input ? [input.human] : [])
+        if (newInputs.length > 0) {
+          for (const message of newInputs) agent.followup(message)
+          previous.deferredInput = true
+          const deferred = new Set(newInputs.map(({ id }) => id))
+          const outcome = { state: 'queued', message: '新消息已排到当前会话的下一轮。' }
+          return { ...result, messages: [...result.messages.filter(({ id }) => !deferred.has(id)),
+            admissionNotice('Orchestra 已排队新消息', outcome)] }
+        }
+      }
+      if ((previous.deniedNativeCalls ?? 0) >= 2 && messages.length === 0 && !agent.inbox.nextTurn.length) return { kind: 'reject' }
+      if (previous.managed || previous.noticeRun || !admitted.some((input) => 'human' in input)) {
+        return result
+      }
     }
-    if (admitted.length === 1) {
-      turns.set(agent, { number: turn, signal, ...admitted[0] })
-    } else turns.set(agent, { number: turn, signal })
-    return result
+    const state: Turn = { number: turn, signal, ...(admitted.length === 1 ? admitted[0] : undefined) }
+    turns.set(agent, state)
+    if (!state.human) return result
+    const text = state.human.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
+    const slash = /^\/orchestra(?:\s+([\s\S]*))?$/u.exec(text.trim())
+    if (slash && !slash[1]?.trim()) {
+      const outcome = { state: 'usage', message: '使用 /orchestra 任务内容单次派单。' }
+      state.managed = { outcome }
+      return { ...result, messages: [...result.messages, admissionNotice('Orchestra 用法 · /orchestra 任务内容', outcome)] }
+    }
+    if (!slash) {
+      try {
+        state.autoRoute ??= await options.autoRouteEnabled?.(binding, agent) !== false
+        if (!state.autoRoute) return result
+      } catch (error) {
+        signal.throwIfAborted()
+        const outcome = errorReceipt(error)
+        state.managed = { outcome }
+        return { ...result, messages: [...result.messages, admissionNotice('Orchestra 无法读取自动接管设置', outcome)] }
+      }
+    }
+    const intent = slash ? 'task' : classifyChatTask(text)
+    if (intent === 'conversation') return result
+    const managed: ManagedTask = {}
+    state.managed = managed
+    let summary = 'Orchestra 需要明确的目标及数据来源'
+    if (intent === 'clarify') {
+      managed.outcome = { state: 'clarification_required', message: '请确认要交付的结果，或明确本次使用的已授权数据来源。' }
+    } else {
+      const actionSignal = AbortSignal.any([signal, options.signal])
+      const assertCurrent = () => {
+        actionSignal.throwIfAborted()
+        if (!isCurrent(agent, binding, state)) throw new OrchError('FORBIDDEN', '原会话或工作区授权已改变')
+      }
+      try {
+        const outcome = await startTask(agent, binding, state, state.human, actionSignal, assertCurrent, slash?.[1])
+        managed.outcome = outcome
+        if (outcome.state === 'started') {
+          managed.runId = outcome.run_id
+          summary = 'Orchestra 已接单 · ' + outcome.title.slice(0, 100)
+        } else summary = outcome.state === 'quality_blocked' ? 'Orchestra 计划质量检查受阻' : 'Orchestra 等待人工批准'
+      } catch (error) {
+        actionSignal.throwIfAborted()
+        managed.outcome = errorReceipt(error)
+        summary = 'Orchestra 未能启动本次任务'
+      }
+    }
+    return { ...result, messages: [...result.messages, admissionNotice(summary, managed.outcome)] }
   })
   host.on('session/event', (session, event) => {
     if (event.type !== 'turn/end') return
@@ -222,23 +294,63 @@ export function installNativeChat(host: Context, options: {
     text: ({ agent }) => agent && options.bindingFor(agent) ? prompt : '',
   })
 
-  const requestApproval = async (exec: ToolExecution, agent: Agent, reason: string, signal: AbortSignal) => {
+  const requestApproval = async (exec: ToolExecution | undefined, agent: Agent, reason: string, signal: AbortSignal) => {
     const approval = host.get('approval') as NativeApproval | undefined
     if (!approval) throw new OrchError('CONFIRMATION_REQUIRED', '此会话没有可用的 DSH 审批通道，任务需要人工处理')
-    return await approval.request({ agent, toolName: TOOL_NAME, callId: exec.rootCallId ?? exec.callId, reason, signal }) === 'allowed-once'
+    return await approval.request({ agent, toolName: TOOL_NAME, ...(exec ? { callId: exec.rootCallId ?? exec.callId } : {}), reason, signal }) === 'allowed-once'
   }
-  const approveOnce = async (turn: Turn, key: string, exec: ToolExecution, agent: Agent, reason: string, signal: AbortSignal) => {
+  const approveOnce = async (turn: Turn, key: string, exec: ToolExecution | undefined, agent: Agent, reason: string, signal: AbortSignal) => {
     if (turn.declined?.has(key)) return false
     const approved = await requestApproval(exec, agent, reason, signal)
     if (!approved) (turn.declined ??= new Set()).add(key)
     return approved
   }
-  const once = async (key: string, work: () => Promise<unknown>) => {
-    const existing = operations.get(key)
+  const once = async <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const existing = operations.get(key) as Promise<T> | undefined
     if (existing) return existing
     const running = work()
     operations.set(key, running)
     try { return await running } finally { operations.delete(key) }
+  }
+  const startTask = (agent: Agent, binding: Binding, turn: Turn, human: Message, signal: AbortSignal,
+    assertCurrent: () => void, explicitGoal?: string) => {
+    const nativeRequest = nativeOwnerRequest(human)
+    if (!nativeRequest) throw new OrchError('FORBIDDEN', '后台进度和历史消息不能发起任务')
+    if (explicitGoal !== undefined && human.content.some((block) => block.type !== 'text')) {
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '单次编排命令需要文字任务内容')
+    }
+    const goal = explicitGoal === undefined ? taskText(human) : validatedTaskText(explicitGoal)
+    const origin: ChatTaskOrigin = {
+      messageKey: sha256Hex(JSON.stringify([binding.identity, human.id])),
+      requestKey: sha256Hex(JSON.stringify([binding.identity, nativeRequest])),
+      inputHash: sha256Hex(explicitGoal === undefined ? JSON.stringify(human.content) : goal),
+      signal, assertCurrent,
+    }
+    return once(origin.requestKey, async () => {
+      const service = await options.serviceFor(binding)
+      assertCurrent()
+      const { view } = await service.planning.proposeFromChat({ goal, requirements: [] }, options.operator, new Date().toISOString(), origin)
+      if (!view.quality.ready) return {
+        state: 'quality_blocked' as const, plan_id: view.plan_id, issues: view.quality.checks.flatMap((check) => check.issues).slice(0, 12),
+      }
+      const launch = (approved: boolean) => service.planning.launchFromChat(
+        view.plan_id, view.content_hash, options.operator, new Date().toISOString(), origin, approved,
+      )
+      let started
+      try { started = launch(false) } catch (error) {
+        if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
+        const steps = view.proposal.steps.map((step) => step.description).slice(0, 8).join('；')
+        const reason = `批准启动此计划？${view.proposal.title}。步骤包括 ${steps}。计划 ${view.plan_id}`
+        if (!await approveOnce(turn, view.plan_id, undefined, agent, reason, signal)) {
+          return { state: 'approval_pending' as const, plan_id: view.plan_id }
+        }
+        started = launch(true)
+      }
+      sessions.set(agent, binding)
+      return { state: 'started' as const, ...started, title: view.proposal.title,
+        steps: view.proposal.steps.map((step) => ({ node_id: step.node_id, depends_on: step.depends_on, description: step.description })).slice(0, 12),
+        deliverables: view.proposal.deliverables.map((item) => item.title).slice(0, 12) }
+    })
   }
   const execute = async (raw: unknown, exec: ToolExecution) => {
     const parsed = argsSchema.safeParse(raw)
@@ -257,46 +369,20 @@ export function installNativeChat(host: Context, options: {
     }
     assertCurrent()
     if (input.action === 'start') {
-      const nativeRequest = turn.human && nativeOwnerRequest(turn.human)
-      if (!turn.human || !nativeRequest) throw new OrchError('FORBIDDEN', '后台进度和历史消息不能发起任务')
-      const goal = taskText(turn.human)
-      const origin: ChatTaskOrigin = {
-        messageKey: sha256Hex(JSON.stringify([binding.identity, turn.human.id])),
-        requestKey: sha256Hex(JSON.stringify([binding.identity, nativeRequest])),
-        inputHash: sha256Hex(JSON.stringify(turn.human.content)),
-        signal, assertCurrent,
-      }
-      return once(origin.requestKey, async () => {
-        const service = await options.serviceFor(binding)
-        assertCurrent()
-        const { view } = await service.planning.proposeFromChat({ goal, requirements: [] }, options.operator, new Date().toISOString(), origin)
-        if (!view.quality.ready) return {
-          state: 'quality_blocked', plan_id: view.plan_id, issues: view.quality.checks.flatMap((check) => check.issues).slice(0, 12),
-        }
-        const launch = (approved: boolean) => service.planning.launchFromChat(
-          view.plan_id, view.content_hash, options.operator, new Date().toISOString(), origin, approved,
-        )
-        let started
-        try { started = launch(false) } catch (error) {
-          if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
-          const title = view.proposal.title
-          const steps = view.proposal.steps.map((step) => step.description).slice(0, 8).join('；')
-          const reason = `批准启动此计划？${title}。步骤包括 ${steps}。计划 ${view.plan_id}`
-          if (!await approveOnce(turn, view.plan_id, exec, agent, reason, signal)) return { state: 'approval_pending', plan_id: view.plan_id }
-          started = launch(true)
-        }
-        sessions.set(agent, binding)
-        return { state: 'started', ...started, title: view.proposal.title,
-          steps: view.proposal.steps.map((step) => ({ node_id: step.node_id, depends_on: step.depends_on, description: step.description })).slice(0, 12),
-          deliverables: view.proposal.deliverables.map((item) => item.title).slice(0, 12) }
-      })
+      if (turn.deferredInput) return { state: 'queued', message: '新消息已排到当前会话的下一轮。' }
+      if (turn.managed?.outcome) return turn.managed.outcome
+      if (!turn.human) throw new OrchError('FORBIDDEN', '后台进度和历史消息不能发起任务')
+      throw new OrchError('CONFIRMATION_REQUIRED', '这条消息没有已接管的编排任务')
     }
-    if (turn.noticeRun && input.run_id !== turn.noticeRun) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
+    const scopedRun = turn.noticeRun ?? turn.managed?.runId
+    if ((turn.noticeRun || turn.managed) && (!scopedRun || (input.run_id !== undefined && input.run_id !== scopedRun))) {
+      throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
+    }
     if (!options.hasService(binding)) throw new OrchError('NOT_FOUND', '当前会话还没有编排运行')
     const service = await options.serviceFor(binding)
     assertCurrent()
     const { db, commands } = service.orchestra
-    const runId = chatRun(db, options.operator, input.run_id)
+    const runId = chatRun(db, options.operator, scopedRun ?? input.run_id)
     if (!runId) throw new OrchError('NOT_FOUND', '当前会话没有对应的编排运行')
     if (input.action === 'status') return describeRun(service, runId)
     if (input.action === 'artifact') return getArtifactContent(db, runId, input.artifact_id, 'preview', Date.now()).item
@@ -340,9 +426,21 @@ export function installNativeChat(host: Context, options: {
       return { state: input.resolution, run_id: runId, decision_id: decision.decision_id }
     })
   }
+  host.tools.guard((execution) => {
+    const turn = execution.agent && turns.get(execution.agent)
+    if (!turn || execution.name === TOOL_NAME) return
+    if (turn.managed || turn.noticeRun) {
+      turn.deniedNativeCalls = (turn.deniedNativeCalls ?? 0) + 1
+      return '此回合已由 Orchestra 接管，请仅回报已登记状态。'
+    }
+    if (turn.autoRoute && execution.name !== 'ask_user_question') {
+      turn.deniedNativeCalls = (turn.deniedNativeCalls ?? 0) + 1
+      return '任务默认交给 Orchestra。请直接回答普通问题；如需操作文件或运行命令，请先让用户明确目标，也可请用户使用 /orchestra 任务内容。'
+    }
+  })
   host.tools.register({
     name: TOOL_NAME,
-    description: 'Start a task explicitly assigned by the current human message, or read the status, approval, and evidence of an existing task in the current DSH conversation.',
+    description: 'Read the current Orchestra admission receipt, status, approval, or evidence in the original DSH conversation. The host admits tasks before model execution.',
     parameters: { type: 'object', properties: {
       action: { type: 'string', enum: ['start', 'status', 'artifact', 'review'] },
       run_id: { type: 'string' }, artifact_id: { type: 'string' }, decision_id: { type: 'string' },
@@ -353,9 +451,7 @@ export function installNativeChat(host: Context, options: {
     async execute(input, execution) {
       try { return respond(await execute(input, execution)) } catch (error) {
         if (execution.signal.aborted) execution.signal.throwIfAborted()
-        return respond(error instanceof OrchError
-          ? { state: 'error', code: error.code, message: error.message, retryable: error.retryable }
-          : { state: 'error', code: 'SERVICE_UNAVAILABLE', message: '编排服务未就绪或原会话已关闭。', retryable: true })
+        return respond(errorReceipt(error))
       }
     },
   }, { when: ({ agent }) => Boolean(options.bindingFor(agent)) })

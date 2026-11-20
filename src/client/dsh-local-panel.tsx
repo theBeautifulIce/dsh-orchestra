@@ -32,7 +32,7 @@ export function isDshLocalShell(href: string): boolean {
   return (url.protocol === 'http:' || url.protocol === 'https:') && loopbackNames.has(url.hostname)
 }
 
-function workspaceForSession(sessionId: string | undefined, workspaces: WorkspaceList): string | undefined {
+export function workspaceForSession(sessionId: string | undefined, workspaces: WorkspaceList): string | undefined {
   if (!sessionId || workspaces.archivedSessionIds.includes(sessionId)) return undefined
   const matches = workspaces.items.filter(workspace => workspace.sessionIds.includes(sessionId))
   return matches.length === 1 ? matches[0]?.workspaceId : undefined

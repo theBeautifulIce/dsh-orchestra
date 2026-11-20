@@ -1,4 +1,4 @@
-import { createContext, useContext, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { createContext, useContext, useLayoutEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import type { StreamStatus } from '../api/sse.ts'
@@ -54,10 +54,21 @@ export function UnknownState({ value }: { value: string }) {
 }
 
 export function PanelShell(props: PanelShellProps) {
+  const content = useRef<HTMLElement>(null)
+  useLayoutEffect(() => {
+    if (content.current) {
+      content.current.scrollTop = 0
+      content.current.scrollLeft = 0
+    }
+  }, [props.activeRoute])
+
   if (props.protocolMismatch) {
-    return <main role="alert" style={fullPageStyle}>
-      <h1 style={{ fontSize: FONT_PX.title }}>{COPY.protocolMismatch}</h1>
-    </main>
+    return <div className="ops-panel-viewport" style={appStyle}>
+      <style>{PANEL_LAYOUT_CSS}</style>
+      <main role="alert" className="ops-panel-protocol-error">
+        <h1 style={{ fontSize: FONT_PX.title }}>{COPY.protocolMismatch}</h1>
+      </main>
+    </div>
   }
 
   const stateLabel = !props.serviceConnected
@@ -67,42 +78,44 @@ export function PanelShell(props: PanelShellProps) {
   const commandsEnabled = props.serviceConnected && !isStale
   const commandsUnavailableReason = !props.serviceConnected ? COPY.serviceDown : COPY.staleNotice
   return <CommandsEnabledContext.Provider value={{ enabled: commandsEnabled, reason: commandsUnavailableReason }}>
-  <div className="ops-shell" data-panel-route={props.activeRoute} style={appStyle}>
-    <style>{PANEL_LAYOUT_CSS}</style>
-    <aside aria-label="主导航" style={sidebarStyle}>
-      <div style={brandStyle}>Orchestra</div>
-      <nav aria-label="主菜单" style={{ display: 'grid', gap: 4 }}>
-        {PANEL_ROUTES.filter((route) => route.id !== 'collaboration' || props.collaborationEnabled).map((route) => <button
-          key={route.id}
-          type="button"
-          aria-current={props.activeRoute === route.id ? 'page' : undefined}
-          onClick={() => props.onNavigate(route.id)}
-          style={{ ...navButtonStyle, ...(props.activeRoute === route.id ? activeNavStyle : {}) }}
-        >{route.label}</button>)}
-      </nav>
-    </aside>
-    <div className="ops-shell-main" data-panel-route={props.activeRoute} style={{ minWidth: 0, flex: 1 }}>
-      <header style={props.activeRoute === 'tasks' ? headerStyle : { ...headerStyle, height: 44, paddingInline: 22 }}>
-        <strong>{PANEL_ROUTES.find((route) => route.id === props.activeRoute)?.label}</strong>
-        <span role="status" style={{ color: props.serviceConnected ? COLOR.success : COLOR.warning }}>
-          {stateLabel}
-        </span>
-      </header>
-      {(!props.serviceConnected || isStale) && <div role="status" style={noticeStyle}>
-        {COPY.staleNotice}。刷新成功后可继续写入。
-      </div>}
-      <main id="panel-content" style={contentStyle}>{props.children}</main>
+    <div className="ops-panel-viewport" style={appStyle}>
+      <style>{PANEL_LAYOUT_CSS}</style>
+      <div className="ops-shell" data-panel-route={props.activeRoute}>
+        <aside aria-label="主导航" className="ops-shell-sidebar" style={sidebarStyle}>
+          <div className="ops-shell-brand" style={brandStyle}>Orchestra</div>
+          <nav aria-label="主菜单">
+            {PANEL_ROUTES.filter((route) => route.id !== 'collaboration' || props.collaborationEnabled).map((route) => <button
+              key={route.id}
+              type="button"
+              aria-current={props.activeRoute === route.id ? 'page' : undefined}
+              onClick={() => props.onNavigate(route.id)}
+              style={{ ...navButtonStyle, ...(props.activeRoute === route.id ? activeNavStyle : {}) }}
+            >{route.label}</button>)}
+          </nav>
+        </aside>
+        <div className="ops-shell-main" data-panel-route={props.activeRoute}>
+          <header style={props.activeRoute === 'tasks' ? headerStyle : { ...headerStyle, height: 44, paddingInline: 22 }}>
+            <strong>{PANEL_ROUTES.find((route) => route.id === props.activeRoute)?.label}</strong>
+            <span role="status" style={{ color: props.serviceConnected ? COLOR.success : COLOR.warning }}>
+              {stateLabel}
+            </span>
+          </header>
+          {(!props.serviceConnected || isStale) && <div role="status" style={noticeStyle}>
+            {COPY.staleNotice}。刷新成功后可继续写入。
+          </div>}
+          <main id="panel-content" ref={content} tabIndex={0}>
+            <div className="ops-panel-content-inner">{props.children}</div>
+          </main>
+        </div>
+      </div>
     </div>
-  </div>
   </CommandsEnabledContext.Provider>
 }
 
-const appStyle = { minHeight: '100vh', display: 'flex', background: COLOR.canvas, color: COLOR.ink, fontSize: FONT_PX.body, lineHeight: 1.55 } as const
-const sidebarStyle = { width: 236, flex: '0 0 236px', padding: '22px 14px', boxSizing: 'border-box' as const, background: COLOR.sidebar, borderRight: `1px solid ${COLOR.line}` }
-const brandStyle = { fontSize: 16, fontWeight: 700, padding: '4px 10px 22px' } as const
+const appStyle = { background: COLOR.canvas, color: COLOR.ink, fontSize: FONT_PX.body, lineHeight: 1.55 } as const
+const sidebarStyle = { background: COLOR.sidebar }
+const brandStyle = { fontSize: 16, fontWeight: 700 } as const
 const navButtonStyle = { minHeight: 40, padding: '0 12px', border: 0, borderRadius: 7, textAlign: 'left' as const, background: 'transparent', color: COLOR.ink, fontFamily: 'system-ui, sans-serif', fontSize: FONT_PX.menu, fontWeight: 500, cursor: 'pointer' }
 const activeNavStyle = { background: '#e9edf2', fontWeight: 700 } as const
 const headerStyle = { height: 58, padding: '0 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.menu } as const
 const noticeStyle = { padding: '10px 28px', background: '#fff8e9', color: COLOR.warning, borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.helper } as const
-const contentStyle = { maxWidth: 1780, margin: '0 auto', minWidth: 0 } as const
-const fullPageStyle = { minHeight: '100vh', display: 'grid', placeContent: 'center', padding: 24, background: COLOR.canvas, color: COLOR.ink, textAlign: 'center' as const }
