@@ -94,7 +94,11 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
   expect(receipt.migrations.at(-1)!.version).toBeGreaterThan(57)
   const installedPath = installed!
   for (const file of ['lib/index.js', 'lib/client.js']) {
-    expect(readFileSync(join(installedPath, file))).toEqual(execFileSync('tar', ['-xOf', tarball!, 'package/' + file]))
+    const installedBytes = readFileSync(join(installedPath, file))
+    const packedBytes = execFileSync('tar', ['-xOf', tarball!, 'package/' + file], {
+      maxBuffer: Math.max(1024 * 1024, installedBytes.length + 1),
+    })
+    expect(installedBytes.equals(packedBytes)).toBe(true)
   }
   const root = mkdtempSync(join(tmpdir(), 'orch-package-e2e-'))
   const secret = 'packed-install-ledger-fixture'
@@ -119,7 +123,9 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
     const require = createRequire(resolve('package.json'))
     let client!: typeof import('../../src/client/index.tsx')
     const bundle = readFileSync(join(installedPath, 'lib/client.js'), 'utf8')
-    runInNewContext(bundle, { window: { __ModuleLoader__: { load(value: { id: string; factory: (load: NodeJS.Require) => typeof client }) {
+    runInNewContext(bundle, { window: { localStorage: window.localStorage,
+      addEventListener: window.addEventListener.bind(window), removeEventListener: window.removeEventListener.bind(window),
+      __ModuleLoader__: { load(value: { id: string; factory: (load: NodeJS.Require) => typeof client }) {
       expect(value.id).toBe('dsh-orchestra')
       client = value.factory(require)
     } } }, document, navigator, AbortController, URL, Headers, TextEncoder, TextDecoder, setTimeout, clearTimeout },
