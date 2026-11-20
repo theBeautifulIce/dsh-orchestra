@@ -40,6 +40,7 @@ export type WorkflowCanvasViewProps = {
 const REWORK_STATUS: Record<string, string> = { proposed: '等待授权', needs_human_approval: '等待人工授权', scheduled: '等待返工', awaiting_review: '等待重新验收', escalated: '等待处理', closed: '验收通过', declined: '未批准', cancelled: '已取消' }
 const NODE_WIDTH = 160
 const NODE_HEIGHT = 56
+const TASK_NODE_HEIGHT = 88
 const MIN_CANVAS_WIDTH = 1100
 const MIN_CANVAS_HEIGHT = 620
 
@@ -55,7 +56,7 @@ export function WorkflowCanvasView({
 }: WorkflowCanvasViewProps) {
   const compact = readOnly && runtimeCompact
   const repairOverlaps = compact && !workspace
-  const nodeHeight = readOnly && runtimeTopology ? 108 : NODE_HEIGHT
+  const nodeHeight = readOnly && runtimeTopology ? 108 : repairOverlaps ? TASK_NODE_HEIGHT : NODE_HEIGHT
   const doc = useMemo(() => {
     const base = runtimeCanvasDoc(definition, readOnly ? runtimeTopology : null)
     return base && repairOverlaps ? separateOverlappingNodes(base, NODE_WIDTH, nodeHeight) : base
@@ -289,7 +290,8 @@ export function WorkflowCanvasView({
     </div>}
     {alert && <p role="alert" data-canvas-alert="true" style={alertStyle}>{alert}</p>}
     {doc === null && <p style={mutedStyle}>流程定义 JSON 还没解析成对象，画布暂时是空的。</p>}
-    <div className={workspace && inspectNodes ? 'ops-workflow-stage' : undefined} style={inspectNodes && !workspace ? inspectionLayout : undefined}>
+    <div className={workspace && inspectNodes ? 'ops-workflow-stage' : undefined}
+      style={inspectNodes && !workspace ? (repairOverlaps ? taskInspectionLayout : inspectionLayout) : undefined}>
     <div style={workspace ? workspaceViewport : viewportStyle}>
       <div
         ref={canvasRef}
@@ -493,6 +495,7 @@ const nodeStyle = {
 const nodeTitleStyle = { fontSize: FONT_PX.body, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } as const
 const nodeSelectStyle = { ...nodeTitleStyle, background: 'transparent', border: 0, color: COLOR.link, textAlign: 'left', cursor: 'pointer', padding: 0 } as const
 const inspectionLayout = { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(120px, 24%)', gap: 10, minWidth: 0 }
+const taskInspectionLayout = { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 10 }
 const inspectionPanel = { padding: 10, borderRadius: 8, border: `1px solid ${COLOR.line}`, minWidth: 0, overflowWrap: 'anywhere' } as const
 const nodeMetaStyle = { color: COLOR.inkMuted, fontSize: FONT_PX.helper } as const
 const handleStyle = {
