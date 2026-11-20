@@ -18,6 +18,7 @@ import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
 import { closeRun } from './commands/run-close.ts'
 import { applyTransition } from './commands/nodes.ts'
 import { appendNodeRunEvent } from '../infra/db/ledger.ts'
+import { ExecutionQueueFullError } from './execution-scheduler.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
@@ -182,12 +183,18 @@ async function dispatchProgressively(deps: DispatchDeps, p: DispatchParams, init
         for (const row of selection?.rows ?? []) {
           submitted.add(row.node_run_id)
           inFlight.add(row.node_run_id)
-          void dispatchOne(deps, request, row).then(
+          let queueFull = false
+          void dispatchOne(deps, request, row, true).then(
             (outcome) => { outcomes.push(outcome) },
-            (error: unknown) => { failure ??= { error } },
+            (error: unknown) => {
+              queueFull = error instanceof ExecutionQueueFullError
+              if (!queueFull) failure ??= { error }
+            },
           ).finally(() => {
             inFlight.delete(row.node_run_id)
-            wake()
+            // Retry from a later pump tick or another completion, after reading queued rows again.
+            if (queueFull) submitted.delete(row.node_run_id)
+            if (!queueFull || failure || progress.signal.aborted) wake()
           })
         }
       }
@@ -248,6 +255,7 @@ async function dispatchOne(
   deps: DispatchDeps,
   p: DispatchParams,
   row: DispatchRow,
+  retryOnQueueFull = false,
 ): Promise<DispatchOutcome> {
   // 取消与派发可能并发：选行之后、真正执行之前再查一次取消位，
   // 避免已取消的 run 因为节点还留在 queued 又被执行一次。
@@ -321,6 +329,7 @@ async function dispatchOne(
       evidence_source: res.evidence?.source,
     }
   } catch (err) {
+    if (retryOnQueueFull && err instanceof ExecutionQueueFullError) throw err
     return {
       node_run_id: row.node_run_id,
       node_id: row.node_id,
