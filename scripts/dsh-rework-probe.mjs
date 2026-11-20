@@ -236,7 +236,7 @@ function parseToolReply(message) {
 const proof = () => ['orchestra_read_tool',{tool:TOOL,args:[]}]
 const feedback=(action,args={})=>['orchestra_rework',{action,...args}]
 function stepsFor(phase,ctx) {
-  const publish=(text,file_name)=>()=>feedback('publish',{operation_id:uuidv7(),file_name,text})
+  const publish=(text,file_name)=>()=>feedback('publish',{...(phase==='C1'?{}:{operation_id:uuidv7()}),file_name,text})
   const readInput = () => feedback('read',{artifact_id:ctx.inputs[0].artifact_id,artifact_hash:ctx.inputs[0].artifact_hash})
   if(phase==='A1')return [proof,([e])=>{
     const sample = JSON.parse(e.stdout)

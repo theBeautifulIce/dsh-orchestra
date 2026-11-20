@@ -23,6 +23,27 @@ pnpm pack --pack-destination <已有的输出目录>
 
 在目标 DSH profile 安装生成的 tgz，例如运行 `dsh plugin --profile web add <tgz的绝对路径>`。包内的 Cordis patch 注册 `dsh-orchestra` 双端插件行，Web 冷启动时加载 `./client`。实际工作区的服务与鉴权传输由受信宿主装配。
 
+### 本机 DSH Desktop 个人使用
+
+用 DSH Desktop 的插件管理安装包。在本机 profile 的 Cordis patch 为该插件启用个人宿主。
+
+```yaml
+- id: dsh-orchestra
+  config:
+    local:
+      enabled: true
+      modelCapacity: standard
+      allowWorkspaceListing: true
+```
+
+重启后在 Orchestra 选择已添加到 DSH 工作区且未归档的会话。宿主在 DSH 模型目录校验会话已选模型，未选择时使用目录的默认模型。`modelCapacity` 是此 profile 允许该模型承担的最高档位，按实际能力配置。`allowWorkspaceListing` 只授权列出工作区根目录中的非隐藏条目。确需读取用户明确选定的非敏感验收文本时，在 `local.sampleFile` 写入该文件的绝对路径，例如 `D:/work/acceptance-sample.txt`。仅该文件所在的 DSH 工作区可以读取它，最多 200 行且不超过 16 KiB。
+
+个人宿主通过「用自然语言规划任务」生成并确认可派发的规格。使用现有流程时，在目标中写明流程名称，并写清验收文件名和条件。确认后可在「结果」预览实际登记的产物。
+
+个人账本按工作区与会话隔离，默认保存在 DSH 数据目录的 `orchestra/personal`。S6 的人工动作绑定本机登录操作人。个人宿主不接入共享试用圈、记忆或 QQ。
+
+### 自管受信宿主
+
 - 服务端在受信 Cordis 插件中调用 `serveDshOrchestra`。传入隔离的数据路径、实际阶段、服务密钥和账本接口，以及 DSH 上下文、按节点解析获准主会话的函数、模型目录、工具注册表和执行器。自然语言规划另提供 `dshPlanner`。按需装配 `memory` 和 `collaboration`。随包配置是 S2 样例，服务实际阶段在健康页可见。宿主退出时调用服务的 `close()`。
 - 在同一 DSH Web Cordis 服务作用域中，由受信客户端适配器提供 `orchestraPanelTransport`。`baseUrl` 指向宿主为获准工作区提供的接口，`fetcher` 使用宿主已验证的登录会话。宿主在服务端持有服务密钥。事件流沿用同一会话。面板等待传输服务并在适配器卸载时移除侧栏与页面。
 - 面板的服务与能力状态来自实际 `/health`。主脑模型、执行模型、记忆写入能力与工作区权限由宿主提供。开发用 DSH 探针使用独立 profile 和回环模型服务，便于复验模型及协作链路。

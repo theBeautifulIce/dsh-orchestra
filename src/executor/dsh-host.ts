@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
 import { OrchError } from '../core/errors.ts'
+import { uuidv7 } from '../core/ids.ts'
 import { BridgeClient, type BridgeEvent, type BridgeTransport, type SendParams, type SpawnParams } from './bridge.ts'
 import { MODEL_COMPLEXITIES, MODEL_LEVELS, MODEL_REF_RE, type ModelProfile, type ModelRouting } from './model-routing.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
@@ -262,9 +263,10 @@ export function createDshExecutor(options: {
         if (!releaseCwd && options.rework && params.actionGeneration !== undefined) {
           const feedback = options.rework
           const binding = { node_run_id: params.nodeRunId, attempt: params.attempt, action_generation: params.actionGeneration }
+          const issuedPublicationIds = new Map<string, string>()
           ctx.tools.register({
             name: 'orchestra_rework',
-            description: '提交本步骤文本成果(publish)，读取已绑定的上游版本(read)，查询反馈(inbox/get)，提出修改(request)，验收修订(accept/request_changes)。写操作复用同一 UUIDv7。',
+            description: '提交本步骤文本成果(publish)，读取已绑定的上游版本(read)，查询反馈(inbox/get)，提出修改(request)，验收修订(accept/request_changes)。publish 省略 operation_id 由宿主生成，其他写操作复用同一 UUIDv7。',
             parameters: { type: 'object', properties: {
               action: { type: 'string', enum: ['publish','read','inbox','get','request','accept','request_changes','escalate'] },
               operation_id: { type: 'string' }, run_id: { type: 'string' }, target_node_run_id: { type: 'string' },
@@ -279,6 +281,13 @@ export function createDshExecutor(options: {
             async execute(input, execution) {
               execution.signal.throwIfAborted()
               if (execution.agent !== agent || agent.status !== 'running') throw new OrchError('FORBIDDEN', '成果工具只接受当前智能体会话')
+              const request = input as { action: string; file_name?: string; operation_id?: string }
+              if (request.action === 'publish' && request.operation_id === undefined && request.file_name) {
+                const operationId = issuedPublicationIds.get(request.file_name) ?? uuidv7()
+                const result = feedback(binding, { ...request, operation_id: operationId })
+                issuedPublicationIds.set(request.file_name, operationId)
+                return { text: JSON.stringify(result) }
+              }
               return { text: JSON.stringify(feedback(binding, input)) }
             },
           })
@@ -351,7 +360,9 @@ export function createDshExecutor(options: {
       throw new OrchError('PROTOCOL_VERSION_MISMATCH', '执行前 DSH 子会话模型已发生变化')
     }
     child.sent = { id: params.attemptId, instruction: params.instruction }
-    prompt(agent, params.instruction + '\n使用所授权工具时调用 orchestra_read_tool。最后回复单个 JSON 对象，包含 status: "done" 及 output 字段。用 output.summary 简述实际完成的操作、结果与限制，供用户查阅。')
+    prompt(agent, params.instruction + '\n使用所授权工具时调用 orchestra_read_tool，args 传空数组，由宿主执行获准的固定命令。'
+      + '\n如果节点输入要求交付 artifact，先用 orchestra_rework 的 publish 提交每份实际完成的 UTF-8 文本。file_name 抄写验收条件中的名称，text 提供完整正文，省略 operation_id。只有工具实际返回的成果才可写为已交付。'
+      + '\n最后回复单个 JSON 对象，包含 status: "done" 及 output 字段。用 output.summary 简述实际完成的操作、结果与限制，供用户查阅。')
     child.activity = agent.whenIdle().then(() => {
       const requests = observedModel(agent, child.route)
       for (const request of requests) {
