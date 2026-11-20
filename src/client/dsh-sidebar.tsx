@@ -1,5 +1,6 @@
 import { useSyncExternalStore, type ReactElement } from 'react'
-import { DshLocalPanel, isDshLocalShell, type DshLocalPanelSources } from './dsh-local-panel.tsx'
+import { DshLocalPanel, isDshLocalShell } from './dsh-local-panel.tsx'
+import { registerNativeOrchestraSlash, type NativeOrchestraSlashContext } from './dsh-orchestra-slash.ts'
 import { createPanelHost, type PanelHostProps } from './panel-host.tsx'
 
 const panelId = 'dsh-orchestra'
@@ -20,7 +21,7 @@ export type DshPanelContext = {
 export type DshOrchestraPanelTransport = PanelHostProps & { fetcher: NonNullable<PanelHostProps['fetcher']> }
 
 type Panel = () => ReactElement
-type DshClientContext = DshPanelContext & DshLocalPanelSources & {
+type DshClientContext = DshPanelContext & NativeOrchestraSlashContext & {
   inject(names: string[], callback: (ctx: DshClientContext) => void): unknown
   orchestraPanelTransport: DshOrchestraPanelTransport
 }
@@ -70,6 +71,11 @@ export function apply(ctx: DshClientContext): void {
   })
 
   if (typeof window === 'undefined' || !window.location?.href || !isDshLocalShell(window.location.href)) return
+  ctx.inject(['sessions', 'workspaces', 'inputTriggers'], ready => {
+    ready.effect(function* () {
+      yield registerNativeOrchestraSlash(ready, (input, init) => window.fetch(input, init))
+    }, 'orchestra: native slash suggestion')
+  })
   ctx.inject(['slots', 'sessions', 'workspaces'], function bindLocalShell(ready) {
     ready.effect(function* () {
       const { sessions, workspaces } = ready

@@ -18,6 +18,7 @@ import { MemoryPanel } from './memory-panel.tsx'
 import { SettingsScreen } from './settings-screen.tsx'
 import { ModelRoutingSettings } from './model-routing-settings.tsx'
 import { PlanningTimeoutSettings } from './planning-timeout-settings.tsx'
+import { ChatRoutingSettings } from './chat-routing-settings.tsx'
 import { UnverifiedEffects } from './unverified-effects.tsx'
 import { WorkflowCanvas } from './workflow-canvas.tsx'
 import { WorkflowListScreen } from './workflow-list.tsx'
@@ -35,6 +36,7 @@ export type PanelAppProps = {
   memoryProposalOnly?: boolean
   modelRoutingEnabled?: boolean
   planningTimeoutsEnabled?: boolean
+  nativeChatRoutingEnabled?: boolean
   modelEscalationEnabled?: boolean
   servicePhase?: string
   panelVersion?: string
@@ -204,7 +206,9 @@ export function PanelApp(props: PanelAppProps) {
       ?? <MemoryPanel api={api} recovery={memoryRecovery} memoryEnabled={props.memoryEnabled} proposalOnly={props.memoryProposalOnly}
         reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} onOpenTasks={() => setRoute('tasks')} />
   } else if (route === 'settings') {
-    screen = <section className="ops-page"><h1>设置</h1><div className="ops-context-grid">{props.additionalScreens?.settings
+    screen = <section className="ops-page ops-settings-page"><h1>设置</h1><div className="ops-settings-section">
+      {props.nativeChatRoutingEnabled && <ChatRoutingSettings client={client} reloadVersion={settingsReloadVersion} writable={writesEnabled.current} />}
+      {props.additionalScreens?.settings
       ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={snapshotStale} streamStatus={streamStatus}
         phase={props.servicePhase} panelVersion={props.panelVersion} onRefresh={refreshSettings} />}
       {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}

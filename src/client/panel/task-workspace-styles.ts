@@ -119,14 +119,6 @@ export const TASK_WORKSPACE_CSS = `
   .task-flow-picker > header { display: none; }
   .task-flow-picker button.task-flow-pick { min-width: 174px; border-top: 0; border-right: 1px solid ${COLOR.line}; }
 }
-@media (max-width: 680px) {
-  .ops-shell[data-panel-route=tasks] { flex-direction: column; }
-  .ops-shell[data-panel-route=tasks] > aside { box-sizing: border-box; width: 100% !important; flex-basis: auto !important; padding: 5px 8px !important; border-right: 0 !important; }
-  .ops-shell[data-panel-route=tasks] > aside > div { padding: 4px !important; }
-  .ops-shell[data-panel-route=tasks] > aside nav { display: flex !important; overflow-x: auto; }
-  .ops-shell[data-panel-route=tasks] > aside nav button { white-space: nowrap; }
-  .ops-shell-main[data-panel-route=tasks] > main { padding: 10px 10px 24px; }
-}
 `
 
 export const TASK_INSPECTOR_CSS = `

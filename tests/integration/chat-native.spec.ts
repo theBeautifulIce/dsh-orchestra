@@ -10,13 +10,17 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
 import { installConfiguredLocalDshHost, localDshHostConfig } from '../../src/service/local-dsh-host.ts'
 import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
+import { classifyChatTask } from '../../src/service/chat-task-intent.ts'
+import { installNativeChat } from '../../src/service/chat-native.ts'
 
 type Message = Parameters<Agent['followup']>[0]
 type Definition = Parameters<Context['tools']['register']>[0]
 type Activation = NonNullable<Parameters<Context['tools']['register']>[1]>
+type Guard = Parameters<Context['tools']['guard']>[0]
 type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 
-async function fixture(options: { profile?: string; version?: string; enabled?: false | 'desktop'; host?: string } = {}) {
+async function fixture(options: { profile?: string; version?: string; enabled?: false | 'desktop'; host?: string;
+  routing?: { enabled: boolean } } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'orchestra-native-chat-'))
   const ctx = new Context()
   const agents = new Map<string, Agent>()
@@ -25,6 +29,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   const notices: Array<{ sessionId: string; message: Message }> = []
   let tool: Definition | undefined
   let activation: Activation | undefined
+  let guard: Guard | undefined
   let prompt: ((context: { agent: Agent }) => string) | undefined
   let deny = false
   let badPlan = false
@@ -52,10 +57,13 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   const controllerPackage = join(directory, 'node_modules', '@deepseek-ai', 'dsh-api-session-controller')
   await mkdir(controllerPackage, { recursive: true })
   await writeFile(join(controllerPackage, 'package.json'), JSON.stringify({ version: options.version ?? '0.2.2-rc.5' }))
-  ctx.provide('profileContext', { name: options.profile ?? 'desktop', installAnchor: join(directory, 'package.json') })
+  ctx.provide('profileContext', { name: options.profile ?? 'desktop', dir: directory, installAnchor: join(directory, 'package.json') })
   ctx.provide('webServer', { host: options.host ?? '127.0.0.1' })
   ctx.provide('llm', {})
-  ctx.provide('tools', { register(definition: Definition, options: Activation) { tool = definition; activation = options } })
+  ctx.provide('tools', {
+    register(definition: Definition, options: Activation) { tool = definition; activation = options },
+    guard(check: Guard) { guard = check },
+  })
   ctx.provide('systemPrompt', { section(section: { text: typeof prompt }) { prompt = section.text } })
   ctx.provide('sessions', { flush: async () => true })
   ctx.provide('approval', { request: approval })
@@ -70,18 +78,43 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     resolveAgent: async (id: string) => ({ agent: agents.get(id) }),
     modelCatalog: async () => ({ default: { provider: 'fixture', model: 'model' }, groups: [{ id: 'fixture', models: [{ id: 'model' }] }] }),
   })
-  const serve = vi.fn< typeof serveDshOrchestra >(async ({ dbFile, dsh, asOfSeq, listEvents, listTasks, appendLedgerEvent }) => {
-    const agent = dsh.parentForNode('fixture')!
+  const openService = async (sessionId: string, dbFile: string) => {
     const service = await serveOrchestra({
-      dbFile, secret, phase: 'S6', asOfSeq, listTasks, listEvents, appendLedgerEvent,
+      dbFile, secret, phase: 'S6', asOfSeq: () => 0, listEvents: () => [], listTasks: () => [],
+      appendLedgerEvent: () => { throw new Error('Unexpected raw ledger write') },
       planning: { propose: planner, workflowGenerator },
     })
-    services.set(agent.session.id, service)
+    services.set(sessionId, service)
     return service
+  }
+  const serve = vi.fn<typeof serveDshOrchestra>(async ({ dbFile, dsh }) => openService(dsh.parentForNode('fixture')!.session.id, dbFile))
+  const plugin = ctx.plugin((host) => {
+    if (!options.routing) {
+      installConfiguredLocalDshHost(host, localDshHostConfig.parse({
+        local: { enabled: options.enabled ?? 'desktop', dataDirectory: directory },
+      }).local, serve)
+      return
+    }
+    const stop = new AbortController()
+    host.effect(() => async () => {
+      stop.abort()
+      await Promise.all([...services.values()].map((service) => service.close()))
+    }, 'test routing services')
+    host.inject(['agents', 'sessions', 'tools', 'systemPrompt'], (ready) => {
+      installNativeChat(ready, {
+        operator: 'local-dsh:fixture', signal: stop.signal,
+        bindingFor(agent) {
+          const sessionId = agent.session.id
+          if (agents.get(sessionId) !== agent || agent.session.header.origin === 'subagent') return
+          const workspaceId = [...conversations].find(([, ids]) => ids.includes(sessionId))?.[0]
+          if (workspaceId) return { identity: workspaceId + '/' + sessionId, workspaceId, sessionId }
+        },
+        hasService: ({ sessionId }) => services.has(sessionId),
+        async serviceFor({ sessionId }) { return services.get(sessionId) ?? openService(sessionId, join(directory, sessionId + '.sqlite')) },
+        autoRouteEnabled: () => options.routing!.enabled,
+      })
+    })
   })
-  const plugin = ctx.plugin((host) => installConfiguredLocalDshHost(host, localDshHostConfig.parse({
-    local: { enabled: options.enabled ?? 'desktop', dataDirectory: directory },
-  }).local, serve))
   await plugin.await()
   if ((options.profile ?? 'desktop') === 'desktop' && options.version === undefined && options.enabled !== false) {
     await expect.poll(() => Boolean(tool)).toBe(true)
@@ -89,13 +122,16 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
 
   function session(workspace: string, sessionId: string, header: Record<string, unknown> = {}) {
     const events: Array<{ type: string; data: unknown }> = []
+    const nextTurn: Message[] = []
     const signal = new AbortController()
     let turn = 0
     const agent = {
       id: sessionId, status: 'running', model: { current: () => ({ provider: 'fixture', model: 'model' }) },
+      inbox: { nextTurn },
       session: { id: sessionId, header: { cwd: directory, ...header }, snapshotEvents: () => [...events] },
       followup(message: Message) {
         const recorded = structuredClone(message)
+        nextTurn.push(recorded)
         events.push({ type: 'agent/inbox/spliced', data: { inserted: [recorded] } })
         notices.push({ sessionId, message: recorded })
         agentEvents(ctx, agent).emit('agent/inbox/inserted', { message: recorded })
@@ -106,20 +142,27 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     async function admit(message: Message, newInbox = true, advance = true) {
       const dispatch = agentEvents(ctx, agent)
       if (newInbox) dispatch.emit('agent/inbox/inserted', { message })
+      else {
+        const queued = nextTurn.findIndex(({ id }) => id === message.id)
+        if (queued !== -1) nextTurn.splice(queued, 1)
+      }
       if (advance) turn++
       const claimed = structuredClone(message)
-      await dispatch.waterfall('agent/pre-step', { messages: [claimed], turn, step: advance ? 0 : 1,
+      const decision = await dispatch.waterfall('agent/pre-step', { messages: [claimed], turn, step: advance ? 0 : 1,
         signal: signal.signal, modelSelection: { provider: 'fixture', model: 'model' } },
       async () => ({ kind: 'enter', messages: [claimed] }))
-      events.push({ type: 'user/message', data: claimed })
+      if (decision.kind === 'enter') for (const entry of decision.messages) events.push({ type: 'user/message', data: entry })
+      return decision
     }
     async function call(input: object = { action: 'start' }) {
       const execution = { agent, callId: 'call', signal: signal.signal } as Parameters<Definition['execute']>[1]
       return JSON.parse((await tool!.execute(input, execution) as { text: string }).text)
     }
-    return { agent, admit, call, signal }
+    const checkTool = (name: string, parent?: symbol) => guard?.({ agent, name, signal: signal.signal, parent } as Parameters<Guard>[0])
+    return { agent, admit, call, signal, checkTool, nextTurn }
   }
-  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, registered: () => ({ activation: activation!, prompt: prompt! }),
+  return { session, serve, services, planner, workflowGenerator, routes, approval, notices,
+    registered: () => ({ activation: activation!, prompt: prompt! }),
     deny: (value: boolean) => { deny = value }, badPlan: (value: boolean) => { badPlan = value },
     plannerUnavailable: (value: boolean) => { plannerUnavailable = value },
     async close() { await plugin.dispose(); await rm(directory, { recursive: true, force: true }) }, secret,
@@ -154,14 +197,14 @@ it('applies a captured budget to native chat, including the aggregate deadline, 
       entered()
       return new Promise<never>(() => {})
     })
-    await human.admit(user('整理第二份办公室事项报告'))
-    const oldRequest = human.call()
+    const oldRequest = human.admit(user('整理第二份办公室事项报告'))
     await started
     settings.save({ operation_id: uuidv7(), expected_revision: 0, values: {
       ...planningTimeoutDefaults, task_seconds: 160, stage_seconds: 180, request_seconds: 200,
     } }, 'settings-owner', new Date().toISOString())
     await vi.advanceTimersByTimeAsync(30_000)
-    expect(await oldRequest).toMatchObject({ state: 'error', code: 'OPERATION_TIMEOUT' })
+    await oldRequest
+    expect(await human.call()).toMatchObject({ state: 'error', code: 'OPERATION_TIMEOUT' })
 
     started = new Promise<void>((resolve) => { entered = resolve })
     test.planner.mockImplementationOnce(async (input) => {
@@ -169,11 +212,11 @@ it('applies a captured budget to native chat, including the aggregate deadline, 
       await delay(135_000)
       return originalPlan(input)
     })
-    await human.admit(user('整理第三份办公室事项报告'))
-    const extendedRequest = human.call()
+    const extendedRequest = human.admit(user('整理第三份办公室事项报告'))
     await started
     await vi.advanceTimersByTimeAsync(135_000)
-    expect(await extendedRequest).toMatchObject({ state: 'started' })
+    await extendedRequest
+    expect(await human.call()).toMatchObject({ state: 'started' })
 
     settings.save({ operation_id: uuidv7(), expected_revision: 1, values: {
       ...planningTimeoutDefaults, task_seconds: 75, stage_seconds: 80, request_seconds: 100,
@@ -188,11 +231,11 @@ it('applies a captured budget to native chat, including the aggregate deadline, 
       await delay(60_000)
       return originalPlan(input)
     })
-    await human.admit(user('整理第四份办公室事项报告'))
-    const aggregate = human.call()
+    const aggregate = human.admit(user('整理第四份办公室事项报告'))
     await started
     await vi.advanceTimersByTimeAsync(100_000)
-    expect(await aggregate).toMatchObject({ state: 'error', code: 'OPERATION_TIMEOUT' })
+    await aggregate
+    expect(await human.call()).toMatchObject({ state: 'error', code: 'OPERATION_TIMEOUT' })
     await vi.advanceTimersByTimeAsync(21_000)
     for (const table of ['tasks', 'workflows', 'task_plans', 'runs', 'chat_task_receipts'] as const) {
       expect(count(service, table)).toBe(2)
@@ -203,6 +246,26 @@ it('applies a captured budget to native chat, including the aggregate deadline, 
   }
 })
 
+it('cancels native admission during planning without creating records or launching work', async () => {
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    const planned = Promise.withResolvers<void>()
+    test.planner.mockImplementationOnce(async () => {
+      planned.resolve()
+      return new Promise<never>(() => {})
+    })
+    const admission = human.admit(user('整理一份待取消的办公报告'))
+    await planned.promise
+    human.signal.abort(new DOMException('operator cancelled', 'AbortError'))
+    await expect(admission).rejects.toMatchObject({ name: 'AbortError' })
+    const service = test.services.get('parent')!
+    for (const table of ['tasks', 'workflows', 'task_plans', 'runs', 'chat_task_receipts'] as const) {
+      expect(count(service, table)).toBe(0)
+    }
+  } finally { await test.close() }
+})
+
 it('binds ordinary native conversation, live owner input and one durable run per message', async () => {
   const test = await fixture()
   try {
@@ -210,13 +273,15 @@ it('binds ordinary native conversation, live owner input and one durable run per
     const child = test.session('work', 'child', { origin: 'subagent', parentSession: 'parent' })
     const other = test.session('other', 'other')
     expect(test.routes).toHaveLength(1)
-    expect(test.registered().prompt({ agent: human.agent })).toContain('orchestra_task')
+    expect(test.registered().prompt({ agent: human.agent })).toContain('The host admits explicit tasks')
     expect(test.registered().prompt({ agent: child.agent })).toBe('')
     const eligible = (agent: Agent) => test.registered().activation.when!({ agent, modelSelection: { provider: 'fixture', model: 'model' },
       signal: new AbortController().signal })
     expect(eligible(human.agent)).toBe(true)
     expect(eligible(child.agent)).toBe(false)
     await human.admit(user('你好'))
+    expect(human.checkTool('read')).toMatch(/任务默认交给 Orchestra/u)
+    expect(human.checkTool('ask_user_question')).toBeUndefined()
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'CONFIRMATION_REQUIRED' })
     await human.admit(user('什么是并发调度？'))
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'CONFIRMATION_REQUIRED' })
@@ -229,8 +294,21 @@ it('binds ordinary native conversation, live owner input and one durable run per
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
     await child.admit(assigned)
     await expect(child.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    await human.admit(user('把事项整理成报告', { source: { kind: 'chess-context' } }))
+    expect(human.checkTool('read')).toBeUndefined()
+    const ambiguous = await human.admit(user('请帮我处理一下'))
+    expect(ambiguous).toMatchObject({ kind: 'enter', messages: [expect.anything(), expect.objectContaining({
+      content: [expect.objectContaining({ text: expect.stringContaining('clarification_required') })],
+    })] })
     expect(test.serve).not.toHaveBeenCalled()
-    await human.admit(assigned)
+    const admitted = await human.admit(assigned)
+    expect(admitted).toMatchObject({ kind: 'enter', messages: [assigned, expect.objectContaining({
+      content: [expect.objectContaining({ text: expect.stringContaining('Orchestra 已接单') })],
+    })] })
+    expect(count(test.services.get('parent')!, 'runs')).toBe(1)
+    expect(human.checkTool('read')).toMatch(/Orchestra 接管/u)
+    expect(human.checkTool('shell', Symbol('parent tool'))).toMatch(/Orchestra 接管/u)
+    expect(human.checkTool('orchestra_task')).toBeUndefined()
     await expect(human.call({ action: 'start', goal: '替换原文', session_id: 'other' }))
       .resolves.toMatchObject({ state: 'error', code: 'PAYLOAD_SCHEMA_INVALID' })
     const [first, concurrent] = await Promise.all([human.call(), human.call()])
@@ -238,12 +316,12 @@ it('binds ordinary native conversation, live owner input and one durable run per
     expect(concurrent).toEqual(first)
     expect(test.planner.mock.calls[0]?.[0].goal).toBe('整理一份办公室事项并交付 Markdown 报告')
     expect(test.approval).not.toHaveBeenCalled()
-    await expect(human.call()).resolves.toMatchObject({ run_id: first.run_id, replayed: true })
+    await expect(human.call()).resolves.toMatchObject({ run_id: first.run_id, replayed: false })
     await human.admit(assigned)
     await expect(human.call()).resolves.toMatchObject({ run_id: first.run_id, replayed: true })
     await human.admit(user('整理一份办公室事项并交付 Markdown 报告', { source: assigned.source }))
     await expect(human.call()).resolves.toMatchObject({ run_id: first.run_id, replayed: true })
-    await human.admit(user('换一个目标', { id: assigned.id }))
+    await human.admit(user('整理另一份办公室报告', { id: assigned.id }))
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'OPERATION_ID_CONFLICT' })
     await other.admit(user('查这个任务进度'))
     await expect(other.call({ action: 'status', run_id: first.run_id })).resolves.toMatchObject({ state: 'error', code: 'NOT_FOUND' })
@@ -251,6 +329,165 @@ it('binds ordinary native conversation, live owner input and one durable run per
     expect(count(service, 'runs')).toBe(1)
     expect(count(service, 'task_plans')).toBe(1)
     expect(count(service, 'chat_task_receipts')).toBe(1)
+  } finally { await test.close() }
+})
+
+it.each([
+  ['读当前工作区的办公流水表，汇总收入和退款并输出 Markdown 报告。', 'task'],
+  ['把我提供的会议记录整理成纪要和待办清单，按负责人分组。', 'task'],
+  ['为下周园区开放日撰写一段面向家长的活动介绍。', 'task'],
+  ['供应商有三家，预算上限是十万元。我现在要你按价格与交期对比它们并制作一份优先级清单。', 'task'],
+  ['以下是本次背景。\n请帮我整理一份给项目组的三点沟通摘要。', 'task'],
+  ['请核对我上传的成本表，只读不修改原表。', 'task'],
+  ['请教我怎么写报告', 'conversation'],
+  ['帮我解释一下如何生成汇总表', 'conversation'],
+  ['先说方案，等我确认再开始', 'conversation'],
+  ['你可以整理 CSV 和生成报告吗？', 'conversation'],
+  ['怎么读取当前工作区的 CSV？', 'conversation'],
+  ['先别读取或整理表格，稍后再说。', 'conversation'],
+  ['请不要生成这份报告。', 'conversation'],
+  ['请不要生成汇总表，只说明表的结构。', 'conversation'],
+  ['请解释一下报告里“生成汇总表”的含义。', 'conversation'],
+  ['请告诉我这份报告写了什么。', 'conversation'],
+  ['Please explain how to write a report for our board.', 'conversation'],
+  ['Can you explain what tools I can use to read the report?', 'conversation'],
+  ['仅做可行性分析，介绍目前方案的风险。', 'conversation'],
+  ['请查看上一个任务的运行结果。', 'conversation'],
+  ['例子：请生成报价汇总表。', 'conversation'],
+  ['下面是客户在会上转述的原话。\n请根据授权样本生成一份 Markdown 报告。', 'conversation'],
+  ['老师说：\n请生成一份报告。', 'conversation'],
+  ['请看以下示例：\n请生成报告。', 'conversation'],
+  ['给我一些起草会议纪要的建议。', 'conversation'],
+  ['请在不读取附件的情况下给我解释报告的写作方法。', 'conversation'],
+  ['帮我理解怎么写项目计划。', 'conversation'],
+  ['请评估一下能否读取 costs.xlsx 中的数据并生成报表。', 'conversation'],
+  ['请提供一些起草月报的建议，先讲结构，再讲细节。', 'conversation'],
+  ['Would you recommend trying to create a weekly report?', 'conversation'],
+  ['这是一个测试案例。请生成季度报告。', 'conversation'],
+  ['修一下这个 bug，改好后跑测试', 'task'],
+  ['帮我把错别字都改掉并保存', 'task'],
+  ['经理说：现在请你生成报价表。', 'conversation'],
+  ['同事的原话是“以下不用复核”。\n我现在需要你核对报价并交付风险清单。', 'task'],
+  ['客户说：请生成报告。\n我的实际要求是编一份项目进度简报。', 'task'],
+  ['请帮我处理一下。', 'clarify'],
+] as const)('classifies authenticated wording %s as %s', (text, intent) => {
+  expect(classifyChatTask(text)).toBe(intent)
+})
+
+it('queues fresh owner steering from a managed turn and never returns its older run as the new receipt', async () => {
+  const test = await fixture({ routing: { enabled: false } })
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('/orchestra 归纳会议事项，交付清单'))
+    const original = await human.call()
+    const nextTask = user('/orchestra 整理另外一份会议纪要')
+    const nextQuestion = user('请说明这份文档的结构')
+    for (const message of [nextTask, nextQuestion]) {
+      const steering = await human.admit(message, true, false)
+      expect(steering).toMatchObject({ kind: 'enter', messages: [expect.objectContaining({
+        content: [expect.objectContaining({ text: expect.stringContaining('Orchestra 已排队新消息') })],
+      })] })
+      expect(await human.call()).toMatchObject({ state: 'queued' })
+      expect(await human.call()).not.toHaveProperty('run_id')
+    }
+    expect(human.nextTurn).toEqual([nextTask, nextQuestion])
+    const service = test.services.get('parent')!
+    expect(count(service, 'runs')).toBe(1)
+    await human.admit(nextTask, false)
+    const next = await human.call()
+    expect(next).toMatchObject({ state: 'started', replayed: false })
+    expect(next.run_id).not.toBe(original.run_id)
+    await expect(human.admit(nextQuestion, false)).resolves.toEqual({ kind: 'enter', messages: [nextQuestion] })
+    expect(human.checkTool('read')).toBeUndefined()
+    expect(count(service, 'runs')).toBe(2)
+  } finally { await test.close() }
+})
+
+it('takes a new preference snapshot for an owner steer in an ordinary open turn', async () => {
+  const routing = { enabled: true }
+  const test = await fixture({ routing })
+  try {
+    const human = test.session('work', 'parent')
+    const explanation = user('请解释这个项目的背景')
+    await expect(human.admit(explanation)).resolves.toEqual({ kind: 'enter', messages: [explanation] })
+    expect(human.checkTool('write')).toMatch(/任务默认交给 Orchestra/u)
+    routing.enabled = false
+    const freshSteer = user('整理一份可交付的项目报告')
+    await expect(human.admit(freshSteer, true, false)).resolves.toEqual({ kind: 'enter', messages: [freshSteer] })
+    expect(human.checkTool('write')).toBeUndefined()
+    await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'CONFIRMATION_REQUIRED' })
+    expect(test.services.size).toBe(0)
+  } finally { await test.close() }
+})
+
+it('keeps off-mode DSH and historical approvals, admits only the owner slash, and pins an in-flight turn', async () => {
+  const routing = { enabled: false }
+  const test = await fixture({ routing })
+  try {
+    const human = test.session('work', 'parent')
+    const child = test.session('work', 'child', { origin: 'subagent', parentSession: 'parent' })
+    const goal = '按负责人整理项目待办清单'
+    const ordinary = user(goal)
+    await expect(human.admit(ordinary)).resolves.toEqual({ kind: 'enter', messages: [ordinary] })
+    expect(human.checkTool('read')).toBeUndefined()
+    await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'CONFIRMATION_REQUIRED' })
+    expect(test.services.size).toBe(0)
+
+    const rpcId = uuidv7()
+    const source = { kind: 'plugin', plugin: 'dsh-orchestra', form: 'notice', summary: 'Orchestra 单次任务' }
+    await human.admit(user('/orchestra ' + goal, { source }))
+    await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    await human.admit(user('/orchestra ' + goal, { source: { kind: 'chess-context' } }))
+    await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    await child.admit(user('/orchestra ' + goal))
+    await expect(child.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    const bare = await human.admit(user('/orchestra   '))
+    expect(bare).toMatchObject({ kind: 'enter', messages: [expect.anything(), expect.objectContaining({
+      content: [expect.objectContaining({ text: expect.stringContaining('Orchestra 用法 · /orchestra 任务内容') })],
+    })] })
+    expect(test.services.size).toBe(0)
+    await human.admit(user('/orchestra ' + goal, { source: { kind: 'user', rpcId } }))
+    const explicit = await human.call()
+    expect(explicit).toMatchObject({ state: 'started', replayed: false })
+    expect(human.checkTool('write')).toMatch(/Orchestra 接管/u)
+    const service = test.services.get('parent')!
+    await human.admit(user('/orchestra ' + goal, { source: { kind: 'user', rpcId } }))
+    await expect(human.call()).resolves.toMatchObject({ run_id: explicit.run_id, replayed: true })
+    expect(count(service, 'runs')).toBe(1)
+
+    routing.enabled = true
+    const entered = Promise.withResolvers<void>()
+    const proceed = Promise.withResolvers<void>()
+    const plan = test.planner.getMockImplementation()!
+    test.planner.mockImplementationOnce(async (input) => {
+      entered.resolve()
+      await proceed.promise
+      return plan(input)
+    })
+    const pending = human.admit(user('编制下周会议计划'))
+    await entered.promise
+    routing.enabled = false
+    proceed.resolve()
+    await pending
+    await expect(human.call()).resolves.toMatchObject({ state: 'started' })
+    expect(human.checkTool('write')).toMatch(/Orchestra 接管/u)
+    await human.admit(user('整理另外一份会议纪要'))
+    expect(human.checkTool('write')).toBeUndefined()
+    expect(count(service, 'runs')).toBe(2)
+    await expect(human.call({ action: 'status', run_id: explicit.run_id })).resolves.toMatchObject({ run_id: explicit.run_id })
+    const { db } = service.orchestra
+    const decision = decisionId()
+    withTx(db, (tx) => openDecision(tx, {
+      decisionId: decision, runId: explicit.run_id, nodeRunId: null, kind: 'pre_execution', approver: 'human',
+      confirmRequired: true, payload: { target_summary: '关闭自动接管后的待审事项' },
+    }))
+    const noticeWithDecision = () => test.notices.find((entry) => entry.message.content
+      .some((part) => part.type === 'text' && part.text.includes(decision)))?.message
+    await expect.poll(noticeWithDecision, { timeout: 5_000 }).toBeTruthy()
+    await human.admit(noticeWithDecision()!, false)
+    expect(human.checkTool('write')).toMatch(/Orchestra 接管/u)
+    await expect(human.call({ action: 'review', run_id: explicit.run_id, decision_id: decision })).resolves.toMatchObject({ state: 'approved' })
+    expect(test.approval).toHaveBeenCalledTimes(2)
   } finally { await test.close() }
 })
 

@@ -8,11 +8,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { sha256Hex } from '../core/canonical.ts'
-import { failEnvelope, OrchError } from '../core/errors.ts'
+import { failEnvelope, okEnvelope, OrchError } from '../core/errors.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../executor/tools.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
+import { createNativeChatRoutingSettings, nativeChatRoutingUpdate } from './native-chat-routing-settings.ts'
 import { PROJECT_CONTEXT_FILE, type ProjectContextSource } from './project-shared-context.ts'
 
 const localOptions = z.strictObject({
@@ -39,7 +40,7 @@ type NativeModelCatalog = {
   failures?: readonly { id: string; name?: string }[]
 }
 type Credential = { kind: 'grant'; payload: unknown } | { kind: 'api-key'; key?: string }
-type Profile = { name?: string; installAnchor?: string }
+type Profile = { name?: string; installAnchor?: string; dir?: string }
 
 type LocalHost = Context & {
   connection: {
@@ -61,9 +62,11 @@ type LocalHost = Context & {
 }
 
 const routePath = '/api/orchestra.request'
+const chatRoutingPath = '/v1/settings/chat-routing'
 const responseHeaders = ['content-type', 'content-disposition', 'cache-control', 'x-content-type-options']
 const catalog = {
   GET: new Set([
+    chatRoutingPath,
     '/health', '/v1/activity', '/v1/artifacts', '/v1/artifacts/content', '/v1/artifacts/get', '/v1/attestations/get',
     '/v1/collaboration/scopes', '/v1/collaboration/scopes/get', '/v1/decisions', '/v1/decisions/get', '/v1/effects/review',
     '/v1/effects/unverified', '/v1/events', '/v1/events/stream', '/v1/evidence/get', '/v1/execution-history', '/v1/ledger/verify',
@@ -73,6 +76,7 @@ const catalog = {
     '/v1/workflows', '/v1/workflows/generate/capability', '/v1/workflows/get', '/v1/workflows/versions/get', '/v1/workspace/overview',
   ]),
   POST: new Set([
+    chatRoutingPath,
     '/v1/collaboration/reassign', '/v1/collaboration/review', '/v1/collaboration/scopes', '/v1/decisions/acknowledge',
     '/v1/decisions/resolve', '/v1/effects/resolve', '/v1/model-escalation', '/v1/rework/hold', '/v1/rework/inspect',
     '/v1/rework/plan', '/v1/rework/plan/approve', '/v1/rework/request', '/v1/rework/review', '/v1/runs/start',
@@ -251,7 +255,19 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     const human = `local-dsh:${userInfo().username}`
     const services = new Map<string, ReturnType<typeof openLocalService>>()
     const stop = new AbortController()
+    let chatRouting: ReturnType<typeof createNativeChatRoutingSettings> | undefined
+    const profileDir = (ctx.get('profileContext') as Profile | undefined)?.dir
     const identityFor = (workspace: Workspace, sessionId: string) => sha256Hex(JSON.stringify([workspace.id, workspace.path, sessionId, human]))
+    const bindingFor = (agent: Agent) => {
+      const { id, header } = agent.session
+      if (stop.signal.aborted || !localListener(host)
+        || header.origin === 'subagent' || header.parentSession || host.agents.get(id) !== agent
+        || host.workspaceRegistry.archivedSessionIds.includes(id)) return
+      const owners = host.workspaceRegistry.list().filter((workspace) => workspace.sessionIds.includes(id))
+      const workspace = owners[0]
+      if (owners.length !== 1 || !workspace || !header.cwd || relative(workspace.path, header.cwd) !== '') return
+      return { identity: identityFor(workspace, id), workspaceId: workspace.id, sessionId: id }
+    }
     const serviceFor = (workspace: Workspace, sessionId: string) => {
       if (stop.signal.aborted) throw new OrchError('SERVICE_UNAVAILABLE', '编排服务正在停止')
       const identity = identityFor(workspace, sessionId)
@@ -269,19 +285,15 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       await Promise.allSettled([...services.values()].map(async (startup) => (await startup).service.close()))
     }, 'Orchestra personal services')
     if (nativeChat) host.inject(['systemPrompt', 'sessions', 'webServer'], (chatCtx) => {
+      const settings = profileDir && isAbsolute(profileDir) ? createNativeChatRoutingSettings(profileDir) : undefined
       installNativeChat(chatCtx, {
         operator: human,
         signal: stop.signal,
-        bindingFor(agent) {
-          const { id, header } = agent.session
-          if (stop.signal.aborted || !localListener(chatCtx)
-            || header.origin === 'subagent' || header.parentSession || host.agents.get(id) !== agent
-            || host.workspaceRegistry.archivedSessionIds.includes(id)) return
-          const owners = host.workspaceRegistry.list().filter((workspace) => workspace.sessionIds.includes(id))
-          const workspace = owners[0]
-          if (owners.length !== 1 || !workspace || !header.cwd || relative(workspace.path, header.cwd) !== '') return
-          return { identity: identityFor(workspace, id), workspaceId: workspace.id, sessionId: id }
+        autoRouteEnabled() {
+          if (!settings) throw new OrchError('SERVICE_UNAVAILABLE', '无法读取此 Desktop 用户的自动接管设置')
+          return settings.read().enabled
         },
+        bindingFor,
         hasService(binding) {
           return services.has(binding.identity) || existsSync(join(localDataDirectory(options), `${binding.identity}.sqlite`))
         },
@@ -293,6 +305,10 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           return (await serviceFor(workspace, binding.sessionId)).service
         },
       })
+      chatCtx.effect(() => {
+        chatRouting = settings
+        return () => { if (chatRouting === settings) chatRouting = undefined }
+      }, 'Orchestra native chat preferences')
     })
     host.connection.fetch.register({ path: routePath, methods: ['GET', 'POST'], requestBody: 'buffered', async fetch(request) {
       if (stop.signal.aborted || request.signal.aborted) return failure(503, 'SERVICE_UNAVAILABLE', '编排请求已取消')
@@ -310,6 +326,34 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       const sessionId = query.get('sessionId') ?? ''
       const workspace = selectedWorkspace(host, workspaceId, sessionId)
       if (!workspace) return failure(403, 'FORBIDDEN', '请选择该工作区中未归档的 DSH 会话')
+      if (target.pathname === chatRoutingPath) {
+        const settings = chatRouting
+        if (!settings) return failure(404, 'NOT_FOUND', '此宿主未启用原生聊天接管设置')
+        let input: unknown
+        if (request.method === 'POST') {
+          try { input = await request.json() } catch {
+            return failure(400, 'PAYLOAD_SCHEMA_INVALID', '自动接管设置格式无效')
+          }
+        }
+        const resolved = await host.sessionController.resolveAgent(sessionId).catch(() => undefined)
+        if (stop.signal.aborted || request.signal.aborted || chatRouting !== settings) {
+          return failure(503, 'SERVICE_UNAVAILABLE', '自动接管设置请求已取消')
+        }
+        const binding = resolved && 'agent' in resolved && resolved.agent ? bindingFor(resolved.agent) : undefined
+        if (binding?.workspaceId !== workspaceId || binding.sessionId !== sessionId
+          || binding.identity !== identityFor(workspace, sessionId)) {
+          return failure(403, 'FORBIDDEN', '自动接管设置需要此工作区的本机用户会话')
+        }
+        try {
+          const update = request.method === 'POST' ? nativeChatRoutingUpdate.safeParse(input) : undefined
+          if (update && !update.success) return failure(400, 'PAYLOAD_SCHEMA_INVALID', '自动接管设置格式无效')
+          const view = update ? settings.save(update.data) : settings.read()
+          return Response.json(okEnvelope(0, view), { headers: { 'cache-control': 'no-store' } })
+        } catch (error) {
+          if (error instanceof OrchError && error.code === 'STALE_GENERATION') return failure(409, error.code, error.message)
+          return failure(503, 'SERVICE_UNAVAILABLE', '暂时无法确认自动接管设置')
+        }
+      }
       if (request.method === 'POST' && target.pathname === '/v1/runs/start') {
         return failure(403, 'FORBIDDEN', '个人宿主请使用「用自然语言规划任务」，注明要使用的已发布流程及交付物，核对计划后再启动。')
       }
@@ -329,6 +373,11 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
         for (const name of responseHeaders) {
           const value = response.headers.get(name)
           if (value) forwarded.set(name, value)
+        }
+        if (request.method === 'GET' && target.pathname === '/health' && response.ok && chatRouting) {
+          const health = await response.json() as { ok?: boolean; data?: Record<string, unknown> }
+          if (health.ok && health.data) health.data.native_chat_routing_enabled = true
+          return Response.json(health, { status: response.status, headers: forwarded })
         }
         return new Response(response.body, { status: response.status, headers: forwarded })
       } catch {
