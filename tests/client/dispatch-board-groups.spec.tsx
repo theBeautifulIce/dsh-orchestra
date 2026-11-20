@@ -162,3 +162,28 @@ it('keeps a focused and open branch mounted during a same-run refresh, failure a
     expect(view.container.querySelector('.task-card-steps [role="alert"]')).toBeNull()
   } finally { view.unmount() }
 })
+
+it('remembers expanded branches when a task moves columns without moving focus from another control', async () => {
+  const nodes = [step('a', '复核甲', []), step('b', '复核乙', [])]
+  let finished = false
+  const service = createFakeService(({ path }) => path === '/v1/tasks'
+    ? { ok: true, data: page([{ ...task, lane: finished ? 'finished' : 'running' }]) }
+    : { ok: true, data: { items: nodes } })
+  const api = createResourcesApi(createApiClient('http://panel.test', service.fetcher))
+  const screen = (reloadVersion: number) => <TaskListScreen api={api} onSelectTask={() => {}} reloadVersion={reloadVersion} />
+  const view = await renderPanel(screen(0))
+  try {
+    await view.click(view.container.querySelector('[aria-label="展开步骤：运行复核"]')!)
+    await view.click(view.container.querySelector(`${groupSelector} summary`)!)
+    await view.flush()
+    const search = view.container.querySelector<HTMLElement>('#task-search')!
+    search.focus()
+    finished = true
+    await view.rerender(screen(1))
+    await view.flush()
+    const group = view.container.querySelector<HTMLDetailsElement>(`[data-task-column="finished"] ${groupSelector}`)
+    expect(group?.open).toBe(true)
+    expect(document.activeElement).toBe(search)
+    expect(service.calls.filter(({ path }) => path === '/v1/node-runs')).toHaveLength(2)
+  } finally { view.unmount() }
+})

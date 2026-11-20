@@ -144,7 +144,9 @@ function stepLabels(steps: readonly NodeRunView[]): StepLabels {
   return { titles, namesakes, references }
 }
 
-function BoardSteps({ steps, labels, partial }: { steps: NodeRunView[]; labels: StepLabels; partial: boolean }) {
+function BoardSteps({ steps, labels, partial, openBranches }: {
+  steps: NodeRunView[]; labels: StepLabels; partial: boolean; openBranches?: Set<string>
+}) {
   const groups = partial ? undefined : boardGroups(steps)
   if (!groups) return <StepRows nodes={steps} labels={labels} />
   return <div className="task-board-step-groups">
@@ -153,7 +155,10 @@ function BoardSteps({ steps, labels, partial }: { steps: NodeRunView[]; labels: 
       const active = group.filter((step) => ACTIVE_NODE_STATES.has(executionState(step))).length
       const done = group.filter((step) => executionState(step) === 'done').length
       const upstream = parentTitle(parents, labels)
-      return <details key={key}>
+      return <details key={key} open={openBranches?.has(key)} onToggle={(event) => {
+        if (event.currentTarget.open) openBranches?.add(key)
+        else openBranches?.delete(key)
+      }}>
         <summary><strong>{upstream ? `${upstream}之后` : '运行起点'} · {group.length} 个并行步骤</strong>
           <small>{done} / {group.length} 步完成{active > 0 && ` · ${active} 步执行中`}</small>
         </summary>
@@ -163,8 +168,8 @@ function BoardSteps({ steps, labels, partial }: { steps: NodeRunView[]; labels: 
   </div>
 }
 
-export function TaskStepOverview({ nodes, queue = false, partial = nodes.length >= PAGE_LIMIT }: {
-  nodes: readonly NodeRunView[]; queue?: boolean; partial?: boolean
+export function TaskStepOverview({ nodes, queue = false, partial = nodes.length >= PAGE_LIMIT, openBranches }: {
+  nodes: readonly NodeRunView[]; queue?: boolean; partial?: boolean; openBranches?: Set<string>
 }) {
   const steps = [...currentAttempts(nodes).values()]
   const labels = stepLabels(steps)
@@ -187,7 +192,7 @@ export function TaskStepOverview({ nodes, queue = false, partial = nodes.length 
           <StepRows nodes={group} labels={labels} groupTitle={title} />
         </section>
       })}
-    </div> : <BoardSteps steps={steps} labels={labels} partial={partial} />}
+    </div> : <BoardSteps steps={steps} labels={labels} partial={partial} openBranches={openBranches} />}
     {partial && <p className="task-flow-empty">本次最多读取 {PAGE_LIMIT} 条尝试记录，可能还有步骤或较新的尝试未显示。</p>}
   </>
 }
