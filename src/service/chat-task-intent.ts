@@ -66,6 +66,9 @@ export function classifyChatTask(text: string): ChatTaskIntent {
   if (!body) return 'conversation'
   const header = taskHeader.exec(body)
   if (header) return classifyTaskDetails(body.slice(header[0].length).replace(/^[，,：:]/u, ''))
+  // An unaddressed question can name a concrete deliverable without assigning work.
+  // Keep an earlier independent imperative if the operator appended a question.
+  if (directive.endsWith('?') && !request.test(directive)) return classifyTaskDetails(directive)
   const details = body.replace(actionQualifiers, '')
   if (asksAboutExecution.test(details) || (details !== body && (actionConsultation.test(details) || consultationOnly.test(details)))) return 'conversation'
   const predicate = action.exec(details)
