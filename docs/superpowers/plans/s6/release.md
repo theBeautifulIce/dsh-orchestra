@@ -48,6 +48,7 @@
 - **正反断言。** 真实上一版升级、包加载、只读回放、合成 run、带负载恢复接单和带在途回滚有与 SQL/服务账本相符的回执。跳步、篡改水位、旧版不识别返工、备份损坏或目标落在 live、恢复重复调度、固定版本漂移、链损坏及未授权回退均拒；账本序号继续增加，服务不得写回旧库覆盖正式数据。
 - **定向命令。** 拟新增 `node --no-warnings scripts/upgrade.ts dry-run --plan <plan.json>`、`node --no-warnings scripts/upgrade.ts step <backup|verify-copy|quiesce|healthcheck|synthetic-run|observe|rollback-table> --plan <plan.json>`。以两个各自真实构建包、独立宿主/数据目录与持续负载执行每步。`pnpm exec vitest run tests/integration/upgrade.spec.ts tests/integration/backup.spec.ts tests/integration/workflow-identity.spec.ts tests/integration/rework-process-restart.spec.ts --reporter=dot`。
 - **证据与退出。** 保留七步 receipts、两构建/迁移兼容矩阵、正常演练与反向故障前后账本水位和回放对账、十分钟观测、授权者以及可执行回滚表。仅带负载且双向窗口验证成功的记录计入 G6。
+- **隔离演练入口。** `scripts/package-acceptance.ts <tgz> <previous|candidate>` 核对包内容并输出 SHA256。将两包的绝对路径、摘要及源码提交、配置路径与摘要、`tmp/` 内的独立状态目录与新账本路径、`compatible_floor: 57`、观测时长 `observation_ms` 及当次授权写入 schema v1 演练单。旧构建固定为 G5 已签候选。运行 `scripts/upgrade.ts run --plan <plan.json>` 可顺序执行，`step` 可核对已收口回执或继续下一步。通过 `ORCHESTRA_REHEARSAL_SECRET` 和 `ORCHESTRA_REHEARSAL_PROOF` 提供单次演练的账本密钥和授权证明，仅哈希进入演练单。状态目录保留七张串联回执、原始观测、失败与前滚判断。短夹具使用 development，candidate 需要确切的干净候选和完整十分钟。驱动仅操纵它创建的合成账本和私有端口。
 
 <a id="t15"></a>
 

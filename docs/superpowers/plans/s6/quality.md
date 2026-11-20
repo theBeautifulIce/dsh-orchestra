@@ -17,6 +17,7 @@
 - **正反断言**：任务总量 10000 的首屏 p95 <100ms，1000 节点的 `get_run` <150ms，实际 200 条的 `list_nodes` <80ms，实际 200 条的 `list_events` <50ms，等值为失败。实际基表查询无全表扫描，Q-27 检查过滤和排序索引，临时排序与物化层逐条分类并附界限依据。单页记录与 `as_of_seq` 同快照，跨页保持现有无同快照保证。错规模、错路由、旧 SQL、样本少/非有限、失败或 skip 被统计为通过、游标混用/跨过滤或退化成仅查询原始任务表，应得到失败或不可判定。
 - **未来定向命令**：`pnpm exec vitest run tests/integration/perf-budget.spec.ts --disableConsoleIntercept --reporter=verbose`（已有三路基线，需要新增第四路）；`pnpm exec vitest run tests/integration/workflow-queries.spec.ts tests/integration/queries.spec.ts`；若选用新增基准入口，同时执行 `pnpm exec vitest run tests/integration/perf.spec.ts --disableConsoleIntercept --reporter=verbose`。冻结候选必须由严格判定器按四路全部实测样本重算，未命中、超限或跳过均不能通过。旧基准在超限时可能 ctx.skip 且进程退出 0；它的退出码只作诊断。
 - **交付与未达处理**：每路记录环境、种子、查询/参数形状、条数和返回语义、原始轮次、p50/p95/max、实际计划、退出码、候选哈希、SHA256 和独立重跑指针。缺 `list_events`、基表计划不通过或时延超标时，该项不通过，回到查询/索引所有者修复后重新冻结和复测。S1 末轮的 026 存量时间单位判定交升级卡独立核对，任务数据规模以 §8.3 与当前基准种子为准。
+- **实际入口**：在干净的候选工作树独立执行 `tests/integration/perf-budget.spec.ts`，将 `ORCHESTRA_PERF_EVIDENCE_DIR` 指向 `tmp/s6-evidence/T07/` 下本轮的新目录。使用 `pnpm exec vitest run tests/integration/perf-budget.spec.ts --disableConsoleIntercept --reporter=verbose`，也可在通过 Node 直调 Vitest 时将 `pnpm --version` 的实测版本写入 `ORCHESTRA_PERF_PNPM_VERSION`。每轮落盘 `checkpoints.ndjson`、`perf-report.json`、SHA256 与隔离配置；缺少完整报告的轮次只能诊断。独立复算运行 `node --no-warnings scripts/perf-budget-evidence.ts <本轮目录>/perf-report.json`。普通 G5 测量继续使用无环境变量入口。回填、批量播种和回环 HTTP 诊断各自记录，四路阈值使用生产查询函数的无写窗口。
 
 <a id="t08"></a>
 

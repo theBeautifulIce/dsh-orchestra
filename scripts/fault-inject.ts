@@ -26,6 +26,13 @@ import { createWorkflow, publishWorkflowCommand, publishContextFor, updateDraft 
 import { NODE_CAPABILITY } from '../src/core/workflow-def.ts'
 import { sweep } from '../src/service/sweep.ts'
 import { openServiceOrchestra } from '../src/index.ts'
+import { caseG15S6 } from './fault-backup.ts'
+import { caseG14S6 } from './fault-migration.ts'
+import { caseG16S6 } from './fault-cancel-tree.ts'
+import { caseG05S6, caseG06S6 } from './fault-cancel-receipts.ts'
+import { caseG07S6, caseG08S6, caseG09S6 } from './fault-clock-stream.ts'
+import { caseG10S6, caseG11S6, caseG12S6 } from './fault-business.ts'
+import { caseG13S6 } from './fault-upgrade.ts'
 import { acquireDbLock } from '../src/infra/lock.ts'
 import { bumpEpoch } from '../src/infra/db/open.ts'
 import { sweepNow, type RuntimeDeps } from '../src/service/commands/runtime.ts'
@@ -38,6 +45,10 @@ import { runNode } from '../src/executor/run-node.ts'
 import type { HostAgentFactory } from '../src/executor/session.ts'
 import type { Db } from '../src/infra/sqlite/driver.ts'
 import { caseG11 } from './g11-memory.ts'
+import { caseG01S6, caseG02S6 } from './fault-g01.ts'
+import { writeFaultReport, type FaultCase } from './fault-report.ts'
+import { caseG03S6 } from './fault-report-replay.ts'
+import { caseG04S6 } from './fault-executor.ts'
 
 export type InjectionCase = 'G-10' | 'G-01' | 'G-02' | 'G-03' | 'G-04' | 'G-05' | 'G-06' | 'G-07' | 'G-08' | 'G-09' | 'G-11' | 'G-12' | 'G-14' | 'G-15' | 'G-16'
   | 'ev-g2-01' | 'ev-g2-02' | 'ev-g2-03' | 'ev-g2-04' | 'ev-g2-05' | 'ev-g2-06' | 'ev-g2-07'
@@ -1594,7 +1605,54 @@ export async function runCase(name: string): Promise<InjectionResult> {
   throw new Error(`Unknown fault injection case ID: ${JSON.stringify(name)}`)
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+const s6Cases: ReadonlyMap<string, FaultCase> = new Map([
+  ['G-01', caseG01S6],
+  ['G-02', caseG02S6],
+  ['G-03', caseG03S6],
+  ['G-04', caseG04S6],
+  ['G-05', caseG05S6],
+  ['G-06', caseG06S6],
+  ['G-07', caseG07S6],
+  ['G-08', caseG08S6],
+  ['G-09', caseG09S6],
+  ['G-10', caseG10S6],
+  ['G-11', caseG11S6],
+  ['G-12', caseG12S6],
+  ['G-13', caseG13S6],
+  ['G-14', caseG14S6],
+  ['G-15', caseG15S6],
+  ['G-16', caseG16S6],
+])
+
+export function runFaultCase(name: string, params: { out: string; argv?: readonly string[] }) {
+  const scenario = s6Cases.get(name)
+  if (!scenario) throw new Error('Unregistered S6 fault injection case ID: ' + JSON.stringify(name))
+  return writeFaultReport(name, params.out, params.argv ?? process.argv, scenario)
+}
+
+function parseS6Args(argv: string[]): { name: string; out: string } {
+  const options = new Map<string, string>()
+  let s6 = false
+  for (let index = 0; index < argv.length; index++) {
+    const option = argv[index]!
+    if (option === '--s6' && !s6) {
+      s6 = true
+      continue
+    }
+    if ((option !== '--case' && option !== '--out') || options.has(option)) {
+      throw new Error('Unexpected S6 argument: ' + JSON.stringify(option))
+    }
+    const value = argv[++index]
+    if (!value?.trim() || value.startsWith('--')) throw new Error('Missing value after ' + option)
+    options.set(option, value)
+  }
+  const name = options.get('--case')
+  const out = options.get('--out')
+  if (!name || !out) throw new Error('--s6 requires explicit --case and --out')
+  return { name, out }
+}
+
+async function runLegacyCli(): Promise<void> {
   const idx = process.argv.indexOf('--case')
   const name = idx >= 0 ? process.argv[idx + 1] : 'G-01'
   if (name === undefined) throw new Error('Missing fault injection case ID after --case')
@@ -1605,4 +1663,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const evidenceRoot = outIdx >= 0 ? process.argv[outIdx + 1]! : join(process.cwd(), 'docs/gates/evidence')
   writeEvidence(join(evidenceRoot, gate), out)
   console.log(JSON.stringify(out, null, 2))
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const argv = process.argv.slice(2)
+  if (argv.includes('--s6')) {
+    const { name, out } = parseS6Args(argv)
+    const report = await runFaultCase(name, { out })
+    console.log(JSON.stringify(report, null, 2))
+    if (!report.passed) process.exitCode = 1
+  } else {
+    await runLegacyCli()
+  }
 }

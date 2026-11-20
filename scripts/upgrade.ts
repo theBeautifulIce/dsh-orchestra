@@ -11,7 +11,7 @@ import { backup, restore, sha256File, verifyBackup } from '../src/infra/backup.t
 import { acquireDbLock } from '../src/infra/lock.ts'
 import { openDb } from '../src/infra/sqlite/driver.ts'
 import { inspectPackage } from './package-acceptance.ts'
-import { bootBuild, completeRun, ensureRehearsalWorkflow, head, loadUpgradeBuild, operationId,
+import { bootBuild, completeRun, ensureRehearsalWorkflow, head, loadPreviousHost, loadUpgradeBuild, operationId,
   previousCompatibility, readPreviousModelCatalog, request, snapshot, startRun, upgradeBlockers, verifyPrefix, verifyRuntime, waitWorkflow } from './upgrade-host.ts'
 
 export const PREVIOUS_SIGNED_BUILD = '2f07617a2cfe1b5b8a069c0b1b3d73aad24549ce'
@@ -25,6 +25,7 @@ export const upgradePlanSchema = z.strictObject({
   rehearsal_id: z.string().regex(/^[\w-]{8,96}$/),
   mode: z.enum(['development', 'candidate']),
   previous: pkg,
+  previous_host: z.strictObject({ module_sha256: hash, source_commit: commit, archive_sha256: hash }).optional(),
   candidate: pkg,
   live_db: z.string(),
   state_dir: z.string(),
@@ -70,6 +71,10 @@ export function validateUpgradePlan(input: unknown, workspace = process.cwd()) {
   const candidateArchive = isolatedPath(plan.candidate.archive, tmp)
   if (plan.previous.source_commit !== PREVIOUS_SIGNED_BUILD || plan.previous.sha256 === plan.candidate.sha256) {
     throw new Error('Previous must be the signed G5 build and the candidate must be distinct')
+  }
+  if (plan.previous_host && (plan.previous_host.source_commit !== plan.previous.source_commit
+    || plan.previous_host.archive_sha256 !== plan.previous.sha256)) {
+    throw new Error('Previous host registration does not match the previous build')
   }
   if (plan.mode === 'candidate' && (plan.observation_ms < 600_000 || plan.candidate.source_commit === PREVIOUS_SIGNED_BUILD)) {
     throw new Error('Candidate rehearsal needs a distinct frozen commit and at least ten minutes')
@@ -117,7 +122,8 @@ export function readUpgradeReceipts(root: string, identity: string, planSha: str
   return ordered
 }
 
-export async function rehearseUpgrade(input: unknown, command: 'run' | Step, secret: string, proof: string, workspace = process.cwd()) {
+export async function rehearseUpgrade(input: unknown, command: 'run' | Step, secret: string, proof: string,
+  workspace = process.cwd(), previousHostPath = process.env.ORCHESTRA_REHEARSAL_PREVIOUS_HOST) {
   const plan = validateUpgradePlan(input, workspace)
   if (secret.length < 16 || !proof || sha256Hex(proof) !== plan.approval.proof_sha256) throw new Error('Rehearsal requires operator proof and a private ledger secret')
   const planSha = sha256Hex(canonicalJson(plan))
@@ -144,9 +150,13 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
     if (previous.inspected.migrations.length !== plan.compatible_floor
       || candidate.inspected.migrations.length <= plan.compatible_floor) throw new Error('Build migration windows do not match the plan')
 
-    const boot = (version: 'S5' | 'S6', target = plan.live_db) => {
+    const boot = async (version: 'S5' | 'S6', target = plan.live_db) => {
+      const module = (version === 'S5' ? previous : candidate).module
+      const executor = version === 'S5' && plan.previous_host
+        ? await loadPreviousHost(plan.previous_host, plan.previous, module, previousHostPath)
+        : undefined
       mkdirSync(dirname(target), { recursive: true })
-      return bootBuild((version === 'S5' ? previous : candidate).module, target, secret, version, plan.config_path)
+      return bootBuild(module, target, secret, version, plan.config_path, executor)
     }
     const using = async <T>(version: 'S5' | 'S6', fn: (service: Awaited<ReturnType<typeof boot>>) => Promise<T>, target?: string) => {
       const service = await boot(version, target)
@@ -157,6 +167,11 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
     })
     const takeSnapshot = () => snapshot(plan.live_db)
     const fork = join(root, 'compatibility', 'orchestra.db')
+    const previousCatalog = async (service: Awaited<ReturnType<typeof boot>>) => {
+      const profiles = await readPreviousModelCatalog(service, secret)
+      if (plan.previous_host && !profiles) throw new Error('Registered previous host did not expose its approved model catalog')
+      return profiles
+    }
     const backupDir = join(root, 'backup')
     const fenceFile = join(root, 'external-fence.json')
     const transition = async (step: Step): Promise<Record<string, unknown>> => {
@@ -182,13 +197,14 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
       if (step === 'verify-copy') {
         if (!existsSync(fork)) restore(backupDir, fork)
         const before = snapshot(join(backupDir, 'orchestra.db'))
-        const previousProfiles = await using('S5', (service) => readPreviousModelCatalog(service, secret), fork)
+        const previousProfiles = await using('S5', previousCatalog, fork)
         const newer = await using('S6', async (service) => {
           verifyPrefix(service.orchestra.db, before)
           return { ...await verifyRuntime(service, secret, 'S6'), compatibility: previousCompatibility(service.orchestra.db, previousProfiles) }
         }, fork)
         const older = await using('S5', async (service) => {
           verifyPrefix(service.orchestra.db, before)
+          previousCompatibility(service.orchestra.db, await previousCatalog(service))
           return verifyRuntime(service, secret, 'S5')
         }, fork)
         if (newer.state.migrations.length !== candidate.inspected.migrations.length
@@ -275,18 +291,18 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
         })
       }
       const waitingRun = z.string().parse(receipts[5]?.facts.rollback_pending_run)
-      const previousProfiles = z.array(z.object({ ref: z.string(), capacity: z.enum(['routine', 'standard', 'complex']) }))
-        .nullish().parse(receipts[1]?.facts.previous_model_catalog) ?? undefined
       const faultFile = join(root, 'rollback-fault.json')
       const pendingVersion = { run_id: waitingRun, workflow_version: 1 }
       if (!existsSync(faultFile)) {
+        const previousProfiles = await using('S5', previousCatalog, fork)
         const fault = await using('S6', async (service) => {
+          previousCompatibility(service.orchestra.db, previousProfiles)
+          const pending = await request<{ status: string; workflow_version: number }>(service, secret, '/v1/runs/get?run_id=' + waitingRun)
+          if (pending.status !== 'running' || pending.workflow_version !== 1) throw new Error('Rollback load seam was not in flight')
           const intake = intakeFor(service)
           if (!intake.get().paused) intake.pause(proof, 'T14 rollback boundary')
           const compatibility = previousCompatibility(service.orchestra.db, previousProfiles)
           const blockers = upgradeBlockers(service.orchestra.db, waitingRun)
-          const pending = await request<{ status: string; workflow_version: number }>(service, secret, '/v1/runs/get?run_id=' + waitingRun)
-          if (pending.status !== 'running' || pending.workflow_version !== 1) throw new Error('Rollback load seam was not in flight')
           return { before: snapshot(service.orchestra.db), endpoint: service.endpoint, compatibility, blockers, pending: pendingVersion }
         })
         let refused = false
@@ -296,19 +312,23 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
       }
       const fault = JSON.parse(readFileSync(faultFile, 'utf8')) as { before: ReturnType<typeof snapshot>; fault: string; authorization: string }
       // A retry after the recorded outage must recheck before even advancing the old writer's epoch.
+      const fencedProfiles = await using('S5', previousCatalog, fork)
       const reader = openDb(plan.live_db, { readonly: true })
       try {
-        previousCompatibility(reader, previousProfiles)
+        previousCompatibility(reader, fencedProfiles)
         upgradeBlockers(reader, waitingRun)
         verifyPrefix(reader, fault.before)
       } finally { reader.raw.close() }
       return using('S5', async (service) => {
         verifyPrefix(service.orchestra.db, fault.before)
+        const restartedProfiles = await previousCatalog(service)
+        previousCompatibility(service.orchestra.db, restartedProfiles)
         const before = fault.before.seq
         const after = await completeRun(service, secret, waitingRun)
         if (after <= before) throw new Error('Rollback did not continue the original live ledger')
         return { decision: 'switch_runtime_only', approval_actor: fault.authorization, fault: fault.fault,
-          restored_run: pendingVersion, before_seq: before, after_seq: after, ...await verifyRuntime(service, secret, 'S5') }
+          restored_run: pendingVersion, before_seq: before, after_seq: after, previous_model_catalog: restartedProfiles ?? null,
+          ...await verifyRuntime(service, secret, 'S5') }
       })
     }
 
@@ -344,6 +364,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const [kind, ...args] = process.argv.slice(2)
     if (kind === '--help') {
       console.log('Usage: node scripts/upgrade.ts <dry-run|run|step NAME> --plan <plan.json>')
+      console.log('For a registered previous_host, set ORCHESTRA_REHEARSAL_PREVIOUS_HOST to the pinned local executor module.')
     } else {
       const step = kind === 'step' ? z.enum(UPGRADE_STEPS).parse(args.shift()) : z.enum(['dry-run', 'run']).parse(kind)
       if (args.length !== 2 || args[0] !== '--plan' || !args[1]) throw new Error('Specify --plan <plan.json>')

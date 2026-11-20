@@ -1,12 +1,18 @@
 /** G-11 uses a separate durable writer store so ledger projections cannot stand in for write facts. */
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { contentHash, type MemoryItemInput } from '../src/core/memory-canonical.ts'
 import { uuidv7 } from '../src/core/ids.ts'
+import { openServiceOrchestra } from '../src/index.ts'
+import { wakeOnEvent } from '../src/service/commands/wait.ts'
+import { listUnverifiedEffects } from '../src/service/queries/effects.ts'
+import { ORPHAN_REFERENCES_SQL, sealCheckpoint, type FaultQuery } from './fault-reconcile.ts'
+import { businessQuery, checkpoint, EVENT_PREFIX, faultRows, missingPrefix } from './fault-business-support.ts'
+import type { FaultCase } from './fault-report.ts'
 import { ScriptedClock } from '../src/core/clock.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../src/infra/db/migrate.ts'
 import { openDb, withTx, type Db, type Tx } from '../src/infra/sqlite/driver.ts'
@@ -52,7 +58,7 @@ function insertRows(tx: Pick<Tx, 'get' | 'run'>, input: Pick<GovernedWriteInput,
   })
 }
 
-function memoryRuntime(db: Db, writer: Db, crash?: Crash) {
+function memoryRuntime(db: Db, writer: Db, crash?: Crash, recordWrite?: (input: GovernedWriteInput) => void) {
   return createMemoryRuntime({
     db, secret: TEST_SECRET, now: () => NOW,
     prepareItems: async () => ({ items: proposals }),
@@ -63,6 +69,7 @@ function memoryRuntime(db: Db, writer: Db, crash?: Crash) {
     writer: {
       fenceAndInspect: fencedInspection(writer),
       writeMemory: async (input) => {
+        recordWrite?.(input)
         const items = crash === 'partial' || crash === 'rolled_back' ? input.items.slice(0, 1) : input.items
         if (crash === 'rolled_back') {
           writer.raw.exec('BEGIN IMMEDIATE')
@@ -91,10 +98,10 @@ function fencedInspection(writer: Db): InspectMemoryWrite {
   })
 }
 
-async function killWriter(dbFile: string, writerFile: string, runId: string, crash: Crash): Promise<void> {
+async function killWriter(dbFile: string, writerFile: string, runId: string, crash: Crash) {
   const child = spawn(process.execPath, ['--no-warnings', fileURLToPath(import.meta.url), '--worker', dbFile, writerFile, runId, crash],
     { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<{ pid: number; code: number | null; signal: NodeJS.Signals; output: string }>((resolve, reject) => {
     let output = ''
     let marker = false
     let killed = false
@@ -110,7 +117,8 @@ async function killWriter(dbFile: string, writerFile: string, runId: string, cra
     child.once('close', (code, signal) => {
       clearTimeout(timer)
       if (!marker || !killed || code === 0 || signal !== 'SIGKILL') reject(new Error('G-11 未在写入点终止子进程：' + output))
-      else resolve()
+      else if (!child.pid) reject(new Error('G-11 writer PID missing'))
+      else resolve({ pid: child.pid, code, signal, output })
     })
   })
 }
@@ -124,43 +132,70 @@ function ledgerSnapshot(db: Db, batch: string, run: string) {
   }
 }
 
-async function scenario(dir: string, crash: Crash) {
+async function scenario(dir: string, crash: Crash, sourceRunId?: string) {
   const dbFile = join(dir, crash + '.db')
   const writerFile = join(dir, crash + '-writer.db')
   let db = openDb(dbFile)
   let writer = setupWriter(writerFile)
   const before: unknown[] = []
+  const scoped = sourceRunId !== undefined
+  const sourceRun = sourceRunId ?? 'r1'
+  const stages: Record<string, ReturnType<typeof s6Snapshot>> = {}
+  const retries: Pick<GovernedWriteInput, 'node_run_id' | 'run_id' | 'batch_id'>[] = []
   try {
-    applySteps(db, loadSteps(defaultMigrationsDir()))
-    seed(db)
-    db.raw.prepare("UPDATE runs SET status = 'succeeded' WHERE run_id = 'r1'").run()
+    if (!scoped) {
+      applySteps(db, loadSteps(defaultMigrationsDir()))
+      seed(db)
+      db.raw.prepare("UPDATE runs SET status = 'succeeded' WHERE run_id = 'r1'").run()
+    }
     const { memory_run_id: run, batch_id: batch } = startMemoryRun(db, {
-      source_run_id: 'r1', request_key: 'g11', reason: 'G-11', operation_id: uuidv7(), now: NOW,
+      source_run_id: sourceRun, request_key: 'g11', reason: 'G-11', operation_id: uuidv7(), now: NOW,
     })
     await memoryRuntime(db, writer).advance({ memory_run_id: run })
     const { decision_id } = db.raw.prepare('SELECT decision_id FROM memory_batches WHERE batch_id = ?').get(batch)!
     withTx(db, (tx) => resolveMemoryApproval(tx, TEST_SECRET, {
       batch_id: batch, decision_id: String(decision_id), resolution: 'approved', actor: ACTOR, now: NOW,
     }))
+    const capture = (stage: string) => {
+      if (!scoped) return
+      stages[stage] = s6Snapshot(db, writer, batch, run, sourceRun)
+      if (stage !== 'after') {
+        checkpoint(db, dir, crash + '-' + stage + '.db')
+        checkpoint(writer, dir, crash + '-' + stage + '-writer.db')
+      }
+    }
     before.push(ledgerSnapshot(db, batch, run))
+    capture('before')
+    const prefix = scoped ? faultRows(db, EVENT_PREFIX) : []
     db.raw.close()
     writer.raw.close()
-    await killWriter(dbFile, writerFile, run, crash)
+    const termination = await killWriter(dbFile, writerFile, run, crash)
     db = openDb(dbFile)
     writer = setupWriter(writerFile)
     const cut = ledgerSnapshot(db, batch, run)
     assert.deepEqual({ ...cut.batch }, { status: 'applying', outcome: null, applied_count: 0 })
     assert.equal(cut.nodes[0]?.status, 'started')
     before.push(cut)
+    capture('breakpoint')
     const applyId = String(db.raw.prepare("SELECT apply_node_run_id FROM memory_batches WHERE batch_id = ?").get(batch)!.apply_node_run_id)
     const maintenance = '2026-11-20T00:00:00.000Z'
     const clock = new ScriptedClock('g11-restart', { wallClockMs: Date.parse(maintenance), monotonicNs: 0 })
     sweep(db, TEST_SECRET, { now: maintenance, clock, executorLost: [applyId] })
     assert.equal(ledgerSnapshot(db, batch, run).nodes[0]?.status, 'indeterminate_side_effect')
-    const runtime = memoryRuntime(db, writer)
+    capture('lost')
+    const runtime = memoryRuntime(db, writer, undefined, ({ node_run_id, run_id, batch_id }) => {
+      retries.push({ node_run_id, run_id, batch_id })
+    })
     assert.equal((await runtime.advance({ memory_run_id: run })).status, 'blocked')
     const recovery = { db, secret: TEST_SECRET, now: () => NOW, inspectWrite: fencedInspection(writer) }
     const original = recovery.inspectWrite
+    if (scoped) {
+      const lost = stages.lost
+      await assert.rejects(inspectMemoryRecovery({ ...recovery, inspectWrite: async (scope) => ({
+        ...scope, stopped_at: '', entries: [],
+      }) }, batch), { code: 'VERIFICATION_TOO_WEAK' })
+      assert.deepEqual(s6Snapshot(db, writer, batch, run, sourceRun), lost)
+    }
     if (crash === 'partial') {
       await assert.rejects(inspectMemoryRecovery({ ...recovery, inspectWrite: async (scope) => {
         const facts = await original(scope)
@@ -169,11 +204,19 @@ async function scenario(dir: string, crash: Crash) {
       assert.equal(ledgerSnapshot(db, batch, run).batch?.status, 'applying')
     }
     const proof = await runtime.inspectBatch(batch)
+    if (scoped) {
+      assert.equal(stages.breakpoint?.writerRows.length, crash === 'committed' ? 2 : crash === 'partial' ? 1 : 0)
+      assert.equal(stages.breakpoint?.fences.length, 0)
+      assert.ok(proof.evidence_id)
+      assert.ok(Number.isFinite(Date.parse(proof.stopped_at)))
+    }
     assert.equal(proof.written_count, crash === 'committed' ? 2 : crash === 'partial' ? 1 : 0)
     assert.equal(proof.missing_count, 2 - proof.written_count)
     assert.equal(proof.partial, crash === 'partial')
     sweep(db, TEST_SECRET, { now: maintenance, clock })
+    capture('inspected')
     assert.deepEqual((await runtime.inspectBatch(batch)), proof)
+    if (scoped) assert.deepEqual(s6Snapshot(db, writer, batch, run, sourceRun), stages.inspected)
     assert.equal(ledgerSnapshot(db, batch, run).nodes[0]?.status, 'indeterminate_side_effect')
     assert.equal(ledgerSnapshot(db, batch, run).run, 'paused')
     const resolution = crash === 'committed' ? 'confirm_applied' : crash === 'partial' ? 'abandon' : 'confirm_not_applied'
@@ -189,20 +232,31 @@ async function scenario(dir: string, crash: Crash) {
       decisionId: proof.decision_id, revision: proof.revision, resolution: 'approved', now: NOW, actor: ACTOR,
     })), { code: 'RESOLUTION_NOT_AVAILABLE' })
     assert.throws(() => resolveMemoryRecovery(recovery, ACTOR, { ...request, revision: 0 }), { code: 'DECISION_REVISION_CONFLICT' })
+    if (scoped) assert.deepEqual(s6Snapshot(db, writer, batch, run, sourceRun), stages.inspected)
     const result = runtime.resolveRecovery(ACTOR, request)
+    capture('resolved')
     assert.deepEqual(runtime.resolveRecovery(ACTOR, request), result)
+    if (scoped) assert.deepEqual(s6Snapshot(db, writer, batch, run, sourceRun), stages.resolved)
 
+    let acknowledgement: { request: unknown; reply: unknown; inspection: unknown; operationId: string } | undefined
     if (crash === 'partial') {
       assert.throws(() => startMemoryRun(db, {
-        source_run_id: 'r1', request_key: 'second', reason: 'G-11', operation_id: uuidv7(), now: NOW, retry: true,
+        source_run_id: sourceRun, request_key: 'second', reason: 'G-11', operation_id: uuidv7(), now: NOW, retry: true,
       }), { code: 'MEMORY_RUN_ACTIVE' })
       assert.equal((await runtime.advance({ memory_run_id: run })).status, 'blocked')
       const ack = await runtime.inspectBatch(batch)
       assert.equal(ack.decision_id, result.abandon_ack_id)
       assert.equal(ledgerSnapshot(db, batch, run).run, 'paused')
-      const acked = runtime.resolveRecovery(ACTOR, { ...request, decision_id: ack.decision_id,
-        revision: ack.revision, operation_id: uuidv7(), resolution: 'acknowledge_abandon' })
+      const ackRequest = { ...request, decision_id: ack.decision_id,
+        revision: ack.revision, operation_id: uuidv7(), resolution: 'acknowledge_abandon' } as const
+      const acked = runtime.resolveRecovery(ACTOR, ackRequest)
       assert.equal(acked.terminal, 'succeeded_with_unverified')
+      acknowledgement = { request: ackRequest, reply: acked, inspection: ack, operationId: ackRequest.operation_id }
+      if (scoped) {
+        const first = s6Snapshot(db, writer, batch, run, sourceRun)
+        assert.deepEqual(runtime.resolveRecovery(ACTOR, ackRequest), acked)
+        assert.deepEqual(s6Snapshot(db, writer, batch, run, sourceRun), first)
+      }
     } else {
       if (crash === 'rolled_back') {
         const newAttempt = ledgerSnapshot(db, batch, run)
@@ -218,11 +272,22 @@ async function scenario(dir: string, crash: Crash) {
     assert.deepEqual(final.items.map((row) => row.status), crash === 'partial' ? ['applied', 'approved'] : ['applied', 'applied'])
     assert.equal(final.batch?.status, crash === 'partial' ? 'indeterminate' : 'applied')
     if (crash === 'rolled_back') assert.deepEqual(final.nodes.map((row) => row.action_generation), [1, 2])
-    assert.equal(db.raw.prepare("SELECT status FROM runs WHERE run_id = 'r1'").get()?.status, 'succeeded')
+    assert.equal(db.raw.prepare("SELECT status FROM runs WHERE run_id = ?").get(sourceRun)?.status, 'succeeded')
     assert.throws(() => withTx(writer, (tx) => insertRows(tx,
       { batch_id: batch, node_run_id: proof.node_run_id, run_id: run }, proposals)), /attempt fenced/)
+    capture('after')
+    if (scoped) {
+      assert.deepEqual(retries.map(row => row.node_run_id), crash === 'rolled_back' ? [result.replacement_node_run_id] : [])
+      if (crash !== 'rolled_back') assert.deepEqual(stages.after?.writerRows, stages.breakpoint?.writerRows)
+      const outstanding = stages.after?.unverified.filter(row => row.node_id === 'mem_apply')
+      assert.deepEqual(outstanding?.map(row => [row.node_run_id, row.evidence]), crash === 'partial'
+        ? [[proof.node_run_id, proof.evidence_id]] : [])
+      assert.equal(stages.after?.terminal.length, 1)
+      assert.deepEqual(faultRows(db, EVENT_PREFIX).slice(0, prefix.length), prefix)
+    }
     return {
       crash, before, after: final,
+      s6: { stages, prefix, termination, run, batch, sourceRun, proof, request, resolution: result, acknowledgement, retries },
       reconcile: { writer_rows: stored, written_count_at_inspect: proof.written_count, missing_count_at_inspect: proof.missing_count,
         partial: proof.partial, evidence_recorded: !!db.raw.prepare("SELECT 1 FROM node_run_events WHERE node_run_id = ? AND type = 'memory.apply.inspected'").get(proof.node_run_id),
         stopped_attempt_cannot_write: true, source_run: 'succeeded' },
@@ -244,6 +309,149 @@ export async function caseG11(): Promise<InjectionResult> {
       before: section('before'), after: section('after'), reconcile: section('reconcile') }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+}
+
+function s6Snapshot(db: Db, writer: Db, batch: string, run: string, sourceRun: string) {
+  return {
+    source: faultRows(db, 'SELECT * FROM runs WHERE run_id=?', sourceRun),
+    run: faultRows(db, 'SELECT * FROM runs WHERE run_id=?', run),
+    batch: faultRows(db, 'SELECT * FROM memory_batches WHERE batch_id=?', batch),
+    items: faultRows(db, 'SELECT * FROM memory_items WHERE batch_id=? ORDER BY client_key', batch),
+    nodes: faultRows(db, "SELECT * FROM node_runs WHERE run_id=? AND node_id='mem_apply' ORDER BY attempt", run),
+    decisions: faultRows(db, 'SELECT * FROM decisions WHERE run_id=? ORDER BY decision_id', run),
+    recoveries: faultRows(db, 'SELECT * FROM memory_write_recoveries WHERE batch_id=? ORDER BY node_run_id', batch),
+    events: faultRows(db, 'SELECT * FROM events WHERE run_id=? ORDER BY seq', run),
+    terminal: faultRows(db, "SELECT * FROM events WHERE run_id=? AND type='run.terminal' ORDER BY seq", run),
+    chains: faultRows(db, 'SELECT e.* FROM node_run_events e JOIN node_runs n ON n.node_run_id=e.node_run_id WHERE n.run_id=? ORDER BY e.node_run_id, e.seq', run),
+    writerRows: faultRows(writer, 'SELECT * FROM written WHERE batch_id=? ORDER BY client_key', batch),
+    fences: faultRows(writer, 'SELECT * FROM fences ORDER BY attempt_id'),
+    unverified: listUnverifiedEffects(db, { run_id: run, now: Date.parse(NOW) }).items,
+    globalEventCount: db.raw.prepare('SELECT COUNT(*) AS n FROM events').get()?.n,
+    receiptCount: db.raw.prepare('SELECT COUNT(*) AS n FROM inbox').get()?.n,
+  }
+}
+
+async function startS6Source(file: string) {
+  const service = await openServiceOrchestra({ dbFile: file, secret: TEST_SECRET, phase: 'S6' })
+  const { commands, db } = service.orchestra
+  const workflowId = 'wf_s6_g11_source'
+  try {
+    commands.loadWorkflow({ workflow_id: workflowId, workflow_version: '1', nodes: [{
+      node_id: 'source', type: 'wait', wait: { wait_kind: 'event', match: { type: 'g11.source.done' }, max_wait_ms: 60_000 },
+    }] })
+    const source = commands.startRun({ workflowId, workflowVersion: '1', taskTitle: 'S6 G-11 synthetic source',
+      operationId: uuidv7(), now: NOW }).run_id
+    const dispatch = await commands.dispatch({ runId: source, nodes: { source: { tools: [] } }, now: NOW })
+    assert.deepEqual(dispatch.map(item => item.status), ['waiting'])
+    const wake = withTx(db, tx => wakeOnEvent(tx, TEST_SECRET, { runId: source, eventType: 'g11.source.done', now: NOW }))
+    assert.equal(wake.woken, 1)
+    assert.equal(db.raw.prepare('SELECT status FROM runs WHERE run_id=?').get(source)?.status, 'succeeded')
+    return source
+  } finally {
+    await service.release()
+  }
+}
+
+const ARTIFACT_STAGES = ['before', 'breakpoint', 'lost', 'inspected', 'resolved'] as const
+
+export const caseG11S6: FaultCase = async ({ directory }) => {
+  const results: ({ crash: Crash } & Awaited<ReturnType<typeof scenario>>['s6'])[] = []
+  const artifacts: string[] = ['memory-recovery.json']
+  const extraQueries: Record<string, FaultQuery> = {}
+  for (const crash of CASES) {
+    const database = crash + '.db'
+    const file = join(directory, database)
+    const writer = crash + '-writer.db'
+    const source = await startS6Source(file)
+    const result = (await scenario(directory, crash, source)).s6
+    sealCheckpoint(file)
+    sealCheckpoint(join(directory, writer))
+    results.push({ crash, ...result })
+    artifacts.push(database, writer)
+    for (const stage of ARTIFACT_STAGES) artifacts.push(crash + '-' + stage + '.db', crash + '-' + stage + '-writer.db')
+    const cut = crash + '-breakpoint.db'
+    const lost = crash + '-lost.db'
+    const inspected = crash + '-inspected.db'
+    const { run, batch, proof } = result
+    const n = crash === 'committed' ? 2 : crash === 'partial' ? 1 : 0
+    const terminal = crash === 'partial' ? 'succeeded_with_unverified' : 'succeeded'
+    extraQueries[crash + '_breakpoint_writer_rows'] = businessQuery(crash + '-breakpoint-writer.db',
+      'SELECT * FROM written WHERE batch_id=? ORDER BY client_key', n, batch)
+    extraQueries[crash + '_final_writer_rows'] = businessQuery(writer,
+      'SELECT * FROM written WHERE batch_id=? ORDER BY client_key', crash === 'partial' ? 1 : 2, batch)
+    extraQueries[crash + '_killed_while_applying'] = businessQuery(cut,
+      "SELECT * FROM memory_batches WHERE batch_id=? AND memory_run_id=? AND status='applying' AND outcome IS NULL AND applied_count=0", 1, batch, run)
+    extraQueries[crash + '_lost_executor'] = businessQuery(lost,
+      "SELECT * FROM node_runs WHERE node_run_id=? AND run_id=? AND status='indeterminate_side_effect'", 1, proof.node_run_id, run)
+    extraQueries[crash + '_uninspected_at_loss'] = businessQuery(lost,
+      'SELECT * FROM memory_write_recoveries WHERE batch_id=?', 0, batch)
+    extraQueries[crash + '_inspection'] = businessQuery(inspected,
+      "SELECT * FROM memory_write_recoveries WHERE batch_id=? AND node_run_id=? AND evidence_id=? AND stopped_at=? AND status='inspected'",
+      1, batch, proof.node_run_id, proof.evidence_id, proof.stopped_at)
+    extraQueries[crash + '_writer_fence'] = businessQuery(crash + '-inspected-writer.db',
+      'SELECT * FROM fences WHERE attempt_id=? AND stopped_at=?', 1, proof.node_run_id, proof.stopped_at)
+    extraQueries[crash + '_evidence_events'] = businessQuery(database,
+      "SELECT * FROM events WHERE run_id=? AND node_run_id=? AND type='memory.apply.inspected' AND json_extract(payload_redacted,'$.evidence_id')=?",
+      1, run, proof.node_run_id, proof.evidence_id)
+    extraQueries[crash + '_recovery_events'] = businessQuery(database,
+      "SELECT * FROM events WHERE run_id=? AND node_run_id=? AND type='memory.apply.recovered' AND json_extract(payload_redacted,'$.evidence_id')=? ORDER BY seq",
+      crash === 'partial' ? 2 : 1, run, proof.node_run_id, proof.evidence_id)
+    extraQueries[crash + '_terminal_event'] = businessQuery(database,
+      "SELECT * FROM events WHERE run_id=? AND type='run.terminal' AND json_extract(payload_redacted,'$.status')=?", 1, run, terminal)
+    extraQueries[crash + '_memory_terminal'] = businessQuery(database,
+      'SELECT * FROM runs WHERE run_id=? AND status=?', 1, run, terminal)
+    extraQueries[crash + '_source_terminal'] = businessQuery(database,
+      "SELECT * FROM runs WHERE run_id=? AND status='succeeded'", 1, source)
+    extraQueries[crash + '_final_batch'] = businessQuery(database,
+      'SELECT * FROM memory_batches WHERE batch_id=? AND memory_run_id=? AND status=? AND applied_count=?',
+      1, batch, run, crash === 'partial' ? 'indeterminate' : 'applied', crash === 'partial' ? 1 : 2)
+    extraQueries[crash + '_original_receipt'] = businessQuery(database,
+      "SELECT * FROM inbox WHERE operation_id=? AND status='applied' AND receipt_json IS NOT NULL", 1, result.request.operation_id)
+    extraQueries[crash + '_orphan_runs'] = businessQuery(database, ORPHAN_REFERENCES_SQL, 0)
+    extraQueries[crash + '_missing_events'] = missingPrefix(database, result.prefix)
+    if (crash === 'rolled_back') {
+      extraQueries.retry_generation = businessQuery(database,
+        "SELECT * FROM node_runs WHERE run_id=? AND node_id='mem_apply' AND (action_generation=1 AND status='superseded' OR action_generation=2 AND status='done') ORDER BY action_generation",
+        2, run)
+    }
+    if (crash === 'partial') {
+      assert.ok(result.acknowledgement)
+      extraQueries.partial_ack_receipt = businessQuery(database,
+        "SELECT * FROM inbox WHERE operation_id=? AND status='applied' AND receipt_json IS NOT NULL", 1, result.acknowledgement.operationId)
+      extraQueries.partial_ack_decisions = businessQuery(database,
+        "SELECT * FROM decisions WHERE run_id=? AND kind IN ('verify_human','abandon_ack') AND status='resolved' ORDER BY kind", 2, run)
+      extraQueries.partial_still_unverified = businessQuery(database,
+        "SELECT * FROM node_runs WHERE run_id=? AND node_run_id=? AND status='abandoned_unverified' AND side_effect_verified_none=0",
+        1, run, proof.node_run_id)
+      extraQueries.partial_items_split = businessQuery(database,
+        "SELECT * FROM memory_items WHERE batch_id=? AND (client_key='first' AND status='applied' AND applied_item_id IS NOT NULL OR client_key='second' AND status='approved' AND applied_item_id IS NULL) ORDER BY client_key",
+        2, batch)
+    }
+  }
+
+  const partial = results.find(result => result.crash === 'partial')!
+  const forStage = (stage: string) => Object.fromEntries(results.map(result => [result.crash, result.stages[stage]]))
+  const writes = Object.fromEntries(results.map(result => [result.crash, result.retries]))
+  writeFileSync(join(directory, artifacts[0]!), JSON.stringify({ scenarios: results, writes }, null, 2) + '\n')
+  return {
+    params: { storage: 'separate local SQLite writer implementing governed write and fence/inspect ports',
+      fixture: 'synthetic proposal/judge and controlled host protocol; actual independent SQLite transactions' },
+    sampleIds: Object.fromEntries(results.flatMap(result => [
+      [result.crash + '_source_run_id', result.sourceRun], [result.crash + '_memory_run_id', result.run],
+      [result.crash + '_batch_id', result.batch], [result.crash + '_apply_node_run_id', result.proof.node_run_id],
+    ])),
+    boundary: { reached: true, marker: 'G11_WRITE_REACHED', writers: results.map(result => ({ crash: result.crash, ...result.termination })) },
+    snapshots: { before: forStage('before'), breakpoint: forStage('breakpoint'), after: forStage('after') },
+    queries: {
+      half_rows: businessQuery('partial.db', `SELECT i.* FROM memory_items i JOIN memory_batches b USING (batch_id) WHERE i.batch_id=?
+        AND (b.status!='indeterminate' OR (i.status='applied')!=(i.applied_item_id IS NOT NULL))`, 0, partial.batch),
+      orphan_runs: businessQuery('partial.db', ORPHAN_REFERENCES_SQL, 0),
+      missing_events: missingPrefix('partial.db', partial.prefix),
+    },
+    extraQueries,
+    artifacts,
+    extra: { stage_ledger_and_writer_copies: ARTIFACT_STAGES, writes },
   }
 }
 

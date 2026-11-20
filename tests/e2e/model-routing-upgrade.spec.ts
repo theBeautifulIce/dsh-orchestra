@@ -1,7 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { loadUpgradeBuild, head, previousCompatibility, readPreviousModelCatalog, request } from '../../scripts/upgrade-host.ts'
+import { bootBuild, loadUpgradeBuild, head, previousCompatibility, readPreviousModelCatalog, request } from '../../scripts/upgrade-host.ts'
+import { PREVIOUS_SIGNED_BUILD, UPGRADE_STEPS, type UpgradePlan } from '../../scripts/upgrade.ts'
+import { sha256Hex } from '../../src/core/canonical.ts'
+import { openDb } from '../../src/infra/sqlite/driver.ts'
 import { sha256File } from '../../src/infra/backup.ts'
 import { BridgeClient, type SpawnParams } from '../../src/executor/bridge.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
@@ -145,3 +149,97 @@ it.runIf(Boolean(previousArchive && candidateArchive))('双包设置可往返，
     rmSync(root, { recursive: true, force: true })
   }
 }, 40_000)
+
+it.runIf(Boolean(previousArchive && candidateArchive))('T14 从已签旧包读取登记宿主目录，拒绝降档不暂停，并可在普通映射下原库回退', async () => {
+  mkdirSync(resolve('tmp'), { recursive: true })
+  const root = mkdtempSync(resolve('tmp', 'upgrade-model-host-'))
+  const secret = 't14-rehearsal-fixture-secret'
+  const proof = 't14-rehearsal-fixture-proof'
+  const state = join(root, 'state')
+  const config = join(root, 'config.json')
+  const provider = join(root, 'old-host.mjs')
+  const planPath = join(root, 'plan.json')
+  const previous = { archive: previousArchive!, sha256: sha256File(previousArchive!), source_commit: PREVIOUS_SIGNED_BUILD }
+  const candidate = { archive: candidateArchive!, sha256: sha256File(candidateArchive!), source_commit: 'c'.repeat(40) }
+  const configuration = JSON.parse(readFileSync('orchestra.config.json', 'utf8'))
+  configuration.bridge.spill_dir = join(root, 'spill')
+  writeFileSync(config, JSON.stringify(configuration))
+  writeFileSync(provider, `
+    export function createPreviousRehearsalExecutor({ module, sourceCommit, archiveSha256 }) {
+      if (sourceCommit !== '${previous.source_commit}' || archiveSha256 !== '${previous.sha256}') throw new Error('Unexpected old package');
+      const registry = new module.ToolRegistry();
+      const deny = () => { throw new Error('Wait-only fixture may not dispatch external work'); };
+      return {
+        bridge: { spawn: deny },
+        registry,
+        runner: new module.ReadOnlyToolRunner(registry, { readonlyAvailable: () => false, run: deny }, ${JSON.stringify(root)}),
+        modelRouting: { profiles: [{ ref: 'shared', capacity: 'routine' }], recommend: deny },
+      };
+    }
+  `)
+  const plan: UpgradePlan = {
+    schema_version: 1, rehearsal_id: 'registered-old-host', mode: 'development',
+    config_path: config, config_sha256: sha256File(config), state_dir: state, live_db: join(state, 'live', 'orch.db'),
+    compatible_floor: 57, observation_ms: 100, previous, candidate,
+    previous_host: { module_sha256: sha256File(provider), archive_sha256: previous.sha256, source_commit: previous.source_commit },
+    approval: { actor: 'fixture:operator', approved_at: new Date().toISOString(), operation_id: uuidv7(), proof_sha256: sha256Hex(proof) },
+  }
+  writeFileSync(planPath, JSON.stringify(plan))
+  const invoke = (step: string) => spawnSync(process.execPath, ['--no-warnings', 'scripts/upgrade.ts', 'step', step, '--plan', planPath], {
+    encoding: 'utf8', env: { ...process.env, ORCHESTRA_REHEARSAL_SECRET: secret, ORCHESTRA_REHEARSAL_PROOF: proof,
+      ORCHESTRA_REHEARSAL_PREVIOUS_HOST: provider },
+  })
+  const runStep = (step: string) => {
+    const run = invoke(step)
+    expect(run.status, run.stderr).toBe(0)
+    return JSON.parse(run.stdout)
+  }
+  const readIntake = (module: Awaited<ReturnType<typeof loadUpgradeBuild>>['module']) => {
+    const db = openDb(plan.live_db, { readonly: true })
+    try {
+      return { intake: module.createIntakeControl(db, { authenticate: () => null }).get(), seq: head(db) }
+    } finally { db.raw.close() }
+  }
+  try {
+    const recorded = UPGRADE_STEPS.slice(0, -1).map(runStep)
+    expect(recorded[1].facts.previous_model_catalog).toEqual([{ ref: 'shared', capacity: 'routine' }])
+    const { module } = await loadUpgradeBuild(candidate, join(state, 'build-s6'), false)
+    const providerBytes = readFileSync(provider)
+    const beforeTamper = readIntake(module)
+    writeFileSync(provider, '// modified after the copy verification\n')
+    const tampered = invoke('rollback-table')
+    expect(tampered.status).toBe(1)
+    expect(tampered.stderr).toMatch(/module or signed build checksum mismatch/)
+    expect(readIntake(module)).toEqual(beforeTamper)
+    writeFileSync(provider, providerBytes)
+    const registry = new module.ToolRegistry()
+    const transport = fakeAgentBridge({ agentId: 'upgrade-host-test', steps: [], at: new Date().toISOString() })
+    const setMapping = async (revision: number, complexity: 'routine' | 'complex') => {
+      const service = await bootBuild(module, plan.live_db, secret, 'S6', config, {
+        bridge: new BridgeClient(transport),
+        registry, runner: new module.ReadOnlyToolRunner(registry, { readonlyAvailable: () => false,
+          run: async () => { throw new Error('No tool execution expected') } }, root),
+        modelRouting: { profiles: [{ ref: 'shared', capacity: 'complex' }], recommend: () => { throw new Error('No agent dispatch expected') } },
+      })
+      try {
+        await request(service, secret, '/v1/settings/model-routing', { operation_id: uuidv7(), expected_revision: revision,
+          mapping: { routine: null, standard: null, complex: null, [complexity]: 'shared' } })
+      } finally { await service.close() }
+    }
+    await setMapping(0, 'complex')
+    const before = readIntake(module)
+    expect(before.intake.paused).toBe(false)
+    const refused = invoke('rollback-table')
+    expect(refused.status).toBe(1)
+    expect(refused.stderr).toMatch(/previous_catalog_missing_or_insufficient/)
+    expect(readIntake(module)).toEqual(before)
+    expect(existsSync(join(state, 'rollback-fault.json'))).toBe(false)
+
+    await setMapping(1, 'routine')
+    const last = runStep('rollback-table')
+    expect(last.facts).toMatchObject({ decision: 'switch_runtime_only', health: { phase: 'S5' },
+      previous_model_catalog: [{ ref: 'shared', capacity: 'routine' }] })
+    expect(last.facts.after_seq).toBeGreaterThan(last.facts.before_seq)
+    expect(readIntake(module).intake.paused).toBe(true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+}, 50_000)
