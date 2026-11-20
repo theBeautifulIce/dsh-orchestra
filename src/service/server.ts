@@ -109,7 +109,7 @@ export type ServerQueries = {
     items: RunSummary[]; next_cursor?: string | null; as_of_seq: number
   }
   getRun: (runId: string) => RunSummary
-  listNodes: (runId: string, limit?: number) => { items: NodeRunView[]; as_of_seq: number }
+  listNodes: (runId: string, limit?: number) => { items: NodeRunView[]; as_of_seq: number; has_more?: boolean }
   getNode: (nodeRunId: string) => { item: NodeRunView; as_of_seq: number }
   getArtifact: (artifactId: string, now: number) => { item: ArtifactView; as_of_seq: number }
   getArtifactContent?: (runId: string, artifactId: string, mode: Parameters<typeof getArtifactContent>[3], now: number) => ReturnType<typeof getArtifactContent>
@@ -660,7 +660,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     if (req.method === 'GET' && url.pathname === '/v1/node-runs' && deps.queries) {
       const runId = stringParam(url, 'run_id', 256) ?? ''
       const result = deps.queries.listNodes(runId, Math.min(intParam(url, 'limit', 100), 200))
-      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items }))
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, has_more: result.has_more }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/node-runs/get' && deps.queries) {
