@@ -58,7 +58,7 @@ const catalog = {
     '/health', '/v1/activity', '/v1/artifacts', '/v1/artifacts/content', '/v1/artifacts/get', '/v1/attestations/get',
     '/v1/collaboration/scopes', '/v1/collaboration/scopes/get', '/v1/decisions', '/v1/decisions/get', '/v1/effects/review',
     '/v1/effects/unverified', '/v1/events', '/v1/events/stream', '/v1/evidence/get', '/v1/execution-history', '/v1/ledger/verify',
-    '/v1/model-escalation', '/v1/node-runs', '/v1/node-runs/get', '/v1/operations/get', '/v1/rework', '/v1/rework/get',
+    '/v1/memory/batches', '/v1/model-escalation', '/v1/node-runs', '/v1/node-runs/get', '/v1/operations/get', '/v1/rework', '/v1/rework/get',
     '/v1/rework/holds', '/v1/rework/inspections', '/v1/rework/plan', '/v1/rework/topology', '/v1/runs', '/v1/runs/get', '/v1/settings/model-routing',
     '/v1/task-plans/by-task', '/v1/task-plans/capability', '/v1/task-plans/get', '/v1/task-triggers', '/v1/tasks', '/v1/tasks/get',
     '/v1/workflows', '/v1/workflows/generate/capability', '/v1/workflows/get', '/v1/workflows/versions/get', '/v1/workspace/overview',

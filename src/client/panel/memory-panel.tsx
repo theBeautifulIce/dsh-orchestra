@@ -59,6 +59,13 @@ export type MemoryPanelProps = {
 }
 
 type Notice = { text: string; tone: 'ok' | 'error' }
+type ReadResult = {
+  retry: number
+  reloadVersion: number
+  onSnapshot: MemoryPanelProps['onSnapshot']
+} & ({ status: 'ready'; batches: MemoryBatchView[] } | { status: 'failed' })
+
+const EMPTY_BATCHES: MemoryBatchView[] = []
 
 const RECOVERY_LABEL: Record<RecoveryChoice, string> = {
   confirm_applied: '确认全部写入',
@@ -72,10 +79,19 @@ function recoveryError(error: unknown): string {
   return describeDecisionError(error)
 }
 
-export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reloadVersion = 0, onSnapshot, onOpenDecisions, onOpenTasks }: MemoryPanelProps) {
-  const [batches, setBatches] = useState<MemoryBatchView[]>([])
-  const [loading, setLoading] = useState(true)
-  const [failed, setFailed] = useState(false)
+export function MemoryPanel(props: MemoryPanelProps) {
+  const { api, recovery, memoryEnabled, proposalOnly } = props
+  const [source, setSource] = useState({ api, recovery, memoryEnabled, proposalOnly, generation: 0 })
+  // Reset expanded items and recovery proofs before rendering another source or permission mode.
+  if (source.api !== api || source.recovery !== recovery
+    || source.memoryEnabled !== memoryEnabled || source.proposalOnly !== proposalOnly) {
+    setSource({ api, recovery, memoryEnabled, proposalOnly, generation: source.generation + 1 })
+  }
+  return <MemoryPanelContent key={source.generation} {...props} />
+}
+
+function MemoryPanelContent({ api, recovery, memoryEnabled, proposalOnly, reloadVersion = 0, onSnapshot, onOpenDecisions, onOpenTasks }: MemoryPanelProps) {
+  const [readResult, setReadResult] = useState<ReadResult | null>(null)
   const [retry, setRetry] = useState(0)
   const [developerView, setDeveloperView] = useState(false)
   const [openedItem, setOpenedItem] = useState<string | null>(null)
@@ -85,20 +101,21 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
 
   useEffect(() => {
     let current = true
-    setLoading(true)
-    setFailed(false)
+    const request = { retry, reloadVersion, onSnapshot }
     void api.listMemoryBatches({}).then((result) => {
       if (!current) return
-      setBatches(result.data.items)
+      setReadResult({ ...request, status: 'ready', batches: result.data.items })
       onSnapshot?.(result.as_of_seq)
     }).catch(() => {
-      if (current) setFailed(true)
-    }).finally(() => {
-      if (current) setLoading(false)
+      if (current) setReadResult({ ...request, status: 'failed' })
     })
     return () => { current = false }
   }, [api, retry, reloadVersion, onSnapshot])
 
+  const result = readResult?.retry === retry && readResult.reloadVersion === reloadVersion && readResult.onSnapshot === onSnapshot
+    ? readResult : null
+  const batches = result?.status === 'ready' ? result.batches : EMPTY_BATCHES
+  const readOnly = memoryEnabled === false
   const latest = useMemo(() => {
     if (batches.length === 0) return undefined
     return [...batches].sort((a, b) =>
@@ -117,7 +134,7 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
   const notWrittenBatches = useMemo(() => batches.filter((batch) => NOT_WRITTEN_STATUSES.has(batch.status)), [batches])
 
   async function inspectBatch(batch: MemoryBatchView) {
-    if (!recovery) return
+    if (readOnly || !recovery) return
     setBusy(true)
     setNotice(null)
     setProof(null)
@@ -132,7 +149,7 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
   }
 
   async function resolveRecovery(inspection: MemoryRecoveryView, choice: RecoveryChoice) {
-    if (!recovery) return
+    if (readOnly || !recovery) return
     setBusy(true)
     setNotice(null)
     try {
@@ -152,19 +169,22 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
     <header className="ops-page-header">
       <div>
         <h1 id="memory-panel-title">记忆管理</h1>
-        <p className="ops-meta">把一次成功任务中值得复用的经验整理成条目，例如已验证的发布步骤。{proposalOnly ? '当前工作区开放提议和来源核对，写入尚未开放。' : '你可以检查提议和来源，批准后才写入记忆插件。'}</p>
-        {latest && <p className="ops-meta">最近批次 · {memoryCopy(latest).text}</p>}
+        <p className="ops-meta">{readOnly ? '当前宿主未启用记忆整理，页面为只读。连接正常时，仍可查看已有条目和历史整理结果。'
+          : proposalOnly ? '当前工作区开放记忆提议和来源核对，写入尚未开放。'
+            : memoryEnabled ? '把成功任务中值得复用的经验整理成条目，核对提议和来源后，再批准写入。'
+              : '查看任务整理出的记忆条目、提议和来源。'}</p>
+        {latest && <p className="ops-meta">最近批次 · {batchStateText(latest, readOnly, proposalOnly)}</p>}
       </div>
-      <label style={toggleStyle}>
+      {result?.status === 'ready' && <label style={toggleStyle}>
         <input type="checkbox" aria-label="开发者视图" checked={developerView} onChange={(event) => setDeveloperView(event.target.checked)} />
         开发者视图
-      </label>
+      </label>}
     </header>
-    {notice && <p role={notice.tone === 'error' ? 'alert' : 'status'} style={notice.tone === 'error' ? errorTextStyle : mutedStyle}>{notice.text}</p>}
-    {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={() => setRetry((value) => value + 1)} style={buttonStyle}>{COPY.retry}</button></div>}
-    {loading && <p role="status" style={mutedStyle}>正在读取记忆…</p>}
+    {result?.status === 'ready' && notice && <p role={notice.tone === 'error' ? 'alert' : 'status'} style={notice.tone === 'error' ? errorTextStyle : mutedStyle}>{notice.text}</p>}
+    {result?.status === 'failed' && <div role="alert" style={errorStyle}><span>记忆{COPY.queryFailed}</span><button type="button" onClick={() => setRetry((value) => value + 1)} style={buttonStyle}>{COPY.retry}</button></div>}
+    {!result && <p role="status" style={mutedStyle}>正在读取记忆…</p>}
 
-    <div className="ops-context-grid">
+    {result?.status === 'ready' && <div className="ops-context-grid">
     <section aria-labelledby="memory-q1-title" style={blockStyle}>
       <h2 id="memory-q1-title" style={sectionTitleStyle}>已写入条目</h2>
       {writtenItems.length === 0
@@ -188,23 +208,26 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
     </section>
 
     <section aria-labelledby="memory-q2-title" style={blockStyle}>
-      <h2 id="memory-q2-title" style={sectionTitleStyle}>审批与对账</h2>
+      <h2 id="memory-q2-title" style={sectionTitleStyle}>{!readOnly && proposalOnly ? '提议与来源' : '审批与对账'}</h2>
       {awaitingBatches.length === 0
-        ? <p style={mutedStyle}>没有待确认</p>
+        ? <p style={mutedStyle}>{!readOnly && proposalOnly ? '没有可查看的提议' : '没有待确认'}</p>
         : <>
-          <p style={statusStyle}>有 {pendingTotal} 条等你确认</p>
-          <button type="button" onClick={() => onOpenDecisions?.()} disabled={!onOpenDecisions} style={buttonStyle}>查看审批</button>
+          <p style={statusStyle}>{readOnly ? `有 ${pendingTotal} 条提议待确认，当前仅可查看。`
+            : proposalOnly ? `有 ${pendingTotal} 条记忆提议可查看` : `有 ${pendingTotal} 条等你确认`}</p>
+          {!readOnly && <button type="button" onClick={() => onOpenDecisions?.()} disabled={!onOpenDecisions} style={buttonStyle}>
+            {proposalOnly ? '查看提议' : '查看审批'}
+          </button>}
         </>}
-      {batches.filter((batch) => batch.recovery_available).map((batch) => {
+      {!readOnly && batches.filter((batch) => batch.recovery_available).map((batch) => {
         const inspection = proof?.batch_id === batch.batch_id ? proof : null
         return <div key={batch.batch_id} style={itemStyle}>
-          <PanelCommandButton disabled={!recovery || busy || loading || failed} onClick={() => { void inspectBatch(batch) }} style={buttonStyle}>
+          <PanelCommandButton disabled={!recovery || busy} onClick={() => { void inspectBatch(batch) }} style={buttonStyle}>
             核对记忆写入
           </PanelCommandButton>
           {inspection && <>
             <p style={mutedStyle}>已写入 {inspection.written_count} 条，未写入 {inspection.missing_count} 条。</p>
             {inspection.allowed_resolutions.map((choice) => <PanelCommandButton key={choice}
-              disabled={busy || loading || failed} style={buttonStyle}
+              disabled={busy} style={buttonStyle}
               onClick={() => { void resolveRecovery(inspection, choice) }}>{RECOVERY_LABEL[choice]}</PanelCommandButton>)}
           </>}
         </div>
@@ -216,12 +239,11 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
       {notWrittenBatches.length === 0
         ? <p style={mutedStyle}>这次没有没写成的条目。</p>
         : notWrittenBatches.map((batch) => {
-          const copy = memoryCopy(batch)
           const hideItems = batch.status === 'indeterminate'
           const notWritten = batch.items.filter((item) => item.status !== 'applied')
           return <div key={batch.batch_id} style={itemStyle}>
-            <p style={statusStyle}>{copy.text}</p>
-            <p style={mutedStyle}>{NEXT_STEP[batch.status] ?? '可以再让管家处理一次。'}</p>
+            <p style={statusStyle}>{batchStateText(batch, readOnly)}</p>
+            {!readOnly && <p style={mutedStyle}>{NEXT_STEP[batch.status] ?? '可以再让管家处理一次。'}</p>}
             {!hideItems && notWritten.map((item) => <p key={item.client_key} style={mutedStyle}>
               {item.title}：{item.judge_reason ?? '这次没有写进去'}
             </p>)}
@@ -231,8 +253,8 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
 
     <section aria-labelledby="memory-q4-title" style={blockStyle}>
       <h2 id="memory-q4-title" style={sectionTitleStyle}>整理状态</h2>
-      {!latest
-        ? <div><p style={mutedStyle}>{memoryEnabled === false ? '当前连接无法发起记忆整理。请在设置中查看宿主连接状态。' : '要记录这次任务的经验，打开成功运行的「结果」，选择「整理为记忆」，写下希望保留的内容。'}</p>
+      {readOnly ? <p style={mutedStyle}>{latest ? '以上是最近一次整理的记录。' : '暂无整理记录。'}</p>
+        : !latest ? <div><p style={mutedStyle}>要记录这次任务的经验，打开成功运行的「结果」，选择「整理为记忆」，写下希望保留的内容。</p>
             {memoryEnabled && onOpenTasks && <button type="button" onClick={onOpenTasks} style={buttonStyle}>去任务中选择一次成功运行</button>}
           </div>
         : <>
@@ -241,12 +263,14 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
               <p style={mutedStyle}>让管家改一版</p>
               <p style={mutedStyle}>再试一次</p>
             </>
-            : <p style={mutedStyle}>{latest.status === 'awaiting_human' ? '先确认要写哪几条' : '这次不用再记了'}</p>}
+            : <p style={mutedStyle}>{latest.status === 'awaiting_human'
+              ? proposalOnly ? '可以查看提议及其来源' : '先确认要写哪几条'
+              : '这次不用再记了'}</p>}
         </>}
     </section>
 
-    </div>
-    {developerView && <dl style={detailGridStyle}>
+    </div>}
+    {result?.status === 'ready' && developerView && <dl style={detailGridStyle}>
       {batches.map((batch) => <Fragment key={batch.batch_id}>
         <dt>批次 ID</dt><dd>batch_id: {batch.batch_id}</dd>
         <dt>评估 ID</dt><dd>evaluation_id: {batch.evaluation_id ?? NOT_PROVIDED}</dd>
@@ -256,6 +280,17 @@ export function MemoryPanel({ api, recovery, memoryEnabled, proposalOnly, reload
       </Fragment>)}
     </dl>}
   </section>
+}
+
+function batchStateText(batch: MemoryBatchView, readOnly: boolean, proposalOnly?: boolean): string {
+  if (batch.status === 'awaiting_human' && (readOnly || proposalOnly)) {
+    return `有 ${batch.pending_count} 条${readOnly ? '提议待确认' : '提议可查看'}`
+  }
+  if (readOnly) {
+    if (batch.status === 'approved') return '已批准，尚未写入'
+    if (batch.status === 'applying' || batch.status === 'indeterminate') return '写入结果待核对'
+  }
+  return memoryCopy(batch).text
 }
 
 const sectionTitleStyle = { margin: 0, fontSize: 16 }
