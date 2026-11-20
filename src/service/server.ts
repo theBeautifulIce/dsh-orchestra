@@ -737,13 +737,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const { as_of_seq, ...data } = deps.queries.listExecutionHistory({
         taskId: stringParam(url, 'task_id', 256), runId: stringParam(url, 'run_id', 256), nodeId: stringParam(url, 'node_run_id', 256),
         before: intParam(url, 'before', Number.MAX_SAFE_INTEGER), limit: intParam(url, 'limit', 35),
+        filter: stringParam(url, 'filter', 24),
       })
       sendJson(res, 200, okEnvelope(as_of_seq, data))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/activity' && deps.queries) {
       const { as_of_seq, ...data } = deps.queries.listEventHistory({ runId: stringParam(url, 'run_id', 256), taskId: stringParam(url, 'task_id', 256),
-        beforeSeq: intParam(url, 'before_seq', Number.MAX_SAFE_INTEGER), limit: Math.min(intParam(url, 'limit', 40), 100) })
+        beforeSeq: intParam(url, 'before_seq', Number.MAX_SAFE_INTEGER), limit: Math.min(intParam(url, 'limit', 40), 100), filter: stringParam(url, 'filter', 24) })
       sendJson(res, 200, okEnvelope(as_of_seq, data))
       return
     }

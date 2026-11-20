@@ -1,9 +1,12 @@
 import { currentAttempts } from './runtime-topology.ts'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { NodeRunView, RunSummary } from '../api/types.ts'
 import { readCanvasDoc, NODE_TYPE_LABEL, topologicalOrder, type CanvasDoc, type CanvasNode } from './workflow-canvas-nodes.tsx'
-import { ACTIVE_NODE_STATES, BLOCKED_NODE_STATES, nodeExecutionLabel, nodeExecutionPhase, waitingFor } from './task-node-status.ts'
+import { MODEL_LEVELS } from '../../executor/model-routing.ts'
+import { COPY } from './copy.ts'
+import { nodeExecutionLabel, nodeExecutionPhase, waitingFor } from './task-node-status.ts'
+import { TASK_RUN_STEPS_CSS } from './task-workspace-styles.ts'
 
 type Step = { id: string; nodeId: string; title: string; type: string; attempt: NodeRunView | null; definition?: CanvasNode }
 
@@ -40,9 +43,9 @@ export function usePinnedWorkflow(api: ResourcesApi, workflowId: string | null |
   return key === loaded?.key ? loaded : undefined
 }
 
-export function TaskRunSteps({ nodes, doc, run, compact = false, onOpenRun, renderEvidence }: {
-  nodes: readonly NodeRunView[]; doc?: CanvasDoc | null; compact?: boolean
-  run?: RunSummary
+export function TaskRunSteps({ nodes, doc, run, runDetails = false, onOpenRun, renderEvidence }: {
+  nodes: readonly NodeRunView[]; doc?: CanvasDoc | null
+  run?: RunSummary; runDetails?: boolean
   onOpenRun?: (trigger: HTMLButtonElement) => void
   renderEvidence?: (node: NodeRunView) => ReactNode
 }) {
@@ -50,90 +53,154 @@ export function TaskRunSteps({ nodes, doc, run, compact = false, onOpenRun, rend
   const titles = useMemo(() => new Map([...(doc?.nodes ?? []).map((node) => [node.node_id, node.title] as const),
     ...steps.map((step) => [step.nodeId, step.title] as const)]), [steps, doc])
   const [selectedId, setSelectedId] = useState<string>()
-  const active = steps.find((step) => step.attempt && (ACTIVE_NODE_STATES.has(step.attempt.status) || BLOCKED_NODE_STATES.has(step.attempt.status)))
-  const selected = steps.find((step) => step.nodeId === selectedId) ?? active ?? steps[0]
+  const attention = steps.filter(({ attempt }) => needsAttention(attempt))
+  const active = steps.filter(({ attempt }) => nodeExecutionPhase(attempt).tone === 'active')
+  const waiting = steps.filter(({ attempt }) => attempt?.execution_state === 'waiting_capacity' || attempt?.execution_state === 'waiting_dependencies')
+  const selected = steps.find((step) => step.nodeId === selectedId) ?? attention[0] ?? active[0] ?? waiting[0] ?? steps[0]
   const done = steps.filter((step) => step.attempt?.status === 'done').length
+  const parallel = useMemo(() => sameLayerWidth(doc, steps), [doc, steps])
+  const progress = steps.length > 1 ? nodes.length ? `${done} / ${steps.length} 步完成` : `${steps.length} 个计划步骤` : null
+  const picker = useRef<HTMLOListElement>(null)
+  const selectedNodeId = selected?.nodeId
+  useLayoutEffect(() => {
+    const list = picker.current
+    const button = list?.querySelector('[aria-pressed=true]')
+    if (!list || !button) return
+    const box = list.getBoundingClientRect()
+    const row = button.getBoundingClientRect()
+    if (row.top < box.top) list.scrollTop -= box.top - row.top
+    else if (row.bottom > box.bottom) list.scrollTop += row.bottom - box.bottom
+  }, [selectedNodeId])
 
-  return <div className={compact ? 'task-run-grid task-run-grid--compact' : 'task-run-grid'}>
-    <section className="task-flow-steps" aria-label="执行步骤">
-      <header className="task-flow-section-head">
-        <strong>执行步骤</strong>
-        <span>{nodes.length ? `${done} / ${steps.length} 步完成` : steps.length ? `${steps.length} 个计划步骤` : '暂无步骤'}</span>
-      </header>
-      {run?.scheduled_for && <div className="task-flow-trigger-record">
-        <span className="task-type-badge">触发</span>
-        <div><strong>定时触发</strong><p>计划时间 <time dateTime={run.scheduled_for}>{formatTaskDate(run.scheduled_for)}</time></p></div>
-        <span>已记录</span>
-      </div>}
-      {active && <p className="task-flow-current">当前关注 · {active.title}</p>}
-      {steps.length === 0 && <p className="task-flow-empty">执行步骤会在运行排入后出现在这里。</p>}
-      <ol>
+  return <section className="task-run-steps" aria-label="执行步骤">
+    <style>{TASK_RUN_STEPS_CSS}</style>
+    <header className="task-run-steps-head">
+      <h3>执行步骤{runDetails && ` · ${steps.length}`}</h3>
+      {runDetails && run?.settling && <p>正在收尾</p>}
+      {progress && <span>{progress}</span>}
+    </header>
+    {(attention.length > 0 || active.length > 1 || waiting.length > 0 || parallel > 1) && steps.length > 1 &&
+      <ul className="task-step-totals" aria-label="步骤状态概况">
+        {attention.length > 0 && <li data-tone="blocked">{attention.length} 步需关注</li>}
+        {active.length > 0 && <li data-tone="active">{active.length} 步执行中</li>}
+        {waiting.length > 0 && <li>{waiting.length} 步等待</li>}
+        {parallel > 1 && <li>同层最多 {parallel} 步</li>}
+      </ul>}
+    {!runDetails && run?.scheduled_for && <p className="task-flow-trigger-record">定时触发 · 计划时间 <time dateTime={run.scheduled_for}>{formatTaskDate(run.scheduled_for)}</time></p>}
+    {steps.length === 0 ? <p className="task-flow-empty">{runDetails ? '这次运行没有执行步骤。' : '执行步骤会在运行排入后出现在这里。'}</p>
+      : <div className="task-run-grid" data-single={steps.length === 1}>
+      {steps.length > 1 && <ol className="task-flow-steps" ref={picker} aria-label="选择执行步骤">
         {steps.map((step, index) => {
           const phase = nodeExecutionPhase(step.attempt)
           const type = NODE_TYPE_LABEL[step.type] ?? step.type
           return <li key={step.id}>
             <button className="task-flow-step" type="button" data-tone={phase.tone} aria-pressed={selected === step} onClick={() => setSelectedId(step.nodeId)}>
-              <span className="task-flow-step-mark"><span className="task-flow-step-number">{String(index + 1).padStart(2, '0')}</span></span>
-              <span className="task-flow-step-content"><strong>{step.title}</strong>
-                <span>{type}{step.attempt ? ` · 第 ${step.attempt.attempt} 次尝试` : ' · 固定流程定义'}</span>
-                {step.attempt?.started_at && <time dateTime={step.attempt.started_at}>开始于 {formatTaskDate(step.attempt.started_at)}</time>}
-              </span>
+              <span className="task-flow-step-number" aria-hidden="true">{index + 1}</span>
+              <strong title={type}>{step.title}</strong>
               <span className="task-flow-step-result">{step.attempt ? nodeExecutionLabel(step.attempt) : '尚无执行记录'}</span>
             </button>
           </li>
         })}
-      </ol>
-    </section>
-    <aside className="task-step-inspector" aria-label="步骤执行详情">
-      <header className="task-flow-section-head"><strong>步骤执行详情</strong>
-        {selected && <span>{steps.indexOf(selected) + 1} / {steps.length}</span>}
-      </header>
-      {selected
-        ? <StepInspection step={selected} doc={doc} titles={titles} renderEvidence={renderEvidence} onOpenRun={onOpenRun} />
-        : <p className="task-flow-empty">选择一个执行步骤，查看其依赖、结果和证据。</p>}
-    </aside>
-  </div>
+      </ol>}
+      <aside className="task-step-inspector" aria-label="步骤执行详情">
+        {selected && <StepInspection key={selected.id} step={selected} steps={steps} doc={doc} titles={titles} renderEvidence={renderEvidence} onOpenRun={onOpenRun} />}
+      </aside>
+    </div>}
+  </section>
 }
 
-function StepInspection({ step, doc, titles, onOpenRun, renderEvidence }: {
-  step: Step; doc?: CanvasDoc | null; onOpenRun?: (trigger: HTMLButtonElement) => void
+function sameLayerWidth(doc: CanvasDoc | null | undefined, steps: readonly Step[]) {
+  const topology = doc && steps.length > 1 ? topologicalOrder(doc) : null
+  if (!topology?.ok) return 0
+  const counts = new Map<number, number>()
+  for (const { nodeId } of steps) {
+    const layer = topology.layer.get(nodeId)
+    if (layer !== undefined) counts.set(layer, (counts.get(layer) ?? 0) + 1)
+  }
+  return Math.max(0, ...counts.values())
+}
+
+function StepInspection({ step, steps, doc, titles, onOpenRun, renderEvidence }: {
+  step: Step; steps: readonly Step[]; doc?: CanvasDoc | null; onOpenRun?: (trigger: HTMLButtonElement) => void
   titles: ReadonlyMap<string, string>
   renderEvidence?: (node: NodeRunView) => ReactNode
 }) {
   const node = step.attempt
   const name = (id: string) => titles.get(id) || id
-  const incoming = node?.depends_on?.map(name) ?? doc?.edges.filter((edge) => edge.to === step.nodeId).map((edge) => name(edge.from))
-  const outgoing = doc?.edges.filter((edge) => edge.from === step.nodeId).map((edge) => name(edge.to))
+  const incomingIds = node?.depends_on ?? doc?.edges.filter((edge) => edge.to === step.nodeId).map((edge) => edge.from)
+  const incoming = incomingIds?.map(name)
+  const downstream = new Set(doc?.edges.filter((edge) => edge.from === step.nodeId).map((edge) => edge.to))
+  for (const { nodeId, attempt } of steps) {
+    if (attempt?.depends_on?.includes(step.nodeId)) downstream.add(nodeId)
+    else if (attempt?.depends_on) downstream.delete(nodeId)
+  }
+  const outgoing = [...downstream].map(name)
   const assignment = node?.model_assignment
   const model = assignment?.usage
   const contract = step.definition?.raw.contract as { description?: unknown } | undefined
+  const description = typeof contract?.description === 'string' ? contract.description : null
   const waiting = node && waitingFor(node, titles)
+  const allUpstreamWaiting = waiting && incomingIds?.length && incomingIds.length === node?.waiting_on?.length
+    && node.waiting_on.every((id) => incomingIds.includes(id))
+  const heartbeat = node && heartbeatNotice(node)
+  const phase = nodeExecutionPhase(node)
+  const status = node ? nodeExecutionLabel(node) : '尚无执行记录'
+  const modelLabel = model ? '实际执行模型' : assignment?.state === 'confirmed' ? '宿主确认模型'
+    : assignment?.state === 'rejected' ? '模型未获宿主确认' : '拟用模型'
+  const modelName = assignment && (model ? `${model.provider} / ${model.model}`
+    : assignment.provider && assignment.model ? `${assignment.provider} / ${assignment.model}` : assignment.model_ref)
+  const [open, setOpen] = useState(false)
   return <div className="task-step-inspect-body">
-    <h3>{step.title}</h3>
-    <p>{NODE_TYPE_LABEL[step.type] ?? step.type} · {nodeExecutionPhase(node).label}{node && ` · 第 ${node.attempt} 次尝试`}</p>
-    {node?.started_at && <p>开始于 <time dateTime={node.started_at}>{formatTaskDate(node.started_at)}</time></p>}
-    {step.definition?.raw.runtime_step != null && <p>运行中新增 · 来源角色：{String((step.definition.raw.runtime_step as { source_title: string }).source_title)}</p>}
-    {typeof contract?.description === 'string' && <section><h4>步骤职责</h4><p>{contract.description}</p></section>}
-    <section><h4>状态与结果</h4><p>{node ? nodeExecutionLabel(node) : '尚无执行记录'}</p>
+    <header className="task-step-head"><h4>{step.title}</h4><span data-tone={phase.tone}>{status}</span></header>
+    <p className="task-step-meta">{NODE_TYPE_LABEL[step.type] ?? step.type}{node && ` · 第 ${node.attempt} 次尝试`}
+      {node?.started_at && <> · 开始于 <time dateTime={node.started_at}>{formatTaskDate(node.started_at)}</time></>}
+      {node && node.execution_count > 0 && ` · ${node.execution_count} 条工具执行记录`}
+      {node && Boolean(node.projection_missing?.length) && ' · 部分信息暂不可用'}
+    </p>
+    {(waiting || node?.hang_reason || heartbeat || Boolean(node?.active_decision_ids.length)) && <div className="task-step-attention" data-tone={phase.tone}>
       {waiting && <p>{waiting}</p>}
       {node?.hang_reason && <p>{node.hang_reason}</p>}
-      {node && node.active_decision_ids.length > 0 && <p>{node.active_decision_ids.length} 项待审批</p>}
-    </section>
-    {(incoming || outgoing) && <section><h4>节点依赖</h4><dl className="task-step-dependencies">
-      {incoming && <><dt>上游</dt><dd>{incoming.join('、') || '无上游步骤'}</dd></>}
-      {outgoing && <><dt>下游</dt><dd>{outgoing.join('、') || '无后续节点'}</dd></>}
-    </dl></section>}
-    {assignment && <section>
-      <h4>{model ? '实际执行模型' : assignment.state === 'confirmed' ? '宿主确认模型' : assignment.state === 'rejected' ? '模型未获宿主确认' : '拟用模型'}</h4>
-      <p>{model ? `${model.provider} / ${model.model}` : assignment.provider && assignment.model
-        ? `${assignment.provider} / ${assignment.model}` : assignment.model_ref}</p><p>{assignment.reason}</p>
-      {assignment.reasoning_effort !== undefined && <p>派发思考深度 · {assignment.reasoning_effort ?? '模型默认'}</p>}
-      {model?.reasoning_effort && <p>实际请求思考深度 · {model.reasoning_effort}</p>}
-      {assignment.settings_revision != null && <p>按用户配置 · 修订 {assignment.settings_revision}</p>}
-    </section>}
-    {node && renderEvidence?.(node)}
+      {heartbeat && <p>{heartbeat}</p>}
+      {node && node.active_decision_ids.length > 0 && <p>{node.active_decision_ids.length} 项{COPY.awaitingDecision}</p>}
+    </div>}
+    {((!allUpstreamWaiting && !!incoming?.length) || outgoing.length > 0) && <dl className="task-step-dependencies">
+      {!allUpstreamWaiting && !!incoming?.length && <><dt>上游</dt><dd>{incoming.join('、')}</dd></>}
+      {outgoing.length > 0 && <><dt>下游</dt><dd>{outgoing.join('、')}</dd></>}
+    </dl>}
+    {assignment && <div className="task-step-model">
+      <p><strong>{modelLabel}</strong> · {modelName}</p>
+      {assignment.reasoning_effort !== undefined && <span>派发思考深度 · {assignment.reasoning_effort ?? '模型默认'}</span>}
+      {model?.reasoning_effort && <span>实际请求思考深度 · {model.reasoning_effort}</span>}
+    </div>}
+    {(assignment || description || step.definition?.raw.runtime_step != null || (node && renderEvidence)) && <details className="task-step-more"
+      onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>{node && renderEvidence ? '更多详情与执行日志' : '更多步骤详情'}</summary>
+      {open && <div className="task-step-more-body">
+        {step.definition?.raw.runtime_step != null && <p>运行中新增 · 来源角色：{String((step.definition.raw.runtime_step as { source_title: string }).source_title)}</p>}
+        {description && <section><h5>步骤职责</h5><p>{description}</p></section>}
+        {assignment && <section><h5>模型诊断</h5>
+          <p>{MODEL_LEVELS[assignment.complexity]?.label} · {assignment.reason}</p>
+          {assignment.settings_revision != null && <p>按用户配置 · 修订 {assignment.settings_revision}</p>}
+        </section>}
+        {node && renderEvidence?.(node)}
+      </div>}
+    </details>}
     {onOpenRun && node && <button type="button" className="task-quiet-button" onClick={(event) => onOpenRun(event.currentTarget)}>查看这次运行</button>}
   </div>
+}
+
+const terminal = new Set(['done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded'])
+
+function heartbeatNotice(node: NodeRunView): string | null {
+  if (!node.heartbeat_at || terminal.has(node.status)) return null
+  const seconds = Math.floor((Date.now() - Date.parse(node.heartbeat_at)) / 1000)
+  return seconds > 30 ? `${COPY.heartbeatStopped} ${seconds} 秒` : null
+}
+
+function needsAttention(node: NodeRunView | null) {
+  if (!node) return false
+  const { tone } = nodeExecutionPhase(node)
+  return tone === 'blocked' || tone === 'failed' || Boolean(node.hang_reason || node.active_decision_ids.length || heartbeatNotice(node))
 }
 
 export function formatTaskDate(value: string, timeZone?: string): string {

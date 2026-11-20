@@ -617,7 +617,12 @@ it('Q-08 / Q-30 投影关联版本的外部操作声明、既有结算及决定�
     const workflowId = 'effect-projection'
     const title = '外部操作'
     const user = 'human:owner'
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET side_effect_policy = 'pure' WHERE node_run_id = 'nr1'"))
+    expect(getNodeSnapshot(db, 'nr1').item).toMatchObject({
+      declared_effect: null, verified_effect: null, evidence_state: 'not_required', projection_missing: [],
+    })
     withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET side_effect_policy = 'irreversible' WHERE node_run_id = 'nr1'")
       createWorkflow(tx, { workflowId, name: title, actor: user, now: NOW, definition: { name: title, nodes: [
         { node_id: 'start', type: 'trigger', title: '入口', position: { x: 0, y: 0 } },
         { node_id: 'n1', type: 'agent', title, position: { x: 100, y: 0 }, contract: { declared_effect: 'not_applied' } },
@@ -641,6 +646,7 @@ it('Q-08 / Q-30 投影关联版本的外部操作声明、既有结算及决定�
     })
     expect(getNodeSnapshot(db, 'nr1').item).toMatchObject({
       declared_effect: 'not_applied', verified_effect: 'applied', evidence_state: 'settled', evidence_strength: null, effect_decision_id: decision,
+      effect_resolution_basis: 'evidence',
     })
     expect(settle(db, { basis: 'evidence', evidenceId: EXEC_ID })).toMatchObject({ replayed: true, evidence_id: EXEC_ID })
   } finally {

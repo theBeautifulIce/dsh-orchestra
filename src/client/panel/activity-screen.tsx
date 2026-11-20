@@ -28,6 +28,10 @@ const LABELS: Readonly<Record<string, string>> = {
   'collaboration.adopted': '主理人采纳核验结论',
 }
 
+export function activityTitle(type: string) {
+  return Object.hasOwn(LABELS, type) ? LABELS[type]! : type
+}
+
 export function ActivityScreen({ api, reloadVersion, onSnapshot }: { api: ResourcesApi; reloadVersion: number; onSnapshot: (seq: number) => void }) {
   return <section aria-labelledby="activity-title" className="ops-page">
     <header className="ops-page-header"><h1 id="activity-title">事件日志</h1></header>
@@ -62,7 +66,7 @@ export function ActivityList({ api, runId, taskId, reloadVersion, onSnapshot, co
     {failed && <p role="alert">活动记录读取失败。 <button type="button" onClick={() => { setBefore(undefined); setRetry((value) => value + 1) }}>重试</button></p>}
     {!loading && !failed && items.length === 0 && <p style={muted}>当前没有活动记录。</p>}
     {items.length > 0 && <ol style={timeline}>{items.map((event) => <li key={event.seq} style={row}>
-      <div><strong>{LABELS[event.type] ?? event.type}</strong><p style={muted}>
+      <div><strong>{activityTitle(event.type)}</strong><p style={muted}>
         {[event.run_id, event.node_run_id, event.decision_id].filter(Boolean).join(' · ') || `事件 #${event.seq}`}</p>
         {!compact && <EventDetails entries={event.details} />}</div>
       <time dateTime={event.occurred_at} style={muted}>{new Date(event.occurred_at).toLocaleString()}</time>

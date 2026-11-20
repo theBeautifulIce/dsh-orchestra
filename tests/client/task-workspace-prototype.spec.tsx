@@ -4,6 +4,8 @@ import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { TaskDetailScreen } from '../../src/client/panel/task-detail-screen.tsx'
 import { TaskFlowView } from '../../src/client/panel/task-flow-view.tsx'
+import { TaskRunSteps } from '../../src/client/panel/task-run-steps.tsx'
+import { readCanvasDoc } from '../../src/client/panel/workflow-canvas-nodes.tsx'
 import { createFakeService, nodeRunView, renderPanel, runSummary, taskSummary, type FakeQuery, type FakeReply } from './harness.ts'
 
 const now = '2026-11-18T01:00:00.000Z'
@@ -25,6 +27,51 @@ function apiFrom(handler: (query: FakeQuery) => FakeReply) {
 const missing = { ok: false, error: { code: 'NOT_FOUND', message: 'missing', retryable: false } } as const
 
 describe('任务工作台与排期详情', () => {
+  it('单步只有一处摘要，主动展开后加载该次尝试的日志与证据', async () => {
+    const node = nodeRunView({ node_id: 'review', node_run_id: 'review-2', title: '核对记忆', attempt: 2 })
+    const opened: string[] = []
+    const view = await renderPanel(<TaskRunSteps nodes={[node]} renderEvidence={(step) => {
+      opened.push(step.node_run_id)
+      return <p>日志夹具</p>
+    }} />)
+    try {
+      expect(view.findAll('button.task-flow-step')).toHaveLength(0)
+      expect(view.findAll('.task-step-head h4').map((title) => title.textContent)).toEqual(['核对记忆'])
+      expect(view.text()).not.toContain('日志夹具')
+      expect(opened).toEqual([])
+      await view.click(view.findAll('.task-step-more summary')[0]!)
+      await view.flush()
+      expect(view.text()).toContain('日志夹具')
+      expect(opened).toEqual(['review-2'])
+    } finally { view.unmount() }
+  })
+
+  it('多步优先检查异常，保持选择顺序与等待依赖，历史尝试不增加步骤', async () => {
+    const doc = readCanvasDoc({ name: '并行核验', nodes: [
+      { node_id: 'write', title: '编写报告', type: 'agent' }, { node_id: 'check', title: '独立核对', type: 'agent' },
+      { node_id: 'join', title: '汇总', type: 'agent' },
+    ], edges: [{ from: 'write', to: 'join' }, { from: 'check', to: 'join' }] })
+    const view = await renderPanel(<TaskRunSteps doc={doc} nodes={[
+      nodeRunView({ node_run_id: 'write', node_id: 'write', title: '编写报告', status: 'started', status_label: '执行中' }),
+      nodeRunView({ node_run_id: 'check-1', node_id: 'check', title: '旧核对名', status: 'superseded' }),
+      nodeRunView({ node_run_id: 'check-2', node_id: 'check', title: '独立核对', attempt: 2, status: 'failed', status_label: '核对未通过', hang_reason: '证据不全' }),
+      nodeRunView({ node_run_id: 'join', node_id: 'join', title: '汇总', execution_state: 'waiting_dependencies', depends_on: ['write', 'check'], waiting_on: ['write', 'check'] }),
+    ]} />)
+    try {
+      const picker = view.findAll('button.task-flow-step')
+      expect(picker.map((button) => button.querySelector('strong')?.textContent)).toEqual(['编写报告', '独立核对', '汇总'])
+      expect(picker[1]?.getAttribute('aria-pressed')).toBe('true')
+      expect(view.text()).toContain('1 步需关注')
+      expect(view.text()).toContain('同层最多 2 步')
+      const detail = view.container.querySelector('.task-step-inspector')!
+      expect(detail.textContent).toContain('证据不全')
+      expect(detail.textContent).toContain('第 2 次尝试')
+      await view.click(picker[2]!)
+      expect(detail.textContent).toContain('等待：编写报告、独立核对')
+      expect(detail.textContent?.match(/编写报告、独立核对/gu)).toHaveLength(1)
+    } finally { view.unmount() }
+  })
+
   it('流程使用运行固定版本，选中步骤展示上游和模型使用证据', async () => {
     const { api, service } = apiFrom(({ path }) => {
       if (path === '/v1/runs/get') return { ok: true, data: recent }

@@ -131,6 +131,34 @@ it('shows the real ten-way fan-out, join, and live queue with one selected run r
   } finally { view.unmount() }
 })
 
+it('keeps an older directly opened run mounted while refreshing its details', async () => {
+  const run = runSummary({ task_id: main.task_id, run_id: 'older', project_context: {
+    version: 'a'.repeat(64), as_of_seq: 9, sources: [{ path: 'README.md', status: 'available' }],
+  } })
+  const pending = deferred<FakeReply>()
+  let refresh = false
+  const service = createFakeService(({ path }) => {
+    if (path === '/v1/tasks/get') return { ok: true, data: main }
+    if (path === '/v1/runs/get') return refresh ? pending.promise : { ok: true, data: run }
+    return { ok: true, data: page([]) }
+  })
+  const api = createResourcesApi(createApiClient('http://panel.test', service.fetcher))
+  const screen = (reloadVersion: number) =>
+    <TaskDetailScreen api={api} taskId={main.task_id} initialRunId="older" onBack={() => {}} reloadVersion={reloadVersion} />
+  const view = await renderPanel(screen(0))
+  try {
+    await view.flush()
+    const project = () => view.findAll('summary').find((el) => el.textContent?.startsWith('本次派单的项目资料'))?.closest('details')
+    await view.click(project()!.querySelector('summary')!)
+    refresh = true
+    await view.rerender(screen(1))
+    expect(project()?.open).toBe(true)
+    await act(async () => pending.resolve({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'fixture', retryable: true } }))
+    expect(project()?.open).toBe(true)
+    expect(view.byRole('alert')).not.toHaveLength(0)
+  } finally { view.unmount() }
+})
+
 it('rechecks the selected run after refresh until its project sources are fixed, without losing model evidence', async () => {
   const run = runSummary({ task_id: main.task_id, run_id: 'main-run' })
   let pinned = false
@@ -169,24 +197,27 @@ it('rechecks the selected run after refresh until its project sources are fixed,
     await view.rerender(screen(1))
     await view.flush()
     expect(view.text()).toContain('实际请求思考深度 · medium')
-    const disclosure = view.findAll('summary').find((node) => node.textContent?.startsWith('本次派单的项目资料'))!
-    expect(disclosure.textContent).toBe('本次派单的项目资料 · a123456789ab')
+    const project = view.findAll('summary').find((node) => node.textContent?.startsWith('本次派单的项目资料'))!
+    expect(project.textContent).toBe('本次派单的项目资料 · 已读取 1 项')
+    expect(project.closest('details')?.open).toBe(false)
+    await view.click(project)
+    const disclosure = view.findAll('summary').find((node) => node.textContent === '查看项目资料记录明细')!
     expect(disclosure.closest('details')?.open).toBe(false)
+    expect(project.closest('details')!.textContent).toContain('ORCHESTRA.md · 可选项目说明，未提供')
+    expect(project.closest('details')!.textContent).toContain('README.md · 已读取 · 已截断')
+    expect(project.closest('details')!.textContent).toContain('工作区目录索引 · 未纳入 · 超出读取范围')
     await view.click(disclosure)
     const expanded = disclosure.closest('details')!
     expect(expanded.open).toBe(true)
     expect(expanded.textContent).toContain('账本位置 42')
-    expect(expanded.textContent).toContain('ORCHESTRA.md · 缺失')
-    expect(expanded.textContent).toContain('README.md · 已读取 · 已截断')
     expect(expanded.textContent).toContain('读取的片段')
-    expect(expanded.querySelectorAll('code')).toHaveLength(1)
-    expect(expanded.textContent).toContain('工作区目录索引 · 未纳入 · 超出读取范围')
+    expect(expanded.querySelectorAll('code')).toHaveLength(2)
     await view.click(view.findAll('button').find((item) => item.textContent === '证据')!)
     await view.rerender(screen(2))
     await view.flush()
     expect(view.text()).toContain('本次派单的项目资料')
     expect(service.calls.filter(({ path }) => path === '/v1/runs/get').map(({ params }) => params.get('run_id')))
-      .toEqual(['main-run', 'main-run'])
+      .toEqual(['main-run', 'main-run', 'main-run'])
 
     const replacement = createFakeService(({ path }) => ({ ok: true, data: path === '/v1/tasks/get' ? main : page([run]) }))
     const replacementApi = createResourcesApi(createApiClient('http://another-source.test', replacement.fetcher))
