@@ -5,7 +5,7 @@ import { isReleaseWorkflow, RELEASE_CHECK_WORKFLOW_ID, RELEASE_WORKFLOW_ID } fro
 import { OrchError } from '../../core/errors.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from '../workflows.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
-import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { appendEvent, appendNodeRunEvent, chainBreakOf, readChain, readChainHead } from '../../infra/db/ledger.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { runId as newRunId, uuidv7 } from '../../core/ids.ts'
 import { applyTransition } from './nodes.ts'
@@ -545,6 +545,15 @@ function childSideEffectAggregate(tx: Tx, childRunId: string): ChildSideEffectAg
   }
 }
 
+export function nodeRunChainIsIntact(tx: Tx, secret: string, nodeRunId: string, needsEvents = false): boolean {
+  const chain = readChain(tx, nodeRunId)
+  const head = readChainHead(tx, nodeRunId)
+  const tail = chain.at(-1)
+  if (!tail) return !needsEvents && !head
+  return !!head && head.event_count === chain.length && head.last_seq === tail.seq
+    && head.last_hash === tail.hash && !chainBreakOf(secret, chain)
+}
+
 /**
  * 子运行落终态后收口父控制节点。
  * 父节点在 waiting 时按子 run 终态映射 done/failed/superseded，不能一律当成功；
@@ -554,7 +563,7 @@ function childSideEffectAggregate(tx: Tx, childRunId: string): ChildSideEffectAg
 export function finishSubworkflowChild(
   tx: Tx,
   secret: string,
-  p: { childRunId: string; now: string },
+  p: { childRunId: string; now: string; closeHealthyChild?: true },
 ): { parentNodeRunId: string; status: string } {
   const child = loadRun(tx, p.childRunId)
   if (!isRunTerminal(child.status)) {
@@ -567,6 +576,21 @@ export function finishSubworkflowChild(
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '子运行没有父节点，不能唤醒', { childRunId: p.childRunId })
   }
   const node = loadNodeRun(tx, child.parent_node_run_id)
+  const unchanged = { parentNodeRunId: node.node_run_id, status: node.status }
+  // The child can commit independently. Paths writing the parent also require its siblings'
+  // chains and recovery state to be trustworthy, as the maintenance scan does.
+  const canWriteParent = () => {
+    const siblings = tx.all<{ node_run_id: string; recovery_uncertain: string | null }>(
+      'SELECT node_run_id, recovery_uncertain FROM node_runs WHERE run_id = ?', [node.run_id],
+    )
+    const unsafe = siblings.find(row => row.recovery_uncertain !== null
+      || !nodeRunChainIsIntact(tx, secret, row.node_run_id, row.node_run_id === node.node_run_id))
+    if (!unsafe) return true
+    if (p.closeHealthyChild) return false
+    throw new OrchError('FORBIDDEN', '父运行的节点链或恢复状态尚未核实，暂不能收口父节点', {
+      runId: node.run_id, nodeRunId: unsafe.node_run_id,
+    })
+  }
   const aggregate = childSideEffectAggregate(tx, p.childRunId)
   const childUnverified = aggregate.unverified > 0 || child.status === 'orphaned'
   if ((NODE_TERMINAL as readonly string[]).includes(node.status)) {
@@ -574,6 +598,7 @@ export function finishSubworkflowChild(
     // 状态不改，只把子运行的副作用事实回填到父节点，父 run 的终态仍能继承它。
     if (childUnverified) {
       const inherited: SideEffectPolicy = aggregate.policy === 'pure' ? 'compensable' : aggregate.policy
+      if (!canWriteParent()) return unchanged
       const res = tx.run(
         'UPDATE node_runs SET side_effect_policy = ?, side_effect_verified_none = 0, revision = revision + 1, updated_at = ? '
         + 'WHERE node_run_id = ? AND status = ? AND (side_effect_policy <> ? OR side_effect_verified_none <> 0)',
@@ -593,15 +618,17 @@ export function finishSubworkflowChild(
       // A cancelled control node provisionally represents its child. Its actual pure child now has a definitive receipt.
       const receipt = tx.get<{ seq: number }>("SELECT seq FROM events WHERE run_id=? AND type='run.terminal' AND json_extract(payload_redacted,'$.outcome')='succeeded' AND json_extract(payload_redacted,'$.status')='cancelled' LIMIT 1", [child.run_id])
       if (receipt && !tx.get('SELECT 1 FROM runs WHERE parent_node_run_id=? AND run_id<>? LIMIT 1', [node.node_run_id,child.run_id])) {
+        if (!canWriteParent()) return unchanged
         tx.run("UPDATE node_runs SET side_effect_policy='pure',revision=revision+1,updated_at=? WHERE node_run_id=?", [p.now,node.node_run_id])
         appendNodeRunEvent(tx, secret, node.node_run_id, 'subworkflow.pure_child_confirmed', { child_run_id: child.run_id, terminal_seq: receipt.seq })
       }
     }
-    return { parentNodeRunId: node.node_run_id, status: node.status }
+    return unchanged
   }
   // 旧数据里父节点可能已经被取消围栏推进到 timing_out/stopping：为它补一个终态出口，
   // 不能因为取消路径和唤醒路径互斥而把父 run 永久悬空。
   if (node.status === 'timing_out') {
+    if (!canWriteParent()) return unchanged
     applyTransition(tx, secret, {
       nodeRunId: node.node_run_id,
       from: ['timing_out'],
@@ -617,6 +644,7 @@ export function finishSubworkflowChild(
     return { parentNodeRunId: node.node_run_id, status: 'timeout' }
   }
   if (node.status === 'stopping') {
+    if (!canWriteParent()) return unchanged
     applyTransition(tx, secret, {
       nodeRunId: node.node_run_id,
       from: ['stopping'],
@@ -638,6 +666,7 @@ export function finishSubworkflowChild(
       status: node.status,
     })
   }
+  if (!canWriteParent()) return unchanged
   // 子运行自己取消、而父运行没有取消意图时，父节点不能记成 superseded：
   // 那会让父 run 在所有节点终态后收成 succeeded。没有替代物就按失败收口。
   const parentCancelled = tx.get<{ cancel_requested_at: string | null }>(
