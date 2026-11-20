@@ -1,5 +1,7 @@
 import { rememberManualDispatchSpecs, resolveManualReworkSpecs } from './service/rework-dispatch-specs.ts'
 import { configureReceiptRetention } from './service/receipt-retention.ts'
+import { installLocalDshHost, localDshHostConfig } from './service/local-dsh-host.ts'
+import type { Context } from '@deepseek-ai/cordis'
 // src/index.ts —— DSH 插件入口 + 生产装配（规格 12.5 行 1088-1092）
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { OrchError } from './core/errors.ts'
@@ -88,8 +90,12 @@ export { createDshExecutor, createDshPlanningCallback, type DshExecutionModel } 
 export { ReadOnlyToolRunner, ToolRegistry } from './executor/tools.ts'
 export type { EffectVerifier, EffectVerificationTarget, EffectVerdict } from './executor/tools.ts'
 
-/** Host half of the Web loader row. The trusted host provisions the service separately. */
-export function apply(): void {}
+export const Config = localDshHostConfig
+
+/** Host half of the dual-face package. Personal operation is profile opt-in. */
+export function apply(ctx: Context, config: typeof Config._output): void {
+  if (config.local.enabled) installLocalDshHost(ctx, config.local, serveDshOrchestra)
+}
 
 /** Mount inside DSH's Cordis context with a host-authorized parent and model catalog. */
 export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrchestra>[0], 'executor'> & {

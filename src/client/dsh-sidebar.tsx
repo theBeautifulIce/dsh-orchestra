@@ -1,4 +1,5 @@
-import type { ReactElement } from 'react'
+import { useSyncExternalStore, type ReactElement } from 'react'
+import { DshLocalPanel, isDshLocalShell, type DshLocalPanelSources } from './dsh-local-panel.tsx'
 import { createPanelHost, type PanelHostProps } from './panel-host.tsx'
 
 const panelId = 'dsh-orchestra'
@@ -18,26 +19,80 @@ export type DshPanelContext = {
 
 export type DshOrchestraPanelTransport = PanelHostProps & { fetcher: NonNullable<PanelHostProps['fetcher']> }
 
-type DshClientContext = DshPanelContext & {
+type Panel = () => ReactElement
+type DshClientContext = DshPanelContext & DshLocalPanelSources & {
   inject(names: string[], callback: (ctx: DshClientContext) => void): unknown
   orchestraPanelTransport: DshOrchestraPanelTransport
 }
 
 export const inject = ['slots']
 
-/** Wait for the trusted browser adapter in the same Cordis service scope. */
+/** Activate the host panel while a trusted transport is available in this scope. */
 export function apply(ctx: DshClientContext): void {
-  ctx.inject(['slots', 'orchestraPanelTransport'], function mountOrchestraPanel(ready) {
-    registerDshOrchestraPanel(ready, ready.orchestraPanelTransport)
+  let explicit: Panel | undefined
+  let local: Panel | undefined
+  let unmount: (() => unknown) | undefined
+  let unmounting: Promise<unknown> | undefined
+  const listeners = new Set<() => void>()
+
+  function ActivePanel() {
+    const Panel = useSyncExternalStore(listener => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    }, () => explicit ?? local)
+    return Panel ? <Panel /> : <></>
+  }
+
+  function refresh() {
+    for (const listener of listeners) listener()
+    if (explicit || local) {
+      if (!unmount && !unmounting) {
+        const dispose = registerSlots(ctx, ActivePanel)
+        if (typeof dispose === 'function') unmount = dispose as () => unknown
+      }
+    } else if (unmount) {
+      const dispose = unmount
+      unmount = undefined
+      unmounting = Promise.resolve(dispose()).finally(() => {
+        unmounting = undefined
+        refresh()
+      })
+      return unmounting
+    }
+  }
+
+  ctx.inject(['slots', 'orchestraPanelTransport'], function bindHostAdapter(ready) {
+    ready.effect(function* () {
+      explicit = bindTransport(ready.orchestraPanelTransport)
+      refresh()
+      yield () => { explicit = undefined; return refresh() }
+    }, 'orchestra: provided transport')
+  })
+
+  if (typeof window === 'undefined' || !window.location?.href || !isDshLocalShell(window.location.href)) return
+  ctx.inject(['slots', 'sessions', 'workspaces'], function bindLocalShell(ready) {
+    ready.effect(function* () {
+      const { sessions, workspaces } = ready
+      local = () => <DshLocalPanel sessions={sessions} workspaces={workspaces} />
+      refresh()
+      yield () => { local = undefined; return refresh() }
+    }, 'orchestra: local DSH workspace transport')
   })
 }
 
 /** Called by a trusted DSH web adapter after it resolves the workspace's endpoint and authenticated transport. */
 export function registerDshOrchestraPanel(ctx: DshPanelContext, options: DshOrchestraPanelTransport) {
+  return registerSlots(ctx, bindTransport(options))
+}
+
+function bindTransport(options: DshOrchestraPanelTransport): Panel {
   if (typeof options?.baseUrl !== 'string' || !options.baseUrl.trim() || typeof options.fetcher !== 'function') {
     throw new TypeError('Orchestra requires an endpoint and an authenticated host fetcher')
   }
-  const panel = createPanelHost(options)
+  return createPanelHost(options)
+}
+
+function registerSlots(ctx: DshPanelContext, panel: Panel) {
   const icon = () => <span aria-hidden="true">◫</span>
   const root = ctx.root
   return ctx.effect(function* () {

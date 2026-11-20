@@ -37,6 +37,8 @@ export type ChainHead = {
   updated_at: string
 }
 
+export type ChainPosition = Pick<ChainHead, 'last_seq' | 'last_hash' | 'event_count'>
+
 export function appendNodeRunEvent(tx: Tx, secret: string, nodeRunIdValue: string, type: string, payload: unknown): { seq: number; hash: string } {
   const head = tx.get<{ last_seq: number; last_hash: string; event_count: number }>(
     'SELECT last_seq, last_hash, event_count FROM node_run_chain_heads WHERE node_run_id = ?', [nodeRunIdValue])
@@ -89,6 +91,13 @@ export function readChainHead(tx: Tx, nodeRunIdValue: string): ChainHead | undef
 
 export function chainBreakOf(secret: string, rows: ChainRow[]): ChainBreak | null {
   return verifyChain(secret, rows)
+}
+
+export function chainIsIntact(secret: string, rows: ChainRow[], head: ChainPosition | undefined, needsEvents = false): boolean {
+  const tail = rows.at(-1)
+  if (!tail) return !needsEvents && !head
+  return !!head && head.event_count === rows.length && head.last_seq === tail.seq
+    && head.last_hash === tail.hash && !chainBreakOf(secret, rows)
 }
 
 /**

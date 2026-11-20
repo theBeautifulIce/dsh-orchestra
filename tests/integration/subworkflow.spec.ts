@@ -9,6 +9,8 @@ import {
 } from '../../src/service/commands/subworkflow.ts'
 import { assertRunCanTerminal } from '../../src/service/commands/parallel.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
+import { sweepNow } from '../../src/service/commands/runtime.ts'
+import { verifyLedger } from '../../src/service/queries/verify_ledger.ts'
 import { applyCancel } from '../../src/service/commands/cancel.ts'
 import { resolveEffect } from '../../src/service/commands/effects.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
@@ -443,6 +445,73 @@ describe('已取消父节点的子运行收口', () => {
         expect(parentChains()).toEqual(beforeChain)
         expect(db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id='r1' AND type='run.terminal'").get()).toEqual({ n: 0 })
       }
+    } finally { db.raw.close() }
+  })
+
+  it.each([
+    ['missing head', '链头记录缺失'],
+    ['wrong count', '链的条数与链头记录对不上'],
+    ['wrong sequence', '链尾序号与链头记录对不上'],
+    ['wrong hash', '链尾哈希与链头记录对不上'],
+    ['head without events', '整条链在账本里没了'],
+    ['head and events missing', '节点已经动过却没有链'],
+  ] as const)('reports a parent with %s while maintenance closes its healthy child', (integrity, ledgerReason) => {
+    const db = memoryDb()
+    const parentId = 'nr-parent'
+    try {
+      const workflows = catalog()
+      const childId = withTx(db, (tx) => {
+        const child = startSubworkflowNode(tx, SECRET, workflows, {
+          nodeRunId: parentId, attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
+        })
+        const parent = tx.get<{ attempt: number; revision: number }>(
+          'SELECT attempt, revision FROM node_runs WHERE node_run_id = ?', [parentId])!
+        applyCancel(tx, SECRET, {
+          clock: TEST_CLOCK, nodeRunId: parentId, attempt: parent.attempt, revision: parent.revision,
+          cancelResult: 'interrupted', now: NOW, graceMs: 1000,
+        })
+        const childNode = tx.get<{ node_run_id: string }>('SELECT node_run_id FROM node_runs WHERE run_id = ?', [child.run_id])!
+        tx.run("UPDATE node_runs SET status = 'done', side_effect_policy = 'pure', side_effect_verified_none = 1 WHERE node_run_id = ?",
+          [childNode.node_run_id])
+        appendNodeRunEvent(tx, SECRET, childNode.node_run_id, 'fixture.child_stopped', {})
+        tx.run("UPDATE runs SET cancel_requested_at = ?, cancel_result = 'interrupted' WHERE run_id = ?", [NOW, child.run_id])
+        tx.run(`INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at)
+          VALUES ('r-empty', 't1', 'running', 1, ?, ?)`, [NOW, NOW])
+        tx.run(`INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, revision, created_at, updated_at)
+          VALUES ('nr-empty', 'r-empty', 'empty', 1, 'agent', 'queued', 1, ?, ?)`, [NOW, NOW])
+
+        // Only this disposable ledger simulates a structurally damaged projection or log.
+        if (integrity === 'missing head' || integrity === 'head and events missing') {
+          tx.exec('DROP TRIGGER trg_node_run_chain_heads_no_delete')
+          tx.run('DELETE FROM node_run_chain_heads WHERE node_run_id = ?', [parentId])
+        } else if (integrity !== 'head without events') {
+          tx.exec('DROP TRIGGER trg_node_run_chain_heads_update_guard')
+          const change = { 'wrong count': 'event_count = event_count + 1', 'wrong sequence': 'last_seq = last_seq + 1',
+            'wrong hash': "last_hash = 'damaged fixture'" }[integrity]
+          tx.run(`UPDATE node_run_chain_heads SET ${change} WHERE node_run_id = ?`, [parentId])
+        }
+        if (integrity === 'head without events' || integrity === 'head and events missing') {
+          tx.exec('DROP TRIGGER trg_node_run_events_no_delete')
+          tx.run('DELETE FROM node_run_events WHERE node_run_id = ?', [parentId])
+        }
+        return child.run_id
+      })
+      const parentState = () => withTx(db, (tx) => ({
+        node: tx.get('SELECT * FROM node_runs WHERE node_run_id = ?', [parentId]),
+        run: tx.get("SELECT * FROM runs WHERE run_id = 'r1'"),
+        chain: readChain(tx, parentId),
+        head: readChainHead(tx, parentId),
+      }))
+      const before = parentState()
+      expect(verifyLedger(db, SECRET).gaps).toEqual([
+        expect.objectContaining({ node_run_id: parentId, reason: expect.stringContaining(ledgerReason) }),
+      ])
+      const deps = { db, secret: SECRET, phase: 'S3' as const, catalog: workflows, clock: TEST_CLOCK }
+      expect(sweepNow(deps, NOW)).toMatchObject({ chain_broken: [parentId], runs_closed: [childId], subworkflow_finished: [] })
+      expect(sweepNow(deps, NOW)).toMatchObject({ chain_broken: [parentId], runs_closed: [], subworkflow_finished: [] })
+      expect(parentState()).toEqual(before)
+      expect(db.raw.prepare('SELECT status FROM runs WHERE run_id = ?').get(childId)).toEqual({ status: 'cancelled' })
+      expect(db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id = ? AND type = 'run.terminal'").get(childId)).toEqual({ n: 1 })
     } finally { db.raw.close() }
   })
 })

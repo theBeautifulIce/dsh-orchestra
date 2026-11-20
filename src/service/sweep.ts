@@ -16,7 +16,7 @@ import { IN_FLIGHT_COMMAND_STATUSES } from './commands/idempotency.ts'
 import { receiptRetention } from './receipt-retention.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import type { Report } from '../core/report.ts'
-import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
+import { chainIsIntact, readChain, appendNodeRunEvent, type ChainPosition } from '../infra/db/ledger.ts'
 import { canTransition, isTerminal, type NodeStatus } from '../core/state-machine.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { ClockProvider, Deadline } from '../core/clock.ts'
@@ -83,13 +83,25 @@ type VerifyRow = {
   verify_deadline_monotonic_ns: number | null
 }
 
+type SweepChain = { node_run_id: string } & (ChainPosition | { [K in keyof ChainPosition]: null })
+
 // 扫描必须可重入：重复跑不会产生第二份副作用
 export function sweep(db: Db, secret: string, params: SweepParams): SweepResult {
   return inTx(db, (tx) => {
     // 恢复前先验链：断链节点整轮跳过，恢复动作不许把坏账本再往前推
     const broken = new Set<string>()
-    for (const row of tx.all<{ node_run_id: string }>('SELECT node_run_id FROM node_runs')) {
-      if (chainBreakOf(secret, readChain(tx, row.node_run_id))) broken.add(row.node_run_id)
+    const chains = tx.all<SweepChain>('SELECT n.node_run_id, h.last_seq, h.last_hash, h.event_count FROM node_runs n '
+      + 'LEFT JOIN node_run_chain_heads h ON h.node_run_id = n.node_run_id')
+    // A persisted child proves its parent reached the control step and had a chain.
+    const parentsWithChildren = new Set(tx.all<{ node_run_id: string }>(
+      'SELECT n.node_run_id FROM runs r JOIN node_runs n ON n.node_run_id = r.parent_node_run_id AND n.run_id = r.parent_run_id '
+      + 'WHERE r.parent_node_run_id IS NOT NULL',
+    ).map((row) => row.node_run_id))
+    for (const row of chains) {
+      const head = row.last_seq === null ? undefined : row
+      if (!chainIsIntact(secret, readChain(tx, row.node_run_id), head, parentsWithChildren.has(row.node_run_id))) {
+        broken.add(row.node_run_id)
+      }
     }
     // 先把上个 boot 写下的锚点换算到当前时钟：不换算的话 decide() 只会返回 uncertain，
     // fence / wait / 动作截止会永久停住（规格 4.4 行 342）。

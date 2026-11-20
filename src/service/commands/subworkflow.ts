@@ -5,7 +5,7 @@ import { isReleaseWorkflow, RELEASE_CHECK_WORKFLOW_ID, RELEASE_WORKFLOW_ID } fro
 import { OrchError } from '../../core/errors.ts'
 import { definitionHashOf, workflowIdOf, type WorkflowCatalog } from '../workflows.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
-import { appendEvent, appendNodeRunEvent, chainBreakOf, readChain, readChainHead } from '../../infra/db/ledger.ts'
+import { appendEvent, appendNodeRunEvent, chainIsIntact, readChain, readChainHead } from '../../infra/db/ledger.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { runId as newRunId, uuidv7 } from '../../core/ids.ts'
 import { applyTransition } from './nodes.ts'
@@ -546,12 +546,7 @@ function childSideEffectAggregate(tx: Tx, childRunId: string): ChildSideEffectAg
 }
 
 export function nodeRunChainIsIntact(tx: Tx, secret: string, nodeRunId: string, needsEvents = false): boolean {
-  const chain = readChain(tx, nodeRunId)
-  const head = readChainHead(tx, nodeRunId)
-  const tail = chain.at(-1)
-  if (!tail) return !needsEvents && !head
-  return !!head && head.event_count === chain.length && head.last_seq === tail.seq
-    && head.last_hash === tail.hash && !chainBreakOf(secret, chain)
+  return chainIsIntact(secret, readChain(tx, nodeRunId), readChainHead(tx, nodeRunId), needsEvents)
 }
 
 /**
