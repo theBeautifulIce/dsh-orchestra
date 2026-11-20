@@ -676,6 +676,9 @@ async function probeRoutes(q26Db: Db, q27Db: Db, configPath: string) {
     }
     expect([tasks, run, nodes, events].every(({ body, timing }) => body.ok && timing.status === 200)).toBe(true)
     expect(run.body.data.top_nodes).toHaveLength(10)
+    expect(run.body.data).toMatchObject({ delivery_checks: { has_more: true, items: Array.from({ length: 50 }, (_, i) => ({
+      result_id: 'perf-result-' + pad(i, 2), outcome: 'passed',
+    })) } })
     return { http: { list_tasks: tasks.timing, get_run: run.timing, list_nodes: nodes.timing, list_events: events.timing }, checks }
   } finally {
     try { await q26Server?.close() } finally { await q27Server.close() }
@@ -690,6 +693,7 @@ function seedCounts(q26Db: Db, q27Db: Db) {
     q26_nodes: count(q26Db, 'node_runs', "WHERE run_id = 'perf-run-q26'"),
     q26_events: count(q26Db, 'events'), q26_decisions: count(q26Db, 'decisions'),
     q26_executions: count(q26Db, 'tool_executions'), q26_attestations: count(q26Db, 'attestations'),
+    q26_start_receipts: count(q26Db, 'start_run_operations'), q26_deliverables: count(q26Db, 'run_acceptance_results'),
   }
 }
 
@@ -736,6 +740,22 @@ it.runIf(Boolean(strictEvidenceDir))('S6 T07 · 生产四路读取、原始样�
     withTx(own26.db, (tx) => {
       tx.run("INSERT INTO runs (run_id, task_id, status, revision, created_at, updated_at) VALUES ('perf-disjoint-run','perf-task-q26','succeeded',1,?,?)", [BASE_TS, BASE_TS])
       tx.run("INSERT INTO node_runs (node_run_id,run_id,node_id,seq,status,node_type,revision,created_at,updated_at) VALUES ('perf-disjoint-node','perf-disjoint-run','unrelated',1,'done','agent',1,?,?)", [BASE_TS, BASE_TS])
+      const receipts: unknown[][] = Array.from({ length: Q27_TASK_COUNT }, (_, i) => [
+        'perf-other-receipt-' + i, 'perf-task-q26', 'perf-other-run-' + i, BASE_TS,
+      ])
+      receipts.push(['perf-receipt-q26', 'perf-task-q26', Q26_RUN_ID, BASE_TS])
+      const write = (sql: string, values: unknown[]) => { tx.run(sql, values) }
+      insertRows(write, 'runs', 'run_id, task_id, status, revision, created_at, updated_at',
+        receipts.slice(0, -1).map(([, taskId, runId]) => [runId, taskId, 'succeeded', 1, BASE_TS, BASE_TS]))
+      insertRows(write, 'start_run_operations', 'operation_id, task_id, run_id, created_at', receipts)
+      tx.run(`INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, content_hash, launch_operation_id, created_at)
+        VALUES ('perf-plan-q26', 'synthetic:perf', '{}', '{}', '{}', 'perf-hash-q26', 'perf-receipt-q26', ?)`, [BASE_TS])
+      insertRows(write, 'run_acceptance_results',
+        'result_id, run_id, plan_id, content_hash, rule_version, deliverable_key, kind, outcome, evidence_json, evaluated_at',
+        Array.from({ length: 51 }, (_, i) => [
+          'perf-result-' + pad(i, 2), Q26_RUN_ID, 'perf-plan-q26', 'perf-hash-q26', 'perf-rules',
+          pad(i, 2), 'artifact', 'passed', '{}', BASE_TS,
+        ]))
     })
     const seedStats = seedCounts(own26.db, own27.db)
     record({ stage: 'seeded', seeds: seedStats, write_cost })

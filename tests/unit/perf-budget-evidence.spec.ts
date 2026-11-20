@@ -22,10 +22,12 @@ function evidence(): PerfReport {
       start_at: '2026-11-20T00:00:00Z', end_at: '2026-11-20T00:05:00Z',
       busy_fraction: 0.15, calibration_before_ms: 1, calibration_after_ms: 1 },
     seeds: { q27_tasks: 10000, q27_runs: 10000, q27_nodes: 20000, q27_decisions: 500, q27_start_receipts: 10000, q27_plans: 476,
-      q26_nodes: 1000, q26_events: 1000, q26_decisions: 50, q26_executions: 100, q26_attestations: 20 },
+      q26_nodes: 1000, q26_events: 1000, q26_decisions: 50, q26_executions: 100, q26_attestations: 20,
+      q26_start_receipts: 10001, q26_deliverables: 51 },
     write_cost: { q27_seed_before_ms: 100, q27_seed_after_ms: 200, q27_backfill_ms: 100, q27_backfill_rows: 10000 },
     warmups: 5,
-    base_tables: ['task_attention_order', 'tasks', 'runs', 'node_runs', 'events'],
+    base_tables: ['task_attention_order', 'tasks', 'runs', 'node_runs', 'events', 'start_run_operations', 'task_plans',
+      'run_acceptance_results', 'rework_plan_edges'],
     checks: { filtered_task_paging: true, task_cursor_scope: true, event_cursor_paging: true, event_cursor_exclusive: true, disjoint_node_run: true },
     cases: {
       list_tasks: route('list_tasks', [statement(taskSql + ' LIMIT ?) SELECT * FROM task_page',
@@ -33,6 +35,10 @@ function evidence(): PerfReport {
       get_run: route('get_run', [
         statement('SELECT status, COUNT(*) FROM node_runs WHERE run_id = ? GROUP BY status ORDER BY status', 'SEARCH node_runs USING INDEX idx_node_runs_run (run_id=?)'),
         statement('SELECT node_run_id FROM node_runs WHERE run_id = ? ORDER BY updated_at DESC LIMIT 10', 'SEARCH node_runs USING INDEX idx_node_runs_run (run_id=?)'),
+        statement('SELECT p.plan_id, p.content_hash FROM task_plans p JOIN start_run_operations o ON o.operation_id = p.launch_operation_id WHERE o.run_id = ? ORDER BY p.created_at, p.plan_id LIMIT 1',
+          'SEARCH o USING INDEX start_run_operations_run (run_id=?)'),
+        statement('SELECT result_id FROM run_acceptance_results WHERE run_id = ? AND plan_id = ? AND content_hash = ? ORDER BY deliverable_key LIMIT 51',
+          'SEARCH run_acceptance_results USING INDEX sqlite_autoindex_run_acceptance_results_2 (run_id=? AND plan_id=? AND content_hash=?)'),
       ]),
       list_nodes: route('list_nodes', [statement('SELECT n.* FROM node_runs n WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?',
         'SEARCH n USING INDEX idx_node_runs_run (run_id=?)')]),
@@ -76,4 +82,26 @@ it('严格判定拒绝跳过和缺少一路', () => {
   expect(assessPerfReport({ ...report, completed: false }).pass).toBe(false)
   const { list_events: _events, ...partialCases } = report.cases
   expect(assessPerfReport({ ...report, cases: partialCases }).pass).toBe(false)
+})
+
+it('只接受已用 run_id 索引限定范围的回执排序和返工边排序', () => {
+  const report = evidence()
+  const orderBy = { id: 2, parent: 0, detail: 'USE TEMP B-TREE FOR ORDER BY' }
+  const boundPlan = report.cases.get_run.statements[2]!.plan
+  boundPlan.push(orderBy)
+  const edges = {
+    sql: 'SELECT e.from_node_id,e.to_node_id FROM rework_plan_edges e JOIN rework_local_plans p ON p.plan_hash=e.plan_hash '
+      + 'WHERE e.run_id=? AND p.approved_by IS NOT NULL ORDER BY e.from_node_id,e.to_node_id',
+    calls: 1, method: 'all' as const, bindings: ['run-1'],
+    plan: [{ id: 1, parent: 0, detail: 'SEARCH e USING INDEX rework_plan_edges_run (run_id=?)' }, orderBy],
+  }
+  report.cases.list_nodes.statements.push(edges)
+  expect(assessPerfReport(report).pass).toBe(true)
+  boundPlan[0]!.detail = 'SCAN o USING INDEX start_run_operations_run'
+  edges.plan[0]!.detail = 'SEARCH e USING INDEX rework_plan_edges_unscoped (to_node_id=?)'
+  expect(assessPerfReport(report).errors).toEqual(expect.arrayContaining([
+    'get_run: base scan SCAN o USING INDEX start_run_operations_run',
+    'get_run: unclassified temporary sort USE TEMP B-TREE FOR ORDER BY',
+    'list_nodes: unclassified temporary sort USE TEMP B-TREE FOR ORDER BY',
+  ]))
 })
