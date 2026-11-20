@@ -21,9 +21,13 @@ const capacitySchema = z.enum(MODEL_COMPLEXITIES)
 const capacitiesSchema = z.array(z.strictObject({ ref: modelRef, capacity: capacitySchema.nullable() }))
 const effortSchema = z.string().refine(validModelEffort).nullable()
 const effortsSchema = z.partialRecord(capacitySchema, effortSchema)
+const modelEffortsSchema = z.array(z.strictObject({ ref: modelRef, effort: effortSchema }))
+const plannerModelSchema = z.strictObject({ ref: modelRef, effort: effortSchema }).nullable()
 const preferencesSchema = z.strictObject({
   model_capacities: capacitiesSchema.default([]),
   reasoning_efforts: effortsSchema.default({}),
+  model_reasoning_defaults: modelEffortsSchema.default([]),
+  planner_model: plannerModelSchema.default(null),
 })
 const MODEL_NOTES_MAX_BYTES = 8 * 1024
 export const modelRoutingSettingsSchema = z.strictObject({
@@ -33,6 +37,8 @@ export const modelRoutingSettingsSchema = z.strictObject({
   model_notes: notesSchema.optional(),
   model_capacities: capacitiesSchema.optional(),
   reasoning_efforts: effortsSchema.optional(),
+  model_reasoning_defaults: modelEffortsSchema.optional(),
+  planner_model: plannerModelSchema.optional(),
 })
 
 type Row = { revision: number; mapping_json: string; extended_mapping_json: string; model_notes_json: string;
@@ -67,7 +73,7 @@ export function approvedModelProfiles(profiles: readonly ModelCatalogProfile[]):
 }
 
 export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCatalogProfile[] | (() => ModelCatalogSnapshot),
-  refresh?: () => Promise<void>) {
+  refresh?: () => Promise<void>, plannerModelConfigurable = false) {
   const snapshot = (): ModelCatalogSnapshot => typeof source === 'function' ? source() : { profiles: source }
   function get() {
     return withReadTx(db, ({ tx, as_of_seq }) => {
@@ -75,10 +81,11 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
       const { profiles, unavailable_providers } = snapshot()
       const refs = new Set(profiles.map(({ ref }) => ref))
       const baseCapacities = new Map(profiles.map(({ ref, capacity }) => [ref, capacity]))
-      return { item: { ...settings, model_notes: settings.model_notes.filter(({ ref }) => refs.has(ref)),
+      return { item: { ...settings, planner_model_configurable: plannerModelConfigurable, model_notes: settings.model_notes.filter(({ ref }) => refs.has(ref)),
         model_capacities: settings.model_capacities.filter(({ ref }) => refs.has(ref)),
-        profiles: effectiveModelCatalog(profiles, settings).map((profile) => unavailable_providers
-          ? { ...profile, host_capacity: baseCapacities.get(profile.ref) ?? null } : profile),
+        model_reasoning_defaults: settings.model_reasoning_defaults.filter(({ ref }) => refs.has(ref)),
+        profiles: effectiveModelCatalog(profiles, settings).map((profile) =>
+          ({ ...profile, host_capacity: baseCapacities.get(profile.ref) ?? null })),
         ...(unavailable_providers ? { unavailable_providers } : {}) }, as_of_seq }
     })
   }
@@ -108,6 +115,19 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
           expert: expert === undefined ? current.mapping.expert : expert }
         const { profiles } = snapshot()
         const available = new Set(profiles.map(({ ref }) => ref))
+        const byRef = new Map(profiles.map((profile) => [profile.ref, profile]))
+        const supportsEffort = (ref: string, effort: string) => byRef.get(ref)?.reasoning?.efforts.some(({ id }) => id === effort)
+        if (input.planner_model !== undefined && !plannerModelConfigurable) {
+          throw new OrchError('FORBIDDEN', '此宿主统一管理主脑模型配置。')
+        }
+        const plannerModel = input.planner_model === undefined ? current.planner_model : input.planner_model
+        if (input.planner_model) {
+          const { ref, effort } = input.planner_model
+          if (!available.has(ref)) throw new OrchError('FORBIDDEN', '主脑模型已不在当前目录。请重新选择，或改为跟随当前会话。')
+          if (effort !== null && !supportsEffort(ref, effort)) {
+            throw new OrchError('FORBIDDEN', '主脑模型未提供所选思考强度，请重新选择。')
+          }
+        }
         const capacities = new Map(current.model_capacities.map(({ ref, capacity }) => [ref, capacity]))
         const changedCapacities = new Set<string>()
         for (const { ref, capacity } of input.model_capacities ?? []) {
@@ -127,13 +147,25 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
           if (ref !== null && (mappingChanged || typeof effort === 'string')) {
             selectExecutionModel(catalog, { complexity, preferredModel: ref, reason: '用户指定' })
           }
-          if (typeof effort === 'string' && (!ref || !catalog.find((profile) => profile.ref === ref)
-            ?.reasoning?.efforts.some(({ id }) => id === effort))) {
+          if (typeof effort === 'string' && (!ref || !supportsEffort(ref, effort))) {
             throw new OrchError('FORBIDDEN', '此 DSH 模型未提供所选思考深度，请重新读取目录或改用默认')
           }
           if (mappingChanged || effort === null) delete reasoning_efforts[complexity]
           if (typeof effort === 'string') reasoning_efforts[complexity] = effort
         }
+        const defaultEfforts = new Map(current.model_reasoning_defaults.map(({ ref, effort }) => [ref, effort]))
+        const changedDefaultEfforts = new Set<string>()
+        for (const { ref, effort } of input.model_reasoning_defaults ?? []) {
+          if (!available.has(ref)) throw new OrchError('FORBIDDEN', '仅可为 DSH 目录中的模型设置思考深度')
+          if (changedDefaultEfforts.has(ref)) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '同一模型只能设置一条默认思考深度')
+          changedDefaultEfforts.add(ref)
+          if (effort === null) defaultEfforts.delete(ref)
+          else {
+            if (!supportsEffort(ref, effort)) throw new OrchError('FORBIDDEN', '此 DSH 模型未提供所选思考深度，请重新读取目录或改用宿主默认')
+            defaultEfforts.set(ref, effort)
+          }
+        }
+        const model_reasoning_defaults = [...defaultEfforts].map(([ref, effort]) => ({ ref, effort }))
         const notes = new Map(current.model_notes.map(({ ref, note }) => [ref, note]))
         const changedRefs = new Set<string>()
         for (const { ref, note } of input.model_notes ?? []) {
@@ -144,7 +176,9 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
           else notes.delete(ref)
         }
         const modelNotesJson = JSON.stringify([...notes].map(([ref, note]) => ({ ref, note })))
-        const preferencesJson = JSON.stringify({ model_capacities, reasoning_efforts })
+        const preferencesJson = JSON.stringify({ model_capacities, reasoning_efforts,
+          ...(plannerModel ? { planner_model: plannerModel } : {}),
+          ...(model_reasoning_defaults.length ? { model_reasoning_defaults } : {}) })
         if (Buffer.byteLength(modelNotesJson, 'utf8') > MODEL_NOTES_MAX_BYTES) {
           throw new OrchError('RANGE_TOO_LARGE', '模型用途说明超出总容量，请缩短或清除部分说明')
         }
@@ -158,7 +192,8 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
           + 'preferences_json=excluded.preferences_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at',
         [revision, JSON.stringify(legacy), JSON.stringify({ advanced: mapping.advanced, expert: mapping.expert }), modelNotesJson, preferencesJson, actor, now])
         appendEvent(tx, { type: 'model_routing.updated', payload: { revision, actor, mapping, model_note_refs: [...changedRefs],
-          model_capacity_refs: [...changedCapacities], reasoning_efforts } })
+          model_capacity_refs: [...changedCapacities], reasoning_efforts, model_reasoning_default_refs: [...changedDefaultEfforts],
+          ...(input.planner_model !== undefined ? { planner_model: plannerModel } : {}) } })
         return { revision }
       }).result)
     },

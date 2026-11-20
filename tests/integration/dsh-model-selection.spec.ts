@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { expect, it, vi } from 'vitest'
-import { createDshExecutor, MODEL_CATALOG_TIMEOUT_MS } from '../../src/executor/dsh-host.ts'
+import { createDshExecutor, createDshPlanningCallback, MODEL_CATALOG_TIMEOUT_MS } from '../../src/executor/dsh-host.ts'
 import type { ModelReasoning } from '../../src/executor/model-routing.ts'
 
 it('目录刷新可单飞、有界重试，关闭或超时的迟到结果不得替换目录', async () => {
@@ -36,6 +36,69 @@ it('目录刷新可单飞、有界重试，关闭或超时的迟到结果不得�
     expect(load).toHaveBeenCalledTimes(3)
     expect(host.modelRouting.catalog!().profiles).toMatchObject([{ model: 'new' }])
   } finally { vi.useRealTimers(); await host.close() }
+})
+
+it('每个主脑阶段固定该次选择，旧供应商额度错误可安全回报并切换后重试', async () => {
+  type Selection = { provider: string; model: string; reasoningEffort?: string }
+  const old = { provider: 'old', model: 'same' }
+  const next = { provider: 'new', model: 'same', reasoningEffort: 'deep' }
+  let selection: Selection = old
+  const routes: Selection[] = []
+  const planned = (options: { agentOptions: Selection; setup: (ctx: unknown, agent: unknown) => void }) => {
+    const events: unknown[] = []
+    let entered = Promise.resolve()
+    let preStep: ({ agent, modelSelection }: { agent: unknown; modelSelection: Selection }, run: () => void) => Promise<void>
+    const agent = { model: { select() {} }, session: { snapshotEvents: () => events }, followup(message: { source: { kind: string } }) {
+      expect(message.source.kind).toBe('plugin:dsh-orchestra')
+      const { provider } = options.agentOptions
+      entered = preStep({ agent, modelSelection: options.agentOptions }, () => {
+        routes.push(options.agentOptions)
+        events.push({ type: 'request/header', data: { header: { config: options.agentOptions } } },
+          { type: 'turn/end', data: { reason: provider === old.provider
+            ? { kind: 'error', error: { code: 'QUOTA', message: 'private provider diagnostics' } } : { kind: 'completed' } } },
+          { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '{"ok":true}' }] } } })
+      })
+    }, whenIdle: () => entered }
+    options.setup({ tools: { restrict() {} }, on(_event: string, cb: typeof preStep) { preStep = cb } }, agent)
+    return { agent, async dispose() {} }
+  }
+  type Options = Parameters<typeof createDshPlanningCallback>[0]
+  const parent = { session: { id: 'parent', header: { cwd: process.cwd() } }, model: { current: () => selection },
+    ctx: { agents: { create: async (options: Parameters<typeof planned>[0]) => planned(options) } } } as unknown as NonNullable<ReturnType<Options['parent']>>
+  const context = { agents: { get: () => parent }, llm: { listModels: async () => [{ id: 'same' }],
+    resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'deep' }] } }) } } as unknown as Context
+  const model = (agent: typeof parent) => agent.model.current()
+  const propose = createDshPlanningCallback({ context, parent: () => parent, model })
+  await expect(propose({ goal: 'first' })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', message: expect.stringContaining('额度不足') })
+  selection = next
+  await expect(propose({ goal: 'retry' })).resolves.toEqual({ ok: true })
+  await expect(createDshPlanningCallback({ context, parent: () => parent, model }, 'workflow')({ goal: 'workflow' })).resolves.toEqual({ ok: true })
+  await expect(createDshPlanningCallback({ context, parent: () => parent, model }, 'rework')({ purpose: 'inspect' })).resolves.toEqual({ ok: true })
+  const pinned = createDshPlanningCallback({ context, parent: () => parent, model: old })
+  await expect(pinned({ goal: 'fixed' })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', message: expect.stringContaining('额度不足') })
+  expect(routes.map(({ provider, model: id, reasoningEffort }) => [provider, id, reasoningEffort ?? null])).toEqual([
+    ['old', 'same', null], ['new', 'same', 'deep'], ['new', 'same', 'deep'], ['new', 'same', 'deep'], ['old', 'same', null],
+  ])
+})
+
+it('显式主脑可选未评级模型，模型或档位失效时按正式目录拒绝且不用旧缓存', async () => {
+  const profiles = [
+    { ref: 'a/same', provider: 'a', model: 'same', capacity: 'standard' as const },
+    { ref: 'b/same', provider: 'b', model: 'same', capacity: null, reasoning: { efforts: [{ id: 'deep', name: 'Deep' }] } },
+  ]
+  const load = vi.fn().mockResolvedValue({ profiles })
+  const host = createDshExecutor({ context: {} as Context, parentForNode: () => undefined,
+    models: [], loadModelCatalog: load, recommend: () => ({ complexity: 'standard', reason: 'fixture' }) })
+  const signal = new AbortController().signal
+  try {
+    await expect(host.resolvePlanningModel('b/same', 'deep', signal)).resolves.toEqual({ provider: 'b', model: 'same', reasoningEffort: 'deep' })
+    await expect(host.resolvePlanningModel('b/same', null, signal)).resolves.toEqual({ provider: 'b', model: 'same', reasoningEffort: null })
+    await expect(host.resolvePlanningModel('b/same', 'invalid', signal)).rejects.toMatchObject({ code: 'FORBIDDEN', message: expect.stringContaining('思考深度') })
+    load.mockRejectedValueOnce(new Error('offline'))
+    await expect(host.resolvePlanningModel('b/same', 'deep', signal)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    load.mockResolvedValueOnce({ profiles: profiles.slice(0, 1) })
+    await expect(host.resolvePlanningModel('b/same', 'deep', signal)).rejects.toMatchObject({ code: 'FORBIDDEN', message: expect.stringContaining('没有所选主脑模型') })
+  } finally { await host.close() }
 })
 
 it('分别固定同名模型的供应商与思考档，并核验并行子会话各自的请求头', async () => {

@@ -169,7 +169,9 @@ export function previousCompatibility(db: Db, previousProfiles?: readonly ModelP
   const hasPreferences = db.raw.prepare("SELECT 1 FROM pragma_table_info('model_routing_settings') WHERE name = 'preferences_json'").get()
   const unsupportedPreferences = Boolean(hasPreferences && db.raw.prepare(`SELECT 1 FROM model_routing_settings WHERE id = 1 AND
     (EXISTS (SELECT 1 FROM json_each(preferences_json, '$.model_capacities'))
-    OR EXISTS (SELECT 1 FROM json_each(preferences_json, '$.reasoning_efforts')))`).get())
+    OR json_type(preferences_json, '$.planner_model') = 'object'
+    OR EXISTS (SELECT 1 FROM json_each(preferences_json, '$.reasoning_efforts'))
+    OR EXISTS (SELECT 1 FROM json_each(preferences_json, '$.model_reasoning_defaults')))`).get())
   const legacy = legacyModelMappingSchema.safeParse(routing
     ? JSON.parse(routing.mapping_json) : { routine: null, standard: null, complex: null })
   const modelBindings = legacy.success ? (['routine', 'standard', 'complex'] as const).flatMap((complexity) => {

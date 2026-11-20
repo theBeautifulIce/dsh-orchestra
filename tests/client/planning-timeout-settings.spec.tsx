@@ -35,6 +35,17 @@ it('同一操作重试并回读，恢复默认会保存 null', async () => {
   try {
     await view.flush()
     const inputs = view.findAll('input') as HTMLInputElement[]
+    expect(view.findAll('legend').map((legend) => legend.textContent)).toEqual(['非流式阶段', '流式阶段', '请求上限'])
+    expect(inputs.map((input) => input.labels?.[0]?.textContent)).toEqual(['任务规划', '独立流程生成', '无新输出等待', '单阶段总时长', '整次规划总时长'])
+    expect(inputs[0]?.nextElementSibling?.textContent).toBe('秒')
+    const descriptions = inputs[0]?.getAttribute('aria-describedby')?.split(' ').map((id) => view.container.querySelector('#' + id)?.textContent)
+    expect(descriptions).toEqual(['每次调用主脑的时限，也适用于任务内自动生成流程。', '范围 1–600 秒 · 默认 30 秒'])
+    await change(inputs[0]!, '601')
+    await view.click(button('保存规划时限'))
+    expect(inputs[0]?.getAttribute('aria-invalid')).toBe('true')
+    expect(view.container.querySelector('[role=alert]')?.textContent).toContain('任务规划请输入 1–600 的整数秒')
+    expect(posts).toHaveLength(0)
+    await change(inputs[0]!, '30')
     await change(inputs[3]!, '240')
     await view.click(button('保存规划时限'))
     expect(view.text()).toContain('不能长于整次规划总时长')
