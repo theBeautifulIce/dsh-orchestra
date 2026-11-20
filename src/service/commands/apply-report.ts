@@ -274,6 +274,7 @@ function upholdDecision(
     nodeType: row.node_type,
     attempt: params.attempt + 1,
     originNodeRunId: params.nodeRunId,
+    previousActionGeneration: row.action_generation,
     now: params.now,
   })
   // A new attempt of the same fixed pure step preserves its policy and must publish fresh evidence.
