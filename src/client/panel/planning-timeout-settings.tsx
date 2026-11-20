@@ -76,7 +76,7 @@ export function PlanningTimeoutSettings({ client, reloadVersion = 0, onSnapshot 
 
   return <section className="ops-surface planning-timeouts" aria-labelledby="planning-timeouts-title">
     <style>{PLANNING_TIMEOUT_STYLES}</style>
-    <header className="ops-surface-head"><h2 id="planning-timeouts-title">规划时限</h2></header>
+    <header className="ops-surface-head"><h2 id="planning-timeouts-title" className="ops-settings-anchor" tabIndex={-1}>规划时限</h2></header>
     <form className="planning-timeouts-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(false) }}>
       <p className="planning-timeouts-intro">仅对当前会话中新发起的任务规划和流程草稿生成生效。已开始的规划、任务执行、返工与记忆整理沿用各自的时限。</p>
       {saved && draft && <>

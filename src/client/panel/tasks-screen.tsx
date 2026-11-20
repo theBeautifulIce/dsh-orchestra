@@ -11,6 +11,7 @@ import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
 import { TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
 import { TaskStepOverview, useRunStepSnapshot } from './task-step-overview.tsx'
+import { readDisplayPreferences, TASK_VIEWS } from './display-preferences.ts'
 
 const ATTENTION_LABEL: Record<string, string> = {
   decision: '待审批', unverified: '待核验', failed: '执行失败', orphaned: '待接管', running: '执行中', none: '无待处理事项',
@@ -70,7 +71,6 @@ export function taskCardStatus(task: TaskSummary) {
   return taskStatusView(task.status, task.display_status)
 }
 
-const VIEWS = [{ id: 'board', label: '看板' }, { id: 'flow', label: '流程' }, { id: 'queue', label: '队列' }, { id: 'list', label: '列表' }] as const
 const ORIGINS = { manual: '人工', scheduled: '定时', event: '事件触发', continuous: '持续' } as const
 const AUTONOMY = { autonomous: '自主执行', assisted: '协助执行', supervised: '人工监督' } as const
 const ABSOLUTE_STATUSES = ['reserved', 'queued', 'running', 'waiting', 'paused', 'succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'cancelled']
@@ -91,7 +91,7 @@ function taskColumn(task: TaskSummary): TaskLane {
 
 export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
-  const [view, setView] = useState<(typeof VIEWS)[number]['id']>('board')
+  const [view, setView] = useState(() => readDisplayPreferences().preferences.taskView)
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
   const [filter, setFilter] = useState<Omit<ListTasksParams, 'cursor' | 'limit'>>({})
   const [status, setStatus] = useState('')
@@ -211,7 +211,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
       </form>
       <button type="button" onClick={refresh} disabled={loading} style={quietButtonStyle}>{loading ? '正在更新…' : '刷新'}</button>
       {!filter.archived && <div className="task-view-group" role="group" aria-label="任务视图">
-        {VIEWS.map(({ id, label }) => <button type="button" key={id} aria-pressed={view === id} onClick={() => setView(id)}>{label}</button>)}
+        {TASK_VIEWS.map(({ id, label }) => <button type="button" key={id} aria-pressed={view === id} onClick={() => setView(id)}>{label}</button>)}
       </div>}
     </div>
 

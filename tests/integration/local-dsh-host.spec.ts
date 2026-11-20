@@ -80,10 +80,11 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
     expect(headers.get('x-orchestra-secret')).toMatch(/^[a-f0-9]{64}$/u)
     expect(serve.mock.calls[0]?.[0].dsh.parentForNode('node')).toBe(agent)
     expect(modelCatalog).not.toHaveBeenCalled()
+    expect(serve.mock.calls[0]?.[0].dsh.sessionExecutionModelRef?.()).toBe('trusted/selected')
     const load = serve.mock.calls[0]?.[0].dsh.loadModelCatalog
-    expect((await load!()).profiles).toMatchObject([
-      { ref: 'trusted/default', capacity: null }, { ref: 'trusted/selected', capacity: 'standard' },
-    ])
+    expect(await load!()).toMatchObject({ session_execution_model_ref: 'trusted/selected', profiles: [
+      { ref: 'trusted/default', capacity: null }, { ref: 'trusted/selected', capacity: null },
+    ] })
     groups = [{ id: 'trusted', models: [{ id: 'default' }] }, { id: 'other', models: [{ id: 'default' }] }]
     expect((await load!()).profiles).toMatchObject([
       { ref: 'trusted/default', capacity: null }, { ref: 'other/default', capacity: null },
@@ -96,6 +97,7 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
     archivedSessionIds.push(sessionId)
     expect((await request('/health')).status).toBe(403)
     expect(serve.mock.calls[0]?.[0].dsh.parentForNode('node')).toBeUndefined()
+    expect(serve.mock.calls[0]?.[0].dsh.sessionExecutionModelRef?.()).toBeUndefined()
     expect(serve).toHaveBeenCalledTimes(1)
   } finally {
     await plugin.dispose()

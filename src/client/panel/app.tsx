@@ -19,6 +19,9 @@ import { SettingsScreen } from './settings-screen.tsx'
 import { ModelRoutingSettings } from './model-routing-settings.tsx'
 import { PlanningTimeoutSettings } from './planning-timeout-settings.tsx'
 import { ChatRoutingSettings } from './chat-routing-settings.tsx'
+import { DisplayPreferenceSettings } from './display-preference-settings.tsx'
+import { ExecutionCapacitySettings } from './execution-capacity-settings.tsx'
+import { WorkflowConcurrencySettings } from './workflow-concurrency-settings.tsx'
 import { UnverifiedEffects } from './unverified-effects.tsx'
 import { WorkflowCanvas } from './workflow-canvas.tsx'
 import { WorkflowListScreen } from './workflow-list.tsx'
@@ -37,6 +40,8 @@ export type PanelAppProps = {
   modelRoutingEnabled?: boolean
   planningTimeoutsEnabled?: boolean
   nativeChatRoutingEnabled?: boolean
+  executionCapacityEnabled?: boolean
+  workflowConcurrencyEnabled?: boolean
   modelEscalationEnabled?: boolean
   servicePhase?: string
   panelVersion?: string
@@ -80,6 +85,8 @@ export function PanelApp(props: PanelAppProps) {
   const [decisionId, setDecisionId] = useState<string>()
   const [reloadVersion, setReloadVersion] = useState(0)
   const [settingsReloadVersion, setSettingsReloadVersion] = useState(0)
+  const [plannerHeading, setPlannerHeading] = useState<HTMLHeadingElement | null>(null)
+  const [submodelHeading, setSubmodelHeading] = useState<HTMLHeadingElement | null>(null)
   const streamStarted = useRef(false)
   const resyncGeneration = useRef(0)
   const resyncAnchor = useRef<{ generation: number; seq: number } | null>(null)
@@ -158,7 +165,9 @@ export function PanelApp(props: PanelAppProps) {
     }
   }, [eventStream, finishResync, refreshGeneration])
 
-  const canReadViewSnapshot = route === 'settings' ? props.modelRoutingEnabled === true || props.planningTimeoutsEnabled === true
+  const canReadViewSnapshot = route === 'settings'
+    ? props.modelRoutingEnabled === true || props.planningTimeoutsEnabled === true
+      || props.executionCapacityEnabled === true || props.workflowConcurrencyEnabled === true
     : route === 'collaboration' ? props.collaborationEnabled === true
       : route !== 'memory' || !props.additionalScreens?.memory
   useEffect(() => {
@@ -177,6 +186,19 @@ export function PanelApp(props: PanelAppProps) {
     setDecisionId(id)
     setRoute('decisions')
   }
+
+  const showServiceStatus = props.additionalScreens?.settings == null
+  const settingsSections = [
+    ...(props.nativeChatRoutingEnabled ? [{ id: 'chat-routing-title', label: '会话路由' }] : []),
+    ...(props.modelRoutingEnabled && plannerHeading ? [{ id: plannerHeading.id, label: '主脑模型' }] : []),
+    ...(props.modelRoutingEnabled && submodelHeading ? [{ id: submodelHeading.id, label: '子模型及能力' }] : []),
+    ...(props.planningTimeoutsEnabled ? [{ id: 'planning-timeouts-title', label: '规划时限' }] : []),
+    ...(props.executionCapacityEnabled ? [{ id: 'execution-capacity-title', label: '执行与排队' }] : []),
+    ...(props.workflowConcurrencyEnabled ? [{ id: 'workflow-concurrency-title', label: 'Workflow 并发' }] : []),
+    { id: 'display-preferences-title', label: '显示偏好' },
+    ...(showServiceStatus ? [{ id: 'settings-title', label: '服务状态' }] : []),
+    { id: 'memory-capability-title', label: '任务记忆' },
+  ]
 
   let screen: ReactNode
   if (route === 'overview') {
@@ -208,13 +230,17 @@ export function PanelApp(props: PanelAppProps) {
   } else if (route === 'settings') {
     screen = <section className="ops-page ops-settings-page"><h1>设置</h1><div className="ops-settings-section">
       {props.nativeChatRoutingEnabled && <ChatRoutingSettings client={client} reloadVersion={settingsReloadVersion} writable={writesEnabled.current} />}
+      {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot}
+        plannerHeadingRef={setPlannerHeading} submodelHeadingRef={setSubmodelHeading} />}
+      {props.planningTimeoutsEnabled && <PlanningTimeoutSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
+      {props.executionCapacityEnabled && <ExecutionCapacitySettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
+      {props.workflowConcurrencyEnabled && <WorkflowConcurrencySettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
+      <DisplayPreferenceSettings />
       {props.additionalScreens?.settings
       ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={snapshotStale} streamStatus={streamStatus}
         phase={props.servicePhase} panelVersion={props.panelVersion} onRefresh={refreshSettings} />}
-      {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
-      {props.planningTimeoutsEnabled && <PlanningTimeoutSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
       <section className="ops-surface" aria-labelledby="memory-capability-title">
-        <header className="ops-surface-head"><h2 id="memory-capability-title">任务记忆</h2></header>
+        <header className="ops-surface-head"><h2 id="memory-capability-title" className="ops-settings-anchor" tabIndex={-1}>任务记忆</h2></header>
         <div className="ops-inset">
           <p>{!props.serviceConnected ? '服务未连接，记忆整理状态待确认。' : props.memoryEnabled === true ? '宿主已启用记忆整理。' : props.memoryEnabled === false ? '当前宿主未启用记忆整理。' : '宿主尚未报告记忆整理状态。'}</p>
           <p>{props.memoryProposalOnly ? '当前工作区开放记忆提议。你可以从成功任务的「结果」整理经验，在记忆页查看建议和来源。' : '在成功任务的「结果」中发起整理。你在审批中心确认条目后，可到记忆页查看实际写入的内容和来源。'}</p>
@@ -241,6 +267,7 @@ export function PanelApp(props: PanelAppProps) {
     snapshotStale={snapshotStale}
     streamStatus={streamStatus}
     collaborationEnabled={props.collaborationEnabled}
+    settingsSections={settingsSections}
   >{screen}
     {taskId && <TaskDetailScreen rework={rework} modelEscalation={modelEscalation} reworkPlannerEnabled={props.reworkPlannerEnabled} key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
       setTaskId(null)

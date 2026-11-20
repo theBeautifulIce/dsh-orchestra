@@ -28,6 +28,25 @@ const CONFIG_SAMPLE = {
 }
 
 describe('执行调度器', () => {
+  it('returns a cancelled workflow wait slot immediately and leaves newer attempts alone', async () => {
+    const scheduler = createExecutionScheduler({ concurrency: 2, maxWaiting: 1 })
+    scheduler.configureWorkflowLimits(() => ({ runLimit: 1, nodeLimit: null }))
+    const workflowScope = { runId: 'r', workflowId: 'w', nodeId: 'review' }
+    const gate = Promise.withResolvers<void>()
+    const first = scheduler.run(() => gate.promise, { workflowScope })
+    try {
+      const blocked = scheduler.run(() => { throw new Error('cancelled body ran') },
+        { nodeRunId: 'n', attempt: 2, workflowScope })
+      scheduler.cancelWaiting?.('n', 1)
+      expect(scheduler.waiting).toBe(1)
+      scheduler.cancelWaiting?.('n', 2)
+      await expect(blocked).rejects.toThrow('已取消排队')
+      expect(scheduler.waiting).toBe(0)
+      const next = scheduler.run(() => 'ok', { workflowScope })
+      gate.resolve()
+      await expect(next).resolves.toBe('ok')
+    } finally { gate.resolve(); await first; await scheduler.close() }
+  })
   it('同时执行的任务数真的受 concurrency 限制', async () => {
     const sched = createExecutionScheduler({ concurrency: 2 })
     let active = 0
@@ -126,6 +145,81 @@ describe('执行调度器', () => {
     release()
     await first
     await second
+  })
+
+  it('热缩容保留在跑和已排队节点，提高并发后立即补位', async () => {
+    const scheduler = createExecutionScheduler({ concurrency: 2, maxWaiting: 3 })
+    const gates = Array.from({ length: 4 }, () => Promise.withResolvers<void>())
+    const started: number[] = []
+    const jobs = gates.map((gate, index) => scheduler.run(() => {
+      started.push(index)
+      return gate.promise
+    }))
+    scheduler.setCapacity({ concurrency: 1, maxWaiting: 1 })
+    expect(scheduler.stats()).toMatchObject({ inFlight: 2, waiting: 2, concurrency: 1, maxWaiting: 1 })
+    await expect(scheduler.run(() => { throw new Error('queue full') })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    gates[0]!.resolve()
+    await jobs[0]
+    expect(started).toEqual([0, 1])
+    gates[1]!.resolve()
+    await jobs[1]
+    expect(started).toEqual([0, 1, 2])
+    scheduler.setCapacity({ concurrency: 2, maxWaiting: 1 })
+    expect(started).toEqual([0, 1, 2, 3])
+    for (const gate of gates) gate.resolve()
+    await Promise.all(jobs)
+    await scheduler.close()
+  })
+
+  it('三个名额原子检查，在队列满时也允许可直接开跑的分组通过', async () => {
+    const scheduler = createExecutionScheduler({ concurrency: 3, maxWaiting: 2 })
+    scheduler.configureWorkflowLimits(() => ({ runLimit: 1, nodeLimit: 1 }))
+    const gates = Array.from({ length: 5 }, () => Promise.withResolvers<void>())
+    const started: number[] = []
+    const submit = (index: number, runId: string, workflowId: string, nodeId: string) => scheduler.run(() => {
+      started.push(index)
+      return gates[index]!.promise
+    }, { nodeRunId: String(index), workflowScope: { runId, workflowId, nodeId } })
+    const active = submit(0, 'r1', 'wf1', 'x')
+    const byRun = submit(1, 'r1', 'wf1', 'y')
+    const byNode = submit(2, 'r2', 'wf1', 'x')
+    expect(scheduler.isWaiting?.('1')).toBe(true)
+    expect(scheduler.isWaiting?.('2')).toBe(true)
+    const sameNodeInOtherWorkflow = submit(3, 'r3', 'wf2', 'x')
+    const sameWorkflowDifferentNode = submit(4, 'r2', 'wf1', 'z')
+    expect(started).toEqual([0, 3, 4])
+    await expect(scheduler.run(() => { throw new Error('queue full') })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    const releasedOnFailure = expect(sameNodeInOtherWorkflow).rejects.toThrow('test failure')
+    gates[3]!.reject(new Error('test failure'))
+    await releasedOnFailure
+    expect(started).toEqual([0, 3, 4])
+    scheduler.configureWorkflowLimits(() => ({ runLimit: 2, nodeLimit: 2 }))
+    expect(started).toEqual([0, 3, 4, 1])
+    gates[4]!.resolve()
+    await sameWorkflowDifferentNode
+    expect(started).toEqual([0, 3, 4, 1, 2])
+    for (const gate of gates) gate.resolve()
+    await Promise.all([active, byRun, byNode])
+    await scheduler.close()
+  })
+
+  it('启用分组收紧时会计入已开始的节点，释放到新限额以下才补位', async () => {
+    const scheduler = createExecutionScheduler({ concurrency: 3 })
+    const scope = { workflowScope: { runId: 'r1', workflowId: 'wf', nodeId: 'x' } }
+    const firstGate = Promise.withResolvers<void>()
+    const secondGate = Promise.withResolvers<void>()
+    const first = scheduler.run(() => firstGate.promise, scope)
+    const second = scheduler.run(() => secondGate.promise, scope)
+    scheduler.configureWorkflowLimits(() => ({ runLimit: 1, nodeLimit: 1 }))
+    const third = scheduler.run(() => 'accepted', scope)
+    expect(scheduler.stats()).toMatchObject({ inFlight: 2, waiting: 1 })
+    firstGate.resolve()
+    await first
+    expect(scheduler.stats()).toMatchObject({ inFlight: 1, waiting: 1 })
+    secondGate.resolve()
+    await second
+    await expect(third).resolves.toBe('accepted')
+    await scheduler.close()
   })
 
   it('缺省值与配置定值一致：并发 3、人工名额 1、排队上限有界', () => {

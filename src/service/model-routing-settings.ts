@@ -78,7 +78,7 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
   function get() {
     return withReadTx(db, ({ tx, as_of_seq }) => {
       const settings = readModelRoutingSettings(tx)
-      const { profiles, unavailable_providers } = snapshot()
+      const { profiles, unavailable_providers, session_execution_model_ref } = snapshot()
       const refs = new Set(profiles.map(({ ref }) => ref))
       const baseCapacities = new Map(profiles.map(({ ref, capacity }) => [ref, capacity]))
       return { item: { ...settings, planner_model_configurable: plannerModelConfigurable, model_notes: settings.model_notes.filter(({ ref }) => refs.has(ref)),
@@ -86,6 +86,7 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
         model_reasoning_defaults: settings.model_reasoning_defaults.filter(({ ref }) => refs.has(ref)),
         profiles: effectiveModelCatalog(profiles, settings).map((profile) =>
           ({ ...profile, host_capacity: baseCapacities.get(profile.ref) ?? null })),
+        ...(session_execution_model_ref ? { session_execution_model_ref } : {}),
         ...(unavailable_providers ? { unavailable_providers } : {}) }, as_of_seq }
     })
   }

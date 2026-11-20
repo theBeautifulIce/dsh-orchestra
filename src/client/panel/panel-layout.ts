@@ -13,7 +13,19 @@ export const PANEL_LAYOUT_CSS = `
   border-right: 1px solid ${COLOR.line};
 }
 .ops-shell-brand { padding: 4px 10px 22px; }
-.ops-shell-sidebar nav { display: grid; gap: 4px; }
+.ops-main-menu { display: grid; gap: 4px; }
+.ops-settings-menu {
+  display: grid; gap: 2px; margin: 4px 0 0 13px; padding-inline-start: 7px;
+  border-inline-start: 1px solid ${COLOR.line};
+}
+.ops-settings-menu button {
+  min-height: 36px; border: 0; border-radius: 6px; padding: 4px 8px;
+  background: transparent; color: ${COLOR.inkMuted}; text-align: start;
+  font: inherit; font-size: ${FONT_PX.menu}px; cursor: pointer;
+}
+.ops-settings-menu button:hover { background: #eef3f9; }
+.ops-settings-menu button[aria-current=location] { background: #e5efff; color: #1e55a1; font-weight: 700; }
+.ops-settings-menu button:focus-visible, .ops-settings-anchor:focus-visible { outline: 2px solid #225fba; outline-offset: 2px; }
 .ops-shell-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .ops-shell-main > header, .ops-shell-main > [role=status] { flex: none; }
 .ops-shell-main > main {
@@ -92,8 +104,12 @@ export const PANEL_LAYOUT_CSS = `
   .ops-shell { flex-direction: column; }
   .ops-shell-sidebar { width: 100%; padding: 5px 8px; border-right: 0; overflow: visible; scrollbar-gutter: auto; }
   .ops-shell-brand { padding: 4px; }
-  .ops-shell-sidebar nav { display: flex; overflow-x: auto; }
-  .ops-shell-sidebar nav button { white-space: nowrap; }
+  .ops-main-menu { display: flex; overflow-x: auto; }
+  .ops-main-menu button { white-space: nowrap; }
+  .ops-settings-menu {
+    display: flex; flex-wrap: wrap; gap: 2px 4px; margin: 3px 0 0; padding: 3px 0 0;
+    border-inline-start: 0; border-block-start: 1px solid ${COLOR.line};
+  }
   .ops-shell-main[data-panel-route] .ops-panel-content-inner { padding: 10px 10px 24px; }
   .ops-workflow-stage { grid-template-columns: minmax(0, 1fr); }
   .ops-table th, .ops-table td { padding: 7px 8px; }
