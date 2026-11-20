@@ -363,7 +363,8 @@ describe('记忆审批卡：拒绝与过期', () => {
       const sourceRunId = 'run_expiring_source'
       const taskId = 'task_expiring_source'
       withTx(db, (tx) => {
-        tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES (?, '源任务', 'running', 1, ?, ?)", [taskId, NOW, NOW])
+        tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at, autonomy) VALUES (?, '源任务', 'running', 1, ?, ?, 'supervised')",
+          [taskId, NOW, NOW])
         tx.run("INSERT INTO runs (run_id, task_id, workflow_id, workflow_version, status, revision, created_at, updated_at) VALUES (?, ?, 'wf', 1, 'succeeded', 1, ?, ?)", [sourceRunId, taskId, NOW, NOW])
       })
       const headers = { 'content-type': 'application/json', 'x-orchestra-secret': TEST_SECRET }
@@ -384,7 +385,12 @@ describe('记忆审批卡：拒绝与过期', () => {
       expect(Date.parse(decision.expires_at!) - Date.parse(NOW)).toBe(24 * 60 * 60 * 1000)
       const decisionPath = '/v1/decisions/get?decision_id=' + encodeURIComponent(decisionId)
       const activePath = '/v1/decisions?run_id=' + encodeURIComponent(memoryRunId)
-      expect(await (await request(decisionPath)).json()).toMatchObject({ data: { allowed_resolutions: ['approved', 'rejected'] } })
+      expect(await (await request(decisionPath)).json()).toMatchObject({ data: {
+        allowed_resolutions: ['approved', 'rejected'], expiry_effect: 'auto_resolve',
+      } })
+      expect(await (await request(activePath + '&inbox=human')).json()).toMatchObject({ data: {
+        items: [expect.objectContaining({ decision_id: decisionId, approver: 'human', status: 'pending' })],
+      } })
 
       const expiresAt = Date.parse(decision.expires_at!)
       vi.setSystemTime(expiresAt - 2001)

@@ -17,6 +17,34 @@ async function change(element: HTMLInputElement | HTMLSelectElement | HTMLTextAr
   })
 }
 
+it('explains three approval modes and submits the selected mode separately from collaboration', async () => {
+  const service = createFakeService(() => ({ ok: true, data: page([workflowItem()]) }))
+  const client = createApiClient('http://panel.test', service.fetcher)
+  const start = vi.fn().mockResolvedValue({ task_id: 'new-task', run_id: 'new-run' })
+  const view = await renderPanel(<PanelShell activeRoute="tasks" serviceConnected onNavigate={() => {}}>
+    <TaskStartForm api={createResourcesApi(client)} commands={{ ...createTaskCommands(client), start }} onCreated={() => {}}
+      collaborationEnabled />
+  </PanelShell>)
+  try {
+    await view.flush()
+    const select = view.container.querySelector<HTMLSelectElement>('select[aria-describedby]')!
+    const help = view.container.querySelector<HTMLElement>(`[id="${select.getAttribute('aria-describedby')}"]`)!
+    expect(select.value).toBe('autonomous')
+    expect(help.textContent).toContain('只有必须人工处理或你点名的事项')
+    await change(select, 'supervised')
+    expect(help.textContent).toContain('超时仍等待获授权的处理')
+    await change(select, 'assisted')
+    expect(help.textContent).toContain('普通决定也会进入')
+    expect(help.textContent).toContain('超时按默认规则处理')
+    expect(help.textContent).not.toContain('协作核验')
+    expect(view.text()).toContain('两个步骤互相检查')
+    await change(view.container.querySelector('input')!, '月报')
+    await change(view.container.querySelector('select')!, 'wf1')
+    await view.click(view.container.querySelector<HTMLButtonElement>('button[type="submit"]')!)
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ title: '月报', autonomy: 'assisted' }))
+  } finally { view.unmount() }
+})
+
 it('selects two named agent attempts and only creates a scope', async () => {
   const posts: Array<{ path: string; body: Record<string, unknown> }> = []
   const service = createFakeService(({ path }) => {

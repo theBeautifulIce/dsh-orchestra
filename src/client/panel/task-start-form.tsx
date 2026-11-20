@@ -1,12 +1,18 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useId, useState, type FormEvent } from 'react'
 import { ApiError } from '../api/client.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { TaskCommands } from '../api/task-commands.ts'
 import type { WorkflowListItem } from '../api/types.ts'
+import type { Autonomy } from '../../service/runs.ts'
 import { PanelCommandButton } from './shell.tsx'
 
 type LaunchInput = Parameters<TaskCommands['start']>[0]
+const AUTONOMY_HELP: Record<Autonomy, string> = {
+  autonomous: '只有必须人工处理或你点名的事项会进入「审批中心 → 待处理」。普通决定可在「全部进行中」查看，超时按默认规则处理。',
+  assisted: '普通决定也会进入「审批中心 → 待处理」，你可按权限提前处理。审计专属决定可在「全部进行中」查看。普通决定超时按默认规则处理。',
+  supervised: '你可处理的决定会进入「审批中心 → 待处理」。超时仍等待获授权的处理。',
+}
 
 export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborationEnabled }: {
   api: ResourcesApi; commands: TaskCommands; onCreated: () => void
@@ -17,7 +23,8 @@ export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborati
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
   const [selected, setSelected] = useState('')
-  const [autonomy, setAutonomy] = useState('assisted')
+  const [autonomy, setAutonomy] = useState<Autonomy>('autonomous')
+  const autonomyHelpId = useId()
   const [pending, setPending] = useState<LaunchInput | null>(null)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
@@ -61,11 +68,12 @@ export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborati
       <label>已发布流程 <select value={selected} disabled={busy || Boolean(pending)} onChange={(event) => setSelected(event.target.value)}>
         <option value="">选择流程</option>{workflows.map((item) => <option key={item.workflow_id} value={item.workflow_id}>{item.name} · v{item.current_version}</option>)}
       </select></label>
-      <label>自治档位 <select value={autonomy} disabled={busy || Boolean(pending)} onChange={(event) => setAutonomy(event.target.value)}>
-        <option value="assisted">协助执行</option><option value="autonomous">自主执行</option><option value="supervised">人工监督</option>
+      <label>审批提醒与等待方式 <select value={autonomy} aria-describedby={autonomyHelpId} disabled={busy || Boolean(pending)}
+        onChange={(event) => setAutonomy(event.target.value as Autonomy)}>
+        <option value="autonomous">自主执行（默认）</option><option value="assisted">协助执行</option><option value="supervised">人工监督</option>
       </select></label>
-      <p>{autonomy === 'supervised' ? '需要你决定的事项会留在审批中心，超时后仍等待人工处理。'
-        : '需要你决定的事项会出现在审批中心，超时按该决定的默认规则处理。'}{collaborationEnabled && ' 要让两个步骤相互检查，在「协作核验」选择参与步骤。'}</p>
+      <p id={autonomyHelpId}>{AUTONOMY_HELP[autonomy]}</p>
+      {collaborationEnabled && <p>需要两个步骤互相检查时，可在「协作核验」选择参与步骤。</p>}
       <PanelCommandButton type="submit" disabled={busy || (!pending && (!title.trim() || !selected))}>{pending ? '查询或重试' : '创建并排队'}</PanelCommandButton>
     </>}
     {notice && <p role="status">{notice}</p>}

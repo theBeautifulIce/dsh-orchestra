@@ -13,7 +13,7 @@ export type ListTasksParams = {
   limit?: number; cursor?: string; status?: string; query?: string; attention?: string; lane?: TaskLane
   trigger_kind?: TaskOrigin | 'unknown'; archived?: '1'; updated_from?: string; updated_before?: string
 }
-export type ListDecisionsParams = { run_id?: string; status?: string; limit?: number; cursor?: string }
+export type ListDecisionsParams = { run_id?: string; status?: string; inbox?: 'human'; limit?: number; cursor?: string }
 export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; query?: string; owner_task_id?: string }
 export type ListEventsParams = { from_seq?: number; limit?: number; cursor?: string }
 export type ListMemoryBatchesParams = { task_id?: string; limit?: number; cursor?: string }

@@ -132,8 +132,7 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
   }
 }
 
-const OPEN_DECISIONS = `FROM decisions d WHERE d.run_id = t.current_run_id
-  AND d.status IN ('pending','acknowledged','blocked_for_human')`
+const OPEN_DECISIONS = 'FROM human_decision_inbox d WHERE d.run_id = t.current_run_id'
 const UNVERIFIED_NODES = `FROM node_runs n WHERE n.run_id = t.current_run_id AND ${UNVERIFIED_EFFECT}`
 const ORPHANED_NODES = `FROM node_runs n WHERE n.run_id = t.current_run_id
   AND n.status = 'orphaned' AND n.replacement_node_run_id IS NULL`
@@ -180,7 +179,7 @@ export function getWorkspaceOverview(db: Db, includeRelease = false): { item: Wo
     const counts = ctx.tx.all<{ lane: TaskLane; count: number }>(
       'SELECT lane, COUNT(*) AS count FROM task_attention_order WHERE archived = 0 GROUP BY lane')
     for (const row of counts) lanes[row.lane] = row.count
-    const decisions = ctx.tx.get<{ count: number }>("SELECT COUNT(*) AS count FROM decisions WHERE status IN ('pending','acknowledged','blocked_for_human')")
+    const decisions = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM human_decision_inbox')
     const effects = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM node_runs n WHERE ' + UNVERIFIED_EFFECT)
     return { item: { lanes, open_decisions: decisions?.count ?? 0, unverified_effects: effects?.count ?? 0,
       ...(includeRelease ? { release_gate: readReleaseGateCard(ctx.tx) } : {}) }, as_of_seq: ctx.as_of_seq }

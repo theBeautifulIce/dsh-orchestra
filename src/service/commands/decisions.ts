@@ -102,12 +102,18 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
   )
   const priority = draft.priority ?? decisionPriority(draft.kind, context?.side_effect_policy, approver, confirmRequired)
   const expiresByEscalation = context?.node_status === 'blocked_post' || (context && timeoutDisposition(context.autonomy) === 'hold_for_human')
+  // Other kinds already call for an operator (execution gates, recovery, or unresolved rules).
+  // An ordinary audit can wait for its existing resolution or timeout without asking a person.
+  const humanAttention = context?.autonomy !== 'autonomous' || draft.kind !== 'audit_result'
+    || approver === 'human' || confirmRequired || actionCategory === 'irreversible'
+    || context.side_effect_policy === 'irreversible' || context.node_status === 'blocked_post'
   const expiry = draft.kind === 'report_contradicted'
     ? { effect: 'none', reason: '报告冲突只由人工裁决。' }
-    : expiresByEscalation ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' } : undefined
+    : expiresByEscalation ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' }
+      : { effect: 'auto_resolve', reason: '超时后按已记录的默认规则处理。' }
   tx.run(
     'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, approver, '
-    + "confirm_required, created_at, priority, priority_reason, expiry_effect, expiry_effect_reason) VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    + "confirm_required, created_at, priority, priority_reason, expiry_effect, expiry_effect_reason, human_attention) VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       draft.decisionId,
       draft.runId,
@@ -119,7 +125,7 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
       approver,
       confirmRequired ? 1 : 0,
       draft.createdAt ?? new Date().toISOString(),
-      priority.level, priority.reason, expiry?.effect ?? null, expiry?.reason ?? null,
+      priority.level, priority.reason, expiry.effect, expiry.reason, humanAttention ? 1 : 0,
     ],
   )
 }
@@ -414,11 +420,13 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     revision: number
     created_at: string
     autonomy: string
+    human_attention: number | null
+    expiry_effect: string | null
     run_status: string | null
     node_status: string | null
     node_run_id: string | null
   }>(
-    'SELECT d.decision_id, d.run_id, d.status, d.revision, d.created_at, d.node_run_id, '
+    'SELECT d.decision_id, d.run_id, d.status, d.revision, d.created_at, d.node_run_id, d.human_attention, d.expiry_effect, '
       + 'COALESCE(t.autonomy, \'autonomous\') AS autonomy, r.status AS run_status, n.status AS node_status '
       + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
       + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
@@ -436,7 +444,9 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     if (row.run_status !== null && (RUN_TERMINAL_STATUSES as readonly string[]).includes(row.run_status)) continue
     const age = nowMs - Date.parse(row.created_at)
     // blocked_post 压在人工核验上：证据门只能由人关，自动过期会留下“卡没了、节点还卡着”的死角
-    const holdForHuman = timeoutDisposition(row.autonomy) === 'hold_for_human' || row.node_status === 'blocked_post'
+    const holdForHuman = row.node_status === 'blocked_post' || (row.human_attention === null
+      ? timeoutDisposition(row.autonomy) === 'hold_for_human'
+      : row.expiry_effect === 'escalate_only')
     if (age >= expireAfterMs && !holdForHuman) {
       const closed = cancelDecision(tx, secret, { decisionId: row.decision_id, now: opts.now, reason: 'expired_final' })
       // 并发的人工裁决抢先改了 revision：本轮不算自动处理成功
@@ -449,7 +459,7 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       }
       continue
     }
-    if (age >= blockedAfterMs && row.status !== 'blocked_for_human') {
+    if (age >= blockedAfterMs && row.status !== 'blocked_for_human' && (row.human_attention !== 0 || holdForHuman)) {
       const res = tx.run(
         "UPDATE decisions SET status = 'blocked_for_human', revision = revision + 1 WHERE decision_id = ? AND revision = ? AND status IN ('pending', 'acknowledged')",
         [row.decision_id, row.revision],
