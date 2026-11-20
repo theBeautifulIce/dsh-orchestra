@@ -11,6 +11,13 @@ export const DEFAULT_HUMAN_SLOTS = 1
 // 排队上限：生产默认必须有界，不能让无限 Promise 把内存与停机时间拖垮（S2 第三十七轮 P1-01）。
 export const DEFAULT_MAX_WAITING = 1000
 
+/** This submission was rejected before joining the execution queue. */
+export class ExecutionQueueFullError extends OrchError {
+  constructor(maxWaiting: number, waiting: number) {
+    super('SERVICE_UNAVAILABLE', '执行队列满了，先别排', { maxWaiting, waiting })
+  }
+}
+
 export type ExecutionWorkflowScope = { runId: string; workflowId: string; nodeId: string }
 type ResolveWorkflowLimits = (scope: ExecutionWorkflowScope) => { runLimit: number | null; nodeLimit: number | null }
 
@@ -184,10 +191,7 @@ class Scheduler {
       }
       if (this.queue.length >= this.maxWaiting && !this.canStart(task)) {
         this.log.warn('执行队列满了，拒掉这一件', { waiting: this.queue.length, maxWaiting: this.maxWaiting })
-        reject(new OrchError('SERVICE_UNAVAILABLE', '执行队列满了，先别排', {
-          maxWaiting: this.maxWaiting,
-          waiting: this.queue.length,
-        }))
+        reject(new ExecutionQueueFullError(this.maxWaiting, this.queue.length))
         return
       }
       this.queue.push(task)

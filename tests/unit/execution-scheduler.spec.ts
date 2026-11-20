@@ -1,8 +1,12 @@
 // 执行调度器单测：配置里的 concurrency 与 human_slots 真正限制同时执行的任务数（评审 P1）
+import { setImmediate } from 'node:timers/promises'
 import { describe, expect, it } from 'vitest'
+import { SystemClock } from '../../src/core/clock.ts'
 import { parseConfig } from '../../src/core/config.ts'
+import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
+import { openDb, type Db } from '../../src/infra/sqlite/driver.ts'
 import { dispatchRun, type DispatchDeps } from '../../src/service/dispatcher.ts'
-import type { Db } from '../../src/infra/sqlite/driver.ts'
+import { definitionHashOf, WorkflowCatalog } from '../../src/service/workflows.ts'
 import {
   createExecutionScheduler,
   createExecutionSchedulerFromConfig,
@@ -289,6 +293,101 @@ describe('执行调度器', () => {
 })
 
 describe('dispatcher 与调度器接线', () => {
+  it.each(['容量恢复', '取消', '关停', '拒绝结算时关停'])('队列满时拒绝的后继在后续派发周期处理：%s', async (scenario) => {
+    const scheduler = createExecutionScheduler({ concurrency: 2, maxWaiting: 1 })
+    const db = openDb(':memory:')
+    const abort = new AbortController()
+    const ticks = new EventTarget()
+    const predecessor = Promise.withResolvers<void>()
+    const long = Promise.withResolvers<void>()
+    const independent = Promise.withResolvers<void>()
+    const extraFinished = Promise.withResolvers<void>()
+    const rejectDuringShutdown = scenario === '拒绝结算时关停'
+    const now = '2026-11-20T00:00:00.000Z'
+    const nodeIds = ['predecessor', 'long', 'independent', 'successor']
+    const definition = {
+      workflow_id: 'flow', workflow_version: '1',
+      nodes: nodeIds.map((node_id) => ({ node_id, type: 'agent' as const })),
+      edges: [{ from: 'predecessor', to: 'successor' }],
+    }
+    const catalog = new WorkflowCatalog('S6')
+    catalog.load(definition)
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    db.raw.prepare("INSERT INTO tasks(task_id,title,status,created_at,updated_at) VALUES('t','容量回归','running',?,?)").run(now, now)
+    db.raw.prepare(`INSERT INTO runs(run_id,task_id,workflow_id,workflow_version,workflow_definition_hash,status,created_at,updated_at)
+      VALUES('r','t','flow',1,?,'running',?,?)`).run(definitionHashOf(definition), now, now)
+    for (const [seq, id] of nodeIds.entries()) {
+      const status = rejectDuringShutdown && id !== 'successor' ? 'done' : 'queued'
+      db.raw.prepare(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,created_at,updated_at)
+        VALUES(?,'r',?,?,'agent',?,?,?)`).run(id, id, seq, status, now, now)
+    }
+    const otherRunJobs = rejectDuringShutdown
+      ? Array.from({ length: 3 }, () => scheduler.run(() => independent.promise))
+      : []
+    const nodes = Object.fromEntries(nodeIds.map((id) => [id, { tools: [] }]))
+    const writeStatus = db.raw.prepare('UPDATE node_runs SET status=? WHERE node_run_id=?')
+    const submitted: string[] = []
+    const started: string[] = []
+    const runtime = { db, catalog, secret: 'test', phase: 'S6' as const, clock: new SystemClock('test') }
+    const dispatch = dispatchRun({ ...runtime, runtime, executeNode: async ({ nodeRunId }) => {
+      submitted.push(nodeRunId)
+      const job = scheduler.run(async () => {
+        started.push(nodeRunId)
+        writeStatus.run('started', nodeRunId)
+        if (nodeRunId === 'predecessor') await predecessor.promise
+        if (nodeRunId === 'long') await long.promise
+        if (nodeRunId === 'independent') {
+          // The freed slot admitted this branch. A job from another run fills the freed queue entry.
+          void scheduler.run(() => {}).then(extraFinished.resolve, extraFinished.reject)
+          await independent.promise
+        }
+        writeStatus.run('done', nodeRunId)
+        return { node_run_id: nodeRunId, final_status: 'done', evidence: null, agent_id: nodeRunId }
+      })
+      if (rejectDuringShutdown) abort.abort()
+      return job
+    } }, { runId: 'r', nodes, now }, { signal: abort.signal, ticks, now: () => now, resolve: async () => nodes })
+
+    try {
+      if (rejectDuringShutdown) {
+        // The abort wakes the pump before the rejection has settled. No normal tick will follow.
+        await expect(Promise.race([dispatch.then(() => true), setImmediate(false)])).resolves.toBe(true)
+        expect(submitted).toEqual(['successor'])
+        expect(started).toEqual([])
+        return
+      }
+      predecessor.resolve()
+      await setImmediate()
+      expect(scheduler.stats()).toMatchObject({ inFlight: 2, waiting: 1 })
+      expect(submitted).toEqual(nodeIds)
+      expect(started).toEqual(nodeIds.slice(0, 3))
+      if (scenario === '取消') db.raw.prepare("UPDATE runs SET cancel_requested_at=? WHERE run_id='r'").run(now)
+      if (scenario === '关停') abort.abort()
+      independent.resolve()
+      await extraFinished.promise
+      ticks.dispatchEvent(new Event('tick'))
+      await setImmediate()
+      const readStatus = db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id=?')
+      expect(readStatus.get('long')).toMatchObject({ status: 'started' })
+      if (scenario === '容量恢复') {
+        expect(submitted).toEqual([...nodeIds, 'successor'])
+        expect(started).toEqual(nodeIds)
+        expect(readStatus.get('successor')).toMatchObject({ status: 'done' })
+      } else {
+        expect(submitted).toEqual(nodeIds)
+        expect(started).toEqual(nodeIds.slice(0, 3))
+        expect(readStatus.get('successor')).toMatchObject({ status: 'queued' })
+      }
+    } finally {
+      abort.abort()
+      ticks.dispatchEvent(new Event('tick'))
+      predecessor.resolve()
+      independent.resolve()
+      long.resolve()
+      try { await dispatch; await Promise.all(otherRunJobs) } finally { await scheduler.close(); db.raw.close() }
+    }
+  })
+
   it('不显式传调度器时，兜底闸仍把并发压到默认上限', async () => {
     let active = 0
     let maxActive = 0
