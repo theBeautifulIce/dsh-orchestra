@@ -718,11 +718,12 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     expect(closed.closed_reason).toBe('approved')
   })
 
-  it('uphold_decision：旧行 superseded，新 attempt queued 接班，迟到报告标 stale', () => {
+  it('uphold_decision：新 attempt 以更高动作代接班，重放不会创建或再次派发', () => {
     const db = setup()
     const { decisionId } = hang(db)
     const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
-    const out = applyUphold(db, { decisionId, revision: card.revision, resolution: 'uphold_decision' })
+    const resolution = { decisionId, revision: card.revision, resolution: 'uphold_decision' as const }
+    const out = applyUphold(db, resolution)
     expect(out).toEqual({ accepted: false, reason: 'uphold_decision', next_status: 'superseded', registry_state: 'stale' })
     const old = nodeRow(db)
     expect(old.status).toBe('superseded')
@@ -730,6 +731,14 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     const next = db.raw.prepare("SELECT * FROM node_runs WHERE origin_node_run_id='nr_ar'").get() as any
     expect(next.status).toBe('queued')
     expect(next.attempt).toBe(3)
+    expect(next.action_generation).toBe(old.action_generation)
+    const lease = withTx(db, (tx) => acquireLease(tx, TEST_SECRET, {
+      nodeRunId: next.node_run_id, ownerEpoch: 1, leaseTtlMs: 60_000, now: NOW,
+    }))
+    expect(lease.actionGeneration).toBe(old.action_generation + 1)
+    expect(applyUphold(db, resolution).accepted).toBe(false)
+    expect(db.raw.prepare("SELECT status, attempt, action_generation FROM node_runs WHERE origin_node_run_id='nr_ar'").all())
+      .toEqual([{ status: 'dispatched', attempt: 3, action_generation: lease.actionGeneration }])
     expect(registry(db, 'rep_conflict').state).toBe('stale')
     const closed = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
     expect(closed.closed_reason).toBe('uphold_decision')
