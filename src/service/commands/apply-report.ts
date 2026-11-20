@@ -406,7 +406,7 @@ export function applyReport(
   }
   // 挂起闸：报告与人裁决冲突时，普通出口一律 STALE_HANG；
   // 只有 uphold_report / uphold_decision 两张明确的收口口能穿过（M-59/M-60）。
-  let upholdReport = false
+  let upheldDecision: ContradictionDecisionRow | undefined
   if (row.hang_reason === HANG_REASON_REPORT_CONTRADICTED) {
     if (!params.decision) {
       throw new OrchError('STALE_HANG', '节点挂在报告冲突上，普通出口不许推进', {
@@ -424,15 +424,7 @@ export function applyReport(
         resolution: params.decision.resolution,
       })
     }
-    const decision = loadContradictionDecision(tx, params)
-    resolveDecision(tx, secret, {
-      decisionId: decision.decision_id,
-      revision: decision.revision,
-      resolution: 'uphold_report',
-      now: params.now,
-      actor: { kind: 'human', id: 'human:uphold' },
-    })
-    upholdReport = true
+    upheldDecision = loadContradictionDecision(tx, params)
   }
   if (row.action_generation !== params.generation) {
     // 动作代对不上：旧执行器的过期写，按 STALE_GENERATION 处理（规格 4.3 行 309）
@@ -512,7 +504,14 @@ export function applyReport(
       missing: Array.isArray(request?.missing) ? request.missing.map(String) : [],
     }
   }
-  if (upholdReport) {
+  if (upheldDecision) {
+    resolveDecision(tx, secret, {
+      decisionId: upheldDecision.decision_id,
+      revision: upheldDecision.revision,
+      resolution: 'uphold_report',
+      now: params.now,
+      actor: { kind: 'human', id: 'human:uphold' },
+    })
     applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,
       from: [row.status as NodeStatus],
