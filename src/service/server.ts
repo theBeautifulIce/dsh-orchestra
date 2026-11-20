@@ -164,6 +164,7 @@ export type NodeCommands = {
     triggerKind?: TaskOrigin
     escalations?: { kind: 'node_type' | 'action_category' | 'workflow_version_publish'; value: string }[]
     operationId: string
+    startedBy?: string
     now: string
   }) => StartRunResult
   setTaskArchive?: (body: SetTaskArchive, actor: string, now: string) => { task_id: string; archived_at: string | null }
@@ -275,7 +276,7 @@ function authenticate(req: IncomingMessage, secret: string): string {
 function authenticatedHuman(deps: ServerDeps, serviceActor: string, bound: { id: string } | null | undefined): Actor {
   if (deps.phase !== 'S6') return { kind: 'human', id: serviceActor }
   if (!bound || typeof bound.id !== 'string' || !bound.id.trim() || bound.id !== bound.id.trim() || bound.id.length > 256
-    || /[\u0000-\u001f\u007f]/u.test(bound.id) || /^(?:service|agent):/i.test(bound.id)) {
+    || /[\u0000-\u001f\u007f]/u.test(bound.id) || /^(?:service|agent|system):/i.test(bound.id)) {
     throw new OrchError('FORBIDDEN', '这条命令需要宿主认证的人工会话')
   }
   return { kind: 'human', id: bound.id }
@@ -349,13 +350,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     const actor = bound ? human().id : serviceActor
     if (deps.modelEscalation && url.pathname === '/v1/model-escalation') {
       if (req.method === 'GET') {
-        const { as_of_seq, ...view } = deps.modelEscalation.get(stringParam(url, 'run_id') ?? '', stringParam(url, 'node_run_id') ?? '', actor)
+        const { as_of_seq, ...view } = deps.modelEscalation.get(stringParam(url, 'run_id') ?? '', stringParam(url, 'node_run_id') ?? '', human().id)
         sendJson(res, 200, okEnvelope(as_of_seq, view))
         return
       }
       if (req.method === 'POST') {
         const body = parseBody(modelEscalationInput, await readJsonBody(req), '主脑诊断节点模型')
-        const result = await deps.modelEscalation.assess(body, actor, requestNow)
+        const result = await deps.modelEscalation.assess(body, human().id, requestNow)
         sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
         return
       }
@@ -363,29 +364,30 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
 
     if (req.method === 'POST' && deps.inspection && url.pathname === '/v1/rework/inspect') {
       const body = parseBody(reworkInspectionInput, await readJsonBody(req), '主脑检查指定成果')
-      const result = await deps.inspection.inspect(body, actor, requestNow)
+      const result = await deps.inspection.inspect(body, human().id, requestNow)
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
     if (req.method === 'GET' && deps.inspection && url.pathname === '/v1/rework/inspections') {
-      const { items, as_of_seq } = deps.inspection.list(stringParam(url, 'run_id') ?? '', actor)
+      const { items, as_of_seq } = deps.inspection.list(stringParam(url, 'run_id') ?? '', human().id)
       sendJson(res, 200, okEnvelope(as_of_seq, { items }))
       return
     }
 
     if (req.method === 'GET' && deps.rework && url.pathname === '/v1/rework') {
-      const { items, as_of_seq } = deps.rework.list(actor, stringParam(url, 'run_id'))
+      const { items, as_of_seq } = deps.rework.list(human().id, stringParam(url, 'run_id'))
       sendJson(res, 200, okEnvelope(as_of_seq, { items }))
       return
     }
     if (req.method === 'GET' && deps.rework && url.pathname === '/v1/rework/get') {
-      const { item, as_of_seq } = deps.rework.get(stringParam(url, 'request_id') ?? '', actor)
+      const { item, as_of_seq } = deps.rework.get(stringParam(url, 'request_id') ?? '', human().id)
       sendJson(res, 200, okEnvelope(as_of_seq, { item }))
       return
     }
     if (req.method === 'POST' && deps.rework && url.pathname === '/v1/rework/request') {
       const body = parseBody(reworkRequestSchema, await readJsonBody(req), '提出成果修改意见')
-      const result = await queue.run(() => deps.rework!.request(body, actor, requestNow))
+      const reviewer = human().id
+      const result = await queue.run(() => deps.rework!.request(body, reviewer, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
@@ -397,7 +399,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && deps.delivery && url.pathname === '/v1/rework/holds') {
-      const { items, as_of_seq } = deps.delivery.list(actor, stringParam(url, 'run_id'))
+      const { items, as_of_seq } = deps.delivery.list(human().id, stringParam(url, 'run_id'))
       sendJson(res, 200, okEnvelope(as_of_seq, { items }))
       return
     }
@@ -409,18 +411,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && deps.localPlanning && url.pathname === '/v1/rework/topology') {
-      const { as_of_seq, ...view } = deps.localPlanning.topology(stringParam(url, 'run_id') ?? '', actor)
+      const { as_of_seq, ...view } = deps.localPlanning.topology(stringParam(url, 'run_id') ?? '', human().id)
       sendJson(res, 200, okEnvelope(as_of_seq, view))
       return
     }
     if (req.method === 'GET' && deps.localPlanning && url.pathname === '/v1/rework/plan') {
-      const { plan, as_of_seq } = deps.localPlanning.get(stringParam(url, 'request_id') ?? '', actor)
+      const { plan, as_of_seq } = deps.localPlanning.get(stringParam(url, 'request_id') ?? '', human().id)
       sendJson(res, 200, okEnvelope(as_of_seq, { plan }))
       return
     }
     if (req.method === 'POST' && deps.localPlanning && url.pathname === '/v1/rework/plan') {
       const body = parseBody(localPlanInput, await readJsonBody(req), '生成局部返工方案')
-      const result = await deps.localPlanning.propose(body, actor, requestNow)
+      const result = await deps.localPlanning.propose(body, human().id, requestNow)
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
@@ -898,6 +900,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         triggerKind: body.triggerKind,
         escalations: body.escalations,
         operationId: body.operationId,
+        ...(bound ? { startedBy: human().id } : {}),
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))

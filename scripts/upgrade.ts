@@ -12,7 +12,7 @@ import { acquireDbLock } from '../src/infra/lock.ts'
 import { openDb } from '../src/infra/sqlite/driver.ts'
 import { inspectPackage } from './package-acceptance.ts'
 import { bootBuild, completeRun, ensureRehearsalWorkflow, head, loadUpgradeBuild, operationId,
-  previousCompatibility, request, snapshot, startRun, upgradeBlockers, verifyPrefix, verifyRuntime, waitWorkflow } from './upgrade-host.ts'
+  previousCompatibility, readPreviousModelCatalog, request, snapshot, startRun, upgradeBlockers, verifyPrefix, verifyRuntime, waitWorkflow } from './upgrade-host.ts'
 
 export const PREVIOUS_SIGNED_BUILD = '2f07617a2cfe1b5b8a069c0b1b3d73aad24549ce'
 export const UPGRADE_STEPS = ['backup', 'verify-copy', 'quiesce', 'healthcheck', 'synthetic-run', 'observe', 'rollback-table'] as const
@@ -182,9 +182,10 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
       if (step === 'verify-copy') {
         if (!existsSync(fork)) restore(backupDir, fork)
         const before = snapshot(join(backupDir, 'orchestra.db'))
+        const previousProfiles = await using('S5', (service) => readPreviousModelCatalog(service, secret), fork)
         const newer = await using('S6', async (service) => {
           verifyPrefix(service.orchestra.db, before)
-          return { ...await verifyRuntime(service, secret, 'S6'), compatibility: previousCompatibility(service.orchestra.db) }
+          return { ...await verifyRuntime(service, secret, 'S6'), compatibility: previousCompatibility(service.orchestra.db, previousProfiles) }
         }, fork)
         const older = await using('S5', async (service) => {
           verifyPrefix(service.orchestra.db, before)
@@ -193,7 +194,8 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
         if (newer.state.migrations.length !== candidate.inspected.migrations.length
           || older.state.migrations.length !== newer.state.migrations.length) throw new Error('Both real builds did not read the upgraded migration window')
         if (takeSnapshot().event_sha256 !== before.event_sha256) throw new Error('Live ledger changed during the isolated compatibility probe')
-        return { newer, older, live_untouched: true }
+        return { newer, older, live_untouched: true, previous_model_catalog: previousProfiles ?? null,
+          model_probe_scope: previousProfiles ? 'approved catalog read from old host' : 'wait-only rehearsal, no old model route' }
       }
       if (step === 'quiesce') {
         if (!existsSync(fenceFile)) persist(fenceFile, { rehearsal_id: id, plan_sha256: planSha, pause_seq: takeSnapshot().seq })
@@ -273,13 +275,15 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
         })
       }
       const waitingRun = z.string().parse(receipts[5]?.facts.rollback_pending_run)
+      const previousProfiles = z.array(z.object({ ref: z.string(), capacity: z.enum(['routine', 'standard', 'complex']) }))
+        .nullish().parse(receipts[1]?.facts.previous_model_catalog) ?? undefined
       const faultFile = join(root, 'rollback-fault.json')
       const pendingVersion = { run_id: waitingRun, workflow_version: 1 }
       if (!existsSync(faultFile)) {
         const fault = await using('S6', async (service) => {
           const intake = intakeFor(service)
           if (!intake.get().paused) intake.pause(proof, 'T14 rollback boundary')
-          const compatibility = previousCompatibility(service.orchestra.db)
+          const compatibility = previousCompatibility(service.orchestra.db, previousProfiles)
           const blockers = upgradeBlockers(service.orchestra.db, waitingRun)
           const pending = await request<{ status: string; workflow_version: number }>(service, secret, '/v1/runs/get?run_id=' + waitingRun)
           if (pending.status !== 'running' || pending.workflow_version !== 1) throw new Error('Rollback load seam was not in flight')
@@ -294,7 +298,7 @@ export async function rehearseUpgrade(input: unknown, command: 'run' | Step, sec
       // A retry after the recorded outage must recheck before even advancing the old writer's epoch.
       const reader = openDb(plan.live_db, { readonly: true })
       try {
-        previousCompatibility(reader)
+        previousCompatibility(reader, previousProfiles)
         upgradeBlockers(reader, waitingRun)
         verifyPrefix(reader, fault.before)
       } finally { reader.raw.close() }

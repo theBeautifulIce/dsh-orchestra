@@ -19,7 +19,9 @@
     "lib",
     "cordis.patch.yml",
     "orchestra.config.json",
-    "README.md"
+    "README.md",
+    "docs/runbook.md",
+    "docs/trial-circles.md"
   ],
   "dsh": {
     "bundle": {

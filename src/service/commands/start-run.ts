@@ -23,6 +23,8 @@ export type StartRunParams = {
   triggerKind?: TaskOrigin
   escalations?: readonly EscalationRule[]
   operationId: string
+  // The production HTTP adapter supplies this only for an authenticated human session.
+  startedBy?: string
   nodeIds?: string[]
   // 预留任务号（方向 A）：绑定到 reserveTask 生成的可信 task_id
   taskId?: string
@@ -40,7 +42,7 @@ export type StartRunResult = {
 
 /** Only a committed trigger occurrence can start another run for the stable task. */
 export function startTriggeredRunInTx(tx: Tx, catalog: WorkflowCatalog, triggerId: string, params: StartRunParams): StartRunResult {
-  const created = createRunInTx(tx, catalog, { ...params, escalations: validateEscalations(params.escalations) }, triggerId)
+  const created = createRunInTx(tx, catalog, { ...params, startedBy: undefined, escalations: validateEscalations(params.escalations) }, triggerId)
   return {
     task_id: created.task_id, run_id: created.run_id, workflow_id: created.workflow_id,
     workflow_version: created.workflow_version, autonomy: created.autonomy, replayed: false,
@@ -79,10 +81,15 @@ export function escalationRequiresConfirm(
   })
 }
 
-function replay(db: Db, operationId: string): StartRunResult | null {  const row = db.raw.prepare(
-    'SELECT o.task_id, o.run_id, t.workflow_id, t.workflow_version, t.autonomy FROM start_run_operations o JOIN tasks t ON t.task_id = o.task_id WHERE o.operation_id = ?',
-  ).get(operationId) as { task_id: string; run_id: string; workflow_id: string; workflow_version: string; autonomy: Autonomy } | undefined
+function replay(db: Db, operationId: string, startedBy?: string): StartRunResult | null {
+  const row = db.raw.prepare(
+    'SELECT o.task_id, o.run_id, t.workflow_id, t.workflow_version, t.autonomy, o.started_by'
+    + ' FROM start_run_operations o JOIN tasks t ON t.task_id = o.task_id WHERE o.operation_id = ?',
+  ).get(operationId) as (Omit<StartRunResult, 'replayed'> & { started_by: string | null }) | undefined
   if (!row) return null
+  if (row.started_by !== null && row.started_by !== startedBy) {
+    throw new OrchError('OPERATION_ID_CONFLICT', '该启动回执属于另一位已认证的操作者')
+  }
   return {
     task_id: row.task_id, run_id: row.run_id, workflow_id: row.workflow_id,
     workflow_version: row.workflow_version, autonomy: row.autonomy, replayed: true,
@@ -97,7 +104,7 @@ export function startRun(db: Db, catalog: WorkflowCatalog, p: StartRunParams): S
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '起运行必须带 operation_id', {})
   }
   catalog.requireWorkflowCapability(p.workflowId)
-  const prior = replay(db, p.operationId)
+  const prior = replay(db, p.operationId, p.startedBy)
   if (prior) {
     catalog.requireWorkflowCapability(prior.workflow_id)
     return prior
@@ -116,11 +123,12 @@ export function startRun(db: Db, catalog: WorkflowCatalog, p: StartRunParams): S
       triggerKind: p.triggerKind,
       escalations,
       operationId: p.operationId,
+      startedBy: p.startedBy,
       now: p.now,
     })
   } catch (err) {
     // 并发重放：唯一键冲突时以已提交的那一笔为准，不建第二条任务。
-    const raced = replay(db, p.operationId)
+    const raced = replay(db, p.operationId, p.startedBy)
     if (raced) {
       catalog.requireWorkflowCapability(raced.workflow_id)
       return raced

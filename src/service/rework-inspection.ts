@@ -32,8 +32,8 @@ export type ReworkInspection = {
 }
 export type InspectionResult = ReworkInspection & { request: ReworkRequest | null }
 
-function snapshot(tx: ReadTx, secret: string, body: InspectionInput, actor: string, now: string) {
-  const owner = requireReviewOperator(tx, secret, actor, body.run_id)
+function snapshot(tx: ReadTx, secret: string, body: InspectionInput, actor: string, now: string, humanOnly: boolean) {
+  const owner = requireReviewOperator(tx, secret, actor, body.run_id, humanOnly)
   const run = tx.get<{run_id: string; revision: number; workflow_definition_hash: string | null; workflow_id: string | null; workflow_version: string | null}>(
     `SELECT r.run_id,r.revision,r.workflow_definition_hash,r.workflow_id,r.workflow_version FROM runs r JOIN tasks t ON t.task_id=r.task_id
       WHERE r.run_id=? AND r.status='running' AND r.cancel_requested_at IS NULL
@@ -60,13 +60,13 @@ function snapshot(tx: ReadTx, secret: string, body: InspectionInput, actor: stri
     file_name: artifact.file_name, criteria: body.criteria, text }
 }
 
-export function createReworkInspectionHost(db: Db, secret: string, rework: ReworkHost, planner?: ReworkPlanner) {
+export function createReworkInspectionHost(db: Db, secret: string, rework: ReworkHost, planner?: ReworkPlanner, humanOnly = false) {
   const inFlight = new Set<string>()
   return {
     enabled: Boolean(planner),
     list(runId: string, actor: string) {
       return withReadTx(db, ({tx,as_of_seq}) => {
-        requireReviewOperator(tx,secret,actor,runId)
+        requireReviewOperator(tx,secret,actor,runId,humanOnly)
         return {items:tx.all<ReworkInspection>('SELECT * FROM rework_inspections WHERE run_id=? ORDER BY created_at DESC,inspection_id DESC LIMIT 100',[runId]),as_of_seq}
       })
     },
@@ -77,7 +77,7 @@ export function createReworkInspectionHost(db: Db, secret: string, rework: Rewor
         return withTx(db,tx=>runIdempotentCommand(tx,receipt,(): InspectionResult=>{throw new OrchError('STALE_GENERATION','主脑检查回执状态已变化')}).result)
       }
       if (!planner) throw new OrchError('SERVICE_UNAVAILABLE','该宿主未配置主脑成果检查，可继续人工审核')
-      const state = withReadTx(db,({tx})=>snapshot(tx,secret,body,actor,now))
+      const state = withReadTx(db,({tx})=>snapshot(tx,secret,body,actor,now,humanOnly))
       const target = body.run_id+'/'+body.target_node_run_id+'/'+body.source_artifact_hash
       if (inFlight.has(target)||inFlight.size>=2) throw new OrchError('COMMAND_BUSY','主脑正在检查成果，请稍后查看结果')
       inFlight.add(target)
@@ -87,7 +87,7 @@ export function createReworkInspectionHost(db: Db, secret: string, rework: Rewor
         const opinion = parsed.data
         return withTx(db,tx=>runIdempotentCommand(tx,receipt,()=>{
           const completedAt = new Date().toISOString()
-          const current = snapshot(tx,secret,body,actor,completedAt)
+          const current = snapshot(tx,secret,body,actor,completedAt,humanOnly)
           if (canonicalJson(state)!==canonicalJson(current)) throw new OrchError('STALE_GENERATION','主脑检查期间成果或执行快照发生变化，请重新检查')
           const request = opinion.verdict==='changes' ? rework.requestFromPlannerInTx(tx,{
             operation_id:body.operation_id,run_id:body.run_id,target_node_run_id:body.target_node_run_id,

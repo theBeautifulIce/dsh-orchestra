@@ -22,30 +22,35 @@ export function hasDeliveryReviewHold(tx: ReadTx, runId: string): boolean {
     AND n.status IN ('done','queued','started','verifying','dispatched') LIMIT 1`, [runId]))
 }
 
-export function reviewOwnership(tx: ReadTx, secret: string, runId: string) {
-  const operator = 'service:' + sha256Hex(secret).slice(0, 8)
+export function reviewOwnership(tx: ReadTx, secret: string, runId: string, humanOnly = false) {
   const root = tx.get<{run_id:string;task_id:string}>(`WITH RECURSIVE lineage(run_id,parent_run_id,task_id,depth) AS (
     SELECT run_id,parent_run_id,task_id,0 FROM runs WHERE run_id=?
     UNION ALL SELECT r.run_id,r.parent_run_id,r.task_id,l.depth+1 FROM runs r JOIN lineage l ON r.run_id=l.parent_run_id
     WHERE r.task_id=l.task_id AND l.depth<16
   ) SELECT run_id,task_id FROM lineage WHERE parent_run_id IS NULL ORDER BY depth DESC LIMIT 1`,[runId])
   if (!root) throw new OrchError('FORBIDDEN','当前运行没有有效的任务归属链')
-  const owner = tx.get<{ created_by: string }>(`SELECT p.created_by FROM task_plans p
-    JOIN start_run_operations o ON o.operation_id=p.launch_operation_id WHERE o.run_id=?`, [root.run_id])
-  return { rootRunId: root.run_id, taskId: root.task_id, owner: owner?.created_by ?? operator }
+  const launch = tx.get<{ started_by: string | null; created_by: string | null }>(`SELECT o.started_by,p.created_by
+    FROM start_run_operations o LEFT JOIN task_plans p ON p.launch_operation_id=o.operation_id
+    WHERE o.run_id=? AND o.task_id=?`, [root.run_id, root.task_id])
+  const authorized = launch?.started_by ?? launch?.created_by
+  if (humanOnly && (!authorized?.trim() || /^(?:service|agent|system):/i.test(authorized))) {
+    throw new OrchError('FORBIDDEN', '该运行未记录可信的人工负责人，无法办理人工审核')
+  }
+  const owner = authorized ?? 'service:' + sha256Hex(secret).slice(0, 8)
+  return { rootRunId: root.run_id, taskId: root.task_id, owner }
 }
 
-export function requireReviewOperator(tx: ReadTx, secret: string, actor: string, runId: string) {
-  const ownership = reviewOwnership(tx, secret, runId)
+export function requireReviewOperator(tx: ReadTx, secret: string, actor: string, runId: string, humanOnly = false) {
+  const ownership = reviewOwnership(tx, secret, runId, humanOnly)
   if (actor !== ownership.owner) throw new OrchError('FORBIDDEN', '当前主体没有该运行的人工审核权限')
   return ownership
 }
 
-export function createDeliveryReviewHost(db: Db, secret: string) {
+export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = false) {
   return {
     list(actor: string, runId?: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
-        if (runId) requireReviewOperator(tx, secret, actor, runId)
+        if (runId) requireReviewOperator(tx, secret, actor, runId, humanOnly)
         const items = tx.all(`SELECT h.run_id,h.node_id,n.node_run_id,
           CASE WHEN n.node_run_id=h.node_run_id THEN h.status ELSE 'held' END AS status,
           h.artifact_id,h.sha256,h.updated_at FROM delivery_review_holds h
@@ -60,7 +65,7 @@ export function createDeliveryReviewHost(db: Db, secret: string) {
       return withTx(db, (tx) => runIdempotentCommand(tx, {
         kind: 'rework.hold', operationId: body.operation_id, requestHash: requestHashOf('rework.hold', { body, actor }), now,
       }, () => {
-        requireReviewOperator(tx, secret, actor, body.run_id)
+        requireReviewOperator(tx, secret, actor, body.run_id, humanOnly)
         const node = tx.get<{ node_id: string; status: string }>(`SELECT n.node_id,n.status FROM node_runs n JOIN runs r USING(run_id)
           WHERE r.run_id=? AND n.node_run_id=? AND n.node_type='agent' AND n.replacement_node_run_id IS NULL
           AND r.status='running' AND r.cancel_requested_at IS NULL`, [body.run_id, body.node_run_id])

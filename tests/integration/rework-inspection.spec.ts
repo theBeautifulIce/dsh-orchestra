@@ -168,7 +168,7 @@ it('a child run inspection inherits the current root task plan owner and rejects
     const launch=uuidv7()
     withTx(db,tx=>{
       tx.run("UPDATE tasks SET current_run_id='r1' WHERE task_id='t1'")
-      tx.run('INSERT INTO start_run_operations VALUES(?,?,?,?)',[launch,'t1','r1',now])
+      tx.run('INSERT INTO start_run_operations (operation_id,task_id,run_id,created_at) VALUES(?,?,?,?)',[launch,'t1','r1',now])
       tx.run('INSERT INTO task_plans(plan_id,created_by,input_json,proposal_json,quality_json,content_hash,launch_operation_id,created_at) VALUES(?,?,\'{}\',\'{}\',\'{}\',?,?,?)',['plan','human:task-owner','hash',launch,now])
       tx.run("INSERT INTO runs(run_id,task_id,status,revision,parent_run_id,parent_node_run_id,root_run_id,workflow_id,workflow_version,created_at,updated_at) VALUES('child','t1','running',1,'r1','parent-control','r1','inspection','1',?,?)",[now,now])
       tx.run("INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,revision,side_effect_policy,created_at,updated_at) VALUES('child-node','child','n1',1,'agent','done',1,'pure',?,?)",[now,now])

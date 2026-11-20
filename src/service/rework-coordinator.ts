@@ -7,7 +7,7 @@ import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand, UUID_V7_RE } from './commands/idempotency.ts'
 import { readStrongEvidence } from './queries/evidence.ts'
 import { closeRun, isRunTerminal } from './commands/run-close.ts'
-import { reviewOwnership } from './delivery-review.ts'
+import { requireReviewOperator, reviewOwnership } from './delivery-review.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { propagateRunCancellation } from './commands/subworkflow.ts'
 import type { ClockProvider } from '../core/clock.ts'
@@ -189,13 +189,13 @@ export function authorizeReworkPlanInTx(tx: Tx, secret: string, row: ReworkReque
   event(tx, scheduled, 'plan_authorized')
   return loadReworkRequest(tx, row.request_id)
 }
-export function createReworkHost(db: Db, secret: string, options: {clock?: ClockProvider} = {}) {
+export function createReworkHost(db: Db, secret: string, options: {clock?: ClockProvider; humanOnly?: boolean} = {}) {
   const submitRequest = (tx: Tx, body: z.output<typeof reworkRequestSchema>, actor: ReworkActor, now: string, planner = false): ReworkRequest => {
     active(tx, body.run_id)
     const target = loadNode(tx, body.target_node_run_id)
     if (target.run_id !== body.run_id || target.status !== 'done' || target.replacement_node_run_id || target.revision !== body.expected_revision || target.node_type !== 'agent')
       throw new OrchError('STALE_GENERATION', '返工目标必须是当前已完成的 Agent 成果')
-    const { owner } = reviewOwnership(tx, secret, body.run_id)
+    const { owner } = reviewOwnership(tx, secret, body.run_id, options.humanOnly)
     if (typeof actor === 'string') {
       if (actor !== owner)
         throw new OrchError('FORBIDDEN', '只有任务宿主负责人可提出返工')
@@ -292,6 +292,7 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
       const body = reworkReviewSchema.parse(input)
       return withTx(db, tx => runIdempotentCommand(tx, { kind: 'rework.review', operationId: body.operation_id, requestHash: requestHashOf('rework.review', { ...body, actor }), now }, () => {
         let row = loadReworkRequest(tx, body.request_id)
+        if (options.humanOnly && typeof actor === 'string') requireReviewOperator(tx, secret, actor, row.run_id, true)
         const reviewedRound = row.round_no
         access(tx, row, actor, true)
         active(tx, row.run_id)
@@ -360,8 +361,10 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
     },
     list(actor: ReworkActor, runId?: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
-        if (typeof actor === 'string')
+        if (typeof actor === 'string') {
+          if (options.humanOnly && runId) requireReviewOperator(tx, secret, actor, runId, true)
           return { items: tx.all<ReworkRequest>('SELECT * FROM rework_requests WHERE owner_actor=? AND (? IS NULL OR run_id=?) ORDER BY created_at DESC,request_id DESC LIMIT 100', [actor, runId ?? null, runId ?? null]), as_of_seq }
+        }
         const node = bound(tx, actor)
         return { items: tx.all<ReworkRequest>('SELECT r.* FROM rework_requests r LEFT JOIN node_runs q ON q.node_run_id=r.requester_node_run_id JOIN node_runs t ON t.node_run_id=r.target_node_run_id WHERE r.run_id=? AND (? IS NULL OR r.run_id=?) AND (q.node_id=? OR t.node_id=?) ORDER BY r.created_at DESC,r.request_id DESC LIMIT 100', [node.run_id, runId ?? null, runId ?? null, node.node_id, node.node_id]), as_of_seq }
       })
@@ -369,6 +372,7 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
     get(requestId: string, actor: ReworkActor) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
         const request = loadReworkRequest(tx, requestId)
+        if (options.humanOnly && typeof actor === 'string') requireReviewOperator(tx, secret, actor, request.run_id, true)
         access(tx, request, actor)
         return { item: { request, dispatch_blocks: tx.all<{node_id:string;node_run_id:string;reason:string;message:string;created_at:string;resolved_at:string|null}>('SELECT node_id,node_run_id,reason,message,created_at,resolved_at FROM rework_dispatch_blocks WHERE request_id=? ORDER BY created_at,node_run_id',[requestId]), attempts: tx.all<ReworkAttempt>('SELECT * FROM rework_attempts WHERE request_id=? ORDER BY round_no', [requestId]), reviews: tx.all<ReworkReview>('SELECT * FROM rework_reviews WHERE request_id=? ORDER BY created_at,review_id', [requestId]), impacts: tx.all<{
               node_id: string

@@ -29,6 +29,7 @@ export type CreateRunParams = {
   escalations?: readonly Record<string, unknown>[]
   // 起运行命令的幂等键；旧调用不传就不写操作表
   operationId?: string
+  startedBy?: string
   // 任务专属工作流的归属声明：用 task_local 工作流时必须与登记的 owner 一致
   ownerTaskId?: string | null
   // 预留任务号：方向 A——先由服务端生成可信 task_id，再以它为 owner 建 task_local 工作流
@@ -269,8 +270,8 @@ export function createRunInTx(
     })
     if (p.operationId) {
       tx.run(
-        'INSERT INTO start_run_operations (operation_id, task_id, run_id, created_at) VALUES (?, ?, ?, ?)',
-        [p.operationId, taskIdValue, runIdValue, p.now],
+        'INSERT INTO start_run_operations (operation_id, task_id, run_id, created_at, started_by) VALUES (?, ?, ?, ?, ?)',
+        [p.operationId, taskIdValue, runIdValue, p.now, p.startedBy ?? null],
       )
     }
     return { task_id: taskIdValue, run_id: runIdValue, workflow_id: workflowId, workflow_version: version, autonomy, nodes }

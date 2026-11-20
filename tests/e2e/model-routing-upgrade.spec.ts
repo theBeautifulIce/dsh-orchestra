@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { loadUpgradeBuild, head, previousCompatibility, request } from '../../scripts/upgrade-host.ts'
+import { loadUpgradeBuild, head, previousCompatibility, readPreviousModelCatalog, request } from '../../scripts/upgrade-host.ts'
 import { sha256File } from '../../src/infra/backup.ts'
 import { BridgeClient, type SpawnParams } from '../../src/executor/bridge.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
@@ -74,9 +74,17 @@ it.runIf(Boolean(previousArchive && candidateArchive))('双包设置可往返，
     }, { timeout: 8_000 })
   }
   try {
+    session = await boot(packs[0].module, 'S5')
+    const previousCatalog = await readPreviousModelCatalog(session.service, secret)
+    expect(previousCatalog).toEqual(profiles.slice(0, 2))
+    await session.service.close()
     session = await boot(packs[1].module, 'S6')
-    const save = { operation_id: uuidv7(), expected_revision: 0, mapping: { ...map, advanced: null } }
+    const save = { operation_id: uuidv7(), expected_revision: 0, mapping: { ...map, routine: 'expert', advanced: null } }
     await session.call(mappingPath, save)
+    expect(() => previousCompatibility(session!.service.orchestra.db, previousCatalog))
+      .toThrow(/"candidate_model_bindings":1.*previous_catalog_missing_or_insufficient/)
+    expect(() => previousCompatibility(session!.service.orchestra.db))
+      .toThrow(/"candidate_model_bindings":1.*previous_catalog_unverified/)
     const fullSave = { operation_id: uuidv7(), expected_revision: 1, mapping: map,
       model_notes: [{ ref: 'expert', note: '复杂证据' }, { ref: 'fast', note: '低延迟' }] }
     await session.call(mappingPath, fullSave)
@@ -93,7 +101,10 @@ it.runIf(Boolean(previousArchive && candidateArchive))('双包设置可往返，
       base_version: 0, publish_note: 'fixture', operation_id: uuidv7() })
     const ordinary = await session.call<TaskPlanView>('/v1/task-plans', propose)
     expect(ordinary.proposal.steps[0]).not.toHaveProperty('preferred_model_ref')
-    expect(previousCompatibility(session.service.orchestra.db)).toMatchObject({ candidate_plans: 0, candidate_routing: 0 })
+    expect(previousCompatibility(session.service.orchestra.db, previousCatalog))
+      .toMatchObject({ candidate_plans: 0, candidate_routing: 0, candidate_model_bindings: 0 })
+    expect(() => previousCompatibility(session!.service.orchestra.db, [{ ref: 'fast', capacity: 'expert' }]))
+      .toThrow(/previous_catalog_missing_or_insufficient/)
     await session.service.close()
     session = await boot(packs[0].module, 'S5')
     expect(await session.call(mappingPath)).toMatchObject({ revision: 2, mapping: { routine: 'fast', standard: null, complex: null } })
@@ -116,7 +127,7 @@ it.runIf(Boolean(previousArchive && candidateArchive))('双包设置可往返，
     })
     const db = session.service.orchestra.db
     const before = { seq: head(db), epoch: db.epoch }
-    expect(() => previousCompatibility(db)).toThrow(/"candidate_plans":1,"in_flight_model_plans":1/)
+    expect(() => previousCompatibility(db, previousCatalog)).toThrow(/"candidate_plans":1,"in_flight_model_plans":1/)
     const context = { taskId: inFlight.task_id, runId: inFlight.run_id, workflowId: 'model-compat', workflowVersion: '1',
       nodeRunId: 'fixture', nodeId: 'check', attempt: 1, actionGeneration: 1 }
     expect(() => packs[0].module.getTaskPlanRecommendation(db, context)).toThrow()
@@ -128,7 +139,7 @@ it.runIf(Boolean(previousArchive && candidateArchive))('双包设置可往返，
     session = await boot(packs[1].module, 'S6', 'preferred-only')
     const preferred = await session.call<TaskPlanView>('/v1/task-plans', propose)
     expect(preferred.proposal.steps[0]).toMatchObject({ complexity: 'routine', preferred_model_ref: 'fast' })
-    expect(() => previousCompatibility(session!.service.orchestra.db)).toThrow(/"candidate_plans":2,"in_flight_model_plans":0/)
+    expect(() => previousCompatibility(session!.service.orchestra.db, previousCatalog)).toThrow(/"candidate_plans":2,"in_flight_model_plans":0/)
   } finally {
     await session?.service.close()
     rmSync(root, { recursive: true, force: true })

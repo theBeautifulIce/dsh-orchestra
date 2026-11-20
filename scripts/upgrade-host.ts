@@ -6,6 +6,7 @@ import { sha256Hex, canonicalJson } from '../src/core/canonical.ts'
 import { openDb, type Db } from '../src/infra/sqlite/driver.ts'
 import { UNVERIFIED_EFFECT } from '../src/infra/db/unverified-effects.ts'
 import { legacyModelMappingSchema } from '../src/service/model-routing-settings.ts'
+import { selectExecutionModel, type ModelProfile } from '../src/executor/model-routing.ts'
 import { inspectPackage } from './package-acceptance.ts'
 
 type Module = typeof import('../src/index.ts')
@@ -116,7 +117,18 @@ export function upgradeBlockers(db: Db, waitingRun?: string) {
   return state
 }
 
-export function previousCompatibility(db: Db) {
+export async function readPreviousModelCatalog(service: Service, secret: string): Promise<readonly ModelProfile[] | undefined> {
+  try {
+    const result = await request<{ profiles: ModelProfile[] }>(service, secret, '/v1/settings/model-routing')
+    if (!Array.isArray(result.profiles)) throw new Error('Old settings did not provide an approved model catalog')
+    return result.profiles
+  } catch (error) {
+    if ((error as { code?: string }).code === 'NOT_FOUND') return undefined
+    throw error
+  }
+}
+
+export function previousCompatibility(db: Db, previousProfiles?: readonly ModelProfile[]) {
   // A downgraded service reads even historical plans with a strict schema.
   // Projecting away these fields would alter both the signed plan hash and execution model.
   const advancedPlans = db.raw.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(CASE
@@ -125,13 +137,27 @@ export function previousCompatibility(db: Db) {
     WHERE EXISTS (SELECT 1 FROM json_each(p.proposal_json, '$.steps') s WHERE
       json_extract(s.value, '$.complexity') IN ('advanced','expert') OR json_type(s.value, '$.preferred_model_ref') IS NOT NULL)`).get() as { n: number; in_flight: number }
   const routing = db.raw.prepare('SELECT mapping_json FROM model_routing_settings WHERE id = 1').get() as { mapping_json: string } | undefined
-  const unreadableRouting = routing && !legacyModelMappingSchema.safeParse(JSON.parse(routing.mapping_json)).success ? 1 : 0
+  const legacy = legacyModelMappingSchema.safeParse(routing
+    ? JSON.parse(routing.mapping_json) : { routine: null, standard: null, complex: null })
+  const modelBindings = legacy.success ? (['routine', 'standard', 'complex'] as const).flatMap((complexity) => {
+    const ref = legacy.data[complexity]
+    if (ref === null) return []
+    if (!previousProfiles) return [{ complexity, ref, reason: 'previous_catalog_unverified' }]
+    try {
+      selectExecutionModel(previousProfiles.filter((profile) => Object.hasOwn(legacy.data, profile.capacity)),
+        { complexity, preferredModel: ref, reason: '旧宿主回退预检' })
+      return []
+    } catch {
+      return [{ complexity, ref, reason: 'previous_catalog_missing_or_insufficient' }]
+    }
+  }) : []
   const release = db.raw.prepare("SELECT COUNT(*) AS n FROM workflow_versions WHERE workflow_id='wf_release_v1'").get() as { n: number }
   const blockers = { candidate_plans: advancedPlans.n, in_flight_model_plans: advancedPlans.in_flight,
-    candidate_routing: unreadableRouting, release_versions: release.n }
+    candidate_routing: Number(!legacy.success), candidate_model_bindings: modelBindings.length, release_versions: release.n }
   if (Object.values(blockers).some((n) => n > 0)) {
     const detail = advancedPlans.n > 0 ? '。已有计划使用进阶、专家档或明确的首选模型，请保留原计划与批准记录，并用当前构建继续处理。' : ''
-    throw new Error('Previous build cannot interpret candidate data: ' + JSON.stringify(blockers) + detail)
+    const models = modelBindings.length ? '。旧宿主未确认可用的已指定模型：' + JSON.stringify(modelBindings) : ''
+    throw new Error('Previous build cannot interpret candidate data: ' + JSON.stringify(blockers) + detail + models)
   }
   return blockers
 }

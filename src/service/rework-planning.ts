@@ -28,8 +28,9 @@ type PlanRow = { plan_hash: string; proposal_json: string; snapshot_json: string
 function view(row: PlanRow) {
   return { plan_hash: row.plan_hash, revision: row.revision, proposal: proposalSchema.parse(JSON.parse(row.proposal_json)), approved_by: row.approved_by }
 }
-function snapshot(tx: ReadTx, requestId: string, actor: string, revision: number, now: string) {
+function snapshot(tx: ReadTx, requestId: string, actor: string, revision: number, now: string, secret: string, humanOnly: boolean) {
   const request = loadReworkRequest(tx, requestId)
+  if (humanOnly) requireReviewOperator(tx, secret, actor, request.run_id, true)
   assertReworkOwner(tx, request, actor)
   if (request.revision !== revision || request.expires_at <= now || !['proposed', 'needs_human_approval'].includes(request.status)) {
     throw new OrchError('STALE_GENERATION', '反馈已变化，请重新查看当前请求')
@@ -114,14 +115,14 @@ function validatePlan(raw: unknown, state: ReturnType<typeof snapshot>): Proposa
   return p
 }
 
-export function createReworkPlanningHost(db: Db, secret: string, planner?: ReworkPlanner) {
+export function createReworkPlanningHost(db: Db, secret: string, planner?: ReworkPlanner, humanOnly = false) {
   // The planner has no write authority. CAS and a unique (request,revision) pin its reviewed output.
   const inFlight = new Set<string>()
   return {
     enabled: Boolean(planner),
     topology(runId: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
-        requireReviewOperator(tx, secret, actor, runId)
+        requireReviewOperator(tx, secret, actor, runId, humanOnly)
         if (!tx.get('SELECT 1 FROM runs WHERE run_id=?', [runId])) throw new OrchError('NOT_FOUND', '运行不存在')
         const requests = tx.all(`SELECT q.request_id,n.node_id AS target_node_id,q.status,q.round_no
           FROM rework_requests q JOIN node_runs n ON n.node_run_id=q.target_node_run_id
@@ -135,7 +136,9 @@ export function createReworkPlanningHost(db: Db, secret: string, planner?: Rewor
     },
     get(id: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
-        assertReworkOwner(tx, loadReworkRequest(tx, id), actor)
+        const request = loadReworkRequest(tx, id)
+        if (humanOnly) requireReviewOperator(tx, secret, actor, request.run_id, true)
+        assertReworkOwner(tx, request, actor)
         const plan = tx.get<PlanRow>('SELECT * FROM rework_local_plans WHERE request_id=? ORDER BY revision DESC LIMIT 1', [id])
         return { plan: plan ? view(plan) : null, as_of_seq }
       })
@@ -151,12 +154,12 @@ export function createReworkPlanningHost(db: Db, secret: string, planner?: Rewor
       if (inFlight.has(key) || inFlight.size >= 2) throw new OrchError('COMMAND_BUSY', '主脑正在规划，请稍后查看方案')
       inFlight.add(key)
       try {
-        const state = withReadTx(db, ({ tx }) => snapshot(tx, body.request_id, actor, body.expected_revision, now))
+        const state = withReadTx(db, ({ tx }) => snapshot(tx, body.request_id, actor, body.expected_revision, now, secret, humanOnly))
         const existing = db.raw.prepare('SELECT * FROM rework_local_plans WHERE request_id=? AND revision=?').get(body.request_id, body.expected_revision) as PlanRow | undefined
         const unchanged = existing?.snapshot_json === canonicalJson(state)
         const proposal = unchanged ? view(existing).proposal : validatePlan(await callBoundedPlanner(planner, state), state)
         return withTx(db, tx => runIdempotentCommand(tx, receipt, () => {
-          const current = snapshot(tx, body.request_id, actor, body.expected_revision, new Date().toISOString())
+          const current = snapshot(tx, body.request_id, actor, body.expected_revision, new Date().toISOString(), secret, humanOnly)
           const snapshotJson = canonicalJson(state)
           if (snapshotJson !== canonicalJson(current)) throw new OrchError('STALE_GENERATION', '规划期间执行状态发生变化')
           const hash = sha256Hex(canonicalJson({ state, proposal }))
@@ -178,7 +181,7 @@ export function createReworkPlanningHost(db: Db, secret: string, planner?: Rewor
       const body = localPlanApproval.parse(input)
       return withTx(db, tx => runIdempotentCommand(tx, { kind: 'rework.plan_approve', operationId: body.operation_id,
         requestHash: requestHashOf('rework.plan_approve', { body, actor }), now }, () => {
-        const state = snapshot(tx, body.request_id, actor, body.expected_revision, now)
+        const state = snapshot(tx, body.request_id, actor, body.expected_revision, now, secret, humanOnly)
         const saved = tx.get<PlanRow>('SELECT * FROM rework_local_plans WHERE request_id=? AND revision=? AND plan_hash=? AND approved_by IS NULL',
           [body.request_id, body.expected_revision, body.plan_hash])
         if (!saved || saved.snapshot_json !== canonicalJson(state)) throw new OrchError('STALE_GENERATION', '批准的方案或依赖快照已变化')

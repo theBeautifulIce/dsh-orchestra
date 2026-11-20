@@ -58,8 +58,9 @@ function latestAssessment(tx: ReadTx, nodeRunId: string) {
   return entry ? JSON.parse(entry.payload) as Assessment : undefined
 }
 
-function factsFor(tx: ReadTx, secret: string, input: Input, actor: string, now: string, profiles: readonly Profile[], successorId?: string) {
-  const ownership = requireReviewOperator(tx, secret, actor, input.run_id)
+function factsFor(tx: ReadTx, secret: string, input: Input, actor: string, now: string, profiles: readonly Profile[],
+  humanOnly: boolean, successorId?: string) {
+  const ownership = requireReviewOperator(tx, secret, actor, input.run_id, humanOnly)
   const node = tx.get<Node>('SELECT n.* FROM node_runs n JOIN runs r USING(run_id) JOIN tasks t USING(task_id)'
     + " JOIN runs root ON root.run_id=? WHERE n.node_run_id=? AND n.run_id=? AND n.node_type='agent'"
     + ' AND n.replacement_node_run_id IS ? AND n.attempt=? AND n.action_generation=?'
@@ -165,7 +166,7 @@ export function noteAgentStopped(tx: Tx, secret: string, node: NodeRunRow, attem
 }
 
 export function createModelEscalationHost(db: Db, secret: string, profiles: readonly Profile[], planner?: ReworkPlanner,
-  onError?: (error: unknown) => void, nowAt: () => string = () => new Date().toISOString()) {
+  onError?: (error: unknown) => void, nowAt: () => string = () => new Date().toISOString(), humanOnly = false) {
   const inFlight = new Set<string>()
   const deferred = new Map<string, number>()
   let nextAutoAt = 0
@@ -174,14 +175,14 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
     const body = modelEscalationInput.parse(input)
     const receipt = { kind: assessmentEvent, operationId: body.operation_id, requestHash: requestHashOf(assessmentEvent, { body, actor }), now }
     const previous = withReadTx(db, ({ tx }) => {
-      requireReviewOperator(tx, secret, actor, body.run_id)
+      requireReviewOperator(tx, secret, actor, body.run_id, humanOnly)
       return tx.get('SELECT 1 FROM inbox WHERE operation_id=?', [body.operation_id])
     })
     if (previous) return withTx(db, (tx) => runIdempotentCommand(tx, receipt, (): Assessment => {
       throw new OrchError('STALE_GENERATION', '模型诊断回执已失效')
     }).result)
     if (!planner) throw new OrchError('SERVICE_UNAVAILABLE', '当前宿主没有配置主脑模型诊断')
-    const state = withReadTx(db, ({ tx }) => factsFor(tx, secret, body, actor, now, profiles, successor?.id))
+    const state = withReadTx(db, ({ tx }) => factsFor(tx, secret, body, actor, now, profiles, humanOnly, successor?.id))
     if (!state) throw new OrchError('FORBIDDEN', '当前尝试没有可诊断的执行阻塞、长耗时或两次有效打回')
     if (inFlight.has(body.node_run_id) || inFlight.size >= 2) throw new OrchError('COMMAND_BUSY', '主脑正在诊断模型，请稍后查看')
     inFlight.add(body.node_run_id)
@@ -207,7 +208,7 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
         if (successor && safeOrigin(tx, successor.id, completedAt, successor.generation)?.node_run_id !== body.node_run_id) {
           throw new OrchError('STALE_GENERATION', '下一次执行尝试的租约或前序状态已变化')
         }
-        const current = factsFor(tx, secret, body, actor, completedAt, profiles, successor?.id)
+        const current = factsFor(tx, secret, body, actor, completedAt, profiles, humanOnly, successor?.id)
         if (current?.fingerprint !== state.fingerprint || chainBreakOf(secret, readChain(tx, body.node_run_id))) {
           throw new OrchError('STALE_GENERATION', '诊断期间执行事实已变化或节点账本损坏')
         }
@@ -235,10 +236,15 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
       const pending = withReadTx(db, ({ tx }) => {
         const origin = safeOrigin(tx, nodeRunId, now, generation)
         if (!origin) return
-        const owner = reviewOwnership(tx, secret, origin.run_id).owner
+        let owner: string
+        try { owner = reviewOwnership(tx, secret, origin.run_id, humanOnly).owner }
+        catch (error) {
+          if (error instanceof OrchError && error.code === 'FORBIDDEN') return
+          throw error
+        }
         const body = { operation_id: uuidv7(), run_id: origin.run_id, node_run_id: origin.node_run_id,
           expected_attempt: origin.attempt, expected_action_generation: origin.action_generation }
-        const state = factsFor(tx, secret, body, owner, now, profiles, nodeRunId)
+        const state = factsFor(tx, secret, body, owner, now, profiles, humanOnly, nodeRunId)
         const previous = latestAssessment(tx, origin.node_run_id)
         if (!state || (previous?.fingerprint === state.fingerprint && previous.expires_at > now)) return
         return { body, owner }
@@ -247,7 +253,7 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
     },
     get(runId: string, nodeRunId: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
-        requireReviewOperator(tx, secret, actor, runId)
+        requireReviewOperator(tx, secret, actor, runId, humanOnly)
         const node = tx.get<Node>('SELECT * FROM node_runs WHERE run_id=? AND node_run_id=?', [runId, nodeRunId])
         if (!node) {
           throw new OrchError('NOT_FOUND', '该运行没有此节点尝试')
@@ -263,7 +269,7 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
         let eligible = false
         if (planner && !node.replacement_node_run_id) {
           try {
-            eligible = Boolean(factsFor(tx, secret, { ...precondition, operation_id: uuidv7() }, actor, nowAt(), profiles))
+            eligible = Boolean(factsFor(tx, secret, { ...precondition, operation_id: uuidv7() }, actor, nowAt(), profiles, humanOnly))
           } catch (error) {
             if (!(error instanceof OrchError && error.code === 'STALE_GENERATION')) throw error
           }
@@ -302,8 +308,8 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
           const body = { operation_id: uuidv7(), run_id: node.run_id, node_run_id: node.node_run_id,
             expected_attempt: node.attempt, expected_action_generation: node.action_generation }
           try {
-            const owner = reviewOwnership(tx, secret, node.run_id).owner
-            if (factsFor(tx, secret, body, owner, now, profiles)) return { body, owner }
+            const owner = reviewOwnership(tx, secret, node.run_id, humanOnly).owner
+            if (factsFor(tx, secret, body, owner, now, profiles, humanOnly)) return { body, owner }
           } catch (error) {
             if (!(error instanceof OrchError && ['STALE_GENERATION', 'FORBIDDEN'].includes(error.code))) throw error
           }

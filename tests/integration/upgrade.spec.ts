@@ -85,3 +85,15 @@ it('旧构建兼容窗口拒绝五档配置、在途动作和账本原像漂移'
     expect(() => verifyPrefix(db, before)).toThrow(/fixed version/)
   } finally { db.raw.close() }
 })
+
+it('同一模型编号在旧宿主档位不足时不能回退', () => {
+  const db = openDb(':memory:')
+  try {
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    withTx(db, (tx) => tx.run('INSERT INTO model_routing_settings(id,revision,mapping_json,updated_by,updated_at) VALUES(1,1,?,?,?)',
+      [JSON.stringify({ routine: null, standard: null, complex: 'shared' }), 'tester', '2026-11-20T00:00:00Z']))
+    expect(() => previousCompatibility(db, [{ ref: 'shared', capacity: 'standard' }]))
+      .toThrow(/previous_catalog_missing_or_insufficient/)
+    expect(previousCompatibility(db, [{ ref: 'shared', capacity: 'complex' }])).toMatchObject({ candidate_model_bindings: 0 })
+  } finally { db.raw.close() }
+})
