@@ -75,13 +75,16 @@ type WorkflowCandidate = {
 }
 type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
-  propose(input: PlanInput & { workflows: WorkflowCandidate[]; model_profiles?: readonly ModelPlanningProfile[] }, signal: AbortSignal): Promise<unknown>
+  propose(input: PlanInput & { workflows: WorkflowCandidate[]; model_profiles?: readonly ModelPlanningProfile[] }, signal: AbortSignal, onProgress?: () => void): Promise<unknown>
   timeoutMs?: number
+  /** This planner reports nonempty provider output through onProgress. */
+  streamProgress?: boolean
   /**
    * 自动生成任务专属流程的能力：没有可复用的合适流程时，由服务端生成 task_local 流程。
    * 不装配它就退回原来的口径：提示先发布至少一个可复用流程。
    */
-  workflowGenerator?: (input: { goal: string }, signal: AbortSignal) => Promise<unknown>
+  workflowGenerator?: (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) => Promise<unknown>
+  workflowStreamProgress?: boolean
   /** 运行时允许的节点类型（发布层校验用）；默认只认 agent / wait。 */
   runtimeNodeTypes?: ReadonlySet<string>
 }
@@ -468,10 +471,41 @@ function candidateFromRuntime(def: WorkflowDefinition, title: string, registry: 
   return { workflowId: def.workflow_id ?? '', version: String(def.workflow_version), title, nodes }
 }
 
+export async function callPlanningStage<T>(run: (signal: AbortSignal, onProgress?: () => void) => Promise<T>, caller: AbortSignal | undefined,
+  messages: { timeout: string; failure: string }, maximumMs = 120_000, idleMs: number | null = 30_000): Promise<T> {
+  caller?.throwIfAborted()
+  const controller = new AbortController()
+  const signal = caller ? AbortSignal.any([caller, controller.signal]) : controller.signal
+  const expire = (boundary: 'inactivity' | 'maximum') => controller.abort(new OrchError('OPERATION_TIMEOUT', messages.timeout, { boundary }))
+  const maximum = setTimeout(() => expire('maximum'), maximumMs)
+  const idle = idleMs === null ? undefined : setTimeout(() => expire('inactivity'), idleMs)
+  maximum.unref()
+  idle?.unref()
+  let onAbort: () => void = () => {}
+  const stopped = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    const operation = idle ? run(signal, () => { if (!signal.aborted) idle.refresh() }) : run(signal)
+    const value = await Promise.race([operation, stopped])
+    signal.throwIfAborted()
+    return value
+  } catch (error) {
+    if (signal.aborted) throw signal.reason
+    if (error instanceof OrchError) throw error
+    throw new OrchError('SERVICE_UNAVAILABLE', messages.failure)
+  } finally {
+    clearTimeout(maximum)
+    clearTimeout(idle)
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
 export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registry: ToolRegistry | undefined,
   options?: TaskPlanningOptions, planningProfiles?: () => readonly ModelPlanningProfile[]) {
-  const timeout = options?.timeoutMs ?? 30_000
-  if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 120_000) {
+  const explicitTimeout = options?.timeoutMs
+  if (explicitTimeout !== undefined && (!Number.isSafeInteger(explicitTimeout) || explicitTimeout < 1000 || explicitTimeout > 120_000)) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑规划时限必须在 1 到 120 秒之间')
   }
   const get = (planId: string, actor: string) => withReadTx(db, ({ tx, as_of_seq }) => {
@@ -479,36 +513,16 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     if (!row) throw new OrchError('NOT_FOUND', '没有对应的任务计划')
     return { row, view: toPlanView(row), as_of_seq }
   })
-  /** 调主脑：统一的超时与错误口径 */
-  const callPlanner = async <T>(
-    run: (signal: AbortSignal) => Promise<T>,
-    messages: { timeout: string; failure: string },
-  ): Promise<T> => {
-    const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      const expired = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new OrchError('OPERATION_TIMEOUT', messages.timeout))
-          controller.abort()
-        }, timeout)
-        timer.unref()
-      })
-      return await Promise.race([run(controller.signal), expired])
-    } catch (error) {
-      if (error instanceof OrchError && error.code === 'OPERATION_TIMEOUT') throw error
-      throw new OrchError('SERVICE_UNAVAILABLE', messages.failure)
-    } finally { if (timer !== undefined) clearTimeout(timer) }
-  }
   /** 主脑提案：完整提案，或者显式的「没有可用候选」信号 */
-  const askPlanner = async (brief: PlanInput, workflows: WorkflowCandidate[]): Promise<PlannerOutcome> => {
+  const askPlanner = async (brief: PlanInput, workflows: WorkflowCandidate[], caller?: AbortSignal): Promise<PlannerOutcome> => {
     const planner = options?.propose
     if (!planner) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
     const profiles = planningProfiles?.() ?? []
     const offered = structuredClone({ ...brief, workflows, ...(profiles.length > 0 ? { model_profiles: profiles } : {}) })
-    const candidate = await callPlanner(
-      (signal) => planner(offered, signal),
+    const candidate = await callPlanningStage(
+      (signal, onProgress) => onProgress ? planner(offered, signal, onProgress) : planner(offered, signal), caller,
       { timeout: '主脑没有在时限内生成计划', failure: '主脑暂时未能产出计划' },
+      explicitTimeout ?? (options?.streamProgress ? 120_000 : 30_000), options?.streamProgress ? 30_000 : null,
     )
     const parsed = proposalSchema.safeParse(candidate)
     if (parsed.success) {
@@ -529,7 +543,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
    * 没有可复用的合适流程时：生成任务专属流程（task_local），再基于它产出一份完整计划。
    * 预留任务 + 建流程 + 发布 + 落计划在同一笔事务里：失败不留孤儿流程，也不留悬空预留任务。
    */
-  const proposeAuto = async (brief: PlanInput, actor: string, now: string): Promise<ReturnType<typeof get>> => {
+  const proposeAuto = async (brief: PlanInput, actor: string, now: string, caller?: AbortSignal): Promise<ReturnType<typeof get>> => {
     const generator = options?.workflowGenerator
     if (!generator) {
       throw new OrchError('VERDICT_UNSUPPORTED', '主脑判定没有可用流程，但服务端没有装配流程生成能力')
@@ -537,9 +551,10 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     const runtimeNodeTypes = options?.runtimeNodeTypes ?? DEFAULT_RUNTIME_NODE_TYPES
     const goal = [brief.goal, ...brief.requirements.map((item) => item.text)].join('；')
     // 1) 主脑出流程草案：放在事务外，主脑耗时不能占着写锁
-    const draft = await callPlanner(
-      (signal) => generator({ goal }, signal),
+    const draft = await callPlanningStage(
+      (signal, onProgress) => onProgress ? generator({ goal }, signal, onProgress) : generator({ goal }, signal), caller,
       { timeout: '主脑没有在时限内生成流程', failure: '主脑暂时未能生成流程' },
+      explicitTimeout ?? (options?.workflowStreamProgress ? 120_000 : 30_000), options?.workflowStreamProgress ? 30_000 : null,
     )
     const doc = buildAutoDoc(draft, registry, runtimeNodeTypes)
     const workflowId = 'tl_' + uuidv7().replace(/-/g, '')
@@ -547,7 +562,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     const workflowHash = definitionHashOf(runtime)
     const autoCandidate = candidateFromRuntime(runtime, doc.name, registry)
     // 2) 再让主脑基于新生成的流程产出一份完整计划（steps / deliverables / risks）
-    const outcome = await askPlanner(brief, [autoCandidate])
+    const outcome = await askPlanner(brief, [autoCandidate], caller)
     if (outcome.kind !== 'proposal') {
       throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑没有基于新生成的流程产出完整计划')
     }
@@ -558,6 +573,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     const quality = evaluate(brief, proposal, autoCandidate)
     const hash = planHash({ brief, proposal, quality }, workflowHash)
     const id = uuidv7()
+    caller?.throwIfAborted()
     // 3) 预留任务 + 建流程 + 发布 + 落计划：同一笔事务
     const published = withTx(db, (tx) => {
       const ctx = publishContextFor(tx, runtimeNodeTypes)
@@ -587,6 +603,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
   }
   return {
     enabled: options !== undefined,
+    requestTimeoutMs: Math.max(180_000, options?.streamProgress || options?.workflowStreamProgress ? 0 : 3 * (explicitTimeout ?? 0)),
     get,
     getForTask(taskId: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
@@ -594,7 +611,8 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         return { item: row ? toPlanView(row) : null, as_of_seq }
       })
     },
-    async propose(input: TaskPlanInput, actor: string, now: string) {
+    async propose(input: TaskPlanInput, actor: string, now: string, caller?: AbortSignal) {
+      caller?.throwIfAborted()
       if (!options?.propose) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
       const brief = { goal: input.goal, requirements: input.requirements.map((text, index) => ({ id: 'R' + (index + 1), text })) }
       // 候选检索：先捞一个较大的池子，再按任务适配性排序，最后才截断
@@ -612,17 +630,18 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       // 候选池里一个都没有：走自动生成；没有生成能力就还是让调用方先去发布流程
       if (choices.length === 0) {
         if (!options.workflowGenerator) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '请先发布至少一个可复用流程')
-        return proposeAuto(brief, actor, now)
+        return proposeAuto(brief, actor, now, caller)
       }
-      const outcome = await askPlanner(brief, choices.map((item) => item.workflow))
+      const outcome = await askPlanner(brief, choices.map((item) => item.workflow), caller)
       // 主脑判定候选池里没有一个适合这次任务：走同一条自动生成路径
-      if (outcome.kind === 'no_candidate') return proposeAuto(brief, actor, now)
+      if (outcome.kind === 'no_candidate') return proposeAuto(brief, actor, now, caller)
       const proposal = outcome.proposal
       const selected = choices.find(({ workflow }) => workflow.workflowId === proposal.workflow_id && workflow.version === proposal.workflow_version)
       const quality = evaluate(brief, proposal, selected?.workflow)
       const workflowHash = selected?.hash ?? null
       const hash = planHash({ brief, proposal, quality }, workflowHash)
       const id = uuidv7()
+      caller?.throwIfAborted()
       withTx(db, (tx) => {
         tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
           + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)',

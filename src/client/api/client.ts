@@ -47,7 +47,7 @@ export async function unwrap<T>(res: Response): Promise<ApiResult<T>> {
 
 export type ApiClient = {
   get<T>(path: string, query?: Record<string, string | number | undefined>): Promise<ApiResult<T>>
-  post<T>(path: string, payload: unknown): Promise<ApiResult<T>>
+  post<T>(path: string, payload: unknown, signal?: AbortSignal): Promise<ApiResult<T>>
 }
 
 export function createApiClient(baseUrl: string, fetcher: FetchLike = globalThis.fetch.bind(globalThis)): ApiClient {
@@ -59,22 +59,27 @@ export function createApiClient(baseUrl: string, fetcher: FetchLike = globalThis
     return url.toString()
   }
   const send = async <T>(path: string, init: RequestInit, query?: Record<string, string | number | undefined>): Promise<ApiResult<T>> => {
+    init.signal?.throwIfAborted()
     let response: Response
     try { response = await fetcher(urlFor(path, query), init) } catch (error) {
+      init.signal?.throwIfAborted()
       const timedOut = error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')
       const commandOutcomeUnknown = init.method === 'POST'
       const code = timedOut ? 'OPERATION_TIMEOUT' : commandOutcomeUnknown ? 'OPERATION_OUTCOME_UNKNOWN' : 'SERVICE_UNAVAILABLE'
       const message = timedOut || commandOutcomeUnknown ? '请求结果暂不可确认' : '服务未连接'
       throw new ApiError(code, message, true)
     }
-    return unwrap<T>(response)
+    const result = await unwrap<T>(response)
+    init.signal?.throwIfAborted()
+    return result
   }
   return {
     get: <T>(path: string, query?: Record<string, string | number | undefined>) => send<T>(path, { method: 'GET', headers: { accept: 'application/json' } }, query),
-    post: <T>(path: string, payload: unknown) => send<T>(path, {
+    post: <T>(path: string, payload: unknown, signal?: AbortSignal) => send<T>(path, {
       method: 'POST',
       headers: { accept: 'application/json', 'content-type': 'application/json' },
       body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),
     }),
   }
 }

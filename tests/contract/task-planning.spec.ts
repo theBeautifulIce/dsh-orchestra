@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { getTaskPlanRecommendation, serveOrchestra, type ModelRouting, type TaskPlanningOptions, type TaskPlanProposal } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import type { WorkflowDoc } from '../../src/core/workflow-doc.ts'
@@ -93,6 +93,44 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
   return { endpoint: service.endpoint, client, api: createResourcesApi(client), planCommands: createTaskCommands(client),
     db, catalog, commands, registry, publish }
 }
+
+it('HTTP 规划请求断开后取消流程生成且不创建任务或计划', async () => {
+  let start!: (signal: AbortSignal) => void
+  const started = new Promise<AbortSignal>((resolve) => { start = resolve })
+  const { endpoint, db } = await boot(async () => {
+    throw new Error('已取消请求不应进入第二阶段')
+  }, undefined, { empty: true, workflowGenerator: async (_input, signal) => {
+    start(signal)
+    return new Promise(() => {})
+  } })
+  const client = new AbortController()
+  const response = fetch(endpoint + '/v1/task-plans', {
+    method: 'POST', signal: client.signal,
+    headers: { 'x-orchestra-secret': 'planning-contract-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({ goal: '生成试验计划' }),
+  })
+  const outcome = expect(response).rejects.toMatchObject({ name: 'AbortError' })
+  const planningSignal = await started
+  client.abort()
+  await outcome
+  await expect.poll(() => planningSignal.aborted).toBe(true)
+  for (const table of ['tasks', 'workflows', 'task_plans']) {
+    expect(db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n).toBe(0)
+  }
+})
+
+it('独立流程生成通过既有两参数回调并保留 45 秒默认时限', async () => {
+  const generate = vi.fn(async () => reviewDoc)
+  const { client } = await boot(async () => valid(), undefined, { empty: true, workflowGenerator: generate })
+  const timers = vi.spyOn(globalThis, 'setTimeout')
+  try {
+    const result = await client.post<{ definition: WorkflowDoc }>('/v1/workflows/generate', { goal: '生成试验流程' })
+    expect(result.data.definition).toEqual(reviewDoc)
+    expect(generate.mock.calls[0]).toHaveLength(2)
+    expect(timers.mock.calls.some(([, timeout]) => timeout === 45_000)).toBe(true)
+    expect(timers.mock.calls.some(([, timeout]) => timeout === 30_000 || timeout === 120_000)).toBe(false)
+  } finally { timers.mockRestore() }
+})
 
 it('规划、质量检查、人工确认与启动回执绑定同一份固定版本和模型建议', async () => {
   const { client, api, planCommands, db, endpoint } = await boot(async (input, signal) => {

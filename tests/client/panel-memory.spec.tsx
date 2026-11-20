@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // 面板侧 S5-I 的行为测试：记忆屏四问、十二句状态文案、记忆审批卡、开发者视图与只读边界。
 import { describe, expect, it } from 'vitest'
+import { act } from 'react'
 import { createApiClient, type FetchLike } from '../../src/client/api/client.ts'
 import { createDecisionCommandsApi } from '../../src/client/api/decision-commands.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
@@ -8,12 +9,12 @@ import type { MemoryBatchView, MemoryItemView } from '../../src/client/api/types
 import { PanelApp } from '../../src/client/panel/app.tsx'
 import { DecisionInbox } from '../../src/client/panel/decision-inbox.tsx'
 import { MemoryPanel, memoryCopy } from '../../src/client/panel/memory-panel.tsx'
-import { createFakeService, decisionView, page, renderPanel, type FakeQuery, type FakeReply } from './harness.ts'
+import { createFakeService, decisionView, deferred, page, renderPanel, type FakeQuery, type FakeReply } from './harness.ts'
 
 type RecordedPost = { path: string; body: Record<string, unknown> }
 
 /** 假服务外面再包一层：harness 只记路径，这里把请求体也记下来。 */
-function panelService(handler: (query: FakeQuery) => FakeReply) {
+function panelService(handler: (query: FakeQuery) => FakeReply | Promise<FakeReply>) {
   const posts: RecordedPost[] = []
   const service = createFakeService(handler)
   const fetcher: FetchLike = async (input, init) => {
@@ -130,6 +131,133 @@ describe('记忆面板的十二句状态文案', () => {
 })
 
 describe('记忆屏的四问', () => {
+  it('首次读取和查询失败均不显示空态，重试成功且确实为空才显示空态', async () => {
+    const first = deferred<FakeReply>()
+    const retry = deferred<FakeReply>()
+    let requestCount = 0
+    const { api } = panelService(() => (++requestCount === 1 ? first.promise : retry.promise))
+    const view = await renderPanel(<MemoryPanel api={api} memoryEnabled={false} />)
+    const assertNoData = () => {
+      for (const text of ['已写入条目', '还没有记下东西', '没有待确认', '没有没写成的条目', '暂无整理记录']) {
+        expect(view.text()).not.toContain(text)
+      }
+    }
+    try {
+      expect(view.byRole('status')[0]?.textContent).toContain('正在读取记忆')
+      assertNoData()
+      await act(async () => first.resolve({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'fixture error', retryable: true } }))
+      expect(view.byRole('alert')[0]?.textContent).toContain('记忆查询失败')
+      expect(view.text()).not.toContain('正在读取记忆')
+      assertNoData()
+      await view.click(view.findAll('button').find((button) => button.textContent === '重试')!)
+      expect(requestCount).toBe(2)
+      expect(view.byRole('status')[0]?.textContent).toContain('正在读取记忆')
+      expect(view.byRole('alert')).toEqual([])
+      assertNoData()
+      await act(async () => retry.resolve({ ok: true, data: page([]) }))
+      expect(view.text()).toContain('还没有记下东西')
+      expect(view.text()).toContain('没有待确认')
+      expect(view.text()).not.toContain('整理为记忆')
+    } finally { view.unmount() }
+  })
+
+  it('同源刷新失败隐藏审批与历史，切换来源后丢弃晚到旧响应和展开状态', async () => {
+    const failure = { ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'fixture error', retryable: true } } as const
+    const stale = deferred<FakeReply>()
+    const next = deferred<FakeReply>()
+    const entries = [memoryBatch({ items: [memoryItem({ title: '旧来源的条目', content: '旧来源全文' })] }),
+      memoryBatch({ batch_id: 'pending', status: 'awaiting_human', pending_count: 1, items: [] })]
+    let requestCount = 0
+    const original = panelService(() => {
+      requestCount += 1
+      if (requestCount === 1) return { ok: true, data: page(entries) }
+      return requestCount === 2 ? failure : stale.promise
+    })
+    const replacement = panelService(() => next.promise)
+    const render = (api = original.api, reloadVersion = 0) => <MemoryPanel api={api} memoryEnabled reloadVersion={reloadVersion}
+      onOpenDecisions={() => {}} />
+    const view = await renderPanel(render())
+    const assertOldHidden = () => {
+      for (const text of ['最近批次', '旧来源的条目', '旧来源全文', '有 1 条等你确认', '查看审批']) {
+        expect(view.text()).not.toContain(text)
+      }
+    }
+    try {
+      await view.flush()
+      await view.click(view.findAll('button').find((button) => button.textContent === '展开看全文与来源')!)
+      expect(view.text()).toContain('旧来源全文')
+      expect(view.text()).toContain('查看审批')
+      await view.rerender(render(original.api, 1))
+      expect(view.byRole('alert')[0]?.textContent).toContain('记忆查询失败')
+      assertOldHidden()
+      await view.click(view.findAll('button').find((button) => button.textContent === '重试')!)
+      assertOldHidden()
+      await view.rerender(render(replacement.api, 1))
+      expect(view.text()).toContain('正在读取记忆')
+      await act(async () => stale.resolve({ ok: true, data: page(entries) }))
+      assertOldHidden()
+      await act(async () => next.resolve({ ok: true, data: page([
+        memoryBatch({ items: [memoryItem({ title: '新来源的条目', content: '新来源全文' })] }),
+      ]) }))
+      expect(view.text()).toContain('新来源的条目')
+      expect(view.text()).not.toContain('新来源全文')
+      expect(view.text()).not.toContain('旧来源')
+    } finally { view.unmount() }
+  })
+
+  it('未装配整理时可查看已写入条目和历史提议，页面没有审批、对账或新增整理入口', async () => {
+    const service = memoryService([
+      memoryBatch(),
+      memoryBatch({ batch_id: 'pending', status: 'awaiting_human', pending_count: 2, items: [] }),
+      memoryBatch({ batch_id: 'apply', status: 'applying', recovery_available: true, items: [] }),
+      memoryBatch({ batch_id: 'failed', status: 'failed', items: [] }),
+    ])
+    const view = await renderPanel(<MemoryPanel api={service.api} memoryEnabled={false} proposalOnly
+      onOpenDecisions={() => {}} onOpenTasks={() => {}} />)
+    try {
+      await view.flush()
+      expect(view.text()).toContain('当前宿主未启用记忆整理，页面为只读')
+      expect(view.text()).toContain('连接正常时，仍可查看已有条目')
+      expect(view.text()).toContain('面板测试用 Vitest')
+      expect(view.text()).toContain('有 2 条提议待确认，当前仅可查看')
+      expect(view.text()).toContain('没写成：裁判没给出结果')
+      for (const text of ['写入尚未开放', '查看审批', '核对记忆写入', '再试一次', '去任务中选择一次成功运行', '批准写入']) {
+        expect(view.text()).not.toContain(text)
+      }
+      expect(service.calls.map(({ path }) => path)).toEqual(['/v1/memory/batches'])
+    } finally { view.unmount() }
+  })
+
+  it.each([false, true])('已启用整理时保留提议入口，准确说明是否可写入（proposalOnly=%s）', async (proposalOnly) => {
+    const { api } = memoryService([])
+    let opened = 0
+    const view = await renderPanel(<MemoryPanel api={api} memoryEnabled proposalOnly={proposalOnly} onOpenTasks={() => { opened += 1 }} />)
+    try {
+      await view.flush()
+      expect(view.text()).toContain(proposalOnly ? '写入尚未开放' : '再批准写入')
+      expect(view.text()).not.toContain(proposalOnly ? '再批准写入' : '写入尚未开放')
+      await view.click(view.findAll('button').find((button) => button.textContent === '去任务中选择一次成功运行')!)
+      expect(opened).toBe(1)
+    } finally { view.unmount() }
+  })
+
+  it('仅提议模式把待确认批次引向既有提议查看入口', async () => {
+    const { api, posts } = memoryService([memoryBatch({ status: 'awaiting_human', pending_count: 2, items: [] })])
+    let opened = 0
+    const view = await renderPanel(<MemoryPanel api={api} memoryEnabled proposalOnly onOpenDecisions={() => { opened += 1 }} />)
+    try {
+      await view.flush()
+      expect(view.text()).toContain('有 2 条记忆提议可查看')
+      expect(view.text()).toContain('可以查看提议及其来源')
+      expect(view.text()).not.toContain('等你确认')
+      expect(view.text()).not.toContain('查看审批')
+      expect(view.text()).not.toContain('先确认要写哪几条')
+      await view.click(view.findAll('button').find((button) => button.textContent === '查看提议')!)
+      expect(opened).toBe(1)
+      expect(posts).toEqual([])
+    } finally { view.unmount() }
+  })
+
   it('按更新时间展示最近批次，展开同名键时只显示所选批次的来源', async () => {
     const { api } = memoryService([
       memoryBatch({ batch_id: 'old', attempt: 8, items: [memoryItem({ source: '历史项目' })] }),

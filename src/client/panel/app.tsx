@@ -53,9 +53,9 @@ export function PanelApp(props: PanelAppProps) {
   writesEnabled.current = props.serviceConnected && !props.protocolMismatch && !snapshotStale
   const client = useMemo<ApiClient>(() => ({
     get: (...args) => props.client.get(...args),
-    async post<T>(path: string, payload: unknown) {
+    async post<T>(path: string, payload: unknown, signal?: AbortSignal) {
       if (!writesEnabled.current) throw new ApiError('PANEL_WRITE_UNAVAILABLE', '当前为只读状态，刷新成功后再操作', false)
-      return props.client.post<T>(path, payload)
+      return props.client.post<T>(path, payload, signal)
     },
   }), [props.client])
   const rework = useMemo(() => props.reworkEnabled ? createReworkApi(client) : undefined, [client, props.reworkEnabled])

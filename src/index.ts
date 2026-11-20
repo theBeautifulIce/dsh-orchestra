@@ -121,16 +121,17 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   try {
     const generateWorkflow = dshPlanner && createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'workflow')
     // 同一个流程生成回调既接给服务端入口，也接给规划侧：没有可复用的合适流程时，规划侧自动生成任务专属流程
-    const workflowGenerator = generateWorkflow ? (input: { goal: string }, signal: AbortSignal) =>
-      generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal) : undefined
+    const workflowGenerator = generateWorkflow ? (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) =>
+      generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal, onProgress) : undefined
     const service = await serveOrchestra({
       ...serviceOptions,
       ...(dshPlanner ? { reworkPlanner: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'rework') } : {}),
       ...(dshPlanner ? { planning: {
         propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }),
-        ...(workflowGenerator ? { workflowGenerator } : {}),
+        streamProgress: true,
+        ...(workflowGenerator ? { workflowGenerator, workflowStreamProgress: true } : {}),
       } } : {}),
-      ...(workflowGenerator ? { workflowGenerator } : {}),
+      ...(workflowGenerator ? { workflowGenerator, workflowGeneratorStreamProgress: true } : {}),
       executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
     })
     collaboration = service.collaboration
@@ -572,6 +573,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   resolveHttpHuman?: ServerDeps['resolveHttpHuman']
   memory?: MemoryHostOptions
   workflowGenerator?: ServerDeps['workflowGenerator']
+  workflowGeneratorStreamProgress?: boolean
   resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs
   asOfSeq: ServerDeps['asOfSeq']
   listTasks: ServerDeps['listTasks']
@@ -647,6 +649,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     const planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, opts.planning ? {
       ...opts.planning,
       workflowGenerator: opts.planning.workflowGenerator ?? opts.workflowGenerator,
+      workflowStreamProgress: opts.planning.workflowGenerator ? opts.planning.workflowStreamProgress : opts.workflowGeneratorStreamProgress,
       runtimeNodeTypes: RUNTIME_NODE_TYPES,
     } : undefined, modelSettings?.planningProfiles)
     if (opts.memory) {
@@ -702,6 +705,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       rework, delivery, localPlanning, inspection, modelEscalation,
       modelSettings,
       workflowGenerator: opts.workflowGenerator,
+      workflowGeneratorStreamProgress: opts.workflowGeneratorStreamProgress,
       taskTriggers,
       log,
     })
