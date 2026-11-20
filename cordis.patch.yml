@@ -1,4 +1,4 @@
-# Register the dual-face package. The trusted host adapter provisions the runtime.
+# Auto-activate the personal adapter in a supported local Desktop profile.
 [
-  { insert: [{ id: dsh-orchestra, name: dsh-orchestra }] }
+  { insert: [{ id: dsh-orchestra, name: dsh-orchestra, config: { local: { enabled: desktop } } }] }
 ]

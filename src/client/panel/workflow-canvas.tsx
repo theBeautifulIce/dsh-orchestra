@@ -10,6 +10,8 @@ import { taskOriginLabel, taskStatusView } from './tasks-screen.tsx'
 import { PanelCommandButton } from './shell.tsx'
 import { WorkflowStatusBadge } from './workflow-list.tsx'
 import { formatTaskDate, runDuration } from './task-run-steps.tsx'
+import { readCanvasDoc } from './workflow-canvas-nodes.tsx'
+import { WorkflowDependencyView } from './workflow-dependency-view.tsx'
 
 export type WorkflowCanvasProps = {
   api: ResourcesApi
@@ -138,9 +140,11 @@ export function WorkflowCanvas({ api, workflowId, onBack, onOpenRun, reloadVersi
 }
 
 function DefinitionPanel({ definition }: { definition: unknown }) {
+  const doc = readCanvasDoc(definition)
   return <section aria-labelledby="workflow-definition-title" className="ops-surface">
     <header className="ops-surface-head"><h2 id="workflow-definition-title">流程定义</h2><span className="ops-status">只读</span></header>
     {definition == null ? <p className="ops-empty">流程定义暂不可用。</p> : <div className="ops-inset">
+      {doc && <WorkflowDependencyView doc={doc} />}
       <WorkflowCanvasView definition={definition} readOnly runtimeCompact inspectNodes workspace canvasId="published-canvas" />
       <details><summary>查看定义 JSON</summary><pre style={jsonStyle}>{JSON.stringify(definition, null, 2)}</pre></details>
     </div>}

@@ -1,8 +1,10 @@
 import { OrchError } from '../../core/errors.ts'
-import { MODEL_COMPLEXITIES, readModelUse, type ModelAssignment } from '../../executor/model-routing.ts'
+import { MODEL_COMPLEXITIES, readModelUse, validModelEffort, type ModelAssignment } from '../../executor/model-routing.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { withReadTx, type ReadCtx, type ReadTx } from './read-tx.ts'
 import type { EffectVerdict } from '../../executor/tools.ts'
+import { dependencyReadiness, pinnedEdges, readRunBinding, runPredecessors } from '../run-readiness.ts'
+import { reworkBlocksNode } from '../rework-runtime.ts'
 
 export const NODE_TERMINAL = [
   'done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded',
@@ -49,6 +51,9 @@ export type NodeRunView = {
   status: string
   display_status: string
   status_label: string
+  execution_state?: string
+  depends_on?: string[]
+  waiting_on?: string[]
   revision: number
   side_effect_policy: string
   side_effect_verified_none: boolean
@@ -157,6 +162,8 @@ function modelAssignment(ctx: ReadCtx, row: NodeRow): NodeRunView['model_assignm
   const usage = payload.state === 'confirmed' ? readModelUse(payload.usage) : undefined
   const settingsRevision = payload.settings_revision
   return { model_ref: payload.model_ref, complexity: payload.complexity, reason: payload.reason, state: payload.state,
+    ...(typeof payload.provider === 'string' && typeof payload.model === 'string' ? { provider: payload.provider, model: payload.model } : {}),
+    ...(payload.reasoning_effort === null || validModelEffort(payload.reasoning_effort) ? { reasoning_effort: payload.reasoning_effort } : {}),
     ...(usage ? { usage } : {}), ...(Number.isSafeInteger(settingsRevision) && settingsRevision! > 0 ? { settings_revision: settingsRevision } : {}) }
 }
 
@@ -198,32 +205,55 @@ export function readRunNodeDisplay(tx: ReadTx, runId: string) {
   return { settling: row.settling === 1, nodes }
 }
 
-export function listNodes(db: Db, runId: string, limit = 100): { items: NodeRunView[]; as_of_seq: number } {
+function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: string) => boolean) {
+  const binding = readRunBinding(tx, runId)
+  const edges = binding ? pinnedEdges(binding) : null
+  const preds = edges ? runPredecessors(tx, runId, edges) : null
+  return (row: NodeRow): Pick<NodeRunView, 'execution_state' | 'depends_on' | 'waiting_on'> => {
+    const depends_on = preds?.get(String(row.node_id)) ?? []
+    const state = (execution_state: string, waiting_on: string[] = []) => ({ execution_state, depends_on, waiting_on })
+    if (row.status !== 'queued') return state(row.status)
+    if (binding?.cancel_requested_at) return state('cancelled')
+    if (binding?.status === 'paused' || reworkBlocksNode(tx, row.node_run_id)) return state('paused')
+    if (!preds) return state('queued_unknown')
+    const readiness = dependencyReadiness(tx, runId, row.node_run_id, depends_on)
+    if (!readiness.ready) {
+      const waiting_on = [...readiness.missingPreds, ...readiness.failedPreds, ...readiness.waitingPreds]
+      return state(readiness.missingPreds.length > 0 ? 'queued_unknown' : 'waiting_dependencies', waiting_on)
+    }
+    return state(isWaiting?.(row.node_run_id) ? 'waiting_capacity' : 'ready')
+  }
+}
+
+export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeRunId: string) => boolean): { items: NodeRunView[]; as_of_seq: number } {
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
   return withReadTx(db, (ctx) => {
     const { settling, nodes } = readRunNodeDisplay(ctx.tx, runId)
+    const executionState = readExecutionStates(ctx.tx, runId, isWaiting)
     const rows = ctx.tx.all<NodeRow>(
       NODE_VIEW_SELECT + ' WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit],
     )
-    const items = rows.map((row) => toNodeView(
-      row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
-      modelAssignment(ctx, row), nodes.get(String(row.node_id)),
-    ))
+    const items = rows.map((row) => ({
+      ...toNodeView(row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
+        modelAssignment(ctx, row), nodes.get(String(row.node_id))),
+      ...executionState(row),
+    }))
     return { items, as_of_seq: ctx.as_of_seq }
   })
 }
 
-export function getNodeSnapshot(db: Db, nodeRunId: string): { item: NodeRunView; as_of_seq: number } {
+export function getNodeSnapshot(db: Db, nodeRunId: string, isWaiting?: (nodeRunId: string) => boolean): { item: NodeRunView; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const row = ctx.tx.get<NodeRow>(NODE_VIEW_SELECT + ' WHERE n.node_run_id = ?', [nodeRunId])
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个执行节点', { node_run_id: nodeRunId })
     const { settling, nodes } = readRunNodeDisplay(ctx.tx, row.run_id)
     return {
-      item: toNodeView(
-        row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
-        modelAssignment(ctx, row), nodes.get(String(row.node_id)),
-      ),
+      item: {
+        ...toNodeView(row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
+          modelAssignment(ctx, row), nodes.get(String(row.node_id))),
+        ...readExecutionStates(ctx.tx, row.run_id, isWaiting)(row),
+      },
       as_of_seq: ctx.as_of_seq,
     }
   })

@@ -22,7 +22,7 @@ export type WorkflowDocNodeType = (typeof WORKFLOW_NODE_TYPES)[number]
 /** 内建图结构节点：不依赖运行时能力注册，trigger 永远允许 */
 export const BUILTIN_GRAPH_TYPES: ReadonlySet<string> = new Set(['trigger'])
 
-/** trigger / branch / parallel 可以有多条出边；branch 必须带 route */
+/** branch 和 parallel 控制节点必须有后续步骤。 */
 const MULTI_OUT_DEGREE: ReadonlySet<WorkflowDocNodeType> = new Set(['branch', 'parallel'])
 
 const NODE_ID_RE = /^[a-z][a-z0-9_]{0,63}$/
@@ -175,12 +175,11 @@ const outDegreeIssues = (doc: WorkflowDoc): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
   const out = new Map<string, number>()
   for (const edge of doc.edges) out.set(edge.from, (out.get(edge.from) ?? 0) + 1)
-  const triggers = doc.nodes.filter((n) => n.type === 'trigger')
   for (const node of doc.nodes) {
     const degree = out.get(node.node_id) ?? 0
     if (node.type === 'trigger') {
-      if (degree !== 1) {
-        issues.push({ path: nodePath(doc, node.node_id), code: 'WORKFLOW_TRIGGER_FANOUT', message: 'trigger 必须恰好有一条出边' })
+      if (degree === 0) {
+        issues.push({ path: nodePath(doc, node.node_id), code: 'WORKFLOW_TRIGGER_FANOUT', message: 'trigger 至少要有一条出边' })
       }
       continue
     }
@@ -188,12 +187,10 @@ const outDegreeIssues = (doc: WorkflowDoc): ValidationIssue[] => {
     if (multi && degree < 1) {
       issues.push({ path: nodePath(doc, node.node_id), code: 'WORKFLOW_NODE_FANOUT_INVALID', message: node.type + ' 至少要有一条出边' })
     }
-    if (!multi && degree > 1) {
+    if (!multi && node.type !== 'agent' && degree > 1) {
       issues.push({ path: nodePath(doc, node.node_id), code: 'WORKFLOW_NODE_FANOUT_INVALID', message: node.type + ' 最多只能有一条出边' })
     }
   }
-  // trigger 必须有出边，末端节点没有出边是正常的：上面的规则已覆盖
-  void triggers
   return issues
 }
 

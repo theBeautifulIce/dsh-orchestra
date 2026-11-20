@@ -15,6 +15,8 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
   const sessionId = 'session-id'
   const archivedSessionIds: string[] = []
   const agent = { session: { id: sessionId, header: { cwd: dir } }, model: { current: () => ({ provider: 'trusted', model: 'selected' }) } }
+  let groups = [{ id: 'trusted', models: [{ id: 'default' }, { id: 'selected' }] }]
+  const modelCatalog = vi.fn(async () => ({ default: { provider: 'trusted', model: 'default' }, groups }))
   const close = vi.fn(async () => {})
   ctx.provide('connection', { fetch: { register(options: { fetch: NonNullable<typeof route> }) { route = options.fetch } } })
   ctx.provide('workspaceRegistry', {
@@ -23,7 +25,7 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
   })
   ctx.provide('sessionController', {
     resolveAgent: async () => ({ agent }),
-    modelCatalog: async () => ({ default: { provider: 'trusted', model: 'default' }, groups: [{ id: 'trusted', models: [{ id: 'default' }, { id: 'selected' }] }] }),
+    modelCatalog,
   })
   ctx.provide('credentials', { modifyRecord: async (_key: string, update: (value: undefined) => Promise<unknown>) => update(undefined) })
   ctx.provide('agents', { get: () => agent })
@@ -76,7 +78,15 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
     expect(headers.has('cookie')).toBe(false)
     expect(headers.get('x-orchestra-secret')).toMatch(/^[a-f0-9]{64}$/u)
     expect(serve.mock.calls[0]?.[0].dsh.parentForNode('node')).toBe(agent)
-    expect(serve.mock.calls[0]?.[0].dsh.models).toMatchObject([{ provider: 'trusted', model: 'selected' }])
+    expect(modelCatalog).not.toHaveBeenCalled()
+    const load = serve.mock.calls[0]?.[0].dsh.loadModelCatalog
+    expect((await load!()).profiles).toMatchObject([
+      { ref: 'trusted/default', capacity: null }, { ref: 'trusted/selected', capacity: 'standard' },
+    ])
+    groups = [{ id: 'trusted', models: [{ id: 'default' }] }, { id: 'other', models: [{ id: 'default' }] }]
+    expect((await load!()).profiles).toMatchObject([
+      { ref: 'trusted/default', capacity: null }, { ref: 'other/default', capacity: null },
+    ])
     expect((await request('/v1/rework/plan')).status).toBe(200)
     const result = await serve.mock.calls[0]![0].tools.runner.runTool({ command: 'workspace_read_sample', args: ['other.txt'],
       cwd: '.', timeoutMs: 1000, workspaceRoot: dir })

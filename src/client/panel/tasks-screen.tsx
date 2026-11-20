@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { ListTasksParams, ResourcesApi } from '../api/resources.ts'
 import type { TaskSummary } from '../api/types.ts'
 import { TASK_LANES, type TaskLane } from '../../core/task-workspace.ts'
@@ -10,6 +10,7 @@ import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
 import { TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
+import { TaskStepOverview, useRunStepSnapshot } from './task-step-overview.tsx'
 
 const ATTENTION_LABEL: Record<string, string> = {
   decision: '待审批', unverified: '待核验', failed: '执行失败', orphaned: '待接管', running: '执行中', none: '无待处理事项',
@@ -69,7 +70,7 @@ export function taskCardStatus(task: TaskSummary) {
   return taskStatusView(task.status, task.display_status)
 }
 
-const VIEWS = [{ id: 'board', label: '看板' }, { id: 'flow', label: '流程' }, { id: 'list', label: '列表' }] as const
+const VIEWS = [{ id: 'board', label: '看板' }, { id: 'flow', label: '流程' }, { id: 'queue', label: '队列' }, { id: 'list', label: '列表' }] as const
 const ORIGINS = { manual: '人工', scheduled: '定时', event: '事件触发', continuous: '持续' } as const
 const AUTONOMY = { autonomous: '自主执行', assisted: '协助执行', supervised: '人工监督' } as const
 const ABSOLUTE_STATUSES = ['reserved', 'queued', 'running', 'waiting', 'paused', 'succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'cancelled']
@@ -91,6 +92,7 @@ function taskColumn(task: TaskSummary): TaskLane {
 export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
   const [view, setView] = useState<(typeof VIEWS)[number]['id']>('board')
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
   const [filter, setFilter] = useState<Omit<ListTasksParams, 'cursor' | 'limit'>>({})
   const [status, setStatus] = useState('')
   const [period, setPeriod] = useState('')
@@ -120,7 +122,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
     setError(false)
     void api.listTasks({ limit: 50, cursor, ...filter }).then((result) => {
       if (!current) return
-      setItems((previous) => cursor ? mergeByTaskId(previous, result.data.items) : result.data.items)
+      setItems((previous) => mergeByTaskId(cursor ? previous : [], result.data.items))
       setNextCursor(result.data.next_cursor)
       onSnapshot?.(result.as_of_seq)
     }).catch(() => {
@@ -164,7 +166,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
     <header className="task-page-header">
       <div>
       <h1 id="tasks-title" style={titleStyle}>{filter.archived ? '归档箱' : '任务'}</h1>
-      <p style={mutedStyle}>{filter.archived ? '归档任务仍可查看运行记录、结果与证据，也可以取回。' : '点开任务，在右侧查看步骤、结果和证据。'}</p>
+      <p style={mutedStyle}>{filter.archived ? '归档任务仍可查看运行记录、结果与证据，也可以取回。' : '在看板展开步骤看进度，打开任务查看结果和证据。'}</p>
       </div>
       {!filter.archived && <div className="task-page-actions">
         {commands && <button type="button" aria-expanded={startOpen} onClick={() => setStartOpen(!startOpen)} style={buttonStyle}>从流程新建任务</button>}
@@ -224,11 +226,13 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
         <h2 id={`tasks-${id}`} className="task-column-title">{label}<span>{grouped[id].length}</span></h2>
         {grouped[id].length === 0 && <p className="task-column-empty">暂无任务</p>}
         {grouped[id].map((task) => <TaskCard key={task.task_id} task={task} selected={task.task_id === selectedTaskId} compact={Boolean(selectedTaskId)}
-          onSelect={(trigger) => onSelectTask(task.task_id, trigger)} />)}
+          expanded={expandedTaskId === task.task_id} onExpand={() => setExpandedTaskId((selected) => selected === task.task_id ? null : task.task_id)}
+          api={api} reloadVersion={reload} onSelect={(trigger) => onSelectTask(task.task_id, trigger)} />)}
       </section>)}
     </div></div>}
     {items.length > 0 && (filter.archived || view === 'list') && <TaskTable tasks={items} archived={Boolean(filter.archived)} selectedTaskId={selectedTaskId} onSelect={onSelectTask} />}
-    {items.length > 0 && !filter.archived && view === 'flow' && <TaskFlowView reworkEnabled={reworkEnabled} api={api} tasks={items} onOpenTask={onSelectTask} reloadVersion={reloadVersion + reload} />}
+    {items.length > 0 && !filter.archived && (view === 'flow' || view === 'queue') &&
+      <TaskFlowView reworkEnabled={reworkEnabled} api={api} tasks={items} onOpenTask={onSelectTask} reloadVersion={reload} queue={view === 'queue'} />}
     {nextCursor && !error && <div style={{ display: 'flex', justifyContent: 'center' }}>
       <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>
     </div>}
@@ -289,9 +293,11 @@ function mergeByTaskId(previous: TaskSummary[], incoming: TaskSummary[]): TaskSu
   return merged
 }
 
-function TaskCard({ task, selected, compact, onSelect }: {
+function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, api, reloadVersion }: {
   task: TaskSummary; selected: boolean; compact: boolean; onSelect: (trigger: HTMLButtonElement) => void
+  expanded: boolean; onExpand: () => void; api: ResourcesApi; reloadVersion: number
 }) {
+  const stepsId = useId()
   const attention = ATTENTION_LABEL[task.attention]
   const { label: status, tone } = taskCardStatus(task)
   const hasUnverified = task.unverified_count > 0
@@ -317,7 +323,22 @@ function TaskCard({ task, selected, compact, onSelect }: {
       <TaskWaitAndHeartbeat task={task} />
       <time dateTime={task.updated_at} title={formatDate(task.updated_at)}>{formatDate(task.updated_at)}</time>
     </div>
+    {task.current_run_id && <div className="task-card-steps">
+      <button type="button" className="task-quiet-button" aria-expanded={expanded} aria-controls={stepsId}
+        aria-label={`${expanded ? '收起' : '展开'}步骤：${task.title || '未命名任务'}`}
+        onClick={onExpand}>{expanded ? '收起步骤' : '展开步骤'}</button>
+      <div id={stepsId} hidden={!expanded}>
+        {expanded && <CardSteps api={api} runId={task.current_run_id} reloadVersion={reloadVersion} />}
+      </div>
+    </div>}
   </article>
+}
+
+function CardSteps({ api, runId, reloadVersion }: { api: ResourcesApi; runId: string; reloadVersion: number }) {
+  const { nodes, failed, refresh } = useRunStepSnapshot(api, runId, reloadVersion)
+  if (failed) return <p role="alert">步骤读取失败。<button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>
+  if (!nodes) return <p role="status">正在读取步骤…</p>
+  return <TaskStepOverview nodes={nodes} />
 }
 
 function TaskRisk({ level }: { level: TaskSummary['max_side_effect_level'] }) {

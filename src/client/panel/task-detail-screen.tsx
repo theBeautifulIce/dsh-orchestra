@@ -1,4 +1,4 @@
-import { runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
+import { currentAttempts, runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
 import { ReworkPanel } from './rework-panel.tsx'
 import type { ReworkApi } from '../api/rework.ts'
 import type { ModelEscalationApi } from '../api/model-escalation.ts'
@@ -24,6 +24,7 @@ import { TaskPlanBrief } from './task-plan-form.tsx'
 import { TaskRunSteps, formatTaskDate, runDuration, usePinnedWorkflow } from './task-run-steps.tsx'
 import { NodeEffectFacts, NodeEvidence } from './task-run-evidence.tsx'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
+import { nodeExecutionLabel, waitingFor } from './task-node-status.ts'
 
 export type TaskDetailScreenProps = {
   api: ResourcesApi
@@ -42,6 +43,8 @@ export type TaskDetailScreenProps = {
   onOpenDecision?: (id: string) => void
 }
 type DetailData = { task: TaskSummary; runs: RunSummary[]; next: string | null }
+type RunRead = { api: ResourcesApi; taskId: string; runId: string }
+  & ({ run: RunSummary; failed?: undefined } | { run?: undefined; failed: true })
 const TASK_TABS = ['概览', '运行', '编排', '事件'] as const
 const RUN_TABS = ['步骤', '结果', '证据', '事件'] as const
 type TaskTab = (typeof TASK_TABS)[number]
@@ -58,13 +61,15 @@ const NODE_TERMINAL_STATUSES = new Set([
 export function TaskDetailScreen({
   api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision,
 }: TaskDetailScreenProps) {
-  const [data, setData] = useState<DetailData | null>(null)
+  const [loaded, setLoaded] = useState<{ api: ResourcesApi; taskId: string; data: DetailData }>()
+  const data = loaded?.api === api && loaded.taskId === taskId ? loaded.data : undefined
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [reload, setReload] = useState(0)
   const [taskTab, setTaskTab] = useState<TaskTab>('概览')
   const [runTab, setRunTab] = useState<RunTab>('步骤')
-  const [runSelection, setRunSelection] = useState<RunSummary>()
+  const [runSelection, setRunSelection] = useState<{ api: ResourcesApi; taskId: string; run: RunSummary }>()
+  const [runRead, setRunRead] = useState<RunRead>()
   const [showRun, setShowRun] = useState(Boolean(initialRunId))
   const close = useRef<HTMLButtonElement>(null)
   const dialog = useRef<HTMLDialogElement>(null)
@@ -88,13 +93,10 @@ export function TaskDetailScreen({
     let current = true
     setLoading(true)
     setFailed(false)
-    void Promise.all([api.getTask(taskId), api.listRuns({ task_id: taskId, limit: 50 }),
-      initialRunId ? api.getRun(initialRunId) : null]).then(([taskResult, runsResult, pinned]) => {
+    void Promise.all([api.getTask(taskId), api.listRuns({ task_id: taskId, limit: 50 })]).then(([taskResult, runsResult]) => {
       if (!current) return
-      if (pinned && pinned.data.task_id !== taskId) throw new Error('运行归属已变化')
-      setData({ task: taskResult.data, runs: runsResult.data.items, next: runsResult.data.next_cursor ?? null })
-      if (pinned) setRunSelection((selection) => !selection || selection.run_id === pinned.data.run_id ? pinned.data : selection)
-      onSnapshot?.(Math.max(taskResult.as_of_seq, runsResult.as_of_seq, pinned?.as_of_seq ?? 0))
+      setLoaded({ api, taskId, data: { task: taskResult.data, runs: runsResult.data.items, next: runsResult.data.next_cursor ?? null } })
+      onSnapshot?.(Math.max(taskResult.as_of_seq, runsResult.as_of_seq))
     }).catch(() => {
       if (current) setFailed(true)
     }).finally(() => {
@@ -106,12 +108,29 @@ export function TaskDetailScreen({
   const task = data?.task
   const taskState = task ? taskCardStatus(task) : null
   const latest = data?.runs.find((item) => item.run_id === task?.current_run_id) ?? data?.runs[0]
-  const run = data?.runs.find((item) => item.run_id === runSelection?.run_id) ?? runSelection
+  const selection = runSelection?.api === api && runSelection.taskId === taskId ? runSelection.run : undefined
+  const selectedRunId = selection?.run_id ?? initialRunId
+  const detail = runRead?.api === api && runRead.taskId === taskId && runRead.runId === selectedRunId ? runRead : undefined
+  const summary = data?.runs.find((item) => item.run_id === selectedRunId) ?? selection
+  const projectContext = detail?.run?.project_context ?? summary?.project_context
+  const run = summary && projectContext ? { ...summary, project_context: projectContext } : summary ?? detail?.run
+  // The run list carries summaries, and a live refresh can precede the first project pin.
+  const hasProjectContext = Boolean(projectContext)
+  useEffect(() => {
+    if (!showRun || !selectedRunId || hasProjectContext) return
+    let active = true
+    const key = { api, taskId, runId: selectedRunId }
+    void api.getRun(selectedRunId).then(({ data }) => {
+      if (data.run_id !== selectedRunId || data.task_id !== taskId) throw new Error('运行归属已变化')
+      if (active) setRunRead({ ...key, run: data })
+    }).catch(() => { if (active) setRunRead({ ...key, failed: true }) })
+    return () => { active = false }
+  }, [api, taskId, selectedRunId, showRun, reload, reloadVersion, hasProjectContext])
   const resetScroll = () => { if (body.current) body.current.scrollTop = 0 }
   const closeDetail = () => { dialog.current?.close?.(); onBack() }
   const returnToTask = () => { setShowRun(false); resetScroll() }
   const openRun = (selected: RunSummary) => {
-    setRunSelection(selected)
+    setRunSelection({ api, taskId, run: selected })
     setRunTab('步骤')
     setShowRun(true)
     resetScroll()
@@ -145,6 +164,7 @@ export function TaskDetailScreen({
       {loading && !data && <p role="status" style={mutedStyle}>正在读取任务详情…</p>}
       {failed && <ReadError onRetry={() => setReload((n) => n + 1)} />}
       {showRun && <div className="task-inspector-back"><button className="task-quiet-button" type="button" onClick={returnToTask}>返回任务</button></div>}
+      {showRun && !run && !failed && detail?.failed && <ReadError onRetry={() => setReload((n) => n + 1)} />}
       {showRun && task && run && <>
         {rework && <ReworkPanel api={api} commands={rework} runId={run.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
         <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} modelEscalation={modelEscalation} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision} />
@@ -438,6 +458,8 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
     }).catch(() => { if (current) setFailed(true) })
     return () => { current = false }
   }, [api, run.run_id, reloadVersion, onSnapshot, retry])
+  const latestAttempts = [...currentAttempts(nodes ?? []).values()]
+  const titles = new Map(latestAttempts.map((node) => [node.node_id, node.title || node.node_id]))
   return <>
     {run.run_id === task.current_run_id && <PendingNotices task={task} />}
     {tab === '步骤' && <div className="task-drawer-card task-schedule-card">
@@ -454,20 +476,49 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
     {tab === '事件' && <><ActivityList api={api} runId={run.run_id} reloadVersion={reloadVersion} />
       <ExecutionHistory api={api} runId={run.run_id} reloadVersion={reloadVersion} /></>}
     {(tab === '步骤' || tab === '证据') && <>
+      {run.project_context && <RunProjectContext context={run.project_context} />}
       {failed && <ReadError onRetry={() => setRetry((value) => value + 1)} />}
       {!failed && !nodes && <p role="status" style={mutedStyle}>正在读取执行步骤…</p>}
-      {nodes && tab === '步骤' && <section>
-        <h3 style={sectionTitleStyle}>执行步骤 · {run.total}</h3>
+      {!failed && nodes && tab === '步骤' && <section>
+        <h3 style={sectionTitleStyle}>执行步骤 · {latestAttempts.length}</h3>
         <p style={mutedStyle}><RunStatusLabel status={run.status} displayStatus={run.display_status} />{run.settling ? ' · 正在收尾' : ''}</p>
-        {nodes.length ? <ol style={stepListStyle}>{nodes.map((node) => <li key={node.node_run_id}><NodeRow node={node} onOpenDecision={onOpenDecision} />
+        {latestAttempts.length ? <ol style={stepListStyle}>{latestAttempts.map((node) => <li key={node.node_id}><NodeRow node={node} titles={titles} onOpenDecision={onOpenDecision} />
           {modelEscalation && node.node_type === 'agent' && node.model_assignment && <ModelEscalation api={modelEscalation} node={node} reloadVersion={reloadVersion} />}
-          <NodeHistoryDisclosure api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} /></li>)}</ol>
+          <NodeHistoryDisclosure key={node.node_run_id} api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} /></li>)}</ol>
           : <p style={mutedStyle}>这次运行没有执行步骤。</p>}
       </section>}
       {nodes && tab === '证据' && <EvidenceList api={api} nodes={nodes} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} />}
-      {nodes && run.total > nodes.length && <p style={mutedStyle}>显示 {nodes.length} / {run.total} 个步骤</p>}
+      {!failed && nodes && run.total > nodes.length && <p style={mutedStyle}>仅显示本次读取到的 {nodes.length} 条尝试记录</p>}
     </>}
   </>
+}
+
+const PROJECT_SOURCE_STATE = {
+  available: '已读取',
+  missing: '缺失',
+  unavailable: '暂不可读取',
+  excluded: '未纳入',
+}
+const PROJECT_HASH_SCOPE = {
+  read_text: '读取的文本',
+  excerpt: '读取的片段',
+  directory_index: '目录索引',
+}
+
+function RunProjectContext({ context }: { context: NonNullable<RunSummary['project_context']> }) {
+  return <details className="task-drawer-card">
+    <summary>本次派单的项目资料 · {context.version.slice(0, 12)}</summary>
+    <p style={mutedStyle}>账本位置 {context.as_of_seq}</p>
+    <ul>
+      {context.sources.map((source) => <li key={source.path} style={{ overflowWrap: 'anywhere' }}>
+        <strong>{source.path === '.' ? '工作区目录索引' : source.path}</strong> · {PROJECT_SOURCE_STATE[source.status] ?? '状态未知'}
+        {source.truncated && (source.status === 'available' ? ' · 已截断' : ' · 超出读取范围')}
+        {source.status === 'available' && source.sha256 && <div>
+          <span>SHA-256{source.sha256_scope && ` · ${PROJECT_HASH_SCOPE[source.sha256_scope] ?? '范围未知'}`} </span><code>{source.sha256}</code>
+        </div>}
+      </li>)}
+    </ul>
+  </details>
 }
 
 function RunResult({ api, run, reloadVersion }: { api: ResourcesApi; run: RunSummary; reloadVersion: number }) {
@@ -536,15 +587,17 @@ function PendingNotices({ task }: { task: TaskSummary }) {
   return <p style={attentionStyle}>{parts.join(' · ')}</p>
 }
 
-function NodeRow({ node, onOpenDecision }: { node: NodeRunView; onOpenDecision?: (id: string) => void }) {
+function NodeRow({ node, titles, onOpenDecision }: { node: NodeRunView; titles: ReadonlyMap<string, string>; onOpenDecision?: (id: string) => void }) {
   const heartbeat = heartbeatNotice(node)
   const assignment = node.model_assignment
   const model = assignment?.usage
+  const waiting = waitingFor(node, titles)
   return <article style={nodeStyle}>
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
       <strong title={node.node_id}>{node.title || node.node_id}</strong>
-      <span>{node.status_label || <UnknownState value={node.status} />}</span>
+      <span>{nodeExecutionLabel(node)}</span>
     </div>
+    {waiting && <p style={mutedStyle}>{waiting}</p>}
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 8, color: COLOR.inkMuted, fontSize: FONT_PX.helper }}>
       <span>第 {node.attempt} 次尝试</span>
       {node.execution_count > 0 && <span>{node.execution_count} 条工具执行记录</span>}
@@ -556,8 +609,11 @@ function NodeRow({ node, onOpenDecision }: { node: NodeRunView; onOpenDecision?:
       <NodeEffectFacts node={node} onOpenDecision={onOpenDecision} />}
     {node.hang_reason && <p style={{ margin: '8px 0 0', fontSize: FONT_PX.body }}>{node.hang_reason}</p>}
     {assignment && <div style={mutedStyle}>
-      <strong>{model ? '实际执行模型' : assignment.state === 'confirmed' ? '宿主确认模型' : assignment.state === 'rejected' ? '模型未获宿主确认' : '拟用模型'} · {model ? `${model.provider} / ${model.model}` : assignment.model_ref}</strong>
+      <strong>{model ? '实际执行模型' : assignment.state === 'confirmed' ? '宿主确认模型' : assignment.state === 'rejected' ? '模型未获宿主确认' : '拟用模型'} · {model ? `${model.provider} / ${model.model}` :
+        assignment.provider && assignment.model ? `${assignment.provider} / ${assignment.model}` : assignment.model_ref}</strong>
       <p style={mutedStyle}>{MODEL_LEVELS[assignment.complexity].label} · {assignment.reason}</p>
+      {assignment.reasoning_effort !== undefined && <p style={mutedStyle}>派发思考深度 · {assignment.reasoning_effort ?? '模型默认'}</p>}
+      {model?.reasoning_effort && <p style={mutedStyle}>实际请求思考深度 · {model.reasoning_effort}</p>}
       {assignment.settings_revision != null && <p style={mutedStyle}>按用户配置 · 修订 {assignment.settings_revision}</p>}
     </div>}
   </article>

@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { homedir, userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -8,12 +9,14 @@ import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { sha256Hex } from '../core/canonical.ts'
 import { failEnvelope, OrchError } from '../core/errors.ts'
-import { MODEL_COMPLEXITIES, MODEL_REF_RE } from '../executor/model-routing.ts'
+import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../executor/tools.ts'
 import type { serveDshOrchestra } from '../index.ts'
+import { installNativeChat } from './chat-native.ts'
+import { PROJECT_CONTEXT_FILE, type ProjectContextSource } from './project-shared-context.ts'
 
 const localOptions = z.strictObject({
-  enabled: z.boolean().default(false),
+  enabled: z.union([z.boolean(), z.literal('desktop')]).default(false),
   modelCapacity: z.enum(MODEL_COMPLEXITIES).default('standard'),
   dataDirectory: z.string().refine(isAbsolute, '必须为绝对路径').optional(),
   allowWorkspaceListing: z.boolean().default(false),
@@ -30,17 +33,23 @@ type LocalService = Awaited<ReturnType<Serve>>
 type Agent = AgentHandle['agent']
 type Workspace = { id: string; path: string; sessionIds: readonly string[] }
 type Model = { provider: string; model: string }
+type NativeModelCatalog = {
+  default: Model
+  groups: readonly { id: string; name?: string; models: readonly { id: string; name?: string; reasoning?: ModelReasoning }[] }[]
+  failures?: readonly { id: string; name?: string }[]
+}
 type Credential = { kind: 'grant'; payload: unknown } | { kind: 'api-key'; key?: string }
+type Profile = { name?: string; installAnchor?: string }
 
 type LocalHost = Context & {
   connection: {
     fetch: { register(route: { path: string; methods: ['GET', 'POST']; requestBody: 'buffered'; fetch(request: Request): Promise<Response> }): () => Promise<void> }
   }
   credentials: { modifyRecord(key: string, update: (current: Credential | undefined) => Promise<Credential | undefined>): Promise<Credential | undefined> }
-  workspaceRegistry: { get(id: string): Workspace | undefined; archivedSessionIds: readonly string[] }
+  workspaceRegistry: { get(id: string): Workspace | undefined; list(): readonly Workspace[]; archivedSessionIds: readonly string[] }
   sessionController: {
     resolveAgent(id: string): Promise<{ agent: Agent } | { error: unknown }>
-    modelCatalog(): Promise<{ default: Model; groups: readonly { id: string; models: readonly { id: string }[] }[] }>
+    modelCatalog(): Promise<NativeModelCatalog>
   }
   workspaceFiles: {
     list(scope: { sessionId: string; workspaceRoot: string }, path: string, signal: AbortSignal): Promise<{
@@ -90,9 +99,36 @@ function localAuthority(request: Request): boolean {
   return /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/iu.test(authority)
 }
 
+function localListener(host: Context): boolean {
+  const address = host.get('webServer')?.host
+  return address === undefined || /^(?:localhost|127\.0\.0\.1|::1|\[::1\])$/iu.test(address)
+}
+
+function compatibleDesktop(profile: Profile | undefined): boolean {
+  if (profile?.name !== 'desktop' || !profile.installAnchor) return false
+  try {
+    const pkg = createRequire(profile.installAnchor)('@deepseek-ai/dsh-api-session-controller/package.json') as { version?: string }
+    const match = /^0\.2\.2(?:-rc\.(\d+))?$/u.exec(pkg.version ?? '')
+    // rc.5 records non-owner principals on native prompt admission and
+    // distinguishes an empty retry from original operator input.
+    return Boolean(match && (match[1] === undefined || Number(match[1]) >= 5))
+  } catch { return false }
+}
+
+export function installConfiguredLocalDshHost(ctx: Context, options: LocalOptions, serve: Serve): void {
+  if (options.enabled === false) return
+  const desktop = compatibleDesktop(ctx.get('profileContext') as Profile | undefined)
+  if (options.enabled === 'desktop' && !desktop) return
+  installLocalDshHost(ctx, options, serve, desktop)
+}
+
 function selectedWorkspace(host: LocalHost, workspaceId: string, sessionId: string) {
   const workspace = host.workspaceRegistry.get(workspaceId)
   return workspace?.sessionIds.includes(sessionId) && !host.workspaceRegistry.archivedSessionIds.includes(sessionId) ? workspace : undefined
+}
+
+function localDataDirectory(options: LocalOptions) {
+  return options.dataDirectory ?? join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'orchestra', 'personal')
 }
 
 async function ledgerSecret(host: LocalHost, identity: string, dbFile: string) {
@@ -111,23 +147,54 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
   const resolved = await host.sessionController.resolveAgent(sessionId)
   if (!('agent' in resolved) || resolved.agent.session.header.origin === 'subagent'
     || !selectedWorkspace(host, workspace.id, sessionId)) throw new Error('Workspace session could not be activated')
-  const models = await host.sessionController.modelCatalog()
-  const route = resolved.agent.model.current() ?? models.default
-  if (!route || !models.groups.some((group) => group.id === route.provider && group.models.some((model) => model.id === route.model))) {
-    throw new Error('The selected DSH model is not routable')
+  const defaultModel = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined
+  const route = resolved.agent.model.current() ?? defaultModel?.currentSelection()
+  function modelRef(provider: string, model: string) {
+    const readable = `${provider}/${model}`
+    return !provider.includes('/') && MODEL_REF_RE.test(readable) ? readable
+      : `dsh:${sha256Hex(JSON.stringify([provider, model])).slice(0, 24)}`
   }
-  const { provider, model: modelId } = route
-  const readableRef = `${provider}/${modelId}`
-  const ref = MODEL_REF_RE.test(readableRef) ? readableRef : `dsh:${sha256Hex(JSON.stringify([provider, modelId])).slice(0, 24)}`
-  const model = { provider, model: modelId, capacity: options.modelCapacity, ref }
+  const modelsFor = (catalog: NativeModelCatalog) => catalog.groups.flatMap((group) => group.models.map((model) => {
+    const preferred = route ?? catalog.default
+    const efforts = model.reasoning?.efforts.filter(({ id }) => validModelEffort(id)) ?? []
+    const defaultEffort = model.reasoning?.defaultEffort
+    return { provider: group.id, provider_name: group.name, model: model.id, name: model.name,
+      ref: modelRef(group.id, model.id),
+      capacity: group.id === preferred?.provider && model.id === preferred.model ? options.modelCapacity : null,
+      ...(efforts.length ? { reasoning: { efforts, ...(efforts.some(({ id }) => id === defaultEffort) ? { defaultEffort } : {}) } } : {}) }
+  }))
   const parent = () => selectedWorkspace(host, workspace.id, sessionId) ? host.agents.get(resolved.agent.session.id) : undefined
-  const directory = options.dataDirectory ?? join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'orchestra', 'personal')
+  const directory = localDataDirectory(options)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const dbFile = join(directory, `${identity}.sqlite`)
   const secret = await ledgerSecret(host, identity, dbFile)
   const proof = randomBytes(32).toString('hex')
   const registry = new ToolRegistry()
   const sampleFile = options.sampleFile && relative(workspace.path, dirname(options.sampleFile)) === '' ? basename(options.sampleFile) : undefined
+  const approvedFallback = sampleFile === 'README.md' || sampleFile === 'AGENTS.md' ? sampleFile : undefined
+  const projectScope = { sessionId, workspaceRoot: workspace.path }
+  const projectAuthorized = () => {
+    const liveWorkspace = selectedWorkspace(host, workspace.id, sessionId)
+    if (!liveWorkspace || liveWorkspace.path !== workspace.path) return false
+    const cwd = parent()?.session.header.cwd
+    return Boolean(cwd && relative(workspace.path, cwd) === '')
+  }
+  const projectContext: ProjectContextSource = {
+    workspaceRoot: workspace.path, isAuthorized: projectAuthorized, approvedFallback,
+    async read(path, signal) {
+      const files = host.get('workspaceFiles') as LocalHost['workspaceFiles'] | undefined
+      if (!files || !projectAuthorized() || (path !== PROJECT_CONTEXT_FILE && path !== approvedFallback)) {
+        throw new OrchError('FORBIDDEN', '共享项目文字未获当前工作区授权')
+      }
+      return files.read(projectScope, path, { offset: 1, limit: 120 }, signal)
+    },
+    ...(options.allowWorkspaceListing ? {
+      async list(signal: AbortSignal) {
+        if (!projectAuthorized()) throw new OrchError('FORBIDDEN', '共享项目目录未获当前工作区授权')
+        return host.workspaceFiles.list(projectScope, '.', signal)
+      },
+    } : {}),
+  }
   if (options.allowWorkspaceListing) registry.register({
     name: 'workspace_list', capability: 'read_only', command: { bin: 'dsh:workspace.list', args: ['.'] },
   })
@@ -160,10 +227,15 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
   let service: LocalService | undefined
   service = await serve({
     dbFile, secret, phase: 'S6', tools: { registry, runner },
+    projectContext,
     resolveHttpHuman: (req) => req.headers['x-orchestra-local-proof'] === proof ? { id: human } : null,
-    dsh: { context: host, parentForNode: parent, models: [model],
+    dsh: { context: host, parentForNode: parent, models: [],
+      loadModelCatalog: async () => {
+        const catalog = await host.sessionController.modelCatalog()
+        return { profiles: modelsFor(catalog), unavailable_providers: catalog.failures?.map(({ id, name }) => name || id) ?? [] }
+      },
       recommend: () => ({ complexity: 'routine', reason: '使用此宿主已批准的 DSH 默认执行模型。' }) },
-    dshPlanner: { parent, model },
+    ...(route ? { dshPlanner: { parent, model: route } } : {}),
     asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events').get()?.n ?? 0),
     listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => { throw new OrchError('FORBIDDEN', '个人面板不提供原始账本写入') },
@@ -171,7 +243,7 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
   return { service, secret, proof }
 }
 
-export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: Serve): void {
+export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: Serve, nativeChat = true): void {
   const dependencies = ['agents', 'llm', 'tools', 'connection', 'credentials', 'workspaceRegistry', 'sessionController']
   if (options.allowWorkspaceListing || options.sampleFile) dependencies.push('workspaceFiles')
   ctx.inject(dependencies, (ready) => {
@@ -179,13 +251,52 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     const human = `local-dsh:${userInfo().username}`
     const services = new Map<string, ReturnType<typeof openLocalService>>()
     const stop = new AbortController()
+    const identityFor = (workspace: Workspace, sessionId: string) => sha256Hex(JSON.stringify([workspace.id, workspace.path, sessionId, human]))
+    const serviceFor = (workspace: Workspace, sessionId: string) => {
+      if (stop.signal.aborted) throw new OrchError('SERVICE_UNAVAILABLE', '编排服务正在停止')
+      const identity = identityFor(workspace, sessionId)
+      let startup = services.get(identity)
+      if (!startup) {
+        if (services.size >= 8) throw new OrchError('SERVICE_UNAVAILABLE', '已打开过多编排会话')
+        startup = openLocalService(host, options, workspace, sessionId, identity, human, serve)
+        services.set(identity, startup)
+        void startup.catch(() => { if (services.get(identity) === startup) services.delete(identity) })
+      }
+      return startup
+    }
     host.effect(() => async () => {
       stop.abort()
       await Promise.allSettled([...services.values()].map(async (startup) => (await startup).service.close()))
     }, 'Orchestra personal services')
+    if (nativeChat) host.inject(['systemPrompt', 'sessions', 'webServer'], (chatCtx) => {
+      installNativeChat(chatCtx, {
+        operator: human,
+        signal: stop.signal,
+        bindingFor(agent) {
+          const { id, header } = agent.session
+          if (stop.signal.aborted || !localListener(chatCtx)
+            || header.origin === 'subagent' || header.parentSession || host.agents.get(id) !== agent
+            || host.workspaceRegistry.archivedSessionIds.includes(id)) return
+          const owners = host.workspaceRegistry.list().filter((workspace) => workspace.sessionIds.includes(id))
+          const workspace = owners[0]
+          if (owners.length !== 1 || !workspace || !header.cwd || relative(workspace.path, header.cwd) !== '') return
+          return { identity: identityFor(workspace, id), workspaceId: workspace.id, sessionId: id }
+        },
+        hasService(binding) {
+          return services.has(binding.identity) || existsSync(join(localDataDirectory(options), `${binding.identity}.sqlite`))
+        },
+        async serviceFor(binding) {
+          const workspace = selectedWorkspace(host, binding.workspaceId, binding.sessionId)
+          if (!workspace || identityFor(workspace, binding.sessionId) !== binding.identity) {
+            throw new OrchError('FORBIDDEN', '工作区会话授权已失效')
+          }
+          return (await serviceFor(workspace, binding.sessionId)).service
+        },
+      })
+    })
     host.connection.fetch.register({ path: routePath, methods: ['GET', 'POST'], requestBody: 'buffered', async fetch(request) {
       if (stop.signal.aborted || request.signal.aborted) return failure(503, 'SERVICE_UNAVAILABLE', '编排请求已取消')
-      if (!localAuthority(request) || host.get('webServer')?.host === '0.0.0.0') {
+      if (!localAuthority(request) || !localListener(host)) {
         return failure(403, 'FORBIDDEN', '此面板仅供本机 DSH 操作人使用')
       }
       if (request.method === 'POST' && (request.headers.get('x-orchestra-request') !== '1'
@@ -202,16 +313,8 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       if (request.method === 'POST' && target.pathname === '/v1/runs/start') {
         return failure(403, 'FORBIDDEN', '个人宿主请使用「用自然语言规划任务」，注明要使用的已发布流程及交付物，核对计划后再启动。')
       }
-      const identity = sha256Hex(JSON.stringify([workspace.id, workspace.path, sessionId, human]))
-      let startup = services.get(identity)
-      if (!startup) {
-        if (services.size >= 8) return failure(503, 'SERVICE_UNAVAILABLE', '已打开过多编排会话')
-        startup = openLocalService(host, options, workspace, sessionId, identity, human, serve)
-        services.set(identity, startup)
-        void startup.catch(() => { if (services.get(identity) === startup) services.delete(identity) })
-      }
       try {
-        const { service, secret, proof } = await startup
+        const { service, secret, proof } = await serviceFor(workspace, sessionId)
         const signal = AbortSignal.any([request.signal, stop.signal])
         signal.throwIfAborted()
         if (!selectedWorkspace(host, workspaceId, sessionId)) return failure(403, 'FORBIDDEN', '工作区会话授权已失效')

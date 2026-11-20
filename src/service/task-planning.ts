@@ -8,11 +8,12 @@ import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel,
   type ModelPlanningProfile, type ModelRecommendation, type ModelRoutingContext } from '../executor/model-routing.ts'
 import type { ToolRegistry } from '../executor/tools.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
-import { withTx, type Db } from '../infra/sqlite/driver.ts'
+import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { ARTIFACT_MAX_BYTES, isArtifactFileName } from './artifact-store.ts'
+import { bindChatPlan, findChatPlan, type ChatTaskOrigin } from './chat-task-receipts.ts'
 import { startRun, startTrustedTaskLocalRun } from './commands/start-run.ts'
 import { createWorkflow, publishContextFor, publishDraft, runtimeProjection, testWorkflowDraft } from './commands/workflows.ts'
-import { withReadTx } from './queries/read-tx.ts'
+import { withReadTx, type ReadTx } from './queries/read-tx.ts'
 import type { NodeSpec } from './dispatcher.ts'
 import type { TriggerRunReady } from './task-trigger-dispatch.ts'
 import { reserveTaskInTx } from './runs.ts'
@@ -71,7 +72,7 @@ type Goal = { id: string; text: string }
 type PlanInput = { goal: string; requirements: Goal[] }
 type WorkflowCandidate = {
   workflowId: string; version: string; title: string
-  nodes: Array<{ id: string; type: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[] }>
+  nodes: Array<{ id: string; type: string; title?: string; description?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[] }>
 }
 type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
@@ -317,6 +318,26 @@ function assertApprovedPlan(row: PlanRow, workflowId: string | null, workflowVer
   return view
 }
 
+/** Exact artifact obligations of a started, approved task step with no planned tools. */
+export function approvedArtifactRequirements(tx: ReadTx, runId: string, nodeId: string) {
+  const run = tx.get<{ task_id: string; workflow_id: string; version: string; workflow_definition_hash: string }>(
+    'SELECT task_id,workflow_id,CAST(workflow_version AS TEXT) AS version,workflow_definition_hash FROM runs WHERE run_id=?', [runId],
+  )
+  if (!run?.workflow_definition_hash) return null
+  const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE o.run_id=? AND o.task_id=?', [runId, run.task_id])
+  if (!row || row.workflow_hash !== run.workflow_definition_hash) return null
+  try {
+    const { proposal } = assertApprovedPlan(row, run.workflow_id, run.version)
+    const step = proposal.steps.find((item) => item.node_id === nodeId)
+    if (!step || step.tools.length > 0) return null
+    const rules = proposal.deliverables.filter((item) => item.node_id === nodeId).map((item) => item.acceptance)
+    if (rules.length === 0 || !rules.every((rule) => rule.kind === 'artifact')) return null
+    return { planId: row.plan_id, contentHash: row.content_hash, rules }
+  } catch {
+    return null
+  }
+}
+
 // 自动生成的流程只认这几种节点：evaluate 会把 subworkflow 节点记成阻断项，所以这里只放 trigger / agent / wait
 const GENERATED_NODE_TYPES = new Set(['trigger', 'agent', 'wait'])
 /** 默认运行时允许的节点类型（发布层校验用） */
@@ -330,6 +351,7 @@ const generatedDocSchema = z.object({
     title: z.string().trim().max(80).optional(),
     position: z.object({ x: z.number().int().min(0).max(20000), y: z.number().int().min(0).max(20000) }).optional(),
     config: z.record(z.string(), z.unknown()).optional(),
+    contract: z.object({ description: z.string().trim().min(1).max(2000).optional() }).optional(),
   })).min(1).max(50),
   // route 由发布层校验（branch 才需要 route 对象），主脑草案里的 route 一律丢弃
   edges: z.array(z.object({
@@ -375,15 +397,6 @@ function validWaitConfig(config: Record<string, unknown> | undefined): boolean {
     && typeof maxWait === 'number' && Number.isInteger(maxWait) && maxWait > 0
 }
 
-/** 图语义不合法时退化成的直线流程：trigger → 各个 agent */
-function linearize(doc: WorkflowDoc): WorkflowDoc {
-  const trigger = doc.nodes.find((node) => node.type === 'trigger')
-    ?? { node_id: 'start', type: 'trigger', title: '开始', position: { x: 0, y: 0 }, config: {} }
-  const chain = [trigger, ...doc.nodes.filter((node) => node.type === 'agent')]
-  const edges = chain.slice(1).map((node, index) => ({ from: chain[index]!.node_id, to: node.node_id }))
-  return { name: doc.name, nodes: chain, edges }
-}
-
 /** 把主脑给的流程草案整理成可保存、可发布的流程文档 */
 function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtimeNodeTypes: ReadonlySet<string>): WorkflowDoc {
   const parsed = generatedDocSchema.safeParse(draft)
@@ -406,6 +419,7 @@ function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtim
     if (type === 'wait') Object.assign(config, node.config ?? {})
     if (type === 'agent') {
       const tools = allowedReadOnlyTools(node.config, registry)
+      config.side_effect_policy = 'pure'
       if (tools.length > 0) config.tools = { allow: tools }
     }
     nodes.push({
@@ -413,14 +427,14 @@ function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtim
       title: node.title && node.title.length > 0 ? node.title : id,
       position: node.position ?? { x: 100 * (index + 1), y: 0 },
       config,
+      ...(node.contract?.description ? { contract: { description: node.contract.description } } : {}),
     })
   })
   // 恰好一个 trigger：多了丢掉多余的，少了补一个起点
   const triggers = nodes.filter((node) => node.type === 'trigger')
   for (const extra of triggers.slice(1)) nodes.splice(nodes.indexOf(extra), 1)
-  if (!nodes.some((node) => node.type === 'trigger')) {
-    nodes.unshift({ node_id: 'start', type: 'trigger', title: '开始', position: { x: 0, y: 0 }, config: {} })
-  }
+  const inferredTrigger = triggers.length === 0 ? sanitizeNodeId('start', used) : null
+  if (inferredTrigger) nodes.unshift({ node_id: inferredTrigger, type: 'trigger', title: '开始', position: { x: 0, y: 0 }, config: {} })
   const existing = new Set(nodes.map((node) => node.node_id))
   const edges: WorkflowDoc['edges'] = []
   const seen = new Set<string>()
@@ -434,6 +448,12 @@ function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtim
     seen.add(key)
     edges.push({ from, to })
   }
+  if (inferredTrigger) {
+    const incoming = new Set(edges.map((edge) => edge.to))
+    for (const node of nodes) {
+      if (node.node_id !== inferredTrigger && !incoming.has(node.node_id)) edges.push({ from: inferredTrigger, to: node.node_id })
+    }
+  }
   const doc: WorkflowDoc = { name: source.name, nodes, edges }
   const saved = validateSaveLayer(doc, { expectedName: source.name })
   if (saved.report.errors.length > 0) {
@@ -442,34 +462,33 @@ function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtim
     })
   }
   const ctx: PublishContext = { registeredNodeTypes: runtimeNodeTypes, publishedVersions: () => true }
-  if (validatePublishLayer(doc, ctx).length > 0) {
-    const chain = linearize(doc)
-    const chainSaved = validateSaveLayer(chain, { expectedName: source.name })
-    if (chainSaved.report.errors.length > 0 || validatePublishLayer(chain, ctx).length > 0) {
-      throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑生成的流程无法整理成可发布的图')
-    }
-    return chain
+  const issues = validatePublishLayer(doc, ctx)
+  if (issues.length > 0) {
+    throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑生成的流程无法发布，请检查步骤和依赖', { issues: issues.slice(0, 12) })
   }
   return doc
 }
 
 /** 运行时投影 → 规划器看到的候选流程 */
-function candidateFromRuntime(def: WorkflowDefinition, title: string, registry: ToolRegistry | undefined): WorkflowCandidate {
+function candidateFromRuntime(def: WorkflowDefinition, doc: WorkflowDoc, registry: ToolRegistry | undefined): WorkflowCandidate {
+  const docs = new Map(doc.nodes.map((node) => [node.node_id, node]))
   const nodes = def.nodes.map((node) => {
     const deny = node.tools?.deny ?? []
     const allow = [...new Set((node.tools?.allow ?? []).filter((tool) => !deny.includes(tool)))]
     return {
       id: node.node_id, type: node.type,
+      title: docs.get(node.node_id)?.title,
+      description: docs.get(node.node_id)?.contract?.description as string | undefined,
       dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
       declaredTools: allow,
       toolAllow: allow.filter((tool) => registry?.lookup(tool)?.capability === 'read_only'),
     }
   })
-  return { workflowId: def.workflow_id ?? '', version: String(def.workflow_version), title, nodes }
+  return { workflowId: def.workflow_id ?? '', version: String(def.workflow_version), title: doc.name, nodes }
 }
 
 export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registry: ToolRegistry | undefined,
-  options?: TaskPlanningOptions, planningProfiles?: () => readonly ModelPlanningProfile[]) {
+  options?: TaskPlanningOptions, planningProfiles?: () => readonly ModelPlanningProfile[] | Promise<readonly ModelPlanningProfile[]>) {
   const timeout = options?.timeoutMs ?? 30_000
   if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 120_000) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑规划时限必须在 1 到 120 秒之间')
@@ -483,8 +502,10 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
   const callPlanner = async <T>(
     run: (signal: AbortSignal) => Promise<T>,
     messages: { timeout: string; failure: string },
+    origin?: ChatTaskOrigin,
   ): Promise<T> => {
     const controller = new AbortController()
+    const signal = origin ? AbortSignal.any([controller.signal, origin.signal]) : controller.signal
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const expired = new Promise<never>((_, reject) => {
@@ -494,21 +515,24 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         }, timeout)
         timer.unref()
       })
-      return await Promise.race([run(controller.signal), expired])
+      signal.throwIfAborted()
+      return await Promise.race([run(signal), expired])
     } catch (error) {
+      origin?.signal.throwIfAborted()
       if (error instanceof OrchError && error.code === 'OPERATION_TIMEOUT') throw error
       throw new OrchError('SERVICE_UNAVAILABLE', messages.failure)
     } finally { if (timer !== undefined) clearTimeout(timer) }
   }
   /** 主脑提案：完整提案，或者显式的「没有可用候选」信号 */
-  const askPlanner = async (brief: PlanInput, workflows: WorkflowCandidate[]): Promise<PlannerOutcome> => {
+  const askPlanner = async (brief: PlanInput, workflows: WorkflowCandidate[], origin?: ChatTaskOrigin): Promise<PlannerOutcome> => {
     const planner = options?.propose
     if (!planner) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
-    const profiles = planningProfiles?.() ?? []
+    const profiles = await planningProfiles?.() ?? []
     const offered = structuredClone({ ...brief, workflows, ...(profiles.length > 0 ? { model_profiles: profiles } : {}) })
     const candidate = await callPlanner(
       (signal) => planner(offered, signal),
       { timeout: '主脑没有在时限内生成计划', failure: '主脑暂时未能产出计划' },
+      origin,
     )
     const parsed = proposalSchema.safeParse(candidate)
     if (parsed.success) {
@@ -529,7 +553,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
    * 没有可复用的合适流程时：生成任务专属流程（task_local），再基于它产出一份完整计划。
    * 预留任务 + 建流程 + 发布 + 落计划在同一笔事务里：失败不留孤儿流程，也不留悬空预留任务。
    */
-  const proposeAuto = async (brief: PlanInput, actor: string, now: string): Promise<ReturnType<typeof get>> => {
+  const proposeAuto = async (brief: PlanInput, actor: string, now: string, origin?: ChatTaskOrigin): Promise<ReturnType<typeof get>> => {
     const generator = options?.workflowGenerator
     if (!generator) {
       throw new OrchError('VERDICT_UNSUPPORTED', '主脑判定没有可用流程，但服务端没有装配流程生成能力')
@@ -540,14 +564,15 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     const draft = await callPlanner(
       (signal) => generator({ goal }, signal),
       { timeout: '主脑没有在时限内生成流程', failure: '主脑暂时未能生成流程' },
+      origin,
     )
     const doc = buildAutoDoc(draft, registry, runtimeNodeTypes)
     const workflowId = 'tl_' + uuidv7().replace(/-/g, '')
     const runtime = runtimeProjection(workflowId, '1', doc)
     const workflowHash = definitionHashOf(runtime)
-    const autoCandidate = candidateFromRuntime(runtime, doc.name, registry)
+    const autoCandidate = candidateFromRuntime(runtime, doc, registry)
     // 2) 再让主脑基于新生成的流程产出一份完整计划（steps / deliverables / risks）
-    const outcome = await askPlanner(brief, [autoCandidate])
+    const outcome = await askPlanner(brief, [autoCandidate], origin)
     if (outcome.kind !== 'proposal') {
       throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑没有基于新生成的流程产出完整计划')
     }
@@ -575,6 +600,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
         + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now, reserved.task_id, workflowId])
+      bindChatPlan(tx, origin, id)
       appendEvent(tx, {
         type: 'task_plan.proposed',
         payload: { plan_id: id, content_hash: hash, quality_ready: quality.ready, auto_workflow_id: workflowId },
@@ -585,16 +611,10 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     catalog.adopt(published.definition, published.definition_hash)
     return get(id, actor)
   }
-  return {
-    enabled: options !== undefined,
-    get,
-    getForTask(taskId: string, actor: string) {
-      return withReadTx(db, ({ tx, as_of_seq }) => {
-        const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE o.task_id = ? AND p.created_by = ?', [taskId, actor])
-        return { item: row ? toPlanView(row) : null, as_of_seq }
-      })
-    },
-    async propose(input: TaskPlanInput, actor: string, now: string) {
+  const propose = async (input: TaskPlanInput, actor: string, now: string, origin?: ChatTaskOrigin) => {
+      origin?.assertCurrent()
+      const existing = origin && findChatPlan(db, origin)
+      if (existing) return get(existing, actor)
       if (!options?.propose) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
       const brief = { goal: input.goal, requirements: input.requirements.map((text, index) => ({ id: 'R' + (index + 1), text })) }
       // 候选检索：先捞一个较大的池子，再按任务适配性排序，最后才截断
@@ -612,11 +632,11 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       // 候选池里一个都没有：走自动生成；没有生成能力就还是让调用方先去发布流程
       if (choices.length === 0) {
         if (!options.workflowGenerator) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '请先发布至少一个可复用流程')
-        return proposeAuto(brief, actor, now)
+        return proposeAuto(brief, actor, now, origin)
       }
-      const outcome = await askPlanner(brief, choices.map((item) => item.workflow))
+      const outcome = await askPlanner(brief, choices.map((item) => item.workflow), origin)
       // 主脑判定候选池里没有一个适合这次任务：走同一条自动生成路径
-      if (outcome.kind === 'no_candidate') return proposeAuto(brief, actor, now)
+      if (outcome.kind === 'no_candidate') return proposeAuto(brief, actor, now, origin)
       const proposal = outcome.proposal
       const selected = choices.find(({ workflow }) => workflow.workflowId === proposal.workflow_id && workflow.version === proposal.workflow_version)
       const quality = evaluate(brief, proposal, selected?.workflow)
@@ -627,15 +647,18 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
           + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)',
           [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now])
+        bindChatPlan(tx, origin, id)
         appendEvent(tx, { type: 'task_plan.proposed', payload: { plan_id: id, content_hash: hash, quality_ready: quality.ready } })
       })
       return get(id, actor)
-    },
-    confirm(input: PlanConfirm, actor: string, now: string) {
-      const { row, view } = get(input.plan_id, actor)
+  }
+  const launch = (planId: string, contentHash: string, actor: string, now: string, chat?: {
+    origin: ChatTaskOrigin
+    nativeApproval: boolean
+  }) => {
+      const { row, view } = get(planId, actor)
       const { brief, proposal, quality } = view
-      if (input.confirmed !== true) throw new OrchError('CONFIRMATION_REQUIRED', '请核对计划后确认启动')
-      if (input.content_hash !== row.content_hash || row.content_hash !== planHash({ brief, proposal, quality }, row.workflow_hash)) {
+      if (contentHash !== row.content_hash || row.content_hash !== planHash({ brief, proposal, quality }, row.workflow_hash)) {
         throw new OrchError('CONFIRMATION_MISMATCH', '待确认计划的内容已发生变化')
       }
       if (view.launch) return { ...view.launch, replayed: true }
@@ -658,6 +681,14 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       if (!current || current.hash !== row.workflow_hash || !evaluate(brief, proposal, current.workflow).ready) {
         throw new OrchError('CONFIRMATION_MISMATCH', '固定流程版本或工具授权已变化，请重新规划')
       }
+      if (chat) {
+        chat.origin.assertCurrent()
+        if (findChatPlan(db, chat.origin) !== planId) throw new OrchError('FORBIDDEN', '计划与当前会话消息的绑定不一致')
+        const definition = catalog.get(proposal.workflow_id, proposal.workflow_version)
+        const needsApproval = definition.nodes.some((node) => node.side_effect_policy === 'irreversible'
+          || node.side_effect_policy === 'compensable' || (node.type !== 'agent' && node.type !== 'wait'))
+        if (needsApproval && !chat.nativeApproval) throw new OrchError('CONFIRMATION_REQUIRED', '此工作流需要在当前会话中批准后才能启动')
+      }
       // 自动生成的是任务专属流程：只走服务端可信编排路径。
       // 任务号取自服务端落库的计划行，不来自请求体，客户端伪造不了。
       if (check.meta?.scope === 'task_local') {
@@ -675,11 +706,45 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       const started = startRun(db, catalog, { taskTitle: proposal.title, workflowId: proposal.workflow_id,
         workflowVersion: proposal.workflow_version, autonomy: 'supervised', triggerKind: 'manual', operationId: row.launch_operation_id, now })
       return { task_id: started.task_id, run_id: started.run_id, replayed: started.replayed }
+  }
+  return {
+    enabled: options !== undefined,
+    get,
+    getForTask(taskId: string, actor: string) {
+      return withReadTx(db, ({ tx, as_of_seq }) => {
+        const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE o.task_id = ? AND p.created_by = ?', [taskId, actor])
+        return { item: row ? toPlanView(row) : null, as_of_seq }
+      })
+    },
+    propose: (input: TaskPlanInput, actor: string, now: string) => propose(input, actor, now),
+    proposeFromChat: (input: TaskPlanInput, actor: string, now: string, origin: ChatTaskOrigin) => propose(input, actor, now, origin),
+    confirm(input: PlanConfirm, actor: string, now: string) {
+      if (input.confirmed !== true) throw new OrchError('CONFIRMATION_REQUIRED', '请核对计划后确认启动')
+      return launch(input.plan_id, input.content_hash, actor, now)
+    },
+    launchFromChat(planId: string, contentHash: string, actor: string, now: string, origin: ChatTaskOrigin, nativeApproval = false) {
+      origin.assertCurrent()
+      if (findChatPlan(db, origin) !== planId) throw new OrchError('FORBIDDEN', '计划与当前会话消息的绑定不一致')
+      return launch(planId, contentHash, actor, now, { origin, nativeApproval })
     },
   }
 }
 
 export type TaskPlanningHost = ReturnType<typeof createTaskPlanningHost>
+
+/** Read only a confirmed plan that launched this exact run and pinned definition. */
+export function readApprovedTaskPlanForRun(tx: Pick<Tx, 'get'>, runId: string): TaskPlanView | null {
+  const bound = tx.get<{ task_id: string; workflow_id: string | null; workflow_version: string | null;
+    workflow_definition_hash: string | null }>(`SELECT task_id,workflow_id,CAST(workflow_version AS TEXT) AS workflow_version,
+    workflow_definition_hash FROM runs WHERE run_id=?`, [runId])
+  if (!bound) return null
+  const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE o.task_id = ? AND o.run_id = ?', [bound.task_id, runId])
+  if (!row) return null
+  if (row.workflow_hash !== bound.workflow_definition_hash) {
+    throw new OrchError('CONFIRMATION_MISMATCH', '运行与已批准计划的流程哈希不符')
+  }
+  return assertApprovedPlan(row, bound.workflow_id, bound.workflow_version)
+}
 
 /** The executor calls this inside its dispatch transaction, after the plan was confirmed and started. */
 export function getTaskPlanRecommendation(db: Db, context: ModelRoutingContext): ModelRecommendation | null {

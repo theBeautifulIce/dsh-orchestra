@@ -87,6 +87,7 @@ export type ExecutorAgent = {
   sessionId: string
   tools: ToolDescriptor[]
   effectiveModelRef?: string
+  effectiveReasoningEffort?: string | null
 }
 
 export type HostAgentFactory = {
@@ -99,8 +100,9 @@ export type HostAgentFactory = {
     // 不继承主会话历史，只拿节点输入与策略（规格 5.2 行 444-445）
     inheritHistory: false
     modelRef?: string
+    reasoningEffort?: string | null
     actionGeneration?: number
-  }): Promise<{ agentId: string; sessionId: string; effectiveModelRef?: string }>
+  }): Promise<{ agentId: string; sessionId: string; effectiveModelRef?: string; effectiveReasoningEffort?: string | null }>
 }
 
 // 指令文本里写明：完成由服务端收口，执行器不许自报完成（规格 5.2 行 448）
@@ -132,7 +134,8 @@ export function resolveTaskSessionToolPolicy(policy: ToolPolicy = TASK_SESSION_T
 export async function createExecutorAgent(
   host: HostAgentFactory,
   registry: ToolRegistry,
-  params: { nodeRunId: string; attempt: number; input: unknown; outputSchema: unknown; toolPolicy: ToolPolicy; modelRef?: string; actionGeneration?: number },
+  params: { nodeRunId: string; attempt: number; input: unknown; outputSchema: unknown; toolPolicy: ToolPolicy; modelRef?: string;
+    reasoningEffort?: string | null; actionGeneration?: number },
 ): Promise<ExecutorAgent> {
   checkToolPolicy(registry, params.toolPolicy)
   const tools = resolveToolSet(registry, params.toolPolicy)
@@ -145,8 +148,10 @@ export async function createExecutorAgent(
       ...(params.toolPolicy.releaseCheckCwd ? { releaseCheckCwd: params.toolPolicy.releaseCheckCwd } : {}) },
     inheritHistory: false,
     ...(params.modelRef ? { modelRef: params.modelRef } : {}),
+    ...(params.reasoningEffort === undefined ? {} : { reasoningEffort: params.reasoningEffort }),
     ...(params.actionGeneration !== undefined ? { actionGeneration: params.actionGeneration } : {}),
   })
   return { agentId: res.agentId, sessionId: res.sessionId, tools,
-    ...(res.effectiveModelRef ? { effectiveModelRef: res.effectiveModelRef } : {}) }
+    ...(res.effectiveModelRef ? { effectiveModelRef: res.effectiveModelRef } : {}),
+    ...(res.effectiveReasoningEffort === undefined ? {} : { effectiveReasoningEffort: res.effectiveReasoningEffort }) }
 }

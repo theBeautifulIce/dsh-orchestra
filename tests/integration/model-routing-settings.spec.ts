@@ -1,11 +1,90 @@
+import { Readable } from 'node:stream'
 import { expect, it } from 'vitest'
 import { uuidv7 } from '../../src/core/ids.ts'
-import { MODEL_NOTE_MAX_LENGTH, selectExecutionModel, type ModelProfile } from '../../src/executor/model-routing.ts'
+import { MODEL_NOTE_MAX_LENGTH, selectExecutionModel, type ModelCatalogProfile, type ModelProfile } from '../../src/executor/model-routing.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand } from '../../src/service/commands/idempotency.ts'
 import { createModelRoutingSettingsHost } from '../../src/service/model-routing-settings.ts'
 import { freshLedger } from '../fixtures/ledger.ts'
+import { startServer } from '../../src/service/server.ts'
+import { WriteQueue } from '../../src/service/write-queue.ts'
+
+it('模型保存等目录时，另一 HTTP 写仍可以通过全局写队列', async () => {
+  const { db } = freshLedger()
+  const fetching = Promise.withResolvers<void>()
+  const complete = Promise.withResolvers<void>()
+  const queue = new WriteQueue()
+  const secret = 'model-catalog-write-gate-fixture'
+  const settings = createModelRoutingSettingsHost(db, [{ ref: 'p/m', capacity: 'standard' }], async () => {
+    fetching.resolve()
+    await complete.promise
+  })
+  const api = await startServer({ secret, phase: 'S6', epoch: db.epoch, asOfSeq: () => 0,
+    modelSettings: settings, queue, listTasks: () => [], listEvents: () => [],
+    appendLedgerEvent: () => ({ seq: 1, event_id: 'other-receipt' }) })
+  const post = (path: string, body: unknown) => new Promise<{ status: number; payload: unknown }>((resolve) => {
+    const req = Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), {
+      method: 'POST', url: path, headers: { 'x-orchestra-secret': secret, 'content-type': 'application/json' },
+    })
+    let status = 0
+    // Invoke the mounted HTTP listener directly so this test also runs in sandboxes without loopback TCP.
+    api.server.emit('request', req, {
+      writeHead: (value: number) => { status = value },
+      end: (text: string) => resolve({ status, payload: JSON.parse(text) }),
+    })
+  })
+  const saving = post('/v1/settings/model-routing', { operation_id: uuidv7(), expected_revision: 0,
+    mapping: { routine: 'p/m', standard: null, complex: null } })
+  try {
+    await Promise.race([fetching.promise, saving.then(() => { throw new Error('save returned before refreshing the catalog') })])
+    expect(queue.size).toBe(0)
+    const unrelated = await post('/v1/ledger/events', {})
+    expect(unrelated).toMatchObject({ status: 200, payload: { data: { event_id: 'other-receipt' } } })
+    complete.resolve()
+    expect((await saving).status).toBe(200)
+    expect(settings.get().item.revision).toBe(1)
+  } finally {
+    complete.resolve()
+    await saving.catch(() => {})
+    await api.close()
+    db.raw.close()
+  }
+})
+
+it('保留已移除模型的配置与回执，只允许为当前供应商和模型保存真实思考档', () => {
+  const { db } = freshLedger()
+  try {
+    const plain = { ref: 'a/same', provider: 'a', model: 'same', capacity: 'standard' } satisfies ModelCatalogProfile
+    const reasoner = { ref: 'b/same', provider: 'b', model: 'same', capacity: null,
+      reasoning: { efforts: [{ id: 'adapter-specific', name: 'Extended' }], defaultEffort: 'adapter-specific' } } satisfies ModelCatalogProfile
+    let profiles: ModelCatalogProfile[] = [plain]
+    const host = createModelRoutingSettingsHost(db, () => ({ profiles, unavailable_providers: [] }))
+    const now = '2026-11-20T02:00:00.000Z'
+    const mapping = { routine: null, standard: null, advanced: null, complex: null, expert: 'a/same' }
+    const rating = [{ ref: 'a/same', capacity: 'expert' as const }]
+    const initial = { operation_id: uuidv7(), expected_revision: 0, mapping, model_capacities: rating }
+    expect(() => host.save({ ...initial, reasoning_efforts: { expert: 'adapter-specific' } }, 'operator', now))
+      .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    expect(host.save(initial, 'operator', now)).toEqual({ revision: 1 })
+    expect(host.get().item.profiles).toMatchObject([{ ref: 'a/same', host_capacity: 'standard', capacity: 'expert' }])
+    profiles = [reasoner]
+    expect(host.get().item).toMatchObject({ mapping, profiles: [{ ref: 'b/same', capacity: null }] })
+    expect(host.save(initial, 'operator', now)).toEqual({ revision: 1 })
+    const changed = { operation_id: uuidv7(), expected_revision: 1, mapping: { ...mapping, expert: 'b/same' },
+      model_capacities: [{ ref: 'b/same', capacity: 'expert' as const }],
+      model_notes: [{ ref: 'b/same', note: '复核多项证据' }], reasoning_efforts: { expert: 'adapter-specific' } }
+    expect(host.save(changed, 'operator', now)).toEqual({ revision: 2 })
+    expect(host.get().item.reasoning_efforts).toEqual({ expert: 'adapter-specific' })
+    expect(host.planningProfiles()).toEqual([{ ref: 'b/same', capacity: 'expert', user_note: '复核多项证据' }])
+    profiles = [plain, { ...reasoner, reasoning: undefined }]
+    expect(host.get().item).toMatchObject({ profiles: [{ ref: 'a/same', capacity: 'expert' }, { ref: 'b/same', capacity: 'expert' }],
+      reasoning_efforts: { expert: 'adapter-specific' } })
+    expect(host.save({ operation_id: uuidv7(), expected_revision: 2, mapping: changed.mapping,
+      reasoning_efforts: { expert: null } }, 'operator', now)).toEqual({ revision: 3 })
+    expect(host.get().item.reasoning_efforts).toEqual({})
+  } finally { db.raw.close() }
+})
 
 it('模型分配只能使用获准且达到对应复杂度的模型，保留修订与重放回执', () => {
   const { db } = freshLedger()

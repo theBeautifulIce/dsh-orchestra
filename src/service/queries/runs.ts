@@ -3,6 +3,7 @@ import { TASK_ORIGINS, type TaskOrigin } from '../../core/task-workspace.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx, type ReadCtx } from './read-tx.ts'
+import { readProjectContextMetadata, type ProjectContextMetadata } from '../project-shared-context.ts'
 
 export type NodeRunCount = { status: string; count: number }
 export type NodeRunPreview = {
@@ -36,6 +37,7 @@ export type RunSummary = {
   ended_at?: string | null
   scheduled_for?: string | null
   trigger_kind?: TaskOrigin | null
+  project_context?: ProjectContextMetadata
 }
 
 type RunRow = Record<string, unknown> & { run_id: string }
@@ -117,6 +119,7 @@ export function getRun(db: Db, runId: string): RunSummary {
   return withReadTx(db, (ctx) => {
     const run = ctx.tx.get<RunRow>(RUN_SELECT + ' WHERE r.run_id = ?', [runId])
     if (!run) throw new OrchError('NOT_FOUND', '没找到这次运行', { run_id: runId })
-    return toRunSummary(ctx, run)
+    const project_context = readProjectContextMetadata(ctx.tx, runId)
+    return { ...toRunSummary(ctx, run), ...(project_context ? { project_context } : {}) }
   })
 }

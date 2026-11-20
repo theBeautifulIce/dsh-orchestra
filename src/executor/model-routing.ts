@@ -13,11 +13,33 @@ export const MODEL_LEVELS = {
 export const MODEL_REF_RE = /^[\w./:@+-]{1,128}$/
 export const MODEL_NOTE_MAX_LENGTH = 160
 
-export type ModelProfile = { ref: string; capacity: ModelComplexity }
+export const MODEL_EFFORT_MAX_LENGTH = 128
+export type ModelReasoning = {
+  efforts: readonly { id: string; name: string; description?: string }[]
+  defaultEffort?: string
+}
+export type ModelProfile = {
+  ref: string; capacity: ModelComplexity; provider?: string; model?: string; reasoning?: ModelReasoning
+}
+export type ModelCatalogProfile = Omit<ModelProfile, 'capacity'> & {
+  capacity: ModelComplexity | null; host_capacity?: ModelComplexity | null; name?: string; provider_name?: string
+}
+export type ModelCatalogSnapshot = {
+  profiles: readonly ModelCatalogProfile[]
+  unavailable_providers?: readonly string[]
+}
 export type ModelPlanningProfile = ModelProfile & { user_note: string }
 export type ModelRecommendation = { complexity: ModelComplexity; reason: string; preferredModel?: string }
-export type ModelUse = { provider: string; model: string; observed_request_headers: number }
-export type ModelAssignment = { model_ref: string; complexity: ModelComplexity; reason: string; usage?: ModelUse; settings_revision?: number }
+export type ModelUse = { provider: string; model: string; observed_request_headers: number; reasoning_effort?: string | null }
+export type ModelAssignment = {
+  model_ref: string; complexity: ModelComplexity; reason: string; usage?: ModelUse; settings_revision?: number
+  provider?: string; model?: string
+  reasoning_effort?: string | null
+}
+
+export function validModelEffort(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MODEL_EFFORT_MAX_LENGTH && !/[\x00-\x1f\x7f]/u.test(value)
+}
 
 export function readModelUse(value: unknown): ModelUse | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
@@ -25,7 +47,8 @@ export function readModelUse(value: unknown): ModelUse | undefined {
   if (typeof use.provider !== 'string' || !use.provider || use.provider.length > 128
     || typeof use.model !== 'string' || !use.model || use.model.length > 256
     || !Number.isSafeInteger(use.observed_request_headers) || use.observed_request_headers! < 1) return undefined
-  return { provider: use.provider, model: use.model, observed_request_headers: use.observed_request_headers! }
+  return { provider: use.provider, model: use.model, observed_request_headers: use.observed_request_headers!,
+    ...(use.reasoning_effort === null || validModelEffort(use.reasoning_effort) ? { reasoning_effort: use.reasoning_effort } : {}) }
 }
 export type ModelRoutingContext = {
   taskId: string; runId: string; nodeRunId: string; nodeId: string; attempt: number; actionGeneration: number
@@ -34,6 +57,9 @@ export type ModelRoutingContext = {
 export type ModelRouting = {
   /** Models already approved for this execution host, in preference order within a capacity. */
   profiles: readonly ModelProfile[]
+  /** Personal DSH hosts expose unclassified entries as well as approved execution profiles. */
+  catalog?: () => ModelCatalogSnapshot
+  refresh?: (signal?: AbortSignal) => Promise<void>
   /** Read the approved task plan synchronously. Dispatch calls this inside a write transaction. */
   recommend(context: ModelRoutingContext): ModelRecommendation
 }

@@ -31,12 +31,12 @@ describe('发布层图语义校验', () => {
     ))).toContain('WORKFLOW_TRIGGER_HAS_INBOUND')
   })
 
-  it('出度纪律：trigger 必须恰好 1 条，普通节点最多 1 条，branch/parallel 至少 1 条', () => {
-    expect(codes(run([node('t', 'trigger'), node('a'), node('b')], [edge('t', 'a'), edge('t', 'b')])))
-      .toContain('WORKFLOW_TRIGGER_FANOUT')
-    expect(codes(run([node('t', 'trigger'), node('a'), node('b'), node('c')], [
+  it('trigger 和 agent 可扇出，trigger、branch、parallel 仍需后续步骤', () => {
+    expect(run([node('t', 'trigger'), node('a'), node('b')], [edge('t', 'a'), edge('t', 'b')])).toEqual([])
+    expect(run([node('t', 'trigger'), node('a'), node('b'), node('c')], [
       edge('t', 'a'), edge('a', 'b'), edge('a', 'c'),
-    ]))).toContain('WORKFLOW_NODE_FANOUT_INVALID')
+    ])).toEqual([])
+    expect(codes(run([node('t', 'trigger')], []))).toContain('WORKFLOW_TRIGGER_FANOUT')
     expect(codes(run([node('t', 'trigger'), node('p', 'parallel')], [edge('t', 'p')])))
       .toContain('WORKFLOW_NODE_FANOUT_INVALID')
   })
@@ -119,7 +119,7 @@ describe('发布层图语义校验', () => {
   })
 
   it('issue 的 path 指到具体下标，不是 id', () => {
-    const issues = run([node('t', 'trigger'), node('a'), node('b')], [edge('t', 'a'), edge('a', 'b'), edge('a', 'b', {})])
+    const issues = run([node('t', 'trigger'), node('a', 'wait'), node('b')], [edge('t', 'a'), edge('a', 'b'), edge('a', 'b', {})])
     const fanout = issues.find((i) => i.code === 'WORKFLOW_NODE_FANOUT_INVALID')
     expect(fanout?.path).toBe('/nodes/1')
   })

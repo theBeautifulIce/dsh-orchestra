@@ -5,7 +5,7 @@ import type { ResourcesApi } from '../api/resources.ts'
 import type { NodeRunView } from '../api/types.ts'
 import { arrangePositions, readCanvasDoc, type CanvasDoc } from './workflow-canvas-nodes.tsx'
 
-export type RuntimeAttempt = Pick<NodeRunView, 'node_id' | 'status' | 'status_label'> & Partial<Pick<NodeRunView, 'attempt' | 'replacement_node_run_id' | 'node_run_id'>>
+export type RuntimeAttempt = Pick<NodeRunView, 'node_id' | 'status' | 'status_label' | 'execution_state'> & Partial<Pick<NodeRunView, 'attempt' | 'replacement_node_run_id' | 'node_run_id'>>
 /** Selection is independent of query order and shared by the graph and step inspector. */
 export function currentAttempts<T extends RuntimeAttempt>(nodes: readonly T[]): Map<string, T> {
   const selected = new Map<string, T>()

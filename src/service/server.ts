@@ -435,12 +435,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
 
     if (req.method === 'GET' && url.pathname === '/v1/settings/model-routing' && deps.modelSettings) {
+      await deps.modelSettings.refresh?.()
       const { item, as_of_seq } = deps.modelSettings.get()
       sendJson(res, 200, okEnvelope(as_of_seq, item))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/settings/model-routing' && deps.modelSettings) {
       const body = parseBody(modelRoutingSettingsSchema, await readJsonBody(req), '保存模型分配')
+      await deps.modelSettings.refresh?.()
       const result = await queue.run(() => deps.modelSettings!.save(body, actor, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return

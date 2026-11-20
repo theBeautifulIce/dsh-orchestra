@@ -10,6 +10,9 @@ import { acquireLease, renewLease } from './lease.ts'
 import { sweep, type SweepResult } from '../sweep.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 import type { ClockProvider } from '../../core/clock.ts'
+import { OrchError } from '../../core/errors.ts'
+import { dependencyReadiness, pinnedEdges, readRunBinding, runPredecessors } from '../run-readiness.ts'
+import { definitionHashOf } from '../workflows.ts'
 
 export type RuntimeDeps = {
   db: Db
@@ -24,6 +27,27 @@ export type AcquireNodeRunResult = { lease_id: string; expires_at: string; actio
 
 export function acquireNodeRun(deps: RuntimeDeps, p: { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }): AcquireNodeRunResult {
   return withTx(deps.db, (tx) => {
+    const node = tx.get<{ run_id: string; node_id: string; workflow_id: string | null; workflow_version: string | null }>(
+      'SELECT n.run_id,n.node_id,r.workflow_id,r.workflow_version FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
+      [p.nodeRunId],
+    )
+    if (!node) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: p.nodeRunId })
+    const run = readRunBinding(tx, node.run_id)!
+    if (run.cancel_requested_at || run.status === 'paused') {
+      throw new OrchError('STALE_GENERATION', '运行已暂停或取消，当前节点不能开始', { runId: node.run_id })
+    }
+    let edges = pinnedEdges(run)
+    // Some in-process integrations load a fixed definition without attaching the catalog to the ledger.
+    if (!edges && !run.definition_json && node.workflow_version !== null) {
+      const def = deps.catalog.get(node.workflow_id ?? 'default', node.workflow_version)
+      if (definitionHashOf(def) === run.workflow_definition_hash) edges = def.edges ?? []
+    }
+    if (!edges) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
+    const preds = runPredecessors(tx, node.run_id, edges).get(node.node_id) ?? []
+    const readiness = dependencyReadiness(tx, node.run_id, p.nodeRunId, preds)
+    if (!readiness.ready) {
+      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '前置节点尚未成功完成，当前节点不能开始', { nodeRunId: p.nodeRunId, ...readiness })
+    }
     const out = acquireLease(tx, deps.secret, p)
     return { lease_id: out.leaseId, expires_at: out.expiresAt, action_generation: out.actionGeneration }
   })
@@ -42,9 +66,9 @@ export function submitReport(deps: RuntimeDeps, p: {
   generation: number
   decision?: { decisionId: string; revision: number; resolution: 'confirm_applied' | 'confirm_not_applied' | 'uphold_report' | 'uphold_decision' }
   now: string
-}): ApplyResult {
+}, allowArtifactCompletion = false): ApplyResult {
   // 判定条件由 applyReport 自己按 run 绑定的工作流版本取，命令层不再经手（审计 M5）
-  return withTx(deps.db, (tx) => applyReport(tx, deps.secret, p, deps.catalog))
+  return withTx(deps.db, (tx) => applyReport(tx, deps.secret, p, deps.catalog, allowArtifactCompletion))
 }
 
 export function submitCancel(deps: RuntimeDeps, p: {

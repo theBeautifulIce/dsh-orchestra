@@ -24,6 +24,7 @@ export const modelEscalationInput = z.strictObject({
 })
 type Input = z.infer<typeof modelEscalationInput>
 type Profile = ModelProfile & { provider?: string; model?: string }
+type ProfileSource = readonly Profile[] | ((tx: ReadTx) => readonly Profile[])
 type Node = NodeRunRow & { started_at: string | null; updated_at: string; replacement_node_run_id: string | null; recovery_uncertain: string | null }
 type Trigger = 'prolonged_runtime' | 'execution_blocked' | 'repeated_rework'
 export type ModelEscalationAssessment = z.infer<typeof opinionSchema> & {
@@ -58,7 +59,7 @@ function latestAssessment(tx: ReadTx, nodeRunId: string) {
   return entry ? JSON.parse(entry.payload) as Assessment : undefined
 }
 
-function factsFor(tx: ReadTx, secret: string, input: Input, actor: string, now: string, profiles: readonly Profile[],
+function factsFor(tx: ReadTx, secret: string, input: Input, actor: string, now: string, profileSource: ProfileSource,
   humanOnly: boolean, successorId?: string) {
   const ownership = requireReviewOperator(tx, secret, actor, input.run_id, humanOnly)
   const node = tx.get<Node>('SELECT n.* FROM node_runs n JOIN runs r USING(run_id) JOIN tasks t USING(task_id)'
@@ -76,6 +77,7 @@ function factsFor(tx: ReadTx, secret: string, input: Input, actor: string, now: 
       + " AND (node_run_id=? OR node_run_id IS NULL) AND kind NOT IN ('action_overrun')",
       [node.run_id, node.node_run_id])) return null
   const observed = modelObservation(tx, node)
+  const profiles = typeof profileSource === 'function' ? profileSource(tx) : profileSource
   const profile = profiles.find((item) => item.ref === observed?.model_ref)
   if (!profile || rank(profile) < 0 || !observed || !['executor.model_confirmed','executor.model_used'].includes(observed.type)) return null
   const reviews = tx.all<{ id: string; note: string; reviewed_at: string }>(
@@ -166,7 +168,7 @@ export function noteAgentStopped(tx: Tx, secret: string, node: NodeRunRow, attem
   }
 }
 
-export function createModelEscalationHost(db: Db, secret: string, profiles: readonly Profile[], planner?: ReworkPlanner,
+export function createModelEscalationHost(db: Db, secret: string, profiles: ProfileSource, planner?: ReworkPlanner,
   onError?: (error: unknown) => void, nowAt: () => string = () => new Date().toISOString(), humanOnly = false) {
   const inFlight = new Set<string>()
   const deferred = new Map<string, number>()

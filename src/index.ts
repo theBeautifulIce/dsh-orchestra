@@ -1,6 +1,6 @@
 import { rememberManualDispatchSpecs, resolveManualReworkSpecs } from './service/rework-dispatch-specs.ts'
 import { configureReceiptRetention } from './service/receipt-retention.ts'
-import { installLocalDshHost, localDshHostConfig } from './service/local-dsh-host.ts'
+import { installConfiguredLocalDshHost, localDshHostConfig } from './service/local-dsh-host.ts'
 import type { Context } from '@deepseek-ai/cordis'
 // src/index.ts —— DSH 插件入口 + 生产装配（规格 12.5 行 1088-1092）
 import { existsSync, realpathSync, statSync } from 'node:fs'
@@ -84,7 +84,7 @@ import { createModelEscalationHost } from './service/model-escalation.ts'
 import { createReleaseWorkflowHost, type ReleaseWorkspace } from './service/release-workflow.ts'
 import { isReleaseWorkflow, RELEASE_CHECK_WORKFLOW_ID, RELEASE_GROUPS, type ReleaseGroup } from './core/wf-release-v1.ts'
 import { commandHashOf, resolveInside } from './executor/tools.ts'
-import { createModelRoutingSettingsHost } from './service/model-routing-settings.ts'
+import { approvedModelProfiles, createModelRoutingSettingsHost, effectiveModelCatalog, readModelRoutingSettings } from './service/model-routing-settings.ts'
 export type { ModelRouting, ModelRoutingContext, ModelComplexity, ModelRecommendation, ModelProfile } from './executor/model-routing.ts'
 export { createDshExecutor, createDshPlanningCallback, type DshExecutionModel } from './executor/dsh-host.ts'
 export { ReadOnlyToolRunner, ToolRegistry } from './executor/tools.ts'
@@ -92,9 +92,9 @@ export type { EffectVerifier, EffectVerificationTarget, EffectVerdict } from './
 
 export const Config = localDshHostConfig
 
-/** Host half of the dual-face package. Personal operation is profile opt-in. */
+/** Host half of the dual-face package. The Desktop bundle selects the personal adapter. */
 export function apply(ctx: Context, config: typeof Config._output): void {
-  if (config.local.enabled) installLocalDshHost(ctx, config.local, serveDshOrchestra)
+  installConfiguredLocalDshHost(ctx, config.local, serveDshOrchestra)
 }
 
 /** Mount inside DSH's Cordis context with a host-authorized parent and model catalog. */
@@ -110,7 +110,8 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     ...(serviceOptions.phase === 'S5' || serviceOptions.phase === 'S6' ? {
       rework(binding, input) {
         if (!installed) throw new OrchError('SERVICE_UNAVAILABLE', '成果审核服务尚未就绪')
-        return callDshRework(installed.db, installed.feedback, binding, input)
+        return callDshRework(installed.db, installed.feedback, binding, input, undefined,
+          serviceOptions.phase === 'S6' ? serviceOptions.secret : undefined)
       },
     } : {}), ...(serviceOptions.collaboration ? {
     collaboration: (binding, input) => {
@@ -136,6 +137,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     collaboration = service.collaboration
     if (service.rework) installed = { db: service.orchestra.db, feedback: service.rework }
     return { ...service, close: async () => {
+      host.stopModelRefresh()
       try { await service.close() } finally { await host.close() }
     } }
   } catch (error) {
@@ -153,6 +155,8 @@ import { SystemClock } from './core/clock.ts'
 import { randomUUID } from 'node:crypto'
 import { createMemoryHost, type MemoryHostOptions } from './service/memory-host.ts'
 import { createTaskPlanningHost, resolveApprovedPlanNodeSpecs, type TaskPlanningOptions } from './service/task-planning.ts'
+import { createRunSharedContext } from './service/run-shared-context.ts'
+import type { ProjectContextSource } from './service/project-shared-context.ts'
 export type { MemoryHostOptions, MemoryPluginWriter } from './service/memory-host.ts'
 
 export const name = 'dsh-orchestra'
@@ -172,13 +176,14 @@ export type OrchestraOptions = {
   phase: Phase
   trial?: TrialOptions
   planning?: TaskPlanningOptions
+  projectContext?: ProjectContextSource
   reworkPlanner?: ReworkPlanner
   release?: Omit<ReleaseWorkspace, 'runGroup'> & { checkDirectories: Record<ReleaseGroup, string> }
   collaboration?: boolean
   log?: Logger
   // 生产执行器：装配了就开 /v1/node-runs/run，没装配时该路由明确报未配置（审计 F-01）
   // agents 省略时由 bridge.spawn 兜底，生产路径不靠外部顺手塞一个宿主工厂。
-  executor?: Omit<RunNodeDeps, 'runtime' | 'db' | 'secret' | 'agents'> & { agents?: HostAgentFactory }
+  executor?: Omit<RunNodeDeps, 'runtime' | 'db' | 'secret' | 'agents' | 'sharedContext'> & { agents?: HostAgentFactory }
   // 执行并发闸：agent 执行是长时间任务，不占写队列的名额，并发上限在这里生效（第二次意见 P1）
   scheduler?: ExecutionScheduler
   // 生产装配读配置的路径；读不到就退回默认并发（并发 3、人工名额 1）
@@ -228,8 +233,10 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const clock = new SystemClock(randomUUID())
   const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
   const executor = opts.executor
-  const modelEscalation = opts.phase === 'S6' && executor?.modelRouting
-    ? createModelEscalationHost(db, opts.secret, executor.modelRouting.profiles, opts.reworkPlanner,
+  const routing = executor?.modelRouting
+  const modelEscalation = opts.phase === 'S6' && routing
+    ? createModelEscalationHost(db, opts.secret, (tx) => approvedModelProfiles(effectiveModelCatalog(
+      routing.catalog?.().profiles ?? routing.profiles, readModelRoutingSettings(tx))), opts.reworkPlanner,
       (error) => opts.log?.error('模型诊断失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }), undefined, true)
     : undefined
   const spillDir = executor?.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(opts.configPath)
@@ -238,13 +245,17 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const executionLimits = executionLimitsFromConfig(opts.configPath)
   const agents = executor ? (executor.agents ?? bridgeHostAgentFactory(executor.bridge)) : null
   const cancels = new ExecutionCancels()
+  const sharedContext = opts.phase === 'S6' && opts.projectContext ? createRunSharedContext(db, opts.projectContext) : undefined
   const executorDeps: RunNodeDeps | null = executor && agents
-    ? { runtime, db, secret: opts.secret, ...executor, agents, modelEscalation, ...(spillDir ? { spillDir } : {}) }
+    ? { runtime, db, secret: opts.secret, ...executor, agents, modelEscalation, sharedContext, ...(spillDir ? { spillDir } : {}) }
     : null
   // 节点执行只有一个底层实现；调度只在装配层包一次（S2 第三十七轮 P0-01）。
   const executeNode = async (p: RunNodeParams): Promise<RunNodeResult> => {
     if (!executorDeps) {
       throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑节点', { nodeRunId: p.nodeRunId })
+    }
+    if (cancels.has(p.nodeRunId, p.attempt)) {
+      throw new OrchError('STALE_GENERATION', '同一次节点执行已在运行', { nodeRunId: p.nodeRunId, attempt: p.attempt })
     }
     const signal = cancels.register(p.nodeRunId, p.attempt)
     try {
@@ -255,8 +266,13 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   }
   // 两条入口（/v1/runs/dispatch 与 /v1/node-runs/run）共用这一个带闸函数：
   // 不允许 dispatcher 自己再排一次，否则同一次执行会重复占两个并发名额。
-  const executeScheduled = (p: RunNodeParams): Promise<RunNodeResult> =>
-    runThroughScheduler(opts.scheduler, () => executeNode(p), { label: p.nodeId })
+  const executeScheduled = (p: RunNodeParams): Promise<RunNodeResult> => {
+    const enqueuedAt = performance.now()
+    return runThroughScheduler(opts.scheduler, () => {
+      const waitedMs = Math.floor(performance.now() - enqueuedAt)
+      return executeNode({ ...p, now: new Date(Date.parse(p.now) + waitedMs).toISOString() })
+    }, { label: p.nodeId, nodeRunId: p.nodeRunId })
+  }
   const releaseOptions = opts.release
   const release = releaseOptions && (() => {
     requireCapability(opts.phase, 'release')
@@ -440,37 +456,41 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       return inTx(db, (tx) => wakeOnEvent(tx, opts.secret, { runId: b.runId, eventType: b.eventType,
         payload: b.payload, idempotencyKey: b.idempotencyKey ?? null, now: b.now }))
     },
-    cancelRun: (b) => inTx(db, (tx) => {
+    cancelRun: (b) => {
       assertOrdinaryRun(b.runId)
-      const out = propagateRunCancellation(tx, opts.secret, {
-        runId: b.runId,
-        cancelResult: b.cancelResult as CancelResult,
-        graceMs: b.graceMs,
-        extendDeadlineMs: b.extendDeadlineMs,
-        now: b.now,
-        clock,
-      })
-      // 终态 run 不再接受取消写入；还压着人工裁决的 run 明确返回 cancellation_pending。
-      // 纯控制节点取消后立即终态；若还有执行器节点在围栏里，sweep 后续再收口。
-      if (out.runStatus !== 'already_stopped') closeRun(tx, opts.secret, b.runId, b.now)
-      // 对外契约：runStatus 是请求层的取消进展，terminalStatus/outcome 是库里的实际结果。
-      // 只给 cancelled 会让调用方以为“取消成功=业务成功”，所以把业务结果一并返回（审计 P2-3）。
-      const statusRow = tx.get<{ status: string }>('SELECT status FROM runs WHERE run_id = ?', [b.runId])
-      const terminalEvent = tx.get<{ payload: string }>(
-        "SELECT payload_redacted AS payload FROM events WHERE type = 'run.terminal' AND run_id = ? ORDER BY seq DESC LIMIT 1",
-        [b.runId],
-      )
-      let outcome: string | null = null
-      if (terminalEvent) {
-        try {
-          outcome = (JSON.parse(terminalEvent.payload) as { outcome?: string }).outcome ?? null
-        } catch {
-          outcome = null
+      const { response, attemptsToStop } = inTx(db, (tx) => {
+        const out = propagateRunCancellation(tx, opts.secret, {
+          runId: b.runId,
+          cancelResult: b.cancelResult as CancelResult,
+          graceMs: b.graceMs,
+          extendDeadlineMs: b.extendDeadlineMs,
+          now: b.now,
+          clock,
+        })
+        // A run may still need stop evidence or human verification.
+        if (out.runStatus !== 'already_stopped') closeRun(tx, opts.secret, b.runId, b.now)
+        const statusRow = tx.get<{ status: string }>('SELECT status FROM runs WHERE run_id = ?', [b.runId])
+        const terminalEvent = tx.get<{ payload: string }>(
+          "SELECT payload_redacted AS payload FROM events WHERE type = 'run.terminal' AND run_id = ? ORDER BY seq DESC LIMIT 1",
+          [b.runId],
+        )
+        let outcome: string | null = null
+        if (terminalEvent) {
+          try {
+            outcome = (JSON.parse(terminalEvent.payload) as { outcome?: string | null }).outcome ?? null
+          } catch {
+            outcome = null
+          }
         }
-      }
-      const terminalStatus = statusRow && RUN_TERMINAL.has(statusRow.status) ? statusRow.status : null
-      return { ...out, terminalStatus, outcome }
-    }),
+        const terminalStatus = statusRow && RUN_TERMINAL.has(statusRow.status) ? statusRow.status : null
+        const attemptsToStop = b.cancelResult === 'already_stopped' ? [] : out.cancelledNodes.map((id) => ({
+          id, attempt: tx.get<{ attempt: number }>('SELECT attempt FROM node_runs WHERE node_run_id=?', [id])!.attempt,
+        }))
+        return { response: { ...out, terminalStatus, outcome }, attemptsToStop }
+      })
+      for (const { id, attempt } of attemptsToStop) cancels.abort(id, attempt, `cancel:${b.cancelResult}`)
+      return response
+    },
     dispatch: async (b) => {
       assertOrdinaryRun(b.runId)
       if (registry && ['S5','S6'].includes(opts.phase)) inTx(db, tx => rememberManualDispatchSpecs(tx, opts.secret, catalog, registry, b.runId, b.nodes, b.now))
@@ -577,11 +597,13 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
-}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; rework?: ReworkHost; close: () => Promise<void> }> {
+}): Promise<{ orchestra: Orchestra; endpoint: string; planning: ReturnType<typeof createTaskPlanningHost>;
+  collaboration?: CollaborationHost; rework?: ReworkHost; close: () => Promise<void> }> {
   const log = opts.log ?? nullLogger
   // 并发闸在生产装配这一层建：配置里的 execution.concurrency 与 human_slots 在这里真正生效。
   // 配置读不到时退回默认定值（并发 3、人工名额 1），不让一个可选配置文件挡住服务启动。
   const scheduler = opts.scheduler ?? schedulerFromConfig(opts.configPath, log)
+  const isWaitingForExecution = (nodeRunId: string) => scheduler.isWaiting?.(nodeRunId) ?? false
   // 服务启动顺序固定：文件锁 → epoch → 打开服务库 → 迁移 → 起服务（第四轮审计 M3）
   const service = await openServiceOrchestra({ ...opts, scheduler })
   const orchestra = service.orchestra
@@ -592,7 +614,9 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const delivery = rework && createDeliveryReviewHost(orchestra.db, opts.secret, humanReviewOnly)
   const localPlanning = rework && createReworkPlanningHost(orchestra.db, opts.secret, opts.reworkPlanner, humanReviewOnly)
   const inspection = rework && createReworkInspectionHost(orchestra.db, opts.secret, rework, opts.reworkPlanner, humanReviewOnly)
-  const modelSettings = opts.executor?.modelRouting && createModelRoutingSettingsHost(orchestra.db, opts.executor.modelRouting.profiles)
+  const modelRouting = opts.executor?.modelRouting
+  const modelSettings = modelRouting && createModelRoutingSettingsHost(orchestra.db,
+    modelRouting.catalog ?? modelRouting.profiles, modelRouting.refresh)
   const modelEscalation = orchestra.modelEscalation
   const taskTriggers = phaseIndex(opts.phase) >= phaseIndex('S5')
     ? createTaskTriggerHost(orchestra.db, orchestra.catalog, { executorReady: () => Boolean(opts.resolveTriggerNodeSpecs) })
@@ -641,14 +665,18 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   }, 2000)
   sweepTimer.unref?.()
   let server: Awaited<ReturnType<typeof startServer>>
+  let planning: ReturnType<typeof createTaskPlanningHost>
   try {
     if (opts.planning) requireCapability(opts.phase, 'panel')
     if (collaboration) requireCapability(opts.phase, 'panel')
-    const planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, opts.planning ? {
+    planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, opts.planning ? {
       ...opts.planning,
       workflowGenerator: opts.planning.workflowGenerator ?? opts.workflowGenerator,
       runtimeNodeTypes: RUNTIME_NODE_TYPES,
-    } : undefined, modelSettings?.planningProfiles)
+    } : undefined, modelSettings ? async () => {
+      await modelSettings.refresh?.()
+      return modelSettings.planningProfiles()
+    } : undefined)
     if (opts.memory) {
       requireCapability(opts.phase, 'memory')
       memory = createMemoryHost(orchestra.db, opts.secret, opts.memory, (error) => {
@@ -672,8 +700,8 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getWorkspaceOverview: () => getWorkspaceOverview(orchestra.db, Boolean(orchestra.release)),
         listRuns: (query) => listRuns(orchestra.db, query),
         getRun: (runId) => getRun(orchestra.db, runId),
-        listNodes: (runId, limit) => listNodes(orchestra.db, runId, limit),
-        getNode: (nodeRunId) => getNodeSnapshot(orchestra.db, nodeRunId),
+        listNodes: (runId, limit) => listNodes(orchestra.db, runId, limit, isWaitingForExecution),
+        getNode: (nodeRunId) => getNodeSnapshot(orchestra.db, nodeRunId, isWaitingForExecution),
         getArtifact: (artifactId, now) => getArtifactSnapshot(orchestra.db, artifactId, now),
         getArtifactContent: (runId, artifactId, mode, now) => getArtifactContent(orchestra.db, runId, artifactId, mode, now),
         listRunArtifacts: (runId, now) => listRunArtifacts(orchestra.db, runId, now),
@@ -716,6 +744,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   return {
     orchestra,
     endpoint: server.endpoint,
+    planning,
     collaboration,
     rework,
     close: async () => {
