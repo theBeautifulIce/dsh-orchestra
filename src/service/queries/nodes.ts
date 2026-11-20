@@ -1,7 +1,7 @@
 import { OrchError } from '../../core/errors.ts'
 import { MODEL_COMPLEXITIES, readModelUse, type ModelAssignment } from '../../executor/model-routing.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
-import { withReadTx, type ReadCtx } from './read-tx.ts'
+import { withReadTx, type ReadCtx, type ReadTx } from './read-tx.ts'
 import type { EffectVerdict } from '../../executor/tools.ts'
 
 export const NODE_TERMINAL = [
@@ -174,8 +174,8 @@ function nodeExecutionIds(ctx: ReadCtx, nodeRunId: string, attempt: number): str
   ).map((row) => row.execution_id)
 }
 
-function runDisplay(ctx: ReadCtx, runId: string) {
-  const row = ctx.tx.get<{ settling: number; doc_json: string | null }>(
+export function readRunNodeDisplay(tx: ReadTx, runId: string) {
+  const row = tx.get<{ settling: number; doc_json: string | null }>(
     'SELECT r.settling, w.doc_json FROM runs r LEFT JOIN workflow_versions w'
     + ' ON w.workflow_id = r.workflow_id AND w.version = r.workflow_version'
     + ' AND (r.workflow_definition_hash IS NULL OR w.content_hash = r.workflow_definition_hash) WHERE r.run_id = ?', [runId],
@@ -202,7 +202,7 @@ export function listNodes(db: Db, runId: string, limit = 100): { items: NodeRunV
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
   return withReadTx(db, (ctx) => {
-    const { settling, nodes } = runDisplay(ctx, runId)
+    const { settling, nodes } = readRunNodeDisplay(ctx.tx, runId)
     const rows = ctx.tx.all<NodeRow>(
       NODE_VIEW_SELECT + ' WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit],
     )
@@ -218,7 +218,7 @@ export function getNodeSnapshot(db: Db, nodeRunId: string): { item: NodeRunView;
   return withReadTx(db, (ctx) => {
     const row = ctx.tx.get<NodeRow>(NODE_VIEW_SELECT + ' WHERE n.node_run_id = ?', [nodeRunId])
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个执行节点', { node_run_id: nodeRunId })
-    const { settling, nodes } = runDisplay(ctx, row.run_id)
+    const { settling, nodes } = readRunNodeDisplay(ctx.tx, row.run_id)
     return {
       item: toNodeView(
         row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),

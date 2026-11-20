@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
+import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { createElement, type ComponentType } from 'react'
 import { expect, it } from 'vitest'
 import { inspectPackage } from '../../scripts/package-acceptance.ts'
@@ -23,7 +24,22 @@ it('包声明保留私有发布、默认阶段和显式宿主注入', () => {
       '@deepseek-ai/dsh-client-ui-sidebar', '@deepseek-ai/dsh-client-ui-layout',
     ]) } } })
   expect(JSON.parse(readFileSync('orchestra.config.json', 'utf8')).phase).toBe('S2')
-  expect(readFileSync('cordis.patch.yml', 'utf8').replace(/^\s*#.*$/gm, '').trim()).toBe('[]')
+  expect(readFileSync('cordis.patch.yml', 'utf8')).toMatch(/id: dsh-orchestra, name: dsh-orchestra/)
+})
+
+it.runIf(Boolean(tarball && sha))('验包拒绝缺少清单声明的任一发布指南', () => {
+  const receipt = inspectPackage(tarball!, { expectedSha256: sha! })
+  const root = mkdtempSync(join(tmpdir(), 'orch-package-guides-'))
+  try {
+    execFileSync('tar', ['-xf', tarball!, '-C', root])
+    const manifest = JSON.parse(readFileSync(join(root, 'package/package.json'), 'utf8'))
+    for (const guide of ['docs/runbook.md', 'docs/trial-circles.md']) {
+      if (!manifest.files?.includes(guide)) continue
+      const archive = join(root, 'missing-' + guide.slice('docs/'.length) + '.tgz')
+      execFileSync('tar', ['-czf', archive, '-C', root, ...receipt.entries.filter((name) => name !== 'package/' + guide)])
+      expect(() => inspectPackage(archive)).toThrow('Missing declared package guide: ' + guide)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁移、产物与受信侧栏注册同时可用', async () => {
@@ -62,19 +78,34 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
     } } }, document, navigator, AbortController, URL, Headers, TextEncoder, TextDecoder, setTimeout, clearTimeout },
       { filename: 'installed-dsh-orchestra-client.js' })
     const components: Array<{ slot: Parameters<DshPanelContext['slots']['register']>[0]; component: ComponentType }> = []
-    const host: DshPanelContext = {
-      effect(factory) { for (const apply of factory()) (apply as () => void)() },
-      slots: {
-        inject(_slot, apply) { return apply },
-        register(slot, component) { components.push({ slot, component }) },
+    const host = new Context()
+    const slots: DshPanelContext['slots'] = {
+      inject(_slot, mount) { return mount() },
+      register(slot, component) {
+        const entry = { slot, component }
+        components.push(entry)
+        return () => { components.splice(components.indexOf(entry), 1) }
       },
     }
-    const fetcher: Parameters<typeof client.createPanelHost>[0]['fetcher'] = (input, init) => {
+    host.provide('slots', slots)
+    const product = host.plugin(client as unknown as Plugin)
+    await product.await()
+    expect(components).toEqual([])
+
+    const fetcher: NonNullable<Parameters<typeof client.createPanelHost>[0]['fetcher']> = (input, init) => {
       const headers = new Headers(init?.headers)
       headers.set('x-orchestra-secret', secret)
       return fetch(input, { ...init, headers })
     }
-    client.registerDshOrchestraPanel(host, { baseUrl: data.endpoint, fetcher, initialRoute: 'settings' })
+    const transport = { baseUrl: data.endpoint, fetcher, initialRoute: 'settings' as const }
+    const connect = (ctx: Context) => { ctx.provide('orchestraPanelTransport', transport) }
+    const adapter = host.plugin(connect)
+    await adapter.await()
+    await expect.poll(() => components.length).toBe(2)
+    const legacy = host.plugin({ inject: ['slots'], apply(ctx: Context) {
+      client.registerDshOrchestraPanel(ctx as unknown as DshPanelContext, transport)
+    } })
+    await legacy.await()
     expect(components.map(({ slot }) => slot)).toEqual([
       { name: 'main', key: 'dsh-orchestra' },
       { name: 'sidebar.panellist', id: 'dsh-orchestra', order: 20, label: expect.any(Function) },
@@ -86,6 +117,15 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
       expect(view.text()).toContain('S6')
       expect(view.text()).toContain('服务已连接')
     } finally { view.unmount() }
+    await legacy.dispose()
+    await adapter.dispose()
+    await expect.poll(() => components.length).toBe(0)
+    const replacement = host.plugin(connect)
+    await replacement.await()
+    await expect.poll(() => components.length).toBe(2)
+    await product.dispose()
+    await expect.poll(() => components.length).toBe(0)
+    await replacement.dispose()
   } finally {
     if (hostProcess.exitCode === null && hostProcess.signalCode === null) {
       const exited = once(hostProcess, 'exit')

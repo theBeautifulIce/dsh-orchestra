@@ -57,6 +57,31 @@ it('selects two named agent attempts and only creates a scope', async () => {
   } finally { view.unmount() }
 })
 
+it('shows saved steps in run order with titles and distinct fallbacks', async () => {
+  const scope = { scope_id: 'scope', title: '月报复核', expires_at: '2026-11-20T18:00:00Z' }
+  const members = [
+    { node_run_id: 'z-first', node_id: 'analyse', task_id: 't1', run_id: 'r1', title: '汇总分析' },
+    { node_run_id: 'y-second', node_id: 'verify', task_id: 't1', run_id: 'r1', title: '独立复核' },
+    { node_run_id: 'b-third', node_id: 'repeat', task_id: 't2', run_id: 'r2', title: '独立复核' },
+    { node_run_id: 'a-legacy', node_id: 'old', task_id: 't3', run_id: 'r3' },
+  ]
+  const service = createFakeService(({ path }) => {
+    if (path === '/v1/collaboration/scopes') return { ok: true, data: page([scope]) }
+    if (path === '/v1/collaboration/scopes/get') return { ok: true, data: { scope, members, findings: [], requests: [] } }
+    throw new Error(path)
+  })
+  const open = vi.fn()
+  const view = await renderPanel(<CollaborationScreen client={createApiClient('http://panel.test', service.fetcher)}
+    onSnapshot={() => {}} onOpenRun={open} reloadVersion={0} />)
+  try {
+    await view.flush()
+    const buttons = view.findAll('button.ops-button--link')
+    expect(buttons.map((button) => button.textContent)).toEqual(['汇总分析', '独立复核 · y-second', '独立复核 · b-third', '步骤 old'])
+    await view.click(buttons[2]!)
+    expect(open).toHaveBeenCalledWith('t2', 'r2')
+  } finally { view.unmount() }
+})
+
 it.each(['workflow', 'goal'])('opens only the confirmed task and run after a %s launch', async (origin) => {
   const launch = { task_id: 'new-task', run_id: 'new-run' }
   let confirmed = false

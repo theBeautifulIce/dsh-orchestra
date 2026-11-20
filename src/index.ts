@@ -88,6 +88,9 @@ export { createDshExecutor, createDshPlanningCallback, type DshExecutionModel } 
 export { ReadOnlyToolRunner, ToolRegistry } from './executor/tools.ts'
 export type { EffectVerifier, EffectVerificationTarget, EffectVerdict } from './executor/tools.ts'
 
+/** Host half of the Web loader row. The trusted host provisions the service separately. */
+export function apply(): void {}
+
 /** Mount inside DSH's Cordis context with a host-authorized parent and model catalog. */
 export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrchestra>[0], 'executor'> & {
   dsh: Parameters<typeof createDshExecutor>[0]

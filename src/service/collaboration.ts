@@ -6,6 +6,7 @@ import { appendEvent } from '../infra/db/ledger.ts'
 import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand, UUID_V7_RE } from './commands/idempotency.ts'
 import { readStrongEvidence } from './queries/evidence.ts'
+import { readRunNodeDisplay } from './queries/nodes.ts'
 import { withReadTx, type ReadTx } from './queries/read-tx.ts'
 
 export type CollaborationBinding = { node_run_id: string; attempt: number; action_generation: number }
@@ -119,10 +120,11 @@ function requireMember(tx: ReadTx, scopeId: string, nodeRunId: string): void {
     throw new OrchError('FORBIDDEN', '该执行主体未加入本次协作范围')
   }
 }
-function readMembers(tx: ReadTx, scopeId: string): Member[] {
+function readMembers(tx: ReadTx, scopeId: string, inRunOrder = false): Member[] {
+  const order = inRunOrder ? 'r.created_at,r.run_id,n.seq,n.attempt,m.node_run_id' : 'm.node_run_id'
   return tx.all<Member>(
     'SELECT m.node_run_id,n.run_id,r.task_id,n.node_id FROM collaboration_members m JOIN node_runs n ON n.node_run_id = m.node_run_id '
-    + 'JOIN runs r ON r.run_id = n.run_id WHERE m.scope_id = ? ORDER BY m.node_run_id', [scopeId],
+    + 'JOIN runs r ON r.run_id = n.run_id WHERE m.scope_id = ? ORDER BY ' + order, [scopeId],
   )
 }
 function expiry(now: string, minutes: number): string {
@@ -188,12 +190,18 @@ export function createCollaborationHost(db: Db, secret: string) {
     getScope(scopeId: string, actor: string, now = new Date().toISOString()) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
         const scope = loadScope(tx, scopeId, actor)
-        const members = readMembers(tx, scopeId)
+        const members = readMembers(tx, scopeId, true)
         const memberStates: MemberState[] = members.map((member) => ({ ...member, ...readNode(tx, member.node_run_id)! }))
+        const titlesByRun = new Map([...new Set(members.map((member) => member.run_id))]
+          .map((runId) => [runId, readRunNodeDisplay(tx, runId).nodes]))
+        const participants = members.map((member) => {
+          const title = titlesByRun.get(member.run_id)?.get(member.node_id)?.title.trim()
+          return { ...member, ...(title ? { title } : {}) }
+        })
         const findings = tx.all<Finding>('SELECT ' + FINDING_FIELDS + ' FROM collaboration_findings WHERE scope_id = ? ORDER BY created_at DESC,finding_id DESC', [scopeId])
         const requests = tx.all<VerificationRow>(REQUEST_FIELDS + ' WHERE scope_id = ? ORDER BY created_at DESC,request_id DESC', [scopeId]).map(verificationView)
         return { item: {
-          scope, members, findings,
+          scope, members: participants, findings,
           requests: requests.map((request) => {
             const previous = memberStates.find((member) => member.node_run_id === request.target_node_run_id)
             if (now >= request.expires_at || !canReassign(request, previous)) return { ...request, reassignment_candidates: null }
