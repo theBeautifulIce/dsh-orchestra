@@ -3,13 +3,10 @@ import { sha256Hex } from './canonical.ts'
 import { OrchError } from './errors.ts'
 import type { MustPassItem } from './gate-artifact.ts'
 
-export const RELEASE_WORKFLOW_ID = 'wf_release_v1'
-export const RELEASE_CHECK_WORKFLOW_ID = 'wf_gate_check_v1'
+import { RELEASE_WORKFLOW_ID, RELEASE_CHECK_WORKFLOW_ID } from './release-workflow-ids.ts'
+export { RELEASE_WORKFLOW_ID, RELEASE_CHECK_WORKFLOW_ID, isReleaseWorkflow } from './release-workflow-ids.ts'
 export const RELEASE_COORDINATOR_ID = 'gate_coordinator'
 export const RELEASE_VERSION = '1'
-export function isReleaseWorkflow(workflowId: string | undefined) {
-  return workflowId === RELEASE_WORKFLOW_ID || workflowId === RELEASE_CHECK_WORKFLOW_ID
-}
 export const RELEASE_GROUPS = {
   migration_recovery: ['G-01', 'G-02', 'G-07', 'G-13', 'G-14', 'G-15', 'upgrade', 'load_rollback'],
   single_node: ['G-03', 'G-04', 'G-05', 'G-06'],

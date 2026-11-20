@@ -10,6 +10,8 @@ import { type Logger, nullLogger } from '../infra/logger.ts'
 import { WriteQueue } from './write-queue.ts'
 import { callPlanningStage } from './task-planning.ts'
 import { planningSettingsSchema, planningTimeoutDefaults, withPlanningBudget, type PlanningSettingsHost } from './planning-settings.ts'
+import { executionCapacitySettingsSchema, type ExecutionCapacitySettingsHost } from './execution-capacity-settings.ts'
+import { workflowConcurrencySchema, type WorkflowConcurrencyHost } from './workflow-concurrency-settings.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
 import type { ListTaskParams, TaskSummary, WorkspaceOverview } from './queries/tasks.ts'
@@ -92,6 +94,8 @@ export type ServerDeps = {
   workflowGenerator?: (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) => Promise<unknown>
   workflowGeneratorStreamProgress?: boolean
   planningSettings?: PlanningSettingsHost
+  executionCapacitySettings?: ExecutionCapacitySettingsHost
+  workflowConcurrencySettings?: WorkflowConcurrencyHost
 }
 
 export type ServerQueries = {
@@ -354,6 +358,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         ok: true, phase: deps.phase, epoch: deps.epoch, memory_enabled: Boolean(deps.memory),
         memory_proposal_only: deps.memoryProposalOnly?.() ?? false,
         planning_timeouts_enabled: Boolean(deps.planningSettings),
+        execution_capacity_enabled: Boolean(deps.executionCapacitySettings && deps.resolveHttpHuman),
+        workflow_concurrency_enabled: Boolean(deps.workflowConcurrencySettings && deps.resolveHttpHuman),
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
         rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
         model_escalation_enabled: Boolean(deps.modelEscalation),
@@ -462,6 +468,37 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const result = await queue.run(() => deps.planningSettings!.save(body, editor, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
+    }
+    if (url.pathname === '/v1/settings/workflow-concurrency' && deps.workflowConcurrencySettings) {
+      const editor = human().id
+      if (req.method === 'GET') {
+        const { item, as_of_seq } = deps.workflowConcurrencySettings.get({
+          workflow_id: stringParam(url, 'workflow_id'), node_id: stringParam(url, 'node_id'),
+        })
+        sendJson(res, 200, okEnvelope(as_of_seq, item))
+        return
+      }
+      if (req.method === 'POST') {
+        const body = parseBody(workflowConcurrencySchema, await readJsonBody(req), '保存 Workflow 并发')
+        const result = await queue.run(() => deps.workflowConcurrencySettings!.save(body, editor, requestNow))
+        sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+        return
+      }
+    }
+    if (url.pathname === '/v1/settings/execution-capacity' && deps.executionCapacitySettings) {
+      if (req.method === 'GET') {
+        human()
+        const { item, as_of_seq } = deps.executionCapacitySettings.get()
+        sendJson(res, 200, okEnvelope(as_of_seq, item))
+        return
+      }
+      if (req.method === 'POST') {
+        const editor = human().id
+        const body = parseBody(executionCapacitySettingsSchema, await readJsonBody(req), '保存执行与排队设置')
+        const result = await queue.run(() => deps.executionCapacitySettings!.save(body, editor, requestNow))
+        sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+        return
+      }
     }
     if (req.method === 'GET' && url.pathname === '/v1/settings/model-routing' && deps.modelSettings) {
       await deps.modelSettings.refresh?.()

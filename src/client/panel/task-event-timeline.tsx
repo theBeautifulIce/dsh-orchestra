@@ -4,6 +4,7 @@ import type { ExecutionEntry } from '../../service/queries/execution-history.ts'
 import { activityTitle } from './activity-screen.tsx'
 import { EventDetails } from './execution-history.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { readDisplayPreferences } from './display-preferences.ts'
 
 type Scope = { taskId: string; runId?: never } | { runId: string; taskId?: never }
 type Props = { api: ResourcesApi; scope: Scope; reloadVersion: number }
@@ -12,7 +13,6 @@ type Filter = 'all' | 'attention' | 'tool' | 'report' | 'model'
 type Event = { id: number; time: string; title: string; type: string; context?: string; attention?: boolean; details: NonNullable<ActivityItem['details']> }
 type Page = { key: string; events: Event[]; next: number | null }
 
-const PAGE_SIZE = 5
 const attentionOptions = [
   ['all', '全部记录'], ['attention', '异常与需留意'],
 ] as const
@@ -81,6 +81,7 @@ export function TaskEventTimeline(props: Props) {
 
 function Timeline({ api, scope, reloadVersion }: Props) {
   const heading = useId()
+  const [pageSize] = useState(() => readDisplayPreferences().preferences.eventPageSize)
   const pageHeading = useRef<HTMLParagraphElement>(null)
   const head = useRef<Page>(undefined)
   const [source, setSource] = useState<Source>('activity')
@@ -109,7 +110,7 @@ function Timeline({ api, scope, reloadVersion }: Props) {
       setPage(head.current)
       return
     }
-    const reqScope = { run_id: runId, task_id: taskId, limit: PAGE_SIZE }
+    const reqScope = { run_id: runId, task_id: taskId, limit: pageSize }
     const load = source === 'activity'
       ? api.listActivity({ ...reqScope, before_seq: before, filter: filter === 'attention' ? filter : 'all' }).then(({ data }) =>
         ({ events: requireFilter(data.items, filter).map(ledgerEvent), next: data.next_before_seq }))
@@ -122,7 +123,7 @@ function Timeline({ api, scope, reloadVersion }: Props) {
       setPage(loaded)
     }).catch(() => { if (active) setFailed(requestKey) })
     return () => { active = false }
-  }, [api, before, filter, requestKey, retry, runId, source, taskId])
+  }, [api, before, filter, pageSize, requestKey, retry, runId, source, taskId])
 
   useEffect(() => {
     if (source !== 'activity') return
@@ -167,7 +168,7 @@ function Timeline({ api, scope, reloadVersion }: Props) {
     <header style={header}>
       <div>
         <h3 id={heading} style={title}>{taskId ? '任务事件' : '运行事件'}</h3>
-        <p className="ops-meta" style={caption}>最新入账在前，每页最多 {PAGE_SIZE} 条。展开记录可查看技术详情。</p>
+        <p className="ops-meta" style={caption}>最新入账在前，每页最多 {pageSize} 条。展开记录可查看技术详情。</p>
       </div>
       <button type="button" className="ops-button" onClick={reset}>刷新到最新</button>
     </header>

@@ -43,6 +43,7 @@ export type SpawnParams = {
   // 节点执行永远开新会话；把这条意图放进协议，不能只靠宿主默认行为。
   inheritHistory: false
   modelRef?: string
+  sessionModelFallback?: true
   reasoningEffort?: string | null
   actionGeneration?: number
 }
@@ -75,6 +76,7 @@ export function bridgeHostAgentFactory(client: BridgeClient): HostAgentFactory {
         toolPolicy: input.toolPolicy,
         inheritHistory: false,
         ...(input.modelRef ? { modelRef: input.modelRef } : {}),
+        ...(input.sessionModelFallback ? { sessionModelFallback: input.sessionModelFallback } : {}),
         ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         ...(input.actionGeneration !== undefined ? { actionGeneration: input.actionGeneration } : {}),
       })

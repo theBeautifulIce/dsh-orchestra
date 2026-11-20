@@ -29,7 +29,7 @@ export function SettingsScreen(props: SettingsScreenProps) {
   const rows = buildRows(props)
   return <section aria-labelledby="settings-title" className="ops-surface">
     <header className="ops-surface-head">
-      <h2 id="settings-title">服务状态</h2>
+      <h2 id="settings-title" className="ops-settings-anchor" tabIndex={-1}>服务状态</h2>
       {props.onRefresh && <button type="button" onClick={props.onRefresh} className="ops-button">重新检测</button>}
     </header>
     <dl style={listStyle}>

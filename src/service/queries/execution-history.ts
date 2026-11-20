@@ -66,6 +66,9 @@ export function describeEvent(type: string, payload: string | null): Detail[] {
   const details: Detail[] = []
   for (const [key, label] of Object.entries(FIELDS)) add(details, label, fields[key])
   if (type === 'report_replayed') add(details, '报告序号', body.report_seq)
+  if ((type === 'bridge.tool.start' || type === 'bridge.tool.result') && body.tool === 'orchestra_assist') {
+    add(details, '复核批次', body.summary)
+  }
   if (type === 'executor.model_used') {
     const usage = object(body.usage)
     add(details, '提供方', usage.provider)

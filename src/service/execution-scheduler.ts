@@ -11,12 +11,17 @@ export const DEFAULT_HUMAN_SLOTS = 1
 // 排队上限：生产默认必须有界，不能让无限 Promise 把内存与停机时间拖垮（S2 第三十七轮 P1-01）。
 export const DEFAULT_MAX_WAITING = 1000
 
+export type ExecutionWorkflowScope = { runId: string; workflowId: string; nodeId: string }
+type ResolveWorkflowLimits = (scope: ExecutionWorkflowScope) => { runLimit: number | null; nodeLimit: number | null }
+
 export type ExecutionTaskOptions = {
   // 占人工名额：等人复核的任务同时最多 human_slots 个
   human?: boolean
   // 任务名：只进日志与排队信息，便于定位是谁在排
   label?: string
   nodeRunId?: string
+  attempt?: number
+  workflowScope?: ExecutionWorkflowScope
 }
 
 export type ExecutionStats = {
@@ -36,6 +41,8 @@ export type ExecutionScheduler = {
   run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T>
   stats(): ExecutionStats
   isWaiting?(nodeRunId: string): boolean
+  cancelWaiting?(nodeRunId: string, attempt: number): void
+  configureWorkflowLimits?(resolve: ResolveWorkflowLimits): void
   readonly inFlight: number
   readonly waiting: number
   readonly concurrency: number
@@ -45,10 +52,19 @@ export type ExecutionScheduler = {
   close(opts?: { drain?: boolean }): Promise<void>
 }
 
+export type ExecutionCapacity = Pick<ExecutionStats, 'concurrency' | 'maxWaiting'>
+
+export type ConfigurableExecutionScheduler = ExecutionScheduler & {
+  setCapacity(capacity: ExecutionCapacity): void
+  configureWorkflowLimits(resolve: ResolveWorkflowLimits): void
+}
+
 type QueuedTask = {
   human: boolean
   label: string
   nodeRunId?: string
+  attempt?: number
+  workflow?: { scope: ExecutionWorkflowScope; nodeKey: string }
   // 真正开跑的那一步
   invoke: () => Promise<unknown> | unknown
   resolve: (value: unknown) => void
@@ -71,14 +87,17 @@ function positive(value: number, field: string): number {
 }
 
 class Scheduler {
-  private readonly concurrencyLimit: number
+  private concurrencyLimit: number
   private readonly humanSlotLimit: number
-  private readonly maxWaiting: number
+  private maxWaiting: number
   private readonly log: Logger
   // 等待中的任务：先进先出，谁先到谁先拿名额
   private readonly queue: QueuedTask[] = []
   private running = 0
   private humanRunning = 0
+  private readonly runningByRun = new Map<string, number>()
+  private readonly runningByWorkflowNode = new Map<string, number>()
+  private resolveWorkflowLimits?: ResolveWorkflowLimits
   // 关闭状态：accepting=false 后新任务一律拒；draining=true 时队列继续跑完。
   private accepting = true
   private draining = false
@@ -123,27 +142,53 @@ class Scheduler {
     return this.queue.some((task) => task.nodeRunId === nodeRunId)
   }
 
+  cancelWaiting(nodeRunId: string, attempt: number): void {
+    for (let index = this.queue.length - 1; index >= 0; index--) {
+      const task = this.queue[index]!
+      if (task.nodeRunId !== nodeRunId || task.attempt !== attempt) continue
+      this.queue.splice(index, 1)
+      task.reject(new OrchError('STALE_GENERATION', '本次步骤尝试已取消排队'))
+    }
+    this.settleClose()
+  }
+
+  setCapacity(capacity: ExecutionCapacity): void {
+    const concurrency = positive(capacity.concurrency, 'concurrency')
+    const maxWaiting = positive(capacity.maxWaiting, 'max_waiting')
+    this.concurrencyLimit = concurrency
+    this.maxWaiting = maxWaiting
+    this.pump()
+  }
+
+  configureWorkflowLimits(resolve: ResolveWorkflowLimits): void {
+    this.resolveWorkflowLimits = resolve
+    this.pump()
+  }
+
   run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (!this.accepting) {
         reject(new OrchError('SERVICE_UNAVAILABLE', '调度器已关闭，先别排', { label: opts?.label ?? '' }))
         return
       }
-      if (this.queue.length >= this.maxWaiting) {
+      const scope = opts?.workflowScope ? { ...opts.workflowScope } : undefined
+      const task: QueuedTask = {
+        human: opts?.human === true,
+        label: opts?.label ?? '',
+        nodeRunId: opts?.nodeRunId,
+        attempt: opts?.attempt,
+        workflow: scope && { scope, nodeKey: JSON.stringify([scope.workflowId, scope.nodeId]) },
+        invoke: fn,
+        resolve: (value) => { resolve(value as T) },
+        reject: (reason) => { reject(reason) },
+      }
+      if (this.queue.length >= this.maxWaiting && !this.canStart(task)) {
         this.log.warn('执行队列满了，拒掉这一件', { waiting: this.queue.length, maxWaiting: this.maxWaiting })
         reject(new OrchError('SERVICE_UNAVAILABLE', '执行队列满了，先别排', {
           maxWaiting: this.maxWaiting,
           waiting: this.queue.length,
         }))
         return
-      }
-      const task: QueuedTask = {
-        human: opts?.human === true,
-        label: opts?.label ?? '',
-        nodeRunId: opts?.nodeRunId,
-        invoke: fn,
-        resolve: (value) => { resolve(value as T) },
-        reject: (reason) => { reject(reason) },
       }
       this.queue.push(task)
       this.log.info('执行任务入队', { label: task.label, waiting: this.queue.length, inFlight: this.running })
@@ -177,10 +222,25 @@ class Scheduler {
     this.resolveClose = null
   }
 
-  // 派名额：先给排在前面的任务；占人工名额的要等人工名额空出来
+  private canStart(task: QueuedTask): boolean {
+    if (this.running >= this.concurrencyLimit || (task.human && this.humanRunning >= this.humanSlotLimit)) return false
+    if (!task.workflow || !this.resolveWorkflowLimits) return true
+    const { scope, nodeKey } = task.workflow
+    const { runLimit, nodeLimit } = this.resolveWorkflowLimits(scope)
+    return (runLimit === null || (this.runningByRun.get(scope.runId) ?? 0) < runLimit)
+      && (nodeLimit === null || (this.runningByWorkflowNode.get(nodeKey) ?? 0) < nodeLimit)
+  }
+
+  private trackWorkflowTask(task: QueuedTask, delta: 1 | -1): void {
+    if (!task.workflow) return
+    changeCount(this.runningByRun, task.workflow.scope.runId, delta)
+    changeCount(this.runningByWorkflowNode, task.workflow.nodeKey, delta)
+  }
+
+  // 按入队顺序取首个仍有所有所需名额的任务。
   private pump(): void {
     while (this.running < this.concurrencyLimit && this.queue.length > 0) {
-      const idx = this.queue.findIndex((t) => !t.human || this.humanRunning < this.humanSlotLimit)
+      const idx = this.queue.findIndex((task) => this.canStart(task))
       if (idx < 0) return
       const [task] = this.queue.splice(idx, 1)
       if (!task) return
@@ -193,6 +253,7 @@ class Scheduler {
   private async launch(task: QueuedTask): Promise<void> {
     this.running += 1
     if (task.human) this.humanRunning += 1
+    this.trackWorkflowTask(task, 1)
     this.log.info('执行任务开跑', { label: task.label, inFlight: this.running, waiting: this.queue.length })
     let value: unknown = undefined
     let failure: unknown = null
@@ -205,11 +266,18 @@ class Scheduler {
     }
     this.running -= 1
     if (task.human) this.humanRunning -= 1
+    this.trackWorkflowTask(task, -1)
     this.pump()
     this.settleClose()
     if (failed) task.reject(failure)
     else task.resolve(value)
   }
+}
+
+function changeCount(counts: Map<string, number>, key: string, delta: 1 | -1): void {
+  const next = (counts.get(key) ?? 0) + delta
+  if (next === 0) counts.delete(key)
+  else counts.set(key, next)
 }
 
 export function createExecutionScheduler(opts: {
@@ -218,7 +286,7 @@ export function createExecutionScheduler(opts: {
   // 排队上限：超了直接拒（背压）。缺省为有界默认值，避免生产队列无界
   maxWaiting?: number
   log?: Logger
-} = {}): ExecutionScheduler {
+} = {}): ConfigurableExecutionScheduler {
   return new Scheduler({
     concurrency: opts.concurrency ?? DEFAULT_EXECUTION_CONCURRENCY,
     humanSlots: opts.humanSlots ?? DEFAULT_HUMAN_SLOTS,
@@ -227,8 +295,8 @@ export function createExecutionScheduler(opts: {
   })
 }
 
-// 配置是唯一来源：execution.concurrency / human_slots / max_waiting 在这里真正落到调度上
-export function createExecutionSchedulerFromConfig(cfg: OrchestraConfig, log?: Logger): ExecutionScheduler {
+// 配置提供宿主默认值；S6 可以在运行时覆盖并发和排队上限。
+export function createExecutionSchedulerFromConfig(cfg: OrchestraConfig, log?: Logger): ConfigurableExecutionScheduler {
   return createExecutionScheduler({
     concurrency: cfg.execution.concurrency,
     humanSlots: cfg.execution.human_slots,

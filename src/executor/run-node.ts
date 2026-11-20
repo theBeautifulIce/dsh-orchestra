@@ -9,7 +9,7 @@ import type { Db } from '../infra/sqlite/driver.ts'
 import { makeTx, withTx } from '../infra/sqlite/driver.ts'
 import { transitionNode, DEFAULT_VERIFY_TIMEOUT_MS } from '../service/commands/node-state.ts'
 import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
-import { loadNodeRun, releaseLease } from '../service/commands/lease.ts'
+import { loadNodeRun, releaseLease, type NodeRunRow } from '../service/commands/lease.ts'
 import { applyTransition } from '../service/commands/nodes.ts'
 import { acquireNodeRun, renewNodeLease, submitReport, type RuntimeDeps } from '../service/commands/runtime.ts'
 import { buildInstruction, checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
@@ -18,7 +18,7 @@ import type { BridgeClient } from './bridge.ts'
 import { AgentLifecycle } from './agent-lifecycle.ts'
 import { canTransition } from '../core/state-machine.ts'
 import type { ClockProvider } from '../core/clock.ts'
-import { MODEL_COMPLEXITIES, selectExecutionModel, type ModelAssignment, type ModelRouting } from './model-routing.ts'
+import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel, type ModelAssignment, type ModelProfile, type ModelRouting } from './model-routing.ts'
 import { requireTrialFlow } from '../service/trial-circles.ts'
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { getTaskPlanRecommendation } from '../service/task-planning.ts'
@@ -29,6 +29,8 @@ import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
 
 export type RunNodeParams = {
+  /** The scheduler derives this from the persisted workflow and node identity at admission. */
+  workflowHelperLimit?: number
   /** Controlled by the dedicated release entrypoint. */
   releaseCheckCwd?: string
   nodeRunId: string
@@ -238,8 +240,10 @@ async function runNodeActions(
         attempt: p.attempt,
         input: p.input,
         outputSchema: p.outputSchema,
-        toolPolicy: p.releaseCheckCwd ? { ...policy, releaseCheckCwd: p.releaseCheckCwd } : policy,
+        toolPolicy: p.releaseCheckCwd ? { ...policy, releaseCheckCwd: p.releaseCheckCwd }
+          : { ...policy, workflowHelperLimit: p.workflowHelperLimit },
         modelRef: assignment?.model_ref,
+        sessionModelFallback: assignment?.session_model_fallback,
         reasoningEffort: assignment?.reasoning_effort,
         ...(deps.modelRouting ? { actionGeneration: generation } : {}),
       })
@@ -272,7 +276,7 @@ async function runNodeActions(
             const reason = spawnTask ? 'agent_spawn_rejected' : deps.cancelSignal?.aborted ? 'pre_spawn_cancelled' : 'model_assignment_unavailable'
             transitionNode(tx, deps.secret, {
               nodeRunId: p.nodeRunId, from: 'dispatched', to: 'blocked_pre',
-              attempt: row.attempt, revision: row.revision, now, reason,
+              attempt: row.attempt, revision: row.revision, now, reason, actionGeneration: generation,
               verifyHuman: { reason, missing: [] },
             })
             if (!spawnTask) releaseLease(tx, { nodeRunId: row.node_run_id, now })
@@ -502,45 +506,65 @@ function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: 
     if (row.status !== 'dispatched' || row.attempt !== p.attempt || row.action_generation !== generation) {
       throw new OrchError('STALE_GENERATION', '模型分配对应的执行尝试已失效')
     }
-    const run = tx.get<{ task_id: string; workflow_id: string | null; workflow_version: string | null }>(
-      'SELECT task_id, workflow_id, CAST(workflow_version AS TEXT) AS workflow_version FROM runs WHERE run_id = ?', [row.run_id],
-    )
-    if (!run) throw new OrchError('NOT_FOUND', '模型分配找不到对应运行')
-    const context = { taskId: run.task_id, runId: row.run_id, nodeId: resolvePinnedNodeId(tx, row.node_run_id), nodeRunId: row.node_run_id,
-      attempt: row.attempt, actionGeneration: generation, workflowId: run.workflow_id, workflowVersion: run.workflow_version }
-    const proposed = getTaskPlanRecommendation(deps.db, context) ?? routing.recommend(context)
-    const settings = readModelRoutingSettings(tx)
-    const catalog = routing.catalog?.()
-    const profiles = approvedModelProfiles(effectiveModelCatalog(catalog?.profiles ?? routing.profiles, settings))
-    const preferred = settings.mapping[proposed.complexity]
-    const capacity = MODEL_COMPLEXITIES.indexOf(proposed.complexity)
-    const qualifies = (ref: string | undefined) => profiles.some((profile) => profile.ref === ref
-      && MODEL_COMPLEXITIES.indexOf(profile.capacity) >= capacity)
-    if (preferred && !qualifies(preferred)) {
-      throw new OrchError('FORBIDDEN', '指定模型已从 DSH 目录移除或能力不足，请重新读取并更新子智能体模型分配')
-    }
-    const recommendedModel = !catalog || qualifies(proposed.preferredModel) ? proposed.preferredModel : undefined
-    const assignment = selectExecutionModel(profiles, { ...proposed, preferredModel: preferred ?? recommendedModel })
-    if (preferred) assignment.settings_revision = settings.revision
-    const selected = deps.modelEscalation?.select(tx, row, profiles, assignment, now) ?? assignment
-    const tierEffort = selected.model_ref === preferred ? settings.reasoning_efforts[proposed.complexity] : undefined
-    const modelEffort = settings.model_reasoning_defaults.find(({ ref }) => ref === selected.model_ref)?.effort
-    const effort = tierEffort ?? modelEffort
-    if (catalog || effort != null) {
-      const profile = profiles.find(({ ref }) => ref === selected.model_ref)
-      if (effort != null && !profile?.reasoning?.efforts.some(({ id }) => id === effort)) {
-        throw new OrchError('FORBIDDEN', '指定思考深度已从 DSH 模型目录移除，请重新读取并更新子智能体模型分配')
-      }
-      if (profile?.provider && profile.model) {
-        selected.provider = profile.provider
-        selected.model = profile.model
-      }
-      if (effort != null) selected.settings_revision = settings.revision
-      selected.reasoning_effort = effort ?? null
-    }
+    const selected = resolveModelAssignment(tx, deps.db, row, routing, (profiles, base) =>
+      deps.modelEscalation?.select(tx, row, profiles, base, now) ?? base)
     recordModel(tx, deps.secret, row, selected, 'selected')
     return selected
   })
+}
+
+export function resolveModelAssignment(tx: Tx, db: Db, row: NodeRunRow, routing: ModelRouting,
+  escalate?: (profiles: readonly ModelProfile[], assignment: ModelAssignment) => ModelAssignment): ModelAssignment {
+  const run = tx.get<{ task_id: string; workflow_id: string | null; workflow_version: string | null }>(
+    'SELECT task_id, workflow_id, CAST(workflow_version AS TEXT) AS workflow_version FROM runs WHERE run_id = ?', [row.run_id],
+  )
+  if (!run) throw new OrchError('NOT_FOUND', '模型分配找不到对应运行')
+  const context = { taskId: run.task_id, runId: row.run_id, nodeId: resolvePinnedNodeId(tx, row.node_run_id), nodeRunId: row.node_run_id,
+    attempt: row.attempt, actionGeneration: row.action_generation, workflowId: run.workflow_id, workflowVersion: run.workflow_version }
+  const proposed = getTaskPlanRecommendation(db, context) ?? routing.recommend(context)
+  const settings = readModelRoutingSettings(tx)
+  const catalog = routing.catalog?.()
+  const effective = effectiveModelCatalog(catalog?.profiles ?? routing.profiles, settings)
+  const profiles = approvedModelProfiles(effective)
+  const preferred = settings.mapping[proposed.complexity]
+  const capacity = MODEL_COMPLEXITIES.indexOf(proposed.complexity)
+  const adequate = profiles.filter((profile) => MODEL_COMPLEXITIES.indexOf(profile.capacity) >= capacity)
+  if (preferred && !adequate.some(({ ref }) => ref === preferred)) {
+    throw new OrchError('FORBIDDEN', '指定模型已从 DSH 目录移除或能力不足，请重新读取并更新子智能体模型分配')
+  }
+  const recommended = !catalog || adequate.some(({ ref }) => ref === proposed.preferredModel) ? proposed.preferredModel : undefined
+  const session = effective.find(({ ref }) => ref === catalog?.session_execution_model_ref)
+  let assignment: ModelAssignment
+  if (!preferred && adequate.length === 0 && capacity >= 0 && capacity <= MODEL_COMPLEXITIES.indexOf('advanced')
+    && session?.capacity === null && session.provider && session.model && MODEL_REF_RE.test(session.ref)) {
+    const reason = typeof proposed.reason === 'string' ? proposed.reason.trim() : ''
+    if (reason.length === 0 || reason.length > 240) {
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑的模型建议缺少合法复杂度或依据')
+    }
+    const fallback = '暂无满足该节点档位的模型，自动沿用当前 DSH 会话已授权的执行模型。该模型能力未评估。'
+    assignment = { model_ref: session.ref, complexity: proposed.complexity, session_model_fallback: true,
+      reason: fallback + ' 规划依据：' + reason.slice(0, 240 - fallback.length - ' 规划依据：'.length) }
+  } else {
+    assignment = selectExecutionModel(profiles, { ...proposed, preferredModel: preferred ?? recommended })
+  }
+  if (preferred) assignment.settings_revision = settings.revision
+  const selected = escalate?.(profiles, assignment) ?? assignment
+  const tierEffort = selected.model_ref === preferred ? settings.reasoning_efforts[proposed.complexity] : undefined
+  const modelEffort = settings.model_reasoning_defaults.find(({ ref }) => ref === selected.model_ref)?.effort
+  const effort = tierEffort ?? modelEffort
+  if (catalog || effort != null) {
+    const profile = effective.find(({ ref }) => ref === selected.model_ref)
+    if (effort != null && !profile?.reasoning?.efforts.some(({ id }) => id === effort)) {
+      throw new OrchError('FORBIDDEN', '指定思考深度已从 DSH 模型目录移除，请重新读取并更新子智能体模型分配')
+    }
+    if (profile?.provider && profile.model) {
+      selected.provider = profile.provider
+      selected.model = profile.model
+    }
+    if (effort != null) selected.settings_revision = settings.revision
+    selected.reasoning_effort = effort ?? null
+  }
+  return selected
 }
 
 function recordModel(tx: Tx, secret: string, row: ReturnType<typeof loadNodeRun>, assignment: ModelAssignment,

@@ -27,6 +27,7 @@ export type ModelCatalogProfile = Omit<ModelProfile, 'capacity'> & {
 export type ModelCatalogSnapshot = {
   profiles: readonly ModelCatalogProfile[]
   unavailable_providers?: readonly string[]
+  session_execution_model_ref?: string
 }
 export type ModelPlanningProfile = ModelProfile & { user_note: string }
 export type ModelRecommendation = { complexity: ModelComplexity; reason: string; preferredModel?: string }
@@ -34,6 +35,7 @@ export type ModelUse = { provider: string; model: string; observed_request_heade
 export type ModelAssignment = {
   model_ref: string; complexity: ModelComplexity; reason: string; usage?: ModelUse; settings_revision?: number
   provider?: string; model?: string
+  session_model_fallback?: true
   reasoning_effort?: string | null
 }
 

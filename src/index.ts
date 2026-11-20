@@ -36,6 +36,7 @@ import { acknowledgeDecision, resolveDecision } from './service/commands/decisio
 import { requestHashOf } from './service/commands/idempotency.ts'
 import { runDecisionCommand } from './service/decision/confirmation.ts'
 import { inspectEffectEvidence, resolveEffect } from './service/commands/effects.ts'
+import { recoverChatModelAssignment } from './service/chat-model-recovery.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
@@ -68,7 +69,7 @@ import {
 import type { Phase } from './core/config.ts'
 import type { CancelResult } from './service/commands/cancel.ts'
 import {
-  runNode, DEFAULT_LEASE_TTL_MS,
+  runNode, DEFAULT_ACTION_TIMEOUT_MS, DEFAULT_LEASE_TTL_MS,
   type RunNodeDeps, type RunNodeParams, type RunNodeResult,
 } from './executor/run-node.ts'
 import { bridgeHostAgentFactory } from './executor/bridge.ts'
@@ -79,6 +80,9 @@ import { createReworkHost, type ReworkHost } from './service/rework-coordinator.
 import { createDeliveryReviewHost } from './service/delivery-review.ts'
 import { createReworkPlanningHost, type ReworkPlanner } from './service/rework-planning.ts'
 import { createPlanningSettingsHost, type PlanningSettingsHost } from './service/planning-settings.ts'
+import { createExecutionCapacitySettingsHost, type ExecutionCapacitySettingsHost } from './service/execution-capacity-settings.ts'
+import { createWorkflowConcurrencyHost, type WorkflowConcurrencyHost } from './service/workflow-concurrency-settings.ts'
+import { resolvePinnedNodeId } from './service/rework-extra-steps.ts'
 import { callDshRework } from './service/dsh-rework.ts'
 import { createReworkInspectionHost } from './service/rework-inspection.ts'
 import { createModelEscalationHost } from './service/model-escalation.ts'
@@ -146,6 +150,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
         ...(workflowGenerator ? { workflowGenerator, workflowStreamProgress: true } : {}),
       } } : {}),
       ...(workflowGenerator ? { workflowGenerator, workflowGeneratorStreamProgress: true } : {}),
+      workflowHelpersAvailable: true,
       executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
     })
     plannerDb = service.orchestra.db
@@ -164,6 +169,7 @@ import type { HostAgentFactory } from './executor/session.ts'
 import { ExecutionCancels } from './service/execution-cancels.ts'
 import {
   createExecutionScheduler, createExecutionSchedulerFromConfig, runThroughScheduler, type ExecutionScheduler,
+  type ConfigurableExecutionScheduler,
 } from './service/execution-scheduler.ts'
 import { loadConfig } from './core/config.ts'
 import { SystemClock } from './core/clock.ts'
@@ -187,6 +193,8 @@ export type { MemoryRecoveryRequest, MemoryWriteEvidence } from './service/comma
 export type { InspectMemoryWrite, MemoryWriteInspection } from './service/commands/memory-ports.ts'
 
 export type OrchestraOptions = {
+  /** Set by the production DSH executor that implements bounded node assistants. */
+  workflowHelpersAvailable?: boolean
   dbFile: string
   secret: string
   phase: Phase
@@ -215,6 +223,8 @@ export type Orchestra = {
   catalog: WorkflowCatalog
   commands: NodeCommands
   modelEscalation?: ReturnType<typeof createModelEscalationHost>
+  executionCapacitySettings?: ExecutionCapacitySettingsHost
+  workflowConcurrencySettings?: WorkflowConcurrencyHost
   release?: ReturnType<typeof createReleaseWorkflowHost>
   // 执行中取消的进程内注册表：账本记取消事实，这里把 AbortSignal 送到对应的 runNode
   cancels: ExecutionCancels
@@ -256,9 +266,16 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       (error) => opts.log?.error('模型诊断失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }), undefined, true)
     : undefined
   const spillDir = executor?.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(opts.configPath)
-  // 执行时限同样只能来自配置：不把 action_timeout_ms / startup_timeout_ms / verify_timeout_ms
-  // 读进来，配置写了也不生效（复审 P2-1）。读不到就交给 runNode 的默认值。
+  // 读取执行器的宿主默认时限；S6 面板可以覆盖单步执行时限。
   const executionLimits = executionLimitsFromConfig(opts.configPath)
+  const scheduler = opts.scheduler
+  const workflowConcurrencySettings = opts.phase === 'S6' && scheduler?.configureWorkflowLimits
+    ? createWorkflowConcurrencyHost(db, scheduler, opts.workflowHelpersAvailable === true) : undefined
+  const executionCapacitySettings = opts.phase === 'S6' && scheduler && 'setCapacity' in scheduler
+    && typeof scheduler.setCapacity === 'function'
+    ? createExecutionCapacitySettingsHost(db, scheduler as ConfigurableExecutionScheduler,
+      executionLimits.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS)
+    : undefined
   const agents = executor ? (executor.agents ?? bridgeHostAgentFactory(executor.bridge)) : null
   const cancels = new ExecutionCancels()
   const sharedContext = opts.phase === 'S6' && opts.projectContext ? createRunSharedContext(db, opts.projectContext) : undefined
@@ -275,7 +292,8 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     }
     const signal = cancels.register(p.nodeRunId, p.attempt)
     try {
-      return await runNode({ ...executorDeps, cancelSignal: signal }, p)
+      const actionTimeoutMs = executionCapacitySettings?.actionTimeoutMs() ?? p.actionTimeoutMs
+      return await runNode({ ...executorDeps, cancelSignal: signal }, { ...p, actionTimeoutMs })
     } finally {
       cancels.release(p.nodeRunId, p.attempt)
     }
@@ -284,10 +302,18 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   // 不允许 dispatcher 自己再排一次，否则同一次执行会重复占两个并发名额。
   const executeScheduled = (p: RunNodeParams): Promise<RunNodeResult> => {
     const enqueuedAt = performance.now()
+    const workflowScope = workflowConcurrencySettings && !p.releaseCheckCwd ? withReadTx(db, ({ tx }) => {
+      const row = tx.get<{runId:string; workflowId:string; node_type:string}>(
+        'SELECT n.run_id AS runId,r.workflow_id AS workflowId,n.node_type FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
+        [p.nodeRunId])
+      if (!row || !row.workflowId || row.node_type !== 'agent' || isReleaseWorkflow(row.workflowId)) return undefined
+      return { runId: row.runId, workflowId: row.workflowId, nodeId: resolvePinnedNodeId(tx, p.nodeRunId) }
+    }) : undefined
     return runThroughScheduler(opts.scheduler, () => {
       const waitedMs = Math.floor(performance.now() - enqueuedAt)
-      return executeNode({ ...p, now: new Date(Date.parse(p.now) + waitedMs).toISOString() })
-    }, { label: p.nodeId, nodeRunId: p.nodeRunId })
+      const workflowHelperLimit = workflowScope ? workflowConcurrencySettings?.helperLimit(workflowScope) : undefined
+      return executeNode({ ...p, workflowHelperLimit, now: new Date(Date.parse(p.now) + waitedMs).toISOString() })
+    }, { label: p.nodeId, nodeRunId: p.nodeRunId, attempt: p.attempt, workflowScope })
   }
   const releaseOptions = opts.release
   const release = releaseOptions && (() => {
@@ -338,6 +364,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       const out = submitCancel(runtime, { ...b, cancelResult: b.cancelResult as CancelResult })
       // 账本先落取消事实，再把停止请求送到正在跑的那个 attempt；
       // 已停的节点没有在跑实例，不打断任何东西。
+      scheduler?.cancelWaiting?.(b.nodeRunId, b.attempt)
       if (out.cancel_result !== 'already_stopped') {
         cancels.abort(b.nodeRunId, b.attempt, `cancel:${out.cancel_result}`)
       }
@@ -499,12 +526,15 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
           }
         }
         const terminalStatus = statusRow && RUN_TERMINAL.has(statusRow.status) ? statusRow.status : null
-        const attemptsToStop = b.cancelResult === 'already_stopped' ? [] : out.cancelledNodes.map((id) => ({
+        const attemptsToStop = out.cancelledNodes.map((id) => ({
           id, attempt: tx.get<{ attempt: number }>('SELECT attempt FROM node_runs WHERE node_run_id=?', [id])!.attempt,
         }))
         return { response: { ...out, terminalStatus, outcome }, attemptsToStop }
       })
-      for (const { id, attempt } of attemptsToStop) cancels.abort(id, attempt, `cancel:${b.cancelResult}`)
+      for (const { id, attempt } of attemptsToStop) {
+        scheduler?.cancelWaiting?.(id, attempt)
+        if (b.cancelResult !== 'already_stopped') cancels.abort(id, attempt, `cancel:${b.cancelResult}`)
+      }
       return response
     },
     dispatch: async (b) => {
@@ -564,6 +594,8 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     catalog,
     commands,
     modelEscalation,
+    executionCapacitySettings,
+    workflowConcurrencySettings,
     release,
     trial,
     cancels,
@@ -616,7 +648,9 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
 }): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; rework?: ReworkHost;
-    planning: TaskPlanningHost; planningSettings?: PlanningSettingsHost; close: () => Promise<void> }> {
+    planning: TaskPlanningHost; planningSettings?: PlanningSettingsHost;
+    recoverChatModelAssignment?: (input: Parameters<typeof recoverChatModelAssignment>[3]) => Promise<string[]>;
+    close: () => Promise<void> }> {
   const log = opts.log ?? nullLogger
   // 并发闸在生产装配这一层建：配置里的 execution.concurrency 与 human_slots 在这里真正生效。
   // 配置读不到时退回默认定值（并发 3、人工名额 1），不让一个可选配置文件挡住服务启动。
@@ -755,6 +789,8 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       memoryProposalOnly: () => Boolean(memory) && (memoryDecisionAccess() === 'proposal_only' || (opts.phase === 'S6' && !opts.resolveHttpHuman)),
       planning,
       planningSettings,
+      executionCapacitySettings: orchestra.executionCapacitySettings,
+      workflowConcurrencySettings: orchestra.workflowConcurrencySettings,
       collaboration,
       rework, delivery, localPlanning, inspection, modelEscalation,
       modelSettings,
@@ -778,6 +814,13 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     collaboration,
     rework,
     planningSettings,
+    recoverChatModelAssignment: opts.phase === 'S6' && modelRouting?.refresh && triggerDispatch
+      ? async (input: Parameters<typeof recoverChatModelAssignment>[3]) => {
+        const { resumed, retrying } = await recoverChatModelAssignment(orchestra.db, opts.secret, modelRouting, input)
+        if (resumed > 0) triggerDispatch.tick()
+        return retrying
+      }
+      : undefined,
     close: async () => {
       clearInterval(sweepTimer)
       const closingTriggerDispatch = triggerDispatch?.close()
@@ -815,8 +858,8 @@ function bridgeSpillDirFromConfig(configPath: string | undefined): string | unde
   }
 }
 
-// 配置是并发的唯一来源；配置缺失或读不动时退回默认定值，不让服务起不来
-function schedulerFromConfig(configPath: string | undefined, log: Logger): ExecutionScheduler {
+// 配置提供默认并发与排队上限，缺失时退回默认值。
+function schedulerFromConfig(configPath: string | undefined, log: Logger): ConfigurableExecutionScheduler {
   try {
     return createExecutionSchedulerFromConfig(loadConfig(configPath ?? 'orchestra.config.json'), log)
   } catch (err) {

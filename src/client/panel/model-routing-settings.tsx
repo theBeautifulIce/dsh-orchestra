@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type Ref } from 'react'
 import type { ApiClient } from '../api/client.ts'
 import { postWithOperationReceipt } from '../api/commands.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
@@ -76,8 +76,10 @@ function ModelPicker({ scope, profiles, refValue, locked, onPick }: {
   </div>
 }
 
-export function ModelRoutingSettings({ client, reloadVersion = 0, onSnapshot }: {
+export function ModelRoutingSettings({ client, reloadVersion = 0, onSnapshot, plannerHeadingRef, submodelHeadingRef }: {
   client: ApiClient; reloadVersion?: number; onSnapshot?: (seq: number) => void
+  plannerHeadingRef?: Ref<HTMLHeadingElement>
+  submodelHeadingRef?: Ref<HTMLHeadingElement>
 }) {
   const [saved, setSaved] = useState<ModelRoutingSettingsView>()
   const [modelDrafts, setModelDrafts] = useState(new Map<string, ModelDraft>())
@@ -292,7 +294,7 @@ export function ModelRoutingSettings({ client, reloadVersion = 0, onSnapshot }: 
         </li>)}</ul>
       </section>}
       {plannerConfigurable && <section aria-labelledby="planner-routing-title" className="ops-inset" style={fieldList}>
-        <h3 id="planner-routing-title">主脑模型</h3>
+        <h3 id="planner-routing-title" ref={plannerHeadingRef} className="ops-settings-anchor" tabIndex={-1}>主脑模型</h3>
         <p className="ops-meta">用于生成任务计划、流程草稿和返工建议。</p>
         <label style={field}>模型来源
           <select id="model-planner-mode" className="ops-field" value={planner ? 'fixed' : 'session'} disabled={locked}
@@ -318,7 +320,7 @@ export function ModelRoutingSettings({ client, reloadVersion = 0, onSnapshot }: 
             ? `该模型只提供 ${plannerPreset.name}，使用宿主默认。` : '该模型未提供可调思考档，使用宿主默认。'}</p>)}
         </>}
       </section>}
-      <h3>子智能体模型分配</h3>
+      <h3 id="submodel-routing-title" ref={submodelHeadingRef} className="ops-settings-anchor" tabIndex={-1}>子智能体模型分配</h3>
       {unavailableDrafts > 0 && <p role="status">有 {unavailableDrafts} 个模型的草稿已保留，模型重新出现在目录后可继续编辑。</p>}
       {editor && <fieldset className="ops-inset" style={fieldList}>
         <legend>编辑子智能体模型</legend>
@@ -349,13 +351,15 @@ export function ModelRoutingSettings({ client, reloadVersion = 0, onSnapshot }: 
           </div> : <p className="ops-meta">{editorPreset
             ? `该模型只提供 ${editorPreset.name}，使用宿主默认。` : '该模型未提供可调思考档，使用宿主默认。'}</p>}
       </fieldset>}
-      <p className="ops-meta">自动分配采用合格的主脑候选，其次选满足要求的最低档。分配时优先使用当前复杂度的思考档，其次使用模型配置，最后沿用宿主默认。</p>
+      <p className="ops-meta">自动分配采用合格的主脑候选，其次选满足要求的最低档。常规至进阶在无合格候选时可沿用当前 DSH 会话已授权且未评估的模型。分配时优先使用当前复杂度的思考档，其次使用模型配置，最后沿用宿主默认。</p>
       {MODEL_COMPLEXITIES.map((level, index) => {
         const { label, description } = MODEL_LEVELS[level]
         const eligible = profiles.filter((item) => {
           const capacity = capacityFor(item)
           return capacity !== null && MODEL_COMPLEXITIES.indexOf(capacity) >= index
         })
+        const session = profiles.find(({ ref }) => ref === saved?.session_execution_model_ref)
+        const usesSession = eligible.length === 0 && session && capacityFor(session) === null && index <= MODEL_COMPLEXITIES.indexOf('advanced')
         const current = mapping[level]
         const selected = eligible.find(({ ref }) => current === ref)
         const reasoning = selected?.reasoning
@@ -371,12 +375,13 @@ export function ModelRoutingSettings({ client, reloadVersion = 0, onSnapshot }: 
           <select id={`model-route-${level}`} className="ops-field" aria-describedby={`model-capacity-${level}`}
             disabled={locked} value={current ?? ''} onChange={(event) =>
               editTier(level, { ref: event.target.value || null, effort: null })}>
-            <option value="">自动选择{eligible.length === 0 ? '（暂无候选）' : ''}</option>
+            <option value="">自动选择{usesSession ? '（沿用当前会话模型）' : eligible.length === 0 ? '（暂无候选）' : ''}</option>
             {current && !selected && <option value={current}>已不可用 · {current}</option>}
             {eligible.map((item) => <option key={item.ref} value={item.ref}>{modelLabel(item)}</option>)}
           </select>
           <span id={`model-capacity-${level}`} className="ops-meta" style={fieldHint}>{description}
-            {eligible.length === 0 && '。可调整模型的最大能力，或在 DSH 中配置更多模型后重新读取。'}
+            {usesSession && `。当前会话模型为 ${modelLabel(session)}，能力未评估。`}
+            {eligible.length === 0 && !usesSession && '。可调整模型的最大能力，或在 DSH 中配置更多模型后重新读取。'}
             {current && !selected && '。已保存的模型已移除或能力不足，请改选模型或自动选择。'}
           </span>
           {selected && (!!effort || !preset && !!reasoning?.efforts.length) ? <>

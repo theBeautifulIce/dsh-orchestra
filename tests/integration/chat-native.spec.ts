@@ -6,11 +6,15 @@ import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
 import { serveOrchestra, type serveDshOrchestra } from '../../src/index.ts'
 import { decisionId, uuidv7 } from '../../src/core/ids.ts'
+import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
+import { transitionNode } from '../../src/service/commands/node-state.ts'
 import { installConfiguredLocalDshHost, localDshHostConfig } from '../../src/service/local-dsh-host.ts'
 import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
+import { registerRunArtifact } from '../../src/service/artifact-store.ts'
 import { classifyChatTask } from '../../src/service/chat-task-intent.ts'
+import { reportChatRun } from '../../src/service/chat-task-receipts.ts'
 import { installNativeChat } from '../../src/service/chat-native.ts'
 
 type Message = Parameters<Agent['followup']>[0]
@@ -511,6 +515,122 @@ it('installs the default bundle entry only in a supported Desktop profile and ho
     await expect(owner.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
     expect(exposed.serve).not.toHaveBeenCalled()
   } finally { await exposed.close() }
+})
+
+it('acknowledges once, keeps recoverable progress quiet, and reports a late blocker and the terminal result once', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    const admission = await human.admit(user('整理办公记录，交付一份报告'))
+    expect(admission).toMatchObject({ kind: 'enter', messages: [expect.anything(), {
+      source: { kind: 'plugin:dsh-orchestra', form: 'notice', summary: expect.stringContaining('已接单') },
+    }] })
+    const { run_id: runId } = await human.call()
+    const { db } = test.services.get('parent')!.orchestra
+    const first = db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id = ? AND node_id = 'draft'").get(runId)!.node_run_id
+    const runScan = () => vi.advanceTimersByTimeAsync(2_000)
+    const setNodeStatus = (status: string) => withTx(db, (tx) => {
+      tx.run('UPDATE node_runs SET status = ? WHERE node_run_id = ?', [status, first])
+    })
+
+    withTx(db, (tx) => tx.run("UPDATE chat_task_receipts SET reported_key = 'progress:started'"))
+    for (const stage of ['queued', 'started', 'verifying', 'waiting', 'startup_unknown', 'paused_bridge_missing', 'started']) {
+      setNodeStatus(stage)
+      await runScan()
+      expect(test.notices).toHaveLength(0)
+    }
+    withTx(db, (tx) => tx.run("UPDATE runs SET status = 'paused' WHERE run_id = ?", [runId]))
+    await runScan()
+    expect(test.notices).toHaveLength(0)
+    withTx(db, (tx) => tx.run("UPDATE runs SET status = 'running' WHERE run_id = ?", [runId]))
+
+    const now = new Date().toISOString()
+    const automatic = decisionId()
+    withTx(db, (tx) => {
+      openDecision(tx, { decisionId: automatic, runId, nodeRunId: String(first), kind: 'audit_result',
+        approver: 'agent:fixture', payload: {}, createdAt: now })
+      tx.run("UPDATE node_runs SET status = 'blocked_pre', blocked_decision_id = ? WHERE node_run_id = ?", [automatic, first])
+    })
+    await runScan()
+    expect(test.notices).toHaveLength(0)
+    await human.admit(user('这次任务当前进度如何？'))
+    await expect(human.call({ action: 'status', run_id: runId })).resolves.toMatchObject({
+      run_id: runId, terminal: false, status: 'running',
+      blocking: [{ node_run_id: first, status: 'blocked_pre', action_required: false }],
+    })
+    expect(db.raw.prepare('SELECT reported_key FROM chat_task_receipts').get()).toMatchObject({ reported_key: 'progress:started' })
+
+    const file = registerRunArtifact(db, { artifactId: uuidv7(), runId, fileName: 'interim.md', bytes: Buffer.from('interim report') })
+    await human.admit(user('/orchestra 独立整理另一批记录并交付汇总报告'))
+    const { run_id: otherRun } = await human.call()
+    expect(otherRun).not.toBe(runId)
+    const unrelated = registerRunArtifact(db, { artifactId: uuidv7(), runId: otherRun, fileName: 'other-run.md', bytes: Buffer.from('other run only') })
+    withTx(db, (tx) => tx.run("UPDATE runs SET status = 'cancelled', ended_at = ? WHERE run_id = ?", [now, otherRun]))
+    reportChatRun(db, otherRun, 'terminal:cancelled')
+    await runScan()
+    expect(test.notices).toHaveLength(0)
+    await human.admit(user('这个运行已经有哪些产物？'))
+    await expect(human.call({ action: 'status', run_id: runId })).resolves.toMatchObject({
+      run_id: runId, status: 'running', artifacts: [{ artifact_id: file.artifact_id, file_name: 'interim.md', bytes: 14 }],
+    })
+    await expect(human.call({ action: 'artifact', run_id: runId, artifact_id: file.artifact_id })).resolves.toMatchObject({
+      kind: 'preview', text: 'interim report',
+    })
+    await expect(human.call({ action: 'artifact', run_id: runId, artifact_id: unrelated.artifact_id })).resolves.toMatchObject({
+      state: 'error', code: 'NOT_FOUND',
+    })
+
+    const approval = decisionId()
+    withTx(db, (tx) => openDecision(tx, {
+      decisionId: approval, runId, nodeRunId: null, kind: 'pre_execution', approver: 'human',
+      confirmRequired: true, payload: { target_summary: '并行分支需要审核' },
+    }))
+    await runScan()
+    expect(test.notices).toHaveLength(1)
+    const lateNode = uuidv7()
+    withTx(db, (tx) => {
+      for (let index = 0; index < 14; index++) {
+        tx.run(`INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 'agent', ?, ?, ?)`, [index === 13 ? lateNode : uuidv7(), runId, `extra-${index}`, index + 20,
+          index === 13 ? 'started' : 'queued', now, now])
+      }
+      transitionNode(tx, test.secret, { nodeRunId: lateNode, from: 'started', to: 'blocked_post', attempt: 1, revision: 0,
+        reason: 'verification_required', verifyHuman: { reason: '原始报告缺少复核证据', missing: [] }, now })
+      for (let index = 0; index < 55; index++) appendNodeRunEvent(tx, test.secret, lateNode, 'tool_finished', { tool_seq: index })
+    })
+    await runScan()
+    await runScan()
+    expect(test.notices).toHaveLength(2)
+    expect(test.notices[1]).toMatchObject({ sessionId: 'parent', message: {
+      source: { summary: expect.stringContaining('等待人工处理') },
+      content: [{ type: 'text', text: expect.stringContaining('原始报告缺少复核证据') }],
+    } })
+    const noticeText = test.notices[1]?.message.content[0]
+    expect(noticeText).toMatchObject({ text: expect.stringContaining('interim.md') })
+    expect(noticeText).not.toMatchObject({ text: expect.stringContaining('other-run.md') })
+    await human.admit(user('查看任务的当前阻塞原因'))
+    const status = await human.call({ action: 'status', run_id: runId })
+    expect(status.nodes).toContainEqual(expect.objectContaining({ node_run_id: lateNode, status: 'blocked_post' }))
+    expect(status.blocking).toContainEqual(expect.objectContaining({
+      node_run_id: lateNode, reason: '原始报告缺少复核证据', action_required: true,
+    }))
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET status = 'done' WHERE node_run_id = ?", [lateNode]))
+    await runScan()
+    expect(test.notices).toHaveLength(2)
+
+    withTx(db, (tx) => tx.run("UPDATE runs SET status = 'failed', ended_at = ? WHERE run_id = ?", [now, runId]))
+    await runScan()
+    await runScan()
+    expect(test.notices).toHaveLength(3)
+    expect(test.notices[2]?.message.source).toMatchObject({ summary: expect.stringContaining('运行失败') })
+    expect(db.raw.prepare('SELECT reported_key FROM chat_task_receipts').all()).toEqual(expect.arrayContaining([
+      { reported_key: 'terminal:failed' }, { reported_key: 'terminal:cancelled' },
+    ]))
+  } finally {
+    await test.close()
+    vi.useRealTimers()
+  }
 })
 
 it('keeps approval, planning failure and terminal results in the originating DSH session', async () => {

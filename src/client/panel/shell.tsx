@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import type { StreamStatus } from '../api/sse.ts'
@@ -17,6 +17,7 @@ export const PANEL_ROUTES = [
 ] as const
 
 export type PanelRoute = (typeof PANEL_ROUTES)[number]['id']
+type SettingsSection = { id: string; label: string }
 export type PanelShellProps = {
   activeRoute: PanelRoute
   onNavigate: (route: PanelRoute) => void
@@ -25,6 +26,7 @@ export type PanelShellProps = {
   snapshotStale?: boolean
   streamStatus?: StreamStatus
   collaborationEnabled?: boolean
+  settingsSections?: readonly SettingsSection[]
   children?: ReactNode
 }
 
@@ -55,12 +57,33 @@ export function UnknownState({ value }: { value: string }) {
 
 export function PanelShell(props: PanelShellProps) {
   const content = useRef<HTMLElement>(null)
+  const settingsMenuId = useId()
+  const [activeSettingsSection, setActiveSettingsSection] = useState<string>()
+  const settingsOpen = props.activeRoute === 'settings' && !!props.settingsSections?.length
   useLayoutEffect(() => {
     if (content.current) {
       content.current.scrollTop = 0
       content.current.scrollLeft = 0
     }
+    setActiveSettingsSection(undefined)
   }, [props.activeRoute])
+
+  useLayoutEffect(() => {
+    if (activeSettingsSection && !props.settingsSections?.some(({ id }) => id === activeSettingsSection)) {
+      setActiveSettingsSection(undefined)
+    }
+  }, [activeSettingsSection, props.settingsSections])
+
+  function openSettingsSection(id: string) {
+    const scroller = content.current
+    const heading = scroller?.querySelector<HTMLElement>(`#${id}`)
+    if (!scroller || !heading) return
+
+    const offset = heading.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+    scroller.scrollTop += offset - 12
+    heading.focus({ preventScroll: true })
+    setActiveSettingsSection(id)
+  }
 
   if (props.protocolMismatch) {
     return <div className="ops-panel-viewport" style={appStyle}>
@@ -83,15 +106,24 @@ export function PanelShell(props: PanelShellProps) {
       <div className="ops-shell" data-panel-route={props.activeRoute}>
         <aside aria-label="主导航" className="ops-shell-sidebar" style={sidebarStyle}>
           <div className="ops-shell-brand" style={brandStyle}>Orchestra</div>
-          <nav aria-label="主菜单">
+          <nav aria-label="主菜单" className="ops-main-menu">
             {PANEL_ROUTES.filter((route) => route.id !== 'collaboration' || props.collaborationEnabled).map((route) => <button
               key={route.id}
               type="button"
               aria-current={props.activeRoute === route.id ? 'page' : undefined}
+              aria-expanded={route.id === 'settings' && props.settingsSections?.length ? settingsOpen : undefined}
+              aria-controls={route.id === 'settings' && settingsOpen ? settingsMenuId : undefined}
               onClick={() => props.onNavigate(route.id)}
               style={{ ...navButtonStyle, ...(props.activeRoute === route.id ? activeNavStyle : {}) }}
             >{route.label}</button>)}
           </nav>
+          {settingsOpen && <nav id={settingsMenuId} aria-label="设置子菜单" className="ops-settings-menu">
+            {props.settingsSections?.map(({ id, label }) => <button key={id} type="button"
+              aria-current={activeSettingsSection === id ? 'location' : undefined}
+              aria-controls={id}
+              onClick={() => openSettingsSection(id)}
+            >{label}</button>)}
+          </nav>}
         </aside>
         <div className="ops-shell-main" data-panel-route={props.activeRoute}>
           <header style={props.activeRoute === 'tasks' ? headerStyle : { ...headerStyle, height: 44, paddingInline: 22 }}>

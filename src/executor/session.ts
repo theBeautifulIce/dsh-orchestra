@@ -4,6 +4,7 @@ import { assertNoMemoryWriteTool, assertTaskSessionToolsAllowed } from '../core/
 import { deriveEffectiveCapability, resolveDeclaredPolicy, type ToolDescriptor, type ToolRegistry } from './tools.ts'
 
 export type ToolPolicy = {
+  workflowHelperLimit?: number
   releaseCheckCwd?: string
   // allow / deny 都是白名单式的显式清单；没声明的按不给算（规格 5.2 行 444）
   allow?: string[]
@@ -100,6 +101,7 @@ export type HostAgentFactory = {
     // 不继承主会话历史，只拿节点输入与策略（规格 5.2 行 444-445）
     inheritHistory: false
     modelRef?: string
+    sessionModelFallback?: true
     reasoningEffort?: string | null
     actionGeneration?: number
   }): Promise<{ agentId: string; sessionId: string; effectiveModelRef?: string; effectiveReasoningEffort?: string | null }>
@@ -134,7 +136,7 @@ export function resolveTaskSessionToolPolicy(policy: ToolPolicy = TASK_SESSION_T
 export async function createExecutorAgent(
   host: HostAgentFactory,
   registry: ToolRegistry,
-  params: { nodeRunId: string; attempt: number; input: unknown; outputSchema: unknown; toolPolicy: ToolPolicy; modelRef?: string;
+  params: { nodeRunId: string; attempt: number; input: unknown; outputSchema: unknown; toolPolicy: ToolPolicy; modelRef?: string; sessionModelFallback?: true;
     reasoningEffort?: string | null; actionGeneration?: number },
 ): Promise<ExecutorAgent> {
   checkToolPolicy(registry, params.toolPolicy)
@@ -145,9 +147,11 @@ export async function createExecutorAgent(
     input: params.input,
     outputSchema: params.outputSchema,
     toolPolicy: { allow: tools.map((t) => t.name), deny: params.toolPolicy.deny ?? [],
+      ...(params.toolPolicy.workflowHelperLimit ? { workflowHelperLimit: params.toolPolicy.workflowHelperLimit } : {}),
       ...(params.toolPolicy.releaseCheckCwd ? { releaseCheckCwd: params.toolPolicy.releaseCheckCwd } : {}) },
     inheritHistory: false,
     ...(params.modelRef ? { modelRef: params.modelRef } : {}),
+    ...(params.sessionModelFallback ? { sessionModelFallback: params.sessionModelFallback } : {}),
     ...(params.reasoningEffort === undefined ? {} : { reasoningEffort: params.reasoningEffort }),
     ...(params.actionGeneration !== undefined ? { actionGeneration: params.actionGeneration } : {}),
   })

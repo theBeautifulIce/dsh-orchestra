@@ -18,7 +18,7 @@ import { PROJECT_CONTEXT_FILE, type ProjectContextSource } from './project-share
 
 const localOptions = z.strictObject({
   enabled: z.union([z.boolean(), z.literal('desktop')]).default(false),
-  modelCapacity: z.enum(MODEL_COMPLEXITIES).default('standard'),
+  modelCapacity: z.enum(MODEL_COMPLEXITIES).optional(),
   dataDirectory: z.string().refine(isAbsolute, '必须为绝对路径').optional(),
   allowWorkspaceListing: z.boolean().default(false),
   sampleFile: z.string().refine((value) => isAbsolute(value)
@@ -35,7 +35,6 @@ type Agent = AgentHandle['agent']
 type Workspace = { id: string; path: string; sessionIds: readonly string[] }
 type Model = { provider: string; model: string }
 type NativeModelCatalog = {
-  default: Model
   groups: readonly { id: string; name?: string; models: readonly { id: string; name?: string; reasoning?: ModelReasoning }[] }[]
   failures?: readonly { id: string; name?: string }[]
 }
@@ -67,6 +66,7 @@ const responseHeaders = ['content-type', 'content-disposition', 'cache-control',
 const catalog = {
   GET: new Set([
     chatRoutingPath,
+    '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/health', '/v1/activity', '/v1/artifacts', '/v1/artifacts/content', '/v1/artifacts/get', '/v1/attestations/get',
     '/v1/collaboration/scopes', '/v1/collaboration/scopes/get', '/v1/decisions', '/v1/decisions/get', '/v1/effects/review',
     '/v1/effects/unverified', '/v1/events', '/v1/events/stream', '/v1/evidence/get', '/v1/execution-history', '/v1/ledger/verify',
@@ -77,6 +77,7 @@ const catalog = {
   ]),
   POST: new Set([
     chatRoutingPath,
+    '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/v1/collaboration/reassign', '/v1/collaboration/review', '/v1/collaboration/scopes', '/v1/decisions/acknowledge',
     '/v1/decisions/resolve', '/v1/effects/resolve', '/v1/model-escalation', '/v1/rework/hold', '/v1/rework/inspect',
     '/v1/rework/plan', '/v1/rework/plan/approve', '/v1/rework/request', '/v1/rework/review', '/v1/runs/start',
@@ -153,21 +154,21 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
     || !selectedWorkspace(host, workspace.id, sessionId)) throw new Error('Workspace session could not be activated')
   const defaultModel = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined
   const currentModel = (agent: Agent | undefined) => agent?.model.current() ?? defaultModel?.currentSelection()
-  const initiallyApprovedExecutionModel = currentModel(resolved.agent)
   function modelRef(provider: string, model: string) {
     const readable = `${provider}/${model}`
     return !provider.includes('/') && MODEL_REF_RE.test(readable) ? readable
       : `dsh:${sha256Hex(JSON.stringify([provider, model])).slice(0, 24)}`
   }
-  const modelsFor = (catalog: NativeModelCatalog, preferred: Model) => catalog.groups.flatMap((group) => group.models.map((model) => {
+  const modelsFor = (catalog: NativeModelCatalog, preferred: Model | undefined) => catalog.groups.flatMap((group) => group.models.map((model) => {
     const efforts = model.reasoning?.efforts.filter(({ id }) => validModelEffort(id)) ?? []
     const defaultEffort = model.reasoning?.defaultEffort
     return { provider: group.id, provider_name: group.name, model: model.id, name: model.name,
       ref: modelRef(group.id, model.id),
-      capacity: group.id === preferred?.provider && model.id === preferred.model ? options.modelCapacity : null,
+      capacity: group.id === preferred?.provider && model.id === preferred.model ? options.modelCapacity ?? null : null,
       ...(efforts.length ? { reasoning: { efforts, ...(efforts.some(({ id }) => id === defaultEffort) ? { defaultEffort } : {}) } } : {}) }
   }))
   const parent = () => selectedWorkspace(host, workspace.id, sessionId) ? host.agents.get(resolved.agent.session.id) : undefined
+  const sessionModelRef = (selection: Model | undefined) => selection && modelRef(selection.provider, selection.model)
   const directory = localDataDirectory(options)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const dbFile = join(directory, `${identity}.sqlite`)
@@ -234,9 +235,15 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
     projectContext,
     resolveHttpHuman: (req) => req.headers['x-orchestra-local-proof'] === proof ? { id: human } : null,
     dsh: { context: host, parentForNode: parent, models: [],
+      sessionExecutionModelRef: () => {
+        const agent = parent()
+        const selection = agent && projectAuthorized() ? currentModel(agent) : undefined
+        return sessionModelRef(selection)
+      },
       loadModelCatalog: async () => {
         const catalog = await host.sessionController.modelCatalog()
-        return { profiles: modelsFor(catalog, initiallyApprovedExecutionModel ?? catalog.default),
+        const selection = currentModel(parent())
+        return { profiles: modelsFor(catalog, selection), session_execution_model_ref: sessionModelRef(selection),
           unavailable_providers: catalog.failures?.map(({ id, name }) => name || id) ?? [] }
       },
       recommend: () => ({ complexity: 'routine', reason: '使用此宿主已批准的 DSH 默认执行模型。' }) },

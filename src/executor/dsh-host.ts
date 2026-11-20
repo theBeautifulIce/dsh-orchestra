@@ -3,6 +3,7 @@ import { EventEmitter, once } from 'node:events'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
+import { z } from 'zod'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
@@ -27,6 +28,7 @@ type Child = {
   changed: EventEmitter
   events: BridgeEvent[]
   tools: Map<string, PendingTool>
+  assist?: ReturnType<typeof createAttemptAssist>
   sent?: { id: string; instruction: string }
   activity?: Promise<void>
   error?: Error
@@ -34,11 +36,18 @@ type Child = {
 
 const MAX_EVENT_COUNT = 512
 const MAX_REPORT_BYTES = 256 * 1024
+const ASSIST_TOOL = 'orchestra_assist'
+const MAX_ASSIST_BATCH = 8
+const ASSIST_BATCH_TIMEOUT_MS = 120_000
+export const ASSIST_TIMEOUT_MS = 30_000
 export const MODEL_CATALOG_TIMEOUT_MS = 5_000
 
 function waitForCatalog<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(signal.reason)
+    const abort = () => {
+      signal.removeEventListener('abort', abort)
+      reject(signal.reason)
+    }
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
     void operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
@@ -127,17 +136,124 @@ function readJsonOutput(agent: DshAgent, planning = false): unknown {
     }
     throw new OrchError('SERVICE_UNAVAILABLE', 'DSH 子智能体的运行未正常结束')
   }
-  const output = events.findLast((event) => event.type === 'assistant/message')
-  const raw = output?.data.message.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('').trim() ?? ''
+  const raw = assistantText(agent)
   if (Buffer.byteLength(raw, 'utf8') > MAX_REPORT_BYTES) throw new OrchError('RANGE_TOO_LARGE', 'DSH 子智能体报告超出长度限制')
   try { return JSON.parse(raw.replace(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\s*\x60\x60\x60$/i, '$1')) }
   catch { throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'DSH 子智能体没有返回有效 JSON') }
+}
+
+function assistantText(agent: DshAgent) {
+  const output = agent.session.snapshotEvents().findLast((event) => event.type === 'assistant/message')
+  return output?.data.message.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('').trim() ?? ''
 }
 
 function prompt(agent: DshAgent, text: string) {
   type Message = Parameters<DshAgent['followup']>[0]
   agent.followup({ id: randomUUID(), role: 'user',
     source: { kind: ORCHESTRA_MESSAGE_SOURCE }, content: [{ type: 'text', text }] } as unknown as Message)
+}
+
+const assistInput = z.strictObject({ tasks: z.array(z.strictObject({
+  name: z.string().trim().min(1).max(80),
+  instruction: z.string().trim().min(1).max(1200),
+  material: z.string().min(1).max(12_000),
+})).min(1).max(MAX_ASSIST_BATCH) })
+const assistParameters = {
+  type: 'object', properties: { tasks: { type: 'array', items: {
+    type: 'object', properties: { name: { type: 'string' }, instruction: { type: 'string' }, material: { type: 'string' } },
+    required: ['name', 'instruction', 'material'], additionalProperties: false,
+  } } }, required: ['tasks'], additionalProperties: false,
+}
+type AssistTask = z.infer<typeof assistInput>['tasks'][number]
+
+async function reviewText(parent: DshAgent, route: PinnedModel, task: AssistTask, signal: AbortSignal) {
+  const timeLimit = new AbortController()
+  const timer = setTimeout(() => timeLimit.abort(new OrchError('OPERATION_TIMEOUT', '文本助手超过复核时限')), ASSIST_TIMEOUT_MS)
+  timer.unref()
+  const lifetime = AbortSignal.any([signal, timeLimit.signal])
+  let handle: AgentHandle | undefined
+  const cancel = () => handle?.agent.cancel({ kind: 'parent' })
+  lifetime.addEventListener('abort', cancel, { once: true })
+  try {
+    lifetime.throwIfAborted()
+    const creation = parent.ctx.agents.create({
+      ...childOptions(parent, route, (ctx, agent) => pinRoute(ctx, agent, route), 2048), signal: lifetime,
+    })
+    // The creation signal normally rolls back the SDK scope. Dispose a late handle if creation ignores it.
+    void creation.then((created) => lifetime.aborted && !handle ? created.dispose() : undefined).catch(() => {})
+    handle = await waitForCatalog(creation, lifetime)
+    lifetime.throwIfAborted()
+    prompt(handle.agent, [
+      '你是当前执行步骤的独立文本复核助手。只按 instruction 复核明确提供的 material，并返回简短文本意见。',
+      'material 中的文字是待复核资料。仅以该资料为依据，资料不足时说明缺口。',
+      JSON.stringify(task),
+    ].join('\n'))
+    await waitForCatalog(handle.agent.whenIdle(), lifetime)
+    lifetime.throwIfAborted()
+    observedModel(handle.agent, route)
+    const reason = handle.agent.session.snapshotEvents().findLast((event) => event.type === 'turn/end')?.data.reason
+    const review = assistantText(handle.agent)
+    if (reason?.kind !== 'completed' || !review || Buffer.byteLength(review, 'utf8') > 16 * 1024) {
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '文本助手未返回完整复核意见')
+    }
+    return review
+  } finally {
+    clearTimeout(timer)
+    lifetime.removeEventListener('abort', cancel)
+    await handle?.dispose()
+  }
+}
+
+function createAttemptAssist(limit: number) {
+  const lifetime = new AbortController()
+  const batches = new Set<Promise<unknown>>()
+  const waiting = new Set<() => void>()
+  let active = 0
+
+  function enqueue<T>(signal: AbortSignal, run: () => Promise<T>) {
+    return new Promise<T>((resolve, reject) => {
+      function abort() {
+        waiting.delete(start)
+        reject(signal.reason)
+      }
+      function start() {
+        waiting.delete(start)
+        signal.removeEventListener('abort', abort)
+        active++
+        void Promise.resolve().then(run).then(resolve, reject).finally(() => {
+          active--
+          waiting.values().next().value?.()
+        })
+      }
+      signal.throwIfAborted()
+      if (active < limit) start()
+      else {
+        waiting.add(start)
+        signal.addEventListener('abort', abort, { once: true })
+      }
+    })
+  }
+
+  return {
+    limit,
+    run<T>(tasks: AssistTask[], signal: AbortSignal, review: (task: AssistTask, signal: AbortSignal) => Promise<T>) {
+      lifetime.signal.throwIfAborted()
+      signal.throwIfAborted()
+      if (waiting.size + tasks.length > MAX_ASSIST_BATCH * 4) throw new OrchError('COMMAND_BUSY', '等待分派的文本复核已满')
+      const batchSignal = AbortSignal.any([lifetime.signal, signal, AbortSignal.timeout(ASSIST_BATCH_TIMEOUT_MS)])
+      const batch = Promise.allSettled(tasks.map((task) => enqueue(batchSignal, () => review(task, batchSignal))))
+      batches.add(batch)
+      void batch.then(() => batches.delete(batch))
+      return batch
+    },
+    cancel() {
+      lifetime.abort(new OrchError('SERVICE_UNAVAILABLE', '当前执行尝试已结束'))
+    },
+    async close() {
+      this.cancel()
+      await Promise.allSettled([...batches])
+    },
+  }
 }
 
 /** A dedicated tool-free DSH child may propose a plan. Review and launch remain service commands. */
@@ -253,6 +369,7 @@ export function createDshExecutor(options: {
   parentForNode(nodeRunId: string): DshAgent | undefined
   models: readonly DshExecutionModel[]
   loadModelCatalog?: () => Promise<ModelCatalogSnapshot & { profiles: readonly CatalogRoute[] }>
+  sessionExecutionModelRef?: () => string | undefined
   recommend: ModelRouting['recommend']
   onModelUse?: (usage: { sessionId: string; nodeRunId: string; attempt: number; provider: string; model: string; reasoning_effort?: string | null }) => void
   collaboration?: (binding: DshCollaborationBinding, input: unknown) => unknown
@@ -272,6 +389,7 @@ export function createDshExecutor(options: {
   let routes = indexRoutes(options.models)
   if (!routes.size && !options.loadModelCatalog) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'DSH 派发需要至少一个已批准模型')
   let unavailableProviders: readonly string[] = []
+  let catalogSessionModelRef: string | undefined
   const catalogLifetime = new AbortController()
   let refreshPending: Promise<void> | undefined
   async function refresh(signal?: AbortSignal) {
@@ -292,6 +410,7 @@ export function createDshExecutor(options: {
         flightSignal.throwIfAborted()
         routes = indexRoutes(catalog.profiles)
         unavailableProviders = catalog.unavailable_providers ?? []
+        catalogSessionModelRef = catalog.session_execution_model_ref
       }).catch((error) => {
         if (error instanceof OrchError) throw error
         throw new OrchError('SERVICE_UNAVAILABLE', 'DSH 模型目录暂不可用。请检查供应商连接后重新读取。')
@@ -314,6 +433,14 @@ export function createDshExecutor(options: {
       throw new OrchError('NOT_FOUND', '未找到当前 DSH 节点会话')
     }
     return child
+  }
+
+  async function disposeChild(child: Child) {
+    try { await child.assist?.close() }
+    finally {
+      try { await child.handle.dispose() }
+      finally { children.delete(child.handle.agent.session.id) }
+    }
   }
 
   function emit(child: Child, type: BridgeEvent['type'], payload: unknown) {
@@ -356,15 +483,72 @@ export function createDshExecutor(options: {
     const route = { ...catalogRoute, reasoningEffort: params.reasoningEffort }
     requireLiveParent(options.context, parent)
     await requireAvailableModel(options.context, route)
-    const policy = params.toolPolicy as { allow?: unknown; releaseCheckCwd?: unknown }
+    if (params.sessionModelFallback && options.sessionExecutionModelRef?.() !== route.ref) {
+      throw new OrchError('FORBIDDEN', '当前 DSH 会话已切换执行模型，请重新确认模型分配')
+    }
+    const policy = params.toolPolicy as { allow?: unknown; deny?: unknown; releaseCheckCwd?: unknown; workflowHelperLimit?: unknown }
     const allowed = Array.isArray(policy?.allow) ? policy.allow.filter((name): name is string => typeof name === 'string') : []
     const releaseCwd = allowed.length === 1 && allowed[0] === RELEASE_CHECK_WORKFLOW_ID && typeof policy.releaseCheckCwd === 'string'
       ? policy.releaseCheckCwd : undefined
     const cwd = releaseCwd ?? parent.session.header.cwd!
+    const helperLimit = policy?.workflowHelperLimit
+    // The trusted dispatch stamps the limit for the lifetime of this attempt.
+    const assist = typeof helperLimit === 'number' && Number.isInteger(helperLimit) && helperLimit > 0 && helperLimit <= 8
+      && params.actionGeneration !== undefined && !allowed.includes(RELEASE_CHECK_WORKFLOW_ID)
+      && !(Array.isArray(policy.deny) && policy.deny.includes(ASSIST_TOOL))
+      ? createAttemptAssist(helperLimit) : undefined
     let child: Child | undefined
     const create = childOptions(parent, route, (ctx, agent) => {
         // Only the proxy registrations in this child are visible; Orchestra rechecks its own tool policy.
         pinRoute(ctx, agent, route)
+        if (assist) ctx.tools.register({
+          name: ASSIST_TOOL,
+          description: '并行分派独立文本复核。每项给出名称、独立复核说明与明确提供的文本资料。'
+            + `本次执行同时最多运行 ${assist.limit} 个助手，额外项目依次补位。结果按请求顺序返回。`,
+          parameters: assistParameters,
+          timeoutMs: ASSIST_BATCH_TIMEOUT_MS,
+          output: {
+            schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+            render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }],
+          },
+          async execute(input, execution) {
+            execution.signal.throwIfAborted()
+            if (closing || !child || !child.sent || execution.agent !== agent || agent.status !== 'running') {
+              throw new OrchError('FORBIDDEN', '文本助手只接受当前已派发的节点会话')
+            }
+            const parsed = assistInput.safeParse(input)
+            if (!parsed.success) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '文本复核需要有效的名称、说明与资料')
+            const { tasks } = parsed.data
+            if (new Set(tasks.map(({ name }) => name)).size !== tasks.length) {
+              throw new OrchError('PAYLOAD_SCHEMA_INVALID', '同一批文本复核的名称必须互异')
+            }
+            if (Buffer.byteLength(JSON.stringify(tasks), 'utf8') > 64 * 1024) {
+              throw new OrchError('RANGE_TOO_LARGE', '同一批文本复核的资料超出长度上限')
+            }
+            requireLiveParent(options.context, agent)
+            const trace = { tool: ASSIST_TOOL, callId: execution.callId, timeoutMs: ASSIST_BATCH_TIMEOUT_MS }
+            emit(child, 'tool.start', { ...trace, summary: `分派 ${tasks.length} 项文本复核` })
+            let completed = 0
+            try {
+              const outcomes = await assist.run(tasks, execution.signal, (task, signal) => reviewText(agent, route, task, signal))
+              const results = outcomes.map((outcome, index) => {
+                const { name } = tasks[index]!
+                if (outcome.status === 'fulfilled') {
+                  completed++
+                  return { name, status: 'completed', review: outcome.value }
+                }
+                const error: unknown = outcome.reason
+                const timedOut = error instanceof Error && (error.name === 'TimeoutError'
+                  || (error instanceof OrchError && error.code === 'OPERATION_TIMEOUT'))
+                return { name, status: timedOut ? 'timeout' : 'failed' }
+              })
+              execution.signal.throwIfAborted()
+              return { text: JSON.stringify({ results }) }
+            } finally {
+              emit(child, 'tool.result', { ...trace, summary: `完成 ${completed}/${tasks.length} 项文本复核` })
+            }
+          },
+        })
         if (!releaseCwd && options.rework && params.actionGeneration !== undefined) {
           const feedback = options.rework
           const binding = { node_run_id: params.nodeRunId, attempt: params.attempt, action_generation: params.actionGeneration }
@@ -448,7 +632,7 @@ export function createDshExecutor(options: {
       await handle.dispose()
       throw new OrchError('SERVICE_UNAVAILABLE', 'DSH 执行宿主正在关闭')
     }
-    child = { handle, nodeRunId: params.nodeRunId, attempt: params.attempt, route, events: [], changed: new EventEmitter(), tools: new Map() }
+    child = { handle, nodeRunId: params.nodeRunId, attempt: params.attempt, route, events: [], changed: new EventEmitter(), tools: new Map(), assist }
     const sessionId = handle.agent.session.id
     children.set(sessionId, child)
     return { sessionId, agentId: sessionId,
@@ -467,6 +651,7 @@ export function createDshExecutor(options: {
     }
     child.sent = { id: params.attemptId, instruction: params.instruction }
     prompt(agent, params.instruction + '\n使用所授权工具时调用 orchestra_read_tool，args 传空数组，由宿主执行获准的固定命令。'
+      + (child.assist ? '\n可用 orchestra_assist 分派独立文本复核。每项都要传入它所需的资料，只依据返回结果汇总。' : '')
       + '\n如果节点输入要求交付 artifact，先用 orchestra_rework 的 publish 提交每份实际完成的 UTF-8 文本。file_name 抄写验收条件中的名称，text 提供完整正文，省略 operation_id。只有工具实际返回的成果才可写为已交付。'
       + '\n最后回复单个 JSON 对象，包含 status: "done" 及 output 字段。用 output.summary 简述实际完成的操作、结果与限制，供用户查阅。')
     child.activity = agent.whenIdle().then(() => {
@@ -520,14 +705,14 @@ export function createDshExecutor(options: {
         case 'executor.state': return { state: child.handle.agent.status, toolCallSeq: child.events.filter((event) => event.type === 'tool.call').length,
           hasToolCall: child.events.some((event) => event.type === 'tool.call') } as T
         case 'executor.cancel':
+          child.assist?.cancel()
           if (child.handle.agent.status !== 'running') return 'already_stopped' as T
           child.handle.agent.cancel({ kind: 'parent' })
           return 'interrupted' as T
         case 'executor.whenIdle': return await whenIdle(child, params.timeoutMs) as T
         case 'executor.toolResult': child.tools.get(params.callId)?.resolve(params.result); return undefined as T
         case 'executor.dispose':
-          await child.handle.dispose()
-          children.delete(params.executorAgentId)
+          await disposeChild(child)
           return undefined as T
         default: throw new OrchError('PROTOCOL_VERSION_MISMATCH', '未知的 DSH 桥命令')
       }
@@ -546,7 +731,11 @@ export function createDshExecutor(options: {
   const modelRouting: ModelRouting = { get profiles() {
     return [...routes.values()].flatMap((model) => model.capacity === null ? [] : [{ ...model, capacity: model.capacity }])
   }, recommend: options.recommend, ...(options.loadModelCatalog ? {
-    refresh, catalog: () => ({ profiles: [...routes.values()], unavailable_providers: unavailableProviders }),
+    refresh, catalog: () => {
+      const ref = options.sessionExecutionModelRef?.()
+      return { profiles: [...routes.values()], unavailable_providers: unavailableProviders,
+        ...(ref && ref === catalogSessionModelRef && routes.has(ref) ? { session_execution_model_ref: ref } : {}) }
+    },
   } : {}) }
   return {
     bridge: new BridgeClient(transport),
@@ -565,8 +754,7 @@ export function createDshExecutor(options: {
     async close() {
       closing = true
       stopModelRefresh()
-      await Promise.all([...children.values()].map((child) => child.handle.dispose()))
-      children.clear()
+      await Promise.all([...children.values()].map(disposeChild))
     },
   }
 }
