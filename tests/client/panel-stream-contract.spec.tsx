@@ -284,7 +284,7 @@ it('Q-17 / Q-20 设置页断号时新一轮账本、健康与模型读取完成�
     return response
   }
   const view = await renderPanel(<PanelHost baseUrl={endpoint} fetcher={fetcher} />)
-  const selected = () => view.findAll('select')[0] as HTMLSelectElement | undefined
+  const selected = () => view.container.querySelector<HTMLSelectElement>('#model-route-routine')
   const choose = async (value: string) => {
     await act(async () => {
       selected()!.value = value
@@ -322,10 +322,14 @@ it('Q-17 / Q-20 设置页断号时新一轮账本、健康与模型读取完成�
     expect(modelWrites).toBe(0)
 
     freshModel.release.resolve()
-    await waitFor(view, () => subscriptions.length === 2 && selected()?.value === 'strong' && view.text().includes('实时更新'))
+    await waitFor(view, () => subscriptions.length === 2 && selected()?.value === 'fast' && view.text().includes('实时更新'))
     expect(subscriptions[1]?.after).toBe(gap.seq)
     expect(view.text()).toContain('S5')
-    await choose('fast')
+    expect(view.text()).toContain('模型设置有冲突')
+    expect(button(view, '保存模型分配').disabled).toBe(true)
+    await view.click(button(view, '保存模型分配'))
+    expect(modelWrites).toBe(0)
+    await view.click(button(view, '保留我的修改'))
     expect(button(view, '保存模型分配').disabled).toBe(false)
     await view.click(button(view, '保存模型分配'))
     await waitFor(view, () => view.text().includes('已保存，下一次派发采用新配置。'))

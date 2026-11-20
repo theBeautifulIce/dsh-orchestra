@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { sha256Hex } from '../core/canonical.ts'
+import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
@@ -30,7 +31,6 @@ type NativeApproval = {
 }
 
 const TOOL_NAME = 'orchestra_task'
-const NOTICE_SOURCE = 'dsh-orchestra'
 const prompt = [
   'The host admits explicit tasks before this model step. When the current step contains an Orchestra receipt or clarification notice, report it to the operator and leave all execution to Orchestra.',
   'A receipt with a run ID confirms admission only. Do not read or write the task files yourself, repeat the request, or claim any result without a recorded terminal result.',
@@ -83,11 +83,16 @@ function errorReceipt(error: unknown) {
     : { state: 'error', code: 'SERVICE_UNAVAILABLE', message: '编排服务未就绪或原会话已关闭。', retryable: true }
 }
 
-function admissionNotice(summary: string, outcome: object): Message {
+function noticeMessage(id: Message['id'], summary: string, instruction: string, outcome: object): Message {
+  // The peer types predate producer-defined message sources.
   return {
-    id: uuidv7(), role: 'user', source: { kind: 'plugin', plugin: NOTICE_SOURCE, form: 'notice', summary },
-    content: [{ type: 'text', text: `${summary}\n宿主已经处理本轮任务入口。请据实回报这个回执。\n${JSON.stringify(outcome)}` }],
+    id, role: 'user', source: { kind: ORCHESTRA_MESSAGE_SOURCE, form: 'notice', summary },
+    content: [{ type: 'text', text: `${summary}\n${instruction}\n${JSON.stringify(outcome)}` }],
   } as unknown as Message
+}
+
+function admissionNotice(summary: string, outcome: object): Message {
+  return noticeMessage(uuidv7() as Message['id'], summary, '宿主已经处理本轮任务入口。请据实回报这个回执。', outcome)
 }
 
 const BLOCKED_NODES = new Set(['blocked_pre', 'blocked_post', 'startup_unknown', 'indeterminate_side_effect'])
@@ -183,8 +188,8 @@ export function installNativeChat(host: Context, options: {
       inserted.set(agent, pending)
     }
     const runId = issued.get(agent)?.get(message.id)
-    const source = message.source as { kind: string; plugin?: string }
-    if (runId && source.kind === 'plugin' && source.plugin === NOTICE_SOURCE) {
+    const source = message.source as { kind: string; form?: string }
+    if (runId && source.kind === ORCHESTRA_MESSAGE_SOURCE && source.form === 'notice') {
       const queued = notices.get(agent) ?? new Map()
       queued.set(message.id, { runId, digest: fingerprint(message) })
       notices.set(agent, queued)
@@ -274,8 +279,9 @@ export function installNativeChat(host: Context, options: {
         } else summary = outcome.state === 'quality_blocked' ? 'Orchestra 计划质量检查受阻' : 'Orchestra 等待人工批准'
       } catch (error) {
         actionSignal.throwIfAborted()
-        managed.outcome = errorReceipt(error)
-        summary = 'Orchestra 未能启动本次任务'
+        const failure = errorReceipt(error)
+        managed.outcome = failure
+        summary = 'Orchestra 未能启动本次任务 · ' + failure.message.slice(0, 96)
       }
     }
     return { ...result, messages: [...result.messages, admissionNotice(summary, managed.outcome)] }
@@ -476,10 +482,7 @@ export function installNativeChat(host: Context, options: {
         pending.set(id, receipt.run_id)
         const summary = noticeSummary(view, key)
         try {
-          // The npm peer declarations omit extension-defined sources. Desktop
-          // accepts plugin context messages and displays the notice summary.
-          agent.followup({ id, role: 'user', source: { kind: 'plugin', plugin: NOTICE_SOURCE, form: 'notice', summary },
-            content: [{ type: 'text', text: `${summary}\n请向本会话用户回报以下账本状态，按其实际结果措辞。\n${JSON.stringify(view)}` }] } as unknown as Message)
+          agent.followup(noticeMessage(id, summary, '请向本会话用户回报以下账本状态，按其实际结果措辞。', view))
         } finally { pending.delete(id) }
       }
       if (!await host.sessions.flush(agent.session) || options.signal.aborted) return

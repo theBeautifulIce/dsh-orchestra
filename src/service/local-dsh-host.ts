@@ -152,14 +152,14 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
   if (!('agent' in resolved) || resolved.agent.session.header.origin === 'subagent'
     || !selectedWorkspace(host, workspace.id, sessionId)) throw new Error('Workspace session could not be activated')
   const defaultModel = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined
-  const route = resolved.agent.model.current() ?? defaultModel?.currentSelection()
+  const currentModel = (agent: Agent | undefined) => agent?.model.current() ?? defaultModel?.currentSelection()
+  const initiallyApprovedExecutionModel = currentModel(resolved.agent)
   function modelRef(provider: string, model: string) {
     const readable = `${provider}/${model}`
     return !provider.includes('/') && MODEL_REF_RE.test(readable) ? readable
       : `dsh:${sha256Hex(JSON.stringify([provider, model])).slice(0, 24)}`
   }
-  const modelsFor = (catalog: NativeModelCatalog) => catalog.groups.flatMap((group) => group.models.map((model) => {
-    const preferred = route ?? catalog.default
+  const modelsFor = (catalog: NativeModelCatalog, preferred: Model) => catalog.groups.flatMap((group) => group.models.map((model) => {
     const efforts = model.reasoning?.efforts.filter(({ id }) => validModelEffort(id)) ?? []
     const defaultEffort = model.reasoning?.defaultEffort
     return { provider: group.id, provider_name: group.name, model: model.id, name: model.name,
@@ -236,10 +236,11 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
     dsh: { context: host, parentForNode: parent, models: [],
       loadModelCatalog: async () => {
         const catalog = await host.sessionController.modelCatalog()
-        return { profiles: modelsFor(catalog), unavailable_providers: catalog.failures?.map(({ id, name }) => name || id) ?? [] }
+        return { profiles: modelsFor(catalog, initiallyApprovedExecutionModel ?? catalog.default),
+          unavailable_providers: catalog.failures?.map(({ id, name }) => name || id) ?? [] }
       },
       recommend: () => ({ complexity: 'routine', reason: '使用此宿主已批准的 DSH 默认执行模型。' }) },
-    ...(route ? { dshPlanner: { parent, model: route } } : {}),
+    dshPlanner: { parent, model: currentModel, useModelRoutingSettings: true },
     asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events').get()?.n ?? 0),
     listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => { throw new OrchError('FORBIDDEN', '个人面板不提供原始账本写入') },

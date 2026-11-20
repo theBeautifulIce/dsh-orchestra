@@ -149,22 +149,30 @@ describe('生产路径跑通单节点', () => {
     }
   }, 2_500)
 
-  it('固定派发时的思考深度与修订，并保存可查询的实际请求回执', async () => {
+  it.each([
+    { mode: '显式复杂度档优先', binding: true, tier: 'deep', model: 'turbo', chosen: 'deep' },
+    { mode: '自动分配继承模型默认', binding: false, tier: null, model: 'turbo', chosen: 'turbo' },
+    { mode: '无覆盖时由宿主决定', binding: false, tier: null, model: null, chosen: null },
+  ] as const)('$mode，固定派发与修订并保存实际请求回执', async ({ binding, tier, model, chosen }) => {
     const { dir, orchestra, release, registry, runner } = await setup()
     try {
       const profile = { ref: 'fixture/same', provider: 'fixture', model: 'same', capacity: 'expert',
-        reasoning: { efforts: [{ id: 'deep', name: 'Deep' }, { id: 'turbo', name: 'Turbo' }] } } as const
+        reasoning: { defaultEffort: 'deep', efforts: [{ id: 'deep', name: 'Deep' }, { id: 'turbo', name: 'Turbo' }] } } as const
       const catalog = () => ({ profiles: [profile], unavailable_providers: [] })
       const settings = createModelRoutingSettingsHost(orchestra.db, catalog)
-      const mapping = { routine: null, standard: null, complex: 'fixture/same' }
-      settings.save({ mapping, operation_id: uuidv7(), expected_revision: 0, reasoning_efforts: { complex: 'deep' } }, 'operator', NOW)
+      const mapping = { routine: null, standard: null, complex: binding ? profile.ref : null }
+      settings.save({ mapping, operation_id: uuidv7(), expected_revision: 0, reasoning_efforts: { complex: tier },
+        model_reasoning_defaults: [{ ref: profile.ref, effort: model }] }, 'operator', NOW)
+      const observed = chosen ?? profile.reasoning.defaultEffort
       const transport = fakeAgentBridge({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })
       const bridge = new BridgeClient({
         async request<T>(method: string, params: unknown) {
           if (method === 'executor.spawn') {
-            expect(params).toMatchObject({ modelRef: profile.ref, reasoningEffort: 'deep' })
-            settings.save({ mapping, operation_id: uuidv7(), expected_revision: 1, reasoning_efforts: { complex: 'turbo' } }, 'operator', NOW)
-            return { agentId: 'agent_1', sessionId: 'session_deep', effectiveModelRef: profile.ref, effectiveReasoningEffort: 'deep' } as T
+            expect(params).toMatchObject({ modelRef: profile.ref, reasoningEffort: chosen })
+            settings.save({ mapping, operation_id: uuidv7(), expected_revision: 1,
+              ...(binding ? { reasoning_efforts: { complex: 'turbo' } } : {}),
+              model_reasoning_defaults: [{ ref: profile.ref, effort: 'deep' }] }, 'operator', NOW)
+            return { agentId: 'agent_1', sessionId: 'session_deep', effectiveModelRef: profile.ref, effectiveReasoningEffort: chosen } as T
           }
           return transport.request(method, params)
         },
@@ -172,7 +180,7 @@ describe('生产路径跑通单节点', () => {
           for await (const event of transport.listen(params, signal)) {
             yield event.type === 'turn' ? { ...event, payload: { ...(event.payload as object),
               model_use: { model_ref: profile.ref, provider: profile.provider, model: profile.model,
-                reasoning_effort: 'deep', observed_request_headers: 1 } } } : event
+                reasoning_effort: observed, observed_request_headers: 1 } } } : event
           }
         },
       })
@@ -183,12 +191,14 @@ describe('生产路径跑通单节点', () => {
       }, { nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
         tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5_000 }], now: NOW, ownerEpoch: 1, leaseTtlMs: 600_000 }))
         .resolves.toMatchObject({ final_status: 'done' })
-      expect(getNode(orchestra.db, 'nrun_1').model_assignment).toMatchObject({
+      const assignment = getNode(orchestra.db, 'nrun_1').model_assignment
+      expect(assignment).toMatchObject({
         model_ref: profile.ref, provider: profile.provider, model: profile.model,
-        state: 'confirmed', settings_revision: 1, reasoning_effort: 'deep',
-        usage: { model: profile.model, provider: profile.provider, reasoning_effort: 'deep', observed_request_headers: 1 },
+        state: 'confirmed', reasoning_effort: chosen,
+        usage: { model: profile.model, provider: profile.provider, reasoning_effort: observed, observed_request_headers: 1 },
       })
-      expect(settings.get().item.reasoning_efforts).toEqual({ complex: 'turbo' })
+      expect(assignment?.settings_revision).toBe(chosen === null ? undefined : 1)
+      expect(settings.get().item.model_reasoning_defaults).toEqual([{ ref: profile.ref, effort: 'deep' }])
     } finally {
       await release()
       rmSync(dir, { recursive: true, force: true })

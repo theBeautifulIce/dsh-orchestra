@@ -9,6 +9,7 @@ import { createModelRoutingSettingsHost } from '../../src/service/model-routing-
 import { freshLedger } from '../fixtures/ledger.ts'
 import { startServer } from '../../src/service/server.ts'
 import { WriteQueue } from '../../src/service/write-queue.ts'
+import { previousCompatibility } from '../../scripts/upgrade-host.ts'
 
 it('模型保存等目录时，另一 HTTP 写仍可以通过全局写队列', async () => {
   const { db } = freshLedger()
@@ -66,6 +67,8 @@ it('保留已移除模型的配置与回执，只允许为当前供应商和模�
     const initial = { operation_id: uuidv7(), expected_revision: 0, mapping, model_capacities: rating }
     expect(() => host.save({ ...initial, reasoning_efforts: { expert: 'adapter-specific' } }, 'operator', now))
       .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    expect(() => host.save({ ...initial, model_reasoning_defaults: [{ ref: plain.ref, effort: 'adapter-specific' }] }, 'operator', now))
+      .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
     expect(host.save(initial, 'operator', now)).toEqual({ revision: 1 })
     expect(host.get().item.profiles).toMatchObject([{ ref: 'a/same', host_capacity: 'standard', capacity: 'expert' }])
     profiles = [reasoner]
@@ -73,16 +76,55 @@ it('保留已移除模型的配置与回执，只允许为当前供应商和模�
     expect(host.save(initial, 'operator', now)).toEqual({ revision: 1 })
     const changed = { operation_id: uuidv7(), expected_revision: 1, mapping: { ...mapping, expert: 'b/same' },
       model_capacities: [{ ref: 'b/same', capacity: 'expert' as const }],
-      model_notes: [{ ref: 'b/same', note: '复核多项证据' }], reasoning_efforts: { expert: 'adapter-specific' } }
+      model_notes: [{ ref: 'b/same', note: '复核多项证据' }], reasoning_efforts: { expert: 'adapter-specific' },
+      model_reasoning_defaults: [{ ref: 'b/same', effort: 'adapter-specific' }] }
+    expect(host.save(changed, 'operator', now)).toEqual({ revision: 2 })
     expect(host.save(changed, 'operator', now)).toEqual({ revision: 2 })
     expect(host.get().item.reasoning_efforts).toEqual({ expert: 'adapter-specific' })
+    expect(createModelRoutingSettingsHost(db, () => ({ profiles })).get().item.model_reasoning_defaults).toEqual(changed.model_reasoning_defaults)
     expect(host.planningProfiles()).toEqual([{ ref: 'b/same', capacity: 'expert', user_note: '复核多项证据' }])
     profiles = [plain, { ...reasoner, reasoning: undefined }]
     expect(host.get().item).toMatchObject({ profiles: [{ ref: 'a/same', capacity: 'expert' }, { ref: 'b/same', capacity: 'expert' }],
       reasoning_efforts: { expert: 'adapter-specific' } })
     expect(host.save({ operation_id: uuidv7(), expected_revision: 2, mapping: changed.mapping,
-      reasoning_efforts: { expert: null } }, 'operator', now)).toEqual({ revision: 3 })
+      reasoning_efforts: { expert: null }, model_reasoning_defaults: [{ ref: 'b/same', effort: null }] }, 'operator', now)).toEqual({ revision: 3 })
     expect(host.get().item.reasoning_efforts).toEqual({})
+    expect(host.get().item.model_reasoning_defaults).toEqual([])
+  } finally { db.raw.close() }
+})
+
+it('主脑默认跟随会话，指定后独立保存，并能在供应商移除后恢复跟随', () => {
+  const { db } = freshLedger()
+  try {
+    const a = { ref: 'account-a/shared', capacity: null } satisfies ModelCatalogProfile
+    const b = { ref: 'account-b/shared', capacity: null, reasoning: { efforts: [{ id: 'high', name: 'High' }] } } satisfies ModelCatalogProfile
+    let profiles: ModelCatalogProfile[] = [a, b]
+    const openSettings = () => createModelRoutingSettingsHost(db, () => ({ profiles }), undefined, true)
+    const host = openSettings()
+    const mapping = { routine: null, standard: null, complex: null }
+    const save = (expected_revision: number) => ({ operation_id: uuidv7(), expected_revision, mapping })
+    const now = new Date().toISOString()
+    expect(host.get().item.planner_model).toBeNull()
+    expect(() => host.save({ ...save(0), planner_model: { ref: a.ref, effort: 'high' } }, 'owner', now))
+      .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    const selection = { ref: b.ref, effort: 'high' }
+    const choice = { ...save(0), planner_model: selection }
+    const managed = createModelRoutingSettingsHost(db, () => ({ profiles }))
+    expect(managed.get().item.planner_model_configurable).toBe(false)
+    expect(() => managed.save(choice, 'owner', now)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    expect(host.save(choice, 'owner', now)).toEqual({ revision: 1 })
+    profiles = [a]
+    expect(host.save(choice, 'owner', now)).toEqual({ revision: 1 })
+    expect(openSettings().get().item.planner_model).toEqual(selection)
+    expect(() => host.save({ ...save(1), planner_model: selection }, 'owner', now))
+      .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    expect(host.save({ ...save(1), model_notes: [{ ref: a.ref, note: '整理' }] }, 'owner', now)).toEqual({ revision: 2 })
+    expect(openSettings().get().item.planner_model).toEqual(selection)
+    expect(() => host.save({ ...save(1), planner_model: null }, 'owner', now)).toThrow(expect.objectContaining({ code: 'STALE_GENERATION' }))
+    expect(host.save({ ...save(2), planner_model: null }, 'owner', now)).toEqual({ revision: 3 })
+    expect(openSettings().get().item.planner_model).toBeNull()
+    const stored = db.raw.prepare('SELECT preferences_json FROM model_routing_settings').get() as { preferences_json: string }
+    expect(JSON.parse(stored.preferences_json)).not.toHaveProperty('planner_model')
   } finally { db.raw.close() }
 })
 
@@ -105,6 +147,24 @@ it('模型分配只能使用获准且达到对应复杂度的模型，保留修�
   expect(createModelRoutingSettingsHost(db, profiles).get().item).toMatchObject({
     revision: 1, mapping: input.mapping, updated_by: 'operator', profiles,
   })
+})
+
+it('存在模型默认思考档时，旧版回退预检拒绝丢失设置，清空后仍兼容旧数据', () => {
+  const db = openDb(':memory:')
+  try {
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    const profile = { ref: 'fixture/same', capacity: 'standard' as const, reasoning: { efforts: [{ id: 'high', name: 'High' }] } }
+    const host = createModelRoutingSettingsHost(db, [profile])
+    const payload = { operation_id: uuidv7(), expected_revision: 0, mapping: { routine: null, standard: null, complex: null },
+      model_reasoning_defaults: [{ ref: profile.ref, effort: 'high' }] }
+    host.save(payload, 'operator', new Date().toISOString())
+    expect(() => previousCompatibility(db, [profile])).toThrow(/"candidate_routing":1/)
+    host.save({ ...payload, operation_id: uuidv7(), expected_revision: 1,
+      model_reasoning_defaults: [{ ref: profile.ref, effort: null }] }, 'operator', new Date().toISOString())
+    expect(previousCompatibility(db, [profile])).toMatchObject({ candidate_routing: 0 })
+    const stored = db.raw.prepare('SELECT preferences_json FROM model_routing_settings WHERE id=1').get() as { preferences_json: string }
+    expect(JSON.parse(stored.preferences_json)).not.toHaveProperty('model_reasoning_defaults')
+  } finally { db.raw.close() }
 })
 
 it('迁移旧映射，重放既有操作，并按修订保存或清空已批准模型的用途说明', () => {
@@ -131,7 +191,8 @@ it('迁移旧映射，重放既有操作，并按修订保存或清空已批准�
     }))
     applySteps(db, steps)
     const host = createModelRoutingSettingsHost(db, profiles)
-    expect(host.get().item).toMatchObject({ revision: 1, model_notes: [], mapping: { ...legacyMapping, advanced: null, expert: null } })
+    expect(host.get().item).toMatchObject({ revision: 1, model_notes: [], model_reasoning_defaults: [],
+      mapping: { ...legacyMapping, advanced: null, expert: null } })
     expect(host.save(legacy, operator, now)).toEqual({ revision: 1 })
     for (const { capacity, ref } of profiles) {
       expect(selectExecutionModel(profiles, { complexity: capacity, reason: '按步骤最低能力派发' }).model_ref).toBe(ref)

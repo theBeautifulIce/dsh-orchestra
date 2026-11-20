@@ -434,7 +434,7 @@ it('keeps off-mode DSH and historical approvals, admits only the owner slash, an
     expect(test.services.size).toBe(0)
 
     const rpcId = uuidv7()
-    const source = { kind: 'plugin', plugin: 'dsh-orchestra', form: 'notice', summary: 'Orchestra 单次任务' }
+    const source = { kind: 'plugin:dsh-orchestra', form: 'notice', summary: 'Orchestra 单次任务' }
     await human.admit(user('/orchestra ' + goal, { source }))
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
     await human.admit(user('/orchestra ' + goal, { source: { kind: 'chess-context' } }))
@@ -443,6 +443,7 @@ it('keeps off-mode DSH and historical approvals, admits only the owner slash, an
     await expect(child.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
     const bare = await human.admit(user('/orchestra   '))
     expect(bare).toMatchObject({ kind: 'enter', messages: [expect.anything(), expect.objectContaining({
+      source: { kind: 'plugin:dsh-orchestra', form: 'notice', summary: expect.any(String) },
       content: [expect.objectContaining({ text: expect.stringContaining('Orchestra 用法 · /orchestra 任务内容') })],
     })] })
     expect(test.services.size).toBe(0)
@@ -518,7 +519,11 @@ it('keeps approval, planning failure and terminal results in the originating DSH
     const human = test.session('work', 'parent')
     const other = test.session('work', 'other')
     test.plannerUnavailable(true)
-    await human.admit(user('请整理这些记录并交付报告'))
+    const failure = await human.admit(user('请整理这些记录并交付报告'))
+    expect(failure).toMatchObject({ kind: 'enter', messages: [expect.anything(), {
+      source: { kind: 'plugin:dsh-orchestra', form: 'notice' },
+      content: [{ type: 'text', text: expect.stringContaining('"code":"SERVICE_UNAVAILABLE"') }],
+    }] })
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'SERVICE_UNAVAILABLE', retryable: true })
     test.plannerUnavailable(false)
     test.badPlan(true)
@@ -541,6 +546,7 @@ it('keeps approval, planning failure and terminal results in the originating DSH
       && part.text.includes(decision))), { timeout: 5_000 }).toMatchObject({ sessionId: 'parent' })
     const notification = test.notices.find((entry) => entry.message.content.some((part) => part.type === 'text'
       && part.text.includes(decision)))!.message
+    expect(notification.source).toEqual({ kind: 'plugin:dsh-orchestra', form: 'notice', summary: expect.any(String) })
     await other.admit(notification, false)
     await expect(other.call({ action: 'review', run_id: prepared.run_id, decision_id: decision }))
       .resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })

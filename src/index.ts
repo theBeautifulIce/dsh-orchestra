@@ -99,12 +99,13 @@ export function apply(ctx: Context, config: typeof Config._output): void {
 }
 
 /** Mount inside DSH's Cordis context with a host-authorized parent and model catalog. */
-export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrchestra>[0], 'executor'> & {
+export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrchestra>[0], 'executor' | 'plannerModelConfigurable'> & {
   dsh: Parameters<typeof createDshExecutor>[0]
-  dshPlanner?: Omit<Parameters<typeof createDshPlanningCallback>[0], 'context'>
+  dshPlanner?: Omit<Parameters<typeof createDshPlanningCallback>[0], 'context'> & { useModelRoutingSettings?: boolean }
   tools: Pick<RunNodeDeps, 'registry' | 'runner'>
 }) {
   const { dsh, dshPlanner, tools, ...serviceOptions } = options
+  let plannerDb: Db | undefined
   let collaboration: CollaborationHost | undefined
   let installed: { db: Db; feedback: ReworkHost } | undefined
   const host = createDshExecutor({ ...dsh,
@@ -121,21 +122,33 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     },
   } : {}) })
   try {
-    const generateWorkflow = dshPlanner && createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'workflow')
+    const planner = dshPlanner && { context: dsh.context, parent: dshPlanner.parent, model: dshPlanner.model }
+    if (planner && dshPlanner.useModelRoutingSettings) {
+      const fallback = planner.model
+      planner.model = (parent, signal) => {
+        if (!plannerDb) throw new OrchError('SERVICE_UNAVAILABLE', '主脑模型设置尚未就绪')
+        const selected = withReadTx(plannerDb, ({ tx }) => readModelRoutingSettings(tx).planner_model)
+        if (selected) return host.resolvePlanningModel(selected.ref, selected.effort, signal)
+        return typeof fallback === 'function' ? fallback(parent, signal) : fallback
+      }
+    }
+    const generateWorkflow = planner && createDshPlanningCallback(planner, 'workflow')
     // 同一个流程生成回调既接给服务端入口，也接给规划侧：没有可复用的合适流程时，规划侧自动生成任务专属流程
     const workflowGenerator = generateWorkflow ? (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) =>
       generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal, onProgress) : undefined
     const service = await serveOrchestra({
       ...serviceOptions,
-      ...(dshPlanner ? { reworkPlanner: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'rework') } : {}),
-      ...(dshPlanner ? { planning: {
-        propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }),
+      plannerModelConfigurable: dshPlanner?.useModelRoutingSettings === true,
+      ...(planner ? { reworkPlanner: createDshPlanningCallback(planner, 'rework') } : {}),
+      ...(planner ? { planning: {
+        propose: createDshPlanningCallback(planner),
         streamProgress: true,
         ...(workflowGenerator ? { workflowGenerator, workflowStreamProgress: true } : {}),
       } } : {}),
       ...(workflowGenerator ? { workflowGenerator, workflowGeneratorStreamProgress: true } : {}),
       executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
     })
+    plannerDb = service.orchestra.db
     collaboration = service.collaboration
     if (service.rework) installed = { db: service.orchestra.db, feedback: service.rework }
     return { ...service, close: async () => {
@@ -593,6 +606,7 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 // 供宿主接进 DSH：返回 endpoint 与关闭句柄
 export async function serveOrchestra(opts: OrchestraOptions & {
   resolveHttpHuman?: ServerDeps['resolveHttpHuman']
+  plannerModelConfigurable?: boolean
   memory?: MemoryHostOptions
   workflowGenerator?: ServerDeps['workflowGenerator']
   workflowGeneratorStreamProgress?: boolean
@@ -620,7 +634,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const inspection = rework && createReworkInspectionHost(orchestra.db, opts.secret, rework, opts.reworkPlanner, humanReviewOnly)
   const modelRouting = opts.executor?.modelRouting
   const modelSettings = modelRouting && createModelRoutingSettingsHost(orchestra.db,
-    modelRouting.catalog ?? modelRouting.profiles, modelRouting.refresh)
+    modelRouting.catalog ?? modelRouting.profiles, modelRouting.refresh, Boolean(opts.planning && opts.plannerModelConfigurable))
   const modelEscalation = orchestra.modelEscalation
   const taskTriggers = phaseIndex(opts.phase) >= phaseIndex('S5')
     ? createTaskTriggerHost(orchestra.db, orchestra.catalog, { executorReady: () => Boolean(opts.resolveTriggerNodeSpecs) })

@@ -523,17 +523,20 @@ function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: 
     const assignment = selectExecutionModel(profiles, { ...proposed, preferredModel: preferred ?? recommendedModel })
     if (preferred) assignment.settings_revision = settings.revision
     const selected = deps.modelEscalation?.select(tx, row, profiles, assignment, now) ?? assignment
-    if (catalog || (preferred && settings.reasoning_efforts[proposed.complexity] !== undefined)) {
+    const tierEffort = selected.model_ref === preferred ? settings.reasoning_efforts[proposed.complexity] : undefined
+    const modelEffort = settings.model_reasoning_defaults.find(({ ref }) => ref === selected.model_ref)?.effort
+    const effort = tierEffort ?? modelEffort
+    if (catalog || effort != null) {
       const profile = profiles.find(({ ref }) => ref === selected.model_ref)
-      const effort = selected.model_ref === preferred ? settings.reasoning_efforts[proposed.complexity] ?? null : null
-      if (effort !== null && !profile?.reasoning?.efforts.some(({ id }) => id === effort)) {
+      if (effort != null && !profile?.reasoning?.efforts.some(({ id }) => id === effort)) {
         throw new OrchError('FORBIDDEN', '指定思考深度已从 DSH 模型目录移除，请重新读取并更新子智能体模型分配')
       }
       if (profile?.provider && profile.model) {
         selected.provider = profile.provider
         selected.model = profile.model
       }
-      selected.reasoning_effort = effort
+      if (effort != null) selected.settings_revision = settings.revision
+      selected.reasoning_effort = effort ?? null
     }
     recordModel(tx, deps.secret, row, selected, 'selected')
     return selected

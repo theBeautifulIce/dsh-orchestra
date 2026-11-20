@@ -3,6 +3,7 @@ import { EventEmitter, once } from 'node:events'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
+import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
 import { BridgeClient, type BridgeEvent, type BridgeTransport, type SendParams, type SpawnParams } from './bridge.ts'
@@ -117,7 +118,13 @@ function readJsonOutput(agent: DshAgent, planning = false): unknown {
       throw new OrchError('FORBIDDEN', 'DSH 或模型服务拒绝了当前规划请求')
     }
     if (planning && reason?.kind === 'max-tokens') throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑输出达到上限，未返回完整规划')
-    if (planning && reason?.kind === 'error') throw new OrchError('SERVICE_UNAVAILABLE', '模型服务未能完成规划，请检查连接或模型状态')
+    if (planning && reason?.kind === 'error') {
+      const { status, code } = reason.error
+      if (status === 402 || code === 'QUOTA' || code === 'ACCOUNT_QUOTA') {
+        throw new OrchError('SERVICE_UNAVAILABLE', '当前规划模型服务额度不足，请补充额度或切换模型后重新发送任务')
+      }
+      throw new OrchError('SERVICE_UNAVAILABLE', '模型服务未能完成规划，请检查连接或模型状态')
+    }
     throw new OrchError('SERVICE_UNAVAILABLE', 'DSH 子智能体的运行未正常结束')
   }
   const output = events.findLast((event) => event.type === 'assistant/message')
@@ -128,17 +135,18 @@ function readJsonOutput(agent: DshAgent, planning = false): unknown {
 }
 
 function prompt(agent: DshAgent, text: string) {
-  agent.followup({ id: randomUUID() as Parameters<DshAgent['followup']>[0]['id'], role: 'user',
-    source: { kind: 'user' }, content: [{ type: 'text', text }] })
+  type Message = Parameters<DshAgent['followup']>[0]
+  agent.followup({ id: randomUUID(), role: 'user',
+    source: { kind: ORCHESTRA_MESSAGE_SOURCE }, content: [{ type: 'text', text }] } as unknown as Message)
 }
 
 /** A dedicated tool-free DSH child may propose a plan. Review and launch remain service commands. */
 export function createDshPlanningCallback(options: {
   context: Context
   parent: () => DshAgent | undefined
-  model: NamedModel
+  model: PinnedModel | ((parent: DshAgent, signal: AbortSignal) => PinnedModel | undefined | Promise<PinnedModel | undefined>)
 }, purpose: 'plan' | 'workflow' | 'rework' = 'plan') {
-  const route = { ...options.model }
+  const configured = typeof options.model === 'function' ? options.model : { ...options.model }
   let inFlight = 0
   return async (input: unknown, signal?: AbortSignal, onProgress?: () => void): Promise<unknown> => {
     signal?.throwIfAborted()
@@ -167,6 +175,9 @@ export function createDshPlanningCallback(options: {
       timeout.unref()
     })
     try {
+      const selection = typeof configured === 'function' ? await Promise.race([deadline, configured(parent, controller.signal)]) : configured
+      if (!selection) throw new OrchError('FORBIDDEN', '当前 DSH 会话没有可用于规划的模型，请先选择模型')
+      const route = { ...selection }
       await Promise.race([deadline, requireAvailableModel(options.context, route)])
       const creation = parent.ctx.agents.create({
         ...childOptions(parent, route, (ctx, agent) => {
@@ -540,6 +551,16 @@ export function createDshExecutor(options: {
   return {
     bridge: new BridgeClient(transport),
     modelRouting,
+    async resolvePlanningModel(ref: string, effort: string | null, signal: AbortSignal): Promise<PinnedModel> {
+      if (options.loadModelCatalog) await refresh(signal)
+      signal.throwIfAborted()
+      const route = routes.get(ref)
+      if (!route) throw new OrchError('FORBIDDEN', 'DSH 当前模型目录中没有所选主脑模型，请检查供应商或更改主脑模型设置')
+      if (effort !== null && !route.reasoning?.efforts.some(({ id }) => id === effort)) {
+        throw new OrchError('FORBIDDEN', '所选主脑模型的思考深度已不可用，请更改主脑模型设置')
+      }
+      return { provider: route.provider, model: route.model, reasoningEffort: effort }
+    },
     stopModelRefresh,
     async close() {
       closing = true
