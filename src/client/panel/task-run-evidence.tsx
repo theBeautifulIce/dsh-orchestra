@@ -3,6 +3,7 @@ import { ApiError } from '../api/client.ts'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { AttestationView, EvidenceView, NodeRunView } from '../api/types.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { operatorReason } from '../../core/operator-language.ts'
 
 type EvidenceReference = { kind: 'tool' | 'human'; id: string; label: string }
 
@@ -10,6 +11,10 @@ const TOOL_ACTIONS = new Map([
   ['workspace_read_sample', '读取已授权的工作区资料'],
   ['workspace_list', '列出获准查看的工作区目录'],
 ])
+
+export function evidenceToolLabel(tool: string, fallback: string): string {
+  return TOOL_ACTIONS.get(tool) ?? fallback
+}
 
 export function NodeEffectFacts({ node, onOpenDecision }: { node: NodeRunView; onOpenDecision?: (id: string) => void }) {
   const effectLabel = (value: string | null) => value === 'applied' ? '外部操作已发生'
@@ -20,7 +25,8 @@ export function NodeEffectFacts({ node, onOpenDecision }: { node: NodeRunView; o
   const readOnly = node.evidence_state === 'not_required' && node.side_effect_policy === 'pure'
   const mismatch = declared && settled && declared !== verified
   const decisionId = node.effect_decision_id
-  if (readOnly && !declared) return <p style={mutedStyle}>{node.evidence_state_reason ?? '此步骤按只读策略执行，无需核验外部操作。'}</p>
+  const reason = node.evidence_state_reason && operatorReason(node.evidence_state_reason)
+  if (readOnly && !declared) return <p style={mutedStyle}>{reason || '此步骤按只读策略执行，无需核验外部操作。'}</p>
   const headline = mismatch ? '声明与核实结果不一致'
     : readOnly ? '只读步骤'
       : settled ? `已核验 · ${verified}`
@@ -35,7 +41,7 @@ export function NodeEffectFacts({ node, onOpenDecision }: { node: NodeRunView; o
       {(!readOnly || declared) && <div><dt>步骤声明</dt><dd>{declared ?? '无声明记录'}</dd></div>}
       {mismatch && <div><dt>核验结果</dt><dd>{verified}</dd></div>}
     </dl>
-    {(basis ?? node.evidence_state_reason) && <p style={mutedStyle}>{basis ?? node.evidence_state_reason}</p>}
+    {(basis ?? reason) && <p style={mutedStyle}>{basis ?? reason}</p>}
     {mismatch && decisionId && onOpenDecision &&
       <button type="button" className="ops-button" onClick={() => onOpenDecision(decisionId)}>查看相关决定</button>}
   </div>
@@ -87,7 +93,7 @@ function EvidenceRecord({ api, node, record, reloadVersion }: {
     return () => { current = false }
   }, [api, node.attempt, node.node_run_id, node.run_id, open, record.id, record.kind, reloadVersion])
   return <details style={evidenceStyle} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>{verified && 'evidence_id' in verified ? (TOOL_ACTIONS.get(verified.tool) ?? `已核对的${record.label}`) : record.label}</summary>
+    <summary>{verified && 'evidence_id' in verified ? evidenceToolLabel(verified.tool, `已核对的${record.label}`) : record.label}</summary>
     {open && failure && <p role="status" style={mutedStyle}>{failure}</p>}
     {open && !verified && !failure && <p role="status" style={mutedStyle}>正在读取…</p>}
     {verified && ('evidence_id' in verified ? <>
@@ -96,6 +102,7 @@ function EvidenceRecord({ api, node, record, reloadVersion }: {
       <details>
         <summary>查看核验明细</summary>
         <p style={mutedStyle}>工具 <code>{verified.tool}</code> · 记录于 {formatDate(verified.observed_at)}</p>
+        <p style={mutedStyle}>证据编号 <code>{verified.evidence_id}</code></p>
         {verified.stdout_hash && <p style={mutedStyle}>标准输出哈希 <code>{verified.stdout_hash}</code></p>}
         {verified.stderr_hash && <p style={mutedStyle}>标准错误哈希 <code>{verified.stderr_hash}</code></p>}
       </details>
@@ -104,6 +111,7 @@ function EvidenceRecord({ api, node, record, reloadVersion }: {
       <p style={mutedStyle}>签认人 {verified.attested_by} · {formatDate(verified.attested_at)}</p>
       <p style={mutedStyle}>签认覆盖本步骤的第 {node.attempt} 次尝试，外部操作结果仍以对应核验记录为准。</p>
       {verified.summary && <p style={mutedStyle}>{verified.summary}</p>}
+      <details><summary>查看签认明细</summary><p>签认编号 <code>{verified.attestation_id}</code></p></details>
     </>)}
   </details>
 }

@@ -2,6 +2,7 @@
 // 规则：写操作一律带 operation_id（UUIDv7）；结果不可确认时只按同一 operation_id 查回执，绝不重发。
 import { ApiError, type ApiClient } from './client.ts'
 import type { OperationRow } from './types.ts'
+import { operatorReason } from '../../core/operator-language.ts'
 // UUIDv7 的造号实现在流程命令客户端里；本任务不许新增文件，直接复用同一份，避免两份实现走样。
 import { newOperationId } from './workflow-commands.ts'
 
@@ -49,7 +50,7 @@ export const DECISION_ERROR_TEXT: Record<string, string> = {
   CONFIRMATION_EXPIRED: '确认已过期，请重新选择处理方式',
   CONFIRMATION_MISMATCH: '确认与本次处理不再匹配，请重新选择',
   FORBIDDEN: '没有权限处理这条决定',
-  RESOLUTION_NOT_AVAILABLE: '同一 kind 已有活跃 decision',
+  RESOLUTION_NOT_AVAILABLE: '当前状态下无法执行这项处理，请刷新后查看可用选项',
   NOT_FOUND: '找不到这条决定，可能已被处理',
   OPERATION_TIMEOUT: '结果未知，正在查回执',
   OPERATION_OUTCOME_UNKNOWN: '结果未知，正在查回执',
@@ -59,9 +60,9 @@ export const DECISION_ERROR_TEXT: Record<string, string> = {
 /** 把服务端错误翻译成面板上的一句中文。 */
 export function describeDecisionError(error: unknown): string {
   if (error instanceof ApiError) {
-    const mapped = DECISION_ERROR_TEXT[error.code]
-    if (mapped) return mapped
-    return error.message || '操作没成功'
+    return Object.hasOwn(DECISION_ERROR_TEXT, error.code)
+      ? DECISION_ERROR_TEXT[error.code]!
+      : operatorReason(error.message || error.code)
   }
   return '操作没成功'
 }

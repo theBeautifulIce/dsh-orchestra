@@ -83,6 +83,36 @@ describe('待你决定屏的四问', () => {
     expect(text).toContain('过期会怎样')
     expect(text).toContain('服务端未提供')
   })
+
+  it('把审批依据、缺少的资料和处理选项显示为中文，保留追溯编号', async () => {
+    const { api } = panelService(() => ({ ok: true, data: page([decisionView({
+      decision_id: 'dec-private',
+      kind: 'future_decision_kind',
+      status: 'future_decision_status',
+      priority: 'urgent',
+      priority_reason: 'evidence_missing',
+      required_evidence: ['tool_evidence_missing', '请核对材料来源。'],
+      resolution_unavailable_reason: '{"reason":"raw_parameters"}',
+      allowed_resolutions: ['future_resolution'],
+      projection_missing: ['allowed_resolutions'],
+    })]) }))
+    const view = await renderPanel(<DecisionInbox api={api} />)
+    try {
+      const text = view.text()
+      expect(text).toContain('待确认事项')
+      expect(text).toContain('当前状态未确认')
+      expect(text).toContain('优先级：紧急')
+      expect(text).toContain('缺少完成核验所需的执行证据')
+      expect(text).toContain('没有找到验收指定步骤的工具执行记录')
+      expect(text).toContain('请核对材料来源。')
+      expect(text).toContain('现有记录未能说明具体原因')
+      expect(text).toContain('当前记录缺少：处理选项')
+      expect(text).not.toMatch(/future_|raw_parameters|dec-private|allowed_resolutions/)
+      await view.click(view.findAll('input[aria-label="开发者视图"]')[0]!)
+      expect(view.text()).toContain('dec-private')
+      expect(view.text()).toContain('allowed_resolutions')
+    } finally { view.unmount() }
+  })
 })
 
 describe('待你决定屏的交互', () => {
@@ -149,7 +179,8 @@ describe('待你决定屏的交互', () => {
     })
     const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
     await view.flush()
-    const resolveButton = view.findAll('button[aria-label="按 continue 处理"]').find((button) => button.closest('article')?.textContent?.includes('执行前确认'))
+    const resolveButton = view.findAll('article button').find((button) => button.textContent === '继续执行'
+      && button.closest('article')?.textContent?.includes('执行前确认'))
     expect(resolveButton).toBeDefined()
     await view.click(resolveButton!)
     await view.flush()
@@ -212,12 +243,12 @@ describe('待你决定屏的交互', () => {
     })]) }))
     const view = await renderPanel(<DecisionInbox api={api} />)
     await view.flush()
-    expect(view.text()).toContain('服务端未持久化的字段')
-    expect(view.text()).toContain('allowed_resolutions')
+    expect(view.text()).toContain('当前记录缺少：处理选项、优先级')
+    expect(view.text()).not.toContain('allowed_resolutions')
     const processButton = view.findAll('button').find((button) => button.textContent === '处理')
     expect(processButton).toBeDefined()
     expect((processButton as HTMLButtonElement).disabled).toBe(true)
-    expect(view.findAll('button[aria-label^="按 "]').length).toBe(0)
+    expect(view.findAll('article button').some((button) => button.textContent === '继续执行')).toBe(false)
   })
 })
 
@@ -229,7 +260,7 @@ describe('决定命令的错误提示', () => {
       { code: 'OPERATION_ID_CONFLICT', text: '命令编号冲突，请稍后重试' },
       { code: 'OPERATION_EXPIRED', text: '命令已过期，请重新发起' },
       { code: 'FORBIDDEN', text: '没有权限处理这条决定' },
-      { code: 'RESOLUTION_NOT_AVAILABLE', text: '同一 kind 已有活跃 decision' },
+      { code: 'RESOLUTION_NOT_AVAILABLE', text: '当前状态下无法执行这项处理' },
       { code: 'NOT_FOUND', text: '找不到这条决定，可能已被处理' },
     ]
     for (const item of cases) {
@@ -246,6 +277,18 @@ describe('决定命令的错误提示', () => {
       expect(view.text()).toContain(item.text)
       view.unmount()
     }
+  })
+
+  it('接手失败的未知错误使用中文提示，避免回显原始参数', async () => {
+    const { api, commands } = panelService(({ path }) => path === '/v1/decisions'
+      ? { ok: true, data: page([decisionView()]) }
+      : { ok: false, error: { code: 'FUTURE_ERROR', message: '{"private_parameter":"test-secret"}', retryable: false } })
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    try {
+      await view.click(view.findAll('button').find((button) => button.textContent === '接手')!)
+      expect(view.text()).toContain('现有记录未能说明具体原因')
+      expect(view.text()).not.toMatch(/FUTURE_ERROR|private_parameter|test-secret/)
+    } finally { view.unmount() }
   })
 
   it('结果不明时只查回执，不重发', async () => {

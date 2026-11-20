@@ -149,7 +149,7 @@ it('prefers an explicit adapter and returns to the one local panel when the adap
   host.provide('workspaces', { list: store(initialWorkspaces) })
   const product = host.plugin({ apply, inject } as unknown as Plugin)
   await product.await()
-  await expect.poll(() => entries.size).toBe(2)
+  await expect.poll(() => entries.size).toBe(3)
   const main = entries.get('main')!
   const view = await renderPanel(createElement(main))
   try {

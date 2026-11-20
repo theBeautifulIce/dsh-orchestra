@@ -149,7 +149,7 @@ export function WorkflowListScreen({ api, onSelectWorkflow, reloadVersion = 0, o
         <tbody>{items.map((workflow) => <tr key={workflow.workflow_id}>
           <td><strong>{workflow.name}</strong><p className="ops-meta">
             {workflow.scope === 'task_local' ? '任务专属' : workflow.scope === 'reusable' ? '可复用' : <UnknownState value={workflow.scope} />}
-            {' · '}{workflow.workflow_id}</p></td>
+            </p><details><summary>查看登记明细</summary><p>流程编号 <code>{workflow.workflow_id}</code> · 范围 <code>{workflow.scope}</code> · 状态 <code>{workflow.status}</code></p></details></td>
           <td><WorkflowStatusBadge status={workflow.status} /></td>
           <td>{workflow.current_version === null ? '未发布' : `v${workflow.current_version}`}
             {workflow.has_draft && <p className="ops-meta">草稿 · 修订 {workflow.draft_revision ?? '未知'}</p>}</td>

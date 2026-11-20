@@ -28,7 +28,7 @@ export function WorkflowDependencyView({ doc, nodes }: { doc: CanvasDoc; nodes?:
     destinations.add(to)
     outgoing.set(from, destinations)
   }
-  const title = (id: string) => attempts.get(id)?.title || byId.get(id)?.title || id
+  const title = (id: string) => attempts.get(id)?.title || byId.get(id)?.title || '未命名步骤'
   const names = (ids: Set<string>) => [...ids].map(title).join('、')
 
   return <section className="ops-surface ops-inset" aria-label="流程步骤依赖">

@@ -78,7 +78,7 @@ describe('任务列表页', () => {
     const view = await renderPanel(<TaskListScreen api={api} onSelectTask={noop} />)
     await view.flush()
     expect(view.text()).toContain(COPY.oldPanel)
-    expect(view.text()).toContain('future-status')
+    expect(view.text()).not.toContain('future-status')
     expect(view.byRole('status').length).toBeGreaterThan(0)
     view.unmount()
   })
@@ -144,14 +144,14 @@ describe('任务列表页', () => {
           rule_version: 'rule-b', tool: 'ro.check', expected_exit_code: 0, exit_codes: [7] },
       ] } }) }
       if (path === '/v1/node-runs' && params.get('run_id') === 'r1') return { ok: true, data: { items: [
-        nodeRunView({ node_id: '核对清单', execution_ids: ['ev1', 'wrong'], execution_count: 2 }),
+        nodeRunView({ node_id: 'checklist', title: '核对清单', execution_ids: ['ev1', 'wrong'], execution_count: 2 }),
         ...Array.from({ length: 12 }, (_, index) => nodeRunView({ node_run_id: `ordinary-${index}`, node_id: `待执行${index}`,
-          status: 'queued', evidence_state: 'not_required', side_effect_policy: 'pure', evidence_state_reason: null })),
-        nodeRunView({ node_run_id: 'visible-failure', node_id: '失败尝试', status: 'failed', status_label: '执行失败',
+          title: `待执行${index}`, status: 'queued', evidence_state: 'not_required', side_effect_policy: 'pure', evidence_state_reason: null })),
+        nodeRunView({ node_run_id: 'visible-failure', node_id: 'failed-check', title: '失败尝试', status: 'failed', status_label: '执行失败',
           evidence_state: 'none', evidence_state_reason: null }),
       ] } }
       if (path === '/v1/artifacts' && params.get('run_id') === 'r1') return { ok: true, data: {
-        items: [{ artifact_id: '交付清单', sha256: 'hash', created_at: task.updated_at }], has_more: false,
+        items: [{ artifact_id: 'delivery-record', run_id: 'r1', file_name: '交付清单', sha256: 'hash', created_at: task.updated_at }], has_more: false,
       } }
       if (path === '/v1/evidence/get') return { ok: true, data: {
         evidence_id: params.get('evidence_id'), node_run_id: 'nr1', run_id: params.get('evidence_id') === 'ev1' ? 'r1' : 'r2',
@@ -248,7 +248,8 @@ describe('流程列表页', () => {
     const view = await renderPanel(<WorkflowListScreen api={api} onSelectWorkflow={noop} />)
     await view.flush()
     expect(view.text()).toContain(COPY.oldPanel)
-    expect(view.text()).toContain('weird_scope')
+    expect(view.findAll('td > .ops-meta').some((element) => element.textContent?.includes('weird_scope'))).toBe(false)
+    expect(view.findAll('td details:not([open]) code').some((element) => element.textContent === 'weird_scope')).toBe(true)
     view.unmount()
   })
 
@@ -302,8 +303,8 @@ describe('等你决定页', () => {
     const view = await renderPanel(<DecisionInbox api={api} />)
     await view.flush()
     expect(view.text()).toContain(COPY.oldPanel)
-    expect(view.text()).toContain('weird_kind')
-    expect(view.text()).toContain('weird_status')
+    expect(view.text()).not.toContain('weird_kind')
+    expect(view.text()).not.toContain('weird_status')
     view.unmount()
   })
 
@@ -315,7 +316,7 @@ describe('等你决定页', () => {
     expect(view.text()).toContain('待处理')
     expect(view.text()).toContain('确认这一步要不要执行')
     expect(view.text()).toContain('动手前要先确认')
-    expect(view.text()).toContain('continue / abort')
+    expect(view.text()).toContain('继续执行 / 停止执行')
     expect(view.text()).toContain('命令清单')
     view.unmount()
   })
@@ -430,8 +431,8 @@ describe('待核实页', () => {
     const view = await renderPanel(<UnverifiedEffects api={api} />)
     await view.flush()
     expect(view.text()).toContain(COPY.oldPanel)
-    expect(view.text()).toContain('weird_policy')
-    expect(view.text()).toContain('weird_status')
+    expect(view.text()).not.toContain('weird_policy')
+    expect(view.text()).not.toContain('weird_status')
     view.unmount()
   })
 

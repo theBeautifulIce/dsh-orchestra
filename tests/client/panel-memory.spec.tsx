@@ -557,8 +557,8 @@ describe('记忆审批卡', () => {
     expect(decline).toBeDefined()
     expect((approve as HTMLButtonElement).disabled).toBe(true)
     expect((decline as HTMLButtonElement).disabled).toBe(true)
-    expect(view.text()).toContain('部分决策信息尚未持久化，当前无法提供安全的处理选项。')
-    expect(view.text()).toContain('服务端未持久化的字段：allowed_resolutions')
+    expect(view.text()).toContain('当前记录缺少：处理选项')
+    expect(view.text()).not.toContain('allowed_resolutions')
     view.unmount()
   })
 

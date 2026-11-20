@@ -108,12 +108,13 @@ function EffectCard({ effect, developerView, children, onOpenDecision }: {
       <dt>已等待</dt><dd>{effect.age_seconds === null ? '时长未知' : `${effect.age_seconds} 秒`}</dd>
       <dt>开始时间</dt><dd>{effect.started_at ? formatDate(effect.started_at) : '没有记录开始时间'}</dd>
       <dt>已确认停止时间</dt><dd>{effect.stopped_at ? formatDate(effect.stopped_at) : UNKNOWN}</dd>
-      <dt>停止记录</dt><dd>{effect.stop_evidence ?? '没有记录停止证据'}</dd>
+      <dt>停止记录</dt><dd>{effect.stop_evidence ? '已有停止证据' : '没有记录停止证据'}</dd>
       {developerView && <><dt>节点运行 ID</dt><dd>{effect.node_run_id}</dd></>}
     </dl>
     {decisionId && onOpenDecision && <button type="button" className="ops-button" onClick={() => onOpenDecision(decisionId)}>查看相关决定</button>}
     {children}
-    {developerView && <><div className="ops-table-scroll"><table className="ops-table" style={tableStyle}>
+    {developerView && <><p style={mutedStyle}>状态代码 <code>{effect.status}</code> · 风险级别代码 <code>{effect.side_effect_policy}</code>
+      {effect.stop_evidence && <> · 停止证据 <code>{effect.stop_evidence}</code></>}</p><div className="ops-table-scroll"><table className="ops-table" style={tableStyle}>
       <thead>
         <tr>
           <th scope="col">运行</th>

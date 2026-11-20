@@ -325,7 +325,7 @@ export function WorkflowCanvasView({
             data-node-x={node.position.x}
             data-node-y={node.position.y}
             data-node-readonly={readOnly ? 'true' : 'false'}
-            aria-label={`节点 ${node.node_id} ${node.title}`}
+            aria-label={compact ? `步骤 ${node.title}` : `节点 ${node.node_id} ${node.title}`}
             aria-disabled={readOnly ? 'true' : 'false'}
             onMouseDown={(event) => startMove(event, node)}
             style={{ ...nodeStyle, height: nodeHeight, left: node.position.x, top: node.position.y, ...(workspace ? {
@@ -375,13 +375,17 @@ export function WorkflowCanvasView({
       {!selected && <p style={mutedStyle}>点选画布中的节点查看依赖。</p>}
       {selected && <>
         <p><strong>{selected.title}</strong></p>
-        <p style={mutedStyle}>{NODE_TYPE_LABEL[selected.type] ?? selected.type} · {selected.node_id}</p>
+        <p style={mutedStyle}>{NODE_TYPE_LABEL[selected.type] ?? '步骤类型未记录'}{!compact && ` · ${selected.node_id}`}</p>
         {runtimeByNode.get(selected.node_id) && <p>{runtimeLabel(selected.node_id)} · 第 {runtimeByNode.get(selected.node_id)?.attempt ?? '未知'} 次执行</p>}
         {selected.raw.runtime_step != null && <><p>来源角色：{String((selected.raw.runtime_step as {source_title: string}).source_title)}</p><p>{String((selected.raw.runtime_step as {instruction: string}).instruction)}</p></>}
-        {runtimeTopology?.requests.filter(r => r.target_node_id === selected.node_id).map(r => <p key={r.request_id}>反馈 {r.request_id} · 第 {r.round_no} 轮 · {REWORK_STATUS[r.status] ?? r.status}</p>)}
+        {runtimeTopology?.requests.filter(r => r.target_node_id === selected.node_id).map(r => <p key={r.request_id}>成果反馈 · 第 {r.round_no} 轮 · {REWORK_STATUS[r.status] ?? '返工状态未确认'}</p>)}
         {runtimeTopology?.held_node_ids.includes(selected.node_id) && <p>受影响步骤：等待返工或验收</p>}
-        <p>上游 · {edges.filter((edge) => edge.to === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.from)?.title ?? edge.from).join('、') || '无'}</p>
-        <p>下游 · {edges.filter((edge) => edge.from === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.to)?.title ?? edge.to).join('、') || '无'}</p>
+        <p>上游 · {edges.filter((edge) => edge.to === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.from)?.title ?? '未命名步骤').join('、') || '无'}</p>
+        <p>下游 · {edges.filter((edge) => edge.from === selected.node_id).map((edge) => nodes.find((node) => node.node_id === edge.to)?.title ?? '未命名步骤').join('、') || '无'}</p>
+        {compact && <details><summary>查看步骤登记明细</summary><p>步骤编号 <code>{selected.node_id}</code></p>
+          {runtimeTopology?.requests.filter((request) => request.target_node_id === selected.node_id).map((request) =>
+            <p key={request.request_id}>反馈编号 <code>{request.request_id}</code> · 状态 <code>{request.status}</code></p>)}
+        </details>}
       </>}
     </aside>}
     </div>

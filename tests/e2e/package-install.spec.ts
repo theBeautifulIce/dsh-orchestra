@@ -12,6 +12,7 @@ import { expect, it } from 'vitest'
 import { inspectPackage } from '../../scripts/package-acceptance.ts'
 import { renderPanel } from '../client/harness.ts'
 import type { DshPanelContext } from '../../src/client/dsh-sidebar.tsx'
+import type { NativeOrchestraToolViewContext } from '../../src/client/dsh-orchestra-toolview.tsx'
 
 const installed = process.env.ORCHESTRA_PACKAGE_INSTALLED_DIR
 const tarball = process.env.ORCHESTRA_PACKAGE_TEST_ARCHIVE
@@ -123,11 +124,12 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
       client = value.factory(require)
     } } }, document, navigator, AbortController, URL, Headers, TextEncoder, TextDecoder, setTimeout, clearTimeout },
       { filename: 'installed-dsh-orchestra-client.js' })
-    const components: Array<{ slot: Parameters<DshPanelContext['slots']['register']>[0]; component: ComponentType }> = []
+    type Slot = Parameters<DshPanelContext['slots']['register']>[0] | Parameters<NativeOrchestraToolViewContext['slots']['register']>[0]
+    const components: Array<{ slot: Slot; component: ComponentType }> = []
     const host = new Context()
-    const slots: DshPanelContext['slots'] = {
-      inject(_slot, mount) { return mount() },
-      register(slot, component) {
+    const slots = {
+      inject(_slot: Slot['name'], mount: () => unknown) { return mount() },
+      register(slot: Slot, component: ComponentType) {
         const entry = { slot, component }
         components.push(entry)
         return () => { components.splice(components.indexOf(entry), 1) }
@@ -136,7 +138,8 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
     host.provide('slots', slots)
     const product = host.plugin(client as unknown as Plugin)
     await product.await()
-    expect(components).toEqual([])
+    const nativeToolSlot = { name: 'tool.call.toolview', key: 'orchestra_task' }
+    expect(components.map(({ slot }) => slot)).toEqual([nativeToolSlot])
 
     const fetcher: NonNullable<Parameters<typeof client.createPanelHost>[0]['fetcher']> = (input, init) => {
       const headers = new Headers(init?.headers)
@@ -147,16 +150,17 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
     const connect = (ctx: Context) => { ctx.provide('orchestraPanelTransport', transport) }
     const adapter = host.plugin(connect)
     await adapter.await()
-    await expect.poll(() => components.length).toBe(2)
+    await expect.poll(() => components.length).toBe(3)
     const legacy = host.plugin({ inject: ['slots'], apply(ctx: Context) {
       client.registerDshOrchestraPanel(ctx as unknown as DshPanelContext, transport)
     } })
     await legacy.await()
     expect(components.map(({ slot }) => slot)).toEqual([
+      nativeToolSlot,
       { name: 'main', key: 'dsh-orchestra' },
       { name: 'sidebar.panellist', id: 'dsh-orchestra', order: 20, label: expect.any(Function) },
     ])
-    const view = await renderPanel(createElement(components[0]!.component))
+    const view = await renderPanel(createElement(components.find(({ slot }) => slot.name === 'main')!.component))
     try {
       await view.flush()
       expect(view.text()).toContain('设置')
@@ -165,10 +169,10 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
     } finally { view.unmount() }
     await legacy.dispose()
     await adapter.dispose()
-    await expect.poll(() => components.length).toBe(0)
+    await expect.poll(() => components.map(({ slot }) => slot)).toEqual([nativeToolSlot])
     const replacement = host.plugin(connect)
     await replacement.await()
-    await expect.poll(() => components.length).toBe(2)
+    await expect.poll(() => components.length).toBe(3)
     await product.dispose()
     await expect.poll(() => components.length).toBe(0)
     await replacement.dispose()

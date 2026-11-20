@@ -24,6 +24,7 @@ export type RunDeliveryCheck = {
   reason: string | null
   evaluated_at: string
   rule_version: string
+  artifact_id?: string
   file_name?: string
   minimum_bytes?: number
   bytes?: number
@@ -132,17 +133,17 @@ export function listRuns(db: Db, opts: RunFilters = {}): { items: RunSummary[]; 
   })
 }
 
-export function getRun(db: Db, runId: string): RunSummary {
+export function getRun(db: Db, runId: string, options?: { includeAcceptanceArtifactIds?: boolean }): RunSummary {
   return withReadTx(db, (ctx) => {
     const run = ctx.tx.get<RunRow>(RUN_SELECT + ' WHERE r.run_id = ?', [runId])
     if (!run) throw new OrchError('NOT_FOUND', '没找到这次运行', { run_id: runId })
     const project_context = readProjectContextMetadata(ctx.tx, runId)
-    const delivery_checks = readDeliveryChecks(ctx, runId)
+    const delivery_checks = readDeliveryChecks(ctx, runId, options?.includeAcceptanceArtifactIds === true)
     return { ...toRunSummary(ctx, run), ...(project_context ? { project_context } : {}), delivery_checks }
   })
 }
 
-function readDeliveryChecks({ tx }: ReadCtx, runId: string): NonNullable<RunSummary['delivery_checks']> {
+function readDeliveryChecks({ tx }: ReadCtx, runId: string, includeArtifactIds: boolean): NonNullable<RunSummary['delivery_checks']> {
   // Match the same confirmed plan and content hash that the acceptance writer uses.
   const rows = tx.all<Pick<RunDeliveryCheck, 'result_id' | 'kind' | 'outcome' | 'reason' | 'evaluated_at' | 'rule_version'> & { evidence_json: string }>(`
     WITH bound AS (
@@ -156,6 +157,7 @@ function readDeliveryChecks({ tx }: ReadCtx, runId: string): NonNullable<RunSumm
     const value = (JSON.parse(evidence_json) as { evidence?: unknown } | null)?.evidence
     const evidence = value && typeof value === 'object' ? value as Record<string, unknown> : {}
     if (row.kind === 'artifact') return { ...row,
+      ...(includeArtifactIds && typeof evidence.artifact_id === 'string' && { artifact_id: evidence.artifact_id }),
       ...(typeof evidence.file_name === 'string' && { file_name: evidence.file_name }),
       ...(isCount(evidence.minimum_bytes) && { minimum_bytes: evidence.minimum_bytes }),
       ...(isCount(evidence.bytes) && { bytes: evidence.bytes }) }

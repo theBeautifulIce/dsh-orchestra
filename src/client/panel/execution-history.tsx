@@ -2,15 +2,33 @@ import { useEffect, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { ExecutionEntry } from '../../service/queries/execution-history.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { operatorReason, operatorStatus } from '../../core/operator-language.ts'
 
-export function EventDetails({ entries }: { entries?: ExecutionEntry['details'] }) {
-  if (!entries?.length) return null
+const statusFields = new Set(['原状态', '新状态', '状态', '报告状态', '记录状态', '业务结果'])
+const reasonFields = new Set(['原因', '错误代码', '处理结论'])
+const plainFields = new Set(['工具', '退出码', '摘要', '报告摘要', '模型配置', '提供方', '实际模型', '文件名称', '节点数量',
+  '计划时间', '计划触发时间', '开始时间', '完成时间', '尝试次数', 'Workflow 版本'])
+
+function Fields({ entries }: { entries: ExecutionEntry['details'] }) {
   return <dl style={{ display: 'grid', gridTemplateColumns: 'minmax(72px, max-content) minmax(0, 1fr)', gap: '4px 10px',
     margin: '8px 0 0', fontSize: FONT_PX.helper, overflowWrap: 'anywhere' }}>
     {entries.map(({ label, value }, index) => <div key={label + index} style={{ display: 'contents' }}>
       <dt style={{ color: COLOR.inkMuted }}>{label}</dt><dd style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{value}</dd>
     </div>)}
   </dl>
+}
+
+export function EventDetails({ entries }: { entries?: ExecutionEntry['details'] }) {
+  if (!entries?.length) return null
+  const readable = entries.flatMap(({ label, value }) => {
+    if (statusFields.has(label)) return [{ label, value: operatorStatus(value) }]
+    if (reasonFields.has(label)) return [{ label: label === '错误代码' ? '错误说明' : label, value: operatorReason(value) }]
+    return plainFields.has(label) ? [{ label, value }] : []
+  })
+  return <>
+    {readable.length > 0 && <Fields entries={readable} />}
+    <details><summary>查看技术记录</summary><Fields entries={entries} /></details>
+  </>
 }
 
 export function ExecutionHistory({ api, taskId, runId, nodeId, reloadVersion }: {
@@ -57,10 +75,8 @@ export function ExecutionHistory({ api, taskId, runId, nodeId, reloadVersion }: 
     {shown?.length ? <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
       {shown.map((item, index) => <li key={item.id} style={{ padding: '9px 0', borderTop: `1px solid ${COLOR.line}` }}>
         <details open={nodeId && index < 3 ? true : undefined}>
-          <summary><strong>{item.title}</strong> <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></summary>
-          {!nodeId && <p style={{ margin: '4px 0', fontSize: FONT_PX.helper }}>节点 {item.node_id} · 运行 <code>{item.run_id}</code></p>}
-          <EventDetails entries={item.details} />
-          {item.details.length === 0 && <p style={{ margin: '4px 0', color: COLOR.inkMuted }}>账本已记录此事件的类型与时间。</p>}
+          <summary><strong>{item.title === item.type ? '其他执行记录' : item.title}</strong> <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></summary>
+          <EventDetails entries={[...item.details, { label: '事件类型', value: item.type }, { label: '步骤 ID', value: item.node_id }, { label: '运行 ID', value: item.run_id }]} />
         </details>
       </li>)}
     </ol> : null}

@@ -10,6 +10,8 @@ import { taskAutonomyLabel, taskCardStatus, taskOriginLabel, taskStatusView } fr
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
 import { WorkflowDependencyView } from './workflow-dependency-view.tsx'
 import { TaskStepOverview, useRunStepSnapshot } from './task-step-overview.tsx'
+import { operatorReason } from '../../core/operator-language.ts'
+import { COPY } from './copy.ts'
 
 export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnabled, queue = false }: {
   api: ResourcesApi; tasks: TaskSummary[]; onOpenTask: (taskId: string, trigger: HTMLButtonElement, runId?: string) => void; reloadVersion: number; reworkEnabled?: boolean
@@ -27,9 +29,9 @@ export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnab
       {available.map((task) => <button key={task.task_id} className="task-flow-pick" type="button" aria-pressed={task === selected}
         onClick={() => setSelection(task.task_id)}>
         <span className="task-flow-pick-meta"><span className="task-type-badge">{taskOriginLabel(task)}</span>
-          <span>{taskCardStatus(task).label ?? task.status}</span></span>
+          <span>{taskCardStatus(task).label ?? COPY.oldPanel}</span></span>
         <strong>{task.title || '未命名任务'}</strong>
-        <span>{task.attention_reason || `${task.run_count} 次运行`}</span>
+        <span>{task.attention_reason ? operatorReason(task.attention_reason) : `${task.run_count} 次运行`}</span>
         {task.next_trigger_at && <span>下次 · {formatTaskDate(task.next_trigger_at)}</span>}
       </button>)}
     </nav>
@@ -74,7 +76,7 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
     task.current_run_id ? run?.workflow_version : task.workflow_version)
   const topology = useRunTopology(api, task.current_run_id ?? undefined, Boolean(reworkEnabled), reloadVersion + retry)
   const runtimeDoc = runtimeCanvasDoc(workflow?.definition, topology.data)
-  const outcome = run ? taskStatusView(run.status, run.display_status).label ?? run.status : null
+  const outcome = run ? taskStatusView(run.status, run.display_status).label ?? COPY.oldPanel : null
   const duration = runDuration(run?.started_at, run?.ended_at)
   const hasRun = Boolean(task.current_run_id)
   return <section className="task-flow-main" aria-label="任务运行流程">
@@ -83,7 +85,7 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
         <span>{taskAutonomyLabel(task)} · {task.run_count} 次运行</span>
       </div>
       <h2>{task.title || '未命名任务'}</h2>
-      <p>{task.attention_reason || (run ? '查看本次运行的步骤与证据。' : '还没有运行记录。')}</p>
+      <p>{task.attention_reason ? operatorReason(task.attention_reason) : run ? '查看本次运行的步骤与证据。' : '还没有运行记录。'}</p>
       {(run || task.next_trigger_at || task.trigger_enabled === false) && <dl className="task-run-facts">
         {run && <div><dt>最近运行</dt><dd>{outcome}{run.settling ? ' · 正在收尾' : ''}</dd></div>}
         {run && <div><dt>开始时间</dt><dd>{run.started_at ? formatTaskDate(run.started_at) : '暂无开始记录'}</dd></div>}
