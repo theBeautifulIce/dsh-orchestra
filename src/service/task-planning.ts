@@ -405,8 +405,15 @@ function validWaitConfig(config: Record<string, unknown> | undefined): boolean {
 function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtimeNodeTypes: ReadonlySet<string>): WorkflowDoc {
   const parsed = generatedDocSchema.safeParse(fitGeneratedWorkflowLayout(draft))
   if (!parsed.success) {
+    const { issues } = parsed.error
+    const layoutOnly = issues.length > 0 && issues.every(({ path }) => {
+      const [nodes, index, position, axis] = path
+      return nodes === 'nodes' && typeof index === 'number' && position === 'position'
+        && (path.length === 3 || (path.length === 4 && (axis === 'x' || axis === 'y')))
+    })
     throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑生成的流程不符合约定结构', {
-      fields: parsed.error.issues.map((issue) => issue.path.join('.')).slice(0, 12),
+      fields: issues.slice(0, 12).map((issue) => issue.path.join('.')),
+      ...(layoutOnly && { planning_issue: 'layout' }),
     })
   }
   const source = parsed.data

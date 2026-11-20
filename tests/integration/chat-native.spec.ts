@@ -480,6 +480,25 @@ it('takes a new preference snapshot for an owner steer in an ordinary open turn'
   } finally { await test.close() }
 })
 
+it('offers manual dispatch when the automatic routing setting cannot be read', async () => {
+  const readRouting = vi.fn((): boolean => { throw new Error('settings unavailable') })
+  const test = await fixture({ routing: { get enabled() { return readRouting() } } })
+  try {
+    const human = test.session('work', 'parent')
+    const goal = '按负责人整理项目待办清单'
+    const assigned = user(goal)
+    await expect(human.admit(assigned)).resolves.toMatchObject({ kind: 'enter', messages: [assigned, {
+      source: { kind: 'plugin:dsh-orchestra', form: 'notice', summary: 'Orchestra 无法读取自动接管设置' },
+      content: [{ type: 'text', text: expect.stringContaining('/orchestra 任务内容') }],
+    }] })
+    expect(test.services.size).toBe(0)
+    await human.admit(user(`/orchestra ${goal}`))
+    await expect(human.call()).resolves.toMatchObject({ state: 'started' })
+    expect(readRouting).toHaveBeenCalledOnce()
+    expect(test.registered().prompt({ agent: human.agent })).toContain('relay its manual /orchestra option')
+  } finally { await test.close() }
+})
+
 it('keeps off-mode DSH and historical approvals, admits only the owner slash, and pins an in-flight turn', async () => {
   const routing = { enabled: false }
   const test = await fixture({ routing })
@@ -919,12 +938,12 @@ it('keeps approval, planning failure and terminal results in the originating DSH
 }, 16_000)
 
 it.each([
-  ['WORKFLOW_DEFINITION_INVALID', ['nodes.2.position.y'], '生成流程的布局未通过校验'],
-  ['WORKFLOW_DEFINITION_INVALID', ['nodes.2.position.y', 'nodes.2.type'], '规划模型生成的计划未通过校验'],
-  ['WORKFLOW_VALIDATION_FAILED', [], '规划模型生成的计划未通过校验'],
-] as const)('reports pre-launch %s (%j) without a nonexistent task or raw details', async (code, fields, heading) => {
+  ['WORKFLOW_DEFINITION_INVALID', ['nodes.2.position'], 'layout', '生成流程的布局未通过校验'],
+  ['WORKFLOW_DEFINITION_INVALID', ['nodes.2.position.y'], undefined, '规划模型生成的计划未通过校验'],
+  ['WORKFLOW_VALIDATION_FAILED', [], undefined, '规划模型生成的计划未通过校验'],
+] as const)('reports pre-launch %s (%j) without a nonexistent task or raw details', async (code, fields, issue, heading) => {
   const privateDetail = 'private provider failure with token=fixture-secret'
-  const test = await fixture({ planningError: new OrchError(code, privateDetail, { fields, planning_issue: privateDetail }) })
+  const test = await fixture({ planningError: new OrchError(code, privateDetail, { fields, planning_issue: issue ?? privateDetail }) })
   try {
     const human = test.session('work', 'parent')
     const assigned = user('请整理这些记录并交付报告')

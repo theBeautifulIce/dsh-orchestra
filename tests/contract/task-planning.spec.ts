@@ -92,7 +92,7 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
     return fetch(input, { ...init, headers })
   })
   return { endpoint: service.endpoint, client, api: createResourcesApi(client), planCommands: createTaskCommands(client),
-    db, catalog, commands, registry, publish }
+    planning: service.planning, db, catalog, commands, registry, publish }
 }
 
 it('配置走已认证 HTTP 写闸和回执，重开账本后仍生效，恢复默认保留宿主回退', async () => {
@@ -386,6 +386,37 @@ it('候选重排提拔较早发布的相关流程，模型拒绝候选时生成�
   expect(offered[2]).toEqual(offered[0])
   expect(offered[3]).toEqual([second.auto_workflow_id])
   expect(second.owner_task_id).not.toBe(first.owner_task_id)
+})
+
+it('标记整个坐标对象及坐标分量无效的流程布局错误', async () => {
+  const { planning } = await boot(async (input) => proposalFor(input), undefined, {
+    empty: true,
+    workflowGenerator: async () => ({ ...reviewDoc, nodes: [
+      { ...reviewDoc.nodes[0], position: null },
+      { ...reviewDoc.nodes[1], position: { x: 'left', y: 0 } },
+      { ...reviewDoc.nodes[2], position: { x: 0, y: 'top' } },
+    ] }),
+  })
+  await expect(planning.propose({ goal: '核对项目交付', requirements: [] }, 'host', now)).rejects.toMatchObject({
+    code: 'WORKFLOW_DEFINITION_INVALID',
+    details: { planning_issue: 'layout', fields: ['nodes.0.position', 'nodes.1.position.x', 'nodes.2.position.y'] },
+  })
+})
+
+it('诊断字段截断后仍区分第 13 项为结构错误的流程', async () => {
+  const { planning } = await boot(async (input) => proposalFor(input), undefined, {
+    empty: true,
+    workflowGenerator: async () => ({ name: reviewDoc.name, nodes: [
+      ...Array.from({ length: 6 }, (_, index) => ({ node_id: `draft_${index}`, position: { x: 'left', y: 'top' } })),
+      { node_id: 'bad_type', type: 1 },
+    ] }),
+  })
+  const error = await planning.propose({ goal: '核对项目交付', requirements: [] }, 'host', now).catch((error: unknown) => error)
+  expect(error).toMatchObject({
+    code: 'WORKFLOW_DEFINITION_INVALID',
+    details: { fields: Array.from({ length: 6 }, (_, index) => [`nodes.${index}.position.x`, `nodes.${index}.position.y`]).flat() },
+  })
+  expect(error).not.toHaveProperty('details.planning_issue')
 })
 
 it('模型返回未提供的新生成流程版本时拒绝持久化计划', async () => {
