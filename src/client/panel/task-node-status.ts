@@ -16,14 +16,17 @@ const QUEUE_PHASES: Record<string, { label: string; tone: string }> = {
   cancelled: { label: '已取消', tone: 'waiting' },
 }
 
-type NodeStatus = Pick<NodeRunView, 'status' | 'status_label' | 'execution_state'>
+type NodeStatus = Pick<NodeRunView, 'status' | 'status_label' | 'execution_state'> & Partial<Pick<NodeRunView, 'replacement_node_run_id'>>
 
 const STEP_STATUS = new Map([
   ['verifying', '核验中'],
   ['blocked_post', '执行结束，待人工处理'],
   ['orphaned', '执行者失联，尚未接手'],
-  ['superseded', '已由新尝试接替'],
 ])
+
+function supersededLabel(node: NodeStatus): string {
+  return node.replacement_node_run_id ? '已由新尝试接替' : '本次尝试已停止'
+}
 
 export function executionState(node: NodeStatus): string {
   return node.execution_state ?? node.status
@@ -40,14 +43,15 @@ export function nodeExecutionPhase(node: NodeStatus | null): { label: string; to
   if (FAILED.has(state)) return { label: '未成功', tone: 'failed' }
   if (state === 'queued') return { label: '等待调度', tone: 'waiting' }
   if (state === 'waiting') return { label: '等待条件', tone: 'waiting' }
-  if (state === 'superseded') return { label: '已被接替', tone: 'waiting' }
+  if (state === 'superseded') return { label: supersededLabel(node), tone: 'waiting' }
   return { label: operatorStatus(state), tone: 'waiting' }
 }
 
 export function nodeExecutionLabel(node: NodeStatus): string {
   const state = node.execution_state
   return (state && Object.hasOwn(QUEUE_PHASES, state) ? QUEUE_PHASES[state]!.label : undefined)
-    ?? STEP_STATUS.get(node.status) ?? (/\p{Script=Han}/u.test(node.status_label) ? operatorReason(node.status_label) : operatorStatus(node.status))
+    ?? (node.status === 'superseded' ? supersededLabel(node) : STEP_STATUS.get(node.status))
+    ?? (/\p{Script=Han}/u.test(node.status_label) ? operatorReason(node.status_label) : operatorStatus(node.status))
 }
 
 /** Only the persisted execution projection identifies which predecessors are still blocking a node. */

@@ -10,9 +10,11 @@ type StepRead = {
   runId: string
   reloadVersion: number
   retry: number
-} & ({ nodes: NodeRunView[]; partial: boolean; failed: false } | { nodes?: undefined; partial?: undefined; failed: true })
+  failed: boolean
+  data?: { nodes: NodeRunView[]; partial: boolean }
+}
 
-export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, reloadVersion: number) {
+export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, reloadVersion: number, retainPrevious = false) {
   const [snapshot, setSnapshot] = useState<StepRead>()
   const [retry, setRetry] = useState(0)
   useEffect(() => {
@@ -21,15 +23,18 @@ export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, relo
     const key = { api, runId, reloadVersion, retry }
     void api.listNodes(runId, PAGE_LIMIT).then(({ data }) => {
       if (data.items.some((node) => node.run_id !== runId)) throw new Error('步骤归属与当前运行不符')
-      if (active) setSnapshot({ ...key, nodes: data.items, partial: data.has_more ?? data.items.length >= PAGE_LIMIT, failed: false })
+      if (active) setSnapshot({ ...key, data: { nodes: data.items, partial: data.has_more ?? data.items.length >= PAGE_LIMIT }, failed: false })
     }).catch(() => {
-      if (active) setSnapshot({ ...key, failed: true })
+      if (active) setSnapshot((previous) => ({
+        ...key, failed: true, data: previous?.api === api && previous.runId === runId ? previous.data : undefined,
+      }))
     })
     return () => { active = false }
   }, [api, runId, reloadVersion, retry])
-  const current = snapshot?.api === api && snapshot.runId === runId
-    && snapshot.reloadVersion === reloadVersion && snapshot.retry === retry ? snapshot : undefined
-  return { nodes: current?.nodes, partial: current?.partial, failed: current?.failed, refresh: () => setRetry((value) => value + 1) }
+  const sameRun = snapshot?.api === api && snapshot.runId === runId ? snapshot : undefined
+  const current = sameRun?.reloadVersion === reloadVersion && sameRun.retry === retry ? sameRun : undefined
+  const data = retainPrevious ? sameRun?.data : current?.failed ? undefined : current?.data
+  return { nodes: data?.nodes, partial: data?.partial, failed: current?.failed, refresh: () => setRetry((value) => value + 1) }
 }
 
 const GROUPS = [
@@ -52,20 +57,25 @@ function queueGroup(node: NodeRunView): QueueGroup {
   return 'attention'
 }
 
-function StepRows({ nodes, titles, groupTitle, joinParents, namesakes }: {
-  nodes: readonly NodeRunView[]; titles: ReadonlyMap<string, string>; groupTitle?: string; joinParents?: readonly string[]
-  namesakes?: ReadonlyMap<string, string>
+type StepLabels = {
+  titles: ReadonlyMap<string, string>
+  namesakes: ReadonlyMap<string, string>
+  references: ReadonlyMap<string, string>
+}
+
+function StepRows({ nodes, labels, groupTitle, joinParents }: {
+  nodes: readonly NodeRunView[]; labels: StepLabels; groupTitle?: string; joinParents?: readonly string[]
 }) {
   return <ul className="task-step-overview">
     {nodes.map((node) => {
-      const waiting = waitingFor(node, titles)
+      const waiting = waitingFor(node, labels.references)
       const label = groupTitle && executionState(node) === 'queued' ? '排队原因未记录' : nodeExecutionLabel(node)
       return <li key={node.node_id} data-tone={nodeExecutionPhase(node).tone}>
-        <strong>{titles.get(node.node_id)}</strong>
-        {namesakes?.has(node.node_id) && <small>{namesakes.get(node.node_id)}</small>}
+        <strong>{labels.titles.get(node.node_id)}</strong>
+        {labels.namesakes.has(node.node_id) && <small>{labels.namesakes.get(node.node_id)}</small>}
         {label !== groupTitle && <span className="task-step-overview-status">{label}</span>}
         {node.attempt > 1 && <small>第 {node.attempt} 次尝试</small>}
-        {joinParents && joinParents.length > 1 && <small className="task-step-waiting">汇合 · 依赖 {parentTitle(joinParents, titles, namesakes)}</small>}
+        {joinParents && joinParents.length > 1 && <small className="task-step-waiting">汇合 · 依赖 {parentTitle(joinParents, labels)}</small>}
         {waiting && <small className="task-step-waiting">{waiting}</small>}
       </li>
     })}
@@ -74,8 +84,8 @@ function StepRows({ nodes, titles, groupTitle, joinParents, namesakes }: {
 
 type ParallelGroup = { key: string; parents: string[]; steps: NodeRunView[] }
 
-function parentTitle(ids: readonly string[], titles: ReadonlyMap<string, string>, namesakes?: ReadonlyMap<string, string>) {
-  return ids.map((id) => namesakes?.has(id) ? `${titles.get(id)}（${namesakes.get(id)}）` : titles.get(id)).join('、')
+function parentTitle(ids: readonly string[], labels: StepLabels) {
+  return ids.map((id) => labels.references.get(id)).join('、')
 }
 
 /** A group has one exact set of direct predecessors. Traversal order expresses dependencies. */
@@ -113,9 +123,8 @@ function boardGroups(steps: readonly NodeRunView[]): ParallelGroup[] | undefined
   return [...new Set(ordered.map(({ node_id }) => groupFor.get(node_id)!))]
 }
 
-function BoardSteps({ steps, titles, partial }: { steps: NodeRunView[]; titles: ReadonlyMap<string, string>; partial: boolean }) {
-  const groups = partial ? undefined : boardGroups(steps)
-  if (!groups) return <StepRows nodes={steps} titles={titles} />
+function stepLabels(steps: readonly NodeRunView[]): StepLabels {
+  const titles = new Map(steps.map((node, index) => [node.node_id, node.title || `未命名步骤 ${index + 1}`]))
   const byTitle = new Map<string, string[]>()
   for (const [id, title] of titles) {
     const matches = byTitle.get(title) ?? []
@@ -123,20 +132,32 @@ function BoardSteps({ steps, titles, partial }: { steps: NodeRunView[]; titles: 
     byTitle.set(title, matches)
   }
   const namesakes = new Map<string, string>()
+  const references = new Map(titles)
   for (const matches of byTitle.values()) {
-    if (matches.length > 1) matches.forEach((id, index) => namesakes.set(id, `同名步骤 ${index + 1}`))
+    if (matches.length < 2) continue
+    matches.sort().forEach((id, index) => {
+      const label = `同名步骤 ${index + 1}`
+      namesakes.set(id, label)
+      references.set(id, `${titles.get(id)}（${label}）`)
+    })
   }
+  return { titles, namesakes, references }
+}
+
+function BoardSteps({ steps, labels, partial }: { steps: NodeRunView[]; labels: StepLabels; partial: boolean }) {
+  const groups = partial ? undefined : boardGroups(steps)
+  if (!groups) return <StepRows nodes={steps} labels={labels} />
   return <div className="task-board-step-groups">
     {groups.map(({ key, parents, steps: group }) => {
-      if (group.length === 1) return <StepRows key={key} nodes={group} titles={titles} joinParents={parents} namesakes={namesakes} />
+      if (group.length === 1) return <StepRows key={key} nodes={group} labels={labels} joinParents={parents} />
       const active = group.filter((step) => ACTIVE_NODE_STATES.has(executionState(step))).length
       const done = group.filter((step) => executionState(step) === 'done').length
-      const upstream = parentTitle(parents, titles, namesakes)
+      const upstream = parentTitle(parents, labels)
       return <details key={key}>
         <summary><strong>{upstream ? `${upstream}之后` : '运行起点'} · {group.length} 个并行步骤</strong>
           <small>{done} / {group.length} 步完成{active > 0 && ` · ${active} 步执行中`}</small>
         </summary>
-        <StepRows nodes={group} titles={titles} namesakes={namesakes} />
+        <StepRows nodes={group} labels={labels} />
       </details>
     })}
   </div>
@@ -146,7 +167,7 @@ export function TaskStepOverview({ nodes, queue = false, partial = nodes.length 
   nodes: readonly NodeRunView[]; queue?: boolean; partial?: boolean
 }) {
   const steps = [...currentAttempts(nodes).values()]
-  const titles = new Map(steps.map((node, index) => [node.node_id, node.title || `未命名步骤 ${index + 1}`]))
+  const labels = stepLabels(steps)
   const groups = new Map<QueueGroup, NodeRunView[]>()
   if (queue) {
     for (const node of steps) {
@@ -163,10 +184,10 @@ export function TaskStepOverview({ nodes, queue = false, partial = nodes.length 
         const group = groups.get(id)
         return group && <section key={id} aria-label={title} className="task-flow-steps">
           <header className="task-flow-section-head"><h3>{title}</h3><span>{group.length} 步</span></header>
-          <StepRows nodes={group} titles={titles} groupTitle={title} />
+          <StepRows nodes={group} labels={labels} groupTitle={title} />
         </section>
       })}
-    </div> : <BoardSteps steps={steps} titles={titles} partial={partial} />}
+    </div> : <BoardSteps steps={steps} labels={labels} partial={partial} />}
     {partial && <p className="task-flow-empty">本次最多读取 {PAGE_LIMIT} 条尝试记录，可能还有步骤或较新的尝试未显示。</p>}
   </>
 }

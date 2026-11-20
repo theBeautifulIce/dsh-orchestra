@@ -30,7 +30,7 @@ const NODE_LABEL: Record<string, string> = {
   abandoned_unverified: '已停止跟踪，外部影响待核验',
   failed_with_unverified: '执行失败，外部影响待核验',
   orphaned: '没有新 attempt 接手',
-  superseded: '已被新 attempt 取代',
+  superseded: '本次尝试已停止',
 }
 
 export function nodeDisplayStatus(status: string, settling: boolean): string {
@@ -83,6 +83,11 @@ export type NodeRunView = {
 }
 
 type NodeRow = Record<string, unknown> & { node_run_id: string; status: string; run_id: string }
+
+function wasCancelled(row: NodeRow): boolean {
+  return row.status === 'superseded' && Boolean(row.cancel_requested_at) && !row.replacement_node_run_id
+}
+
 const NODE_VIEW_SELECT = `SELECT n.*, s.resolution_basis,
   COALESCE(s.decision_id, (
     SELECT d.decision_id FROM node_run_events e JOIN decisions d
@@ -103,6 +108,8 @@ const NODE_VIEW_SELECT = `SELECT n.*, s.resolution_basis,
 
 function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], executionIds: string[], model?: NodeRunView['model_assignment'],
   doc?: { title: string; declaredEffect: EffectVerdict | null }): NodeRunView {
+  const replacement = typeof row.replacement_node_run_id === 'string' ? row.replacement_node_run_id : null
+  const label = wasCancelled(row) ? '已取消' : row.status === 'superseded' && replacement ? '已由新尝试接替' : NODE_LABEL[row.status] ?? row.status
   const declared = doc?.declaredEffect ?? null
   const verified = row.resolution_basis === 'verified_none' ? 'not_applied'
     : row.resolution_basis === 'evidence' || row.resolution_basis === 'decision' ? 'applied' : null
@@ -123,7 +130,7 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     attempt: Number(row.attempt ?? 0),
     status: String(row.status),
     display_status: nodeDisplayStatus(String(row.status), settling),
-    status_label: NODE_LABEL[String(row.status)] ?? String(row.status),
+    status_label: label,
     revision: Number(row.revision ?? 0),
     side_effect_policy: String(row.side_effect_policy ?? 'compensable'),
     side_effect_verified_none: Number(row.side_effect_verified_none ?? 0) === 1,
@@ -143,7 +150,7 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     stop_evidence: typeof row.stop_evidence === 'string' ? row.stop_evidence : null,
     hang_reason: typeof row.hang_reason === 'string' ? row.hang_reason : null,
     recovery_uncertain: typeof row.recovery_uncertain === 'string' ? row.recovery_uncertain : null,
-    replacement_node_run_id: typeof row.replacement_node_run_id === 'string' ? row.replacement_node_run_id : null,
+    replacement_node_run_id: replacement,
     heartbeat_at: typeof row.heartbeat_at === 'string' ? row.heartbeat_at : null,
     started_at: typeof row.started_at === 'string' ? row.started_at : null,
     created_at: String(row.created_at ?? ''),
@@ -218,7 +225,7 @@ function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: 
     const state = (execution_state: string, waiting_on: string[] = []) => ({
       execution_state, waiting_on, ...(binding?.definition_json && preds ? { depends_on } : {}),
     })
-    if (row.status === 'superseded' && row.cancel_requested_at && !row.replacement_node_run_id) return state('cancelled')
+    if (wasCancelled(row)) return state('cancelled')
     if (row.status !== 'queued') return state(row.status)
     if (binding?.cancel_requested_at) return state('cancelled')
     if (binding?.status === 'paused' || reworkBlocksNode(tx, row.node_run_id)) return state('paused')

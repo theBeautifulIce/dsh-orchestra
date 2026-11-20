@@ -42,7 +42,7 @@ it('groups actual siblings beneath one card and keeps partial joins and separate
     expect(groups[0]?.querySelector('summary')?.textContent).toContain('运行起点')
     expect(groups[1]?.querySelector('summary')?.textContent).toContain('收集资料')
     expect(groups[2]?.querySelector('summary')?.textContent).toContain('复核')
-    expect(groups[2]?.querySelector('summary')?.textContent).toContain('同名步骤 2')
+    expect(groups[2]?.querySelector('summary')?.textContent).toContain('同名步骤 1')
     expect(groups[1]?.open).toBe(false)
     await view.click(groups[1]!.querySelector('summary')!)
     expect(groups[1]?.open).toBe(true)
@@ -53,7 +53,7 @@ it('groups actual siblings beneath one card and keeps partial joins and separate
       const row = view.findAll('.task-card-steps li').find((item) => item.querySelector('strong')?.textContent === title)
       expect(row).toBeDefined()
       expect(row?.closest('details')).toBeNull()
-      if (title === '部分汇合') expect(row?.textContent).toContain('汇合 · 依赖 复核（同名步骤 2）、复核（同名步骤 1）')
+      if (title === '部分汇合') expect(row?.textContent).toContain('汇合 · 依赖 复核（同名步骤 1）、复核（同名步骤 2）')
     }
     expect(service.calls.map(({ path }) => path)).toEqual(['/v1/tasks', '/v1/node-runs'])
   } finally { view.unmount() }
@@ -123,5 +123,42 @@ it('replaces loading and failed reads without displaying another run’s topolog
     await view.flush()
     expect(view.text()).toContain('步骤读取失败')
     expect(view.text()).not.toContain('错误运行的步骤')
+  } finally { view.unmount() }
+})
+
+it('keeps a focused and open branch mounted during a same-run refresh, failure and retry', async () => {
+  const first = deferred<FakeReply>()
+  const second = deferred<FakeReply>()
+  const nodes = [step('a', '复核甲', []), step('b', '复核乙', [])]
+  let reads = 0
+  const service = createFakeService(({ path }) => {
+    if (path === '/v1/tasks') return { ok: true, data: page([task]) }
+    reads++
+    return reads === 1 ? { ok: true, data: { items: nodes } } : reads === 2 ? first.promise : second.promise
+  })
+  const api = createResourcesApi(createApiClient('http://panel.test', service.fetcher))
+  const screen = (reloadVersion: number) => <TaskListScreen api={api} onSelectTask={() => {}} reloadVersion={reloadVersion} />
+  const view = await renderPanel(screen(0))
+  try {
+    await view.click(view.container.querySelector('[aria-label="展开步骤：运行复核"]')!)
+    const summary = view.container.querySelector<HTMLElement>(`${groupSelector} summary`)!
+    const branch = summary.closest('details')!
+    summary.focus()
+    await view.click(summary)
+    await view.rerender(screen(1))
+    await view.flush()
+    expect(view.container.querySelector(`${groupSelector} summary`)).toBe(summary)
+    expect(document.activeElement).toBe(summary)
+    expect(branch.open).toBe(true)
+    await act(async () => first.resolve({ ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'fixture', retryable: true } }))
+    expect(view.container.querySelector('.task-card-steps [role="alert"]')?.textContent).toContain('仍显示上次读取结果')
+    expect(document.activeElement).toBe(summary)
+    expect(branch.open).toBe(true)
+    await view.click(view.container.querySelector('.task-card-steps [role="alert"] button')!)
+    await act(async () => second.resolve({ ok: true, data: { items: [{ ...nodes[0]!, title: '已更新的复核甲' }, nodes[1]] } }))
+    expect(view.container.querySelector(`${groupSelector} summary`)).toBe(summary)
+    expect(branch.open).toBe(true)
+    expect(branch.textContent).toContain('已更新的复核甲')
+    expect(view.container.querySelector('.task-card-steps [role="alert"]')).toBeNull()
   } finally { view.unmount() }
 })

@@ -329,17 +329,20 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, api, 
         aria-label={`${expanded ? '收起' : '展开'}步骤：${task.title || '未命名任务'}`}
         onClick={onExpand}>{expanded ? '收起步骤' : '展开步骤'}</button>
       <div id={stepsId} hidden={!expanded}>
-        {expanded && <CardSteps api={api} runId={task.current_run_id} reloadVersion={reloadVersion} />}
+        {expanded && <CardSteps key={task.current_run_id} api={api} runId={task.current_run_id} reloadVersion={reloadVersion} />}
       </div>
     </div>}
   </article>
 }
 
 function CardSteps({ api, runId, reloadVersion }: { api: ResourcesApi; runId: string; reloadVersion: number }) {
-  const { nodes, partial, failed, refresh } = useRunStepSnapshot(api, runId, reloadVersion)
-  if (failed) return <p role="alert">步骤读取失败。<button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>
-  if (!nodes) return <p role="status">正在读取步骤…</p>
-  return <TaskStepOverview nodes={nodes} partial={partial} />
+  const { nodes, partial, failed, refresh } = useRunStepSnapshot(api, runId, reloadVersion, true)
+  return <>
+    {failed && <p role="alert">{nodes ? '步骤刷新失败，仍显示上次读取结果。' : '步骤读取失败。'}
+      <button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>}
+    {!nodes && !failed && <p role="status">正在读取步骤…</p>}
+    {nodes && <TaskStepOverview nodes={nodes} partial={partial} />}
+  </>
 }
 
 function TaskRisk({ level }: { level: TaskSummary['max_side_effect_level'] }) {
