@@ -221,8 +221,8 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
   if (scope !== MEMORY_APPROVAL && tx.get('SELECT 1 FROM memory_batches WHERE decision_id = ?', [req.decisionId])) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆审批必须同时记录批次批准快照')
   }
-  const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string }>(
-    'SELECT status, payload_json, approver, confirm_required, run_id FROM decisions WHERE decision_id = ?',
+  const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string; node_run_id: string | null }>(
+    'SELECT status, payload_json, approver, confirm_required, run_id, node_run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
   )
   if (!current) {
@@ -237,10 +237,19 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
   if (!actor) {
     throw new OrchError('FORBIDDEN', '必须说明批准人', { approver: current.approver })
   }
+  const producers = [...(req.evidenceProducers ?? [])]
+  if (actor.kind === 'agent') {
+    const aliases = actor.id.startsWith('agent:') ? [actor.id, actor.id.slice(6)] : [actor.id, 'agent:' + actor.id]
+    const produced = tx.get('SELECT 1 FROM node_runs n WHERE n.run_id = ? AND (? IS NULL OR n.node_run_id = ?)'
+      + ' AND (n.executor_agent_id IN (?, ?) OR EXISTS (SELECT 1 FROM bridge_stream_cursors c'
+      + ' WHERE c.node_run_id = n.node_run_id AND c.attempt = n.attempt AND c.executor_agent_id IN (?, ?))) LIMIT 1',
+    [current.run_id, current.node_run_id, current.node_run_id, ...aliases, ...aliases])
+    if (produced) producers.push(actor.id)
+  }
   assertApprover({
     approver: current.approver as Approver,
     actor,
-    evidenceProducers: req.evidenceProducers,
+    evidenceProducers: producers,
   })
   const closing = FINAL_RESOLUTIONS.includes(req.resolution)
   const nextStatus = closing ? 'resolved' : current.status

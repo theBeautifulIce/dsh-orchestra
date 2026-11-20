@@ -199,8 +199,8 @@ export function createReworkPlanningHost(db: Db, secret: string, planner?: Rewor
 }
 
 /** Custom host adapters may ignore the abort signal; always free the service slot at the deadline. */
-export async function callBoundedPlanner(planner: ReworkPlanner, state: unknown) {
-  const abort = AbortSignal.timeout(45_000)
+export async function callBoundedPlanner(planner: ReworkPlanner, state: unknown, timeoutMs = 45_000) {
+  const abort = AbortSignal.timeout(timeoutMs)
   let rejectTimeout: () => void = () => {}
   const deadline = new Promise<never>((_, reject) => {
     rejectTimeout = () => reject(new OrchError('OPERATION_TIMEOUT', '主脑规划超时，请稍后重试或人工处理'))

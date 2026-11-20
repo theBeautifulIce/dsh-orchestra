@@ -30,6 +30,7 @@ export type WorkflowNodeDef = {
   type: NodeType
   side_effect_policy?: 'pure' | 'compensable' | 'irreversible'
   tools?: { allow?: string[]; deny?: string[] }
+  verifier?: { toolPolicy?: { allow?: string[]; deny?: string[] } }
   // 节点自带的通过条件；和模板条件取 AND（规格 6.1 行 837）
   pass_conditions?: PassCondition[]
   // 节点要求的必留哈希；和模板要求取并集（规格 4.7 行 380）
@@ -47,6 +48,7 @@ export type WorkflowDefinition = {
   pass_conditions?: PassCondition[]
   // 模板级必留哈希；不可逆节点的通过凭据（规格 4.7 行 380）
   required_hashes?: string[]
+  verifier?: WorkflowNodeDef['verifier']
   nodes: WorkflowNodeDef[]
   // 执行拓扑：B 必须等 A 时给一条 a→b。没有边 = 全部可并行（旧定义兼容）。
   edges?: Array<{ from: string; to: string }>

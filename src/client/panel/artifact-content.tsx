@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { ArtifactContentMode, ArtifactContentView, RunArtifact } from '../api/types.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
@@ -23,7 +23,7 @@ function saveArtifact(artifact: Download): void {
 }
 
 export function artifactContentKey(artifact: RunArtifact): string {
-  return JSON.stringify([artifact.run_id, artifact.artifact_id, artifact.sha256, artifact.file_name])
+  return JSON.stringify([artifact.run_id, artifact.artifact_id, artifact.sha256, artifact.file_name, artifact.retain_until])
 }
 
 export function matchesArtifactContent(content: ArtifactContentView, artifact: RunArtifact): boolean {
@@ -32,8 +32,29 @@ export function matchesArtifactContent(content: ArtifactContentView, artifact: R
 
 type ArtifactContentProps = { api: ResourcesApi; artifact: RunArtifact }
 
+export function useArtifactRetention(artifact?: RunArtifact): 'available' | 'expired' | 'invalid' {
+  const [, refresh] = useState(0)
+  const deadline = artifact?.retain_until == null ? Infinity : Date.parse(artifact.retain_until)
+  const markedExpired = artifact?.expired === true
+  useEffect(() => {
+    if (markedExpired || !Number.isFinite(deadline) || deadline <= Date.now()) return
+    let timer: number | undefined
+    const check = () => {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) refresh(tick => tick + 1)
+      else timer = window.setTimeout(check, Math.min(remaining, 2_147_483_647))
+    }
+    check()
+    return () => window.clearTimeout(timer)
+  }, [markedExpired, deadline])
+  if (markedExpired || deadline <= Date.now()) return 'expired'
+  return Number.isNaN(deadline) ? 'invalid' : 'available'
+}
+
 export function ArtifactContent({ api, artifact }: ArtifactContentProps) {
-  if (artifact.expired) return <p style={noteStyle}>已超过保留期限。仍可查看登记记录。</p>
+  const retention = useArtifactRetention(artifact)
+  if (retention === 'expired') return <p style={noteStyle}>已超过保留期限。仍可查看登记记录。</p>
+  if (retention === 'invalid') return <p style={noteStyle}>产物保留期限未通过校验。仍可查看登记记录。</p>
   if (!artifact.file_name) return <p style={noteStyle}>这份产物仅有登记记录，内容尚未入库。</p>
   return <ArtifactContentReader key={artifactContentKey(artifact)} api={api} artifact={artifact} />
 }
@@ -54,6 +75,7 @@ function ArtifactContentReader({ api, artifact }: ArtifactContentProps) {
     try {
       const { data } = await api.getArtifactContent(artifact.run_id, artifact.artifact_id, mode)
       if (!active.current) return
+      if (artifact.retain_until !== null && Date.parse(artifact.retain_until) <= Date.now()) return
       if (data.kind !== mode || !matchesArtifactContent(data, artifact)) {
         throw new Error('返回的内容与登记记录不一致，请刷新')
       }

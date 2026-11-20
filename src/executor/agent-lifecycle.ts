@@ -31,6 +31,7 @@ export type AgentLifecycleDeps = {
   allowedTools: string[]
   nodeRunId: string
   attempt: number
+  lease?: { lease_id: string; action_generation: number }
   agent: ExecutorAgent
   instruction: string
   timeoutMs: number
@@ -74,6 +75,7 @@ export class AgentLifecycle {
       nodeRunId: deps.nodeRunId,
       attempt: deps.attempt,
       executorAgentId: deps.agent.agentId,
+      lease: deps.lease,
       nowAt: deps.nowAt,
       clock: deps.clock,
     })

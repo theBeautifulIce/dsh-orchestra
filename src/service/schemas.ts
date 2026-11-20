@@ -143,6 +143,12 @@ const passConditionSchema = z.looseObject({
   value: z.unknown().optional(),
 })
 
+const toolPolicySchema = z.looseObject({
+  allow: z.array(z.string().max(LIMITS.toolCommandMaxLength)).max(LIMITS.toolsMaxCount).optional(),
+  deny: z.array(z.string().max(LIMITS.toolCommandMaxLength)).max(LIMITS.toolsMaxCount).optional(),
+})
+const verifierSchema = z.looseObject({ toolPolicy: toolPolicySchema.optional() })
+
 // 加载定义：定义哈希按整个 body 算，未知键必须原样保留，所以用 looseObject
 export const workflowLoadSchema = z.looseObject({
   // 工作流命名空间；省略即 default，旧客户端不需要改
@@ -153,10 +159,9 @@ export const workflowLoadSchema = z.looseObject({
     node_id: identifier,
     // 节点类型不在这里收成枚举：未知类型要落到目录层判 SCHEMA_VERSION_UNSUPPORTED（422）
     type: z.string().min(1).max(LIMITS.statusMaxLength).optional(),
-    tools: z.looseObject({
-      allow: z.array(z.string().max(LIMITS.toolCommandMaxLength)).max(LIMITS.toolsMaxCount).optional(),
-      deny: z.array(z.string().max(LIMITS.toolCommandMaxLength)).max(LIMITS.toolsMaxCount).optional(),
-    }).optional(),
+    side_effect_policy: z.enum(['pure', 'compensable', 'irreversible']).optional(),
+    tools: toolPolicySchema.optional(),
+    verifier: verifierSchema.optional(),
     pass_conditions: z.array(passConditionSchema).max(LIMITS.passConditionsMaxCount).optional(),
     required_hashes: z.array(z.string().min(1).max(LIMITS.identifierMaxLength)).max(LIMITS.requiredHashesMaxCount).optional(),
     // 控制节点配置属于定义内容，随定义一起被哈希固定
@@ -178,6 +183,7 @@ export const workflowLoadSchema = z.looseObject({
   })).max(LIMITS.nodesMaxCount),
   pass_conditions: z.array(passConditionSchema).max(LIMITS.passConditionsMaxCount).optional(),
   required_hashes: z.array(z.string().min(1).max(LIMITS.identifierMaxLength)).max(LIMITS.requiredHashesMaxCount).optional(),
+  verifier: verifierSchema.optional(),
 })
 
 // 建 run：标题与版本号都要有，节点清单可选但有上限

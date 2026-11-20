@@ -7,6 +7,7 @@
 import { type Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import { OrchError } from '../../core/errors.ts'
+import { isReleaseWorkflow } from '../../core/wf-release-v1.ts'
 import { assertNoMemoryWriteToolOnSurface } from '../../core/memory-graph.ts'
 import { resolveTaskSessionToolPolicy } from '../../executor/session.ts'
 import {
@@ -371,7 +372,8 @@ export type PublishResult = {
 }
 
 /** 规格 6.2：步骤 2–9 同笔事务，任何一步失败整笔回滚 */
-type DraftTestPolicy = { requireTest?: boolean; tools?: ToolRegistry; catalog?: Pick<WorkflowCatalog, 'validateDefinition'> }
+type DraftTestPolicy = { requireTest?: boolean; tools?: ToolRegistry;
+  catalog?: Pick<WorkflowCatalog, 'validateDefinition'> & Partial<Pick<WorkflowCatalog, 'requireWorkflowCapability'>> }
 
 function checkDraftTools(doc: WorkflowDoc, registry?: ToolRegistry): ValidationIssue[] {
   return doc.nodes.flatMap((node, index) => {
@@ -449,6 +451,10 @@ export function testWorkflowDraft(tx: Tx, p: { workflowId: string; revision: num
 }
 
 export function publishDraft(tx: Tx, p: PublishParams, ctx: PublishContext, policy: DraftTestPolicy = {}): PublishResult {
+  if (isReleaseWorkflow(p.workflowId)) {
+    policy.catalog?.requireWorkflowCapability?.(p.workflowId)
+    throw new OrchError('FORBIDDEN', '内置发布流程只允许通过专用受信入口登记')
+  }
   if (typeof p.note !== 'string' || p.note.trim().length === 0 || p.note.length > 500) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '发布说明必须是 1–500 字', { publish_note: p.note })
   }

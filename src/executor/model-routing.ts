@@ -1,9 +1,20 @@
 import { OrchError } from '../core/errors.ts'
 
-export const MODEL_COMPLEXITIES = ['routine', 'standard', 'complex'] as const
+export const MODEL_COMPLEXITIES = ['routine', 'standard', 'advanced', 'complex', 'expert'] as const
 export type ModelComplexity = (typeof MODEL_COMPLEXITIES)[number]
 
+export const MODEL_LEVELS = {
+  routine: { label: '常规', description: '规则明确的整理、提取或格式转换' },
+  standard: { label: '中等', description: '根据少量资料做独立分析或核对' },
+  advanced: { label: '进阶', description: '串联多项依赖或综合多份证据' },
+  complex: { label: '复杂', description: '处理难以验证的证据、冲突判断或较高的失败代价' },
+  expert: { label: '专家', description: '解决高度不确定的跨领域问题，或作出高代价的关键判断' },
+} satisfies Record<ModelComplexity, { label: string; description: string }>
+export const MODEL_REF_RE = /^[\w./:@+-]{1,128}$/
+export const MODEL_NOTE_MAX_LENGTH = 160
+
 export type ModelProfile = { ref: string; capacity: ModelComplexity }
+export type ModelPlanningProfile = ModelProfile & { user_note: string }
 export type ModelRecommendation = { complexity: ModelComplexity; reason: string; preferredModel?: string }
 export type ModelUse = { provider: string; model: string; observed_request_headers: number }
 export type ModelAssignment = { model_ref: string; complexity: ModelComplexity; reason: string; usage?: ModelUse; settings_revision?: number }
@@ -34,7 +45,7 @@ export function selectExecutionModel(profiles: readonly ModelProfile[], recommen
   if (minimum < 0 || !reason || reason.length > 240) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑的模型建议缺少合法复杂度或依据')
   }
-  const eligible = profiles.filter((profile) => /^[\w./:@+-]{1,128}$/.test(profile.ref)
+  const eligible = profiles.filter((profile) => MODEL_REF_RE.test(profile.ref)
     && MODEL_COMPLEXITIES.indexOf(profile.capacity) >= minimum)
   const profile = recommendation.preferredModel === undefined
     ? eligible.sort((left, right) => MODEL_COMPLEXITIES.indexOf(left.capacity) - MODEL_COMPLEXITIES.indexOf(right.capacity))[0]

@@ -1,6 +1,7 @@
 import { rememberManualDispatchSpecs, resolveManualReworkSpecs } from './service/rework-dispatch-specs.ts'
+import { configureReceiptRetention } from './service/receipt-retention.ts'
 // src/index.ts —— DSH 插件入口 + 生产装配（规格 12.5 行 1088-1092）
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync, statSync } from 'node:fs'
 import { OrchError } from './core/errors.ts'
 import { openDb, type Db } from './infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from './infra/db/migrate.ts'
@@ -12,7 +13,11 @@ import { createRun, reserveTask } from './service/runs.ts'
 import { createWorkflowCommand, openDraftCommand, updateDraftCommand, publishWorkflowCommand, publishContextFor, setWorkflowStatus, getWorkflow as getWorkflowSummary, listWorkflows as listWorkflowSummaries } from './service/commands/workflows.ts'
 import { getWorkflowDraftTest, testWorkflowDraft } from './service/commands/workflows.ts'
 import { withReadTx } from './service/queries/read-tx.ts'
-import { requireCapability } from './core/config.ts'
+import { phaseIndex, requireCapability } from './core/config.ts'
+import { sweepIntake } from './service/trial-access.ts'
+export { createIntakeControl, type IntakeOptions } from './service/trial-access.ts'
+import { bindTrialHost, type TrialOptions } from './service/trial-circles.ts'
+export type { TrialOptions, TrialScope } from './service/trial-circles.ts'
 import { startRun } from './service/commands/start-run.ts'
 import { setTaskArchive } from './service/commands/task-archive.ts'
 import { createTaskTriggerHost } from './service/task-triggers.ts'
@@ -73,6 +78,10 @@ import { createDeliveryReviewHost } from './service/delivery-review.ts'
 import { createReworkPlanningHost, type ReworkPlanner } from './service/rework-planning.ts'
 import { callDshRework } from './service/dsh-rework.ts'
 import { createReworkInspectionHost } from './service/rework-inspection.ts'
+import { createModelEscalationHost } from './service/model-escalation.ts'
+import { createReleaseWorkflowHost, type ReleaseWorkspace } from './service/release-workflow.ts'
+import { isReleaseWorkflow, RELEASE_CHECK_WORKFLOW_ID, RELEASE_GROUPS, type ReleaseGroup } from './core/wf-release-v1.ts'
+import { commandHashOf, resolveInside } from './executor/tools.ts'
 import { createModelRoutingSettingsHost } from './service/model-routing-settings.ts'
 export type { ModelRouting, ModelRoutingContext, ModelComplexity, ModelRecommendation, ModelProfile } from './executor/model-routing.ts'
 export { createDshExecutor, createDshPlanningCallback, type DshExecutionModel } from './executor/dsh-host.ts'
@@ -152,7 +161,10 @@ export type OrchestraOptions = {
   dbFile: string
   secret: string
   phase: Phase
+  trial?: TrialOptions
   planning?: TaskPlanningOptions
+  reworkPlanner?: ReworkPlanner
+  release?: Omit<ReleaseWorkspace, 'runGroup'> & { checkDirectories: Record<ReleaseGroup, string> }
   collaboration?: boolean
   log?: Logger
   // 生产执行器：装配了就开 /v1/node-runs/run，没装配时该路由明确报未配置（审计 F-01）
@@ -168,9 +180,12 @@ export type OrchestraOptions = {
 
 export type Orchestra = {
   db: Db
+  trial?: ReturnType<typeof bindTrialHost>
   runtime: RuntimeDeps
   catalog: WorkflowCatalog
   commands: NodeCommands
+  modelEscalation?: ReturnType<typeof createModelEscalationHost>
+  release?: ReturnType<typeof createReleaseWorkflowHost>
   // 执行中取消的进程内注册表：账本记取消事实，这里把 AbortSignal 送到对应的 runNode
   cancels: ExecutionCancels
   close: () => void
@@ -191,15 +206,23 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     throw new OrchError('FORBIDDEN', '建 orchestra 必须走 openServiceOrchestra：单写者锁与 epoch 是启动前提', {})
   }
   const db = opts.db ?? openDb(opts.dbFile)
+  const configPath = opts.configPath ?? 'orchestra.config.json'
+  if (existsSync(configPath)) configureReceiptRetention(db, loadConfig(configPath).retention)
   applySteps(db, loadSteps(defaultMigrationsDir()))
+  if (opts.trial && opts.phase !== 'S6') throw new OrchError('FORBIDDEN', '试用圈仅在 S6 开放')
+  const trial = opts.trial ? bindTrialHost(db, opts.trial, opts.executor?.runner.root) : undefined
   const registry = opts.executor?.registry
-  const catalog = new WorkflowCatalog(opts.phase, db, registry ? name => registry.lookup(name)?.capability === 'read_only' : undefined)
+  const catalog = new WorkflowCatalog(opts.phase, db, registry ? name => registry.lookup(name)?.capability === 'read_only' : undefined, registry)
   // 定义落库是跨重启的事实来源：不先把已签发的版本装回内存，重启后同版本会被当成新定义（第六轮审计 P1-1）
   catalog.hydrate()
   // 生产时钟：墙钟与单调钟同时取样，漂移超过 2 秒就判不确定（规格 3.4 行 171）
   const clock = new SystemClock(randomUUID())
   const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
   const executor = opts.executor
+  const modelEscalation = opts.phase === 'S6' && executor?.modelRouting
+    ? createModelEscalationHost(db, opts.secret, executor.modelRouting.profiles, opts.reworkPlanner,
+      (error) => opts.log?.error('模型诊断失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }))
+    : undefined
   const spillDir = executor?.spillDir ?? opts.spillDir ?? bridgeSpillDirFromConfig(opts.configPath)
   // 执行时限同样只能来自配置：不把 action_timeout_ms / startup_timeout_ms / verify_timeout_ms
   // 读进来，配置写了也不生效（复审 P2-1）。读不到就交给 runNode 的默认值。
@@ -207,7 +230,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   const agents = executor ? (executor.agents ?? bridgeHostAgentFactory(executor.bridge)) : null
   const cancels = new ExecutionCancels()
   const executorDeps: RunNodeDeps | null = executor && agents
-    ? { runtime, db, secret: opts.secret, ...executor, agents, ...(spillDir ? { spillDir } : {}) }
+    ? { runtime, db, secret: opts.secret, ...executor, agents, modelEscalation, ...(spillDir ? { spillDir } : {}) }
     : null
   // 节点执行只有一个底层实现；调度只在装配层包一次（S2 第三十七轮 P0-01）。
   const executeNode = async (p: RunNodeParams): Promise<RunNodeResult> => {
@@ -225,13 +248,52 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   // 不允许 dispatcher 自己再排一次，否则同一次执行会重复占两个并发名额。
   const executeScheduled = (p: RunNodeParams): Promise<RunNodeResult> =>
     runThroughScheduler(opts.scheduler, () => executeNode(p), { label: p.nodeId })
+  const releaseOptions = opts.release
+  const release = releaseOptions && (() => {
+    requireCapability(opts.phase, 'release')
+    const descriptor = registry?.lookup(RELEASE_CHECK_WORKFLOW_ID)
+    if (!executorDeps || descriptor?.capability !== 'read_only') {
+      throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '发布运行需要已隔离的生产执行器与固定只读检查命令')
+    }
+    const root = executorDeps.runner.root
+    const groupDirectories = new Map((Object.keys(RELEASE_GROUPS) as ReleaseGroup[]).map((group) => {
+      const configured = releaseOptions.checkDirectories[group]
+      if (typeof configured !== 'string') throw new OrchError('PAYLOAD_SCHEMA_INVALID', '缺少发布检查组的隔离目录', { group })
+      const cwd = realpathSync(resolveInside(root, configured))
+      if (!statSync(cwd).isDirectory()) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '发布检查组路径必须是目录', { group })
+      return [group, resolveInside(root, cwd)]
+    }))
+    if (new Set(groupDirectories.values()).size !== groupDirectories.size) {
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '发布检查组必须使用各自登记的隔离目录')
+    }
+    const hashes = new Map([...groupDirectories].map(([group, cwd]) => [group, commandHashOf(descriptor.command.bin, descriptor.command.args, cwd, root)]))
+    return createReleaseWorkflowHost({ db, secret: opts.secret, catalog, clock, workspace: { ...releaseOptions,
+      verifyGroup(request) { return hashes.get(request.group) === request.execution.command_hash && releaseOptions.verifyGroup(request) },
+      async runGroup(request) {
+        const started = new Date().toISOString()
+        const cwd = groupDirectories.get(request.group)!
+        await executeScheduled({ nodeRunId: request.check_node_run_id, nodeId: 'check', attempt: 1,
+          input: { ...request, instruction: '调用固定检查工具一次，用检查结果说明本组证据。' }, outputSchema: {},
+          tools: [{ command: RELEASE_CHECK_WORKFLOW_ID, args: [], cwd, timeoutMs: 120_000 }], releaseCheckCwd: cwd,
+          now: started, ownerEpoch: db.epoch, leaseTtlMs: DEFAULT_LEASE_TTL_MS, ...executionLimits })
+        inTx(db, (tx) => closeRun(tx, opts.secret, request.child_run_id, new Date().toISOString()))
+      },
+    } })
+  })()
+  function assertOrdinaryRun(id: string, byNode = false) {
+    const row = db.raw.prepare(byNode
+      ? 'SELECT r.workflow_id FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?'
+      : 'SELECT workflow_id FROM runs WHERE run_id=?').get(id) as { workflow_id?: string } | undefined
+    if (isReleaseWorkflow(row?.workflow_id)) throw new OrchError('FORBIDDEN', '发布运行只能通过专用受信入口推进')
+  }
   const commands: NodeCommands = {
     listRecoveryUncertain: () => listRecoveryUncertain(db),
     resolveRecoveryUncertain: (b) => inTx(db, (tx) => resolveRecoveryUncertain(tx, opts.secret, b)),
-    acquireLease: (b) => acquireNodeRun(runtime, b),
-    renewLease: (b) => renewNodeLease(runtime, b),
-    report: (b) => submitReport(runtime, b as Parameters<typeof submitReport>[1]),
+    acquireLease: (b) => { assertOrdinaryRun(b.nodeRunId, true); return acquireNodeRun(runtime, b) },
+    renewLease: (b) => { assertOrdinaryRun(b.nodeRunId, true); return renewNodeLease(runtime, b) },
+    report: (b) => { assertOrdinaryRun(b.nodeRunId, true); return submitReport(runtime, b as Parameters<typeof submitReport>[1]) },
     cancel: (b) => {
+      assertOrdinaryRun(b.nodeRunId, true)
       const out = submitCancel(runtime, { ...b, cancelResult: b.cancelResult as CancelResult })
       // 账本先落取消事实，再把停止请求送到正在跑的那个 attempt；
       // 已停的节点没有在跑实例，不打断任何东西。
@@ -268,7 +330,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       const out = inTx(db, (tx) => publishWorkflowCommand(tx, {
       workflowId: b.workflowId, revision: b.revision, baseVersion: b.baseVersion, note: b.note,
       actor: b.actor, now: b.now, operationId: b.operationId,
-    }, publishContextFor(tx, RUNTIME_NODE_TYPES), { requireTest: opts.phase === 'S5', tools: opts.executor?.registry, catalog }))
+    }, publishContextFor(tx, RUNTIME_NODE_TYPES), { requireTest: phaseIndex(opts.phase) >= phaseIndex('S5'), tools: opts.executor?.registry, catalog }))
       // 发布成功 = 当前进程立即可跑：目录同步注册，哈希不符会当场抛（审计 P1-1）
       catalog.adopt(out.definition, out.definition_hash)
       return out
@@ -301,7 +363,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     },
     acknowledgeDecision: (b) => inTx(db, (tx) => acknowledgeDecision(tx, b)),
     resolveDecision: (input) => inTx(db, (tx) => {
-      const { operationId, now, confirmChallenge, ...b } = input
+      const { operationId, now, confirmChallenge, bindActor, ...b } = input
       return runDecisionCommand(tx, opts.secret, input, requestHashOf('decision.resolve', b), false, (confirmed, requireEffectSettlement) => {
         const out = resolveDecision(tx, opts.secret, {
           decisionId: b.decisionId,
@@ -363,14 +425,13 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         now: b.now,
       }),
     })),
-    wakeOnEvent: (b) => inTx(db, (tx) => wakeOnEvent(tx, opts.secret, {
-      runId: b.runId,
-      eventType: b.eventType,
-      payload: b.payload,
-      idempotencyKey: b.idempotencyKey ?? null,
-      now: b.now,
-    })),
+    wakeOnEvent: (b) => {
+      assertOrdinaryRun(b.runId)
+      return inTx(db, (tx) => wakeOnEvent(tx, opts.secret, { runId: b.runId, eventType: b.eventType,
+        payload: b.payload, idempotencyKey: b.idempotencyKey ?? null, now: b.now }))
+    },
     cancelRun: (b) => inTx(db, (tx) => {
+      assertOrdinaryRun(b.runId)
       const out = propagateRunCancellation(tx, opts.secret, {
         runId: b.runId,
         cancelResult: b.cancelResult as CancelResult,
@@ -401,6 +462,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       return { ...out, terminalStatus, outcome }
     }),
     dispatch: async (b) => {
+      assertOrdinaryRun(b.runId)
       if (registry && ['S5','S6'].includes(opts.phase)) inTx(db, tx => rememberManualDispatchSpecs(tx, opts.secret, catalog, registry, b.runId, b.nodes, b.now))
       // 控制节点（wait / subworkflow）不需要宿主执行器：只跑它们的工作流在无执行器进程里也能推进。
       // 只有 agent 节点必须要有执行器；parallel / decision 没有执行实现，交给 dispatcher 明确拒绝。
@@ -427,6 +489,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       })
     },
     runNode: async (b) => {
+      assertOrdinaryRun(b.nodeRunId, true)
       if (!opts.executor) {
         throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '执行器没有装配，不能跑节点', { nodeRunId: b.nodeRunId })
       }
@@ -454,6 +517,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     runtime,
     catalog,
     commands,
+    modelEscalation,
+    release,
+    trial,
     cancels,
     close: () => { db.raw.close() },
   }
@@ -493,7 +559,7 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 
 // 供宿主接进 DSH：返回 endpoint 与关闭句柄
 export async function serveOrchestra(opts: OrchestraOptions & {
-  reworkPlanner?: ReworkPlanner
+  resolveHttpHuman?: ServerDeps['resolveHttpHuman']
   memory?: MemoryHostOptions
   workflowGenerator?: ServerDeps['workflowGenerator']
   resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs
@@ -515,7 +581,8 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const localPlanning = rework && createReworkPlanningHost(orchestra.db, opts.secret, opts.reworkPlanner)
   const inspection = rework && createReworkInspectionHost(orchestra.db, opts.secret, rework, opts.reworkPlanner)
   const modelSettings = opts.executor?.modelRouting && createModelRoutingSettingsHost(orchestra.db, opts.executor.modelRouting.profiles)
-  const taskTriggers = opts.phase === 'S5'
+  const modelEscalation = orchestra.modelEscalation
+  const taskTriggers = phaseIndex(opts.phase) >= phaseIndex('S5')
     ? createTaskTriggerHost(orchestra.db, orchestra.catalog, { executorReady: () => Boolean(opts.resolveTriggerNodeSpecs) })
     : undefined
   const triggerResolver = taskTriggers ? opts.resolveTriggerNodeSpecs : undefined
@@ -549,11 +616,13 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const sweepTimer = setInterval(() => {
     try {
       sweepNow(orchestra.runtime, new Date().toISOString())
+      if (opts.phase === 'S6') sweepIntake(orchestra.db, new Date().toISOString())
       memory?.resume()
       collaboration?.sweep(new Date().toISOString())
       rework?.recover(new Date().toISOString())
+      modelEscalation?.tick(new Date().toISOString())
     } catch (err) {
-      log.error('维护扫描失败', { err: err instanceof Error ? err.message : String(err) })
+      log.error('维护扫描失败', { code: err instanceof OrchError ? err.code : 'INTERNAL_ERROR' })
     }
     tickTaskTriggers()
   }, 2000)
@@ -566,7 +635,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       ...opts.planning,
       workflowGenerator: opts.planning.workflowGenerator ?? opts.workflowGenerator,
       runtimeNodeTypes: RUNTIME_NODE_TYPES,
-    } : undefined)
+    } : undefined, modelSettings?.planningProfiles)
     if (opts.memory) {
       requireCapability(opts.phase, 'memory')
       memory = createMemoryHost(orchestra.db, opts.secret, opts.memory, (error) => {
@@ -575,6 +644,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     }
     server = await startServer({
       secret: opts.secret,
+      resolveHttpHuman: opts.resolveHttpHuman,
       phase: opts.phase,
       epoch: orchestra.db.epoch,
       asOfSeq: opts.asOfSeq,
@@ -586,7 +656,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         listExecutionHistory: (params) => listExecutionHistory(orchestra.db, params),
         listTaskSummaries: (params) => listTaskSummaries(orchestra.db, params),
         getTaskSummary: (taskId, now) => getTaskSummarySnapshot(orchestra.db, taskId, now),
-        getWorkspaceOverview: () => getWorkspaceOverview(orchestra.db),
+        getWorkspaceOverview: () => getWorkspaceOverview(orchestra.db, Boolean(orchestra.release)),
         listRuns: (query) => listRuns(orchestra.db, query),
         getRun: (runId) => getRun(orchestra.db, runId),
         listNodes: (runId, limit) => listNodes(orchestra.db, runId, limit),
@@ -615,7 +685,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       memory,
       planning,
       collaboration,
-      rework, delivery, localPlanning, inspection,
+      rework, delivery, localPlanning, inspection, modelEscalation,
       modelSettings,
       workflowGenerator: opts.workflowGenerator,
       taskTriggers,
@@ -676,10 +746,7 @@ function schedulerFromConfig(configPath: string | undefined, log: Logger): Execu
   try {
     return createExecutionSchedulerFromConfig(loadConfig(configPath ?? 'orchestra.config.json'), log)
   } catch (err) {
-    log.warn('读不到执行配置，按默认并发装配', {
-      path: configPath ?? 'orchestra.config.json',
-      err: err instanceof Error ? err.message : String(err),
-    })
+    log.warn('读不到执行配置，按默认并发装配', { code: err instanceof OrchError ? err.code : 'INTERNAL_ERROR' })
     return createExecutionScheduler({ log })
   }
 }

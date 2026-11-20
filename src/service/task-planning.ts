@@ -4,7 +4,8 @@ import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { WorkflowDefinition } from '../core/workflow-def.ts'
 import { validatePublishLayer, validateSaveLayer, type PublishContext, type WorkflowDoc } from '../core/workflow-doc.ts'
-import { MODEL_COMPLEXITIES, type ModelRecommendation, type ModelRoutingContext } from '../executor/model-routing.ts'
+import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel,
+  type ModelPlanningProfile, type ModelRecommendation, type ModelRoutingContext } from '../executor/model-routing.ts'
 import type { ToolRegistry } from '../executor/tools.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
@@ -28,6 +29,7 @@ const stepSchema = z.strictObject({
   tools: z.array(key).max(20),
   complexity: z.enum(MODEL_COMPLEXITIES),
   model_reason: z.string().trim().min(1).max(240),
+  preferred_model_ref: z.string().regex(MODEL_REF_RE).optional(),
 })
 const acceptance = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('artifact'), file_name: z.string().trim().min(1).max(240),
@@ -73,7 +75,7 @@ type WorkflowCandidate = {
 }
 type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
-  propose(input: PlanInput & { workflows: WorkflowCandidate[] }, signal: AbortSignal): Promise<unknown>
+  propose(input: PlanInput & { workflows: WorkflowCandidate[]; model_profiles?: readonly ModelPlanningProfile[] }, signal: AbortSignal): Promise<unknown>
   timeoutMs?: number
   /**
    * 自动生成任务专属流程的能力：没有可复用的合适流程时，由服务端生成 task_local 流程。
@@ -466,7 +468,8 @@ function candidateFromRuntime(def: WorkflowDefinition, title: string, registry: 
   return { workflowId: def.workflow_id ?? '', version: String(def.workflow_version), title, nodes }
 }
 
-export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registry: ToolRegistry | undefined, options?: TaskPlanningOptions) {
+export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registry: ToolRegistry | undefined,
+  options?: TaskPlanningOptions, planningProfiles?: () => readonly ModelPlanningProfile[]) {
   const timeout = options?.timeoutMs ?? 30_000
   if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 120_000) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑规划时限必须在 1 到 120 秒之间')
@@ -501,13 +504,21 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
   const askPlanner = async (brief: PlanInput, workflows: WorkflowCandidate[]): Promise<PlannerOutcome> => {
     const planner = options?.propose
     if (!planner) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
-    const offered = structuredClone({ ...brief, workflows })
+    const profiles = planningProfiles?.() ?? []
+    const offered = structuredClone({ ...brief, workflows, ...(profiles.length > 0 ? { model_profiles: profiles } : {}) })
     const candidate = await callPlanner(
       (signal) => planner(offered, signal),
       { timeout: '主脑没有在时限内生成计划', failure: '主脑暂时未能产出计划' },
     )
     const parsed = proposalSchema.safeParse(candidate)
-    if (parsed.success) return { kind: 'proposal', proposal: parsed.data }
+    if (parsed.success) {
+      for (const step of parsed.data.steps) {
+        if (step.preferred_model_ref === undefined) continue
+        selectExecutionModel(profiles, { complexity: step.complexity, reason: step.model_reason,
+          preferredModel: step.preferred_model_ref })
+      }
+      return { kind: 'proposal', proposal: parsed.data }
+    }
     const none = noCandidateSchema.safeParse(candidate)
     if (none.success) return { kind: 'no_candidate', reason: none.data.reason }
     throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑返回的计划不符合约定结构', {
@@ -677,7 +688,8 @@ export function getTaskPlanRecommendation(db: Db, context: ModelRoutingContext):
   const { proposal } = assertApprovedPlan(row, context.workflowId, context.workflowVersion)
   const step = proposal.steps.find((item) => item.node_id === context.nodeId)
   if (!step) throw new OrchError('CONFIRMATION_MISMATCH', '已启动计划未登记该节点的复杂度建议')
-  return { complexity: step.complexity, reason: step.model_reason }
+  return { complexity: step.complexity, reason: step.model_reason,
+    ...(step.preferred_model_ref === undefined ? {} : { preferredModel: step.preferred_model_ref }) }
 }
 
 /** Build bounded dispatch specs using only the approved version and its current registered tools. */

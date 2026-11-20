@@ -66,6 +66,27 @@ describe('备份与恢复', () => {
     expect(got.db_sha256).toBe(made.db_sha256)
   })
 
+  it('读取同一已提交水位，恢复和二次备份均保护已有目标', () => {
+    const { file, db } = seededDb()
+    const dest = join(tmp(), 'backup-snapshot')
+    db.raw.exec('BEGIN IMMEDIATE')
+    try {
+      db.raw.prepare('UPDATE tasks SET title=? WHERE task_id=?').run('尚未提交', 't1')
+      backup(file, dest)
+    } finally { db.raw.exec('ROLLBACK') }
+    const restoredPath = join(tmp(), 'restore.db')
+    restore(dest, restoredPath)
+    const restored = openDb(restoredPath, { readonly: true })
+    try { expect(restored.raw.prepare('SELECT title FROM tasks WHERE task_id=?').get('t1')?.title).toBe('任务一') }
+    finally { restored.raw.close() }
+    const before = sha256File(restoredPath)
+    expect(codeOf(() => restore(dest, restoredPath)).code).toBe('FORBIDDEN')
+    expect(codeOf(() => restore(dest, file)).code).toBe('FORBIDDEN')
+    expect(codeOf(() => backup(file, dest)).code).toBe('FORBIDDEN')
+    expect(sha256File(restoredPath)).toBe(before)
+    expect(verifyBackup(dest).db_sha256).toBe(before)
+  })
+
   it('截断备份库 → 报 db_file 损坏', () => {
     const { file } = seededDb()
     const dest = join(tmp(), 'backup-3')

@@ -1,5 +1,6 @@
 // HTTP 入口：只监听 127.0.0.1；/health 免认证，其余路径都要 x-orchestra-secret（规格 12.5 行 1091）
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { timingSafeEqual } from 'node:crypto'
 import { OrchError, failEnvelope, okEnvelope, toOrchError } from '../core/errors.ts'
 import { sha256Hex } from '../core/canonical.ts'
 import { TASK_LANES, TASK_ORIGINS, type TaskLane, type TaskOrigin } from '../core/task-workspace.ts'
@@ -50,12 +51,17 @@ import { deliveryHoldSchema, type createDeliveryReviewHost } from './delivery-re
 import { localPlanInput, localPlanApproval, type createReworkPlanningHost } from './rework-planning.ts'
 import { reworkInspectionInput, type createReworkInspectionHost } from './rework-inspection.ts'
 import { modelRoutingSettingsSchema, type ModelRoutingSettingsHost } from './model-routing-settings.ts'
+import { modelEscalationInput, type createModelEscalationHost } from './model-escalation.ts'
 import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
 import type { ToolPolicy } from '../executor/session.ts'
 
+/** Host-owned verification of a human session on this request. Use authenticated host context. */
+export type ResolveHttpHuman = (request: IncomingMessage) => { id: string } | null | Promise<{ id: string } | null>
+
 export type ServerDeps = {
   secret: string
+  resolveHttpHuman?: ResolveHttpHuman
   phase: string
   epoch: number
   asOfSeq: () => number
@@ -77,6 +83,7 @@ export type ServerDeps = {
   delivery?: ReturnType<typeof createDeliveryReviewHost>
   localPlanning?: ReturnType<typeof createReworkPlanningHost>
   inspection?: ReturnType<typeof createReworkInspectionHost>
+  modelEscalation?: ReturnType<typeof createModelEscalationHost>
   modelSettings?: ModelRoutingSettingsHost
   taskTriggers?: TaskTriggerHost
   workflowGenerator?: (input: { goal: string }, signal: AbortSignal) => Promise<unknown>
@@ -168,6 +175,7 @@ export type NodeCommands = {
     payload?: Record<string, unknown>
     actor?: Actor
     evidenceProducers?: string[]
+    bindActor?: boolean
     confirm?: boolean
     confirmChallenge?: string
     contentHash?: string
@@ -255,11 +263,21 @@ function authenticate(req: IncomingMessage, secret: string): string {
   if (typeof got !== 'string' || got.length === 0) {
     throw new OrchError('UNAUTHORIZED', '没有认证主体', { reason: 'missing_secret' })
   }
-  if (got !== secret) {
+  const supplied = sha256Hex(got)
+  if (!timingSafeEqual(Buffer.from(supplied, 'hex'), Buffer.from(sha256Hex(secret), 'hex'))) {
     throw new OrchError('UNAUTHORIZED', '认证主体无效', { reason: 'bad_secret' })
   }
   // actor 由认证主体派生；payload 里的 actor 字段一律忽略
-  return 'service:' + sha256Hex(got).slice(0, 8)
+  return 'service:' + supplied.slice(0, 8)
+}
+
+function authenticatedHuman(deps: ServerDeps, serviceActor: string, bound: { id: string } | null | undefined): Actor {
+  if (deps.phase !== 'S6') return { kind: 'human', id: serviceActor }
+  if (!bound || typeof bound.id !== 'string' || !bound.id.trim() || bound.id !== bound.id.trim() || bound.id.length > 256
+    || /[\u0000-\u001f\u007f]/u.test(bound.id) || /^(?:service|agent):/i.test(bound.id)) {
+    throw new OrchError('FORBIDDEN', '这条命令需要宿主认证的人工会话')
+  }
+  return { kind: 'human', id: bound.id }
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -319,10 +337,27 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         ok: true, phase: deps.phase, epoch: deps.epoch, memory_enabled: Boolean(deps.memory),
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
         rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
+        model_escalation_enabled: Boolean(deps.modelEscalation),
       }))
       return
     }
-    const actor = authenticate(req, deps.secret)
+    const serviceActor = authenticate(req, deps.secret)
+    const bound = deps.phase === 'S6' ? await deps.resolveHttpHuman?.(req) : undefined
+    const human = () => authenticatedHuman(deps, serviceActor, bound)
+    const actor = bound ? human().id : serviceActor
+    if (deps.modelEscalation && url.pathname === '/v1/model-escalation') {
+      if (req.method === 'GET') {
+        const { as_of_seq, ...view } = deps.modelEscalation.get(stringParam(url, 'run_id') ?? '', stringParam(url, 'node_run_id') ?? '', actor)
+        sendJson(res, 200, okEnvelope(as_of_seq, view))
+        return
+      }
+      if (req.method === 'POST') {
+        const body = parseBody(modelEscalationInput, await readJsonBody(req), '主脑诊断节点模型')
+        const result = await deps.modelEscalation.assess(body, actor, requestNow)
+        sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+        return
+      }
+    }
 
     if (req.method === 'POST' && deps.inspection && url.pathname === '/v1/rework/inspect') {
       const body = parseBody(reworkInspectionInput, await readJsonBody(req), '主脑检查指定成果')
@@ -353,8 +388,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && deps.rework && url.pathname === '/v1/rework/review') {
+      const reviewer = human().id
       const body = parseBody(reworkReviewSchema, await readJsonBody(req), '审核成果修改')
-      const result = await queue.run(() => deps.rework!.review(body, actor, requestNow))
+      const result = await queue.run(() => deps.rework!.review(body, reviewer, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
@@ -364,8 +400,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && deps.delivery && url.pathname === '/v1/rework/hold') {
+      const reviewer = human().id
       const body = parseBody(deliveryHoldSchema, await readJsonBody(req), '设置人工成果留验')
-      const result = await queue.run(() => deps.delivery!.change(body, actor, requestNow))
+      const result = await queue.run(() => deps.delivery!.change(body, reviewer, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
@@ -386,8 +423,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && deps.localPlanning && url.pathname === '/v1/rework/plan/approve') {
+      const reviewer = human().id
       const body = parseBody(localPlanApproval, await readJsonBody(req), '批准局部返工方案')
-      const result = await queue.run(() => deps.localPlanning!.approve(body, actor, requestNow))
+      const result = await queue.run(() => deps.localPlanning!.approve(body, reviewer, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
@@ -420,14 +458,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/collaboration/review' && deps.collaboration) {
+      const reviewer = human().id
       const body = parseBody(collaborationReviewSchema, await readJsonBody(req), '处理核验请求')
-      const result = await queue.run(() => deps.collaboration!.review(body, actor, requestNow))
+      const result = await queue.run(() => deps.collaboration!.review(body, reviewer, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/collaboration/reassign' && deps.collaboration) {
+      const reviewer = human().id
       const body = parseBody(collaborationReassignSchema, await readJsonBody(req), '重新指派核验')
-      const result = await queue.run(() => deps.collaboration!.reassignVerification(body, actor, requestNow))
+      const result = await queue.run(() => deps.collaboration!.reassignVerification(body, reviewer, requestNow))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
@@ -623,8 +663,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/memory/recovery/resolve' && deps.memory) {
+      const approver = human()
       const body = parseBody(memoryRecoverySchema, await readJsonBody(req), '恢复记忆写入')
-      const out = await queue.run(() => deps.memory!.resolve({ kind: 'human', id: actor }, body))
+      const out = await queue.run(() => deps.memory!.resolve(approver, body))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
@@ -670,6 +711,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     if (req.method === 'GET' && url.pathname === '/v1/events') {
       // 游标与 from_seq 二选一；游标按 kind=events、无过滤条件绑定（规格 8.3 行 638）
       const rawCursor = url.searchParams.get('cursor')
+      if (rawCursor !== null && url.searchParams.has('from_seq')) {
+        throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'cursor 与 from_seq 只能指定其中一个')
+      }
       const fromSeq = rawCursor === null
         ? intParam(url, 'from_seq', 0)
         : Number(decodeCursor(rawCursor, 'events', {}).last_key)
@@ -858,33 +902,43 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/decisions/acknowledge' && deps.commands) {
+      const approver = human()
       const body = parseBody(acknowledgeDecisionSchema, await readJsonBody(req), '确认收到决定')
       const out = await queue.run(() => deps.commands!.acknowledgeDecision({
         decisionId: body.decisionId, revision: body.revision, operationId: body.operation_id,
-        actor: { kind: 'human', id: actor }, now: requestNow,
+        actor: approver, now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/decisions/resolve' && deps.commands) {
+      const approver = human()
       const body = parseBody(resolveDecisionSchema, await readJsonBody(req), '裁决收口')
+      const audit = { operationId: body.operation_id, decisionId: body.decisionId, actorId: approver.id }
       const out = await queue.run(() => deps.commands!.resolveDecision({
         decisionId: body.decisionId,
         revision: body.revision,
         resolution: body.resolution,
         payload: body.payload,
-        actor: { kind: 'human', id: actor },
+        actor: approver,
+        ...(deps.phase === 'S6' ? { bindActor: true } : {}),
         evidenceProducers: body.evidenceProducers,
         confirm: body.confirm,
         confirmChallenge: body.confirm_challenge,
         contentHash: body.contentHash,
         operationId: body.operation_id,
         now: requestNow,
-      }))
+      })).catch(error => {
+        const code = toOrchError(error).code
+        if (code !== 'CONFIRMATION_REQUIRED') log.warn('裁决命令审计', { ...audit, outcome: 'rejected', code })
+        throw error
+      })
+      if (out.replayed) log.info('裁决命令审计', { ...audit, outcome: 'replayed' })
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/effects/resolve' && deps.commands) {
+      const approver = human()
       const body = parseBody(effectResolveSchema, await readJsonBody(req), '副作用结算')
       const out = await queue.run(() => deps.commands!.resolveEffect({
         basis: body.basis,
@@ -899,7 +953,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
           decisionRevision: body.expected.decision_revision ?? null,
         },
         operationId: body.operation_id,
-        actor: { kind: 'human', id: actor },
+        actor: approver,
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
@@ -976,12 +1030,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/node-runs/confirm-start' && deps.commands) {
+      const approver = human()
       const body = parseBody(confirmStartSchema, await readJsonBody(req), '确认启动')
       const out = await queue.run(() => deps.commands!.confirmStart({
         nodeRunId: body.nodeRunId,
         attempt: body.attempt,
         attested: body.attested,
-        actor,
+        actor: approver.id,
         now: requestNow,
       }))
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), out))
@@ -1046,14 +1101,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     if (req.method === 'POST' && url.pathname === '/v1/ledger/events') {
       const body = parseBody(ledgerEventSchema, await readJsonBody(req), '写账本事件')
-      const out = await queue.run(() => deps.appendLedgerEvent(body, actor))
-      sendJson(res, 200, okEnvelope(out.seq, { seq: out.seq, event_id: out.event_id, actor }))
+      if (body.type === 'decision.command_audited') throw new OrchError('FORBIDDEN', '裁决审计只由命令处理器记录')
+      const out = await queue.run(() => deps.appendLedgerEvent(body, serviceActor))
+      sendJson(res, 200, okEnvelope(out.seq, { seq: out.seq, event_id: out.event_id, actor: serviceActor }))
       return
     }
     throw new OrchError('NOT_FOUND', '没有这个接口', { path: url.pathname, method: req.method })
   } catch (err) {
     const e = toOrchError(err)
-    if (e.httpStatus >= 500) log.error('请求失败', { path: url.pathname, code: e.code, err: e.message })
+    if (e.httpStatus >= 500) log.error('请求失败', { code: e.code })
     sendJson(res, e.httpStatus, failEnvelope(deps.asOfSeq(), e))
   }
 }

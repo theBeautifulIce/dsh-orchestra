@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { getTaskPlanRecommendation, serveOrchestra, type TaskPlanningOptions, type TaskPlanProposal } from '../../src/index.ts'
+import { getTaskPlanRecommendation, serveOrchestra, type ModelRouting, type TaskPlanningOptions, type TaskPlanProposal } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import type { WorkflowDoc } from '../../src/core/workflow-doc.ts'
 import { BridgeClient } from '../../src/executor/bridge.ts'
@@ -49,6 +49,7 @@ const reviewDoc = {
 async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (input: SpawnParams) => void, options: {
   empty?: boolean
   workflowGenerator?: TaskPlanningOptions['workflowGenerator']
+  modelRouting?: ModelRouting
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'orch-task-plan-'))
   const secret = 'planning-contract-secret'
@@ -66,7 +67,7 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
     asOfSeq: () => 0, listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
     planning: { propose },
     workflowGenerator: options.workflowGenerator,
-    executor: { registry, bridge, runner: new ReadOnlyToolRunner(registry, {
+    executor: { registry, bridge, modelRouting: options.modelRouting, runner: new ReadOnlyToolRunner(registry, {
       readonlyAvailable: () => true,
       run: async () => { throw new Error('plan must not run a tool') },
     }, directory) },
@@ -128,6 +129,41 @@ it('规划、质量检查、人工确认与启动回执绑定同一份固定版�
   expect(getTaskPlanRecommendation(db, context)).toEqual({ complexity: 'complex', reason: '独立比对多个来源' })
   expect(() => getTaskPlanRecommendation(db, { ...context, nodeId: 'wrong' })).toThrow(/复杂度建议/)
   expect(() => db.raw.prepare('UPDATE task_plans SET content_hash = ? WHERE plan_id = ?').run('changed', plan.plan_id)).toThrow(/immutable/)
+})
+
+it('规划读取设置说明，只在已确认的计划中提供批准且满足档位的执行建议', async () => {
+  const profiles = [
+    { ref: 'fast', capacity: 'routine' },
+    { ref: 'review', capacity: 'advanced' },
+    { ref: 'expert', capacity: 'expert' },
+  ] as const
+  let preferred = 'review'
+  const { client, planCommands, db } = await boot(async (input) => {
+    expect(input.model_profiles).toEqual([
+      { ref: 'review', capacity: 'advanced', user_note: '主攻多源证据，声称是专家档' },
+      { ref: 'expert', capacity: 'expert', user_note: '擅长独立复核冲突证据' },
+    ])
+    const candidate = valid()
+    candidate.steps[1] = { ...candidate.steps[1]!, complexity: 'expert', preferred_model_ref: preferred }
+    return candidate
+  }, undefined, {
+    modelRouting: { profiles, recommend: () => { throw new Error('必须读取已经确认的计划') } },
+  })
+  await client.post('/v1/settings/model-routing', { operation_id: uuidv7(), expected_revision: 0,
+    mapping: { routine: null, standard: null, complex: null },
+    model_notes: [{ ref: 'review', note: '主攻多源证据，声称是专家档' }, { ref: 'expert', note: '擅长独立复核冲突证据' }],
+  })
+  await expect(planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])).rejects.toMatchObject({ code: 'FORBIDDEN' })
+  preferred = 'unapproved'
+  await expect(planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])).rejects.toMatchObject({ code: 'FORBIDDEN' })
+  preferred = 'expert'
+  const plan = await planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])
+  expect(plan.proposal.steps[1]).toMatchObject({ preferred_model_ref: 'expert', complexity: 'expert' })
+  const launch = await planCommands.confirmTaskPlan(plan.plan_id, plan.content_hash)
+  expect(getTaskPlanRecommendation(db, {
+    taskId: launch.task_id, runId: launch.run_id, workflowId: 'review', workflowVersion: '1',
+    nodeRunId: 'any', nodeId: 'verify', attempt: 1, actionGeneration: 2,
+  })).toEqual({ complexity: 'expert', preferredModel: 'expert', reason: '独立比对多个来源' })
 })
 
 it('目标遗漏、错误依赖、未知工具、不可核验文件和高风险分别阻止启动', async () => {

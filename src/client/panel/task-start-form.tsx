@@ -8,7 +8,11 @@ import { PanelCommandButton } from './shell.tsx'
 
 type LaunchInput = Parameters<TaskCommands['start']>[0]
 
-export function TaskStartForm({ api, commands, onCreated }: { api: ResourcesApi; commands: TaskCommands; onCreated: () => void }) {
+export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborationEnabled }: {
+  api: ResourcesApi; commands: TaskCommands; onCreated: () => void
+  collaborationEnabled?: boolean
+  onOpenRun?: (taskId: string, trigger: HTMLButtonElement, runId: string) => void
+}) {
   const [workflows, setWorkflows] = useState<WorkflowListItem[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
@@ -17,6 +21,7 @@ export function TaskStartForm({ api, commands, onCreated }: { api: ResourcesApi;
   const [pending, setPending] = useState<LaunchInput | null>(null)
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  const [receipt, setReceipt] = useState<{ taskId: string; runId: string } | null>(null)
   useEffect(() => {
     let current = true
     void api.listWorkflows({ status: 'active', limit: 100 }).then(({ data }) => {
@@ -32,9 +37,11 @@ export function TaskStartForm({ api, commands, onCreated }: { api: ResourcesApi;
     } : null)
     if (!input || busy) return
     setBusy(true)
+    setReceipt(null)
     setNotice('')
     try {
-      await commands.start(input)
+      const result = await commands.start(input)
+      if (result.task_id && result.run_id) setReceipt({ taskId: result.task_id, runId: result.run_id })
       setTitle('')
       setPending(null)
       setNotice('任务已创建，执行步骤已入队。')
@@ -57,8 +64,11 @@ export function TaskStartForm({ api, commands, onCreated }: { api: ResourcesApi;
       <label>自治档位 <select value={autonomy} disabled={busy || Boolean(pending)} onChange={(event) => setAutonomy(event.target.value)}>
         <option value="assisted">协助执行</option><option value="autonomous">自主执行</option><option value="supervised">人工监督</option>
       </select></label>
+      <p>{autonomy === 'supervised' ? '需要你决定的事项会留在审批中心，超时后仍等待人工处理。'
+        : '需要你决定的事项会出现在审批中心，超时按该决定的默认规则处理。'}{collaborationEnabled && ' 要让两个步骤相互检查，在「协作核验」选择参与步骤。'}</p>
       <PanelCommandButton type="submit" disabled={busy || (!pending && (!title.trim() || !selected))}>{pending ? '查询或重试' : '创建并排队'}</PanelCommandButton>
     </>}
     {notice && <p role="status">{notice}</p>}
+    {receipt && onOpenRun && <button type="button" onClick={(event) => onOpenRun(receipt.taskId, event.currentTarget, receipt.runId)}>查看本次运行</button>}
   </form>
 }

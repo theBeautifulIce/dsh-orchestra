@@ -5,7 +5,7 @@ import type { ResourcesApi } from '../api/resources.ts'
 import type { ReworkApi, ReworkScope, ReworkPlan, ReviewHold, ReworkItem, ReworkDetail } from '../api/rework.ts'
 import type { NodeRunView, RunArtifact } from '../api/types.ts'
 import type { ReworkInspection } from '../../service/rework-inspection.ts'
-import { ArtifactContent, artifactContentKey, matchesArtifactContent } from './artifact-content.tsx'
+import { ArtifactContent, artifactContentKey, matchesArtifactContent, useArtifactRetention } from './artifact-content.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
 
 const labels: Record<string, string> = { proposed: '等待授权', evaluating: '正在评估', needs_human_approval: '等待人工授权', authorized: '已授权', scheduled: '等待返工', executing: '正在返工', awaiting_review: '等待重新验收', accepted: '验收通过', closed: '已完成', declined: '未批准', escalated: '等待人工处理', cancelled: '已取消' }
@@ -84,8 +84,10 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
     && (!currentAttempt?.result_artifact_id || (a.artifact_id === currentAttempt.result_artifact_id && a.sha256 === currentAttempt.result_artifact_hash)))
   const [selected, setSelected] = useState('')
   const revised = candidates.find(a => a.artifact_id === selected) ?? candidates[0]
-  const left = old && !old.expired && old.file_name ? old : undefined
-  const right = revised && !revised.expired && revised.file_name ? revised : undefined
+  const oldRetention = useArtifactRetention(old)
+  const revisedRetention = useArtifactRetention(revised)
+  const left = old && oldRetention === 'available' && old.file_name ? old : undefined
+  const right = revised && revisedRetention === 'available' && revised.file_name ? revised : undefined
   const comparisonKey = JSON.stringify([left && artifactContentKey(left), right && artifactContentKey(right)])
   const [comparison, setComparison] = useState<Comparison>({ key: comparisonKey })
   if (comparison.key !== comparisonKey) setComparison({ key: comparisonKey })
@@ -151,8 +153,8 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
           {revised ? <><p>{revised.artifact_id}</p><code style={hash}>{revised.sha256}</code><ArtifactContent api={api} artifact={revised} /></> : <p>尚无修订成果。</p>}</section>
       </div><p>验收绑定所选修订成果及其哈希。</p>
       <button type="button" disabled={interactionBusy || !left || !right} onClick={() => void compare()}>逐行对比修改</button>
-      {comparison.notice && <p role="status">{comparison.notice}</p>}
-      {comparison.result && <>{comparison.result.truncated && <p>仅对比内容预览，完整成果请分别下载核对。</p>}<LineComparison before={comparison.result.before} after={comparison.result.after} /></>}
+      {comparison.key === comparisonKey && comparison.notice && <p role="status">{comparison.notice}</p>}
+      {left && right && comparison.key === comparisonKey && comparison.result && <>{comparison.result.truncated && <p>仅对比内容预览，完整成果请分别下载核对。</p>}<LineComparison before={comparison.result.before} after={comparison.result.after} /></>}
     </details>
     {history?.impacts && history.impacts.length > 0 && <section><h4>受影响步骤</h4><ul>{history.impacts.map(i => <li key={i.node_run_id}>{i.node_id} · {i.released_at ? '已恢复' : '等待返工或验收'}{i.replacement_node_run_id ? ` · 后续执行 ${i.replacement_node_run_id}` : ''}</li>)}</ul></section>}
     <details><summary>返工与验收历史</summary>{history ? <><ol>{history.attempts.map(a => <li key={a.attempt_id}>第 {a.round_no} 轮 · {labels[a.status] ?? a.status}<p>{a.feedback}</p><p>{a.source_artifact_id} → {a.result_artifact_id ?? '等待修订成果'}</p><p>{a.created_at}</p></li>)}</ol><ol>{history.reviews.map(r => <li key={r.review_id}>第 {r.round_no} 轮 · {r.reviewer_actor} · {r.action === 'accept' ? '验收通过' : r.action === 'request_changes' ? '要求修改' : r.action === 'authorize' ? '授权返工' : r.action === 'reject' ? '不批准' : '升级处理'}<p>{r.note}</p>{r.artifact_id && <p>验收版本 {r.artifact_id} · {r.artifact_hash}</p>}<p>{r.created_at}</p></li>)}</ol></> : <p>尚未读取历史。</p>}</details>

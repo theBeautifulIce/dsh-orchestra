@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
-import type { ApiClient } from '../api/client.ts'
+import { useEffect, useRef, useState } from 'react'
+import { ApiError, type ApiClient } from '../api/client.ts'
+import { CollaborationMembers, type SelectedMember } from './collaboration-members.tsx'
 import { postWithOperationReceipt } from '../api/commands.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
 import type { CollaborationHost } from '../../service/collaboration.ts'
@@ -29,7 +30,9 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
   const [notice, setNotice] = useState('')
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
-  const [members, setMembers] = useState('')
+  const [members, setMembers] = useState<SelectedMember[]>([])
+  const [creating, setCreating] = useState(false)
+  const pending = useRef(new Map<string, string>())
   const [minutes, setMinutes] = useState(60)
   const [review, setReview] = useState<{ id: string; revision: number; action: Action }>()
   const [note, setNote] = useState('')
@@ -54,14 +57,21 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
 
   async function command(path: string, kind: string, body: Record<string, unknown>, done: () => void) {
     if (busy) return
+    const key = JSON.stringify([kind, body])
+    const id = pending.current.get(key) ?? newOperationId()
+    pending.current.set(key, id)
     setNotice(''); setFailed(false); setBusy(true)
     try {
-      await postWithOperationReceipt(client, path, kind, { ...body, operation_id: newOperationId() })
+      await postWithOperationReceipt(client, path, kind, { ...body, operation_id: id })
+      pending.current.delete(key)
       done(); refresh((value) => value + 1); setNotice('已记录。')
-    } catch (error) { setFailed(true); setNotice(error instanceof Error ? error.message : '操作结果暂不可确认。') }
+    } catch (error) {
+      if (!(error instanceof ApiError && error.code === 'OPERATION_OUTCOME_UNKNOWN')) pending.current.delete(key)
+      setFailed(true); setNotice(error instanceof Error ? error.message : '操作结果暂不可确认。')
+    }
     finally { setBusy(false) }
   }
-  const memberIds = members.split(/[\s,，]+/u).filter(Boolean)
+  const memberIds = members.map((member) => member.id).sort()
   const shown = detail?.scope.scope_id === scopeId ? detail : undefined
   return <section className="ops-page">
     <header className="ops-page-header"><h1>协作核验</h1>
@@ -69,17 +79,19 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
         setSelected(event.target.value); setReview(undefined)
       }}>{scopes.map((scope) => <option key={scope.scope_id} value={scope.scope_id}>{scope.title}</option>)}</select></label>}
     </header>
-    <details className="ops-surface ops-inset">
-      <summary>新建协作范围</summary>
+    <p className="ops-meta">让一个执行步骤独立复核另一个步骤的发现。例如，分析步骤发现汇总金额有误，可请复核步骤重算，再由你决定是否采纳。</p>
+    <details className="ops-surface ops-inset" open={creating} onToggle={(event) => setCreating(event.currentTarget.open)}>
+      <summary>选择可相互核验的步骤</summary>
       <form style={form} onSubmit={(event) => {
         event.preventDefault()
         void command('/v1/collaboration/scopes', 'collaboration.scope_create',
-          { title: title.trim(), node_run_ids: memberIds, ttl_minutes: minutes }, () => { setTitle(''); setMembers('') })
+          { title: title.trim(), node_run_ids: memberIds, ttl_minutes: minutes }, () => { setTitle(''); setMembers([]); setSelected(''); setCreating(false) })
       }}>
-        <label>范围名称 <input required maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-        <label>参与节点运行 ID（可含候补接收方） <textarea required placeholder="以空格或换行分隔至少两个 ID" value={members} onChange={(event) => setMembers(event.target.value)} /></label>
-        <label>有效分钟数 <input type="number" required min={1} max={10_080} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} /></label>
-        <PanelCommandButton type="submit" disabled={busy || memberIds.length < 2 || memberIds.length > 16}>保存范围</PanelCommandButton>
+        <label>本次核验名称 <input required maxLength={200} placeholder="例如：复核月报汇总金额" value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+        {creating && <CollaborationMembers client={client} selected={members} onChange={setMembers} disabled={busy} />}
+        <label>允许提出核验的时长（分钟） <input type="number" required min={1} max={10_080} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} /></label>
+        <p className="ops-meta">保存后，选中的步骤可在范围内提出带证据的请求。出现请求时，在这里选择「授权核验」。</p>
+        <PanelCommandButton type="submit" disabled={busy || !title.trim() || memberIds.length < 2 || memberIds.length > 16}>保存范围</PanelCommandButton>
       </form>
     </details>
     {notice && <p role={failed ? 'alert' : 'status'}>{notice} {failed && <button type="button" onClick={() => refresh((value) => value + 1)}>刷新</button>}</p>}
@@ -89,7 +101,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
       <section style={card}><div className="ops-toolbar"><strong>参与节点</strong><span className="ops-meta">有效至 {new Date(shown.scope.expires_at).toLocaleString()}</span></div>
         <div className="ops-actions">{shown.members.map((node) => <button className="ops-button ops-button--link"
           key={node.node_run_id} type="button" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}
-          onClick={() => onOpenRun(node.task_id, node.run_id)}>{node.node_run_id}</button>)}</div>
+          title={node.node_run_id} onClick={() => onOpenRun(node.task_id, node.run_id)}>{node.node_id}</button>)}</div>
       </section>
       {shown.findings.map((finding) => <article key={finding.finding_id} style={card}>
         <h2 style={{ margin: 0, fontSize: FONT_PX.section }}>{finding.title}</h2>
@@ -125,7 +137,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
             }}>
               {review.action === 'reassign' && <label>新接收节点 <select required value={replacement} onChange={(event) => setReplacement(event.target.value)}>
                 <option value="">选择接收节点</option>
-                {candidates?.map((id) => <option key={id} value={id}>{id}</option>)}
+                {candidates?.map((id) => <option key={id} value={id}>{shown.members.find((node) => node.node_run_id === id)?.node_id ?? id} · {id}</option>)}
               </select></label>}
               <label>处理理由 <textarea required maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label>
               <PanelCommandButton type="submit" disabled={busy || !note.trim()
@@ -134,7 +146,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
           </section>
         })}
       </article>)}
-      {shown.findings.length === 0 && <p>当前范围暂无执行者报告的发现。</p>}
+      {shown.findings.length === 0 && <p>参与步骤已选好。执行者提交发现后，这里会显示原始证据和待授权的核验请求。</p>}
     </>}
   </section>
 }

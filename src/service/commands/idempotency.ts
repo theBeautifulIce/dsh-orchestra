@@ -6,6 +6,7 @@ import { type Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import { OrchError } from '../../core/errors.ts'
 import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
+import { receiptExpired, receiptRetention } from '../receipt-retention.ts'
 
 export type CommandReceipt = {
   operation_id: string
@@ -20,6 +21,7 @@ type InboxRow = {
   request_hash: string
   status: string
   receipt_json: string | null
+  completed_at: string | null
   receipt_expired_at: string | null
 }
 
@@ -50,13 +52,13 @@ export function runIdempotentCommand<T>(
   apply: () => T,
 ): { result: T; replayed: boolean } {
   const existing = tx.get<InboxRow>(
-    'SELECT operation_id, kind, request_hash, status, receipt_json, receipt_expired_at FROM inbox WHERE operation_id = ?',
+    'SELECT operation_id, kind, request_hash, status, receipt_json, completed_at, receipt_expired_at FROM inbox WHERE operation_id = ?',
     [p.operationId],
   )
   if (existing) {
     // 过期判断放在回执存在性之前：sweep 清掉 receipt_json 后仍必须回 OPERATION_EXPIRED，
     // 否则会掉进下面的通用分支被误报成 OPERATION_ID_CONFLICT（审计 P2）
-    if (existing.receipt_expired_at && new Date(existing.receipt_expired_at).getTime() <= new Date(p.now).getTime()) {
+    if (receiptExpired(existing, Date.parse(p.now), receiptRetention(tx.raw).receiptMs)) {
       throw new OrchError('OPERATION_EXPIRED', '回执已过期，请用新的 operation_id 重新发起', {
         operation_id: p.operationId,
         receipt_expired_at: existing.receipt_expired_at,

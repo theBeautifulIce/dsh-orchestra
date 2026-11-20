@@ -4,6 +4,7 @@ import { assertNoMemoryWriteTool, assertTaskSessionToolsAllowed } from '../core/
 import { deriveEffectiveCapability, resolveDeclaredPolicy, type ToolDescriptor, type ToolRegistry } from './tools.ts'
 
 export type ToolPolicy = {
+  releaseCheckCwd?: string
   // allow / deny 都是白名单式的显式清单；没声明的按不给算（规格 5.2 行 444）
   allow?: string[]
   deny?: string[]
@@ -140,7 +141,8 @@ export async function createExecutorAgent(
     attempt: params.attempt,
     input: params.input,
     outputSchema: params.outputSchema,
-    toolPolicy: { allow: tools.map((t) => t.name), deny: params.toolPolicy.deny ?? [] },
+    toolPolicy: { allow: tools.map((t) => t.name), deny: params.toolPolicy.deny ?? [],
+      ...(params.toolPolicy.releaseCheckCwd ? { releaseCheckCwd: params.toolPolicy.releaseCheckCwd } : {}) },
     inheritHistory: false,
     ...(params.modelRef ? { modelRef: params.modelRef } : {}),
     ...(params.actionGeneration !== undefined ? { actionGeneration: params.actionGeneration } : {}),

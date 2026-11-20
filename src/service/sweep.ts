@@ -13,6 +13,7 @@ import { finishSubworkflowChild } from './commands/subworkflow.ts'
 import { closeRun } from './commands/run-close.ts'
 import { activeDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
 import { IN_FLIGHT_COMMAND_STATUSES } from './commands/idempotency.ts'
+import { receiptRetention } from './receipt-retention.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import type { Report } from '../core/report.ts'
 import { chainBreakOf, readChain, appendNodeRunEvent } from '../infra/db/ledger.ts'
@@ -509,23 +510,22 @@ const EXECUTOR_BOUND: readonly string[] = [
   'startup_unknown',
 ]
 
-const IN_FLIGHT_TIMEOUT_MS = 10 * 60_000
-const RECEIPT_TTL_MS = 7 * 24 * 60 * 60_000
-
 // 命令回执：在途超时收 rejected；完成后满 7 天清 receipt_json，查询侧据此返回 OPERATION_EXPIRED
 function sweepInboxReceipts(tx: Tx, now: string): { timedOut: number; expired: number } {
   const nowMs = Date.parse(now)
-  const inFlightBefore = new Date(nowMs - IN_FLIGHT_TIMEOUT_MS).toISOString()
-  const receiptBefore = new Date(nowMs - RECEIPT_TTL_MS).toISOString()
+  const { inFlightMs, receiptMs } = receiptRetention(tx.raw)
+  const inFlightBefore = new Date(nowMs - inFlightMs).toISOString()
+  const receiptBefore = new Date(nowMs - receiptMs).toISOString()
   const timedOut = tx.run(
     "UPDATE inbox SET status = 'rejected', receipt_json = ?, completed_at = ?, receipt_expired_at = ? " +
       `WHERE completed_at IS NULL AND created_at <= ? AND status IN (${IN_FLIGHT_COMMAND_STATUSES.map(() => '?').join(',')})`,
-    [JSON.stringify({ error: { code: 'OPERATION_TIMEOUT', message: '命令在途超时，未执行' } }), now, new Date(nowMs + RECEIPT_TTL_MS).toISOString(), inFlightBefore,
+    [JSON.stringify({ error: { code: 'OPERATION_TIMEOUT', message: '命令在途超时，未执行' } }), now, new Date(nowMs + receiptMs).toISOString(), inFlightBefore,
       ...IN_FLIGHT_COMMAND_STATUSES],
   ).changes
   const expired = tx.run(
-    'UPDATE inbox SET receipt_json = NULL, receipt_expired_at = ? WHERE completed_at IS NOT NULL AND completed_at <= ? AND receipt_json IS NOT NULL',
-    [now, receiptBefore],
+    'UPDATE inbox SET receipt_json = NULL, receipt_expired_at = ? WHERE completed_at IS NOT NULL AND receipt_json IS NOT NULL'
+      + ' AND (completed_at <= ? OR receipt_expired_at <= ?)',
+    [now, receiptBefore, now],
   ).changes
   return { timedOut, expired }
 }

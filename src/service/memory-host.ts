@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { SystemClock, type ClockProvider } from '../core/clock.ts'
 import { contentHash, type MemoryItemInput } from '../core/memory-canonical.ts'
 import { OrchError } from '../core/errors.ts'
-import { withTx, type Db } from '../infra/sqlite/driver.ts'
+import { makeTx, withTx, type Db } from '../infra/sqlite/driver.ts'
+import { requireTrialMemoryApply } from './trial-circles.ts'
 import type { Actor } from './decision/approver.ts'
 import { requestHashOf } from './commands/idempotency.ts'
 import { runDecisionCommand } from './decision/confirmation.ts'
@@ -44,6 +45,7 @@ export function createMemoryHost(db: Db, secret: string, options: MemoryHostOpti
     clock: runtimeOptions.clock ?? new SystemClock(randomUUID()),
     writer: {
       async writeMemory({ items, ...scope }) {
+        requireTrialMemoryApply(makeTx(db.raw))
         const approved = items.map((item) => ({ ...item, content_hash: contentHash(item) }))
         const expected = new Map(approved.map((item) => [item.client_key, item.content_hash]))
         const writer = getWriter()
@@ -109,6 +111,7 @@ export function createMemoryHost(db: Db, secret: string, options: MemoryHostOpti
         if (!actor || !input.operationId || (resolution !== 'approved' && resolution !== 'rejected')) {
           throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆写入批准只接受批准或驳回，并须提供回执编号')
         }
+        if (resolution === 'approved') requireTrialMemoryApply(tx)
         resolveMemoryApproval(tx, secret, {
           batch_id: String(row.batch_id), decision_id: input.decisionId, revision: input.revision,
           now: input.now, actor, resolution, confirm: confirmed, contentHash: input.contentHash,
