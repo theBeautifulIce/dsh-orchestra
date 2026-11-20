@@ -1,0 +1,91 @@
+{
+  "run": {
+    "run_id": "run_01a1f996d9c5761fb8f8f7977718884f",
+    "status": "succeeded",
+    "workflow_id": "tl_01a1f996bcd776df8b3c04943549e879",
+    "workflow_version": 1
+  },
+  "steps": [
+    {
+      "node_id": "income_check",
+      "status": "done",
+      "attempt": 1
+    },
+    {
+      "node_id": "refund_check",
+      "status": "done",
+      "attempt": 1
+    },
+    {
+      "node_id": "rows_check",
+      "status": "done",
+      "attempt": 1
+    },
+    {
+      "node_id": "net_calc",
+      "status": "done",
+      "attempt": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "income_check"
+    },
+    {
+      "from": "start",
+      "to": "refund_check"
+    },
+    {
+      "from": "start",
+      "to": "rows_check"
+    },
+    {
+      "from": "income_check",
+      "to": "net_calc"
+    },
+    {
+      "from": "refund_check",
+      "to": "net_calc"
+    }
+  ],
+  "artifacts": [
+    {
+      "producer": "income_check",
+      "name": "qa-b-income.md",
+      "sha256": "0913381365e8da11e368fcd12634f603328c39f9acfaa12fbe65ffd351137944"
+    },
+    {
+      "producer": "net_calc",
+      "name": "qa-b-net.md",
+      "sha256": "b169d6c8c2469dbe8daefc669953d55d9489f6af2ee3fc4ea319ae0c328996c4"
+    },
+    {
+      "producer": "refund_check",
+      "name": "qa-b-refund.md",
+      "sha256": "8a3633ba178139831bc021e978b20f93dff5253c4978db6c5d3d7a6ff7f09f6b"
+    },
+    {
+      "producer": "rows_check",
+      "name": "qa-b-rows.md",
+      "sha256": "89f789f6b56f44f025d17a3d28aec58d98afa9d7374ece25ba3b940c486bbae3"
+    }
+  ],
+  "consumptions": [
+    {
+      "consumer": "net_calc",
+      "name": "qa-b-income.md"
+    },
+    {
+      "consumer": "net_calc",
+      "name": "qa-b-refund.md"
+    }
+  ],
+  "expected": {
+    "qa-b-income.md": "200.00",
+    "qa-b-refund.md": "20.00",
+    "qa-b-rows.md": "3",
+    "qa-b-net.md": "180.00"
+  },
+  "passed": true
+}

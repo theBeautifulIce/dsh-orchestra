@@ -1,0 +1,502 @@
+{
+  "source_commit": "709d798ea45a9f05ec6b7b8a5ea8134524891456",
+  "package_sha256": "9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc",
+  "dsh_runtime": "0.2.2-rc.5",
+  "node": "v24.21.0",
+  "scope": "隔离 DSH rc.5 原生会话、合成模型和 CSV。分支矩阵通过 127.0.0.1 请求合成模型。",
+  "probes": [
+    "three-independent",
+    "four-partial-strict",
+    "one-to-two",
+    "consult",
+    "routing-off",
+    "quota-retry",
+    "blocked",
+    "two-full-join",
+    "routing-default"
+  ],
+  "cases": [
+    {
+      "id": "H01",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/routing-default.json",
+        "sha256": "4f15e9da293a2af48ea96091d3779b3c1fe0980ffa1e047d20ecccda7c755e05"
+      },
+      "observed": {
+        "status": "succeeded",
+        "direct_without_prior_api": true,
+        "node_executions": 1,
+        "parent_start_tool_calls": 0,
+        "workspace_reads": 1,
+        "artifact": {
+          "name": "summary.md",
+          "sha256": "abf859a4b5b687465341071f33620095231f94ae124e8007b69a06ad1d2fe4a2",
+          "text": "# 办公流水汇总\n\n收入 200.00\n退款 −20.00\n净额 180.00\n"
+        },
+        "exact_input": "读取这次已授权的办公流水，分别汇总收入和退款，计算净额并交付 summary.md。"
+      }
+    },
+    {
+      "id": "H02",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/consult.json",
+        "sha256": "e480e1f285b512164b5957fb6fd808715f76bb454e65117c1dbcd9b2d38bce4b"
+      },
+      "observed": {
+        "ordinary_input": [
+          "你好",
+          "请教我怎么写报告",
+          "先说方案，等我确认再开始",
+          "并行生成几份报告，这个思路可行吗？",
+          "分别统计收入和退款再汇总成表格，这样做对吗？",
+          "只写报告的话，要采用什么结构？",
+          "分别核对收入和退款，再写总结，是指哪两个步骤？",
+          "只生成报告是默认行为吗？",
+          "只生成一张表格，你能做到吗？我只是想了解能力。",
+          "分别统计并生成报告：我们只是讨论，不实际做。",
+          "并行生成两份报告可行吗？",
+          "分别统计已授权的收入和退款再汇总成表格应该怎么做？",
+          "分别统计收入和退款再汇总成表格，可以讲讲实现思路吗？",
+          "并行生成两份报告需要多久？",
+          "分别汇总成两份表格会消耗多少额度？",
+          "核对 office-sample.csv 要什么权限？"
+        ],
+        "ordinary_only_parent_requests": true,
+        "ordinary_receipts": 0,
+        "ordinary_ledger_created": false,
+        "status": "succeeded"
+      }
+    },
+    {
+      "id": "H03",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/routing-off.json",
+        "sha256": "1c9055d9773c3b434387db026f096026a274e95ab4dd7b47401873c69dc4096c"
+      },
+      "observed": {
+        "routing_off_slash": true,
+        "toggle_during_ordinary_steer_turn": 4,
+        "parent_native_tool_bodies": 1,
+        "denied_parent_write_attempts": 1,
+        "runs_after_duplicate_and_scheduler": 1,
+        "status": "succeeded"
+      }
+    },
+    {
+      "id": "H04",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/two-full-join.json",
+        "sha256": "eccdb8e08b6a2a17d293c463c1a11dd7cb5285dc041fcd93d7fd789c21a96305"
+      },
+      "observed": {
+        "duplicate_submissions": 3,
+        "persisted_exact_user_messages": 1,
+        "parent_start_calls": 0,
+        "run_statuses": [
+          "succeeded"
+        ],
+        "steps": [
+          {
+            "node_id": "ranking",
+            "status": "done",
+            "attempt": 1
+          },
+          {
+            "node_id": "total",
+            "status": "done",
+            "attempt": 1
+          },
+          {
+            "node_id": "concentration",
+            "status": "done",
+            "attempt": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "H05",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/quota-retry.json",
+        "sha256": "9e54ae17c66c7ff8482e82f5d804f684b5a327fe26f50ce95eb4473f12856d8e"
+      },
+      "observed": {
+        "status": "succeeded",
+        "recovered_with_same_input": true,
+        "runs_after_duplicate_and_scheduler": 1,
+        "initial_failure": {
+          "exact_original_input": "读取这次已授权的办公流水，分别汇总收入和退款，计算净额并交付 summary.md。",
+          "run_count": 0,
+          "parent_writes": 0,
+          "content": [
+            {
+              "type": "text",
+              "text": "Orchestra 规划模型额度不足\n请在 DSH 检查模型额度，或选择其他可用的主脑模型。处理后可重新发送原任务。"
+            }
+          ]
+        },
+        "notices": [
+          [
+            "Orchestra 规划模型额度不足\n请在 DSH 检查模型额度，或选择其他可用的主脑模型。处理后可重新发送原任务。"
+          ],
+          [
+            "Orchestra 已接单 · 办公流水汇总\n已接收任务，执行进度可在 Orchestra 面板查看。"
+          ],
+          [
+            "Orchestra 本次执行已结束 · 办公流水汇总\n交付验收已通过。\n已通过验收的文件：「summary.md」。"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "H06",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/blocked.json",
+        "sha256": "02b9bae58796553e0eee343cd5fcada6b22637289f0af7c7ef48a5630e144ed1"
+      },
+      "observed": {
+        "notice": "Orchestra 执行受阻 · 办公流水汇总\n「汇总复核」执行结果待核验。现有记录缺少完成核验所需的执行证据。当前计划还缺「summary.md」的交付记录。如果原要求只是保留这些文件，请先核对计划里的交付要求。\n请在 Orchestra 面板打开这次运行的「结果」，查看已登记文件，再核对对应步骤和计划里的交付要求。\n已登记文件：「collection-review.md」。任务的交付验收尚无通过结论。",
+        "persisted": 1,
+        "technicalFields": 0,
+        "blocked_node_status": "blocked_post",
+        "observation_ms": 4500
+      }
+    },
+    {
+      "id": "H07",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/two-full-join.json",
+        "sha256": "eccdb8e08b6a2a17d293c463c1a11dd7cb5285dc041fcd93d7fd789c21a96305"
+      },
+      "observed": {
+        "native_receipts": [
+          "Orchestra 已接单 · 收入集中度复核\n已接收任务，执行进度可在 Orchestra 面板查看。",
+          "Orchestra 本次执行已结束 · 收入集中度复核\n交付验收已通过。\n已通过验收的文件：「income-concentration.md」、「income-ranking.md」、「income-total.md」。"
+        ],
+        "preserved": [
+          {
+            "name": "summary.md",
+            "sha256_before": "9ab0e4ed438c16bfbbf0cddb08c66cb77b6e519110c239f9d79bf81e0e70823e",
+            "sha256_after": "9ab0e4ed438c16bfbbf0cddb08c66cb77b6e519110c239f9d79bf81e0e70823e"
+          },
+          {
+            "name": "collection-review.md",
+            "sha256_before": "9288d5f3db93a135aed61f3dcd4281f56c2bb38d6e685dd9606520d9ddc76116",
+            "sha256_after": "9288d5f3db93a135aed61f3dcd4281f56c2bb38d6e685dd9606520d9ddc76116"
+          }
+        ]
+      }
+    },
+    {
+      "id": "H08",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/two-full-join.json",
+        "sha256": "eccdb8e08b6a2a17d293c463c1a11dd7cb5285dc041fcd93d7fd789c21a96305"
+      },
+      "observed": {
+        "branch_overlap": 2,
+        "consumptions": [
+          {
+            "consumer": "concentration",
+            "name": "income-ranking.md",
+            "artifact_hash": "d2ef224ce975e1f291ac6057223d5153063dbeed156468dd6c086d95bf3f16fb"
+          },
+          {
+            "consumer": "concentration",
+            "name": "income-total.md",
+            "artifact_hash": "871b608ed8c964552d508fe4f74442a54bda4bb0be720afa1c9587241817c7a1"
+          }
+        ],
+        "panel_artifact_previews": [
+          "income-concentration.md",
+          "income-ranking.md",
+          "income-total.md"
+        ],
+        "artifacts": [
+          {
+            "name": "income-concentration.md",
+            "sha256": "fe9e8b17b3be3da46295ee48e940fad37773e23a0426680c48f9d57f7ea25e7d",
+            "text": "# 集中度复核\n\n核对收入笔数 2\n核对收入合计 200.00\n最大单笔收入 120.50\n最大单笔收入占比 60.25%\n"
+          },
+          {
+            "name": "income-ranking.md",
+            "sha256": "d2ef224ce975e1f291ac6057223d5153063dbeed156468dd6c086d95bf3f16fb",
+            "text": "# 收入排名\n\n1. 合成样本甲 120.50\n2. 合成样本乙 79.50\n"
+          },
+          {
+            "name": "income-total.md",
+            "sha256": "871b608ed8c964552d508fe4f74442a54bda4bb0be720afa1c9587241817c7a1",
+            "text": "# 收入总额\n\n收入笔数 2\n收入合计 200.00\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "H09",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/three-independent.json",
+        "sha256": "e44cfe025eb80f17e31168761d537e40dacfa413d02c6a55293b7167281a269f"
+      },
+      "observed": {
+        "goal": "请完成名为「三项独立流水核对」的任务。使用当前工作区已授权的 office-sample.csv。请并行独立核对「收入」，交付 income.md；「退款」，交付 refund.md；「记录数」，交付 count.md。这三项没有上下游依赖，各自直接交付。已有的 summary.md 和 collection-review.md 原样保留。进度留在面板，只有需我处理或任务完成时通知。",
+        "result": "passed",
+        "branch_overlap": 3,
+        "csv_reads": [
+          "office-sample.csv",
+          "office-sample.csv",
+          "office-sample.csv"
+        ],
+        "consumptions": [],
+        "http_request_count": 13,
+        "steps": [
+          {
+            "node_id": "income",
+            "status": "done",
+            "attempt": 1
+          },
+          {
+            "node_id": "refund",
+            "status": "done",
+            "attempt": 1
+          },
+          {
+            "node_id": "count",
+            "status": "done",
+            "attempt": 1
+          }
+        ],
+        "artifacts": [
+          {
+            "name": "count.md",
+            "sha256": "a9db3cb7078c3183d2040f93532a5101848f83ca5633fb5b04b6c9a7a2577099",
+            "text": "# 记录数 核对结果\n\n实际值 3\n"
+          },
+          {
+            "name": "income.md",
+            "sha256": "5b7b194017c706f1201137038ab6a6f1b39921924c1a3477c4eac96e7f80aeda",
+            "text": "# 收入 核对结果\n\n实际值 200.00\n"
+          },
+          {
+            "name": "refund.md",
+            "sha256": "0ac0ccdf2dc5f71fc9418a3ed2407e9bcb6b9dc3e49eb87c224b085a8564a3f0",
+            "text": "# 退款 核对结果\n\n实际值 -20.00\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "H10",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/four-partial-strict.json",
+        "sha256": "81f7f0872e63f9a4967c5b836feceeb9f17eff1b7f01edfa92142b35bbaf65f6"
+      },
+      "observed": {
+        "goal": "请完成名为「办公流水部分汇合」的任务。使用当前工作区已授权的 office-sample.csv。请并行独立核对「收入」，交付 income.md；「退款」，交付 refund.md；「记录数」，交付 count.md；「金额区间」，交付 range.md。只有收入和退款完成后，再做「净额复核」并交付 net.md，记录数、金额区间无需先完成。已有的 summary.md 和 collection-review.md 原样保留。进度留在面板，只有需我处理或任务完成时通知。",
+        "result": "passed",
+        "branch_overlap": 3,
+        "join_started_while_unrelated_running": true,
+        "published_before_join": [
+          "income",
+          "refund"
+        ],
+        "consumptions": [
+          {
+            "consumer": "net",
+            "name": "income.md",
+            "artifact_hash": "5b7b194017c706f1201137038ab6a6f1b39921924c1a3477c4eac96e7f80aeda"
+          },
+          {
+            "consumer": "net",
+            "name": "refund.md",
+            "artifact_hash": "0ac0ccdf2dc5f71fc9418a3ed2407e9bcb6b9dc3e49eb87c224b085a8564a3f0"
+          }
+        ],
+        "http_request_count": 20,
+        "after_both_publications_ms": 178,
+        "timeline": [
+          {
+            "event": "started",
+            "node": "income",
+            "elapsed_ms": 2391,
+            "concurrent": []
+          },
+          {
+            "event": "started",
+            "node": "refund",
+            "elapsed_ms": 2391,
+            "concurrent": [
+              "income"
+            ]
+          },
+          {
+            "event": "started",
+            "node": "count",
+            "elapsed_ms": 2391,
+            "concurrent": [
+              "income",
+              "refund"
+            ]
+          },
+          {
+            "event": "published",
+            "node": "income",
+            "elapsed_ms": 2484
+          },
+          {
+            "event": "published",
+            "node": "refund",
+            "elapsed_ms": 2485
+          },
+          {
+            "event": "started",
+            "node": "range",
+            "elapsed_ms": 2652,
+            "concurrent": [
+              "count"
+            ]
+          },
+          {
+            "event": "started",
+            "node": "net",
+            "elapsed_ms": 2663,
+            "concurrent": [
+              "count",
+              "range"
+            ]
+          },
+          {
+            "event": "published",
+            "node": "net",
+            "elapsed_ms": 2693
+          },
+          {
+            "event": "published",
+            "node": "count",
+            "elapsed_ms": 2693
+          },
+          {
+            "event": "published",
+            "node": "range",
+            "elapsed_ms": 2699
+          }
+        ],
+        "artifacts": [
+          {
+            "name": "count.md",
+            "sha256": "a9db3cb7078c3183d2040f93532a5101848f83ca5633fb5b04b6c9a7a2577099",
+            "text": "# 记录数 核对结果\n\n实际值 3\n"
+          },
+          {
+            "name": "income.md",
+            "sha256": "5b7b194017c706f1201137038ab6a6f1b39921924c1a3477c4eac96e7f80aeda",
+            "text": "# 收入 核对结果\n\n实际值 200.00\n"
+          },
+          {
+            "name": "net.md",
+            "sha256": "3324ca3248f2f5b0d1c61d91b22a4a5ed220537fd825cf42a33c1cbe2cd15000",
+            "text": "# 净额复核结果\n\n实际值 180.00\n"
+          },
+          {
+            "name": "range.md",
+            "sha256": "f5ed711e8726a99c4568aa405541fa83669a1f8e0699db176aee7384f486d05a",
+            "text": "# 金额区间 核对结果\n\n实际值 -20.00 至 120.50\n"
+          },
+          {
+            "name": "refund.md",
+            "sha256": "0ac0ccdf2dc5f71fc9418a3ed2407e9bcb6b9dc3e49eb87c224b085a8564a3f0",
+            "text": "# 退款 核对结果\n\n实际值 -20.00\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "H11",
+      "verdict": "符合",
+      "receipt": {
+        "path": "tmp/dispatch-host/native/candidate-9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc/one-to-two.json",
+        "sha256": "53e1d46c3df935f8e6cc959efae6758340b65422fe0136e781261be18fdccfd3"
+      },
+      "observed": {
+        "goal": "请完成名为「共用成果双向复核」的任务。先核对当前工作区已授权的 office-sample.csv 中的收入，交付 source.md。随后两项工作都读取这步成果，各自结束：金额复核交付 amount-review.md，双倍对照交付 double-check.md。已有的 summary.md 和 collection-review.md 原样保留。进度留在面板，只有需我处理或任务完成时通知。",
+        "result": "passed",
+        "concurrent_downstream_consumers": 2,
+        "consumptions": [
+          {
+            "consumer": "twice",
+            "name": "source.md",
+            "artifact_hash": "103d4650cd90022f40763d041aa3f0ca735bfd7f0831474b5b74f06249d66e54"
+          },
+          {
+            "consumer": "echo",
+            "name": "source.md",
+            "artifact_hash": "103d4650cd90022f40763d041aa3f0ca735bfd7f0831474b5b74f06249d66e54"
+          }
+        ],
+        "http_request_count": 13,
+        "downstream_start_gap_ms": 1,
+        "timeline": [
+          {
+            "event": "started",
+            "node": "source",
+            "elapsed_ms": 2354,
+            "concurrent": []
+          },
+          {
+            "event": "published",
+            "node": "source",
+            "elapsed_ms": 2381
+          },
+          {
+            "event": "started",
+            "node": "twice",
+            "elapsed_ms": 2486,
+            "concurrent": []
+          },
+          {
+            "event": "started",
+            "node": "echo",
+            "elapsed_ms": 2487,
+            "concurrent": []
+          },
+          {
+            "event": "published",
+            "node": "echo",
+            "elapsed_ms": 2498
+          },
+          {
+            "event": "published",
+            "node": "twice",
+            "elapsed_ms": 2552
+          }
+        ],
+        "artifacts": [
+          {
+            "name": "amount-review.md",
+            "sha256": "1a4d6a6341976c89b7c79b93a404f1b07dedb7ad2950107f26f967bed733683a",
+            "text": "# 金额复核结果\n\n实际值 200.00\n"
+          },
+          {
+            "name": "double-check.md",
+            "sha256": "7534d2acf0b010abd43d45cadca8555996aba612e2bfece27fca9b1af922ea52",
+            "text": "# 双倍对照结果\n\n实际值 400.00\n"
+          },
+          {
+            "name": "source.md",
+            "sha256": "103d4650cd90022f40763d041aa3f0ca735bfd7f0831474b5b74f06249d66e54",
+            "text": "# 原始来源复核 核对结果\n\n实际值 200.00\n"
+          }
+        ]
+      }
+    }
+  ]
+}
