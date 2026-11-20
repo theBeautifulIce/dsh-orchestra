@@ -6,6 +6,8 @@ import { createDshPlanningCallback } from '../../src/executor/dsh-host.ts'
 import { callPlanningStage, createTaskPlanningHost } from '../../src/service/task-planning.ts'
 import { WorkflowCatalog } from '../../src/service/workflows.ts'
 import { freshLedger } from '../fixtures/ledger.ts'
+import { createPlanningSettingsHost, planningTimeoutDefaults, withPlanningBudget } from '../../src/service/planning-settings.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 
 const messages = { timeout: '生成超时', failure: '模型暂时不可用' }
 
@@ -38,7 +40,7 @@ it('honors a non-streaming extension timeout above the streaming idle limit with
   }
 })
 
-it('keeps an active DSH reasoning stream past the old deadline until the final workflow JSON', async () => {
+it('keeps an active DSH reasoning stream past 120 seconds when the captured stage budget allows it', async () => {
   vi.useFakeTimers()
   let stream!: (event: unknown) => void
   let finish!: () => void
@@ -67,17 +69,67 @@ it('keeps an active DSH reasoning stream past the old deadline until the final w
   }
   const context = { agents: { get: () => parent }, llm: { listModels: async () => [{ id: route.model }] } } as unknown as Context
   const generate = createDshPlanningCallback({ context, parent: () => parent as never, model: route }, 'workflow')
-  const pending = callPlanningStage((signal, progress) => generate({ goal: '计划' }, signal, progress), undefined, messages)
+  const pending = callPlanningStage((signal, progress) => generate({ goal: '计划' }, signal, progress), undefined, messages, 175_000)
   const settled = expect(pending).resolves.toEqual({ name: 'valid workflow' })
-  await vi.advanceTimersByTimeAsync(20_000)
-  stream({ agent, frame: { type: 'chunk', chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } } })
-  await vi.advanceTimersByTimeAsync(20_000)
+  for (let index = 0; index < 7; index++) {
+    await vi.advanceTimersByTimeAsync(20_000)
+    stream({ agent, frame: { type: 'chunk', chunk: { type: 'reasoning-delta', index, text: 'reasoning' } } })
+  }
   stream({ agent, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 1, text: '{' } } })
   await vi.advanceTimersByTimeAsync(12_000)
   finish()
   await settled
   expect(cancel).not.toHaveBeenCalled()
   expect(dispose).toHaveBeenCalledOnce()
+})
+
+it('snapshots old and new non-streaming requests independently and bounds an interrupted multi-stage request', async () => {
+  const { db, dir } = freshLedger()
+  try {
+    vi.useFakeTimers()
+    const settings = createPlanningSettingsHost(db, { task: 'fixed', automatic_workflow: 'fixed', standalone_workflow: 'fixed' })
+    const signals: AbortSignal[] = []
+    const planning = createTaskPlanningHost(db, new WorkflowCatalog('S5', db), undefined, {
+      propose: async () => {}, workflowGenerator: (_input, signal) => {
+        signals.push(signal)
+        return new Promise(() => {})
+      },
+    }, undefined, settings.snapshot)
+    const brief = { goal: '规划测试', requirements: [] }
+    const at = '2026-11-20T00:00:00Z'
+    const old = expect(planning.propose(brief, 'user', at)).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
+    settings.save({ operation_id: uuidv7(), expected_revision: 0, values: {
+      ...planningTimeoutDefaults, task_seconds: 160, stage_seconds: 190, request_seconds: 210,
+    } }, 'user', at)
+    const newer = expect(planning.propose(brief, 'user', at)).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT', details: { boundary: 'maximum' } })
+    await vi.advanceTimersByTimeAsync(30_000)
+    await old
+    expect(signals[0]?.aborted).toBe(true)
+    expect(signals[1]?.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(129_999)
+    expect(signals[1]?.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await newer
+
+    const budget = settings.snapshot()
+    let stages = 0
+    const entire = expect(withPlanningBudget(budget.request, undefined, async (signal) => {
+      for (let index = 0; index < 3; index++) {
+        stages++
+        await callPlanningStage(() => new Promise((resolve) => setTimeout(resolve, 100_000)), signal, messages, budget.stage, null)
+      }
+    })).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT', details: { boundary: 'request' } })
+    await vi.advanceTimersByTimeAsync(210_000)
+    await entire
+    expect(stages).toBe(3)
+    const caller = new AbortController()
+    const disconnected = expect(withPlanningBudget(budget.request, caller.signal, async () => new Promise(() => {}))).rejects.toBe('closed')
+    caller.abort('closed')
+    await disconnected
+  } finally {
+    db.raw.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 it('keeps an idle and hard ceiling and passes caller cancellation through to the planner', async () => {

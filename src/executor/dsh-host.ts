@@ -130,10 +130,10 @@ export function createDshPlanningCallback(options: {
         handle?.agent.cancel({ kind: 'parent' })
         reject(controller.signal.reason)
       }, { once: true })
-      // 支持流进度的调用共享服务阶段预算；独立调用保留自身硬上限。
+      // 服务携带真实的阶段时限。兜底上限容纳本机设置中可配置的最长阶段。
       timeout = setTimeout(() => {
         controller.abort(new OrchError('OPERATION_TIMEOUT', 'DSH 主脑规划超过处理时限', { boundary: 'maximum' }))
-      }, signal && onProgress ? 120_000 : 45_000)
+      }, signal && onProgress ? 600_000 : 45_000)
       timeout.unref()
     })
     try {
