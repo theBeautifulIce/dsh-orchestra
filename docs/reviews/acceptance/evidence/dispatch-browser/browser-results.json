@@ -1,0 +1,193 @@
+{
+  "fixture": true,
+  "results": [
+    {
+      "width": 1366,
+      "board": {
+        "width": 1366,
+        "scrollWidth": 1366
+      },
+      "flow": {
+        "width": 1366,
+        "scrollWidth": 1366
+      },
+      "queue": {
+        "width": 1366,
+        "scrollWidth": 1366
+      },
+      "canvas": {
+        "nodes": [
+          {
+            "id": "start",
+            "x": 555.21875,
+            "y": 1391.4375,
+            "width": 160,
+            "height": 88,
+            "label": "开始核验",
+            "labelHeight": 22
+          },
+          {
+            "id": "branch_0",
+            "x": 795.21875,
+            "y": 1391.4375,
+            "width": 160,
+            "height": 88,
+            "label": "销售复核",
+            "labelHeight": 22
+          },
+          {
+            "id": "branch_1",
+            "x": 795.21875,
+            "y": 1531.4375,
+            "width": 160,
+            "height": 88,
+            "label": "成本核对",
+            "labelHeight": 22
+          },
+          {
+            "id": "branch_2",
+            "x": 795.21875,
+            "y": 1671.4375,
+            "width": 160,
+            "height": 88,
+            "label": "库存独立归档",
+            "labelHeight": 22
+          },
+          {
+            "id": "join",
+            "x": 1035.21875,
+            "y": 1391.4375,
+            "width": 160,
+            "height": 88,
+            "label": "汇总销售与成本",
+            "labelHeight": 22
+          }
+        ],
+        "edges": [
+          [
+            "start",
+            "branch_0"
+          ],
+          [
+            "start",
+            "branch_1"
+          ],
+          [
+            "start",
+            "branch_2"
+          ],
+          [
+            "branch_0",
+            "join"
+          ],
+          [
+            "branch_1",
+            "join"
+          ]
+        ]
+      },
+      "keyboard_tab_enter": true,
+      "board_cards": 2,
+      "primary_task_count": 1,
+      "node_reads": [
+        "run",
+        "run",
+        "run"
+      ]
+    },
+    {
+      "width": 390,
+      "board": {
+        "width": 390,
+        "scrollWidth": 390
+      },
+      "flow": {
+        "width": 390,
+        "scrollWidth": 390
+      },
+      "queue": {
+        "width": 390,
+        "scrollWidth": 390
+      },
+      "canvas": {
+        "nodes": [
+          {
+            "id": "start",
+            "x": 52,
+            "y": 1676.796875,
+            "width": 160,
+            "height": 88,
+            "label": "开始核验",
+            "labelHeight": 22
+          },
+          {
+            "id": "branch_0",
+            "x": 292,
+            "y": 1676.796875,
+            "width": 160,
+            "height": 88,
+            "label": "销售复核",
+            "labelHeight": 22
+          },
+          {
+            "id": "branch_1",
+            "x": 292,
+            "y": 1816.796875,
+            "width": 160,
+            "height": 88,
+            "label": "成本核对",
+            "labelHeight": 22
+          },
+          {
+            "id": "branch_2",
+            "x": 292,
+            "y": 1956.796875,
+            "width": 160,
+            "height": 88,
+            "label": "库存独立归档",
+            "labelHeight": 22
+          },
+          {
+            "id": "join",
+            "x": 532,
+            "y": 1676.796875,
+            "width": 160,
+            "height": 88,
+            "label": "汇总销售与成本",
+            "labelHeight": 22
+          }
+        ],
+        "edges": [
+          [
+            "start",
+            "branch_0"
+          ],
+          [
+            "start",
+            "branch_1"
+          ],
+          [
+            "start",
+            "branch_2"
+          ],
+          [
+            "branch_0",
+            "join"
+          ],
+          [
+            "branch_1",
+            "join"
+          ]
+        ]
+      },
+      "keyboard_tab_enter": true,
+      "board_cards": 2,
+      "primary_task_count": 1,
+      "node_reads": [
+        "run",
+        "run",
+        "run"
+      ]
+    }
+  ]
+}

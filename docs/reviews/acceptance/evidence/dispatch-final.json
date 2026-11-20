@@ -1,0 +1,103 @@
+{
+  "source_commit": "709d798ea45a9f05ec6b7b8a5ea8134524891456",
+  "archive_sha256": "9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc",
+  "packaged_files": 75,
+  "identical_preexisting_migrations": 66,
+  "typecheck": "passed",
+  "main_suite": {
+    "numTotalTests": 1971,
+    "numPassedTests": 1963,
+    "numFailedTests": 0,
+    "numPendingTests": 8
+  },
+  "conditional_assertions": [
+    "Q-63 drives the real memory recovery panel for the same partial-write attempt",
+    "双包设置可往返，旧引擎执行兼容计划，新语义计划保留并阻止旧引擎接手",
+    "T14 从已签旧包读取登记宿主目录，拒绝降档不暂停，并可在普通映射下原库回退",
+    "验包拒绝缺少清单声明的任一发布指南",
+    "实装 tarball 的服务、迁移、产物与受信侧栏注册同时可用",
+    "门记录校验 G1 门记录通过",
+    "recomputes the pinned two-package archive and refuses unsafe rollback through the live driver",
+    "S6 T07 · 生产四路读取、原始样本和 SQL 计划"
+  ],
+  "installed_package_suite": {
+    "numTotalTests": 6,
+    "numPassedTests": 6,
+    "numFailedTests": 0,
+    "numPendingTests": 0
+  },
+  "performance_test": {
+    "numTotalTests": 5,
+    "numPassedTests": 1,
+    "numFailedTests": 0,
+    "numPendingTests": 4
+  },
+  "performance_p95_ms": {
+    "list_tasks": 3.966,
+    "get_run": 3.31,
+    "list_nodes": 15.746,
+    "list_events": 2.095
+  },
+  "native_probes": [
+    {
+      "case": "three-independent",
+      "passed": true
+    },
+    {
+      "case": "four-partial-strict",
+      "passed": true
+    },
+    {
+      "case": "one-to-two",
+      "passed": true
+    },
+    {
+      "case": "consult",
+      "passed": true
+    },
+    {
+      "case": "routing-off",
+      "passed": true
+    },
+    {
+      "case": "quota-retry",
+      "passed": true
+    },
+    {
+      "case": "blocked",
+      "passed": true
+    },
+    {
+      "case": "two-full-join",
+      "passed": true
+    },
+    {
+      "case": "routing-default",
+      "passed": true
+    }
+  ],
+  "installed": {
+    "desktop_version": "0.2.2.0",
+    "exact_installed_files": 75,
+    "changed_other_dependencies": 0,
+    "profile_config_bytes_unchanged": true,
+    "normalized_offline_lock_and_archive_integrity_match": true,
+    "application_restarted": false,
+    "running_host_loaded_new_candidate_verified": false
+  },
+  "real_desktop_evidence": "desktop-1120-b/verified.json",
+  "browser_evidence": "dispatch-browser/browser-results.json",
+  "memory_recovery": {
+    "branch": "Q-63",
+    "written": 1,
+    "missing": 1,
+    "resolution": "abandon",
+    "old_attempt_fenced": true
+  },
+  "g13_short_window": {
+    "numTotalTests": 2,
+    "numPassedTests": 2,
+    "numFailedTests": 0,
+    "numPendingTests": 0
+  }
+}
