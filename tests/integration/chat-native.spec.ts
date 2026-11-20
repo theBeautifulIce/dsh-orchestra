@@ -349,6 +349,34 @@ it('binds ordinary native conversation, live owner input and one durable run per
   } finally { await test.close() }
 })
 
+it('admits the complete named income concentration task through the native owner hook', async () => {
+  const goal = `请完成一项名为「收入集中度复核」的任务，使用当前工作区已授权的 office-sample.csv。
+
+请并行做两项核对：
+1. 「收入排名」只统计类别为“收入”的记录，按金额从高到低列出明细，写入 income-ranking.md。
+2. 「收入总额」独立从原始 CSV 统计收入笔数和收入合计，写入 income-total.md。
+
+两份都完成后，由「集中度复核」读取这两份新报告，核对笔数与合计，计算最大单笔收入占总收入的比例，写入 income-concentration.md。金额和百分比均保留两位小数。
+
+本次只交付上述三份新报告。已有的 summary.md 和 collection-review.md 原样保留。正常进度留在面板，只有确实需要我处理或任务结束时才通知我。`
+  const deliverables = ['income-ranking.md', 'income-total.md', 'income-concentration.md']
+  const test = await fixture({ reportRequirements: deliverables })
+  try {
+    const human = test.session('work', 'parent')
+    const assigned = user(goal)
+    const admitted = await human.admit(assigned)
+    expect(admitted).toMatchObject({ kind: 'enter', messages: [assigned, expect.objectContaining({
+      content: [expect.objectContaining({ text: expect.stringContaining('Orchestra 已接单') })],
+    })] })
+    await expect(human.call()).resolves.toMatchObject({ state: 'started', run_id: expect.any(String), deliverables })
+    expect(test.planner).toHaveBeenCalledOnce()
+    expect(test.planner.mock.calls[0]?.[0].goal).toBe(goal)
+    const service = test.services.get('parent')!
+    expect(count(service, 'runs')).toBe(1)
+    expect(count(service, 'chat_task_receipts')).toBe(1)
+  } finally { await test.close() }
+})
+
 it.each([
   ['读当前工作区的办公流水表，汇总收入和退款并输出 Markdown 报告。', 'task'],
   ['把我提供的会议记录整理成纪要和待办清单，按负责人分组。', 'task'],
@@ -356,6 +384,19 @@ it.each([
   ['供应商有三家，预算上限是十万元。我现在要你按价格与交期对比它们并制作一份优先级清单。', 'task'],
   ['以下是本次背景。\n请帮我整理一份给项目组的三点沟通摘要。', 'task'],
   ['请核对我上传的成本表，只读不修改原表。', 'task'],
+  ['执行任务「月末归档」：把我提供的会议记录整理成纪要。', 'task'],
+  ['请开展一项名叫季度复盘的工作。\n一、生成一份季度摘要。', 'task'],
+  ['帮我做个叫「台账复核」的任务，使用已授权的 costs.xlsx 生成汇总表。', 'task'],
+  ['请完成一项名为「生成审计报告」的任务。', 'clarify'],
+  ['请完成一项名为「成本核对」的任务，使用当前工作区已授权的 costs.xlsx。', 'clarify'],
+  ['请完成一项名为「成本核对」的任务。先讨论如何生成汇总表。', 'conversation'],
+  ['执行任务「成本核对」：核对 costs.xlsx 应该怎么做？', 'conversation'],
+  ['请执行任务「成本核对」。请查看当前任务的进度。', 'conversation'],
+  ['请完成一项名为「成本核对」的任务。客户说：请生成报价表。', 'conversation'],
+  ['请完成一项名为「成本核对」的任务；客户说：\n请生成报价表。', 'conversation'],
+  ['示例：请完成一项名为「成本核对」的任务。\n请生成报价表。', 'conversation'],
+  ['请完成一项名为「成本核对」的任务。现在不要执行，稍后再说。\n请生成报价表。', 'conversation'],
+  ['请执行任务「成本核对」。等我确认后再核对 costs.xlsx 并生成报告。', 'conversation'],
   ['请教我怎么写报告', 'conversation'],
   ['帮我解释一下如何生成汇总表', 'conversation'],
   ['先说方案，等我确认再开始', 'conversation'],
