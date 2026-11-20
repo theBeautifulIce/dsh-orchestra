@@ -38,6 +38,21 @@ export function runtimeCanvasDoc(definition: unknown, topology?: RunTopology | n
   }
   return merged
 }
+
+export function separateOverlappingNodes(doc: CanvasDoc, width: number, height: number): CanvasDoc {
+  const { nodes } = doc
+  const overlaps = nodes.some(({ position: left }, index) => {
+    for (let other = index + 1; other < nodes.length; other++) {
+      const right = nodes[other]!.position
+      if (Math.abs(left.x - right.x) < width && Math.abs(left.y - right.y) < height) return true
+    }
+    return false
+  })
+  if (!overlaps) return doc
+  const arranged = arrangePositions(doc)
+  return arranged.ok ? { ...doc, nodes: arranged.nodes } : doc
+}
+
 export function useRunTopology(api: ResourcesApi, runId: string | undefined, enabled: boolean, reloadVersion: number) {
   const [loaded, setLoaded] = useState<{ key: string; data: RunTopology | null; failed: boolean }>()
   useEffect(() => {

@@ -25,7 +25,7 @@ export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnab
   if (!selected) return queue ? <p className="task-flow-empty">当前列表中没有已创建运行的任务。</p> : null
   return <div className="task-flow-view">
     <nav className="task-flow-picker" aria-label={queue ? '选择任务查看队列' : '选择任务流程'}>
-      <header className="task-flow-section-head"><strong>任务</strong><span>{tasks.length} 项</span></header>
+      <header className="task-flow-section-head"><strong>任务</strong><span>{available.length} 项</span></header>
       {available.map((task) => <button key={task.task_id} className="task-flow-pick" type="button" aria-pressed={task === selected}
         onClick={() => setSelection(task.task_id)}>
         <span className="task-flow-pick-meta"><span className="task-type-badge">{taskOriginLabel(task)}</span>
@@ -42,7 +42,7 @@ export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnab
 }
 
 function TaskRunQueue({ api, task, reloadVersion }: { api: ResourcesApi; task: TaskSummary; reloadVersion: number }) {
-  const { nodes, failed, refresh } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
+  const { nodes, partial, failed, refresh } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
   return <section className="task-flow-main" aria-label="任务队列">
     <header className="task-flow-run-head">
       <h2>队列 · {task.title || '未命名任务'}</h2>
@@ -50,7 +50,7 @@ function TaskRunQueue({ api, task, reloadVersion }: { api: ResourcesApi; task: T
     </header>
     {failed ? <p role="alert" className="task-flow-empty">队列读取失败。<button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>
       : !nodes ? <p role="status" className="task-flow-empty">正在读取队列…</p>
-        : <TaskStepOverview nodes={nodes} queue />}
+        : <TaskStepOverview nodes={nodes} partial={partial} queue />}
   </section>
 }
 
@@ -60,13 +60,13 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
   const [run, setRun] = useState<RunSummary>()
   const [runError, setRunError] = useState(false)
   const [retry, setRetry] = useState(0)
-  const { nodes, failed: nodeError, refresh: refreshNodes } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
+  const { nodes, partial, failed: nodeError, refresh: refreshNodes } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
   useEffect(() => {
     if (!task.current_run_id) return
     let current = true
     setRunError(false)
     void api.getRun(task.current_run_id).then(({ data }) => {
-      if (data.task_id !== task.task_id) throw new Error('运行归属已变化')
+      if (data.run_id !== task.current_run_id || data.task_id !== task.task_id) throw new Error('运行归属已变化')
       if (current) setRun(data)
     }).catch(() => { if (current) setRunError(true) })
     return () => { current = false }
@@ -97,6 +97,7 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
     </header>
     {runError && <p role="alert" className="task-flow-empty">运行信息读取失败。<button className="task-quiet-button" type="button" onClick={() => setRetry((n) => n + 1)}>重试</button></p>}
     {nodeError && <p role="alert" className="task-flow-empty">执行步骤读取失败。<button className="task-quiet-button" type="button" onClick={refreshNodes}>重试</button></p>}
+    {partial && <p className="task-flow-empty">部分步骤或较新的尝试未显示。</p>}
     {runtimeDoc && !topology.failed && !topology.loading && <WorkflowDependencyView doc={runtimeDoc} nodes={nodes} />}
     {hasRun && !nodes && !nodeError && <p role="status" className="task-flow-empty">正在读取执行步骤…</p>}
     {(!hasRun || nodes) && <TaskRunSteps nodes={nodes ?? []} doc={runtimeDoc} run={run}
@@ -109,7 +110,8 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
     {topology.failed && <p role="alert">运行拓扑读取失败，请刷新后重试。</p>}
     {workflow?.doc && !topology.failed && !topology.loading && <details className="task-flow-graph">
       <summary>{reworkEnabled ? '查看本次运行流程图' : '查看固定流程图'} · {workflow.doc.name || '流程'} v{run?.workflow_version ?? task.workflow_version}</summary>
-      <WorkflowCanvasView definition={workflow.definition} readOnly runtimeCompact inspectNodes runtimeTopology={topology.data} canvasId="task-run-flow" runtimeNodes={nodeError ? undefined : nodes} />
+      <WorkflowCanvasView definition={workflow.definition} readOnly runtimeCompact inspectNodes runtimeNodesPartial={partial}
+        runtimeTopology={topology.data} canvasId="task-run-flow" runtimeNodes={nodes} />
     </details>}
   </section>
 }
