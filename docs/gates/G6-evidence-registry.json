@@ -149,6 +149,8 @@
     {"evidence_id":"G-13/rollback-blockers.ndjson","file":"docs/gates/evidence/G6/G-13/rollback-blockers.ndjson","strength":"strong","source":"fault:G-13"},
     {"evidence_id":"G-13/upgrade-failures.ndjson","file":"docs/gates/evidence/G6/G-13/upgrade-failures.ndjson","strength":"strong","source":"fault:G-13"},
     {"evidence_id":"G-13/negative-external-fence.json","file":"docs/gates/evidence/G6/G-13/negative-external-fence.json","strength":"strong","source":"fault:G-13"},
+    {"evidence_id":"G-13/negative-plan.json","file":"docs/gates/evidence/G6/G-13/negative-plan.json","strength":"strong","source":"fault:G-13"},
+    {"evidence_id":"G-13/previous-rehearsal-host.mjs","file":"docs/gates/evidence/G6/G-13/previous-rehearsal-host.mjs","strength":"strong","source":"fault:G-13"},
     {"evidence_id":"G-13/checks.json","file":"docs/gates/evidence/G6/G-13/checks.json","strength":"strong","source":"fault:G-13"},
     {"evidence_id":"G-13/settings-read-by-s5.db","file":"docs/gates/evidence/G6/G-13/settings-read-by-s5.db","strength":"strong","source":"fault:G-13"},
     {"evidence_id":"G-14/report.json","file":"docs/gates/evidence/G6/G-14/report.json","strength":"strong","source":"fault:G-14"},
@@ -207,6 +209,14 @@
     {"evidence_id":"invariants/I7.json","file":"docs/gates/evidence/G6/invariants/I7.json","strength":"strong","source":"invariant-comparison:I7"},
     {"evidence_id":"invariants/I8.json","file":"docs/gates/evidence/G6/invariants/I8.json","strength":"strong","source":"invariant-comparison:I8"},
     {"evidence_id":"invariants/I9.json","file":"docs/gates/evidence/G6/invariants/I9.json","strength":"strong","source":"invariant-comparison:I9"},
+    {"evidence_id":"r0/launch.json","file":"docs/gates/evidence/G6/r0/launch.json","strength":"strong","source":"r0-observation:launch.json"},
+    {"evidence_id":"r0/worker.json","file":"docs/gates/evidence/G6/r0/worker.json","strength":"strong","source":"r0-observation:worker.json"},
+    {"evidence_id":"r0/samples.ndjson","file":"docs/gates/evidence/G6/r0/samples.ndjson","strength":"strong","source":"r0-observation:samples.ndjson"},
+    {"evidence_id":"r0/end.json","file":"docs/gates/evidence/G6/r0/end.json","strength":"strong","source":"r0-observation:end.json"},
+    {"evidence_id":"r0/ledger.db","file":"docs/gates/evidence/G6/r0/ledger.db","strength":"strong","source":"r0-observation:ledger.db"},
+    {"evidence_id":"r0/soak-config.json","file":"docs/gates/evidence/G6/r0/soak-config.json","strength":"strong","source":"r0-observation:soak-config.json"},
+    {"evidence_id":"r0/workspace/sample.txt","file":"docs/gates/evidence/G6/r0/workspace/sample.txt","strength":"strong","source":"r0-observation:workspace/sample.txt"},
+    {"evidence_id":"r0/oncall-review.json","file":"docs/gates/evidence/G6/r0/oncall-review.json","strength":"strong","source":"r0-incident-and-duty-review"},
     {"evidence_id":"invariants/I10.json","file":"docs/gates/evidence/G6/invariants/I10.json","strength":"strong","source":"invariant-comparison:I10"},
     {"evidence_id":"parameters/parameter-queue.json","file":"docs/gates/evidence/G6/parameters/parameter-queue.json","strength":"strong","source":"g6-parameter:queue"},
     {"evidence_id":"parameters/parameter-retention.json","file":"docs/gates/evidence/G6/parameters/parameter-retention.json","strength":"strong","source":"g6-parameter:retention"},
@@ -228,7 +238,7 @@
     "G-10": ["G-10/report.json","G-10/before.db","G-10/breakpoint.db","G-10/dispatched.db","G-10/after.db","G-10/dispatch.json"],
     "G-11": ["G-11/report.json","G-11/memory-recovery.json","G-11/committed.db","G-11/committed-writer.db","G-11/committed-before.db","G-11/committed-before-writer.db","G-11/committed-breakpoint.db","G-11/committed-breakpoint-writer.db","G-11/committed-lost.db","G-11/committed-lost-writer.db","G-11/committed-inspected.db","G-11/committed-inspected-writer.db","G-11/committed-resolved.db","G-11/committed-resolved-writer.db","G-11/rolled_back.db","G-11/rolled_back-writer.db","G-11/rolled_back-before.db","G-11/rolled_back-before-writer.db","G-11/rolled_back-breakpoint.db","G-11/rolled_back-breakpoint-writer.db","G-11/rolled_back-lost.db","G-11/rolled_back-lost-writer.db","G-11/rolled_back-inspected.db","G-11/rolled_back-inspected-writer.db","G-11/rolled_back-resolved.db","G-11/rolled_back-resolved-writer.db","G-11/partial.db","G-11/partial-writer.db","G-11/partial-before.db","G-11/partial-before-writer.db","G-11/partial-breakpoint.db","G-11/partial-breakpoint-writer.db","G-11/partial-lost.db","G-11/partial-lost-writer.db","G-11/partial-inspected.db","G-11/partial-inspected-writer.db","G-11/partial-resolved.db","G-11/partial-resolved-writer.db"],
     "G-12": ["G-12/report.json","G-12/before.db","G-12/breakpoint.db","G-12/resolved.db","G-12/after.db","G-12/http.json"],
-    "G-13": ["G-13/report.json","G-13/before.db","G-13/compatibility.db","G-13/after.db","G-13/upgrade-waiting.db","G-13/upgrade-drained.db","G-13/rollback-waiting.db","G-13/outside-window-before.db","G-13/outside-window-after.db","G-13/previous.tgz","G-13/candidate.tgz","G-13/T14-plan.json","G-13/T14-rollback-fault.json","G-13/T14-external-fence.json","G-13/T14-observations.ndjson","G-13/T14-backup-manifest.json","G-13/1-backup.json","G-13/2-verify-copy.json","G-13/3-quiesce.json","G-13/4-healthcheck.json","G-13/5-synthetic-run.json","G-13/6-observe.json","G-13/7-rollback-table.json","G-13/rollback-blockers.ndjson","G-13/upgrade-failures.ndjson","G-13/negative-external-fence.json","G-13/checks.json","G-13/settings-read-by-s5.db"],
+    "G-13": ["G-13/report.json","G-13/before.db","G-13/compatibility.db","G-13/after.db","G-13/upgrade-waiting.db","G-13/upgrade-drained.db","G-13/rollback-waiting.db","G-13/outside-window-before.db","G-13/outside-window-after.db","G-13/previous.tgz","G-13/candidate.tgz","G-13/T14-plan.json","G-13/T14-rollback-fault.json","G-13/T14-external-fence.json","G-13/T14-observations.ndjson","G-13/T14-backup-manifest.json","G-13/1-backup.json","G-13/2-verify-copy.json","G-13/3-quiesce.json","G-13/4-healthcheck.json","G-13/5-synthetic-run.json","G-13/6-observe.json","G-13/7-rollback-table.json","G-13/rollback-blockers.ndjson","G-13/upgrade-failures.ndjson","G-13/negative-external-fence.json","G-13/negative-plan.json","G-13/previous-rehearsal-host.mjs","G-13/checks.json","G-13/settings-read-by-s5.db"],
     "G-14": ["G-14/report.json","G-14/orchestra.db","G-14/between.db","G-14/between-checkpoint.db","G-14/inside.db","G-14/inside-checkpoint.db","G-14/boundaries.json"],
     "G-15": ["G-15/report.json","G-15/orchestra.db","G-15/restored/orchestra.db","G-15/backup-a/orchestra.db","G-15/backup-a/manifest.json","G-15/backup-b/orchestra.db","G-15/backup-b/manifest.json","G-15/truncated/orchestra.db","G-15/truncated/manifest.json","G-15/changed-byte/orchestra.db","G-15/changed-byte/manifest.json","G-15/count/orchestra.db","G-15/count/manifest.json"],
     "G-16": ["G-16/report.json","G-16/orchestra.db","G-16/clean-pending.db","G-16/unverified-pending.db","G-16/failed-pending.db"],
@@ -249,6 +259,6 @@
     "I7": ["invariants/I7.json","G-11/partial-resolved.db","G-11/committed-writer.db","parameters/parameter-memory_judge.json"],
     "I8": ["invariants/I8.json","G-16/orchestra.db"],
     "I9": ["invariants/I9.json","G-07/after.db","G-14/orchestra.db","parameters/parameter-soak.json"],
-    "I10": ["invariants/I10.json","governance/prior-gates-and-admission.json","parameters/parameter-oncall.json","parameters/parameter-trial.json"]
+    "I10": ["invariants/I10.json","r0/launch.json","r0/worker.json","r0/samples.ndjson","r0/end.json","r0/ledger.db","r0/soak-config.json","r0/workspace/sample.txt","r0/oncall-review.json","governance/prior-gates-and-admission.json","parameters/parameter-oncall.json","parameters/parameter-trial.json"]
   }
 }

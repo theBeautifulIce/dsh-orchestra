@@ -245,6 +245,7 @@ export function createPreviousRehearsalExecutor({ module, sourceCommit, archiveS
       module_sha256: sha256File(provider) },
     approval: { actor: 'synthetic:g13-operator', approved_at: new Date().toISOString(),
       operation_id: uuidv7(), proof_sha256: sha256Hex(FIXTURE_PROOF) } }
+  writeFileSync(join(directory, 'negative-plan.json'), JSON.stringify(plan, null, 2) + '\n', { flag: 'wx' })
   const step = (name: typeof UPGRADE_STEPS[number]) => rehearseUpgrade(plan, name, FIXTURE_SECRET, FIXTURE_PROOF, WORKSPACE, provider)
   const id = plan.rehearsal_id
   const dbFile = plan.live_db
@@ -485,8 +486,10 @@ export const caseG13S6: FaultCase = async ({ directory }) => {
         ? {
           old_readable_model_settings: businessQuery('settings-read-by-s5.db',
             `SELECT * FROM model_routing_settings WHERE id=1 AND revision=1 AND json_extract(mapping_json,'$.standard')=?
-              AND json_type(mapping_json,'$.advanced') IS NULL AND json_extract(extended_mapping_json,'$.advanced')=?
-              AND json_array_length(model_notes_json)=1`, 1, LEGACY_MODEL, ADVANCED_MODEL),
+              AND json_type(mapping_json,'$.advanced') IS NULL AND json_type(mapping_json,'$.expert') IS NULL
+              AND json_extract(extended_mapping_json,'$.advanced')=? AND json_extract(extended_mapping_json,'$.expert')=?
+              AND json_array_length(model_notes_json)=1 AND json_extract(model_notes_json,'$[0].ref')=?`,
+            1, LEGACY_MODEL, ADVANCED_MODEL, ADVANCED_MODEL, ADVANCED_MODEL),
           candidate_plan_preserved: businessQuery('outside-window-after.db', `SELECT p.* FROM task_plans p
             LEFT JOIN start_run_operations o ON o.operation_id=p.launch_operation_id
             WHERE p.plan_id=? AND p.content_hash=? AND o.operation_id IS NULL
@@ -508,7 +511,8 @@ export const caseG13S6: FaultCase = async ({ directory }) => {
     artifacts: ['before.db', 'compatibility.db', 'after.db', 'upgrade-waiting.db', 'upgrade-drained.db', 'rollback-waiting.db',
       'outside-window-before.db', 'outside-window-after.db', 'previous.tgz', 'candidate.tgz', 'T14-plan.json', 'T14-rollback-fault.json',
       'T14-external-fence.json', 'T14-observations.ndjson', 'T14-backup-manifest.json', ...receiptFiles,
-      'rollback-blockers.ndjson', 'upgrade-failures.ndjson', 'negative-external-fence.json', 'checks.json',
+      'rollback-blockers.ndjson', 'upgrade-failures.ndjson', 'negative-external-fence.json', 'negative-plan.json',
+      'previous-rehearsal-host.mjs', 'checks.json',
       ...(negative.modelSettingsReadByPrevious ? ['settings-read-by-s5.db'] : [])],
     extra: runFacts,
   }

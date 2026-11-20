@@ -8,7 +8,7 @@ import { createSseSubscribe } from '../src/client/api/sse-fetch.ts'
 import { uuidv7 } from '../src/core/ids.ts'
 import { BridgeClient, type BridgeTransport } from '../src/executor/bridge.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../src/executor/tools.ts'
-import { serveOrchestra } from '../src/index.ts'
+import { serveOrchestra, type TrialOptions } from '../src/index.ts'
 import { appendEvent } from '../src/infra/db/ledger.ts'
 import { withTx, type Db, type observeSqlite } from '../src/infra/sqlite/driver.ts'
 import { withReadTx } from '../src/service/queries/read-tx.ts'
@@ -74,7 +74,8 @@ export function localJson<T>(endpoint: string, route: string, secret: string, si
   })
 }
 
-export async function startSoakService(directory: string, secret: string, signal: AbortSignal, fail: (error: Error) => void) {
+export async function startSoakService(directory: string, secret: string, signal: AbortSignal, fail: (error: Error) => void,
+  options: { trial?: TrialOptions; serve?: typeof serveOrchestra } = {}) {
   const fixture = join(directory, 'workspace')
   const registry = new ToolRegistry()
   registry.register({ name: TOOL, capability: 'read_only', command: { bin: TOOL, args: [FIXTURE] } })
@@ -114,9 +115,10 @@ export async function startSoakService(directory: string, secret: string, signal
   let service: Service | undefined
   let booted = false
   const role = 's6-soak-synthetic'
-  service = await serveOrchestra({
+  service = await (options.serve ?? serveOrchestra)({
     dbFile: join(directory, DATABASE), phase: 'S6', secret,
     configPath: join(directory, CONFIG), spillDir: join(directory, 'spill'),
+    ...(options.trial ? { trial: options.trial } : {}),
     executor: { registry, runner, bridge: new BridgeClient(transport) },
     asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').get()?.seq ?? 0),
     listTasks: () => { throw new Error('Production task query is unavailable') },
@@ -143,6 +145,7 @@ export async function startSoakService(directory: string, secret: string, signal
     })
     if (results.length !== 1 || results[0]?.status !== 'done') throw new Error('Synthetic node did not settle: ' + JSON.stringify(results))
     counts.nodes++
+    return { runId: started.run_id, nodeRunId: results[0].node_run_id }
   }
   async function poll() {
     const result = await json<{ items: unknown[] }>('/v1/tasks?limit=5')

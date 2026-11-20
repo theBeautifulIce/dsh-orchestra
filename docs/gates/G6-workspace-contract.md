@@ -21,7 +21,7 @@ S6 宿主通过 Orchestra 的 release 选项安装发布工作区，提供已登
 - 事件滞后可用正式浸泡原始事实或单独的 lag-samples.json。两种方式均检查每个窗口，不用汇总数字替代样本。
 - 正式浸泡保留 `launch.json`、`detached.json`、`host.json`、`soak-config.json`、`workspace/sample.txt`、`manifest.json`、`points.ndjson`、`events.ndjson`、`end.json`、`soak-report.json`、`ledger.db` 和 `hashes.json`。核验器检查启动身份、命令与配置、封存原件的哈希，重新判定整个窗口并从数据库核对事件及终点健康状态。
 - 升级、负载回滚和值班演练的 g6-operations/1 按固定顺序记录执行步骤及其独立原件引用。I1–I10 的 g6-invariant/1 绑定实际对照结果的原件摘要。受信执行登记与独立核验负责确认这些记录的实践语义。
-- §16.3 六项定值各有自己的 g6-parameter/1 原件。其证据 source 为 g6-parameter 加对应参数名。R0 必须绑定最终候选、连续满三天、零 P1。
+- §16.3 六项定值各有自己的 dsh-g6-parameter/1 原件。其 source 为 g6-parameter 加对应参数名。R0 冻结七份按分钟运行的原件和一份现场值班与事故评定。机械复算绑定同一候选、安装包、连续三天的 UTC 与实际合成任务。负责人依据值班和事故记录确认零 P1。
 
 ## 联检和封存
 

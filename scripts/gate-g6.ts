@@ -13,6 +13,7 @@ import { releaseDefinitionHash } from '../src/service/release-workflow.ts'
 import { PRIOR_GATE_HASH, sealReleasePair } from '../src/service/release-gate.ts'
 import type { ReleaseGovernance } from '../src/core/gate-artifact.ts'
 import { createG6FileEvidenceReader, withG6Scratch } from './g6-file-evidence.ts'
+import { R0_ORIGINALS, verifyR0Observation } from './r0-observe.ts'
 
 export const G6_GATE_PATH = 'docs/gates/G6.md'
 export const G6_INPUT_PATH = 'docs/gates/G6-release-input.json'
@@ -270,6 +271,25 @@ export function assertG6Body(text: string, expected: string) {
 }
 
 type AuditReader = (text: string) => 'pass' | 'fail' | null
+export function assertG6R0Evidence(entries: readonly { source: string; file: string }[], blob: (file: string) => Uint8Array,
+  expected: { candidate: string; archiveSha256: string; startedAt: string; endedAt: string }) {
+  const sources = entries.filter(({ source }) => source.startsWith('r0-observation:'))
+  const files = new Map(sources.map(({ source, file }) => [source, file]))
+  if (sources.length !== R0_ORIGINALS.length || files.size !== sources.length || new Set(files.values()).size !== files.size
+    || R0_ORIGINALS.some((name) => !files.has('r0-observation:' + name))) return reject('R0 机器观察原件缺失或来源重复')
+  const observed = withG6Scratch((directory) => {
+    for (const name of R0_ORIGINALS) {
+      const target = join(directory, name)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, blob(files.get('r0-observation:' + name)!), { flag: 'wx' })
+    }
+    return verifyR0Observation(directory, expected)
+  })
+  if (observed.from_utc !== expected.startedAt || observed.to_utc !== expected.endedAt) {
+    return reject('R0 实际观察起止与具名批准不一致')
+  }
+}
+
 function loadSignedInput(root: string, trust: G6TrustProvider, readConclusion: AuditReader, allowOutputs: boolean) {
   const tip = head(root)
   const packet = packetSchema.parse(json(trackedBlob(root, tip, G6_INPUT_PATH)))
@@ -365,6 +385,8 @@ function loadSignedInput(root: string, trust: G6TrustProvider, readConclusion: A
   })
     || Date.parse(approval.params.trial.r0_ended_at) - Date.parse(approval.params.trial.r0_started_at) < 72 * 60 * 60 * 1000
     || Date.parse(approval.params.trial.r0_ended_at) > Date.parse(approval.approved_at)) return reject('六项定值或 R0 连续观察没有完整证据')
+  assertG6R0Evidence(registry.evidence, blob, { candidate: C, archiveSha256: workspace.package_sha256,
+    startedAt: approval.params.trial.r0_started_at, endedAt: approval.params.trial.r0_ended_at })
   return { packet, manifest, blob, ledgerBytes, approval, reportHash, independent, packageSha: workspace.package_sha256 }
 }
 
