@@ -47,6 +47,7 @@ type DecisionRow = Record<string, unknown> & DecisionChoiceContext & {
 export type ListDecisionParams = {
   run_id?: string
   status?: string
+  humanInbox?: boolean
   limit?: number
   cursor?: string
   now?: number
@@ -88,7 +89,10 @@ function toDecisionView(row: DecisionRow, now: number, memoryEnabled: MemoryDeci
     resolved_by: asText(row.resolved_by),
     priority, priority_reason: priorityReason, allowed_resolutions: choices, resolution_unavailable_reason: unavailableReason,
     required_evidence: required, target_summary: target,
-    approver: asText(row.approver), expiry_effect: asText(row.expiry_effect),
+    approver: asText(row.approver),
+    // The memory approval sweep uses the card's deadline even when its task is supervised.
+    expiry_effect: row.memory_approval_status != null && typeof row.expires_at === 'string'
+      ? 'auto_resolve' : asText(row.expiry_effect),
     projection_missing: Object.entries({ priority, priority_reason: priorityReason,
       required_evidence: required, target_summary: target, ...(parsed.missing ? { payload: null } : {}) })
       .filter(([, value]) => value === null).map(([field]) => field),
@@ -114,7 +118,8 @@ export function listDecisions(db: Db, params: ListDecisionParams = {}): {
   const limit = params.limit ?? 50
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > DECISIONS_LIMIT_MAX) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 ' + String(DECISIONS_LIMIT_MAX) + ' 条', { limit })
-  const filter = { run_id: params.run_id ?? null, status: params.status ?? null }
+  const filter = { run_id: params.run_id ?? null, status: params.status ?? null,
+    ...(params.humanInbox ? { inbox: 'human' } : {}) }
   const now = params.now ?? Date.now()
   const cursor = params.cursor ? decodeCursor(params.cursor, 'decisions', filter, now) : undefined
   if (cursor && (typeof cursor.last_key !== 'string' || typeof cursor.last_id !== 'string')) {
@@ -129,6 +134,9 @@ export function listDecisions(db: Db, params: ListDecisionParams = {}): {
     if (filter.status) { where.push('status = ?'); values.push(filter.status) }
     else {
       where.push(ACTIVE_DECISIONS)
+    }
+    if (params.humanInbox) {
+      where.push('EXISTS (SELECT 1 FROM human_decision_inbox WHERE decision_id = d.decision_id)')
     }
     if (cursor && byPriority) {
       const match = /^priority:(\d{1,3}):(.+)$/.exec(cursor.last_key)

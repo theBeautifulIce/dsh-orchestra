@@ -628,9 +628,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/decisions' && deps.queries) {
+      const inbox = stringParam(url, 'inbox', 16)
+      if (inbox !== undefined && inbox !== 'human') throw new OrchError('PAYLOAD_SCHEMA_INVALID', '未知的审批收件箱')
       const result = deps.queries.listDecisions({
         run_id: stringParam(url, 'run_id', 256),
         status: stringParam(url, 'status', 64),
+        humanInbox: inbox === 'human',
         limit: Math.min(intParam(url, 'limit', 50), 100),
         cursor: stringParam(url, 'cursor', 4096),
         now: Date.parse(requestNow),

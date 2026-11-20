@@ -179,6 +179,7 @@ it('任务摘要分页后保留精确待裁决聚合、风险、心跳与归档�
   const recent = '2026-11-17T09:59:45.000Z'
   const oldest = '2026-11-17T09:56:00.000Z'
   withTx(db, (tx) => {
+    tx.run("UPDATE tasks SET autonomy = 'assisted' WHERE task_id = 'decision'")
     openDecision(tx, { decisionId: 'first', runId: 'r2', nodeRunId: null, kind: 'rule_ambiguous', createdAt: oldest })
     openDecision(tx, { decisionId: 'second', runId: 'r2', nodeRunId: null, kind: 'audit_result', createdAt: recent })
     tx.run("UPDATE node_runs SET side_effect_policy = 'irreversible', heartbeat_at = ? WHERE node_run_id = 'n2'", [recent])

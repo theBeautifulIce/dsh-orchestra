@@ -86,6 +86,28 @@ describe('待你决定屏的四问', () => {
 })
 
 describe('待你决定屏的交互', () => {
+  it('默认读人工待办，普通自主决定仍可从全部进行中处理', async () => {
+    const ordinary = decisionView({ decision_id: 'ordinary', kind: 'audit_result', target_summary: '普通自主决定',
+      allowed_resolutions: ['approved'] })
+    const auditOnly = decisionView({ decision_id: 'audit-only', kind: 'audit_result', target_summary: '审计专属决定',
+      status: 'blocked_for_human', approver: 'agent:auditor', allowed_resolutions: [] })
+    const { api, commands } = panelService(({ params }) => ({ ok: true, data: page(params.get('inbox') === 'human'
+      ? [] : params.get('status') === 'resolved' ? [] : [ordinary, auditOnly]) }))
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    try {
+      expect(view.text()).not.toContain('普通自主决定')
+      await view.click(view.findAll('button').find((button) => button.textContent === '全部进行中')!)
+      expect(view.text()).toContain('普通自主决定')
+      expect(view.findAll('button').some((button) => button.textContent === '批准执行')).toBe(true)
+      const auditCard = view.findAll('article').find((element) => element.textContent?.includes('审计专属决定'))!
+      expect(auditCard.textContent).toContain('由授权核验主体处理')
+      expect(auditCard.textContent).not.toContain('等你处理')
+      expect(auditCard.querySelector('button')).toBeNull()
+      await view.click(view.findAll('button').find((button) => button.textContent === '已处理')!)
+      expect(view.text()).not.toContain('普通自主决定')
+    } finally { view.unmount() }
+  })
+
   it('批量只接手：批量只发接手请求，界面上没有忽略入口', async () => {
     const { api, commands, posts } = panelService((query) => {
       if (query.path === '/v1/decisions') {

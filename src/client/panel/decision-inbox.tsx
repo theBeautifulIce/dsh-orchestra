@@ -47,6 +47,7 @@ export type DecisionInboxProps = {
 }
 
 type Notice = { text: string; tone: 'ok' | 'error' }
+const DECISION_VIEWS = { inbox: '待处理', active: '全部进行中', history: '已处理' } as const
 
 export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, reloadVersion = 0, onSnapshot, decisionId, onShowAll }: DecisionInboxProps) {
   const canWrite = usePanelCommandsEnabled(true)
@@ -56,7 +57,8 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
-  const [history, setHistory] = useState(false)
+  const [decisionView, setDecisionView] = useState<keyof typeof DECISION_VIEWS>('inbox')
+  const history = decisionView === 'history'
   const lastReload = useRef(reloadVersion)
   const [selected, setSelected] = useState<string[]>([])
   const [developerView, setDeveloperView] = useState(false)
@@ -78,7 +80,10 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
     setFailed(false)
     const query = decisionId
       ? api.getDecision(decisionId).then((result) => ({ ...result, data: { items: [result.data], next_cursor: null } }))
-      : api.listDecisions({ limit: 50, cursor, status: history ? 'resolved' : undefined })
+      : api.listDecisions({ limit: 50, cursor,
+        inbox: decisionView === 'inbox' ? 'human' : undefined,
+        status: decisionView === 'history' ? 'resolved' : undefined,
+      })
     void query.then((result) => {
       if (!current) return
       setItems((previous) => cursor ? [...previous, ...result.data.items] : result.data.items)
@@ -90,7 +95,7 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [api, cursor, retry, history, reloadVersion, onSnapshot, decisionId])
+  }, [api, cursor, retry, decisionView, reloadVersion, onSnapshot, decisionId])
 
   function refresh() { setCursor(undefined); setRetry((value) => value + 1) }
 
@@ -179,10 +184,11 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
     {rework && !decisionId && <ReworkPanel api={api} commands={rework} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
     <div className="ops-toolbar">
     {!decisionId && <div role="group" aria-label="决定视图" className="ops-tabs">
-      {[false, true].map((value) => <button type="button" key={String(value)} aria-pressed={value === history}
+      {Object.entries(DECISION_VIEWS).map(([value, label]) => <button type="button" key={value} aria-pressed={value === decisionView}
         onClick={() => {
-          setItems([]); setSelected([]); setPending(null); setNextCursor(null); setCursor(undefined); setHistory(value); setRetry((version) => version + 1)
-        }}>{value ? '已处理' : '待处理'}</button>)}
+          setItems([]); setSelected([]); setPending(null); setNextCursor(null); setCursor(undefined)
+          setDecisionView(value as keyof typeof DECISION_VIEWS); setRetry((version) => version + 1)
+        }}>{label}</button>)}
     </div>}
     <div className="ops-actions">
       {!history && <>
@@ -290,7 +296,8 @@ function DecisionCard(props: {
 }) {
   const { decision } = props
   const kind = KIND_LABEL[decision.kind]
-  const status = STATUS_LABEL[decision.status]
+  const agentOnly = decision.approver?.startsWith('agent:') === true
+  const status = agentOnly && decision.status !== 'resolved' ? '由授权核验主体处理' : STATUS_LABEL[decision.status]
   const resolutions = decision.allowed_resolutions ?? []
   const missing = decision.projection_missing ?? []
   // 记忆审批卡：卡上的两个按钮由服务端给的标签与 resolution 组成，前端不猜。
@@ -310,7 +317,7 @@ function DecisionCard(props: {
   return <article style={cardStyle}>
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
       <h2 style={cardTitleStyle}>{kind ?? <UnknownState value={decision.kind} />}</h2>
-      <strong style={{ color: decision.status === 'blocked_for_human' ? COLOR.warning : COLOR.inkMuted, fontSize: FONT_PX.helper }}>
+      <strong style={{ color: !agentOnly && decision.status === 'blocked_for_human' ? COLOR.warning : COLOR.inkMuted, fontSize: FONT_PX.helper }}>
         {status ?? <UnknownState value={decision.status} />}
       </strong>
     </div>
@@ -318,10 +325,11 @@ function DecisionCard(props: {
     <dl style={detailGridStyle}>
       <dt>说明</dt><dd>{decision.target_summary ?? '说明暂不可用'}</dd>
       <dt>为什么卡</dt><dd>{decision.priority_reason ?? NOT_PROVIDED}</dd>
-      {decision.approver && <><dt>谁能处理</dt><dd>{APPROVER_LABEL[decision.approver] ?? decision.approver}</dd></>}
+      {decision.approver && <><dt>谁能处理</dt><dd>{agentOnly ? APPROVER_LABEL.agent : (APPROVER_LABEL[decision.approver] ?? decision.approver)}</dd></>}
       <dt>你能选什么</dt><dd>{resolutions.length > 0 ? resolutions.map((value) => DECISION_OPTIONS[value] ?? value).join(' / ') : NOT_PROVIDED}</dd>
       <dt>需要什么证据</dt><dd>{decision.required_evidence && decision.required_evidence.length > 0 ? decision.required_evidence.join('、') : NOT_PROVIDED}</dd>
       <dt>过期会怎样</dt><dd>{decision.kind === 'report_contradicted' ? '仅由人工处理，系统不会自动收口。'
+        : memoryCard && decision.expires_at ? formatDate(decision.expires_at) + ' · 到期未批准，批次关闭。'
         : decision.expires_at ? formatDate(decision.expires_at) + ' · ' + (EXPIRY_LABEL[decision.expiry_effect ?? ''] ?? '截止后的处理方式尚未提供') : NOT_PROVIDED}</dd>
       {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{DECISION_OPTIONS[decision.closed_reason ?? ''] ?? decision.closed_reason ?? NOT_PROVIDED}</dd></>}
       {decision.status === 'resolved' && decision.resolved_by && <><dt>处理人</dt><dd>{decision.resolved_by}</dd></>}
@@ -335,7 +343,7 @@ function DecisionCard(props: {
     {decision.confirm_required && <p style={warningStyle}>处理前需要再次确认。</p>}
     {missing.length > 0 && <p style={mutedStyle}>部分决策信息尚未持久化，当前无法提供安全的处理选项。</p>}
     {missing.length > 0 && <p style={mutedStyle}>服务端未持久化的字段：{missing.join('、')}</p>}
-    {decision.status !== 'resolved' && <div style={actionStyle}>
+    {!agentOnly && decision.status !== 'resolved' && <div style={actionStyle}>
       <label style={toggleStyle}>
         <input
           type="checkbox"
@@ -396,6 +404,7 @@ function MemoryApprovalCardView(props: {
       </strong>
     </div>
     <p style={mutedStyle}>{card.summary_line}</p>
+    {decision.expires_at && <p style={mutedStyle}>{formatDate(decision.expires_at)} · 到期未批准，批次关闭。</p>}
     <ul style={listStyle}>
       {card.items.map((item, index) => <li key={`${item.layer}-${index}`} style={itemStyle}>
         <p style={itemTitleStyle}>层：{item.layer} · {item.title}</p>
