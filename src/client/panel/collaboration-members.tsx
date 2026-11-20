@@ -4,6 +4,15 @@ import type { NodeRunView, RunSummary } from '../api/types.ts'
 
 export type SelectedMember = { id: string; label: string }
 
+export function collaborationMemberNames(members: readonly Pick<NodeRunView, 'title' | 'node_id' | 'node_run_id'>[]) {
+  const names = members.map((member) => member.title?.trim() || `步骤 ${member.node_id || member.node_run_id}`)
+  return new Map(members.map((member, index) => {
+    const name = names[index]!
+    const duplicate = names.indexOf(name) !== names.lastIndexOf(name)
+    return [member.node_run_id, duplicate ? `${name} · ${member.node_run_id}` : name]
+  }))
+}
+
 export function CollaborationMembers({ client, selected, onChange, disabled }: {
   client: ApiClient; selected: SelectedMember[]; onChange: (members: SelectedMember[]) => void; disabled: boolean
 }) {
@@ -44,6 +53,8 @@ export function CollaborationMembers({ client, selected, onChange, disabled }: {
   }, [client, run, retry])
 
   const remove = (id: string) => onChange(selected.filter((member) => member.id !== id))
+  const eligible = nodes?.filter((item) => item.node_type === 'agent') ?? []
+  const names = collaborationMemberNames(eligible)
   return <fieldset disabled={disabled} className="ops-stack">
     <legend>哪些执行步骤可以相互核验？</legend>
     <label>任务运行 <select className="ops-field" value={run} onChange={(event) => {
@@ -57,11 +68,11 @@ export function CollaborationMembers({ client, selected, onChange, disabled }: {
     {next && <button type="button" disabled={loading} onClick={() => setCursor(next!)}>更多运行</button>}
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry((value) => value + 1)}>重新读取</button></p>}
     {run && !nodes && !error && <p role="status">正在读取本次运行的步骤…</p>}
-    {run && nodes && !nodes.some((item) => item.node_type === 'agent') && <p>本页没有可选的智能体步骤。</p>}
+    {run && nodes && eligible.length === 0 && <p>本页没有可选的智能体步骤。</p>}
     {run && nodes?.length === 200 && <p>当前列出前 200 条中的智能体步骤。后续步骤可通过下方的节点运行 ID 添加。</p>}
-    {run && nodes?.filter((item) => item.node_type === 'agent').map((item) => {
+    {run && eligible.map((item) => {
       const checked = selected.some((member) => member.id === item.node_run_id)
-      const name = item.title || item.node_id
+      const name = names.get(item.node_run_id)!
       return <label key={item.node_run_id}><input type="checkbox" checked={checked} disabled={!checked && selected.length >= 16}
         onChange={() => checked ? remove(item.node_run_id) : onChange([...selected, {
           id: item.node_run_id, label: (runs.find((r) => r.run_id === run)?.task_title || run) + ' / ' + name + ' · 第 ' + item.attempt + ' 次',

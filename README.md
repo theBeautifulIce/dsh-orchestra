@@ -20,9 +20,17 @@ pnpm check
 pnpm pack --pack-destination <已有的输出目录>
 ```
 
-将生成的 tgz 作为 DSH 宿主项目的本地依赖安装，例如在该项目目录运行 `pnpm add <tgz的绝对路径>`。包内包含服务入口、浏览器面板、迁移 SQL、Cordis patch 与配置样例。当前 patch 由外部宿主装配，单独安装包后还需在该宿主完成以下接入。
+在目标 DSH profile 安装生成的 tgz，例如运行 `dsh plugin --profile web add <tgz的绝对路径>`。包内的 Cordis patch 注册 `dsh-orchestra` 双端插件行，Web 冷启动时加载 `./client`。实际工作区的服务与鉴权传输由受信宿主装配。
 
-- 服务端在 Cordis 插件中调用 `serveDshOrchestra`。传入隔离的数据路径、实际阶段、服务密钥和账本接口，以及 DSH 上下文、按节点解析获准主会话的函数、模型目录、工具注册表和执行器。自然语言规划另提供 `dshPlanner`。按需装配 `memory` 和 `collaboration`。随包配置是 S2 样例，服务实际阶段在健康页可见。
-- 在受信工作区的 DSH 客户端适配器中调用 `registerDshOrchestraPanel(ctx, { baseUrl, fetcher, ... })`，向宿主登记页面与侧栏入口。`baseUrl` 使用服务返回的地址，`fetcher` 来自宿主已认证的传输，事件流沿用同一身份。宿主退出时调用服务的 `close()`。
+- 服务端在受信 Cordis 插件中调用 `serveDshOrchestra`。传入隔离的数据路径、实际阶段、服务密钥和账本接口，以及 DSH 上下文、按节点解析获准主会话的函数、模型目录、工具注册表和执行器。自然语言规划另提供 `dshPlanner`。按需装配 `memory` 和 `collaboration`。随包配置是 S2 样例，服务实际阶段在健康页可见。宿主退出时调用服务的 `close()`。
+- 在同一 DSH Web Cordis 服务作用域中，由受信客户端适配器提供 `orchestraPanelTransport`。`baseUrl` 指向宿主为获准工作区提供的接口，`fetcher` 使用宿主已验证的登录会话。宿主在服务端持有服务密钥。事件流沿用同一会话。面板等待传输服务并在适配器卸载时移除侧栏与页面。
 - 面板的服务与能力状态来自实际 `/health`。主脑模型、执行模型、记忆写入能力与工作区权限由宿主提供。开发用 DSH 探针使用独立 profile 和回环模型服务，便于复验模型及协作链路。
 - S6 宿主通过 `resolveHttpHuman(request)` 将经验证的当前 DSH 登录会话绑定到实际操作人。为审批、返工和协作授权提供同一受信会话，未登录时返回 `null`。值班 QQ 发送回执与当班人确认分别登记。R1/R2 可从本圈已授权流程的成功运行发起记忆提议。[值班手册](docs/runbook.md) · [试用圈](docs/trial-circles.md)
+
+在现有受信 DSH 客户端适配器的 `apply(ctx)` 中取得工作区接口和鉴权传输后，登记 Cordis 服务。
+
+```js
+ctx.provide('orchestraPanelTransport', { baseUrl, fetcher })
+```
+
+Cordis 将服务及面板挂载绑定到适配器的生命周期。自管面板装配的宿主仍可使用 `registerDshOrchestraPanel(ctx, { baseUrl, fetcher })`。同一个 Web 实例选择一种接线方式。

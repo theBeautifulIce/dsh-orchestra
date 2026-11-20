@@ -1,2 +1,4 @@
-# The host adapter supplies the runtime configuration.
-[]
+# Register the dual-face package. The trusted host adapter provisions the runtime.
+[
+  { insert: [{ id: dsh-orchestra, name: dsh-orchestra }] }
+]

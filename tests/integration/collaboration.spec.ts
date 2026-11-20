@@ -46,6 +46,30 @@ function toolReceipt(db: Db, node: CollaborationBinding, number: number, finishe
   return executionId
 }
 
+it('按运行内步骤顺序显示冻结版本标题并保留历史缺名节点', () => {
+  const { db } = freshLedger()
+  try {
+    withTx(db, (tx) => {
+      for (const [version, title] of [['1', '汇总分析'], ['2', '已改名的汇总步骤']]) {
+        tx.run('INSERT INTO workflow_versions (workflow_id,version,content_hash,definition_json,created_at,doc_json) VALUES (?,?,?,\'{}\',?,?)',
+          ['monthly', version, `hash-${version}`, NOW, JSON.stringify({ nodes: [{ node_id: 'analyse', title }] })])
+      }
+      tx.run("INSERT INTO tasks (task_id,title,status,created_at,updated_at) VALUES ('t1','月报','running',?,?)", [NOW, NOW])
+      tx.run(`INSERT INTO runs (run_id,task_id,workflow_id,workflow_version,workflow_definition_hash,status,created_at,updated_at)
+        VALUES ('run','t1','monthly','1','hash-1','running',?,?)`, [NOW, NOW])
+      tx.run(`INSERT INTO node_runs (node_run_id,run_id,node_id,node_type,seq,status,attempt,action_generation,created_at,updated_at)
+        VALUES ('z-first','run','analyse','agent',1,'started',1,1,?,?), ('a-legacy','run','old','agent',2,'started',1,1,?,?)`,
+        [NOW, NOW, NOW, NOW])
+    })
+    const host = createCollaborationHost(db, TEST_SECRET)
+    const scope = host.createScope({ operation_id: uuidv7(), title: '月报复核', node_run_ids: ['a-legacy', 'z-first'], ttl_minutes: 60 }, actor, NOW)
+    expect(host.getScope(scope.scope_id, actor, NOW).item.members).toEqual([
+      { node_run_id: 'z-first', node_id: 'analyse', task_id: 't1', run_id: 'run', title: '汇总分析' },
+      { node_run_id: 'a-legacy', node_id: 'old', task_id: 't1', run_id: 'run' },
+    ])
+  } finally { db.raw.close() }
+})
+
 it('跨任务发现经过主脑授权、接收、独立核验和采纳，且不改接收方任务', () => {
   const { db } = freshLedger()
   let reopened: Db | undefined

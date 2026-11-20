@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, type ApiClient } from '../api/client.ts'
-import { CollaborationMembers, type SelectedMember } from './collaboration-members.tsx'
+import { CollaborationMembers, collaborationMemberNames, type SelectedMember } from './collaboration-members.tsx'
 import { postWithOperationReceipt } from '../api/commands.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
 import type { CollaborationHost } from '../../service/collaboration.ts'
@@ -73,6 +73,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
   }
   const memberIds = members.map((member) => member.id).sort()
   const shown = detail?.scope.scope_id === scopeId ? detail : undefined
+  const participantNames = collaborationMemberNames(shown?.members ?? [])
   return <section className="ops-page">
     <header className="ops-page-header"><h1>协作核验</h1>
       {scopes && scopes.length > 0 && <label className="ops-actions">协作范围 <select className="ops-field" value={scopeId} onChange={(event) => {
@@ -98,10 +99,10 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
     {!scopes && !failed && <p role="status">正在读取协作范围…</p>}
     {scopes?.length === 0 && <p className="ops-surface ops-empty">还没有协作范围。</p>}
     {shown && <>
-      <section style={card}><div className="ops-toolbar"><strong>参与节点</strong><span className="ops-meta">有效至 {new Date(shown.scope.expires_at).toLocaleString()}</span></div>
+      <section style={card}><div className="ops-toolbar"><strong>参与步骤</strong><span className="ops-meta">有效至 {new Date(shown.scope.expires_at).toLocaleString()}</span></div>
         <div className="ops-actions">{shown.members.map((node) => <button className="ops-button ops-button--link"
           key={node.node_run_id} type="button" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}
-          title={node.node_run_id} onClick={() => onOpenRun(node.task_id, node.run_id)}>{node.node_id}</button>)}</div>
+          title={node.node_run_id} onClick={() => onOpenRun(node.task_id, node.run_id)}>{participantNames.get(node.node_run_id)}</button>)}</div>
       </section>
       {shown.findings.map((finding) => <article key={finding.finding_id} style={card}>
         <h2 style={{ margin: 0, fontSize: FONT_PX.section }}>{finding.title}</h2>
@@ -115,7 +116,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
             <strong>{LABELS[request.status] ?? request.status}</strong>
             {request.withdrawn_from_status && <span> · 撤回前{LABELS[request.withdrawn_from_status]}</span>}
             <p>{request.question}</p>
-            <p>接收节点 <code>{request.target_node_run_id}</code></p>
+            <p>接收步骤 <span title={request.target_node_run_id}>{participantNames.get(request.target_node_run_id) ?? request.target_node_run_id}</span></p>
             {request.target_attempt !== null && <p>执行轮次 {request.target_attempt} · 代次 {request.target_generation}</p>}
             {request.replacement_request_id && <p><a href={'#' + request.replacement_request_id}>查看重新指派的请求</a></p>}
             {request.replaces_request_id && <p><a href={'#' + request.replaces_request_id}>查看已撤回的请求</a></p>}
@@ -135,9 +136,9 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
                 void command('/v1/collaboration/review', 'collaboration.review', { ...base, action: review.action }, () => setReview(undefined))
               }
             }}>
-              {review.action === 'reassign' && <label>新接收节点 <select required value={replacement} onChange={(event) => setReplacement(event.target.value)}>
-                <option value="">选择接收节点</option>
-                {candidates?.map((id) => <option key={id} value={id}>{shown.members.find((node) => node.node_run_id === id)?.node_id ?? id} · {id}</option>)}
+              {review.action === 'reassign' && <label>新接收步骤 <select required value={replacement} onChange={(event) => setReplacement(event.target.value)}>
+                <option value="">选择接收步骤</option>
+                {candidates?.map((id) => <option key={id} value={id}>{participantNames.get(id) ?? id}</option>)}
               </select></label>}
               <label>处理理由 <textarea required maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label>
               <PanelCommandButton type="submit" disabled={busy || !note.trim()

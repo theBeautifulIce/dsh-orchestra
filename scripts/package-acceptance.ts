@@ -31,6 +31,13 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
 
   const read = (name: string) => execFileSync('tar', ['-xOf', archive, 'package/' + name], { maxBuffer: 10 * 1024 * 1024 })
   const manifest = JSON.parse(read('package.json').toString('utf8'))
+  if (!options.previous && Array.isArray(manifest.files)) {
+    for (const file of guideFiles) {
+      if (manifest.files.includes(file) && !entries.includes('package/' + file)) {
+        throw new Error('Missing declared package guide: ' + file)
+      }
+    }
+  }
   const config = read('orchestra.config.json')
   const phase = JSON.parse(config.toString('utf8')).phase
   const patch = read('cordis.patch.yml').toString('utf8').replace(/^\s*#.*$/gm, '').trim()
