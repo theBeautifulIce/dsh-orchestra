@@ -78,6 +78,7 @@ import { callDshCollaboration } from './service/dsh-collaboration.ts'
 import { createReworkHost, type ReworkHost } from './service/rework-coordinator.ts'
 import { createDeliveryReviewHost } from './service/delivery-review.ts'
 import { createReworkPlanningHost, type ReworkPlanner } from './service/rework-planning.ts'
+import { createPlanningSettingsHost, type PlanningSettingsHost } from './service/planning-settings.ts'
 import { callDshRework } from './service/dsh-rework.ts'
 import { createReworkInspectionHost } from './service/rework-inspection.ts'
 import { createModelEscalationHost } from './service/model-escalation.ts'
@@ -122,16 +123,17 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   try {
     const generateWorkflow = dshPlanner && createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'workflow')
     // 同一个流程生成回调既接给服务端入口，也接给规划侧：没有可复用的合适流程时，规划侧自动生成任务专属流程
-    const workflowGenerator = generateWorkflow ? (input: { goal: string }, signal: AbortSignal) =>
-      generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal) : undefined
+    const workflowGenerator = generateWorkflow ? (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) =>
+      generateWorkflow({ ...input, tools: tools.registry.list().filter((tool) => tool.capability === 'read_only').map((tool) => tool.name) }, signal, onProgress) : undefined
     const service = await serveOrchestra({
       ...serviceOptions,
       ...(dshPlanner ? { reworkPlanner: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }, 'rework') } : {}),
       ...(dshPlanner ? { planning: {
         propose: createDshPlanningCallback({ ...dshPlanner, context: dsh.context }),
-        ...(workflowGenerator ? { workflowGenerator } : {}),
+        streamProgress: true,
+        ...(workflowGenerator ? { workflowGenerator, workflowStreamProgress: true } : {}),
       } } : {}),
-      ...(workflowGenerator ? { workflowGenerator } : {}),
+      ...(workflowGenerator ? { workflowGenerator, workflowGeneratorStreamProgress: true } : {}),
       executor: { ...tools, bridge: host.bridge, modelRouting: host.modelRouting },
     })
     collaboration = service.collaboration
@@ -154,7 +156,7 @@ import { loadConfig } from './core/config.ts'
 import { SystemClock } from './core/clock.ts'
 import { randomUUID } from 'node:crypto'
 import { createMemoryHost, type MemoryHostOptions } from './service/memory-host.ts'
-import { createTaskPlanningHost, resolveApprovedPlanNodeSpecs, type TaskPlanningOptions } from './service/task-planning.ts'
+import { createTaskPlanningHost, resolveApprovedPlanNodeSpecs, type TaskPlanningOptions, type TaskPlanningHost } from './service/task-planning.ts'
 import { createRunSharedContext } from './service/run-shared-context.ts'
 import type { ProjectContextSource } from './service/project-shared-context.ts'
 export type { MemoryHostOptions, MemoryPluginWriter } from './service/memory-host.ts'
@@ -166,6 +168,7 @@ export { inspectMemoryRecovery, resolveMemoryRecovery } from './service/commands
 export { createMemoryRuntime, type MemoryRuntimeOptions } from './service/commands/memory-runtime.ts'
 export { registerRunArtifact, type RegisterRunArtifact } from './service/artifact-store.ts'
 export { getTaskPlanRecommendation, type TaskPlanningOptions, type TaskPlanProposal } from './service/task-planning.ts'
+export { withPlanningBudget, type PlanningTimeoutSnapshot } from './service/planning-settings.ts'
 export { createCollaborationHost, type CollaborationBinding, type CollaborationHost } from './service/collaboration.ts'
 export type { MemoryRecoveryRequest, MemoryWriteEvidence } from './service/commands/memory-recovery.ts'
 export type { InspectMemoryWrite, MemoryWriteInspection } from './service/commands/memory-ports.ts'
@@ -592,13 +595,14 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   resolveHttpHuman?: ServerDeps['resolveHttpHuman']
   memory?: MemoryHostOptions
   workflowGenerator?: ServerDeps['workflowGenerator']
+  workflowGeneratorStreamProgress?: boolean
   resolveTriggerNodeSpecs?: ResolveTriggerNodeSpecs
   asOfSeq: ServerDeps['asOfSeq']
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
-}): Promise<{ orchestra: Orchestra; endpoint: string; planning: ReturnType<typeof createTaskPlanningHost>;
-  collaboration?: CollaborationHost; rework?: ReworkHost; close: () => Promise<void> }> {
+}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; rework?: ReworkHost;
+    planning: TaskPlanningHost; planningSettings?: PlanningSettingsHost; close: () => Promise<void> }> {
   const log = opts.log ?? nullLogger
   // 并发闸在生产装配这一层建：配置里的 execution.concurrency 与 human_slots 在这里真正生效。
   // 配置读不到时退回默认定值（并发 3、人工名额 1），不让一个可选配置文件挡住服务启动。
@@ -665,18 +669,28 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   }, 2000)
   sweepTimer.unref?.()
   let server: Awaited<ReturnType<typeof startServer>>
-  let planning: ReturnType<typeof createTaskPlanningHost>
+  let planning: TaskPlanningHost
+  let planningSettings: PlanningSettingsHost | undefined
   try {
     if (opts.planning) requireCapability(opts.phase, 'panel')
     if (collaboration) requireCapability(opts.phase, 'panel')
-    planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, opts.planning ? {
+    const taskOptions = opts.planning ? {
       ...opts.planning,
       workflowGenerator: opts.planning.workflowGenerator ?? opts.workflowGenerator,
+      workflowStreamProgress: opts.planning.workflowGenerator ? opts.planning.workflowStreamProgress : opts.workflowGeneratorStreamProgress,
       runtimeNodeTypes: RUNTIME_NODE_TYPES,
-    } : undefined, modelSettings ? async () => {
-      await modelSettings.refresh?.()
-      return modelSettings.planningProfiles()
-    } : undefined)
+    } : undefined
+    const branch = (callback: unknown, streaming: boolean | undefined) => !callback ? 'unavailable' : streaming ? 'streaming' : 'fixed'
+    if (taskOptions || opts.workflowGenerator) planningSettings = createPlanningSettingsHost(orchestra.db, {
+      task: branch(taskOptions?.propose, taskOptions?.streamProgress),
+      automatic_workflow: branch(taskOptions?.workflowGenerator, taskOptions?.workflowStreamProgress),
+      standalone_workflow: branch(opts.workflowGenerator, opts.workflowGeneratorStreamProgress),
+    }, taskOptions?.timeoutMs)
+    planning = createTaskPlanningHost(orchestra.db, orchestra.catalog, opts.executor?.registry, taskOptions,
+      modelSettings ? async () => {
+        await modelSettings.refresh?.()
+        return modelSettings.planningProfiles()
+      } : undefined, planningSettings?.snapshot)
     if (opts.memory) {
       requireCapability(opts.phase, 'memory')
       memory = createMemoryHost(orchestra.db, opts.secret, opts.memory, (error) => {
@@ -726,10 +740,12 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       memory,
       memoryProposalOnly: () => Boolean(memory) && (memoryDecisionAccess() === 'proposal_only' || (opts.phase === 'S6' && !opts.resolveHttpHuman)),
       planning,
+      planningSettings,
       collaboration,
       rework, delivery, localPlanning, inspection, modelEscalation,
       modelSettings,
       workflowGenerator: opts.workflowGenerator,
+      workflowGeneratorStreamProgress: opts.workflowGeneratorStreamProgress,
       taskTriggers,
       log,
     })
@@ -747,6 +763,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     planning,
     collaboration,
     rework,
+    planningSettings,
     close: async () => {
       clearInterval(sweepTimer)
       const closingTriggerDispatch = triggerDispatch?.close()

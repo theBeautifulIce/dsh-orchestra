@@ -9,6 +9,7 @@ import { decisionId, uuidv7 } from '../../src/core/ids.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
 import { installConfiguredLocalDshHost, localDshHostConfig } from '../../src/service/local-dsh-host.ts'
+import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
 
 type Message = Parameters<Agent['followup']>[0]
 type Definition = Parameters<Context['tools']['register']>[0]
@@ -43,6 +44,10 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
       risks: badPlan ? [{ severity: 'high', description: '涉及影响', mitigation: '需要调整', node_id: 'draft' }] : [],
     }
   })
+  const workflowGenerator = vi.fn(async () => ({
+    name: '整理报告', nodes: [{ node_id: 'start', type: 'trigger' }, { node_id: 'draft', type: 'agent' }],
+    edges: [{ from: 'start', to: 'draft' }],
+  }))
   ctx.provide('agents', { get: (id: string) => agents.get(id), list: () => [...agents.values()] })
   const controllerPackage = join(directory, 'node_modules', '@deepseek-ai', 'dsh-api-session-controller')
   await mkdir(controllerPackage, { recursive: true })
@@ -69,10 +74,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     const agent = dsh.parentForNode('fixture')!
     const service = await serveOrchestra({
       dbFile, secret, phase: 'S6', asOfSeq, listTasks, listEvents, appendLedgerEvent,
-      planning: { propose: planner, workflowGenerator: async () => ({
-        name: '整理报告', nodes: [{ node_id: 'start', type: 'trigger' }, { node_id: 'draft', type: 'agent' }],
-        edges: [{ from: 'start', to: 'draft' }],
-      }) },
+      planning: { propose: planner, workflowGenerator },
     })
     services.set(agent.session.id, service)
     return service
@@ -117,7 +119,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     }
     return { agent, admit, call, signal }
   }
-  return { session, serve, services, planner, routes, approval, notices, registered: () => ({ activation: activation!, prompt: prompt! }),
+  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, registered: () => ({ activation: activation!, prompt: prompt! }),
     deny: (value: boolean) => { deny = value }, badPlan: (value: boolean) => { badPlan = value },
     plannerUnavailable: (value: boolean) => { plannerUnavailable = value },
     async close() { await plugin.dispose(); await rm(directory, { recursive: true, force: true }) }, secret,
@@ -129,9 +131,77 @@ function user(text: string, options: { id?: string; source?: object } = {}): Mes
     content: [{ type: 'text', text }] } as unknown as Message
 }
 
-function count(service: Service, table: 'task_plans' | 'runs' | 'chat_task_receipts') {
+function count(service: Service, table: 'tasks' | 'workflows' | 'task_plans' | 'runs' | 'chat_task_receipts') {
   return service.orchestra.db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n
 }
+
+it('applies a captured budget to native chat, including the aggregate deadline, without orphaning work', async () => {
+  const test = await fixture()
+  const originalPlan = test.planner.getMockImplementation()!
+  const originalWorkflow = test.workflowGenerator.getMockImplementation()!
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理第一份办公室事项报告'))
+    expect(await human.call()).toMatchObject({ state: 'started' })
+    const service = test.services.get('parent')!
+    const settings = service.planningSettings!
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+    let entered!: () => void
+    let started = new Promise<void>((resolve) => { entered = resolve })
+    test.planner.mockImplementationOnce(async () => {
+      entered()
+      return new Promise<never>(() => {})
+    })
+    await human.admit(user('整理第二份办公室事项报告'))
+    const oldRequest = human.call()
+    await started
+    settings.save({ operation_id: uuidv7(), expected_revision: 0, values: {
+      ...planningTimeoutDefaults, task_seconds: 160, stage_seconds: 180, request_seconds: 200,
+    } }, 'settings-owner', new Date().toISOString())
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(await oldRequest).toMatchObject({ state: 'error', code: 'OPERATION_TIMEOUT' })
+
+    started = new Promise<void>((resolve) => { entered = resolve })
+    test.planner.mockImplementationOnce(async (input) => {
+      entered()
+      await delay(135_000)
+      return originalPlan(input)
+    })
+    await human.admit(user('整理第三份办公室事项报告'))
+    const extendedRequest = human.call()
+    await started
+    await vi.advanceTimersByTimeAsync(135_000)
+    expect(await extendedRequest).toMatchObject({ state: 'started' })
+
+    settings.save({ operation_id: uuidv7(), expected_revision: 1, values: {
+      ...planningTimeoutDefaults, task_seconds: 75, stage_seconds: 80, request_seconds: 100,
+    } }, 'settings-owner', new Date().toISOString())
+    started = new Promise<void>((resolve) => { entered = resolve })
+    test.workflowGenerator.mockImplementationOnce(async () => {
+      entered()
+      await delay(60_000)
+      return originalWorkflow()
+    })
+    test.planner.mockImplementationOnce(async (input) => {
+      await delay(60_000)
+      return originalPlan(input)
+    })
+    await human.admit(user('整理第四份办公室事项报告'))
+    const aggregate = human.call()
+    await started
+    await vi.advanceTimersByTimeAsync(100_000)
+    expect(await aggregate).toMatchObject({ state: 'error', code: 'OPERATION_TIMEOUT' })
+    await vi.advanceTimersByTimeAsync(21_000)
+    for (const table of ['tasks', 'workflows', 'task_plans', 'runs', 'chat_task_receipts'] as const) {
+      expect(count(service, table)).toBe(2)
+    }
+  } finally {
+    vi.useRealTimers()
+    await test.close()
+  }
+})
 
 it('binds ordinary native conversation, live owner input and one durable run per message', async () => {
   const test = await fixture()

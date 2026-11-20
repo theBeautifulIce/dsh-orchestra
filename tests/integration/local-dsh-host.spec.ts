@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { expect, it, vi } from 'vitest'
-import type { serveDshOrchestra } from '../../src/index.ts'
+import { serveDshOrchestra } from '../../src/index.ts'
+import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { installLocalDshHost, localDshHostConfig } from '../../src/service/local-dsh-host.ts'
 
 it('binds the native DSH route to one local workspace session and keeps the ledger credentials on the host', async () => {
@@ -102,4 +103,95 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
     await rm(dir, { recursive: true, force: true })
   }
   expect(close).toHaveBeenCalledTimes(1)
+})
+
+it('reads real personal ledger memory pages without a writer and isolates workspace sessions', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'orch-local-memory-'))
+  const workspaces = ['one', 'two'].map((id) => ({ id, path: join(directory, id), sessionIds: [id + '-session'] }))
+  await Promise.all(workspaces.map(({ path }) => mkdir(path)))
+  const route = { provider: 'fixture', model: 'selected' }
+  const agents = new Map(workspaces.map((workspace) => [workspace.sessionIds[0]!, {
+    session: { id: workspace.sessionIds[0], header: { cwd: workspace.path } }, model: { current: () => route },
+  }]))
+  const ctx = new Context()
+  const archivedSessionIds: string[] = []
+  let handleRequest!: (request: Request) => Promise<Response>
+  ctx.provide('connection', { fetch: { register(options: { fetch: typeof handleRequest }) { handleRequest = options.fetch } } })
+  ctx.provide('workspaceRegistry', { archivedSessionIds, get: (id: string) => workspaces.find((item) => item.id === id) })
+  ctx.provide('sessionController', {
+    resolveAgent: async (id: string) => ({ agent: agents.get(id) }),
+    modelCatalog: async () => ({ default: route, groups: [{ id: route.provider, models: [{ id: route.model }] }] }),
+  })
+  ctx.provide('credentials', { modifyRecord: async (_key: string, update: (value: undefined) => Promise<unknown>) => update(undefined) })
+  ctx.provide('agents', { get: (id: string) => agents.get(id) })
+  ctx.provide('llm', {})
+  ctx.provide('tools', {})
+  const services: Awaited<ReturnType<typeof serveDshOrchestra>>[] = []
+  const plugin = ctx.plugin((host) => { installLocalDshHost(host, localDshHostConfig.parse({ local: {
+    enabled: true, dataDirectory: join(directory, 'db'),
+  } }).local, async (options) => {
+    const service = await serveDshOrchestra(options)
+    services.push(service)
+    return service
+  }) })
+  const request = (target: string, workspaceId = 'one', sessionId = workspaceId + '-session', method = 'GET') => {
+    const query = new URLSearchParams({ workspaceId, sessionId, path: target })
+    return handleRequest(new Request('http://dsh.internal/api/orchestra.request?' + query, {
+      method, headers: { host: '127.0.0.1:3210', 'x-orchestra-request': '1', 'content-type': 'application/json' },
+    }))
+  }
+  const path = '/v1/memory/batches'
+  try {
+    await plugin.await()
+    await expect.poll(() => typeof handleRequest).toBe('function')
+    const empty = await request(path)
+    expect(empty.status).toBe(200)
+    expect(await empty.json()).toMatchObject({ ok: true, schema_version: 1, data: { items: [], next_cursor: null } })
+    const owner = services[0]!
+    expect((await fetch(owner.endpoint + path)).status).toBe(401)
+    expect(await (await request('/health')).json()).toMatchObject({ data: { memory_enabled: false } })
+
+    const now = '2026-11-20T00:00:00.000Z'
+    const { db } = owner.orchestra
+    withTx(db, (tx) => {
+      tx.run("INSERT INTO tasks (task_id,title,status,created_at,updated_at) VALUES ('owned-task','历史整理','running',?,?)", [now, now])
+      for (const number of [1, 2]) {
+        const source = `source-${number}`
+        const memory = `memory-${number}`
+        for (const runId of [source, memory]) {
+          tx.run("INSERT INTO runs (run_id,task_id,status,created_at,updated_at) VALUES (?,'owned-task','succeeded',?,?)", [runId, now, now])
+        }
+        tx.run(`INSERT INTO memory_batches (batch_id,task_id,source_run_id,memory_run_id,attempt,status,created_at,updated_at)
+          VALUES (?,'owned-task',?,?,1,'draft',?,?)`, [`batch-${number}`, source, memory, now, now])
+      }
+      tx.run(`INSERT INTO memory_items (item_id,batch_id,client_key,action,layer,title,content,tags_json,questions_json,content_hash,status)
+        VALUES ('item','batch-2','key','create','L4','合法历史条目','实际账本正文','[]','[]','hash','proposed')`)
+    })
+    const first = await request(path + '?task_id=owned-task&limit=1')
+    expect(first.status).toBe(200)
+    const page = await first.json()
+    expect(page.data).toMatchObject({ next_cursor: expect.any(String), items: [
+      { batch_id: 'batch-2', pending_count: 1, items: [{ title: '合法历史条目', content: '实际账本正文' }] },
+    ] })
+    const second = await request(path + '?' + new URLSearchParams({ task_id: 'owned-task', limit: '1', cursor: page.data.next_cursor }))
+    expect(await second.json()).toMatchObject({ ok: true, data: { items: [{ batch_id: 'batch-1' }], next_cursor: null } })
+    const invalid = await request(path + '?limit=101')
+    expect(invalid.status).toBe(413)
+    expect(await invalid.json()).toMatchObject({ error: { code: 'RANGE_TOO_LARGE' } })
+    const badCursor = await request(path + '?cursor=invalid')
+    expect(badCursor.status).toBe(410)
+    expect(await badCursor.json()).toMatchObject({ error: { code: 'CURSOR_EXPIRED' } })
+    expect((await request(path, 'one', 'two-session')).status).toBe(403)
+    expect(await (await request(path + '?task_id=owned-task', 'two')).json()).toMatchObject({ ok: true, data: { items: [] } })
+    for (const action of ['runs/start', 'recovery/inspect', 'recovery/resolve']) {
+      expect((await request('/v1/memory/' + action, 'one', 'one-session', 'POST')).status).toBe(404)
+    }
+    archivedSessionIds.push('one-session')
+    expect((await request(path)).status).toBe(403)
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM memory_batches').get()?.n).toBe(2)
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM memory_items').get()?.n).toBe(1)
+  } finally {
+    await plugin.dispose()
+    await rm(directory, { recursive: true, force: true })
+  }
 })

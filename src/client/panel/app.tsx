@@ -17,6 +17,7 @@ import { OverviewScreen } from './overview-screen.tsx'
 import { MemoryPanel } from './memory-panel.tsx'
 import { SettingsScreen } from './settings-screen.tsx'
 import { ModelRoutingSettings } from './model-routing-settings.tsx'
+import { PlanningTimeoutSettings } from './planning-timeout-settings.tsx'
 import { UnverifiedEffects } from './unverified-effects.tsx'
 import { WorkflowCanvas } from './workflow-canvas.tsx'
 import { WorkflowListScreen } from './workflow-list.tsx'
@@ -33,6 +34,7 @@ export type PanelAppProps = {
   memoryEnabled?: boolean
   memoryProposalOnly?: boolean
   modelRoutingEnabled?: boolean
+  planningTimeoutsEnabled?: boolean
   modelEscalationEnabled?: boolean
   servicePhase?: string
   panelVersion?: string
@@ -53,9 +55,9 @@ export function PanelApp(props: PanelAppProps) {
   writesEnabled.current = props.serviceConnected && !props.protocolMismatch && !snapshotStale
   const client = useMemo<ApiClient>(() => ({
     get: (...args) => props.client.get(...args),
-    async post<T>(path: string, payload: unknown) {
+    async post<T>(path: string, payload: unknown, signal?: AbortSignal) {
       if (!writesEnabled.current) throw new ApiError('PANEL_WRITE_UNAVAILABLE', '当前为只读状态，刷新成功后再操作', false)
-      return props.client.post<T>(path, payload)
+      return props.client.post<T>(path, payload, signal)
     },
   }), [props.client])
   const rework = useMemo(() => props.reworkEnabled ? createReworkApi(client) : undefined, [client, props.reworkEnabled])
@@ -154,7 +156,7 @@ export function PanelApp(props: PanelAppProps) {
     }
   }, [eventStream, finishResync, refreshGeneration])
 
-  const canReadViewSnapshot = route === 'settings' ? props.modelRoutingEnabled === true
+  const canReadViewSnapshot = route === 'settings' ? props.modelRoutingEnabled === true || props.planningTimeoutsEnabled === true
     : route === 'collaboration' ? props.collaborationEnabled === true
       : route !== 'memory' || !props.additionalScreens?.memory
   useEffect(() => {
@@ -206,6 +208,7 @@ export function PanelApp(props: PanelAppProps) {
       ?? <SettingsScreen serviceConnected={props.serviceConnected} protocolMismatch={props.protocolMismatch} snapshotStale={snapshotStale} streamStatus={streamStatus}
         phase={props.servicePhase} panelVersion={props.panelVersion} onRefresh={refreshSettings} />}
       {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
+      {props.planningTimeoutsEnabled && <PlanningTimeoutSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot} />}
       <section className="ops-surface" aria-labelledby="memory-capability-title">
         <header className="ops-surface-head"><h2 id="memory-capability-title">任务记忆</h2></header>
         <div className="ops-inset">

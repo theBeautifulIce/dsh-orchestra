@@ -4,7 +4,7 @@ import { act, createElement, type ReactElement } from 'react'
 import { expect, it, vi } from 'vitest'
 import { DshLocalPanel, isDshLocalShell, type DshLocalPanelSources } from '../../src/client/dsh-local-panel.tsx'
 import { apply, inject, type DshPanelContext } from '../../src/client/dsh-sidebar.tsx'
-import { createFakeService, page, renderPanel } from './harness.ts'
+import { createFakeService, deferred, page, renderPanel } from './harness.ts'
 
 function store<T>(initial: T) {
   let snapshot = initial
@@ -36,31 +36,39 @@ it('recognizes the Electron application authority and loopback web hosts', () =>
   expect(isDshLocalShell('https://dsh.example.invalid/')).toBe(false)
 })
 
-it('sends task commands through the authenticated carrier and cancels the scoped event stream on archive', async () => {
+it('sends authenticated task commands and cancels streams and planning when the DSH session changes', async () => {
   const sessions = { list: store<SessionSnapshot>({ byId: {} }) }
-  const workspaces = { list: store(initialWorkspaces) }
-  let streamSignal: AbortSignal | null | undefined
+  const secondSession = { id: 'session-other', retainedBy: { mainView: 1 } }
+  const registered: WorkspaceSnapshot = { ...initialWorkspaces, items: [{ ...workspace, sessionIds: [selectedRow.id, secondSession.id] }] }
+  const workspaces = { list: store(registered) }
+  const streams = new Map<string, AbortSignal>()
+  const firstPlanning = deferred<Response>()
   const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'dsh-app://app')
     expect(url.pathname).toBe('/api/orchestra.request')
     expect(url.searchParams.get('workspaceId')).toBe(workspace.workspaceId)
-    expect(url.searchParams.get('sessionId')).toBe('session-test')
+    const sessionId = url.searchParams.get('sessionId')!
+    expect([selectedRow.id, secondSession.id]).toContain(sessionId)
     expect(init).toMatchObject({ credentials: 'same-origin', mode: 'same-origin', redirect: 'error' })
     const path = new URL(url.searchParams.get('path')!, 'http://service.test')
     if (path.pathname === '/v1/events/stream') {
       expect(path.searchParams.has('after_seq')).toBe(true)
       expect(new Headers(init?.headers).get('accept')).toBe('text/event-stream')
-      streamSignal = init?.signal
+      const streamSignal = init?.signal!
+      streams.set(sessionId, streamSignal)
       return new Response(new ReadableStream({
         start(controller) {
           streamSignal?.addEventListener('abort', () => controller.close(), { once: true })
         },
       }), { headers: { 'content-type': 'text/event-stream' } })
     }
-    if (path.pathname === '/v1/task-plans') return Response.json({
-      ok: false, schema_version: 1, as_of_seq: 1,
-      error: { code: 'SERVICE_UNAVAILABLE', message: '测试结束', retryable: false },
-    }, { status: 503 })
+    if (path.pathname === '/v1/task-plans') return sessionId === selectedRow.id ? firstPlanning.promise : Response.json({
+      ok: true, schema_version: 1, as_of_seq: 1, data: {
+        plan_id: 'new-plan', content_hash: 'hash', brief: { goal: '新会话计划', requirements: [] },
+        proposal: { title: '新会话计划', workflow_id: 'wf', workflow_version: '1', steps: [], deliverables: [], risks: [] },
+        quality: { ready: true, checks: [] }, launch: null,
+      },
+    })
     const data = path.pathname === '/health' ? { ok: true, phase: 'S6' }
       : path.pathname === '/v1/task-plans/capability' ? { enabled: true }
       : page([])
@@ -79,16 +87,19 @@ it('sends task commands through the authenticated carrier and cancels the scoped
     expect(fetcher).not.toHaveBeenCalled()
     await act(async () => { sessions.list.set({ byId: { 'session-test': selectedRow } }) })
     await view.flush()
-    expect(streamSignal?.aborted).toBe(false)
+    expect(streams.get(selectedRow.id)?.aborted).toBe(false)
 
-    await view.click(view.findAll('summary').find(summary => summary.textContent === '用自然语言规划任务')!)
-    await view.flush()
-    const textarea = view.container.querySelector('textarea')!
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, '阅读报告')
-      textarea.dispatchEvent(new Event('input', { bubbles: true }))
-    })
-    await view.click(view.findAll('button').find(button => button.textContent === '生成计划')!)
+    const submitPlan = async (goal: string) => {
+      await view.click(view.findAll('summary').find(summary => summary.textContent === '用自然语言规划任务')!)
+      await view.flush()
+      const textarea = view.container.querySelector('textarea')!
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, goal)
+        textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await view.click(view.findAll('button').find(button => button.textContent === '生成计划')!)
+    }
+    await submitPlan('阅读报告')
     const post = fetcher.mock.calls.find(([, init]) => init?.method === 'POST')
     expect(post).toBeDefined()
     const url = new URL(String(post![0]), 'dsh-app://app')
@@ -98,9 +109,23 @@ it('sends task commands through the authenticated carrier and cancels the scoped
     expect(headers.get('x-orchestra-request')).toBe('1')
     expect([...headers.keys()].sort()).toEqual(['accept', 'content-type', 'x-orchestra-request'])
     expect(JSON.parse(String(post![1]?.body))).toMatchObject({ goal: '阅读报告' })
+    expect(post![1]?.signal?.aborted).toBe(false)
 
-    await act(async () => { workspaces.list.set({ ...initialWorkspaces, archivedSessionIds: ['session-test'] }) })
-    expect(streamSignal?.aborted).toBe(true)
+    await act(async () => { sessions.list.set({ byId: { [secondSession.id]: secondSession } }) })
+    await view.flush()
+    expect(streams.get(selectedRow.id)?.aborted).toBe(true)
+    expect(post![1]?.signal?.aborted).toBe(true)
+    await act(async () => firstPlanning.resolve(Response.json({
+      ok: false, schema_version: 1, as_of_seq: 1,
+      error: { code: 'SERVICE_UNAVAILABLE', message: '旧会话错误', retryable: false },
+    }, { status: 503 })))
+    await submitPlan('读新报告')
+    expect(view.text()).toContain('新会话计划')
+    expect(view.text()).not.toContain('旧会话错误')
+    expect(new URL(String(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')[1]?.[0]), 'dsh-app://app')
+      .searchParams.get('sessionId')).toBe(secondSession.id)
+    await act(async () => { workspaces.list.set({ ...registered, archivedSessionIds: [secondSession.id] }) })
+    expect(streams.get(secondSession.id)?.aborted).toBe(true)
     expect(view.text()).toContain('打开一个会话')
   } finally {
     view.unmount()

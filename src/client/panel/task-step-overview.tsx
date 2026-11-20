@@ -56,7 +56,7 @@ function StepRows({ nodes, titles, groupTitle }: { nodes: readonly NodeRunView[]
   return <ul className="task-step-overview">
     {nodes.map((node) => {
       const waiting = waitingFor(node, titles)
-      const label = nodeExecutionLabel(node)
+      const label = groupTitle && executionState(node) === 'queued' ? '排队原因未记录' : nodeExecutionLabel(node)
       return <li key={node.node_id} data-tone={nodeExecutionPhase(node).tone}>
         <strong>{node.title || node.node_id}</strong>
         {label !== groupTitle && <span className="task-step-overview-status">{label}</span>}
