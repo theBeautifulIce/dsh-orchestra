@@ -163,7 +163,7 @@ it('keeps a focused and open branch mounted during a same-run refresh, failure a
   } finally { view.unmount() }
 })
 
-it('remembers expanded branches when a task moves columns without moving focus from another control', async () => {
+it.each(['other control', 'branch'] as const)('remembers the open branch and restores focus from %s on a column move', async (focus) => {
   const nodes = [step('a', '复核甲', []), step('b', '复核乙', [])]
   let finished = false
   const service = createFakeService(({ path }) => path === '/v1/tasks'
@@ -174,16 +174,37 @@ it('remembers expanded branches when a task moves columns without moving focus f
   const view = await renderPanel(screen(0))
   try {
     await view.click(view.container.querySelector('[aria-label="展开步骤：运行复核"]')!)
-    await view.click(view.container.querySelector(`${groupSelector} summary`)!)
+    const before = view.container.querySelector<HTMLElement>(`${groupSelector} summary`)!
+    await view.click(before)
     await view.flush()
     const search = view.container.querySelector<HTMLElement>('#task-search')!
-    search.focus()
+    const focused = focus === 'branch' ? before : search
+    focused.focus()
     finished = true
     await view.rerender(screen(1))
     await view.flush()
     const group = view.container.querySelector<HTMLDetailsElement>(`[data-task-column="finished"] ${groupSelector}`)
     expect(group?.open).toBe(true)
-    expect(document.activeElement).toBe(search)
+    expect(document.activeElement).toBe(focus === 'branch' ? group?.querySelector('summary') : search)
     expect(service.calls.filter(({ path }) => path === '/v1/node-runs')).toHaveLength(2)
+  } finally { view.unmount() }
+})
+
+it('keeps focus on the board when the focused card leaves the active results', async () => {
+  let visible = true
+  const service = createFakeService(({ path }) => path === '/v1/tasks'
+    ? { ok: true, data: page(visible ? [task] : []) }
+    : { ok: true, data: { items: [step('a', '复核甲', []), step('b', '复核乙', [])] } })
+  const api = createResourcesApi(createApiClient('http://panel.test', service.fetcher))
+  const screen = (reloadVersion: number) => <TaskListScreen api={api} onSelectTask={() => {}} reloadVersion={reloadVersion} />
+  const view = await renderPanel(screen(0))
+  try {
+    await view.click(view.container.querySelector('[aria-label="展开步骤：运行复核"]')!)
+    view.container.querySelector<HTMLElement>(`${groupSelector} summary`)!.focus()
+    visible = false
+    await view.rerender(screen(1))
+    await view.flush()
+    expect(view.findAll('article.task-card')).toHaveLength(0)
+    expect(document.activeElement).toBe(view.container.querySelector('[aria-label="任务看板"]'))
   } finally { view.unmount() }
 })
