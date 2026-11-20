@@ -9,7 +9,8 @@ import { releaseHash } from '../../src/core/wf-release-v1.ts'
 import { createG6FileEvidenceReader } from '../../scripts/g6-file-evidence.ts'
 import { assertFormalSoakArchive, FORMAL_SOAK_ARCHIVE } from '../../scripts/soak-archive.ts'
 import type { Manifest } from '../../scripts/soak-judge.ts'
-import { assertG6Body, assertG5History, authenticateG6Proof, g6Body, signG6, verifyG6 } from '../../scripts/gate-g6.ts'
+import { assertG6Body, assertG5History, assertG6R0Evidence, authenticateG6Proof, g6Body, signG6, verifyG6 } from '../../scripts/gate-g6.ts'
+import { R0_ORIGINALS } from '../../scripts/r0-observe.ts'
 
 it('binds the authorized role, signer and exact approval payload', () => {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
@@ -33,6 +34,29 @@ it('freezes both artifact anchors and all text before the appendices', () => {
   expect(() => assertG6Body(body.replace(values.independentHash, values.publicationHash), body)).toThrow(/锚前/)
   expect(() => assertG6Body(body.replace('结论：pass', '结论：fail'), body)).toThrow(/锚前/)
   expect(() => assertG6Body(body + 'candidate_commit=' + values.audit, body)).toThrow(/覆写/)
+})
+
+it('拒绝缺少或重复的 R0 原件，以及短窗和错候选、错包的原件', () => {
+  const candidate = '1'.repeat(40)
+  const archiveSha256 = '2'.repeat(64)
+  const expected = { candidate, archiveSha256, startedAt: '2026-11-20T03:00:00.000Z', endedAt: '2026-11-23T03:00:00.000Z' }
+  const inputs = R0_ORIGINALS.map((name) => ({ source: 'r0-observation:' + name, file: 'evidence/r0/' + name }))
+  const originals = new Map<string, Buffer>(inputs.map(({ file }) => [file, Buffer.alloc(0)]))
+  const put = (file: string, value: unknown) => originals.set('evidence/r0/' + file, Buffer.from(JSON.stringify(value)))
+  const blob = (file: string) => originals.get(file)!
+  expect(() => assertG6R0Evidence(inputs.slice(1), blob, expected)).toThrow(/原件缺失/)
+  expect(() => assertG6R0Evidence([...inputs, inputs[0]!], blob, expected)).toThrow(/来源重复/)
+  const id = 'r0-fixture'
+  const short = { schema: 1, id, kind: 'short', slots: 2, interval_ms: 1000, candidate, archive: null, archiveSha256: null }
+  put('launch.json', short)
+  put('worker.json', { id })
+  put('end.json', { id, error: null, status: 'complete', synthetic_ledger_key: 'synthetic-key', prior_sha256: {} })
+  expect(() => assertG6R0Evidence(inputs, blob, expected)).toThrow(/frozen candidate and archive/)
+  const formal = { ...short, kind: 'formal', slots: 4320, interval_ms: 60_000, archive: 'isolation.tgz', archiveSha256 }
+  put('launch.json', { ...formal, candidate: '3'.repeat(40) })
+  expect(() => assertG6R0Evidence(inputs, blob, expected)).toThrow(/frozen candidate and archive/)
+  put('launch.json', { ...formal, archiveSha256: '4'.repeat(64) })
+  expect(() => assertG6R0Evidence(inputs, blob, expected)).toThrow(/frozen candidate and archive/)
 })
 
 it('derives lag from committed-to-observed samples and rejects fake report conclusions', () => {

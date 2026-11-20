@@ -189,7 +189,7 @@ export function createModelEscalationHost(db: Db, secret: string, profiles: read
     inFlight.add(body.node_run_id)
     try {
       const prior = withReadTx(db, ({ tx }) => latestAssessment(tx, body.node_run_id))
-      if (prior?.fingerprint === state.fingerprint && prior.expires_at > now) {
+      if (prior?.fingerprint === state.fingerprint && prior.decided_at <= now && prior.expires_at > now) {
         return withTx(db, (tx) => runIdempotentCommand(tx, receipt, () => prior).result)
       }
       const parsed = opinionSchema.safeParse(await callBoundedPlanner(planner, state.input, successor ? 8_000 : 45_000))

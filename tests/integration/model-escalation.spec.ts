@@ -162,6 +162,24 @@ it('refreshes an expired opinion against the same facts at the next authorized d
   expect(routed(at)).toMatchObject({ model_ref: 'high' })
 })
 
+it('reuses a current diagnosis for a new operation and refreshes it after the host clock moves backwards', async () => {
+  let at = '2026-11-20T12:00:00.080Z'
+  const planner = vi.fn(classify)
+  const host = createModelEscalationHost(db, secret, profiles, planner, undefined, () => at)
+  const original = input()
+  const first = await host.assess(original, owner, at)
+  at = '2026-11-20T12:00:00.081Z'
+  await expect(host.assess(input(), owner, at)).resolves.toEqual(first)
+  expect(planner).toHaveBeenCalledOnce()
+
+  at = '2026-11-20T12:00:00.079Z'
+  await expect(host.assess(original, owner, at)).resolves.toEqual(first)
+  expect(planner).toHaveBeenCalledOnce()
+  const refreshed = await host.assess(input(), owner, at)
+  expect(refreshed).toMatchObject({ fingerprint: first.fingerprint, decided_at: at })
+  expect(planner).toHaveBeenCalledTimes(2)
+})
+
 it('rotates the maintenance cursor past a page of nodes that lack model evidence', async () => {
   withTx(db, (tx) => {
     tx.run("UPDATE node_runs SET updated_at=? WHERE node_run_id='nr1'", [now])
