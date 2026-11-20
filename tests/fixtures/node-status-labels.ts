@@ -20,7 +20,7 @@ const labels = {
   abandoned_unverified: '已停止跟踪，外部影响待核验',
   failed_with_unverified: '执行失败，外部影响待核验',
   orphaned: '没有新 attempt 接手',
-  superseded: '已被新 attempt 取代',
+  superseded: '本次尝试已停止',
 } satisfies Record<NodeStatus, string>
 
 export const NODE_STATUS_LABELS = [...NON_TERMINAL_STATUSES, ...TERMINAL_STATUSES].map((status) =>

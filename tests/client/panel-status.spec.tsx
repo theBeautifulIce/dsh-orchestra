@@ -245,7 +245,7 @@ describe('WP-A 面板侧 G5 门禁', () => {
     expect([...view.container.querySelectorAll('.task-inspector-badges span')].some((badge) => badge.textContent === '进行中')).toBe(true)
     const rows = [...(steps?.querySelectorAll('.task-flow-step') ?? [])]
     const currentLabels: Record<string, string> = {
-      verifying: '核验中', blocked_post: '执行结束，待人工处理', orphaned: '执行者失联，尚未接手', superseded: '已由新尝试接替',
+      verifying: '核验中', blocked_post: '执行结束，待人工处理', orphaned: '执行者失联，尚未接手',
     }
     expect(rows.map((row) => [row.querySelector('strong')?.textContent, row.querySelector('.task-flow-step-result')?.textContent]))
       .toEqual(NODE_STATUS_LABELS.map(({ status, status_label }) => ['步骤 ' + status, currentLabels[status] ?? status_label]))

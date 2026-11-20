@@ -23,17 +23,21 @@ import { readOutstandingFiles } from '../../src/service/chat-expected-files.ts'
 import { fakeAgentBridge } from '../fixtures/agent-bridge.ts'
 
 const roles = ['目录', '链接', '术语', '日期', '引用', '数字', '格式', '附件', '重复项', '缺失项']
-const branchIds = roles.map((_, i) => 'review_' + (i + 1))
-const names = roles.map((role) => role + '核对')
+const allBranchIds = roles.map((_, i) => 'review_' + (i + 1))
+const allNames = roles.map((role) => role + '核对')
 const descriptor = { name: 'ro.check', capability: 'read_only' as const, command: { bin: 'check', args: [] } }
 const goal = '分别核对十类交付内容，然后汇总审核结论'
 
-it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败'] as const)('十个具名分支共享一个运行与并发上限：%s', async (scenario) => {
+it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败', '部分汇合'] as const)('具名分支共享一个运行与并发上限：%s', async (scenario) => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-parallel-plan-'))
   const secret = 'parallel-plan-contract-secret'
   const registry = new ToolRegistry()
+  const partialJoin = scenario === '部分汇合'
+  const branchIds = partialJoin ? allBranchIds.slice(0, 4) : allBranchIds
+  const names = partialJoin ? allNames.slice(0, 4) : allNames
+  const joinSources = partialJoin ? branchIds.slice(0, 2) : branchIds
   const joinAllowsTool = scenario === '合流有工具权限但仅验收成果'
-  const outputOnly = scenario === '纯成果' || joinAllowsTool || scenario === '成果门槛' || scenario === '重启与重试'
+  const outputOnly = partialJoin || scenario === '纯成果' || joinAllowsTool || scenario === '成果门槛' || scenario === '重启与重试'
   const blockedOutputs = scenario === '成果门槛'
   const toolsFor = (nodeId: string) => !outputOnly || (blockedOutputs && nodeId === branchIds[4]) ? [descriptor.name] : []
   if (!outputOnly || blockedOutputs || joinAllowsTool) registry.register(descriptor)
@@ -41,6 +45,8 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
   const spawned: SpawnParams[] = []
   const joinTexts: string[] = []
   const releaseInitialBranches = Promise.withResolvers<void>()
+  const releaseIndependentBranches = Promise.withResolvers<void>()
+  const releaseJoin = Promise.withResolvers<void>()
   const stepOf = (entry: SpawnParams) => (entry.input as { step: string }).step
   const bridge = new BridgeClient({
     async request<T>(method: string, params: unknown): Promise<T> {
@@ -120,7 +126,13 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
         if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
         return
       }
-      if (outputOnly) await releaseInitialBranches.promise
+      if (partialJoin) {
+        const input = spawned.find((entry) => 'agent_' + entry.nodeRunId === params.executorAgentId)!
+        const step = stepOf(input)
+        if (step === '汇总审核') await releaseJoin.promise
+        else if (names.slice(2).includes(step)) await releaseIndependentBranches.promise
+        else await releaseInitialBranches.promise
+      } else if (outputOnly) await releaseInitialBranches.promise
       for await (const event of agents.get(params.executorAgentId)!.listen(params, signal)) {
         yield { ...event, attempt: params.attempt }
       }
@@ -148,12 +160,12 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
         node('join_review', '汇总审核', 600, 450),
       ], edges: [
         ...branchIds.map((id) => ({ from: 'start', to: id })),
-        ...branchIds.map((id) => ({ from: id, to: 'join_review' })),
+        ...joinSources.map((id) => ({ from: id, to: 'join_review' })),
       ] }
     },
     planning: { propose: async ({ workflows }) => {
       const [workflow] = workflows
-      expect(workflow?.nodes.map((node) => node.dependsOn)).toEqual([...roles.map(() => []), branchIds])
+      expect(workflow?.nodes.map((node) => node.dependsOn)).toEqual([...branchIds.map(() => []), joinSources])
       if (joinAllowsTool) expect(workflow?.nodes.at(-1)?.toolAllow).toEqual([descriptor.name])
       return {
         title: '交付审核', workflow_id: workflow!.workflowId, workflow_version: workflow!.version,
@@ -192,15 +204,15 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
     await expect.poll(async () => (await nodes()).filter((node) => node.execution_state === 'started').length,
       { timeout: 6_000 }).toBe(3)
     const inProgress = await nodes()
-    expect(inProgress).toHaveLength(11)
+    expect(inProgress).toHaveLength(branchIds.length + 1)
     if (scenario === '完成') {
       expect((await reads.listNodes(run_id, 10)).data).toMatchObject({ has_more: true })
       expect((await reads.listNodes(run_id, 11)).data).toMatchObject({ has_more: false })
     }
-    expect(inProgress.filter((node) => node.execution_state === 'waiting_capacity')).toHaveLength(7)
+    expect(inProgress.filter((node) => node.execution_state === 'waiting_capacity')).toHaveLength(branchIds.length - 3)
     const joinNode = inProgress.find((node) => node.node_id === 'join_review')!
     expect(joinNode).toMatchObject({
-      title: '汇总审核', status: 'queued', execution_state: 'waiting_dependencies', depends_on: branchIds, waiting_on: branchIds,
+      title: '汇总审核', status: 'queued', execution_state: 'waiting_dependencies', depends_on: joinSources, waiting_on: joinSources,
     })
     expect(inProgress.filter((node) => node.node_id !== 'join_review').map((node) => node.title)).toEqual(names)
     expect(spawned).toHaveLength(3)
@@ -208,6 +220,22 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       nodeRunId: joinNode.node_run_id, ownerEpoch: service.orchestra.db.epoch,
       leaseTtlMs: 60_000, now: new Date().toISOString(),
     })).toThrow(expect.objectContaining({ code: 'RESOLUTION_NOT_AVAILABLE' }))
+
+    if (partialJoin) {
+      releaseInitialBranches.resolve()
+      // 无关分支继续占两个名额。仅完成两条必要上游，汇总必须拿到剩下的名额。
+      await expect.poll(async () => (await nodes()).map((node) => [node.node_id, node.status]), { timeout: 6_000 })
+        .toEqual([[branchIds[0], 'done'], [branchIds[1], 'done'], [branchIds[2], 'started'], [branchIds[3], 'started'], ['join_review', 'started']])
+      expect(spawned.map(stepOf).filter((name) => name === '汇总审核')).toHaveLength(1)
+      expect(joinTexts.toSorted()).toEqual(names.slice(0, 2).map((name) => name + '完成').toSorted())
+      releaseJoin.resolve()
+      await expect.poll(async () => (await nodes()).find((node) => node.node_id === 'join_review')?.status).toBe('done')
+      expect((await reads.getRun(run_id)).data.status).toBe('running')
+      releaseIndependentBranches.resolve()
+      await expect.poll(async () => (await reads.getRun(run_id)).data.status).toBe('succeeded')
+      expect(spawned.map(stepOf).toSorted()).toEqual([...names, '汇总审核'].toSorted())
+      return
+    }
 
     if (scenario === '取消') {
       const result = await api.post<{ terminalStatus: string | null }>('/v1/runs/cancel', {
@@ -221,7 +249,7 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       expect(spawned).toHaveLength(3)
       const cancelled = (await nodes()).filter((node) => node.status === 'superseded')
       expect(cancelled).toHaveLength(8)
-      expect(cancelled.every((node) => node.execution_state === 'cancelled')).toBe(true)
+      expect(cancelled.every((node) => node.execution_state === 'cancelled' && node.status_label === '已取消')).toBe(true)
       expect((await nodes()).filter((node) => node.status === 'timeout')).toHaveLength(3)
       return
     }
@@ -293,7 +321,7 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       await expect.poll(async () => (await nodes()).find((node) => node.node_id === 'join_review')?.status,
         { timeout: 10_000 }).toBe('done')
       expect((await nodes()).filter((node) => node.node_id === uncertain.node_id)).toMatchObject([
-        { attempt: 1, status: 'superseded', execution_state: 'superseded' }, { attempt: 2, status: 'done' },
+        { attempt: 1, status: 'superseded', execution_state: 'superseded', status_label: '已由新尝试接替' }, { attempt: 2, status: 'done' },
       ])
       expect(spawned.map(stepOf).filter((step) => step === names.at(-1))).toHaveLength(2)
       expect(joinTexts.toSorted()).toEqual(names.map((name) => name + '完成').toSorted())
@@ -318,6 +346,8 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
     expect(service.orchestra.db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toEqual({ n: 1 })
   } finally {
     releaseInitialBranches.resolve()
+    releaseIndependentBranches.resolve()
+    releaseJoin.resolve()
     await service.close()
     await rm(dir, { recursive: true, force: true })
   }

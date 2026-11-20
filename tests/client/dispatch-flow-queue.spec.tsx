@@ -91,15 +91,16 @@ it('keeps capacity, dependency waits, upstream failure and unknown queue reasons
     node_id, node_run_id: node_id, title: nodeNames[node_id], status: 'queued', execution_state: state, ...overrides,
   })
   const initial = [
-    row('orders', 'started', { status: 'started' }),
+    row('orders', 'started', { status: 'started', title: '复核' }),
     row('totals', 'waiting_capacity', { node_run_id: 'totals-2', attempt: 2 }),
     row('totals', 'failed', { title: '旧的总额尝试', status: 'failed', replacement_node_run_id: 'totals-2' }),
     row('inventory', 'blocked_post', { status: 'blocked_post' }),
-    row('records', 'failed', { status: 'failed', status_label: '核查失败' }),
-    row('join', 'waiting_dependencies', { depends_on: ['orders', 'inventory'], waiting_on: ['orders', 'inventory'] }),
+    row('records', 'failed', { status: 'failed', status_label: '核查失败', title: '复核' }),
+    row('join', 'waiting_dependencies', { depends_on: ['orders', 'records'], waiting_on: ['orders', 'records'] }),
     row('approval', 'blocked_dependencies', { depends_on: ['join', 'records'], waiting_on: ['records'] }),
     row('filing', 'queued_unknown'),
     row('obsolete', 'cancelled', { status: 'superseded', status_label: '已被新 attempt 取代' }),
+    row('held', 'superseded', { title: '返工暂停步骤', status: 'superseded', status_label: '已被新 attempt 取代' }),
   ]
   let reread = false
   const service = createFakeService(({ path, params }) => {
@@ -117,12 +118,15 @@ it('keeps capacity, dependency waits, upstream failure and unknown queue reasons
     expect(queue('等待执行位')?.querySelectorAll('li strong')).toHaveLength(1)
     expect(queue('等待执行位')?.textContent).toContain('核对总额第 2 次尝试')
     expect(queue('等待上游完成')?.querySelectorAll('li')).toHaveLength(1)
-    expect(queue('等待上游完成')?.textContent).toContain('等待：核对订单、核对库存')
+    expect(queue('进行中')?.textContent).toContain('复核同名步骤 1')
+    expect(queue('等待上游完成')?.textContent).toContain('等待：复核（同名步骤 1）、复核（同名步骤 2）')
     const attention = queue('暂停、重试与异常')!
     expect(attention.querySelectorAll('li[data-tone="blocked"]')).toHaveLength(2)
-    expect(attention.textContent).toContain('审核合并稿上游失败，步骤受阻上游未成功：比对库存台账')
+    expect(attention.textContent).toContain('复核同名步骤 2')
+    expect(attention.textContent).toContain('审核合并稿上游失败，步骤受阻上游未成功：复核（同名步骤 2）')
     expect(attention.textContent).toContain('单独归档库存排队原因未知')
     expect(queue('已结束')?.textContent).toContain('重做库存汇总已取消')
+    expect(queue('已结束')?.textContent).toContain('返工暂停步骤本次尝试已停止')
     expect(view.text()).not.toContain('旧的总额尝试')
 
     reread = true

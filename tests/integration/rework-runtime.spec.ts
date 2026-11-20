@@ -88,6 +88,9 @@ describe('version-bound rework runtime',() => {
   withTx(db,tx=>{ tx.run("UPDATE node_runs SET status='queued' WHERE node_run_id='b'");snapshotArtifactInputs(tx,'b',['a'],now);acquireLease(tx,secret,{nodeRunId:'b',ownerEpoch:0,leaseTtlMs:100000,now});const b=tx.get<{revision:number}>("SELECT revision FROM node_runs WHERE node_run_id='b'")!;transitionNode(tx,secret,{nodeRunId:'b',from:'dispatched',to:'started',attempt:1,revision:b.revision,now,reason:'test'}) })
   const req=request(db,'b'); const fresh=withTx(db,tx=>authorizeReworkRuntime(tx,secret,req,now))
   expect(db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id='b'").get()?.status).toBe('superseded')
+  expect(getNodeSnapshot(db, 'b').item).toMatchObject({
+   execution_state: 'superseded', status_label: '本次尝试已停止', replacement_node_run_id: null,
+  })
   expect(()=>withTx(db,tx=>assertReworkExecutionAllowed(tx,'b',true))).toThrow()
   withTx(db,tx=>{tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?",[fresh]);artifact(tx,fresh,'a-v2');tx.run("UPDATE rework_requests SET status='awaiting_review',new_node_run_id=? WHERE request_id='q'",[fresh])})
   const review=withTx(db,tx=>prepareReworkReviewer(tx,secret,{...req,new_node_run_id:fresh},now))!
