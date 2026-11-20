@@ -159,7 +159,7 @@ function BoardSteps({ steps, labels, partial, openBranches }: {
         if (event.currentTarget.open) openBranches?.add(key)
         else openBranches?.delete(key)
       }}>
-        <summary><strong>{upstream ? `${upstream}之后` : '运行起点'} · {group.length} 个并行步骤</strong>
+        <summary data-task-card-focus={`branch:${key}`}><strong>{upstream ? `${upstream}之后` : '运行起点'} · {group.length} 个并行步骤</strong>
           <small>{done} / {group.length} 步完成{active > 0 && ` · ${active} 步执行中`}</small>
         </summary>
         <StepRows nodes={group} labels={labels} />

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Component, createRef, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { ListTasksParams, ResourcesApi } from '../api/resources.ts'
 import type { TaskSummary } from '../api/types.ts'
 import { TASK_LANES, type TaskLane } from '../../core/task-workspace.ts'
@@ -88,6 +88,42 @@ function taskColumn(task: TaskSummary): TaskLane {
   if (['reserved', 'queued'].includes(task.status)) return 'upcoming'
   if (task.attention === 'running' || ['running', 'settling', 'waiting'].includes(task.status)) return 'running'
   return 'upcoming'
+}
+
+type BoardFocus = { taskId: string; runId: string; action: string }
+
+class TaskBoardScroll extends Component<{ children: ReactNode }> {
+  private readonly board = createRef<HTMLDivElement>()
+
+  getSnapshotBeforeUpdate(): BoardFocus | null {
+    // Moving a card between columns remounts its controls. Read focus before React removes the old card.
+    const board = this.board.current
+    const active = board?.ownerDocument.activeElement
+    if (!active || !board?.contains(active)) return null
+    const card = active.closest<HTMLElement>('[data-board-task-id]')
+    const action = active.getAttribute('data-task-card-focus')
+    return card?.dataset.boardTaskId && action
+      ? { taskId: card.dataset.boardTaskId, runId: card.dataset.boardRunId ?? '', action } : null
+  }
+
+  componentDidUpdate(_previousProps: unknown, _previousState: unknown, previous: BoardFocus | null): void {
+    const board = this.board.current
+    if (!board || !previous) return
+    const doc = board.ownerDocument
+    if (doc.activeElement && doc.activeElement !== doc.body && doc.activeElement !== doc.documentElement) return
+    const card = Array.from(board.querySelectorAll<HTMLElement>('[data-board-task-id]')).find(({ dataset }) =>
+      dataset.boardTaskId === previous.taskId && (dataset.boardRunId ?? '') === previous.runId)
+    const matching = Array.from(card?.querySelectorAll<HTMLElement>('[data-task-card-focus]') ?? []).find((control) =>
+      control.dataset.taskCardFocus === previous.action && !control.closest('[hidden]'))
+    const fallback = card?.querySelector<HTMLElement>('[data-task-card-focus="steps"]')
+      ?? card?.querySelector<HTMLElement>('[data-task-card-focus="inspect"]') ?? board
+    const target = matching ?? fallback
+    target.focus()
+  }
+
+  render() {
+    return <div className="task-board-scroll" ref={this.board} role="region" aria-label="任务看板" tabIndex={-1}>{this.props.children}</div>
+  }
 }
 
 export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled }: TaskListScreenProps) {
@@ -226,7 +262,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
     </div>}
     {loading && <p role="status" style={mutedStyle}>正在读取任务…</p>}
     {!loading && !error && items.length === 0 && <div style={emptyStyle}>{filter.archived ? '归档箱没有符合条件的任务。' : Object.values(filter).some(Boolean) ? '没有符合筛选条件的任务。' : COPY.emptyTasks}</div>}
-    {(!loading || items.length > 0) && !filter.archived && view === 'board' && <div className="task-board-scroll"><div className="task-board">
+    {!filter.archived && view === 'board' && <TaskBoardScroll>{(!loading || items.length > 0) && <div className="task-board">
       {TASK_LANES.map(({ id, label }) => <section key={id} className="task-column" data-task-column={id} aria-labelledby={`tasks-${id}`}>
         <h2 id={`tasks-${id}`} className="task-column-title">{label}<span>{grouped[id].length}</span></h2>
         {grouped[id].length === 0 && <p className="task-column-empty">暂无任务</p>}
@@ -236,7 +272,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
             <CardSteps key={expandedRunId} snapshot={boardSteps} openBranches={openBranches} />}
           onSelect={(trigger) => onSelectTask(task.task_id, trigger)} />)}
       </section>)}
-    </div></div>}
+    </div>}</TaskBoardScroll>}
     {items.length > 0 && (filter.archived || view === 'list') && <TaskTable tasks={items} archived={Boolean(filter.archived)} selectedTaskId={selectedTaskId} onSelect={onSelectTask} />}
     {items.length > 0 && !filter.archived && (view === 'flow' || view === 'queue') &&
       <TaskFlowView reworkEnabled={reworkEnabled} api={api} tasks={items} onOpenTask={onSelectTask} reloadVersion={reload} queue={view === 'queue'} />}
@@ -309,12 +345,12 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
   const { label: status, tone } = taskCardStatus(task)
   const hasUnverified = task.unverified_count > 0
   const actionable = task.open_decision_count > 0 || hasUnverified || taskColumn(task) === 'attention'
-  return <article className="task-card" data-selected={selected || undefined}>
+  return <article className="task-card" data-selected={selected || undefined} data-board-task-id={task.task_id} data-board-run-id={task.current_run_id ?? undefined}>
     <div className="task-card-status">
       <span style={tone ? { color: tone } : undefined}>{status ?? <UnknownState value={task.display_status || task.status} />}</span>
       {task.workflow_version !== null && <span>v{task.workflow_version}</span>}
     </div>
-    <h3 className="task-card-title"><button type="button" onClick={(event) => onSelect(event.currentTarget)} title={task.title} style={compact ? compactTitleStyle : taskTitleStyle}
+    <h3 className="task-card-title"><button type="button" data-task-card-focus="inspect" onClick={(event) => onSelect(event.currentTarget)} title={task.title} style={compact ? compactTitleStyle : taskTitleStyle}
       aria-expanded={selected} aria-controls={selected ? 'task-inspector' : undefined}>{task.title || '未命名任务'}</button></h3>
     <p className="task-card-type">{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</p>
     {task.attention_reason && <p className="task-card-reason">{operatorReason(task.attention_reason)}</p>}
@@ -331,7 +367,7 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
       <time dateTime={task.updated_at} title={formatDate(task.updated_at)}>{formatDate(task.updated_at)}</time>
     </div>
     {task.current_run_id && <div className="task-card-steps">
-      <button type="button" className="task-quiet-button" aria-expanded={expanded} aria-controls={stepsId}
+      <button type="button" className="task-quiet-button" data-task-card-focus="steps" aria-expanded={expanded} aria-controls={stepsId}
         aria-label={`${expanded ? '收起' : '展开'}步骤：${task.title || '未命名任务'}`}
         onClick={onExpand}>{expanded ? '收起步骤' : '展开步骤'}</button>
       <div id={stepsId} hidden={!expanded}>
@@ -346,7 +382,7 @@ function CardSteps({ snapshot: { nodes, partial, failed, refresh }, openBranches
 }) {
   return <>
     {failed && <p role="alert">{nodes ? '步骤刷新失败，仍显示上次读取结果。' : '步骤读取失败。'}
-      <button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>}
+      <button className="task-quiet-button" type="button" data-task-card-focus="retry-steps" onClick={refresh}>重试</button></p>}
     {!nodes && !failed && <p role="status">正在读取步骤…</p>}
     {nodes && <TaskStepOverview nodes={nodes} partial={partial} openBranches={openBranches} />}
   </>
