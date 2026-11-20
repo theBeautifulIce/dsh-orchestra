@@ -684,10 +684,15 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
       nodeRunId: 'nr_ar', attempt: 2, runId: 'r1', reportId: 'rep_conflict', now: NOW,
     }))
   }
-  function applyUphold(db: any, decision: { decisionId: string; revision: number; resolution: 'uphold_report' | 'uphold_decision' }) {
+  function applyUphold(
+    db: any,
+    decision: { decisionId: string; revision: number; resolution: 'uphold_report' | 'uphold_decision' },
+    now = NOW,
+    report = rep({ report_id: 'rep_conflict' }),
+  ) {
     return withTx(db, (tx) => applyReport(tx, TEST_SECRET, {
-      nodeRunId: 'nr_ar', attempt: 2, report: rep({ report_id: 'rep_conflict' }),
-      expectedStatus: 'startup_unknown', generation: 1, now: NOW, decision,
+      nodeRunId: 'nr_ar', attempt: 2, report,
+      expectedStatus: 'startup_unknown', generation: 1, now, decision,
     }, CATALOG))
   }
 
@@ -716,6 +721,17 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     const closed = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
     expect(closed.status).toBe('resolved')
     expect(closed.closed_reason).toBe('approved')
+  })
+
+  it('uphold_report：证据未通过时保留挂起和原裁决修订', () => {
+    const db = setup()
+    const { decisionId } = hang(db)
+    const report = rep({ report_id: 'rep_conflict', evidence: undefined })
+    const result = applyUphold(db, { decisionId, revision: 1, resolution: 'uphold_report' }, NOW, report)
+    expect(result).toMatchObject({ accepted: false, reason: 'evidence_missing' })
+    expect(nodeRow(db)).toMatchObject({ status: 'startup_unknown', contradiction_decision_id: decisionId })
+    expect(db.raw.prepare('SELECT status, revision, closed_reason FROM decisions WHERE decision_id=?').get(decisionId))
+      .toEqual({ status: 'pending', revision: 1, closed_reason: null })
   })
 
   it('uphold_decision：新 attempt 以更高动作代接班，重放不会创建或再次派发', () => {
@@ -767,12 +783,19 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     expect(after.n).toBe(before.n)
   })
 
-  it('报告冲突卡不参与按时间自动升级/过期', () => {
+  it('报告冲突超时只升级，旧修订和未取得有效租约的报告都保留待裁', () => {
     const db = setup()
     const { decisionId } = hang(db)
-    withTx(db, (tx) => escalateDecisions(tx, 'escalate-secret', { now: '2026-11-20T00:00:00.000Z' }))
+    const now = '2026-11-20T00:00:00.000Z'
+    withTx(db, (tx) => escalateDecisions(tx, TEST_SECRET, { now }))
     const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
-    expect(card.status).toBe('pending')
-    expect(card.closed_reason).toBeNull()
+    expect(card).toMatchObject({ status: 'blocked_for_human', revision: 2, closed_reason: null })
+    expect(errorCode(() => applyUphold(db, { decisionId, revision: 1, resolution: 'uphold_report' }, now)))
+      .toBe('DECISION_REVISION_CONFLICT')
+    expect(errorCode(() => applyUphold(db, { decisionId, revision: 2, resolution: 'uphold_report' }, now)))
+      .toBe('LEASE_EXPIRED')
+    expect(db.raw.prepare('SELECT status, revision, closed_reason FROM decisions WHERE decision_id=?').get(decisionId))
+      .toEqual({ status: 'blocked_for_human', revision: 2, closed_reason: null })
+    expect(nodeRow(db)).toMatchObject({ status: 'startup_unknown', contradiction_decision_id: decisionId })
   })
 })
