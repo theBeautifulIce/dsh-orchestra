@@ -108,8 +108,11 @@ describe('start_run', () => {
       openDecision(tx, { decisionId: 'dec_as', runId: assisted.run_id, nodeRunId: null, kind: 'audit_result', createdAt: old })
       openDecision(tx, { decisionId: 'dec_sv', runId: supervised.run_id, nodeRunId: null, kind: 'audit_result', createdAt: old })
     })
-    const out = inTx(db, (tx) => escalateDecisions(tx, 'escalate-secret', { now }))
-    expect(out).toEqual({ blocked: 1, expired: 1 })
+    const first = inTx(db, (tx) => escalateDecisions(tx, 'escalate-secret', { now }))
+    expect(first).toEqual({ blocked: 2, expired: 0 })
+    const afterDay = '2026-11-14T03:00:00.000Z'
+    const out = inTx(db, (tx) => escalateDecisions(tx, 'escalate-secret', { now: afterDay }))
+    expect(out).toEqual({ blocked: 0, expired: 1 })
     const as = db.raw.prepare('SELECT status, closed_reason FROM decisions WHERE decision_id = ?').get('dec_as')
     expect(as).toEqual({ status: 'resolved', closed_reason: 'expired_final' })
     const sv = db.raw.prepare('SELECT status, closed_reason FROM decisions WHERE decision_id = ?').get('dec_sv')

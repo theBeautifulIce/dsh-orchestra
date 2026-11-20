@@ -107,7 +107,7 @@ describe('八种 decision 与活跃唯一性', () => {
     expect(row(db, 'd1').decided_at).toBeNull()
   })
 
-  it('2 小时升 blocked_for_human，24 小时 expired；report_contradicted 不参与', () => {
+  it('2 小时升级，升级后满 24 小时才过期，报告冲突不参与', () => {
     const db = memoryDb()
     withTx(db, (tx) => {
       openDecision(tx, { decisionId: 'd1', runId: 'r1', nodeRunId: null, kind: 'rule_ambiguous', createdAt: '2026-11-14T00:00:00.000Z' })
@@ -127,7 +127,8 @@ describe('八种 decision 与活跃唯一性', () => {
     expect(row(db, 'd2').status).toBe('blocked_for_human')
 
     withTx(db, (tx) => {
-      expect(escalateDecisions(tx, 'escalate-secret', { now: '2026-11-15T00:00:00.000Z' })).toEqual({ blocked: 0, expired: 1 })
+      expect(escalateDecisions(tx, 'escalate-secret', { now: '2026-11-15T00:00:00.000Z' })).toEqual({ blocked: 0, expired: 0 })
+      expect(escalateDecisions(tx, 'escalate-secret', { now: '2026-11-15T02:00:00.000Z' })).toEqual({ blocked: 0, expired: 1 })
     })
     expect(row(db, 'd1').status).toBe('resolved')
     expect(row(db, 'd1').closed_reason).toBe('expired_final')
