@@ -14,6 +14,7 @@ import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { createTaskCommands } from '../../src/client/api/task-commands.ts'
 import { createTaskPlanningHost } from '../../src/service/task-planning.ts'
 import { WorkflowCatalog } from '../../src/service/workflows.ts'
+import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
 
 const closers: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -93,6 +94,49 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
   return { endpoint: service.endpoint, client, api: createResourcesApi(client), planCommands: createTaskCommands(client),
     db, catalog, commands, registry, publish }
 }
+
+it('配置走已认证 HTTP 写闸和回执，重开账本后仍生效，恢复默认保留宿主回退', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'orch-planning-settings-'))
+  const path = '/v1/settings/planning-timeouts'
+  const open = () => serveOrchestra({
+    dbFile: join(directory, 'orchestra.db'), phase: 'S6', secret: 'settings-fixture-secret',
+    resolveHttpHuman: (request) => request.headers['x-bound-test-user'] === 'local' ? { id: 'local-fixture' } : null,
+    planning: { timeoutMs: 75_000, propose: async () => {} },
+    asOfSeq: () => 0, listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => ({ seq: 0, event_id: 'off' }),
+  })
+  let service = await open()
+  const call = (target: string, body?: unknown, identified = true) => fetch(service.endpoint + target, {
+    headers: { 'x-orchestra-secret': 'settings-fixture-secret', 'content-type': 'application/json',
+      ...(identified ? { 'x-bound-test-user': 'local' } : {}) },
+    ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }),
+  })
+  try {
+    expect((await call(path, undefined, false)).status).toBe(403)
+    expect((await call(path, {}, false)).status).toBe(403)
+    expect(await (await call(path)).json()).toMatchObject({ data: { revision: 0, overridden: false, legacy_timeout_ms: 75_000 } })
+    expect(service.planningSettings?.snapshot()).toMatchObject({ task: 75_000, workflow: 45_000, request: 225_000 })
+    const save = { operation_id: uuidv7(), expected_revision: 0, values: {
+      ...planningTimeoutDefaults, task_seconds: 160, stage_seconds: 200, request_seconds: 250,
+    } }
+    const invalid = await call(path, { ...save, values: { ...save.values, idle_seconds: 230 } })
+    expect(invalid.status).toBe(400)
+    for (const _attempt of [1, 2]) expect(await (await call(path, save)).json()).toMatchObject({ ok: true, data: { revision: 1 } })
+    expect((await call(path, { ...save, operation_id: uuidv7() })).status).toBe(409)
+    expect(await (await call('/v1/operations/get?operation_id=' + save.operation_id)).json()).toMatchObject({
+      data: { kind: 'planning_timeouts.save', status: 'applied' },
+    })
+    await service.close()
+    service = await open()
+    expect(await (await call(path)).json()).toMatchObject({ data: { revision: 1, overridden: true, values: save.values } })
+    expect(service.planningSettings?.snapshot()).toMatchObject({ task: 160_000, stage: 200_000, request: 250_000 })
+    const reset = await call(path, { operation_id: uuidv7(), expected_revision: 1, values: null })
+    expect(await reset.json()).toMatchObject({ data: { revision: 2 } })
+    expect(service.planningSettings?.snapshot()).toMatchObject({ task: 75_000, workflow: 45_000, request: 225_000 })
+  } finally {
+    await service.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 it('HTTP 规划请求断开后取消流程生成且不创建任务或计划', async () => {
   let start!: (signal: AbortSignal) => void
