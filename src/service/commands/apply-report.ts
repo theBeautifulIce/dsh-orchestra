@@ -16,6 +16,7 @@ import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
 import { canReportTransition } from '../../core/state-machine.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
+import { verifyArtifactCompletion } from '../artifact-completion.ts'
 
 export type ApplyReportParams = {
   nodeRunId: string
@@ -119,7 +120,7 @@ function rejectReport(tx: Tx, secret: string, params: {
 }
 
 // 判定条件由服务端按 run 绑定的工作流版本取：调用方传不进来，执行器也改不了（规格 4.2 行 293、6.1 行 839）
-function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): ApplyPolicy {
+function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog, checkArtifactCompletion: boolean): ApplyPolicy & { artifactCompletion?: boolean } {
   const run = tx.get<{ workflow_id: string | null; workflow_version: number | string | null; workflow_definition_hash: string | null }>(
     'SELECT workflow_id, workflow_version, workflow_definition_hash FROM runs WHERE run_id = ?',
     [row.run_id],
@@ -142,7 +143,15 @@ function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog): App
       current,
     })
   }
-  return catalog.policyFor(run.workflow_id ?? 'default', run.workflow_version, resolvePinnedNodeId(tx, row.node_run_id))
+  const workflowId = run.workflow_id ?? 'default'
+  const nodeId = resolvePinnedNodeId(tx, row.node_run_id)
+  const policy = catalog.policyFor(workflowId, run.workflow_version, nodeId)
+  if (!checkArtifactCompletion || nodeId !== row.node_id || policy.passConditions.length || policy.requiredHashes.length) return policy
+  const def = catalog.get(workflowId, run.workflow_version)
+  const node = def.nodes.find((item) => item.node_id === nodeId)
+  const tools = catalog.toolPolicyFor(workflowId, run.workflow_version, nodeId)
+  return { ...policy, artifactCompletion: node?.side_effect_policy === 'pure' && !node.verifier && !def.verifier
+    && !tools.allow.some((tool) => !tools.deny.includes(tool)) }
 }
 
 /**
@@ -268,6 +277,8 @@ function upholdDecision(
     originNodeRunId: params.nodeRunId,
     now: params.now,
   })
+  // A new attempt of the same fixed pure step preserves its policy and must publish fresh evidence.
+  if (row.side_effect_policy === 'pure') tx.run("UPDATE node_runs SET side_effect_policy='pure' WHERE node_run_id=?", [newNodeRunId])
   const stale = tx.run(
     'UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?',
     ['stale', params.now, params.report.report_id],
@@ -293,6 +304,7 @@ export function applyReport(
   secret: string,
   params: ApplyReportParams,
   catalog: WorkflowCatalog,
+  allowArtifactCompletion = false,
 ): ApplyResult {
   const report = params.report
   // 第一步：幂等查重
@@ -450,32 +462,34 @@ export function applyReport(
   }
   // 第四、五步只对“完成”上报做通过证据与判定：失败、阻塞的回报不该被要求带通过证据
   let evidenceDigest: string | null = null
+  let artifactProof: ReturnType<typeof verifyArtifactCompletion> = null
   if (report.status === 'done') {
     // 判定条件只从 run 绑定的工作流版本取，不在请求体、也不在函数参数里（规格 4.2 行 293）
-    const policy = policyForReport(tx, row, catalog)
-    // 系统级证据门：弱证据、工具失败都不许直落 done（审计 R3-03）
-    const systemReason = systemEvidenceGate(report)
-    if (systemReason) {
-      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: systemReason, now: params.now })
+    const policy = policyForReport(tx, row, catalog, allowArtifactCompletion && !report.evidence && !params.decision)
+    if (policy.artifactCompletion) artifactProof = verifyArtifactCompletion(tx, secret, row, params.now)
+    if (artifactProof) {
+      evidenceDigest = artifactProof.digest
+    } else {
+      const systemReason = systemEvidenceGate(report)
+      if (systemReason) {
+        return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: systemReason, now: params.now })
+      }
+      // 工具证据须绑定账本中的执行痕迹（审计 R3-03）。
+      const trace = traceBindingGate(tx, params, report)
+      if (trace.reason) {
+        return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: trace.reason, now: params.now })
+      }
+      // requiredHashes 的每个键都必须绑定 report.output 中该字段的内容（审计 P1-1）。
+      const evidence = evaluateEvidence(report, policy.requiredHashes ?? [], { output: report.output })
+      if (!evidence.ok) {
+        return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
+      }
+      const verdict = evaluatePassConditions(policy.passConditions, evidence.normalized)
+      if (!verdict.pass) {
+        return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: verdict.reason ?? 'verdict_unmet', now: params.now })
+      }
+      evidenceDigest = evidence.digest
     }
-    // 证据要跟账本里的工具执行痕迹对得上：伪造的 done 与真跑出来的 done 分得开（审计 R3-03）
-    const trace = traceBindingGate(tx, params, report)
-    if (trace.reason) {
-      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: trace.reason, now: params.now })
-    }
-    // 证据强度按模板要求校验：requiredHashes 的每个键都必须在 report.output 里有同名字段，
-    // 且证据值等于该字段的产物哈希；命令哈希、stdout 哈希、整个 output 的摘要都不能冒充
-    // 某个具名产物（S2 第二十五轮 P1-1）。
-    const evidence = evaluateEvidence(report, policy.requiredHashes ?? [], { output: report.output })
-    if (!evidence.ok) {
-      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
-    }
-    // 判定条件：模板条件是基线，节点只能追加更严的条件（规格 4.7 行 390）
-    const verdict = evaluatePassConditions(policy.passConditions, evidence.normalized)
-    if (!verdict.pass) {
-      return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: verdict.reason ?? 'verdict_unmet', now: params.now })
-    }
-    evidenceDigest = evidence.digest
   }
   // 第六步：节点迁移也必须走状态机（审计 P0-2：这里曾经直接 UPDATE，绕过 blocked 的裁决卡检查）
   // S2 没有 decisions 表：阻塞凭据就是一条 verify_human 请求（理由 + 缺什么），error_code 只作兜底
@@ -547,6 +561,7 @@ export function applyReport(
     report_seq: reportSeq,
     next_status: report.status,
     evidence_digest: evidenceDigest,
+    ...(artifactProof ? { artifact_proof: artifactProof.proof } : {}),
   })
   // 副作用结算：done 收口的同一笔事务里落 evidence 分支结算行（附录 §4）。
   // 证据不合格就不落行（fail closed），但绝不打断报告本身的收口。

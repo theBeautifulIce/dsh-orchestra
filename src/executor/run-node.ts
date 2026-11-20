@@ -10,6 +10,7 @@ import { makeTx, withTx } from '../infra/sqlite/driver.ts'
 import { transitionNode, DEFAULT_VERIFY_TIMEOUT_MS } from '../service/commands/node-state.ts'
 import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { loadNodeRun, releaseLease } from '../service/commands/lease.ts'
+import { applyTransition } from '../service/commands/nodes.ts'
 import { acquireNodeRun, renewNodeLease, submitReport, type RuntimeDeps } from '../service/commands/runtime.ts'
 import { buildInstruction, checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
 import { assertToolsAuthorized, type ReadOnlyToolRunner, type StrongEvidence, type ToolRegistry } from './tools.ts'
@@ -17,14 +18,15 @@ import type { BridgeClient } from './bridge.ts'
 import { AgentLifecycle } from './agent-lifecycle.ts'
 import { canTransition } from '../core/state-machine.ts'
 import type { ClockProvider } from '../core/clock.ts'
-import { selectExecutionModel, type ModelAssignment, type ModelRouting } from './model-routing.ts'
+import { MODEL_COMPLEXITIES, selectExecutionModel, type ModelAssignment, type ModelRouting } from './model-routing.ts'
 import { requireTrialFlow } from '../service/trial-circles.ts'
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { getTaskPlanRecommendation } from '../service/task-planning.ts'
-import { readModelRoutingSettings } from '../service/model-routing-settings.ts'
+import { approvedModelProfiles, effectiveModelCatalog, readModelRoutingSettings } from '../service/model-routing-settings.ts'
 import { executionFeedbackContext } from '../service/rework-execution.ts'
 import { noteAgentStopped, type createModelEscalationHost } from '../service/model-escalation.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
+import type { createRunSharedContext } from '../service/run-shared-context.ts'
 
 export type RunNodeParams = {
   /** Controlled by the dedicated release entrypoint. */
@@ -81,6 +83,7 @@ export type RunNodeDeps = {
   /** Trusted host routing. Incoming execution requests cannot set a model. */
   modelRouting?: ModelRouting
   modelEscalation?: Pick<ReturnType<typeof createModelEscalationHost>, 'prepare' | 'select'>
+  sharedContext?: ReturnType<typeof createRunSharedContext>
 }
 
 export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunNodeResult> {
@@ -219,10 +222,13 @@ async function runNodeActions(
     try {
       if (deps.modelRouting) {
         try {
+          await deps.modelRouting.refresh?.(deps.cancelSignal)
+          deps.cancelSignal?.throwIfAborted()
           await deps.modelEscalation?.prepare(p.nodeRunId, generation, nowAt())
           deps.cancelSignal?.throwIfAborted()
           assignment = chooseModelForAttempt(deps, p, generation, deps.modelRouting, nowAt())
         } catch (error) {
+          if (deps.cancelSignal?.aborted) throw new OrchError('SERVICE_UNAVAILABLE', '节点执行已被取消')
           if (error instanceof OrchError) throw error
           throw new OrchError('FORBIDDEN', '当前节点无法取得可信的模型分配建议')
         }
@@ -234,6 +240,7 @@ async function runNodeActions(
         outputSchema: p.outputSchema,
         toolPolicy: p.releaseCheckCwd ? { ...policy, releaseCheckCwd: p.releaseCheckCwd } : policy,
         modelRef: assignment?.model_ref,
+        reasoningEffort: assignment?.reasoning_effort,
         ...(deps.modelRouting ? { actionGeneration: generation } : {}),
       })
       agent = await withTimeout(
@@ -249,12 +256,26 @@ async function runNodeActions(
       if (!spawnTask || isDeterministicSpawnFailure(err)) {
         withTx(deps.db, (tx) => {
           const row = loadNodeRun(tx, p.nodeRunId)
-          if (row.status === 'dispatched' && row.attempt === p.attempt && row.action_generation === generation) {
+          if (row.attempt !== p.attempt || row.action_generation !== generation) return
+          if (!spawnTask && deps.cancelSignal?.aborted && row.status === 'timing_out'
+            && row.fence_state === 'armed' && row.side_effect_policy === 'pure') {
+            // The bridge was never called. No stop acknowledgement is needed or fabricated.
+            const stoppedAt = nowAt()
+            applyTransition(tx, deps.secret, {
+              nodeRunId: row.node_run_id, from: ['timing_out'], to: 'timeout', ruleId: 'M-24',
+              attempt: row.attempt, actionGeneration: generation, expectedRevision: row.revision, now: stoppedAt,
+              patch: { fence_state: null, fence_grace_until: null, fence_grace_boot_id: null, fence_grace_monotonic_ns: null, fence_remaining_ns: null },
+            })
+            releaseLease(tx, { nodeRunId: row.node_run_id, now: stoppedAt })
+          } else if (row.status === 'dispatched') {
+            const now = nowAt()
+            const reason = spawnTask ? 'agent_spawn_rejected' : deps.cancelSignal?.aborted ? 'pre_spawn_cancelled' : 'model_assignment_unavailable'
             transitionNode(tx, deps.secret, {
               nodeRunId: p.nodeRunId, from: 'dispatched', to: 'blocked_pre',
-              attempt: row.attempt, revision: row.revision, now: nowAt(), reason: spawnTask ? 'agent_spawn_rejected' : 'model_assignment_unavailable',
-              verifyHuman: { reason: spawnTask ? 'agent_spawn_rejected' : 'model_assignment_unavailable', missing: [] },
+              attempt: row.attempt, revision: row.revision, now, reason,
+              verifyHuman: { reason, missing: [] },
             })
+            if (!spawnTask) releaseLease(tx, { nodeRunId: row.node_run_id, now })
           }
         })
         spawnRejected = true
@@ -284,7 +305,8 @@ async function runNodeActions(
       throw err
     }
     const created = agent
-    if (assignment && created.effectiveModelRef !== assignment.model_ref) {
+    if (assignment && (created.effectiveModelRef !== assignment.model_ref
+      || (assignment.reasoning_effort !== undefined && created.effectiveReasoningEffort !== assignment.reasoning_effort))) {
       const selected = assignment
       withTx(deps.db, (tx) => {
         const row = loadNodeRun(tx, p.nodeRunId)
@@ -295,7 +317,7 @@ async function runNodeActions(
           verifyHuman: { reason: 'model_assignment_unconfirmed', missing: [] } })
       })
       spawnRejected = true
-      throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主未确认采用指定模型，执行请求未发送')
+      throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主未确认指定模型或思考设置，执行请求未发送')
     }
     // started 是状态迁移不是完成上报：没过证据门的上报不该用来推进状态
     withTx(deps.db, (tx) => {
@@ -313,6 +335,8 @@ async function runNodeActions(
     })
     const feedback = ['S5','S6'].includes(deps.runtime.phase)
       ? executionFeedbackContext(deps.db, deps.runtime.catalog, p.nodeRunId, nowAt(), p.input) : null
+    const sharedContext = await deps.sharedContext?.(p.nodeRunId, p.nodeId, feedback?.inputs ?? [])
+    deps.cancelSignal?.throwIfAborted()
     lifecycle = new AgentLifecycle({
       db: deps.db,
       secret: deps.secret,
@@ -325,7 +349,7 @@ async function runNodeActions(
       attempt: p.attempt,
       agent,
       lease,
-      instruction: nodeInstruction(p, feedback),
+      instruction: nodeInstruction(p, feedback, sharedContext),
       timeoutMs: actionTimeoutMs,
       idleTimeoutMs: 5_000,
       nowAt,
@@ -333,20 +357,22 @@ async function runNodeActions(
       spillDir: deps.spillDir ?? join(tmpdir(), 'dsh-orchestra-bridge'),
     })
     const envelope = await lifecycle.run(deps.cancelSignal ?? new AbortController().signal)
+    if (typeof assignment?.reasoning_effort === 'string' && !envelope.modelUse) {
+      throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主未提供指定思考深度的实际请求回执')
+    }
     if (envelope.modelUse) {
-      if (!assignment || envelope.modelUse.model_ref !== assignment.model_ref) {
+      if (!assignment || envelope.modelUse.model_ref !== assignment.model_ref
+        || (typeof assignment.reasoning_effort === 'string' && envelope.modelUse.reasoning_effort !== assignment.reasoning_effort)) {
         throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主的实际模型回执与派发模型不一致')
       }
-      const usage = envelope.modelUse
+      const { model_ref: _ref, ...usage } = envelope.modelUse
       const selected = assignment
       withTx(deps.db, (tx) => {
         const row = loadNodeRun(tx, p.nodeRunId)
         if (row.attempt !== p.attempt || row.action_generation !== generation) {
           throw new OrchError('STALE_GENERATION', '执行模型回执已过期')
         }
-        recordModel(tx, deps.secret, row, { ...selected,
-          usage: { provider: usage.provider, model: usage.model, observed_request_headers: usage.observed_request_headers },
-        }, 'confirmed', 'executor.model_used')
+        recordModel(tx, deps.secret, row, { ...selected, usage }, 'confirmed', 'executor.model_used')
       })
     }
     // 取消请求可能刚好落在报告与收口之间：此时不能再把 done 写进账本。
@@ -408,7 +434,7 @@ async function runNodeActions(
       expectedStatus: 'verifying',
       generation,
       now: nowAt(),
-    })
+    }, deps.runtime.phase === 'S6' && p.tools.length === 0 && trace.length === 0 && evidence === null)
     if (!applied.accepted) {
       // 收口被拒：转 blocked_post 并留 verify_human，等人补证据或判失败，不许留 verifying 死等
       markBlocked(deps, p, applied.reason ?? 'verdict_unmet', nowAt())
@@ -444,11 +470,21 @@ async function runNodeActions(
           }
         }
       }
-      if (stopped && deps.modelEscalation) {
+      if (stopped && (deps.modelEscalation || deps.cancelSignal?.aborted)) {
         withTx(deps.db, (tx) => {
           const row = loadNodeRun(tx, p.nodeRunId)
-          if (row.attempt === p.attempt && row.action_generation === generation && row.lease_id
-            && ['done','blocked_post','failed','timeout'].includes(row.status)) {
+          if (row.attempt !== p.attempt || row.action_generation !== generation) return
+          // Only the confirmed stop of this pure attempt can clear its interruption fence.
+          if (deps.cancelSignal?.aborted && row.status === 'timing_out' && row.fence_state === 'armed' && row.side_effect_policy === 'pure') {
+            const stoppedAt = nowAt()
+            if (!deps.modelEscalation) noteAgentStopped(tx, deps.secret, row, p.attempt, generation)
+            applyTransition(tx, deps.secret, {
+              nodeRunId: row.node_run_id, from: ['timing_out'], to: 'timeout', ruleId: 'M-24',
+              attempt: row.attempt, actionGeneration: generation, expectedRevision: row.revision, now: stoppedAt,
+              patch: { fence_state: null, fence_grace_until: null, fence_grace_boot_id: null, fence_grace_monotonic_ns: null, fence_remaining_ns: null },
+            })
+            releaseLease(tx, { nodeRunId: p.nodeRunId, now: stoppedAt })
+          } else if (deps.modelEscalation && row.lease_id && ['done','blocked_post','failed','timeout'].includes(row.status)) {
             releaseLease(tx, { nodeRunId: p.nodeRunId, now: nowAt() })
           }
         })
@@ -474,10 +510,31 @@ function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: 
       attempt: row.attempt, actionGeneration: generation, workflowId: run.workflow_id, workflowVersion: run.workflow_version }
     const proposed = getTaskPlanRecommendation(deps.db, context) ?? routing.recommend(context)
     const settings = readModelRoutingSettings(tx)
+    const catalog = routing.catalog?.()
+    const profiles = approvedModelProfiles(effectiveModelCatalog(catalog?.profiles ?? routing.profiles, settings))
     const preferred = settings.mapping[proposed.complexity]
-    const assignment = selectExecutionModel(routing.profiles, preferred ? { ...proposed, preferredModel: preferred } : proposed)
+    const capacity = MODEL_COMPLEXITIES.indexOf(proposed.complexity)
+    const qualifies = (ref: string | undefined) => profiles.some((profile) => profile.ref === ref
+      && MODEL_COMPLEXITIES.indexOf(profile.capacity) >= capacity)
+    if (preferred && !qualifies(preferred)) {
+      throw new OrchError('FORBIDDEN', '指定模型已从 DSH 目录移除或能力不足，请重新读取并更新子智能体模型分配')
+    }
+    const recommendedModel = !catalog || qualifies(proposed.preferredModel) ? proposed.preferredModel : undefined
+    const assignment = selectExecutionModel(profiles, { ...proposed, preferredModel: preferred ?? recommendedModel })
     if (preferred) assignment.settings_revision = settings.revision
-    const selected = deps.modelEscalation?.select(tx, row, routing.profiles, assignment, now) ?? assignment
+    const selected = deps.modelEscalation?.select(tx, row, profiles, assignment, now) ?? assignment
+    if (catalog || (preferred && settings.reasoning_efforts[proposed.complexity] !== undefined)) {
+      const profile = profiles.find(({ ref }) => ref === selected.model_ref)
+      const effort = selected.model_ref === preferred ? settings.reasoning_efforts[proposed.complexity] ?? null : null
+      if (effort !== null && !profile?.reasoning?.efforts.some(({ id }) => id === effort)) {
+        throw new OrchError('FORBIDDEN', '指定思考深度已从 DSH 模型目录移除，请重新读取并更新子智能体模型分配')
+      }
+      if (profile?.provider && profile.model) {
+        selected.provider = profile.provider
+        selected.model = profile.model
+      }
+      selected.reasoning_effort = effort
+    }
     recordModel(tx, deps.secret, row, selected, 'selected')
     return selected
   })
@@ -538,7 +595,7 @@ async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRu
 }
 
 // 发给 Agent 的任务文本只描述节点与输出约束；完成与否仍由服务端收口。
-function nodeInstruction(p: RunNodeParams, feedback: ReturnType<typeof executionFeedbackContext> | null): string {
+function nodeInstruction(p: RunNodeParams, feedback: ReturnType<typeof executionFeedbackContext> | null, sharedContext?: string): string {
   return [
     buildInstruction({ nodeId: p.nodeId, outputSchema: p.outputSchema }),
     // 指令里只列本次节点真正允许的清单，避免把 Agent 引向随后必被拒绝的工具。
@@ -548,6 +605,7 @@ function nodeInstruction(p: RunNodeParams, feedback: ReturnType<typeof execution
       '本次运行的成果与修订上下文：' + JSON.stringify(feedback),
       '宿主提供 orchestra_rework 时可读取 inputs 中的成果。交付文本请用 publish 登记。revision 要求先读取原成果，按保留要求修订同名文件。review 要求核对候选版本，取得本次执行证据并完成验收后再提交报告。plan_instruction 是本次获批的局部修订要求。工具权限以宿主为准。',
     ] : []),
+    ...(sharedContext ? [sharedContext] : []),
   ].join('\n')
 }
 

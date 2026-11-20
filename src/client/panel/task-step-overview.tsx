@@ -1,0 +1,95 @@
+import { useEffect, useState } from 'react'
+import type { ResourcesApi } from '../api/resources.ts'
+import type { NodeRunView } from '../api/types.ts'
+import { currentAttempts } from './runtime-topology.ts'
+import { ACTIVE_NODE_STATES, executionState, nodeExecutionLabel, nodeExecutionPhase, waitingFor } from './task-node-status.ts'
+
+const PAGE_LIMIT = 200
+type StepRead = {
+  api: ResourcesApi
+  runId: string
+  reloadVersion: number
+  retry: number
+} & ({ nodes: NodeRunView[]; failed: false } | { nodes?: undefined; failed: true })
+
+export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, reloadVersion: number) {
+  const [snapshot, setSnapshot] = useState<StepRead>()
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    if (!runId) return
+    let active = true
+    const key = { api, runId, reloadVersion, retry }
+    void api.listNodes(runId, PAGE_LIMIT).then(({ data }) => {
+      if (data.items.some((node) => node.run_id !== runId)) throw new Error('步骤归属与当前运行不符')
+      if (active) setSnapshot({ ...key, nodes: data.items, failed: false })
+    }).catch(() => {
+      if (active) setSnapshot({ ...key, failed: true })
+    })
+    return () => { active = false }
+  }, [api, runId, reloadVersion, retry])
+  const current = snapshot?.api === api && snapshot.runId === runId
+    && snapshot.reloadVersion === reloadVersion && snapshot.retry === retry ? snapshot : undefined
+  return { nodes: current?.nodes, failed: current?.failed, refresh: () => setRetry((value) => value + 1) }
+}
+
+const GROUPS = [
+  { id: 'active', title: '进行中' },
+  { id: 'capacity', title: '等待执行位' },
+  { id: 'dependencies', title: '等待上游完成' },
+  { id: 'ready', title: '就绪待派发' },
+  { id: 'attention', title: '暂停、重试与异常' },
+  { id: 'finished', title: '已结束' },
+] as const
+type QueueGroup = (typeof GROUPS)[number]['id']
+
+function queueGroup(node: NodeRunView): QueueGroup {
+  const state = executionState(node)
+  if (ACTIVE_NODE_STATES.has(state)) return 'active'
+  if (state === 'waiting_capacity') return 'capacity'
+  if (state === 'waiting_dependencies') return 'dependencies'
+  if (state === 'ready') return 'ready'
+  if (state === 'done' || state === 'cancelled' || state === 'superseded') return 'finished'
+  return 'attention'
+}
+
+function StepRows({ nodes, titles, groupTitle }: { nodes: readonly NodeRunView[]; titles: ReadonlyMap<string, string>; groupTitle?: string }) {
+  return <ul className="task-step-overview">
+    {nodes.map((node) => {
+      const waiting = waitingFor(node, titles)
+      const label = nodeExecutionLabel(node)
+      return <li key={node.node_id} data-tone={nodeExecutionPhase(node).tone}>
+        <strong>{node.title || node.node_id}</strong>
+        {label !== groupTitle && <span className="task-step-overview-status">{label}</span>}
+        {node.attempt > 1 && <small>第 {node.attempt} 次尝试</small>}
+        {waiting && <small className="task-step-waiting">{waiting}</small>}
+      </li>
+    })}
+  </ul>
+}
+
+export function TaskStepOverview({ nodes, queue = false }: { nodes: readonly NodeRunView[]; queue?: boolean }) {
+  const steps = [...currentAttempts(nodes).values()]
+  const titles = new Map(steps.map((node) => [node.node_id, node.title || node.node_id]))
+  const groups = new Map<QueueGroup, NodeRunView[]>()
+  if (queue) {
+    for (const node of steps) {
+      const id = queueGroup(node)
+      const group = groups.get(id) ?? []
+      group.push(node)
+      groups.set(id, group)
+    }
+  }
+  return <>
+    {!steps.length ? <p className="task-flow-empty">{nodes.length ? '读取到的记录中没有当前尝试。' : '这次运行暂无步骤记录。'}</p>
+      : queue ? <div className="task-queue-groups">
+      {GROUPS.map(({ id, title }) => {
+        const group = groups.get(id)
+        return group && <section key={id} aria-label={title} className="task-flow-steps">
+          <header className="task-flow-section-head"><h3>{title}</h3><span>{group.length} 步</span></header>
+          <StepRows nodes={group} titles={titles} groupTitle={title} />
+        </section>
+      })}
+    </div> : <StepRows nodes={steps} titles={titles} />}
+    {nodes.length >= PAGE_LIMIT && <p className="task-flow-empty">本次最多读取 {PAGE_LIMIT} 条尝试记录，可能还有步骤或较新的尝试未显示。</p>}
+  </>
+}

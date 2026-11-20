@@ -166,6 +166,10 @@ export function previousCompatibility(db: Db, previousProfiles?: readonly ModelP
     WHERE EXISTS (SELECT 1 FROM json_each(p.proposal_json, '$.steps') s WHERE
       json_extract(s.value, '$.complexity') IN ('advanced','expert') OR json_type(s.value, '$.preferred_model_ref') IS NOT NULL)`).get() as { n: number; in_flight: number }
   const routing = db.raw.prepare('SELECT mapping_json FROM model_routing_settings WHERE id = 1').get() as { mapping_json: string } | undefined
+  const hasPreferences = db.raw.prepare("SELECT 1 FROM pragma_table_info('model_routing_settings') WHERE name = 'preferences_json'").get()
+  const unsupportedPreferences = Boolean(hasPreferences && db.raw.prepare(`SELECT 1 FROM model_routing_settings WHERE id = 1 AND
+    (EXISTS (SELECT 1 FROM json_each(preferences_json, '$.model_capacities'))
+    OR EXISTS (SELECT 1 FROM json_each(preferences_json, '$.reasoning_efforts')))`).get())
   const legacy = legacyModelMappingSchema.safeParse(routing
     ? JSON.parse(routing.mapping_json) : { routine: null, standard: null, complex: null })
   const modelBindings = legacy.success ? (['routine', 'standard', 'complex'] as const).flatMap((complexity) => {
@@ -182,11 +186,12 @@ export function previousCompatibility(db: Db, previousProfiles?: readonly ModelP
   }) : []
   const release = db.raw.prepare("SELECT COUNT(*) AS n FROM workflow_versions WHERE workflow_id='wf_release_v1'").get() as { n: number }
   const blockers = { candidate_plans: advancedPlans.n, in_flight_model_plans: advancedPlans.in_flight,
-    candidate_routing: Number(!legacy.success), candidate_model_bindings: modelBindings.length, release_versions: release.n }
+    candidate_routing: Number(!legacy.success || unsupportedPreferences), candidate_model_bindings: modelBindings.length, release_versions: release.n }
   if (Object.values(blockers).some((n) => n > 0)) {
     const detail = advancedPlans.n > 0 ? '。已有计划使用进阶、专家档或明确的首选模型，请保留原计划与批准记录，并用当前构建继续处理。' : ''
     const models = modelBindings.length ? '。旧宿主未确认可用的已指定模型：' + JSON.stringify(modelBindings) : ''
-    throw new Error('Previous build cannot interpret candidate data: ' + JSON.stringify(blockers) + detail + models)
+    const preferences = unsupportedPreferences ? '。当前配置保存了模型最大能力或思考深度，旧宿主无法应用这些设置。' : ''
+    throw new Error('Previous build cannot interpret candidate data: ' + JSON.stringify(blockers) + detail + models + preferences)
   }
   return blockers
 }

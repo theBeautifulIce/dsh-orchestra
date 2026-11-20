@@ -2,25 +2,29 @@ import { runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
 import { ReworkPanel } from './rework-panel.tsx'
 import { useEffect, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
-import type { NodeRunView, RunSummary, TaskSummary } from '../api/types.ts'
+import type { RunSummary, TaskSummary } from '../api/types.ts'
 import { TaskRunSteps, formatTaskDate, runDuration, usePinnedWorkflow } from './task-run-steps.tsx'
 import { ExecutionHistory } from './execution-history.tsx'
 import { NodeEvidence } from './task-run-evidence.tsx'
 import { taskAutonomyLabel, taskCardStatus, taskOriginLabel, taskStatusView } from './tasks-screen.tsx'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
+import { WorkflowDependencyView } from './workflow-dependency-view.tsx'
+import { TaskStepOverview, useRunStepSnapshot } from './task-step-overview.tsx'
 
-export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnabled }: {
+export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnabled, queue = false }: {
   api: ResourcesApi; tasks: TaskSummary[]; onOpenTask: (taskId: string, trigger: HTMLButtonElement, runId?: string) => void; reloadVersion: number; reworkEnabled?: boolean
+  queue?: boolean
 }) {
   const [selection, setSelection] = useState('')
-  const selected = tasks.find((task) => task.task_id === selection)
-    ?? tasks.find((task) => task.lane === 'running' || task.current_run_status === 'running')
-    ?? tasks[0]
-  if (!selected) return null
+  const available = queue ? tasks.filter((task) => task.current_run_id) : tasks
+  const selected = available.find((task) => task.task_id === selection)
+    ?? available.find((task) => task.lane === 'running' || task.current_run_status === 'running')
+    ?? available[0]
+  if (!selected) return queue ? <p className="task-flow-empty">当前列表中没有已创建运行的任务。</p> : null
   return <div className="task-flow-view">
-    <nav className="task-flow-picker" aria-label="选择任务流程">
+    <nav className="task-flow-picker" aria-label={queue ? '选择任务查看队列' : '选择任务流程'}>
       <header className="task-flow-section-head"><strong>任务</strong><span>{tasks.length} 项</span></header>
-      {tasks.map((task) => <button key={task.task_id} className="task-flow-pick" type="button" aria-pressed={task === selected}
+      {available.map((task) => <button key={task.task_id} className="task-flow-pick" type="button" aria-pressed={task === selected}
         onClick={() => setSelection(task.task_id)}>
         <span className="task-flow-pick-meta"><span className="task-type-badge">{taskOriginLabel(task)}</span>
           <span>{taskCardStatus(task).label ?? task.status}</span></span>
@@ -29,31 +33,40 @@ export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnab
         {task.next_trigger_at && <span>下次 · {formatTaskDate(task.next_trigger_at)}</span>}
       </button>)}
     </nav>
-    <TaskRunFlow key={`${selected.task_id}:${selected.current_run_id ?? ''}:${selected.workflow_version ?? ''}`}
-      reworkEnabled={reworkEnabled} api={api} task={selected} reloadVersion={reloadVersion} onOpenTask={(trigger, runId) => onOpenTask(selected.task_id, trigger, runId)} />
+    {queue ? <TaskRunQueue api={api} task={selected} reloadVersion={reloadVersion} />
+      : <TaskRunFlow key={`${selected.task_id}:${selected.current_run_id ?? ''}:${selected.workflow_version ?? ''}`}
+        reworkEnabled={reworkEnabled} api={api} task={selected} reloadVersion={reloadVersion} onOpenTask={(trigger, runId) => onOpenTask(selected.task_id, trigger, runId)} />}
   </div>
+}
+
+function TaskRunQueue({ api, task, reloadVersion }: { api: ResourcesApi; task: TaskSummary; reloadVersion: number }) {
+  const { nodes, failed, refresh } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
+  return <section className="task-flow-main" aria-label="任务队列">
+    <header className="task-flow-run-head">
+      <h2>队列 · {task.title || '未命名任务'}</h2>
+      <p>按所选任务的当前运行查看步骤。</p>
+    </header>
+    {failed ? <p role="alert" className="task-flow-empty">队列读取失败。<button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>
+      : !nodes ? <p role="status" className="task-flow-empty">正在读取队列…</p>
+        : <TaskStepOverview nodes={nodes} queue />}
+  </section>
 }
 
 function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
   api: ResourcesApi; task: TaskSummary; reworkEnabled?: boolean; reloadVersion: number; onOpenTask: (trigger: HTMLButtonElement, runId?: string) => void
 }) {
   const [run, setRun] = useState<RunSummary>()
-  const [nodes, setNodes] = useState<NodeRunView[]>()
-  const [nodeError, setNodeError] = useState(false)
   const [runError, setRunError] = useState(false)
   const [retry, setRetry] = useState(0)
+  const { nodes, failed: nodeError, refresh: refreshNodes } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
   useEffect(() => {
     if (!task.current_run_id) return
     let current = true
-    setNodeError(false)
     setRunError(false)
     void api.getRun(task.current_run_id).then(({ data }) => {
       if (data.task_id !== task.task_id) throw new Error('运行归属已变化')
       if (current) setRun(data)
     }).catch(() => { if (current) setRunError(true) })
-    void api.listNodes(task.current_run_id, 200).then(({ data }) => {
-      if (current) setNodes(data.items)
-    }).catch(() => { if (current) setNodeError(true) })
     return () => { current = false }
   }, [api, task.task_id, task.current_run_id, reloadVersion, retry])
 
@@ -81,7 +94,8 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
       <button type="button" className="task-quiet-button" onClick={(event) => onOpenTask(event.currentTarget)}>打开任务详情</button>
     </header>
     {runError && <p role="alert" className="task-flow-empty">运行信息读取失败。<button className="task-quiet-button" type="button" onClick={() => setRetry((n) => n + 1)}>重试</button></p>}
-    {nodeError && <p role="alert" className="task-flow-empty">执行步骤读取失败。<button className="task-quiet-button" type="button" onClick={() => setRetry((n) => n + 1)}>重试</button></p>}
+    {nodeError && <p role="alert" className="task-flow-empty">执行步骤读取失败。<button className="task-quiet-button" type="button" onClick={refreshNodes}>重试</button></p>}
+    {runtimeDoc && !topology.failed && !topology.loading && <WorkflowDependencyView doc={runtimeDoc} nodes={nodes} />}
     {hasRun && !nodes && !nodeError && <p role="status" className="task-flow-empty">正在读取执行步骤…</p>}
     {(!hasRun || nodes) && <TaskRunSteps nodes={nodes ?? []} doc={runtimeDoc} run={run}
       onOpenRun={run ? (trigger) => onOpenTask(trigger, run.run_id) : undefined}

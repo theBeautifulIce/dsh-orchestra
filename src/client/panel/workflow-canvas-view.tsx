@@ -1,4 +1,5 @@
 import { currentAttempts, runtimeCanvasDoc, type RuntimeAttempt, type RunTopology } from './runtime-topology.ts'
+import { nodeExecutionLabel } from './task-node-status.ts'
 // 流程画布视图：草稿可拖动 / 连线 / 增删，已发布只读。
 // 画布只认一份定义：definition 由外部给，改动通过 onChange 把新定义交回去，
 // 画布内部不另存一份「自己的」定义，所以画布和 JSON 抽屉永远同步。
@@ -236,6 +237,10 @@ export function WorkflowCanvasView({
   const edges = doc?.edges ?? []
   const selected = nodes.find((node) => node.node_id === selectedId) ?? (workspace ? nodes[0] : undefined)
   const runtimeByNode = currentAttempts(runtimeNodes ?? [])
+  const runtimeLabel = (id: string) => {
+    const attempt = runtimeByNode.get(id)
+    return attempt ? nodeExecutionLabel(attempt) : '尚无运行记录'
+  }
 
   return <div data-canvas-id={canvasId ?? 'workflow-canvas'} data-canvas-root="true" data-canvas-readonly={readOnly ? 'true' : 'false'} style={rootStyle}>
     {!compact && <div style={workspace ? workspaceToolbar : toolbarStyle}>
@@ -313,6 +318,7 @@ export function WorkflowCanvasView({
             data-node-id={node.node_id}
             data-node-type={node.type}
             data-runtime-status={runtimeByNode.get(node.node_id)?.status}
+            data-runtime-execution-state={runtimeByNode.get(node.node_id)?.execution_state}
             data-runtime-attempt={runtimeByNode.get(node.node_id)?.attempt}
             data-runtime-added={node.raw.runtime_step ? 'true' : undefined}
             data-runtime-held={runtimeTopology?.held_node_ids.includes(node.node_id) ? 'true' : undefined}
@@ -331,7 +337,7 @@ export function WorkflowCanvasView({
               onClick={() => setSelectedId(node.node_id)}
               style={nodeSelectStyle}>{node.title}</button> : <span style={nodeTitleStyle}>{node.title}</span>}
             <span style={nodeMetaStyle}>
-              {runtimeNodes ? runtimeByNode.get(node.node_id)?.status_label || '尚无运行记录' : <>
+              {runtimeNodes ? runtimeLabel(node.node_id) : <>
                 {NODE_TYPE_LABEL[node.type] ?? node.type}{MULTI_OUT_TYPES.has(node.type) ? ' · 可多条出边' : ''}
               </>}
             </span>
@@ -370,7 +376,7 @@ export function WorkflowCanvasView({
       {selected && <>
         <p><strong>{selected.title}</strong></p>
         <p style={mutedStyle}>{NODE_TYPE_LABEL[selected.type] ?? selected.type} · {selected.node_id}</p>
-        {runtimeByNode.get(selected.node_id) && <p>{runtimeByNode.get(selected.node_id)?.status_label} · 第 {runtimeByNode.get(selected.node_id)?.attempt ?? '未知'} 次执行</p>}
+        {runtimeByNode.get(selected.node_id) && <p>{runtimeLabel(selected.node_id)} · 第 {runtimeByNode.get(selected.node_id)?.attempt ?? '未知'} 次执行</p>}
         {selected.raw.runtime_step != null && <><p>来源角色：{String((selected.raw.runtime_step as {source_title: string}).source_title)}</p><p>{String((selected.raw.runtime_step as {instruction: string}).instruction)}</p></>}
         {runtimeTopology?.requests.filter(r => r.target_node_id === selected.node_id).map(r => <p key={r.request_id}>反馈 {r.request_id} · 第 {r.round_no} 轮 · {REWORK_STATUS[r.status] ?? r.status}</p>)}
         {runtimeTopology?.held_node_ids.includes(selected.node_id) && <p>受影响步骤：等待返工或验收</p>}

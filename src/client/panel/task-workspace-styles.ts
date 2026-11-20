@@ -13,12 +13,12 @@ export const TASK_WORKSPACE_CSS = `
 .task-toolbar label, .task-date-range { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .task-toolbar select, .task-toolbar input[type=date], .task-view-group button, .task-flow-view button { padding: 6px 9px; background: ${COLOR.surface}; border: 1px solid ${COLOR.line}; border-radius: 6px; color: ${COLOR.ink}; font: inherit; }
 .task-archive-toggle { margin-left: auto; }
-.task-view-group { display: flex; gap: 4px; }
+.task-view-group { display: flex; flex-wrap: wrap; gap: 4px; }
 .task-view-group button, .task-flow-view button { cursor: pointer; }
 .task-view-group [aria-pressed=true], .task-flow-picker [aria-pressed=true] { background: #eff3f8; border-color: #c2d0df; font-weight: 650; }
 .task-search { display: flex; gap: 6px; min-width: 0; max-width: 100%; }
 .task-search input { box-sizing: border-box; max-width: 100%; }
-.task-board-scroll { overflow-x: auto; min-width: 0; padding: 1px 1px 5px; }
+.task-board-scroll { container-type: inline-size; overflow-x: auto; min-width: 0; padding: 1px 1px 5px; }
 .task-board { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 9px; align-items: stretch; }
 .task-column { min-width: 0; min-height: 258px; display: flex; flex-direction: column; gap: 8px; padding: 9px; background: #f7f8fa; border: 1px solid ${COLOR.line}; border-radius: 10px; }
 .task-column-title { display: flex; align-items: center; justify-content: space-between; gap: 5px; min-height: 27px; margin: 0 0 1px; padding-bottom: 7px; border-bottom: 1px solid ${COLOR.line}; font-size: ${FONT_PX.body}px; }
@@ -37,6 +37,22 @@ export const TASK_WORKSPACE_CSS = `
 .task-card-type { margin: 3px 0; font-size: ${FONT_PX.helper}px; color: ${COLOR.inkMuted}; }
 .task-card-attention { display: grid; gap: 2px; margin-top: 8px; padding: 5px 6px; border: 1px solid #eee2cc; border-radius: 5px; background: #fff9ee; color: ${COLOR.warning}; font-size: ${FONT_PX.helper}px; }
 .task-card-meta { margin-top: 8px; padding-top: 7px; border-top: 1px solid ${COLOR.line}; }
+.task-card-steps { position: relative; z-index: 1; margin-top: 8px; }
+.task-card-steps button:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
+.task-step-overview { display: grid; gap: 0; list-style: none; margin: 0; padding: 0; }
+.task-step-overview li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 7px; min-width: 0; padding: 6px 0; border-top: 1px solid ${COLOR.line}; overflow-wrap: anywhere; }
+.task-step-overview li > * { min-width: 0; max-width: 100%; }
+.task-step-overview-status, .task-step-overview small { color: ${COLOR.inkMuted}; font-size: ${FONT_PX.helper}px; }
+.task-step-overview [data-tone=active] .task-step-overview-status { color: ${COLOR.link}; }
+.task-step-overview [data-tone=blocked] .task-step-overview-status { color: ${COLOR.warning}; }
+.task-step-overview [data-tone=failed] .task-step-overview-status { color: ${COLOR.danger}; }
+.task-step-waiting { flex-basis: 100%; }
+.task-card-steps > div { margin-top: 6px; }
+.task-queue-groups { display: grid; gap: 10px; }
+.task-queue-groups h3 { margin: 0; font-size: ${FONT_PX.body}px; }
+.task-queue-groups .task-step-overview li { padding: 7px 12px; }
+@container (max-width: 720px) { .task-board { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 420px) { .task-board { grid-template-columns: minmax(0, 1fr); } .task-column { min-height: 0; } }
 .task-table-scroll { overflow-x: auto; border: 1px solid ${COLOR.line}; border-radius: 9px; }
 .task-table { width: 100%; min-width: 530px; border-collapse: collapse; font-size: ${FONT_PX.menu}px; text-align: left; }
 .task-table th, .task-table td { padding: 10px 12px; border-bottom: 1px solid ${COLOR.line}; overflow-wrap: anywhere; }
@@ -73,9 +89,8 @@ export const TASK_WORKSPACE_CSS = `
 .task-flow-step:focus-visible, .task-flow-pick:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: -2px; }
 .task-flow-step-mark, .task-flow-step-content, .task-flow-step-result { display: grid; gap: 3px; align-content: start; min-width: 0; }
 .task-flow-step-number { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; background: #f0f2f5; color: ${COLOR.inkMuted}; font-variant-numeric: tabular-nums; }
-.task-flow-step-state, .task-flow-step-result, .task-flow-step-content > span, .task-flow-step-content time { color: ${COLOR.inkMuted}; font-size: ${FONT_PX.helper}px; line-height: 1.4; }
+.task-flow-step-result, .task-flow-step-content > span, .task-flow-step-content time { color: ${COLOR.inkMuted}; font-size: ${FONT_PX.helper}px; line-height: 1.4; }
 .task-flow-step-result { border-left: 1px solid ${COLOR.line}; padding-left: 8px; }
-.task-flow-step-result b { color: ${COLOR.ink}; }
 .task-flow-step[data-tone=done] .task-flow-step-number { color: ${COLOR.success}; background: #e7f4ed; }
 .task-flow-step[data-tone=active] .task-flow-step-number { color: ${COLOR.link}; background: #e3eefc; }
 .task-flow-step[data-tone=blocked] .task-flow-step-number { color: ${COLOR.warning}; background: #fff1d8; }
@@ -103,6 +118,14 @@ export const TASK_WORKSPACE_CSS = `
   .task-flow-picker { display: flex; max-height: none; }
   .task-flow-picker > header { display: none; }
   .task-flow-picker button.task-flow-pick { min-width: 174px; border-top: 0; border-right: 1px solid ${COLOR.line}; }
+}
+@media (max-width: 680px) {
+  .ops-shell[data-panel-route=tasks] { flex-direction: column; }
+  .ops-shell[data-panel-route=tasks] > aside { box-sizing: border-box; width: 100% !important; flex-basis: auto !important; padding: 5px 8px !important; border-right: 0 !important; }
+  .ops-shell[data-panel-route=tasks] > aside > div { padding: 4px !important; }
+  .ops-shell[data-panel-route=tasks] > aside nav { display: flex !important; overflow-x: auto; }
+  .ops-shell[data-panel-route=tasks] > aside nav button { white-space: nowrap; }
+  .ops-shell-main[data-panel-route=tasks] > main { padding: 10px 10px 24px; }
 }
 `
 

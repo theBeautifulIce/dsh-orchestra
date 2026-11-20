@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openServiceOrchestra } from '../../src/index.ts'
 import { OrchError } from '../../src/core/errors.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 import { definitionHashOf } from '../../src/service/workflows.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { ToolRegistry } from '../../src/executor/tools.ts'
@@ -17,6 +18,10 @@ import { BridgeClient, bridgeHostAgentFactory, type BridgeTransport } from '../.
 import { getNode } from '../../src/service/queries/nodes.ts'
 import type { HostAgentFactory } from '../../src/executor/session.ts'
 import { submitCancel, sweepNow } from '../../src/service/commands/runtime.ts'
+import { createModelRoutingSettingsHost } from '../../src/service/model-routing-settings.ts'
+import type { Context } from '@deepseek-ai/cordis'
+import { createDshExecutor } from '../../src/executor/dsh-host.ts'
+import { createExecutionScheduler } from '../../src/service/execution-scheduler.ts'
 import { fakeAgentBridge, fakeAgentClient, type AgentToolStep } from '../fixtures/agent-bridge.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
@@ -105,6 +110,91 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 describe('生产路径跑通单节点', () => {
+  it('节点等待慢目录期间可以取消，交还租约与调度位并且不产生子会话停机回执', async () => {
+    const { dir, orchestra, release, registry, runner } = await setup()
+    const deps = { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime' }
+    const controller = new AbortController()
+    const loading = Promise.withResolvers<void>()
+    const host = createDshExecutor({ context: {} as Context, parentForNode: () => undefined, models: [],
+      loadModelCatalog: () => {
+        loading.resolve()
+        return new Promise(() => {})
+      },
+      recommend: () => ({ complexity: 'routine', reason: 'fixture' }) })
+    const scheduler = createExecutionScheduler({ concurrency: 1, humanSlots: 1 })
+    try {
+      withTx(orchestra.db, (tx) => tx.run("UPDATE node_runs SET side_effect_policy='pure' WHERE node_run_id='nrun_1'"))
+      const bridge = host.bridge
+      const task = scheduler.run(() => runNode({ ...deps, registry, runner, bridge,
+        agents: { create: async () => { throw new Error('must not spawn') } }, cancelSignal: controller.signal, modelRouting: host.modelRouting,
+      }, { nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [], now: NOW, ownerEpoch: 1, leaseTtlMs: 600_000 }))
+      const rejected = expect(task).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', message: '节点执行已被取消' })
+      await loading.promise
+      expect(scheduler.inFlight).toBe(1)
+      const next = scheduler.run(() => 'next action')
+      expect(scheduler.waiting).toBe(1)
+      submitCancel(orchestra.runtime, { nodeRunId: 'nrun_1', attempt: 1, revision: nodeRow(orchestra.db).revision,
+        cancelResult: 'interrupted', now: NOW, graceMs: 10_000 })
+      controller.abort('cancel:interrupted')
+      await rejected
+      await expect(next).resolves.toBe('next action')
+      expect(nodeRow(orchestra.db)).toMatchObject({ status: 'timeout', lease_id: null, fence_state: null })
+      expect(orchestra.db.raw.prepare("SELECT type FROM node_run_events WHERE type IN ('executor.model_selected','executor.agent_stopped')").all()).toEqual([])
+    } finally {
+      await host.close()
+      await scheduler.close()
+      await release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 2_500)
+
+  it('固定派发时的思考深度与修订，并保存可查询的实际请求回执', async () => {
+    const { dir, orchestra, release, registry, runner } = await setup()
+    try {
+      const profile = { ref: 'fixture/same', provider: 'fixture', model: 'same', capacity: 'expert',
+        reasoning: { efforts: [{ id: 'deep', name: 'Deep' }, { id: 'turbo', name: 'Turbo' }] } } as const
+      const catalog = () => ({ profiles: [profile], unavailable_providers: [] })
+      const settings = createModelRoutingSettingsHost(orchestra.db, catalog)
+      const mapping = { routine: null, standard: null, complex: 'fixture/same' }
+      settings.save({ mapping, operation_id: uuidv7(), expected_revision: 0, reasoning_efforts: { complex: 'deep' } }, 'operator', NOW)
+      const transport = fakeAgentBridge({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW })
+      const bridge = new BridgeClient({
+        async request<T>(method: string, params: unknown) {
+          if (method === 'executor.spawn') {
+            expect(params).toMatchObject({ modelRef: profile.ref, reasoningEffort: 'deep' })
+            settings.save({ mapping, operation_id: uuidv7(), expected_revision: 1, reasoning_efforts: { complex: 'turbo' } }, 'operator', NOW)
+            return { agentId: 'agent_1', sessionId: 'session_deep', effectiveModelRef: profile.ref, effectiveReasoningEffort: 'deep' } as T
+          }
+          return transport.request(method, params)
+        },
+        async *listen(params, signal) {
+          for await (const event of transport.listen(params, signal)) {
+            yield event.type === 'turn' ? { ...event, payload: { ...(event.payload as object),
+              model_use: { model_ref: profile.ref, provider: profile.provider, model: profile.model,
+                reasoning_effort: 'deep', observed_request_headers: 1 } } } : event
+          }
+        },
+      })
+      await expect(runNode({ runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime', registry, runner, bridge,
+        agents: bridgeHostAgentFactory(bridge), modelRouting: {
+          profiles: [], catalog, recommend: () => ({ complexity: 'complex', reason: '交叉复核' }),
+        },
+      }, { nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5_000 }], now: NOW, ownerEpoch: 1, leaseTtlMs: 600_000 }))
+        .resolves.toMatchObject({ final_status: 'done' })
+      expect(getNode(orchestra.db, 'nrun_1').model_assignment).toMatchObject({
+        model_ref: profile.ref, provider: profile.provider, model: profile.model,
+        state: 'confirmed', settings_revision: 1, reasoning_effort: 'deep',
+        usage: { model: profile.model, provider: profile.provider, reasoning_effort: 'deep', observed_request_headers: 1 },
+      })
+      expect(settings.get().item.reasoning_efforts).toEqual({ complex: 'turbo' })
+    } finally {
+      await release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it.each([true, false])('模型仅在宿主回读一致后才发送指令（confirmed=%s）', async (confirmed) => {
     const { dir, orchestra, release, registry, runner } = await setup([{ tool: 'ro.echo' }])
     try {

@@ -27,7 +27,7 @@ export function assertReworkRunActive(tx: Tx, runId: string): void {
 export function hasUnresolvedRework(tx: Tx, runId: string): boolean {
   return !!tx.get(`SELECT 1 FROM rework_requests WHERE run_id = ? AND status NOT IN ${resolved} LIMIT 1`, [runId])
 }
-export function reworkBlocksNode(tx: Tx, nodeRunId: string): boolean {
+export function reworkBlocksNode(tx: ReadTx, nodeRunId: string): boolean {
   const n = nodeOf(tx, nodeRunId)
   if (n.replacement_node_run_id) return true
   if (n.status === 'done' && tx.get(`SELECT 1 FROM rework_requests WHERE new_node_run_id=? AND status NOT IN ${resolved}`, [nodeRunId])) return true
@@ -157,7 +157,7 @@ export function previewReworkImpact(tx: ReadTx, req: RuntimeReworkRequest): Arra
   return descendants(tx, req, nodeOf(tx, req.target_node_run_id)).map(n => ({ node_id: n.node_id, node_run_id: n.node_run_id, status: n.status }))
 }
 
-export function isCandidateReviewer(tx: Tx, consumerId: string, candidateId: string): boolean {
+export function isCandidateReviewer(tx: ReadTx, consumerId: string, candidateId: string): boolean {
   return !!tx.get("SELECT 1 FROM rework_requests r JOIN node_runs original ON original.node_run_id=r.requester_node_run_id JOIN node_runs n ON n.run_id=original.run_id AND n.node_id=original.node_id JOIN rework_impacts i ON i.request_id=r.request_id AND i.replacement_node_run_id=n.node_run_id WHERE n.node_run_id=? AND n.replacement_node_run_id IS NULL AND r.new_node_run_id=? AND r.status='awaiting_review'", [consumerId, candidateId])
 }
 /** Start only the original consumer's fresh review context; all other consumers stay held. */

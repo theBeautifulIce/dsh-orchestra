@@ -6,6 +6,7 @@ import { registerRunArtifactInTx, isArtifactFileName } from './artifact-store.ts
 import { reworkRequestSchema, reworkReviewSchema, type ReworkBinding, type ReworkHost } from './rework-coordinator.ts'
 import { runIdempotentCommand, requestHashOf } from './commands/idempotency.ts'
 import { assertReworkRunActive } from './rework-runtime.ts'
+import { recordArtifactPublication } from './artifact-completion.ts'
 
 const key = z.string().min(1).max(256)
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
@@ -14,7 +15,7 @@ const publish = z.strictObject({ operation_id: z.uuidv7(), file_name: key.refine
 const read = z.strictObject({ artifact_id: key, artifact_hash: hash, offset: z.number().int().nonnegative().default(0) })
 
 /** The host owns the session binding. No run, producer, evidence or filename comes from an agent-supplied path. */
-export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, input: unknown, now = new Date().toISOString()) {
+export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, input: unknown, now = new Date().toISOString(), secret?: string) {
   const { action, ...body } = z.looseObject({ action: z.string() }).parse(input)
   const node = db.raw.prepare(`SELECT run_id FROM node_runs WHERE node_run_id=? AND attempt=? AND action_generation=?
     AND status IN ('started','verifying') AND replacement_node_run_id IS NULL`).get(binding.node_run_id, binding.attempt, binding.action_generation)
@@ -32,11 +33,23 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
       const data = publish.parse(body)
       return runIdempotentCommand(tx, { kind: 'rework.artifact', operationId: data.operation_id,
         requestHash: requestHashOf('rework.artifact', { binding, ...data }), now }, () => {
+        const producer = tx.get<{ run_id: string; node_id: string; lease_id: string | null; lease_expires_at: string | null }>(
+          `SELECT run_id,node_id,lease_id,lease_expires_at FROM node_runs WHERE node_run_id=? AND attempt=? AND action_generation=?
+            AND status IN ('started','verifying') AND replacement_node_run_id IS NULL`,
+          [binding.node_run_id, binding.attempt, binding.action_generation],
+        )
+        if (!producer || producer.run_id !== runId) throw new OrchError('STALE_GENERATION', '成果提交对应的执行尝试已失效')
         if (Buffer.byteLength(data.text) > 65536) throw new OrchError('RANGE_TOO_LARGE', '每份文本成果最多 64 KiB')
         const count = tx.get<{ n: number }>('SELECT COUNT(*) AS n FROM artifact_contents WHERE node_run_id=?', [binding.node_run_id])
         if ((count?.n ?? 0) >= 8) throw new OrchError('RANGE_TOO_LARGE', '每次执行最多提交八份文本成果')
-        return registerRunArtifactInTx(tx, { artifactId: 'out_' + sha256Hex(JSON.stringify([binding.node_run_id, data.file_name])),
+        const artifactId = 'out_' + sha256Hex(JSON.stringify([binding.node_run_id, data.file_name]))
+        const firstPublication = !tx.get('SELECT 1 FROM artifacts WHERE artifact_id=?', [artifactId])
+        const artifact = registerRunArtifactInTx(tx, { artifactId,
           runId, nodeRunId: binding.node_run_id, bytes: Buffer.from(data.text), fileName: data.file_name }, now)
+        if (secret && firstPublication && producer.lease_id && producer.lease_expires_at && Date.parse(producer.lease_expires_at) > Date.parse(now)) {
+          recordArtifactPublication(tx, secret, binding, producer, data.file_name, artifact)
+        }
+        return artifact
       }).result
     }
     if (action !== 'read') throw new OrchError('PAYLOAD_SCHEMA_INVALID', '未知成果操作')

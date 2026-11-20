@@ -16,6 +16,7 @@ export type ExecutionTaskOptions = {
   human?: boolean
   // 任务名：只进日志与排队信息，便于定位是谁在排
   label?: string
+  nodeRunId?: string
 }
 
 export type ExecutionStats = {
@@ -34,6 +35,7 @@ export type ExecutionScheduler = {
   // 排进调度器：名额空出来才开跑，任务抛错也照样释放名额
   run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T>
   stats(): ExecutionStats
+  isWaiting?(nodeRunId: string): boolean
   readonly inFlight: number
   readonly waiting: number
   readonly concurrency: number
@@ -46,6 +48,7 @@ export type ExecutionScheduler = {
 type QueuedTask = {
   human: boolean
   label: string
+  nodeRunId?: string
   // 真正开跑的那一步
   invoke: () => Promise<unknown> | unknown
   resolve: (value: unknown) => void
@@ -116,6 +119,10 @@ class Scheduler {
     }
   }
 
+  isWaiting(nodeRunId: string): boolean {
+    return this.queue.some((task) => task.nodeRunId === nodeRunId)
+  }
+
   run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (!this.accepting) {
@@ -133,6 +140,7 @@ class Scheduler {
       const task: QueuedTask = {
         human: opts?.human === true,
         label: opts?.label ?? '',
+        nodeRunId: opts?.nodeRunId,
         invoke: fn,
         resolve: (value) => { resolve(value as T) },
         reject: (reason) => { reject(reason) },

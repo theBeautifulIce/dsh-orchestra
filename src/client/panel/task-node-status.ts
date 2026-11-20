@@ -1,0 +1,48 @@
+import type { NodeRunView } from '../api/types.ts'
+
+export const ACTIVE_NODE_STATES = new Set(['leased', 'dispatched', 'started', 'verifying', 'stopping', 'timing_out'])
+export const BLOCKED_NODE_STATES = new Set(['blocked_pre', 'blocked_post', 'indeterminate_side_effect', 'startup_unknown', 'paused_bridge_missing'])
+const FAILED = new Set(['failed', 'timeout', 'orphaned'])
+const UNVERIFIED = new Set(['failed_with_unverified', 'abandoned_unverified'])
+
+const QUEUE_PHASES: Record<string, { label: string; tone: string }> = {
+  waiting_capacity: { label: '等待执行位', tone: 'waiting' },
+  waiting_dependencies: { label: '等待上游完成', tone: 'waiting' },
+  ready: { label: '就绪待派发', tone: 'waiting' },
+  paused: { label: '已暂停', tone: 'blocked' },
+  queued_unknown: { label: '排队原因未知', tone: 'waiting' },
+  queued: { label: '排队原因未记录', tone: 'waiting' },
+  cancelled: { label: '已取消', tone: 'waiting' },
+}
+
+type NodeStatus = Pick<NodeRunView, 'status' | 'status_label' | 'execution_state'>
+
+export function executionState(node: NodeStatus): string {
+  return node.execution_state ?? node.status
+}
+
+export function nodeExecutionPhase(node: NodeStatus | null): { label: string; tone: string } {
+  if (!node) return { label: '未运行', tone: 'waiting' }
+  const state = executionState(node)
+  if (Object.hasOwn(QUEUE_PHASES, state)) return QUEUE_PHASES[state]!
+  if (state === 'done') return { label: '已完成', tone: 'done' }
+  if (BLOCKED_NODE_STATES.has(state)) return { label: '待处理', tone: 'blocked' }
+  if (ACTIVE_NODE_STATES.has(state)) return { label: state === 'verifying' ? '核验中' : '进行中', tone: 'active' }
+  if (UNVERIFIED.has(state)) return { label: '待核实', tone: 'blocked' }
+  if (FAILED.has(state)) return { label: '未成功', tone: 'failed' }
+  if (state === 'waiting') return { label: '等待条件', tone: 'waiting' }
+  if (state === 'superseded') return { label: '已被接替', tone: 'waiting' }
+  return { label: node.status_label || '执行状态未知', tone: 'waiting' }
+}
+
+export function nodeExecutionLabel(node: NodeStatus): string {
+  const state = executionState(node)
+  return Object.hasOwn(QUEUE_PHASES, state) ? QUEUE_PHASES[state]!.label : node.status_label || nodeExecutionPhase(node).label
+}
+
+/** Only the persisted execution projection identifies which predecessors are still blocking a node. */
+export function waitingFor(node: NodeRunView, titles: ReadonlyMap<string, string>): string | undefined {
+  if (!node.waiting_on?.length) return undefined
+  const names = [...new Set(node.waiting_on)].map((id) => titles.get(id) || id).join('、')
+  return node.execution_state === 'waiting_dependencies' ? `等待：${names}` : `待核对的上游：${names}`
+}

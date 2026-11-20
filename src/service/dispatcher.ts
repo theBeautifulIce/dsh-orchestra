@@ -3,11 +3,10 @@ import { resolvePinnedNodeId } from './rework-extra-steps.ts'
 // 评审 P1：agent 执行是长时间任务，不许占着写队列的名额；并发闸由装配层统一注入。
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
-import { runtimeEdges } from './rework-edges.ts'
-import { reworkBlocksNode, isCandidateReviewer } from './rework-runtime.ts'
+import { reworkBlocksNode } from './rework-runtime.ts'
+import { dependencyReadiness, runPredecessors } from './run-readiness.ts'
 import { makeTx } from '../infra/sqlite/driver.ts'
 import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
-import { TERMINAL_STATUSES } from '../core/state-machine.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
 import { acquireNodeRun, type RuntimeDeps } from './commands/runtime.ts'
@@ -104,56 +103,14 @@ export type DispatchDeps = {
   executionLimits?: Pick<RunNodeParams, 'actionTimeoutMs' | 'startupTimeoutMs' | 'verifyTimeoutMs'>
 }
 
-// 只派发排队中的节点：一个节点失败不拖垮同批别的节点
-// 依赖放行：定义里带了 edges 时，前置节点没到 done 的不派发（审计 P1-3）。
-// 前置节点压根不在 run 里 = 配置错误（nodeIds 闭包被绕过/账本被改），必须可观测地失败，
-// 不能无限期静默跳过（审计 P1 防御面）。
-const SUCCESS_STATUS: ReadonlySet<string> = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
-// 非成功终态必须从状态机终态表派生：indeterminate_side_effect / startup_unknown 等非终态
-// 还能经裁决走到 done，当成失败前置会在裁决窗口误结算后置（S3 r22 P2-7）
-const BLOCKED_TERMINAL: ReadonlySet<string> = new Set(TERMINAL_STATUSES.filter((status) => !SUCCESS_STATUS.has(status)))
-type Readiness =
-  | { ready: true }
-  | { ready: false; missingPreds: string[] }
-  | { ready: false; failedPreds: string[] }
-  | { ready: false; waitingPreds: string[] }
-
-// 前置按「有效行」判定：M-60 重试会换行（旧行 superseded、新行 attempt+1），
-// 只看第一行会把已 done 的新行当成没跑（S3 r21 P2-5b）
-function effectiveStatus(db: DispatchDeps['db'], runId: string, nodeId: string, consumerId?: string): string | null {
-  const row = db.raw.prepare(
-    'SELECT node_run_id,status FROM node_runs WHERE run_id = ? AND node_id = ? ORDER BY attempt DESC, seq DESC LIMIT 1',
-  ).get(runId, nodeId) as { node_run_id: string;status: string } | undefined
-  if (row && consumerId && row.status === 'done' && isCandidateReviewer(makeTx(db.raw),consumerId,row.node_run_id)) return 'done'
-  return row && reworkBlocksNode(makeTx(db.raw),row.node_run_id) ? 'rework_held' : row?.status ?? null
-}
-
-function readinessOf(db: DispatchDeps['db'], runId: string, nodeId: string, preds: ReadonlyMap<string, string[]>): Readiness {
-  const consumer = db.raw.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC LIMIT 1').get(runId,nodeId) as {node_run_id:string} | undefined
-  const missing: string[] = []
-  const failed: string[] = []
-  const waiting: string[] = []
-  for (const pred of preds.get(nodeId) ?? []) {
-    const status = effectiveStatus(db, runId, pred, consumer?.node_run_id)
-    if (status === null) missing.push(pred)
-    else if (SUCCESS_STATUS.has(status)) continue
-    else if (BLOCKED_TERMINAL.has(status)) failed.push(pred)
-    else waiting.push(pred)
-  }
-  if (missing.length > 0) return { ready: false, missingPreds: missing }
-  if (failed.length > 0) return { ready: false, failedPreds: failed }
-  if (waiting.length > 0) return { ready: false, waitingPreds: waiting }
-  return { ready: true }
-}
-
 export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promise<DispatchOutcome[]> {
   const all = deps.db.raw.prepare(
     "SELECT node_run_id, node_id, seq, attempt FROM node_runs WHERE run_id = ? AND status = 'queued' ORDER BY seq ASC",
   ).all(p.runId) as { node_run_id: string; node_id: string; seq: number; attempt: number }[]
   // 有执行拓扑就按拓扑放行；旧定义没有 edges，保持原来的全量派发
-  const preds = new Map<string, string[]>()
-  const runRow = deps.db.raw.prepare('SELECT workflow_id, workflow_version FROM runs WHERE run_id = ?').get(p.runId) as
-    { workflow_id: string; workflow_version: string } | undefined
+  const runRow = deps.db.raw.prepare('SELECT workflow_id, workflow_version, status, cancel_requested_at FROM runs WHERE run_id = ?').get(p.runId) as
+    { workflow_id: string; workflow_version: string; status: string; cancel_requested_at: string | null } | undefined
+  if (runRow?.cancel_requested_at || runRow?.status === 'paused') return []
   // 目录里没有这个版本就退回全量派发：老装配/直接插行的 run 没有已发布定义，
   // 依赖闸只在"定义带着拓扑"时才生效
   let def: { edges?: Array<{ from: string; to: string }> } | undefined
@@ -164,27 +121,24 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
       def = undefined
     }
   }
-  for (const edge of runtimeEdges(makeTx(deps.db.raw), p.runId, def?.edges ?? [])) {
-    const list = preds.get(edge.to) ?? []
-    list.push(edge.from)
-    preds.set(edge.to, list)
-  }
+  const tx = makeTx(deps.db.raw)
+  const preds = runPredecessors(tx, p.runId, def?.edges ?? [])
   const rows: typeof all = []
   const settled: DispatchOutcome[] = []
   for (const row of all) {
-    if (reworkBlocksNode(makeTx(deps.db.raw),row.node_run_id)) continue
-    const readiness = readinessOf(deps.db, p.runId, row.node_id, preds)
+    if (reworkBlocksNode(tx, row.node_run_id)) continue
+    const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [])
     if (readiness.ready) {
       rows.push(row)
       continue
     }
     // 防御面与失败传播：两种都不能让节点永滞 queued，收口结果要进 outcomes（调用方看得见）
-    if ('missingPreds' in readiness) {
+    if (readiness.missingPreds.length > 0) {
       settled.push(outcomeForSettlement(
         failQueuedNode(deps, p, row, '前置节点不在本 run 里：' + readiness.missingPreds.join(','), 'SCHEMA_VERSION_UNSUPPORTED'),
         row, '前置节点不在本 run 里', 'SCHEMA_VERSION_UNSUPPORTED' as DispatchOutcomeErrorCode,
       ))
-    } else if ('failedPreds' in readiness) {
+    } else if (readiness.failedPreds.length > 0) {
       settled.push(outcomeForSettlement(
         failQueuedNode(deps, p, row, '前置节点未成功完成：' + readiness.failedPreds.join(','), 'RESOLUTION_NOT_AVAILABLE'),
         row, '前置节点未成功完成', 'RESOLUTION_NOT_AVAILABLE' as DispatchOutcomeErrorCode,
@@ -201,7 +155,11 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams): Promis
         return out
       })()
   // 这一轮跑完后收口 run：所有子节点都已终态才写，未满足条件保持原状。
-  inTx(deps.db, (tx) => { closeRun(tx, deps.secret, p.runId, p.now) })
+  inTx(deps.db, (tx) => {
+    const latest = tx.get<{ updated_at: string | null }>('SELECT MAX(updated_at) AS updated_at FROM node_runs WHERE run_id=?', [p.runId])
+    const settledAt = latest?.updated_at && Date.parse(latest.updated_at) > Date.parse(p.now) ? latest.updated_at : p.now
+    closeRun(tx, deps.secret, p.runId, settledAt)
+  })
   return [...settled, ...outcomes]
 }
 
