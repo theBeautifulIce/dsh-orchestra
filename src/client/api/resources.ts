@@ -47,7 +47,7 @@ export function createResourcesApi(client: ApiClient) {
       client.get('/v1/runs', compact(params)),
     getRun: (run_id: string): Promise<ApiResult<RunSummary>> =>
       client.get('/v1/runs/get', { run_id }),
-    listNodes: (run_id: string, limit?: number): Promise<ApiResult<{ items: NodeRunView[] }>> =>
+    listNodes: (run_id: string, limit?: number): Promise<ApiResult<{ items: NodeRunView[]; has_more?: boolean }>> =>
       client.get('/v1/node-runs', { run_id, limit }),
     getNode: (node_run_id: string): Promise<ApiResult<NodeRunView>> =>
       client.get('/v1/node-runs/get', { node_run_id }),

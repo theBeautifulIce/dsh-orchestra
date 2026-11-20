@@ -336,10 +336,10 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, api, 
 }
 
 function CardSteps({ api, runId, reloadVersion }: { api: ResourcesApi; runId: string; reloadVersion: number }) {
-  const { nodes, failed, refresh } = useRunStepSnapshot(api, runId, reloadVersion)
+  const { nodes, partial, failed, refresh } = useRunStepSnapshot(api, runId, reloadVersion)
   if (failed) return <p role="alert">步骤读取失败。<button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>
   if (!nodes) return <p role="status">正在读取步骤…</p>
-  return <TaskStepOverview nodes={nodes} />
+  return <TaskStepOverview nodes={nodes} partial={partial} />
 }
 
 function TaskRisk({ level }: { level: TaskSummary['max_side_effect_level'] }) {

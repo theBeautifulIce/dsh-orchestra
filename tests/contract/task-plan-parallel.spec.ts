@@ -193,6 +193,10 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       { timeout: 6_000 }).toBe(3)
     const inProgress = await nodes()
     expect(inProgress).toHaveLength(11)
+    if (scenario === '完成') {
+      expect((await reads.listNodes(run_id, 10)).data).toMatchObject({ has_more: true })
+      expect((await reads.listNodes(run_id, 11)).data).toMatchObject({ has_more: false })
+    }
     expect(inProgress.filter((node) => node.execution_state === 'waiting_capacity')).toHaveLength(7)
     const joinNode = inProgress.find((node) => node.node_id === 'join_review')!
     expect(joinNode).toMatchObject({
@@ -215,7 +219,9 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       await expect.poll(() => [...agents.values()].every((agent) => agent.disposed)).toBe(true)
       await expect.poll(async () => (await reads.getRun(run_id)).data.status, { timeout: 8_000 }).toBe('cancelled')
       expect(spawned).toHaveLength(3)
-      expect((await nodes()).filter((node) => node.status === 'superseded')).toHaveLength(8)
+      const cancelled = (await nodes()).filter((node) => node.status === 'superseded')
+      expect(cancelled).toHaveLength(8)
+      expect(cancelled.every((node) => node.execution_state === 'cancelled')).toBe(true)
       expect((await nodes()).filter((node) => node.status === 'timeout')).toHaveLength(3)
       return
     }
@@ -287,7 +293,7 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       await expect.poll(async () => (await nodes()).find((node) => node.node_id === 'join_review')?.status,
         { timeout: 10_000 }).toBe('done')
       expect((await nodes()).filter((node) => node.node_id === uncertain.node_id)).toMatchObject([
-        { attempt: 1, status: 'superseded' }, { attempt: 2, status: 'done' },
+        { attempt: 1, status: 'superseded', execution_state: 'superseded' }, { attempt: 2, status: 'done' },
       ])
       expect(spawned.map(stepOf).filter((step) => step === names.at(-1))).toHaveLength(2)
       expect(joinTexts.toSorted()).toEqual(names.map((name) => name + '完成').toSorted())

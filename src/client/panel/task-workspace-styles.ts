@@ -39,6 +39,11 @@ export const TASK_WORKSPACE_CSS = `
 .task-card-meta { margin-top: 8px; padding-top: 7px; border-top: 1px solid ${COLOR.line}; }
 .task-card-steps { position: relative; z-index: 1; margin-top: 8px; }
 .task-card-steps button:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
+.task-board-step-groups details { border-top: 1px solid ${COLOR.line}; }
+.task-board-step-groups summary { padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; }
+.task-board-step-groups summary:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
+.task-board-step-groups summary small { display: block; color: ${COLOR.inkMuted}; font-size: ${FONT_PX.helper}px; }
+.task-board-step-groups details ul { margin-inline-start: 10px; }
 .task-step-overview { display: grid; gap: 0; list-style: none; margin: 0; padding: 0; }
 .task-step-overview li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 7px; min-width: 0; padding: 6px 0; border-top: 1px solid ${COLOR.line}; overflow-wrap: anywhere; }
 .task-step-overview li > * { min-width: 0; max-width: 100%; }

@@ -10,7 +10,7 @@ type StepRead = {
   runId: string
   reloadVersion: number
   retry: number
-} & ({ nodes: NodeRunView[]; failed: false } | { nodes?: undefined; failed: true })
+} & ({ nodes: NodeRunView[]; partial: boolean; failed: false } | { nodes?: undefined; partial?: undefined; failed: true })
 
 export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, reloadVersion: number) {
   const [snapshot, setSnapshot] = useState<StepRead>()
@@ -21,7 +21,7 @@ export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, relo
     const key = { api, runId, reloadVersion, retry }
     void api.listNodes(runId, PAGE_LIMIT).then(({ data }) => {
       if (data.items.some((node) => node.run_id !== runId)) throw new Error('步骤归属与当前运行不符')
-      if (active) setSnapshot({ ...key, nodes: data.items, failed: false })
+      if (active) setSnapshot({ ...key, nodes: data.items, partial: data.has_more ?? data.items.length >= PAGE_LIMIT, failed: false })
     }).catch(() => {
       if (active) setSnapshot({ ...key, failed: true })
     })
@@ -29,7 +29,7 @@ export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, relo
   }, [api, runId, reloadVersion, retry])
   const current = snapshot?.api === api && snapshot.runId === runId
     && snapshot.reloadVersion === reloadVersion && snapshot.retry === retry ? snapshot : undefined
-  return { nodes: current?.nodes, failed: current?.failed, refresh: () => setRetry((value) => value + 1) }
+  return { nodes: current?.nodes, partial: current?.partial, failed: current?.failed, refresh: () => setRetry((value) => value + 1) }
 }
 
 const GROUPS = [
@@ -52,22 +52,99 @@ function queueGroup(node: NodeRunView): QueueGroup {
   return 'attention'
 }
 
-function StepRows({ nodes, titles, groupTitle }: { nodes: readonly NodeRunView[]; titles: ReadonlyMap<string, string>; groupTitle?: string }) {
+function StepRows({ nodes, titles, groupTitle, joinParents, namesakes }: {
+  nodes: readonly NodeRunView[]; titles: ReadonlyMap<string, string>; groupTitle?: string; joinParents?: readonly string[]
+  namesakes?: ReadonlyMap<string, string>
+}) {
   return <ul className="task-step-overview">
     {nodes.map((node) => {
       const waiting = waitingFor(node, titles)
       const label = groupTitle && executionState(node) === 'queued' ? '排队原因未记录' : nodeExecutionLabel(node)
       return <li key={node.node_id} data-tone={nodeExecutionPhase(node).tone}>
         <strong>{titles.get(node.node_id)}</strong>
+        {namesakes?.has(node.node_id) && <small>{namesakes.get(node.node_id)}</small>}
         {label !== groupTitle && <span className="task-step-overview-status">{label}</span>}
         {node.attempt > 1 && <small>第 {node.attempt} 次尝试</small>}
+        {joinParents && joinParents.length > 1 && <small className="task-step-waiting">汇合 · 依赖 {parentTitle(joinParents, titles, namesakes)}</small>}
         {waiting && <small className="task-step-waiting">{waiting}</small>}
       </li>
     })}
   </ul>
 }
 
-export function TaskStepOverview({ nodes, queue = false }: { nodes: readonly NodeRunView[]; queue?: boolean }) {
+type ParallelGroup = { key: string; parents: string[]; steps: NodeRunView[] }
+
+function parentTitle(ids: readonly string[], titles: ReadonlyMap<string, string>, namesakes?: ReadonlyMap<string, string>) {
+  return ids.map((id) => namesakes?.has(id) ? `${titles.get(id)}（${namesakes.get(id)}）` : titles.get(id)).join('、')
+}
+
+/** A group has one exact set of direct predecessors. Traversal order expresses dependencies. */
+function boardGroups(steps: readonly NodeRunView[]): ParallelGroup[] | undefined {
+  const ids = new Set(steps.map(({ node_id }) => node_id))
+  const pending = new Map<string, number>()
+  const children = new Map<string, NodeRunView[]>()
+  const groups = new Map<string, ParallelGroup>()
+  const groupFor = new Map<string, ParallelGroup>()
+  const ordered: NodeRunView[] = []
+  for (const step of steps) {
+    if (!step.node_id || !Array.isArray(step.depends_on) || step.depends_on.some((id) => !ids.has(id))) return undefined
+    const parents = [...new Set(step.depends_on)].sort()
+    const key = JSON.stringify(parents)
+    let group = groups.get(key)
+    if (!group) groups.set(key, group = { key, parents, steps: [] })
+    group.steps.push(step)
+    groupFor.set(step.node_id, group)
+    pending.set(step.node_id, parents.length)
+    if (parents.length === 0) ordered.push(step)
+    for (const parent of parents) {
+      const siblings = children.get(parent) ?? []
+      siblings.push(step)
+      children.set(parent, siblings)
+    }
+  }
+  for (let index = 0; index < ordered.length; index++) {
+    for (const child of children.get(ordered[index]!.node_id) ?? []) {
+      const remaining = pending.get(child.node_id)! - 1
+      pending.set(child.node_id, remaining)
+      if (remaining === 0) ordered.push(child)
+    }
+  }
+  if (ordered.length !== steps.length || groups.size === steps.length) return undefined
+  return [...new Set(ordered.map(({ node_id }) => groupFor.get(node_id)!))]
+}
+
+function BoardSteps({ steps, titles, partial }: { steps: NodeRunView[]; titles: ReadonlyMap<string, string>; partial: boolean }) {
+  const groups = partial ? undefined : boardGroups(steps)
+  if (!groups) return <StepRows nodes={steps} titles={titles} />
+  const byTitle = new Map<string, string[]>()
+  for (const [id, title] of titles) {
+    const matches = byTitle.get(title) ?? []
+    matches.push(id)
+    byTitle.set(title, matches)
+  }
+  const namesakes = new Map<string, string>()
+  for (const matches of byTitle.values()) {
+    if (matches.length > 1) matches.forEach((id, index) => namesakes.set(id, `同名步骤 ${index + 1}`))
+  }
+  return <div className="task-board-step-groups">
+    {groups.map(({ key, parents, steps: group }) => {
+      if (group.length === 1) return <StepRows key={key} nodes={group} titles={titles} joinParents={parents} namesakes={namesakes} />
+      const active = group.filter((step) => ACTIVE_NODE_STATES.has(executionState(step))).length
+      const done = group.filter((step) => executionState(step) === 'done').length
+      const upstream = parentTitle(parents, titles, namesakes)
+      return <details key={key}>
+        <summary><strong>{upstream ? `${upstream}之后` : '运行起点'} · {group.length} 个并行步骤</strong>
+          <small>{done} / {group.length} 步完成{active > 0 && ` · ${active} 步执行中`}</small>
+        </summary>
+        <StepRows nodes={group} titles={titles} namesakes={namesakes} />
+      </details>
+    })}
+  </div>
+}
+
+export function TaskStepOverview({ nodes, queue = false, partial = nodes.length >= PAGE_LIMIT }: {
+  nodes: readonly NodeRunView[]; queue?: boolean; partial?: boolean
+}) {
   const steps = [...currentAttempts(nodes).values()]
   const titles = new Map(steps.map((node, index) => [node.node_id, node.title || `未命名步骤 ${index + 1}`]))
   const groups = new Map<QueueGroup, NodeRunView[]>()
@@ -89,7 +166,7 @@ export function TaskStepOverview({ nodes, queue = false }: { nodes: readonly Nod
           <StepRows nodes={group} titles={titles} groupTitle={title} />
         </section>
       })}
-    </div> : <StepRows nodes={steps} titles={titles} />}
-    {nodes.length >= PAGE_LIMIT && <p className="task-flow-empty">本次最多读取 {PAGE_LIMIT} 条尝试记录，可能还有步骤或较新的尝试未显示。</p>}
+    </div> : <BoardSteps steps={steps} titles={titles} partial={partial} />}
+    {partial && <p className="task-flow-empty">本次最多读取 {PAGE_LIMIT} 条尝试记录，可能还有步骤或较新的尝试未显示。</p>}
   </>
 }

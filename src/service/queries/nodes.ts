@@ -52,6 +52,7 @@ export type NodeRunView = {
   display_status: string
   status_label: string
   execution_state?: string
+  /** Direct predecessors from the pinned workflow and approved runtime edges. Missing means unknown. */
   depends_on?: string[]
   waiting_on?: string[]
   revision: number
@@ -214,35 +215,39 @@ function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: 
   const preds = edges ? runPredecessors(tx, runId, edges) : null
   return (row: NodeRow): Pick<NodeRunView, 'execution_state' | 'depends_on' | 'waiting_on'> => {
     const depends_on = preds?.get(String(row.node_id)) ?? []
-    const state = (execution_state: string, waiting_on: string[] = []) => ({ execution_state, depends_on, waiting_on })
+    const state = (execution_state: string, waiting_on: string[] = []) => ({
+      execution_state, waiting_on, ...(binding?.definition_json && preds ? { depends_on } : {}),
+    })
+    if (row.status === 'superseded' && row.cancel_requested_at && !row.replacement_node_run_id) return state('cancelled')
     if (row.status !== 'queued') return state(row.status)
     if (binding?.cancel_requested_at) return state('cancelled')
     if (binding?.status === 'paused' || reworkBlocksNode(tx, row.node_run_id)) return state('paused')
     if (!preds) return state('queued_unknown')
     const readiness = dependencyReadiness(tx, runId, row.node_run_id, depends_on)
     if (!readiness.ready) {
-      const waiting_on = [...readiness.missingPreds, ...readiness.failedPreds, ...readiness.waitingPreds]
-      return state(readiness.missingPreds.length > 0 ? 'queued_unknown' : 'waiting_dependencies', waiting_on)
+      if (readiness.missingPreds.length > 0) return state('queued_unknown', [...readiness.missingPreds, ...readiness.failedPreds, ...readiness.waitingPreds])
+      if (readiness.failedPreds.length > 0) return state('blocked_dependencies', readiness.failedPreds)
+      return state('waiting_dependencies', readiness.waitingPreds)
     }
     return state(isWaiting?.(row.node_run_id) ? 'waiting_capacity' : 'ready')
   }
 }
 
-export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeRunId: string) => boolean): { items: NodeRunView[]; as_of_seq: number } {
+export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeRunId: string) => boolean): { items: NodeRunView[]; as_of_seq: number; has_more: boolean } {
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
   return withReadTx(db, (ctx) => {
     const { settling, nodes } = readRunNodeDisplay(ctx.tx, runId)
     const executionState = readExecutionStates(ctx.tx, runId, isWaiting)
     const rows = ctx.tx.all<NodeRow>(
-      NODE_VIEW_SELECT + ' WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit],
+      NODE_VIEW_SELECT + ' WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit + 1],
     )
-    const items = rows.map((row) => ({
+    const items = rows.slice(0, limit).map((row) => ({
       ...toNodeView(row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
         modelAssignment(ctx, row), nodes.get(String(row.node_id))),
       ...executionState(row),
     }))
-    return { items, as_of_seq: ctx.as_of_seq }
+    return { items, as_of_seq: ctx.as_of_seq, has_more: rows.length > limit }
   })
 }
 

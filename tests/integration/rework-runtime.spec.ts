@@ -13,6 +13,7 @@ import { dispatchRun, type DispatchDeps } from '../../src/service/dispatcher.ts'
 import { WorkflowCatalog, definitionHashOf } from '../../src/service/workflows.ts'
 import { previewReworkImpact } from '../../src/service/rework-runtime.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
+import { getNodeSnapshot, listNodes } from '../../src/service/queries/nodes.ts'
 const now = '2026-11-19T00:00:00.000Z'
 const secret = 'rework-runtime-test'
 const cleanup: Array<() => void> = []
@@ -40,6 +41,35 @@ function request(db: Db, requester: string | null = null) {
  return {request_id:'q',run_id:'r',target_node_run_id:'a',requester_node_run_id:requester}
 }
 describe('version-bound rework runtime',() => {
+ it('projects only known run dependencies and distinguishes failed predecessors from waiting ones', () => {
+  const db = setup()
+  request(db)
+  const catalog = new WorkflowCatalog('S2', db)
+  const nodes = ['a', 'b', 'c', 'd', 'unrelated'].map(node_id => ({ node_id, type: 'agent' as const }))
+  catalog.load({ workflow_id: 'w', workflow_version: '2', nodes, edges: [{ from: 'b', to: 'd' }] })
+  catalog.load({ workflow_id: 'w', workflow_version: '3', nodes, edges: [{ from: 'a', to: 'd' }] })
+  const hash = definitionHashOf(catalog.get('w', '2'))
+  withTx(db, tx => {
+   tx.run("UPDATE runs SET workflow_version='2',workflow_definition_hash=? WHERE run_id='r'", [hash])
+   tx.run("UPDATE node_runs SET status='queued' WHERE node_run_id IN ('d','b')")
+   tx.run("UPDATE node_runs SET status='failed' WHERE node_run_id='unrelated'")
+   tx.run("INSERT INTO rework_local_plans(request_id,revision,plan_hash,proposal_json,snapshot_json,created_at,approved_by) VALUES('q',1,'approved-plan','{}','{}',?,'owner')", [now])
+   tx.run("INSERT INTO rework_plan_edges VALUES('q','approved-plan','r','unrelated','d')")
+  })
+  const full = listNodes(db, 'r', 5)
+  expect(full.has_more).toBe(false)
+  expect(listNodes(db, 'r', 4)).toMatchObject({ items: full.items.slice(0, 4), has_more: true })
+  expect(full.items.find(node => node.node_id === 'a')?.depends_on).toEqual([])
+  expect(full.items.find(node => node.node_id === 'd')).toMatchObject({
+   execution_state: 'blocked_dependencies', depends_on: ['b', 'unrelated'], waiting_on: ['unrelated'],
+  })
+  withTx(db, tx => tx.run("UPDATE runs SET workflow_definition_hash='missing-definition' WHERE run_id='r'"))
+  expect(listNodes(db, 'r').items.every(node => !Object.hasOwn(node, 'depends_on'))).toBe(true)
+  expect(getNodeSnapshot(db, 'd').item).toMatchObject({ execution_state: 'queued_unknown' })
+  withTx(db, tx => tx.run("UPDATE runs SET workflow_definition_hash=NULL,workflow_version='99' WHERE run_id='r'"))
+  expect(getNodeSnapshot(db, 'a').item).not.toHaveProperty('depends_on')
+ })
+
  it('preserves done history, invalidates the diamond and leaves unrelated attempts intact',() => {
   const db=setup(); const req=request(db)
   const fresh=withTx(db,tx=>authorizeReworkRuntime(tx,secret,req,now))
