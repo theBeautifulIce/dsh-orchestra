@@ -304,6 +304,20 @@ it('binds ordinary native conversation, live owner input and one durable run per
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'CONFIRMATION_REQUIRED' })
     await human.admit(user('什么是并发调度？'))
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'CONFIRMATION_REQUIRED' })
+    for (const consultation of [
+      '并行生成几份报告，这个思路可行吗？',
+      '分别统计收入和退款再汇总成表格，这样做对吗？',
+      '只写报告的话，要采用什么结构？',
+      '分别核对收入和退款，再写总结，是指哪两个步骤？',
+      '只生成报告是默认行为吗？',
+      '只生成一张表格，你能做到吗？我只是想了解能力。',
+      '分别统计并生成报告：我们只是讨论，不实际做。',
+    ]) {
+      const message = user(consultation)
+      expect(await human.admit(message)).toMatchObject({ kind: 'enter', messages: [message] })
+    }
+    expect(test.serve).not.toHaveBeenCalled()
+    expect(test.planner).not.toHaveBeenCalled()
     const assigned = user('整理一份办公室事项并交付 Markdown 报告')
     await human.admit(assigned, false)
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
@@ -391,6 +405,9 @@ it.each([
   ['帮我做个叫「台账复核」的任务，使用已授权的 costs.xlsx 生成汇总表。', 'task'],
   ['请完成名为「三项独立流水核对」的任务。使用当前工作区已授权的 office-sample.csv。请并行独立核对收入、退款和记录数，各自交付报告。', 'task'],
   ['请并行分别核对已授权的流水表和发票，交付两份报告。', 'task'],
+  ['能帮我并行独立核对两份已授权的流水并各出一份报告吗？', 'task'],
+  ['能帮我分别统计已授权的收入和退款并汇总为表格吗？', 'task'],
+  ['请并行独立核对两份已授权的流水，各写一份报告回答“金额相符吗？”', 'task'],
   ['请完成名为「流水核对」的任务。请并行独立核对已授权的流水与发票，但先不要执行。', 'conversation'],
   ['请完成一项名为「生成审计报告」的任务。', 'clarify'],
   ['请完成一项名为「成本核对」的任务，使用当前工作区已授权的 costs.xlsx。', 'clarify'],
