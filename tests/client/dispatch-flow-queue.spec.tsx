@@ -4,6 +4,7 @@ import { expect, it } from 'vitest'
 import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { TaskFlowView } from '../../src/client/panel/task-flow-view.tsx'
+import { validatePublishLayer, WorkflowDocSchema } from '../../src/core/workflow-doc.ts'
 import { createFakeService, deferred, nodeRunView, renderPanel, runSummary, taskSummary, type FakeReply } from './harness.ts'
 
 type Edge = { from: string; to: string }
@@ -38,9 +39,12 @@ it.each([
   const authored = scope === 'reusable'
   const nodeIds = layered.flat()
   const definition = { name, scope, nodes: layered.flatMap((layer, col) => layer.map((node_id, row) => ({
-    node_id, title: nodeNames[node_id], type: node_id === 'start' ? 'trigger' : ['fork', 'second'].includes(node_id) ? 'parallel' : 'agent',
+    node_id, title: nodeNames[node_id], type: node_id === 'start' ? 'trigger' : 'agent',
     position: authored ? { x: 12 + col * 255, y: 35 + row * 95 } : { x: 100 * nodeIds.indexOf(node_id), y: 0 },
   }))), edges }
+  expect(validatePublishLayer(WorkflowDocSchema.parse(definition), {
+    registeredNodeTypes: new Set(['agent', 'wait']), publishedVersions: () => false,
+  })).toEqual([])
   const shared = taskSummary({ workflow_id: 'next_workflow', workflow_version: 9 })
   const service = createFakeService(({ path }) => {
     if (path === '/v1/runs/get') return { ok: true, data: runSummary({ workflow_id: workflowId, workflow_version: 2 }) }
