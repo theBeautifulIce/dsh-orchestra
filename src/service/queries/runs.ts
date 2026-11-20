@@ -145,14 +145,14 @@ export function getRun(db: Db, runId: string, options?: { includeAcceptanceArtif
 
 function readDeliveryChecks({ tx }: ReadCtx, runId: string, includeArtifactIds: boolean): NonNullable<RunSummary['delivery_checks']> {
   // Match the same confirmed plan and content hash that the acceptance writer uses.
+  const bound = tx.get<{ plan_id: string; content_hash: string }>(`
+    SELECT p.plan_id, p.content_hash FROM task_plans p JOIN start_run_operations o ON o.operation_id = p.launch_operation_id
+    WHERE o.run_id = ? ORDER BY p.created_at, p.plan_id LIMIT 1`, [runId])
+  if (!bound) return { has_more: false, items: [] }
   const rows = tx.all<Pick<RunDeliveryCheck, 'result_id' | 'kind' | 'outcome' | 'reason' | 'evaluated_at' | 'rule_version'> & { evidence_json: string }>(`
-    WITH bound AS (
-      SELECT p.plan_id, p.content_hash FROM task_plans p JOIN start_run_operations o ON o.operation_id = p.launch_operation_id
-      WHERE o.run_id = ? ORDER BY p.created_at, p.plan_id LIMIT 1
-    )
-    SELECT a.result_id, a.kind, a.outcome, a.reason, a.evaluated_at, a.rule_version, a.evidence_json
-    FROM run_acceptance_results a JOIN bound b USING (plan_id, content_hash)
-    WHERE a.run_id = ? ORDER BY a.deliverable_key LIMIT 51`, [runId, runId])
+    SELECT result_id, kind, outcome, reason, evaluated_at, rule_version, evidence_json
+    FROM run_acceptance_results WHERE run_id = ? AND plan_id = ? AND content_hash = ?
+    ORDER BY deliverable_key LIMIT 51`, [runId, bound.plan_id, bound.content_hash])
   return { has_more: rows.length > 50, items: rows.slice(0, 50).map(({ evidence_json, ...row }) => {
     const value = (JSON.parse(evidence_json) as { evidence?: unknown } | null)?.evidence
     const evidence = value && typeof value === 'object' ? value as Record<string, unknown> : {}

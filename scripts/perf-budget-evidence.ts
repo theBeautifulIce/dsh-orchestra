@@ -37,7 +37,8 @@ export const perfReportSchema = z.object({
   seeds: z.object({ q27_tasks: z.literal(10000), q27_runs: z.literal(10000), q27_nodes: z.literal(20000),
     q27_decisions: z.literal(500), q27_start_receipts: z.literal(10000), q27_plans: z.literal(476),
     q26_nodes: z.literal(1000), q26_events: z.literal(1000),
-    q26_decisions: z.literal(50), q26_executions: z.literal(100), q26_attestations: z.literal(20) }),
+    q26_decisions: z.literal(50), q26_executions: z.literal(100), q26_attestations: z.literal(20),
+    q26_start_receipts: z.literal(10001), q26_deliverables: z.literal(51) }),
   write_cost: z.object({ q27_seed_before_ms: z.number().positive(), q27_seed_after_ms: z.number().positive(),
     q27_backfill_ms: z.number().positive(), q27_backfill_rows: z.literal(10000) }),
   warmups: z.literal(PERF_WARMUP),
@@ -88,6 +89,15 @@ function validatePlans(route: string, statements: PerfStatement[], tables: strin
       } else if (boundedTaskPage && row.detail.includes('group_concat(DISTINCT)')
         && stmt.plan.some((step) => step.parent === row.parent && /^SEARCH n USING INDEX .+ \(run_id=\?\)/.test(step.detail))) {
         diagnostics.push(`${route}: ${row.detail} deduplicates side-effect policy values for one indexed current run per task`)
+      } else if (route === 'get_run' && /WHERE o\.run_id = \? ORDER BY p\.created_at, p\.plan_id LIMIT 1/.test(stmt.sql)
+        && row.detail === 'USE TEMP B-TREE FOR ORDER BY' && stmt.plan.some((step) => step.parent === row.parent
+          && /^SEARCH o USING (?:COVERING )?INDEX \S+ \(run_id=\?\)$/.test(step.detail))) {
+        diagnostics.push(`${route}: ${row.detail} orders confirmed plans for one indexed run receipt range`)
+      } else if (route === 'list_nodes' && /FROM rework_plan_edges e\b/.test(stmt.sql)
+        && /WHERE e\.run_id\s*=\s*\? AND p\.approved_by IS NOT NULL ORDER BY e\.from_node_id,e\.to_node_id/.test(stmt.sql)
+        && row.detail === 'USE TEMP B-TREE FOR ORDER BY' && stmt.plan.some((step) => step.parent === row.parent
+          && /^SEARCH e USING (?:COVERING )?INDEX \S+ \(run_id=\?\)$/.test(step.detail))) {
+        diagnostics.push(`${route}: ${row.detail} orders approved dependency edges for one indexed run`)
       } else if ((route === 'get_run' || route === 'list_nodes') && /\bWHERE (?:n\.)?run_id = \?(?:\s|$|\))/.test(stmt.sql)) {
         diagnostics.push(`${route}: ${row.detail} operates inside the indexed 1,000-node run or a related run/node lookup`)
       } else if (route === 'list_nodes' && /\bWHERE node_run_id = \?/.test(stmt.sql)) {
@@ -115,7 +125,8 @@ export function assessPerfReport(input: unknown) {
     || report.environment.end_at <= report.environment.start_at) errors.push('environment window is not valid')
   const markers: Record<PerfRoute, RegExp[]> = {
     list_tasks: [/task_page AS MATERIALIZED/, /FROM task_attention_order WHERE archived = \?/],
-    get_run: [/GROUP BY status ORDER BY status/, /FROM node_runs\s+WHERE run_id = \? ORDER BY updated_at DESC/],
+    get_run: [/GROUP BY status ORDER BY status/, /FROM node_runs\s+WHERE run_id = \? ORDER BY updated_at DESC/,
+      /JOIN start_run_operations o ON o\.operation_id = p\.launch_operation_id/, /FROM run_acceptance_results WHERE run_id = \? AND plan_id = \? AND content_hash = \?/],
     list_nodes: [/WHERE n\.run_id = \? ORDER BY n\.seq, n\.attempt, n\.node_run_id LIMIT \?/],
     list_events: [/FROM events WHERE seq > \? ORDER BY seq ASC LIMIT \?/],
   }
