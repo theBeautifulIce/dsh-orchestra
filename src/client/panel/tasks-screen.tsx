@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { ListTasksParams, ResourcesApi } from '../api/resources.ts'
 import type { TaskSummary } from '../api/types.ts'
 import { TASK_LANES, type TaskLane } from '../../core/task-workspace.ts'
@@ -108,6 +108,10 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   const [error, setError] = useState(false)
   const [reload, setReload] = useState(0)
   const lastReloadVersion = useRef(reloadVersion)
+  const expandedRunId = view === 'board' && !filter.archived
+    ? items.find((task) => task.task_id === expandedTaskId)?.current_run_id ?? null : null
+  const boardSteps = useRunStepSnapshot(api, expandedRunId, reload, true)
+  const openBranches = useMemo(() => new Set<string>(), [api, expandedTaskId, expandedRunId])
 
   useEffect(() => {
     if (lastReloadVersion.current === reloadVersion) return
@@ -228,7 +232,9 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
         {grouped[id].length === 0 && <p className="task-column-empty">暂无任务</p>}
         {grouped[id].map((task) => <TaskCard key={task.task_id} task={task} selected={task.task_id === selectedTaskId} compact={Boolean(selectedTaskId)}
           expanded={expandedTaskId === task.task_id} onExpand={() => setExpandedTaskId((selected) => selected === task.task_id ? null : task.task_id)}
-          api={api} reloadVersion={reload} onSelect={(trigger) => onSelectTask(task.task_id, trigger)} />)}
+          steps={expandedTaskId === task.task_id && expandedRunId &&
+            <CardSteps key={expandedRunId} snapshot={boardSteps} openBranches={openBranches} />}
+          onSelect={(trigger) => onSelectTask(task.task_id, trigger)} />)}
       </section>)}
     </div></div>}
     {items.length > 0 && (filter.archived || view === 'list') && <TaskTable tasks={items} archived={Boolean(filter.archived)} selectedTaskId={selectedTaskId} onSelect={onSelectTask} />}
@@ -294,9 +300,9 @@ function mergeByTaskId(previous: TaskSummary[], incoming: TaskSummary[]): TaskSu
   return merged
 }
 
-function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, api, reloadVersion }: {
+function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps }: {
   task: TaskSummary; selected: boolean; compact: boolean; onSelect: (trigger: HTMLButtonElement) => void
-  expanded: boolean; onExpand: () => void; api: ResourcesApi; reloadVersion: number
+  expanded: boolean; onExpand: () => void; steps: ReactNode
 }) {
   const stepsId = useId()
   const attention = ATTENTION_LABEL[task.attention]
@@ -329,19 +335,20 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, api, 
         aria-label={`${expanded ? '收起' : '展开'}步骤：${task.title || '未命名任务'}`}
         onClick={onExpand}>{expanded ? '收起步骤' : '展开步骤'}</button>
       <div id={stepsId} hidden={!expanded}>
-        {expanded && <CardSteps key={task.current_run_id} api={api} runId={task.current_run_id} reloadVersion={reloadVersion} />}
+        {steps}
       </div>
     </div>}
   </article>
 }
 
-function CardSteps({ api, runId, reloadVersion }: { api: ResourcesApi; runId: string; reloadVersion: number }) {
-  const { nodes, partial, failed, refresh } = useRunStepSnapshot(api, runId, reloadVersion, true)
+function CardSteps({ snapshot: { nodes, partial, failed, refresh }, openBranches }: {
+  snapshot: ReturnType<typeof useRunStepSnapshot>; openBranches: Set<string>
+}) {
   return <>
     {failed && <p role="alert">{nodes ? '步骤刷新失败，仍显示上次读取结果。' : '步骤读取失败。'}
       <button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>}
     {!nodes && !failed && <p role="status">正在读取步骤…</p>}
-    {nodes && <TaskStepOverview nodes={nodes} partial={partial} />}
+    {nodes && <TaskStepOverview nodes={nodes} partial={partial} openBranches={openBranches} />}
   </>
 }
 
