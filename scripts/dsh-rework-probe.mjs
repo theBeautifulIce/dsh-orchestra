@@ -1,4 +1,6 @@
 // Run after pnpm build, passing the installed DSH CLI entry (dsh/lib/bin.js).
+// Set ORCHESTRA_DSH_PROBE_PHASE=S6 and ORCHESTRA_DSH_REWORK_ESCALATION=1 for the escalation scenario.
+// Use ORCHESTRA_DSH_REWORK_ESCALATION=automatic to require diagnosis during normal dispatch.
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -16,8 +18,12 @@ const PROVIDER = 'orchestra-rework-probe'
 const PARENT = 'probe-lead'
 const SOURCE = 'probe-source'
 const TARGET = 'probe-verifier'
+const PLANNER = 'probe-diagnostic-planner'
 const FLOW = 'native-rework-probe'
 const TOOL = 'ro.verify_fixture'
+const REJECTION_NOTES = ['第三章把毫秒误作秒，必须按测量单位重新核对', '第三章仍未标明测量时间，无法核对同一份原始读数']
+const escalationMode = process.env.ORCHESTRA_DSH_REWORK_ESCALATION
+const escalationEnabled = escalationMode === '1' || escalationMode === 'automatic'
 
 export const name = 'orchestra-rework-probe'
 export const inject = ['agents', 'tools', 'llm', 'appExit']
@@ -35,6 +41,8 @@ export function apply(context) {
 
 async function verifyInDsh(context) {
   const stage = probePhase()
+  const escalate = escalationEnabled
+  if (escalate && stage !== 'S6') throw new Error('Escalation probe requires S6')
   const entry = process.env.ORCHESTRA_DSH_TEST_ENTRY
   const { serveDshOrchestra, ToolRegistry, ReadOnlyToolRunner } = await import(entry ? pathToFileURL(entry).href : '../lib/index.js')
   const cwd = process.cwd(), secret = randomUUID(), uses = []
@@ -61,7 +69,9 @@ async function verifyInDsh(context) {
   try {
     service = await serveDshOrchestra({ dbFile: join(cwd, 'orchestra.sqlite'), secret, phase: stage, tools: { registry, runner },
       ...(stage === 'S6' ? { resolveHttpHuman: (req) => operator.resolveHttpHuman(req) ?? otherOperator.resolveHttpHuman(req) } : {}),
-      dsh: { context, parentForNode: () => parent.agent, models: [{ ref: 'approved/source', capacity: 'routine', provider: PROVIDER, model: SOURCE }],
+      ...(escalate ? { dshPlanner: { parent: () => parent.agent, model: { provider: PROVIDER, model: PLANNER } } } : {}),
+      dsh: { context, parentForNode: () => parent.agent, models: [{ ref: 'approved/source', capacity: 'routine', provider: PROVIDER, model: SOURCE },
+        ...(escalate ? [{ ref: 'approved/stronger', capacity: 'expert', provider: PROVIDER, model: TARGET }] : [])],
         recommend: () => ({ complexity: 'routine', reason: '真实返工工具验收' }), onModelUse: usage => uses.push(usage) },
       asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT MAX(seq) AS seq FROM events').get().seq ?? 0),
       listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => {} })
@@ -132,17 +142,71 @@ async function verifyInDsh(context) {
     if (human.status==='proposed') human=await call('/v1/rework/review',{operation_id:uuidv7(),request_id:human.request_id,expected_revision:human.revision,action:'authorize',note:'同意定向修改第三章'})
     const c2=await latest(runId,'c')
     assert.equal(c2.attempt,2)
-    assert.equal((await run(c2,'C2')).final_status,'done')
+    assert.equal((await run(c2, escalate ? 'C2_REJECTED' : 'C2')).final_status,'done')
     human=await poll(async () => (await call('/v1/rework/get?request_id='+human.request_id)).item.request,r=>r.status==='awaiting_review','C2 never became reviewable')
     const report2=await artifactOf(runId,c2)
-    await call('/v1/rework/review',{operation_id:uuidv7(),request_id:human.request_id,expected_revision:human.revision,action:'accept',note:'第三章修改符合要求',artifact_id:report2.artifact_id,artifact_hash:report2.sha256})
+    let finalNode = c2, finalArtifact = report2, escalation
+    if (escalate) {
+      const rejected = []
+      let explicitDiagnosis
+      for (const [index, note] of REJECTION_NOTES.entries()) {
+        const review = (action, note, artifact) => call('/v1/rework/review', { operation_id: uuidv7(), request_id: human.request_id,
+          expected_revision: human.revision, action, note,
+          ...(artifact ? { artifact_id: artifact.artifact_id, artifact_hash: artifact.sha256 } : {}) })
+        human = await review('request_changes', note, finalArtifact)
+        assert.equal(human.status, 'proposed')
+        rejected.push({ attempt: finalNode.attempt, node_run_id: finalNode.node_run_id,
+          artifact_id: finalArtifact.artifact_id, sha256: finalArtifact.sha256, note })
+        if (index === 1 && escalationMode !== 'automatic') {
+          const diagnosticPath = '/v1/model-escalation'
+          const { precondition } = await call(diagnosticPath + '?run_id=' + runId + '&node_run_id=' + finalNode.node_run_id)
+          assert.ok(precondition && precondition.expected_attempt === 3)
+          explicitDiagnosis = await call(diagnosticPath, { ...precondition, operation_id: uuidv7() })
+          assert.equal(explicitDiagnosis.model_ref, 'approved/stronger')
+        }
+        human = await review('authorize', '授权修订这份交付')
+        assert.equal(human.status, 'scheduled')
+        finalNode = await latest(runId, 'c')
+        assert.equal(finalNode.attempt, index + 3)
+        const result = await run(finalNode, index === 0 ? 'C3_REJECTED' : 'C4_ESCALATED')
+        assert.equal(result.final_status, 'done', JSON.stringify(result))
+        human = await poll(async () => (await call('/v1/rework/get?request_id=' + human.request_id)).item.request,
+          (item) => item.status === 'awaiting_review', 'Revision never became reviewable')
+        finalArtifact = await artifactOf(runId, finalNode)
+        assert.ok(finalArtifact)
+      }
+      assert.notEqual(rejected[0].artifact_id, rejected[1].artifact_id)
+      assert.notEqual(rejected[0].sha256, rejected[1].sha256)
+      const diagnosis = await call('/v1/model-escalation?run_id=' + runId + '&node_run_id=' + rejected[1].node_run_id)
+      assert.equal(diagnosis.item.outcome, 'recommended')
+      assert.equal(diagnosis.item.trigger, 'repeated_rework')
+      assert.equal(diagnosis.item.model_ref, 'approved/stronger')
+      assert.equal(diagnosis.successor_node_run_id, finalNode.node_run_id)
+      assert.deepEqual(diagnosis.dispatch, { model_ref: 'approved/stronger', state: 'confirmed', provider: PROVIDER, model: TARGET })
+      const history = (await call('/v1/rework/get?request_id=' + human.request_id)).item
+      const reviews = history.reviews.filter(({ action }) => action === 'request_changes')
+      for (const item of rejected) {
+        const review = reviews.find(({ artifact_id }) => item.artifact_id === artifact_id)
+        assert.ok(review && review.artifact_hash === item.sha256 && review.note === item.note)
+        assert.equal(review.reviewer_actor, operator.id)
+        assert.ok(diagnosis.item.evidence_ids.includes(review.review_id))
+        item.review_id = review.review_id
+      }
+      const session = uses.find(({ nodeRunId }) => nodeRunId === finalNode.node_run_id)
+      assert.ok(session && session.model === TARGET && session.attempt === 4)
+      assert.equal(uses.filter(({ model }) => model === TARGET).length, 1)
+      if (explicitDiagnosis) assert.equal(diagnosis.item.decided_at, explicitDiagnosis.decided_at)
+      escalation = { assessment_path: explicitDiagnosis ? 'operator-confirmed HTTP diagnosis' : 'automatic pre-dispatch diagnosis',
+        rejected, diagnosis, stronger_session: session }
+    }
+    await call('/v1/rework/review',{operation_id:uuidv7(),request_id:human.request_id,expected_revision:human.revision,action:'accept',note:'第三章修改符合要求',artifact_id:finalArtifact.artifact_id,artifact_hash:finalArtifact.sha256})
     assert.equal((await call('/v1/runs/get?run_id='+runId)).status,'running','manual hold must prevent premature success')
-    await call('/v1/rework/hold',{operation_id:uuidv7(),run_id:runId,node_run_id:c2.node_run_id,action:'accept',artifact_id:report2.artifact_id,sha256:report2.sha256})
+    await call('/v1/rework/hold',{operation_id:uuidv7(),run_id:runId,node_run_id:finalNode.node_run_id,action:'accept',artifact_id:finalArtifact.artifact_id,sha256:finalArtifact.sha256})
     await call('/v1/runs/dispatch',{runId,nodes:{}})
     const closed=await call('/v1/runs/get?run_id='+runId)
     assert.equal(closed.status,'succeeded')
     const before=await call('/v1/artifacts/content?run_id='+runId+'&artifact_id='+v1.artifact_id+'&mode=preview')
-    const after=await call('/v1/artifacts/content?run_id='+runId+'&artifact_id='+report2.artifact_id+'&mode=preview')
+    const after=await call('/v1/artifacts/content?run_id='+runId+'&artifact_id='+finalArtifact.artifact_id+'&mode=preview')
     const baseline = /^sample_id,latency_ms\n(\d+),([\d.]+)$/.exec(before.text)
     assert.ok(baseline && Number(baseline[2]) > 0)
     const all=await nodes(runId)
@@ -152,13 +216,14 @@ async function verifyInDsh(context) {
     assert.equal(humanHistory.reviews.at(-1).action,'accept')
     if (stage === 'S6') assert.equal(humanHistory.reviews.at(-1).reviewer_actor, operator.id)
     assert.ok(uses.length>=6)
-    assert.equal(new Set(uses.map(u=>u.sessionId)).size,6,'each attempt must use a fresh native DSH session')
-    assert.notEqual(report1.artifact_id,report2.artifact_id)
+    assert.equal(new Set(uses.map(u=>u.sessionId)).size,escalate ? 8 : 6,'each attempt must use a fresh native DSH session')
+    assert.notEqual(report1.artifact_id,finalArtifact.artifact_id)
     const preserved = '第一章：目标\n第二章：对 1 MiB 数据计算 SHA-256\n'
     assert.equal(after.text, preserved + '第三章：实测耗时 ' + baseline[2] + ' ms，采样时间 ' + new Date(Number(baseline[1])).toISOString())
     return {phase:stage,...(stage === 'S6' ? { identity: operator.evidence, launchActor, nonOwner: otherOperator.evidence,
       deniedWithoutBinding: 'FORBIDDEN', deniedAsNonOwner: 'FORBIDDEN' } : {}),
-      runId,agentRequest:first.request_id,humanRequest:human.request_id,oldArtifact:v1.artifact_id,revisedReport:report2.artifact_id,
+      runId,agentRequest:first.request_id,humanRequest:human.request_id,oldArtifact:v1.artifact_id,revisedReport:finalArtifact.artifact_id,
+      ...(escalation ? { escalation } : {}),
       nodes:all.map(n=>({id:n.node_id,attempt:n.attempt,status:n.status})),dshSessions:new Set(uses.map(u=>u.sessionId)).size,
       modelUseObservations:uses.length,sampleLatencyMs:Number(baseline[2]),status:closed.status}
   } finally { try { await service?.close() } finally { await Promise.all([parent.dispose(), otherSession?.dispose()]) } }
@@ -201,16 +266,21 @@ function stepsFor(phase,ctx) {
       }]
   }
   if(phase==='C1')return [readInput,proof,publish('第一章：目标\n第二章：对 1 MiB 数据计算 SHA-256\n第三章：待完善','report.txt')]
-  assert.equal(phase,'C2')
+  assert.ok(['C2','C2_REJECTED','C3_REJECTED','C4_ESCALATED'].includes(phase), phase)
   assert.match(ctx.revision.reason,/第三章/)
   return [()=>feedback('read',{artifact_id:ctx.revision.source_artifact_id,artifact_hash:ctx.revision.source_artifact_hash}),readInput,proof,
-    ([old,analysis])=>publish(old.text.replace('第三章：待完善','第三章：'+analysis.text),'report.txt')()]
+    ([old,analysis])=>{
+      const measured = phase === 'C2_REJECTED' ? analysis.text.replace(' ms', ' 秒')
+        : phase === 'C3_REJECTED' ? analysis.text.split('，')[0] : analysis.text
+      return publish(old.text.replace(/第三章：.*/, '第三章：'+measured),'report.txt')()
+    }]
 }
 
 async function main(bin) {
   if (!bin) throw new Error('Pass the installed DSH CLI entry path.')
   const root = await mkdtemp(join(tmpdir(), 'orchestra-dsh-rework-'))
   const trace = []
+  const modelInputs = []
   const failures = []
   const provider = createServer(async (req, res) => {
     if (req.method !== 'POST' || !req.url?.endsWith('/chat/completions')) { res.writeHead(404).end(); return }
@@ -219,22 +289,43 @@ async function main(bin) {
       for await (const chunk of req) raw += chunk
       const request = JSON.parse(raw)
       const serialized = request.messages.map(m => typeof m.content === 'string' ? m.content : JSON.stringify(m.content)).join('\n')
-      const phase = /\"probe_phase\"\s*:\s*\"(A1|A2|B1|B2|C1|C2)\"/.exec(serialized)?.[1]
-      assert.ok(phase, serialized)
-      const marker = serialized.lastIndexOf('本次运行的成果与修订上下文：')
-      assert.ok(marker >= 0, 'trusted execution context missing')
-      const context = JSON.parse(serialized.slice(marker).split('\n')[0].slice('本次运行的成果与修订上下文：'.length))
-      const steps = stepsFor(phase, context)
-      assert.equal(request.model, SOURCE)
-      const replies = request.messages.filter((item) => item.role === 'tool').map(parseToolReply)
-      const call = steps[replies.length]?.(replies)
-      if (call) assert.ok(request.tools?.some((tool) => tool.function.name === call[0]), 'expected registered tool')
-      trace.push([phase, call?.[1].action ?? call?.[0] ?? 'done'])
-      const delta = call ? { role: 'assistant', tool_calls: [{ index: 0, id: 'probe_step_' + replies.length, type: 'function',
-        function: { name: call[0], arguments: JSON.stringify(call[1]) } }] }
-        : { role: 'assistant', content: '{"status":"done","output":{"ok":true}}' }
+      const phase = /\"probe_phase\"\s*:\s*\"(A1|A2|B1|B2|C1|C2|C2_REJECTED|C3_REJECTED|C4_ESCALATED)\"/.exec(serialized)?.[1]
+      let delta, hasTool = false
+      if (request.model === PLANNER) {
+        const diagnosis = serialized.split('\n').map(line => {
+          try { return JSON.parse(line) } catch { return null }
+        }).find((message) => message?.purpose === 'model_escalation')
+        assert.ok(diagnosis)
+        assert.equal(diagnosis.trigger, 'repeated_rework')
+        assert.equal(diagnosis.node_id, 'c')
+        assert.equal(diagnosis.attempt, 3)
+        const rejected = diagnosis.facts.filter(({ kind }) => kind === 'artifact_rejected')
+        assert.deepEqual(rejected.map(({ detail }) => detail.note).sort(), [...REJECTION_NOTES].sort())
+        assert.ok(diagnosis.available_upgrades.some(({ ref, model, capacity }) =>
+          ref === 'approved/stronger' && model === TARGET && capacity === 'expert'))
+        modelInputs.push({ trigger: diagnosis.trigger, node_id: diagnosis.node_id, attempt: diagnosis.attempt, rejected,
+          available_models: diagnosis.available_upgrades })
+        delta = { role: 'assistant', content: JSON.stringify({ classification: 'model_capability', model_ref: 'approved/stronger',
+          reason: '两次修订先误读测量单位，后遗漏同一测量的时间，需更强模型核对源材料与交付约束。',
+          evidence_ids: rejected.map(({ id }) => id) }) }
+      } else {
+        assert.ok(phase, serialized)
+        const marker = serialized.lastIndexOf('本次运行的成果与修订上下文：')
+        assert.ok(marker >= 0, 'trusted execution context missing')
+        const context = JSON.parse(serialized.slice(marker).split('\n')[0].slice('本次运行的成果与修订上下文：'.length))
+        const steps = stepsFor(phase, context)
+        assert.equal(request.model, phase === 'C4_ESCALATED' ? TARGET : SOURCE)
+        const replies = request.messages.filter((item) => item.role === 'tool').map(parseToolReply)
+        const call = steps[replies.length]?.(replies)
+        if (call) assert.ok(request.tools?.some((tool) => tool.function.name === call[0]), 'expected registered tool')
+        trace.push([phase, call?.[1].action ?? call?.[0] ?? 'done', request.model])
+        hasTool = Boolean(call)
+        delta = call ? { role: 'assistant', tool_calls: [{ index: 0, id: 'probe_step_' + replies.length, type: 'function',
+          function: { name: call[0], arguments: JSON.stringify(call[1]) } }] }
+          : { role: 'assistant', content: '{"status":"done","output":{"ok":true}}' }
+      }
       res.writeHead(200, { 'content-type': 'text/event-stream' })
-      for (const choice of [{ delta, finish_reason: null }, { delta: {}, finish_reason: call ? 'tool_calls' : 'stop' }]) {
+      for (const choice of [{ delta, finish_reason: null }, { delta: {}, finish_reason: hasTool ? 'tool_calls' : 'stop' }]) {
         res.write('data: ' + JSON.stringify({ id: 'probe', object: 'chat.completion.chunk', created: 1, model: request.model, choices: [{ index: 0, ...choice }] }) + '\n\n')
       }
       res.end('data: [DONE]\n\n')
@@ -250,7 +341,7 @@ async function main(bin) {
       { id: 'headless-runner', disabled: true },
       { id: 'llm-pi-ai', config: { providers: { [PROVIDER]: {
         api: 'openai-completions', apiKeyEnv: 'ORCHESTRA_DSH_PROBE_KEY', baseURL: 'http://127.0.0.1:' + provider.address().port + '/v1',
-        models: [PARENT, SOURCE, TARGET].map((id) => ({ id, contextWindow: 32768, maxTokens: 8192, input: ['text'] })),
+        models: [PARENT, SOURCE, TARGET, PLANNER].map((id) => ({ id, contextWindow: 32768, maxTokens: 8192, input: ['text'] })),
       } } } },
       { insert: [{ id: name, name: self.replaceAll('\\', '/') }] },
     ]))
@@ -265,6 +356,10 @@ async function main(bin) {
     assert.ok(trace.some(t => t[0] === 'B2' && t[1] === 'accept'))
     console.log(line)
     console.log('Native DSH tool actions: ' + JSON.stringify(trace))
+    if (escalationEnabled) {
+      assert.ok(modelInputs.length > 0 && trace.some(t => t[0] === 'C4_ESCALATED' && t[2] === TARGET))
+      console.log('Native DSH planner input: ' + JSON.stringify(modelInputs))
+    }
   } finally {
     await new Promise((done) => provider.close(done))
   }

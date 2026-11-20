@@ -23,7 +23,7 @@ import type { Tx } from '../infra/sqlite/driver.ts'
 import { getTaskPlanRecommendation } from '../service/task-planning.ts'
 import { readModelRoutingSettings } from '../service/model-routing-settings.ts'
 import { executionFeedbackContext } from '../service/rework-execution.ts'
-import { getEscalatedModel, noteAgentStopped, type createModelEscalationHost } from '../service/model-escalation.ts'
+import { noteAgentStopped, type createModelEscalationHost } from '../service/model-escalation.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 
 export type RunNodeParams = {
@@ -80,7 +80,7 @@ export type RunNodeDeps = {
   cancelSignal?: AbortSignal
   /** Trusted host routing. Incoming execution requests cannot set a model. */
   modelRouting?: ModelRouting
-  modelEscalation?: Pick<ReturnType<typeof createModelEscalationHost>, 'prepare'>
+  modelEscalation?: Pick<ReturnType<typeof createModelEscalationHost>, 'prepare' | 'select'>
 }
 
 export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunNodeResult> {
@@ -477,7 +477,7 @@ function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: 
     const preferred = settings.mapping[proposed.complexity]
     const assignment = selectExecutionModel(routing.profiles, preferred ? { ...proposed, preferredModel: preferred } : proposed)
     if (preferred) assignment.settings_revision = settings.revision
-    const selected = deps.modelEscalation ? getEscalatedModel(tx, deps.secret, row, routing.profiles, assignment, now) : assignment
+    const selected = deps.modelEscalation?.select(tx, row, routing.profiles, assignment, now) ?? assignment
     recordModel(tx, deps.secret, row, selected, 'selected')
     return selected
   })
