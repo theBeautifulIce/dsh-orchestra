@@ -98,6 +98,8 @@ it('only routes required autonomous decisions to the approval center and task wo
     expect(await get('/v1/decisions?status=resolved&run_id=' + auto.run_id))
       .toMatchObject({ items: [{ decision_id: 'autonomous', closed_reason: 'expired_final' }] })
     expect(await get('/v1/decisions/get?decision_id=supervised')).toMatchObject({ status: 'blocked_for_human' })
+    expect(await get('/v1/decisions/get?decision_id=audit-role')).toMatchObject({ status: 'blocked_for_human' })
+    withTx(db, (tx) => sweepDecisions(tx, TEST_SECRET, { now: '2026-11-21T03:00:00.000Z' }))
     expect(await get('/v1/decisions?status=resolved&run_id=' + assisted.run_id)).toMatchObject({
       items: expect.arrayContaining([expect.objectContaining({ decision_id: 'audit-role', closed_reason: 'expired_final' })]),
     })

@@ -63,7 +63,7 @@ export type SweepResult = {
   receipts_expired: number
   // 子 run 已收口但父节点还挂在 waiting/timing_out/stopping：由维护扫描推进父节点
   subworkflow_finished: string[]
-  // 决策卡超时：2 小时升级、24 小时按默认动作过期；过期后连带放掉 blocked_pre 节点
+  // 决策卡超时：满 2 小时升级，升级后再等 24 小时；到期连带放掉 blocked_pre 节点
   decisions_blocked: number
   decisions_expired: number
   decisions_released_nodes: string[]

@@ -404,8 +404,36 @@ export type SweepDecisionsOutcome = {
   closedRuns: string[]
 }
 
+function decisionEscalationKey(decisionId: string): string {
+  return 'decision.escalation:' + decisionId
+}
+
+function decisionEscalationTime(tx: Tx, row: { decision_id: string; revision: number; created_at: string }, now: string): number {
+  const idempotencyKey = decisionEscalationKey(row.decision_id)
+  const stored = tx.get<{ escalated_at: string }>(
+    "SELECT json_extract(payload_redacted, '$.escalated_at') AS escalated_at FROM events WHERE idempotency_key = ?",
+    [idempotencyKey],
+  )
+  if (stored) return Date.parse(stored.escalated_at)
+
+  // Legacy rows can have a newer revision after an operator records "continue waiting".
+  const legacy = tx.get<{ occurred_at: string }>(
+    "SELECT occurred_at FROM events WHERE type = 'decision.blocked' AND json_valid(payload_redacted) "
+      + "AND json_extract(payload_redacted, '$.decisionId') = ? AND json_extract(payload_redacted, '$.revision') <= ? "
+      + 'ORDER BY seq DESC LIMIT 1',
+    [row.decision_id, row.revision],
+  )
+  const escalatedAt = legacy && Date.parse(legacy.occurred_at) >= Date.parse(row.created_at) ? legacy.occurred_at : now
+  appendEvent(tx, {
+    type: 'decision.escalation_clock_restored',
+    idempotencyKey,
+    payload: { decisionId: row.decision_id, revision: row.revision, escalated_at: escalatedAt },
+  })
+  return Date.parse(escalatedAt)
+}
+
 /**
- * 维护扫描里的决策超时：满 2 小时升 blocked_for_human，满 24 小时按默认动作过期。
+ * 维护扫描里的决策超时：满 2 小时升级，实际升级后再等 24 小时按默认动作过期。
  * 与单个受理入口共用同一套 CAS 与事件语义；supervised 只升级不自动收口，
  * report_contradicted 一律留给人裁决（规格 3.6）。
  */
@@ -447,7 +475,12 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     const holdForHuman = row.node_status === 'blocked_post' || (row.human_attention === null
       ? timeoutDisposition(row.autonomy) === 'hold_for_human'
       : row.expiry_effect === 'escalate_only')
-    if (age >= expireAfterMs && !holdForHuman) {
+    // 自主审计的静默卡不走人工升级，继续按现有的创建时间计时。
+    let expiryAge = row.human_attention === 0 ? age : null
+    if (!holdForHuman && row.status === 'blocked_for_human') {
+      expiryAge = nowMs - decisionEscalationTime(tx, row, opts.now)
+    }
+    if (!holdForHuman && expiryAge !== null && expiryAge >= expireAfterMs) {
       const closed = cancelDecision(tx, secret, { decisionId: row.decision_id, now: opts.now, reason: 'expired_final' })
       // 并发的人工裁决抢先改了 revision：本轮不算自动处理成功
       if (!closed.changed) continue
@@ -467,11 +500,13 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
       if (res.changes !== 1) continue
       appendEvent(tx, {
         type: 'decision.blocked',
+        idempotencyKey: decisionEscalationKey(row.decision_id),
         payload: {
           decisionId: row.decision_id,
           revision: row.revision + 1,
           reason: 'timeout_escalated',
           blockedAfterMs,
+          escalated_at: opts.now,
         },
       })
       out.blocked += 1
