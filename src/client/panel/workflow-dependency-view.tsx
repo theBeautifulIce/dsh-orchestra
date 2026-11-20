@@ -46,6 +46,7 @@ export function WorkflowDependencyView({ doc, nodes }: { doc: CanvasDoc; nodes?:
               {attempt && <span>{nodeExecutionLabel(attempt)}</span>}
               {before && <small>{before.size > 1 ? '汇合，依赖' : '依赖'} {names(before)}</small>}
               {after && after.size > 1 && <small>{type === 'branch' ? '可选出口' : '分支至'} {names(after)}</small>}
+              {before && !after && <small>流程终点</small>}
             </li>
           })}
         </ul>

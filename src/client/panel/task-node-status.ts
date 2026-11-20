@@ -9,6 +9,7 @@ const UNVERIFIED = new Set(['failed_with_unverified', 'abandoned_unverified'])
 const QUEUE_PHASES: Record<string, { label: string; tone: string }> = {
   waiting_capacity: { label: '等待执行位', tone: 'waiting' },
   waiting_dependencies: { label: '等待上游完成', tone: 'waiting' },
+  blocked_dependencies: { label: '上游失败，步骤受阻', tone: 'blocked' },
   ready: { label: '就绪待派发', tone: 'waiting' },
   paused: { label: '已暂停', tone: 'blocked' },
   queued_unknown: { label: '排队原因未知', tone: 'waiting' },
@@ -53,5 +54,7 @@ export function nodeExecutionLabel(node: NodeStatus): string {
 export function waitingFor(node: NodeRunView, titles: ReadonlyMap<string, string>): string | undefined {
   if (!node.waiting_on?.length) return undefined
   const names = [...new Set(node.waiting_on)].map((id) => titles.get(id) || '未命名步骤').join('、')
-  return node.execution_state === 'waiting_dependencies' ? `等待：${names}` : `待核对的上游：${names}`
+  if (node.execution_state === 'waiting_dependencies') return `等待：${names}`
+  if (node.execution_state === 'blocked_dependencies') return `上游未成功：${names}`
+  return `待核对的上游：${names}`
 }

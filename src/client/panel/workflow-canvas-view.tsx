@@ -1,4 +1,4 @@
-import { currentAttempts, runtimeCanvasDoc, type RuntimeAttempt, type RunTopology } from './runtime-topology.ts'
+import { currentAttempts, runtimeCanvasDoc, separateOverlappingNodes, type RuntimeAttempt, type RunTopology } from './runtime-topology.ts'
 import { nodeExecutionLabel } from './task-node-status.ts'
 // 流程画布视图：草稿可拖动 / 连线 / 增删，已发布只读。
 // 画布只认一份定义：definition 由外部给，改动通过 onChange 把新定义交回去，
@@ -31,6 +31,7 @@ export type WorkflowCanvasViewProps = {
   canvasId?: string
   inspectNodes?: boolean
   runtimeNodes?: readonly RuntimeAttempt[]
+  runtimeNodesPartial?: boolean
   runtimeTopology?: RunTopology | null
   runtimeCompact?: boolean
   workspace?: boolean
@@ -49,11 +50,16 @@ type DragState =
   | { kind: 'link'; fromNodeId: string }
 
 export function WorkflowCanvasView({
-  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeTopology, runtimeCompact = false, workspace = false,
+  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeNodesPartial = false,
+  runtimeTopology, runtimeCompact = false, workspace = false,
 }: WorkflowCanvasViewProps) {
   const compact = readOnly && runtimeCompact
-  const doc = useMemo(() => runtimeCanvasDoc(definition, readOnly ? runtimeTopology : null), [definition, readOnly, runtimeTopology])
+  const repairOverlaps = compact && !workspace
   const nodeHeight = readOnly && runtimeTopology ? 108 : NODE_HEIGHT
+  const doc = useMemo(() => {
+    const base = runtimeCanvasDoc(definition, readOnly ? runtimeTopology : null)
+    return base && repairOverlaps ? separateOverlappingNodes(base, NODE_WIDTH, nodeHeight) : base
+  }, [definition, readOnly, runtimeTopology, repairOverlaps, nodeHeight])
   const [alert, setAlert] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
@@ -239,7 +245,8 @@ export function WorkflowCanvasView({
   const runtimeByNode = currentAttempts(runtimeNodes ?? [])
   const runtimeLabel = (id: string) => {
     const attempt = runtimeByNode.get(id)
-    return attempt ? nodeExecutionLabel(attempt) : '尚无运行记录'
+    if (attempt) return nodeExecutionLabel(attempt)
+    return runtimeNodesPartial ? '执行状态暂不可用' : '尚无运行记录'
   }
 
   return <div data-canvas-id={canvasId ?? 'workflow-canvas'} data-canvas-root="true" data-canvas-readonly={readOnly ? 'true' : 'false'} style={rootStyle}>
@@ -328,8 +335,9 @@ export function WorkflowCanvasView({
             aria-label={compact ? `步骤 ${node.title}` : `节点 ${node.node_id} ${node.title}`}
             aria-disabled={readOnly ? 'true' : 'false'}
             onMouseDown={(event) => startMove(event, node)}
-            style={{ ...nodeStyle, height: nodeHeight, left: node.position.x, top: node.position.y, ...(workspace ? {
-              boxSizing: 'border-box', cursor: readOnly ? 'default' : 'move',
+            style={{ ...nodeStyle, height: nodeHeight, left: node.position.x, top: node.position.y,
+              boxSizing: workspace || repairOverlaps ? 'border-box' : undefined, ...(workspace ? {
+              cursor: readOnly ? 'default' : 'move',
               borderColor: selected === node ? '#83a9dc' : '#d2deec', background: selected === node ? '#edf5ff' : COLOR.surface,
             } : {}) }}
           >
