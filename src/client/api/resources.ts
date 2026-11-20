@@ -17,7 +17,9 @@ export type ListDecisionsParams = { run_id?: string; status?: string; inbox?: 'h
 export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; query?: string; owner_task_id?: string }
 export type ListEventsParams = { from_seq?: number; limit?: number; cursor?: string }
 export type ListMemoryBatchesParams = { task_id?: string; limit?: number; cursor?: string }
-export type ActivityItem = Pick<EventView, 'seq' | 'event_id' | 'type' | 'occurred_at' | 'run_id' | 'node_run_id' | 'decision_id'> & { details?: ExecutionEntry['details'] }
+export type ActivityItem = Pick<EventView, 'seq' | 'event_id' | 'type' | 'occurred_at' | 'run_id' | 'node_run_id' | 'decision_id'> & {
+  details?: ExecutionEntry['details']; attention?: boolean
+}
 export type EffectReview = {
   node_run_id: string; run_id: string; revision: number
   evidence: Array<{ evidence_id: string; tool: string; exit_code: number; finished_at: string; verdict: 'applied' | 'not_applied' }>
@@ -72,9 +74,10 @@ export function createResourcesApi(client: ApiClient) {
     verifyLedger: (): Promise<ApiResult<LedgerVerify>> => client.get('/v1/ledger/verify'),
     listEvents: (params: ListEventsParams = {}): Promise<ApiResult<Page<EventView>>> =>
       client.get('/v1/events', compact(params)),
-    listActivity: (params: { run_id?: string; task_id?: string; before_seq?: number; limit?: number } = {}): Promise<ApiResult<{ items: ActivityItem[]; next_before_seq: number | null }>> =>
+    listActivity: (params: { run_id?: string; task_id?: string; before_seq?: number; limit?: number; filter?: 'all' | 'attention' } = {}): Promise<ApiResult<{ items: ActivityItem[]; next_before_seq: number | null }>> =>
       client.get('/v1/activity', compact(params)),
-    listExecutionHistory: (params: { run_id?: string; task_id?: string; node_run_id?: string; before?: number }): Promise<ApiResult<{ items: ExecutionEntry[]; next_before: number | null }>> =>
+    listExecutionHistory: (params: { run_id?: string; task_id?: string; node_run_id?: string; before?: number; limit?: number;
+      filter?: 'all' | 'attention' | 'tool' | 'report' | 'model' }): Promise<ApiResult<{ items: ExecutionEntry[]; next_before: number | null }>> =>
       client.get('/v1/execution-history', compact(params)),
     listWorkflows: (params: ListWorkflowsParams = {}): Promise<ApiResult<Page<WorkflowListItem>>> =>
       client.get('/v1/workflows', compact(params)),

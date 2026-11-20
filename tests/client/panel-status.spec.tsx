@@ -242,11 +242,11 @@ describe('WP-A 面板侧 G5 门禁', () => {
 
     const heading = view.findAll('h3').find((element) => element.textContent === '执行步骤 · 20')
     const steps = heading?.closest('section')
-    expect(steps?.querySelector('p')?.textContent).toBe('进行中')
-    const rows = [...(steps?.querySelectorAll('ol > li > article > div:first-child') ?? [])]
-    expect(rows.map((row) => [row.querySelector('strong')?.textContent, row.querySelector('span')?.textContent]))
+    expect([...view.container.querySelectorAll('.task-inspector-badges span')].some((badge) => badge.textContent === '进行中')).toBe(true)
+    const rows = [...(steps?.querySelectorAll('.task-flow-step') ?? [])]
+    expect(rows.map((row) => [row.querySelector('strong')?.textContent, row.querySelector('.task-flow-step-result')?.textContent]))
       .toEqual(NODE_STATUS_LABELS.map(({ status, status_label }) => ['步骤 ' + status, status_label]))
-    expect(new Set(rows.map((row) => row.querySelector('span')?.textContent)).size).toBe(20)
+    expect(new Set(rows.map((row) => row.querySelector('.task-flow-step-result')?.textContent)).size).toBe(20)
     await view.click(view.findAll('button').find((button) => button.textContent === '返回任务')!)
     await view.click(view.findAll('button').find((button) => button.textContent === '运行 · 3')!)
     expect(view.findAll('.task-run-history button > span:nth-child(2)').map((element) => element.textContent))

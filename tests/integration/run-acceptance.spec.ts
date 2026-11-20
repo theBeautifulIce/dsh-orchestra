@@ -10,6 +10,7 @@ import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { applyRunAcceptance, evaluateRunAcceptance } from '../../src/service/commands/run-acceptance.ts'
 import { closeRun } from '../../src/service/commands/run-close.ts'
 import { getTaskSummary } from '../../src/service/queries/tasks.ts'
+import { getRun, listRuns } from '../../src/service/queries/runs.ts'
 import { createRun } from '../../src/service/runs.ts'
 import { WorkflowCatalog } from '../../src/service/workflows.ts'
 import { freshLedger, TEST_SECRET } from '../fixtures/ledger.ts'
@@ -200,6 +201,33 @@ function executionFacts(db: Db, runId: string): string {
 }
 
 describe('交付验收阶段', () => {
+  it('运行详情只展示绑定本次计划的验收事实，区分文件规则和工具退出码', () => {
+    const { db } = freshLedger()
+    try {
+      const catalog = catalogFor(db, 'wf-acceptance')
+      const created = createRun(db, catalog, { taskTitle: '核对交付', workflowId: 'wf-acceptance', workflowVersion: '1', now: NOW })
+      const runId = created.run_id
+      expect(getRun(db, runId).delivery_checks).toEqual({ items: [], has_more: false })
+      seedPlan(db, { planId: 'visible-plan', taskId: created.task_id, runId,
+        deliverables: [artifactDeliverable('汇总内容', '合成账目.md', 10), toolDeliverable('工具核对', 'verify.ledger')] })
+      const node = nodeRunId(db, runId, 'n1')
+      seedArtifact(db, { artifactId: 'whole-file', runId, fileName: '合成账目.md', nodeRunId: node, bytes: 20 })
+      seedToolExecution(db, { nodeRunId: node, tool: 'verify.ledger', exitCode: 7 })
+      expect(finishRun(db, runId, 'done')).toBe('succeeded')
+      withTx(db, (tx) => tx.run('UPDATE run_acceptance_results SET content_hash = ? WHERE run_id = ? AND kind = ?',
+        ['b'.repeat(64), runId, 'artifact']))
+      expect(getRun(db, runId).delivery_checks?.items).toMatchObject([{ kind: 'tool_evidence', outcome: 'failed',
+        reason: 'tool_exit_code_mismatch', tool: 'verify.ledger', expected_exit_code: 0, exit_codes: [7] }])
+      withTx(db, (tx) => tx.run('UPDATE run_acceptance_results SET content_hash = ? WHERE run_id = ? AND kind = ?',
+        ['a'.repeat(64), runId, 'artifact']))
+      const checks = getRun(db, runId).delivery_checks!
+      expect(checks.items).toContainEqual(expect.objectContaining({ kind: 'artifact', outcome: 'passed',
+        file_name: '合成账目.md', minimum_bytes: 10, bytes: 20 }))
+      expect(checks.items.every((item) => !('evidence_json' in item) && !('sha256' in item))).toBe(true)
+      expect(listRuns(db).items[0]?.delivery_checks).toBeUndefined()
+    } finally { db.raw.close() }
+  })
+
   it('AC2 字节不足：验收 failed，run 终态仍是 succeeded，任务显示「交付验收失败」', () => {
     const { db } = freshLedger()
     const catalog = catalogFor(db, 'wf-bytes')

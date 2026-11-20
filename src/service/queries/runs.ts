@@ -4,6 +4,7 @@ import type { Db } from '../../infra/sqlite/driver.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx, type ReadCtx } from './read-tx.ts'
 import { readProjectContextMetadata, type ProjectContextMetadata } from '../project-shared-context.ts'
+import type { AcceptanceKind, AcceptanceOutcome } from '../commands/run-acceptance.ts'
 
 export type NodeRunCount = { status: string; count: number }
 export type NodeRunPreview = {
@@ -14,6 +15,21 @@ export type NodeRunPreview = {
   status: string
   revision: number
   updated_at: string
+}
+
+export type RunDeliveryCheck = {
+  result_id: string
+  kind: AcceptanceKind
+  outcome: AcceptanceOutcome
+  reason: string | null
+  evaluated_at: string
+  rule_version: string
+  file_name?: string
+  minimum_bytes?: number
+  bytes?: number
+  tool?: string
+  expected_exit_code?: number
+  exit_codes?: number[]
 }
 
 export type RunSummary = {
@@ -38,6 +54,7 @@ export type RunSummary = {
   scheduled_for?: string | null
   trigger_kind?: TaskOrigin | null
   project_context?: ProjectContextMetadata
+  delivery_checks?: { items: RunDeliveryCheck[]; has_more: boolean }
 }
 
 type RunRow = Record<string, unknown> & { run_id: string }
@@ -120,6 +137,34 @@ export function getRun(db: Db, runId: string): RunSummary {
     const run = ctx.tx.get<RunRow>(RUN_SELECT + ' WHERE r.run_id = ?', [runId])
     if (!run) throw new OrchError('NOT_FOUND', '没找到这次运行', { run_id: runId })
     const project_context = readProjectContextMetadata(ctx.tx, runId)
-    return { ...toRunSummary(ctx, run), ...(project_context ? { project_context } : {}) }
+    const delivery_checks = readDeliveryChecks(ctx, runId)
+    return { ...toRunSummary(ctx, run), ...(project_context ? { project_context } : {}), delivery_checks }
   })
 }
+
+function readDeliveryChecks({ tx }: ReadCtx, runId: string): NonNullable<RunSummary['delivery_checks']> {
+  // Match the same confirmed plan and content hash that the acceptance writer uses.
+  const rows = tx.all<Pick<RunDeliveryCheck, 'result_id' | 'kind' | 'outcome' | 'reason' | 'evaluated_at' | 'rule_version'> & { evidence_json: string }>(`
+    WITH bound AS (
+      SELECT p.plan_id, p.content_hash FROM task_plans p JOIN start_run_operations o ON o.operation_id = p.launch_operation_id
+      WHERE o.run_id = ? ORDER BY p.created_at, p.plan_id LIMIT 1
+    )
+    SELECT a.result_id, a.kind, a.outcome, a.reason, a.evaluated_at, a.rule_version, a.evidence_json
+    FROM run_acceptance_results a JOIN bound b USING (plan_id, content_hash)
+    WHERE a.run_id = ? ORDER BY a.deliverable_key LIMIT 51`, [runId, runId])
+  return { has_more: rows.length > 50, items: rows.slice(0, 50).map(({ evidence_json, ...row }) => {
+    const value = (JSON.parse(evidence_json) as { evidence?: unknown } | null)?.evidence
+    const evidence = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+    if (row.kind === 'artifact') return { ...row,
+      ...(typeof evidence.file_name === 'string' && { file_name: evidence.file_name }),
+      ...(isCount(evidence.minimum_bytes) && { minimum_bytes: evidence.minimum_bytes }),
+      ...(isCount(evidence.bytes) && { bytes: evidence.bytes }) }
+    return { ...row,
+      ...(typeof evidence.tool === 'string' && { tool: evidence.tool }),
+      ...(isInteger(evidence.expected_exit_code) && { expected_exit_code: evidence.expected_exit_code }),
+      ...(Array.isArray(evidence.exit_codes) && { exit_codes: [...new Set(evidence.exit_codes.filter(isInteger))].slice(0, 20) }) }
+  }) }
+}
+
+function isInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) }
+function isCount(value: unknown): value is number { return isInteger(value) && value >= 0 }

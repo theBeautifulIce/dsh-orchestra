@@ -137,15 +137,26 @@ describe('任务列表页', () => {
       if (path === '/v1/tasks') return { ok: true, data: page([task]) }
       if (path === '/v1/tasks/get') return { ok: true, data: task }
       if (path === '/v1/runs') return { ok: true, data: { items: [runSummary({ total: 1 }), runSummary({ run_id: 'r2' })] } }
+      if (path === '/v1/runs/get') return { ok: true, data: runSummary({ total: 14, delivery_checks: { has_more: false, items: [
+        { result_id: 'a1', kind: 'artifact', outcome: 'passed', reason: null, evaluated_at: task.updated_at,
+          rule_version: 'rule-a', file_name: '账目核验.md', minimum_bytes: 16, bytes: 243 },
+        { result_id: 'a2', kind: 'tool_evidence', outcome: 'failed', reason: 'tool_exit_code_mismatch', evaluated_at: task.updated_at,
+          rule_version: 'rule-b', tool: 'ro.check', expected_exit_code: 0, exit_codes: [7] },
+      ] } }) }
       if (path === '/v1/node-runs' && params.get('run_id') === 'r1') return { ok: true, data: { items: [
         nodeRunView({ node_id: '核对清单', execution_ids: ['ev1', 'wrong'], execution_count: 2 }),
+        ...Array.from({ length: 12 }, (_, index) => nodeRunView({ node_run_id: `ordinary-${index}`, node_id: `待执行${index}`,
+          status: 'queued', evidence_state: 'not_required', side_effect_policy: 'pure', evidence_state_reason: null })),
+        nodeRunView({ node_run_id: 'visible-failure', node_id: '失败尝试', status: 'failed', status_label: '执行失败',
+          evidence_state: 'none', evidence_state_reason: null }),
       ] } }
       if (path === '/v1/artifacts' && params.get('run_id') === 'r1') return { ok: true, data: {
         items: [{ artifact_id: '交付清单', sha256: 'hash', created_at: task.updated_at }], has_more: false,
       } }
       if (path === '/v1/evidence/get') return { ok: true, data: {
         evidence_id: params.get('evidence_id'), node_run_id: 'nr1', run_id: params.get('evidence_id') === 'ev1' ? 'r1' : 'r2',
-        attempt: 1, strength: 'strong', source: 'run_tool', tool: 'ro.verify', exit_code: 0, observed_at: task.updated_at,
+        attempt: 1, strength: 'strong', source: 'run_tool', tool: 'workspace_read_sample', exit_code: 0, observed_at: task.updated_at,
+        stdout_hash: 'fixture-hash',
       } }
       return { ok: false, error: { code: 'NOT_FOUND', message: 'missing', retryable: false } }
     })
@@ -166,12 +177,29 @@ describe('任务列表页', () => {
     await view.flush()
     expect(inspector.textContent).toContain('交付清单')
     await view.click(tab('证据'))
+    await view.flush()
+    expect(inspector.textContent).toContain('产物 · 账目核验.md · 通过')
+    expect(inspector.textContent).toContain('规则核对产物名称、来源步骤和文件大小')
+    expect(inspector.textContent).toContain('工具实际退出码与验收规则不符')
+    expect(inspector.textContent).toContain('失败尝试')
+    expect(inspector.textContent).not.toContain('待执行11')
+    const other = [...inspector.querySelectorAll('summary')].find((summary) => summary.textContent?.includes('其他尝试 · 12'))!
+    expect(other.closest('details')!.open).toBe(false)
+    await view.click(other)
+    await view.flush()
+    expect(inspector.textContent).toContain('待执行11')
     expect(service.calls.some((call) => call.path === '/v1/evidence/get')).toBe(false)
-    const summaries = inspector.querySelectorAll('summary')
+    const summaries = [...inspector.querySelectorAll('summary')].filter((summary) => summary.textContent?.includes('工具执行记录'))
+    expect(summaries).toHaveLength(2)
     await view.click(summaries[0]!)
     await view.click(summaries[1]!)
     await view.flush()
-    expect(inspector.textContent).toContain('系统证据（账本已核验）· ro.verify · 退出码 0')
+    expect(inspector.textContent).toContain('读取已授权的工作区资料')
+    expect(inspector.textContent).toContain('只读工具正常退出 · 退出码 0')
+    const technical = [...inspector.querySelectorAll('summary')].find((summary) => summary.textContent === '查看核验明细')!
+    expect(technical.closest('details')!.open).toBe(false)
+    expect(technical.closest('details')!.textContent).toContain('fixture-hash')
+    expect(technical.closest('details')!.textContent).toContain('workspace_read_sample')
     expect(inspector.textContent).toContain('暂时无法确认这条系统证据')
     await view.click(tab('关闭'))
     expect(view.container.querySelector('#task-inspector')).toBeNull()
@@ -296,17 +324,32 @@ describe('等你决定页', () => {
 describe('待核实页', () => {
   it('Q-33 人工签认只按人证查询，在节点证据栏保留分类且不显示已验证', async () => {
     const id = 'att_host_confirmed'
+    let scope: Record<string, unknown> = { run_id: 'r1', node_run_id: 'nr1', attempt: 1 }
     const { api, service } = apiFrom(({ path, params }) => {
       if (path !== '/v1/attestations/get' || params.get('attestation_id') !== id) throw new Error(path)
       return { ok: true, data: { attestation_id: id, claim: 'action_started', attested_by: 'human:auditor',
+        ...scope,
         attested_at: '2026-11-18T00:00:00.000Z', action_start_source: 'human_attested', classification: '人证，不是系统证据', summary: null } }
     })
-    const view = await renderPanel(<NodeEvidence api={api} node={nodeRunView({ attestation_id: id, action_start_source: 'human_attested' })} reloadVersion={0} />)
+    const node = nodeRunView({ attestation_id: id, action_start_source: 'human_attested' })
+    const view = await renderPanel(<NodeEvidence api={api} node={node} reloadVersion={0} />)
     await view.click(view.findAll('summary').find((summary) => summary.textContent === '人工签认')!)
     await view.flush()
-    expect(view.text()).toContain('人证，不是系统证据')
+    expect(view.text()).toContain('有人确认操作已启动')
+    expect(view.text()).toContain('签认人 human:auditor')
+    expect(view.text()).toContain('签认覆盖本步骤的第 1 次尝试')
     expect(view.text()).not.toContain('已验证')
     expect(service.calls.map((query) => query.path)).toEqual(['/v1/attestations/get'])
+    scope = { ...scope, attempt: 2 }
+    await view.rerender(<NodeEvidence api={api} node={node} reloadVersion={1} />)
+    await view.flush()
+    expect(view.text()).toContain('暂时无法读取这条签认')
+    expect(view.text()).not.toContain('human:auditor')
+    scope = {}
+    await view.rerender(<NodeEvidence api={api} node={node} reloadVersion={2} />)
+    await view.flush()
+    expect(view.text()).toContain('暂时无法读取这条签认')
+    expect(view.text()).not.toContain('签认覆盖本步骤')
     view.unmount()
   })
 
@@ -341,6 +384,7 @@ describe('待核实页', () => {
     expect(view.text()).toContain('声明与核实结果不一致')
     expect(view.text()).toContain('尚无外部操作证据')
     expect(view.text()).toContain('只读策略无需核实')
+    expect(view.text()).not.toContain('未知')
     await view.click(view.findAll('button').find((button) => button.textContent === '查看相关决定')!)
     expect(seen).toEqual(['related-effect'])
     view.unmount()

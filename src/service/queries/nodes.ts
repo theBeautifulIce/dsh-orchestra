@@ -62,6 +62,7 @@ export type NodeRunView = {
   evidence_strength: null
   evidence_state: 'none' | 'not_required' | 'unverified' | 'settled'
   evidence_state_reason: string | null
+  effect_resolution_basis?: 'verified_none' | 'evidence' | 'decision' | null
   effect_decision_id?: string | null
   execution_ids: string[]
   execution_count: number
@@ -108,7 +109,7 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     : row.status === 'done' || executionIds.length === 0 ? 'none' : 'unverified'
   const reasons = {
     none: '尚无能够核实这次外部操作结果的证据。',
-    not_required: '只读策略不要求外部操作核实证据。',
+    not_required: '此步骤按只读策略执行，无需核验外部操作。',
     unverified: '已有工具执行记录，外部操作结果仍待核实。',
     settled: '账本已有结算记录。',
   }
@@ -130,10 +131,12 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     evidence_strength: null,
     evidence_state: evidenceState,
     evidence_state_reason: reasons[evidenceState],
+    effect_resolution_basis: row.resolution_basis === 'verified_none' || row.resolution_basis === 'evidence' || row.resolution_basis === 'decision'
+      ? row.resolution_basis : null,
     effect_decision_id: typeof row.effect_decision_id === 'string' ? row.effect_decision_id : null,
     execution_ids: executionIds,
     execution_count: executionIds.length,
-    projection_missing: declared === null ? ['declared_effect'] : [],
+    projection_missing: declared === null && row.side_effect_policy !== 'pure' ? ['declared_effect'] : [],
     attestation_id: typeof row.attestation_id === 'string' ? row.attestation_id : null,
     action_start_source: typeof row.attestation_id === 'string' ? 'human_attested' : null,
     stop_evidence: typeof row.stop_evidence === 'string' ? row.stop_evidence : null,

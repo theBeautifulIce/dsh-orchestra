@@ -8,11 +8,26 @@ const TITLES: Record<string, string> = {
   status_changed: '节点状态变更', verify_human: '请求人工核验', lease_granted: '分配执行租约',
   lease_lost: '执行租约失效', deadline_rearmed: '更新执行时限', tool_started: '工具调用开始',
   tool_finished: '工具调用结束', report_applied: '执行报告已入账', report_rejected: '执行报告被拒绝',
+  report_replayed: '记录执行报告重放',
   'report.stale': '忽略过期报告', 'report.contradicted': '检测到报告冲突',
   'bridge.step': '智能体执行步骤', 'bridge.turn': '智能体提交报告', 'bridge.tool.call': '智能体请求调用工具',
   'bridge.tool.start': '宿主开始调用工具', 'bridge.tool.result': '宿主返回工具结果',
   'executor.model_selected': '选择执行模型', 'executor.model_confirmed': '宿主确认模型',
   'executor.model_used': '记录实际执行模型', 'executor.model_rejected': '模型选择未获确认',
+}
+
+const attention = `(e.type IN ('verify_human','lease_lost','report_rejected','report.contradicted','executor.model_rejected')
+  OR CASE WHEN e.type IN ('status_changed','tool_finished') AND LENGTH(e.payload) <= 512000 AND json_valid(e.payload) THEN
+    (e.type = 'status_changed' AND json_extract(e.payload, '$.to') IN
+      ('blocked_pre','blocked_post','indeterminate_side_effect','startup_unknown','paused_bridge_missing','failed','timeout','orphaned','failed_with_unverified','abandoned_unverified'))
+    OR (e.type = 'tool_finished' AND json_type(e.payload, '$.exit_code') = 'integer' AND json_extract(e.payload, '$.exit_code') <> 0)
+  ELSE 0 END)`
+const filters: Readonly<Record<string, string>> = {
+  all: '1',
+  attention,
+  tool: "(e.type IN ('tool_started','tool_finished') OR e.type GLOB 'bridge.tool.*')",
+  report: "(e.type IN ('report_applied','report_rejected','report_replayed','bridge.turn') OR e.type GLOB 'report.*')",
+  model: "e.type GLOB 'executor.model_*'",
 }
 const FIELDS: Readonly<Record<string, string>> = {
   from: '原状态', to: '新状态', status: '状态', next_status: '报告状态', reason: '原因',
@@ -50,6 +65,7 @@ export function describeEvent(type: string, payload: string | null): Detail[] {
     tool: body.tool, timeoutMs: body.timeoutMs, callId: body.callId, status: report.status } : body
   const details: Detail[] = []
   for (const [key, label] of Object.entries(FIELDS)) add(details, label, fields[key])
+  if (type === 'report_replayed') add(details, '报告序号', body.report_seq)
   if (type === 'executor.model_used') {
     const usage = object(body.usage)
     add(details, '提供方', usage.provider)
@@ -63,20 +79,27 @@ export function describeEvent(type: string, payload: string | null): Detail[] {
   return details
 }
 
-export function listExecutionHistory(db: Db, opts: { taskId?: string; runId?: string; nodeId?: string; before?: number; limit?: number }) {
+export function listExecutionHistory(db: Db, opts: {
+  taskId?: string; runId?: string; nodeId?: string; before?: number; limit?: number; filter?: string
+}) {
   const scopes = [opts.taskId, opts.runId, opts.nodeId].filter(Boolean)
   const limit = opts.limit ?? 35
   const before = opts.before ?? Number.MAX_SAFE_INTEGER
   if (scopes.length !== 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(before) || before < 1) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '执行日志必须指定一个有效的任务、运行或节点范围')
   }
+  const filter = opts.filter
+  if (filter !== undefined && !Object.hasOwn(filters, filter)) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '执行日志筛选无效')
   const scope = opts.nodeId ? 'e.node_run_id' : opts.runId ? 'n.run_id' : 'r.task_id'
   return withReadTx(db, ({ tx, as_of_seq }) => {
-    const rows = tx.all<Row>(`SELECT e.id,e.type,e.created_at,CASE WHEN LENGTH(e.payload) <= 512000 THEN e.payload ELSE '{}' END AS payload,
-      n.run_id,n.node_id,n.node_run_id FROM node_run_events e JOIN node_runs n ON n.node_run_id=e.node_run_id
-      JOIN runs r ON r.run_id=n.run_id WHERE ${scope} = ? AND e.id < ? ORDER BY e.id DESC LIMIT ?`, [scopes[0], before, limit + 1])
-    const items = rows.slice(0, limit).map(({ payload, ...row }) => ({
-      ...row, title: TITLES[row.type] ?? row.type, details: describeEvent(row.type, payload),
+    const rows = tx.all<Row & { attention?: number }>(`SELECT e.id,e.type,e.created_at,CASE WHEN LENGTH(e.payload) <= 512000 THEN e.payload ELSE '{}' END AS payload,
+      n.run_id,n.node_id,n.node_run_id${filter !== undefined ? `, CASE WHEN ${attention} THEN 1 ELSE 0 END AS attention` : ''}
+      FROM node_run_events e JOIN node_runs n ON n.node_run_id=e.node_run_id
+      JOIN runs r ON r.run_id=n.run_id WHERE ${scope} = ? AND e.id < ?
+      ${filter === undefined ? '' : `AND ${filters[filter]}`} ORDER BY e.id DESC LIMIT ?`, [scopes[0], before, limit + 1])
+    const items = rows.slice(0, limit).map(({ payload, attention: flagged, ...row }) => ({
+      ...row, title: Object.hasOwn(TITLES, row.type) ? TITLES[row.type]! : row.type, details: describeEvent(row.type, payload),
+      ...(flagged === undefined ? {} : { attention: flagged === 1 }),
     }))
     return { items, next_before: rows.length > limit ? items.at(-1)!.id : null, as_of_seq }
   })

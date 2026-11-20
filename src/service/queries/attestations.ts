@@ -4,6 +4,9 @@ import { withReadTx } from './read-tx.ts'
 
 export type AttestationView = {
   attestation_id: string
+  run_id: string
+  node_run_id: string
+  attempt: number
   claim: string
   attested_by: string
   attested_at: string
@@ -15,13 +18,16 @@ export type AttestationView = {
 export function getAttestationSnapshot(db: Db, attestationId: string): { item: AttestationView; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const row = ctx.tx.get<Record<string, unknown>>(
-      'SELECT attestation_id, claim, attested_by, attested_at, action_start_source, summary FROM attestations WHERE attestation_id = ?',
+      'SELECT attestation_id, run_id, node_run_id, attempt, claim, attested_by, attested_at, action_start_source, summary FROM attestations WHERE attestation_id = ?',
       [attestationId],
     )
     if (!row) throw new OrchError('NOT_FOUND', '没找到这条人工签字')
     return {
       item: {
         attestation_id: String(row.attestation_id),
+        run_id: String(row.run_id),
+        node_run_id: String(row.node_run_id),
+        attempt: Number(row.attempt),
         claim: String(row.claim),
         attested_by: String(row.attested_by),
         attested_at: String(row.attested_at),
