@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync, fork } from 'node:child_process'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { createElement, type ComponentType } from 'react'
@@ -21,10 +21,56 @@ it('包声明保留私有发布、默认阶段和显式宿主注入', () => {
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
   expect(manifest).toMatchObject({ private: true, exports: { '.': { default: './lib/index.js' }, './client': './lib/client.js' },
     dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web', inject: expect.arrayContaining([
-      '@deepseek-ai/dsh-client-ui-sidebar', '@deepseek-ai/dsh-client-ui-layout',
+      '@deepseek-ai/dsh-client-ui-sidebar', '@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-input-trigger',
     ]) } } })
   expect(JSON.parse(readFileSync('orchestra.config.json', 'utf8')).phase).toBe('S2')
   expect(readFileSync('cordis.patch.yml', 'utf8')).toMatch(/id: dsh-orchestra, name: dsh-orchestra/)
+})
+
+it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版清单', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-package-inject-'))
+  const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
+  const candidate = manifest.dsh.client.inject as string[]
+  const inputTrigger = '@deepseek-ai/dsh-client-ui-input-trigger'
+  const previous = candidate.filter((dependency) => dependency !== inputTrigger)
+  const files: Record<string, string> = {
+    'package/package.json': '',
+    'package/lib/index.js': 'export function serveDshOrchestra() {}',
+    'package/lib/index.d.ts': 'export declare function serveDshOrchestra(): void',
+    'package/lib/client.js': 'window.__ModuleLoader__.load({})',
+    'package/cordis.patch.yml': '[]',
+    'package/orchestra.config.json': '{"phase":"S2"}',
+    'package/README.md': 'Install the fixture',
+    'package/docs/runbook.md': 'Runbook fixture',
+    'package/docs/trial-circles.md': 'Trial fixture',
+  }
+  for (let version = 1; version <= 57; version++) {
+    files['package/lib/infra/sqlite/migrations/' + String(version).padStart(3, '0') + '_fixture.sql'] = 'SELECT 1;'
+  }
+  function pack(name: string, inject: string[]) {
+    const archive = join(root, name + '.tgz')
+    writeFileSync(join(root, 'package/package.json'), JSON.stringify({
+      ...manifest, dsh: { ...manifest.dsh, client: { ...manifest.dsh.client, inject } },
+    }))
+    execFileSync('tar', ['-czf', archive, '-C', root, ...Object.keys(files)])
+    return archive
+  }
+  try {
+    for (const [file, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, file)), { recursive: true })
+      writeFileSync(join(root, file), content)
+    }
+    const valid = pack('candidate', [...candidate].reverse())
+    expect(inspectPackage(valid).migrations).toHaveLength(57)
+    expect(() => inspectPackage(valid, { previous: true })).toThrow('DSH client inject must contain exactly')
+    const legacy = pack('previous', previous)
+    expect(inspectPackage(legacy, { previous: true }).migrations).toHaveLength(57)
+    expect(() => inspectPackage(legacy)).toThrow('DSH client inject must contain exactly')
+    expect(() => inspectPackage(pack('wrong-dependency', [...previous, '@deepseek-ai/dsh-client-ui-conversation'])))
+      .toThrow('DSH client inject must contain exactly')
+    expect(() => inspectPackage(pack('duplicate-dependency', [...previous, previous[0]!])))
+      .toThrow('DSH client inject must contain exactly')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 it.runIf(Boolean(tarball && sha))('验包拒绝缺少清单声明的任一发布指南', () => {

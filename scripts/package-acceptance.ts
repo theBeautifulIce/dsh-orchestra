@@ -10,6 +10,17 @@ const baseFiles = new Set([
 ])
 const migrationPath = /^package\/lib\/infra\/sqlite\/migrations\/(\d{3})_[a-z0-9_]+\.sql$/
 const guideFiles = ['docs/runbook.md', 'docs/trial-circles.md']
+// The pinned G5 predecessor predates the native slash menu. Both builds
+// advertise 0.1.0, so the rehearsal's existing previous role selects this contract.
+const previousClientInject = [
+  '@deepseek-ai/dsh-client-locale',
+  '@deepseek-ai/dsh-client-ui-settings',
+  '@deepseek-ai/dsh-client-ui-renderer',
+  '@deepseek-ai/dsh-client-ui-layout',
+  '@deepseek-ai/dsh-client-ui-sidebar',
+  '@deepseek-ai/dsh-client-ui-workspace',
+]
+const candidateClientInject = [...previousClientInject, '@deepseek-ai/dsh-client-ui-input-trigger']
 
 export function inspectPackage(path: string, options: { expectedSha256?: string; previous?: boolean } = {}) {
   const archive = resolve(path)
@@ -45,8 +56,14 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
     || manifest.main !== 'lib/index.js' || manifest.types !== 'lib/index.d.ts'
     || manifest.exports?.['.']?.default !== './lib/index.js' || manifest.exports?.['./client'] !== './lib/client.js'
     || manifest.dsh?.bundle?.patch !== './cordis.patch.yml' || manifest.dsh?.manifestVersion !== 1
-    || manifest.dsh?.client?.platform !== 'web' || manifest.dsh?.client?.inject?.length !== 6 || phase !== 'S2') {
+    || manifest.dsh?.client?.platform !== 'web' || phase !== 'S2') {
     throw new Error('Package manifest, advertised DSH client or default phase has changed')
+  }
+  const expectedInject = options.previous ? previousClientInject : candidateClientInject
+  const inject = manifest.dsh.client.inject
+  if (!Array.isArray(inject) || inject.length !== expectedInject.length
+    || !expectedInject.every((dependency) => inject.includes(dependency))) {
+    throw new Error('DSH client inject must contain exactly: ' + expectedInject.join(', '))
   }
   if (!options.previous && !patch.startsWith('[')) throw new Error('DSH bundle patch must contain a top-level sequence')
   if (!read('lib/client.js').toString('utf8').includes('window.__ModuleLoader__.load')
