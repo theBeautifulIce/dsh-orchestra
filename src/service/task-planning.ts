@@ -3,7 +3,7 @@ import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { WorkflowDefinition } from '../core/workflow-def.ts'
-import { validatePublishLayer, validateSaveLayer, type PublishContext, type WorkflowDoc } from '../core/workflow-doc.ts'
+import { fitGeneratedWorkflowLayout, validatePublishLayer, validateSaveLayer, type PublishContext, type WorkflowDoc } from '../core/workflow-doc.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel,
   type ModelPlanningProfile, type ModelRecommendation, type ModelRoutingContext } from '../executor/model-routing.ts'
 import type { ToolRegistry } from '../executor/tools.ts'
@@ -403,7 +403,7 @@ function validWaitConfig(config: Record<string, unknown> | undefined): boolean {
 
 /** 把主脑给的流程草案整理成可保存、可发布的流程文档 */
 function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtimeNodeTypes: ReadonlySet<string>): WorkflowDoc {
-  const parsed = generatedDocSchema.safeParse(draft)
+  const parsed = generatedDocSchema.safeParse(fitGeneratedWorkflowLayout(draft))
   if (!parsed.success) {
     throw new OrchError('WORKFLOW_DEFINITION_INVALID', '主脑生成的流程不符合约定结构', {
       fields: parsed.error.issues.map((issue) => issue.path.join('.')).slice(0, 12),

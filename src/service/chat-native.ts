@@ -8,7 +8,7 @@ import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
 import { classifyChatTask } from './chat-task-intent.ts'
-import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, type ChatOutcome } from './chat-display.ts'
+import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
 import { readOutstandingFiles } from './chat-expected-files.ts'
 import type { ChatModelRecoveryChecks } from './chat-model-recovery.ts'
 import { isRunTerminal } from './commands/run-close.ts'
@@ -37,7 +37,7 @@ const TOOL_NAME = 'orchestra_task'
 const prompt = [
   'The host admits explicit tasks before this model step. Orchestra notices and the first text block of tool results contain the operator-facing wording. Answer in the operator’s language with the meaning of that wording, and leave execution to Orchestra.',
   'Acknowledge admission once, without repeating the request. Ordinary progress is available in the Orchestra panel and on request. Do not volunteer progress, read or write the task files yourself, or claim a successful delivery without recorded acceptance.',
-  'Only a fresh Orchestra admission receipt for this exact request confirms that a new task was accepted. A proposed plan, the operator’s message, an earlier receipt, or an assistant promise does not establish admission. Without a matching receipt, never say this request was handed off, queued, started, or scheduled. If the operator intended to dispatch a new task and no receipt appeared, say so and suggest resending the full request with /orchestra. For existing tasks, report only the state returned by the status tool.',
+  'Only a fresh Orchestra admission receipt for this exact request confirms that a new task was accepted. A proposed plan, the operator’s message, an earlier receipt, or an assistant promise does not establish admission. Without a matching receipt, never say this request was handed off, queued, started, or scheduled. If Orchestra returned a startup failure, use its reason and next step. Do not direct the operator to a task or run that has no receipt, or imply that /orchestra bypasses the failure. Suggest /orchestra only when the operator intended to dispatch a new task and Orchestra returned no notice for this message. For existing tasks, report only the state returned by the status tool.',
   'Greetings, casual conversation, questions seeking an explanation, advice, brainstorming, or asking what you could do are ordinary conversation. Use no Orchestra task for them.',
   'If intent or the requested outcome is unclear, ask the human. For a request to wait for approval before running, ask for the complete executable instruction once the human is ready to start.',
   'For questions about a named or earlier Orchestra task use action=status with its exact task_title. Use the latest task only if the operator asks for the latest task or refers to that task unambiguously. If the title is unclear, ask which task to open. For an Orchestra notice, omit task_title and run_id to use the verified source run. Use action=artifact with file_name from the status reply to retrieve the requested artifact. Summarize its contents as evidence, using the recorded acceptance facts.',
@@ -91,10 +91,12 @@ function validatedTaskText(text: string): string {
 }
 
 function errorReceipt(error: unknown): Extract<ChatOutcome, { state: 'error' }> {
-  return error instanceof OrchError
-    ? { state: 'error', code: error.code, message: error.message, retryable: error.retryable,
-        ...(typeof error.details.planning_issue === 'string' && { planning_issue: error.details.planning_issue }) }
-    : { state: 'error', code: 'SERVICE_UNAVAILABLE', message: '编排服务未就绪或原会话已关闭。', retryable: true }
+  if (!(error instanceof OrchError)) return { state: 'error', code: 'SERVICE_UNAVAILABLE', retryable: true }
+  const { fields, planning_issue } = error.details
+  const layoutOnly = error.code === 'WORKFLOW_DEFINITION_INVALID' && Array.isArray(fields) && fields.length > 0
+    && fields.every((field) => typeof field === 'string' && /^nodes\.\d+\.position\.[xy]$/u.test(field))
+  const issue = layoutOnly ? 'layout' : isChatPlanningIssue(planning_issue) ? planning_issue : undefined
+  return { state: 'error', code: error.code, retryable: error.retryable, ...(issue && { planning_issue: issue }) }
 }
 
 function noticeMessage(id: Message['id'], display: ReturnType<typeof describeChatRun>): Message {
@@ -261,6 +263,10 @@ export function installNativeChat(host: Context, options: {
   const respond = (data: unknown, summary: string, preview = '') => ({
     text: JSON.stringify(data), summary, preview,
   })
+  const respondOutcome = (outcome: ChatOutcome, action?: ChatAction) => {
+    const display = describeChatOutcome(outcome, action)
+    return respond(outcome.state === 'error' ? { ...outcome, message: display.body } : outcome, chatText(display))
+  }
 
   const sameBinding = (agent: Agent, binding: Binding) => options.bindingFor(agent)?.identity === binding.identity
   const track = (agent: Agent) => {
@@ -577,12 +583,14 @@ export function installNativeChat(host: Context, options: {
       }[input.data.action] : '处理 Orchestra 任务'
       return { card: 'generic', title }
     },
-    presentResult(_args, result) {
+    presentResult(args, result) {
       const meta = result.meta
       const summary = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta.summary : undefined
-      const text = typeof summary === 'string' && summary.trim() ? summary : result.isError
-        ? '这次操作未能完成。请在 Orchestra 面板确认任务状态后再试。'
-        : '请在 Orchestra 面板查看这次操作的结果。'
+      const parsed = argsSchema.safeParse(args)
+      const text = typeof summary === 'string' && summary.trim() ? summary
+        : parsed.success && parsed.data.action === 'start' ? 'Orchestra 没有返回可显示的接单回执。请检查 DSH 和 Orchestra 的服务状态。'
+        : result.isError ? '这次操作未能完成。请在 Orchestra 面板确认任务状态后再试。'
+          : '请在 Orchestra 面板查看这次操作的结果。'
       return { card: 'generic', content: [{ type: 'text', text }] }
     },
     output: {
@@ -599,14 +607,13 @@ export function installNativeChat(host: Context, options: {
       const action = (input as { action?: ChatAction } | null)?.action
       try {
         const result = await execute(input, execution)
-        if ('state' in result) return respond(result, chatText(describeChatOutcome(result, action)))
+        if ('state' in result) return respondOutcome(result, action)
         if ('blocking' in result) return respond(result, chatText(describeChatRun(result)))
         const summary = `「${result.file_name}」的内容预览${result.kind === 'preview' && result.truncated ? '（部分）' : ''}。请结合任务的交付验收情况使用这份文件。`
         return respond(result, summary, result.kind === 'preview' ? result.text : '')
       } catch (error) {
         if (execution.signal.aborted) execution.signal.throwIfAborted()
-        const result = errorReceipt(error)
-        return respond(result, chatText(describeChatOutcome(result, action)))
+        return respondOutcome(errorReceipt(error), action)
       }
     },
   }, { when: ({ agent }) => Boolean(options.bindingFor(agent)) })

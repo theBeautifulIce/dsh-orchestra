@@ -37,13 +37,20 @@ const ACCEPTANCE = new Map([
   ['pending', '交付验收还没有结论。'],
 ])
 
-const PLANNING_ISSUES = new Map<string, readonly [string, string]>([
-  ['quota', ['规划模型额度不足', '请在 DSH 检查模型额度，或选择其他可用的主脑模型，再发送任务。']],
-  ['access', ['规划请求被拒绝', '请检查当前模型的访问权限，或选择一个已授权的主脑模型。']],
-  ['length', ['计划超出模型的输出长度', '规划模型在完成计划前达到了输出上限。可缩小单次任务范围，或切换主脑模型后再试。']],
-  ['connection', ['规划模型暂时不可用', '请检查模型服务的连接状态，恢复后再发送任务。']],
-  ['format', ['规划模型返回的计划无法读取', '请重新生成计划，或切换主脑模型后再试。']],
-])
+const PLANNING_ISSUES = {
+  quota: ['规划模型额度不足', '请在 DSH 检查模型额度，或选择其他可用的主脑模型。处理后可重新发送原任务。'],
+  access: ['规划请求被拒绝', '请检查当前模型的访问权限，或选择一个已授权的主脑模型。处理后可重新发送原任务。'],
+  layout: ['生成流程的布局未通过校验', '流程图的布局数据不符合要求，执行尚未开始。可重新发送原任务生成新计划。'],
+  length: ['计划超出模型的输出长度', '规划模型在完成计划前达到了输出上限。可缩小单次任务范围，或切换主脑模型后再发任务。'],
+  connection: ['规划模型暂时不可用', '请检查模型服务的连接状态，恢复后可重新发送原任务。'],
+  format: ['规划模型返回的计划无法读取', '可重新发送原任务。若仍无法读取，请切换主脑模型后再试。'],
+} as const
+
+type PlanningIssue = keyof typeof PLANNING_ISSUES
+
+export function isChatPlanningIssue(value: unknown): value is PlanningIssue {
+  return typeof value === 'string' && Object.hasOwn(PLANNING_ISSUES, value)
+}
 
 function displayTitle(title?: string | null): string {
   return title?.replace(/\s+/gu, ' ').trim().slice(0, 120) ?? ''
@@ -171,7 +178,38 @@ export type ChatOutcome =
   | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
   | { state: 'clarification_required' | 'usage' | 'queued'; message: string }
-  | { state: 'error'; code: AnyOrchErrorCode; message: string; retryable: boolean; planning_issue?: string }
+  | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue }
+
+function startErrorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>): readonly [string, string] {
+  if (outcome.planning_issue) return PLANNING_ISSUES[outcome.planning_issue]
+  switch (outcome.code) {
+    case 'WORKFLOW_DEFINITION_INVALID':
+    case 'WORKFLOW_VALIDATION_FAILED':
+      return ['规划模型生成的计划未通过校验', '计划或流程的结构未通过校验，本次执行尚未开始。可切换主脑模型后重新发送原任务。']
+    case 'COMMAND_BUSY':
+      return ['规划服务正在处理其他请求', '当前没有空闲的规划执行位。请稍后重新发送原任务。']
+    case 'OPERATION_TIMEOUT':
+      return ['规划超时', '规划时间已用完。可在「设置 → 规划时限」延长时间，或更换主脑模型后再发送任务。']
+    case 'PROTOCOL_VERSION_MISMATCH':
+      return ['规划模型设置与本次请求不一致', '请检查 DSH 当前使用的主脑模型与思考设置，确认后重新发送原任务。']
+    case 'VERDICT_UNSUPPORTED':
+      return ['当前 DSH 宿主缺少所需的规划能力', '请检查 DSH 的 Orchestra 安装和主脑模型设置，恢复规划能力后重新发送原任务。']
+    case 'WORKFLOW_NOT_PUBLISHED':
+      return ['没有可用于本次任务的已发布流程', '请在 Orchestra 发布可复用的流程，再发送原任务。']
+    case 'SERVICE_UNAVAILABLE':
+      return ['启动任务所需的服务暂时不可用', '请检查 DSH 和主脑模型服务是否可用。服务恢复后，可重新发送原任务。']
+    case 'FORBIDDEN':
+      return ['当前会话或工作区授权无法启动任务', '请检查原会话和工作区授权是否仍有效，并确认主脑模型可用。']
+    case 'PAYLOAD_SCHEMA_INVALID':
+      return ['需要有效的文字任务目标', '请用 1 至 2000 个字符说明要交付的结果，以及本次可使用的材料。']
+    case 'CONFIRMATION_REQUIRED':
+      return ['这条消息没有可查询的任务回执', '如果已经发送明确的任务，可在当前会话检查 Orchestra 自动接管设置。']
+    case 'OPERATION_ID_CONFLICT':
+      return ['这条消息与已有的接单记录冲突', '若要布置新的任务，请将完整要求作为一条新消息发送。']
+    default:
+      return ['未能启动本次任务', 'Orchestra 没有返回成功的接单回执。请检查 DSH 和 Orchestra 的服务状态。']
+  }
+}
 
 function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?: 'start' | 'status' | 'artifact' | 'review'): string {
   switch (outcome.code) {
@@ -182,8 +220,7 @@ function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?
     case 'FORBIDDEN':
       return '当前会话无法执行这项操作。请回到发起任务的会话，打开对应任务或待办后重试。'
     case 'CONFIRMATION_REQUIRED':
-      return action === 'start' ? '这条消息没有对应的编排任务。需要派单时，请用「/orchestra 任务内容」说明交付目标。'
-        : '这项操作需要人工确认。请在 Orchestra 面板打开待办处理。'
+      return '这项操作需要人工确认。请在 Orchestra 面板打开待办处理。'
     case 'CONFIRMATION_EXPIRED':
     case 'DECISION_REVISION_CONFLICT':
     case 'CONFIRMATION_MISMATCH':
@@ -202,8 +239,7 @@ function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?
     case 'RANGE_TOO_LARGE':
       return '本次读取超出限制。请缩小查询范围，或在 Orchestra 面板选择具体文件。'
     case 'PAYLOAD_SCHEMA_INVALID':
-      return action === 'start' ? '请用 1 至 2000 个字符说明要交付的结果，以及本次可使用的材料。'
-        : '这次操作的参数不完整。请说明要查看的任务、文件或待办。'
+      return '这次操作的参数不完整。请说明要查看的任务、文件或待办。'
     default:
       return outcome.retryable
         ? 'Orchestra 暂时无法完成这项操作。请刷新任务状态后再试。'
@@ -234,12 +270,10 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
       return { heading: 'Orchestra 已排队新消息', body: outcome.message }
     case 'error':
       if (action === 'start') {
-        const hint = PLANNING_ISSUES.get(outcome.planning_issue ?? '')
-        if (hint) return { heading: 'Orchestra ' + hint[0], body: hint[1] }
-        if (outcome.code === 'OPERATION_TIMEOUT') return { heading: 'Orchestra 规划超时',
-          body: '规划时间已用完。可在「设置 → 规划时限」延长时间，或更换主脑模型后再发送任务。' }
+        const [heading, body] = startErrorDisplay(outcome)
+        return { heading: `Orchestra ${heading}`, body }
       }
-      return { heading: action === 'start' ? 'Orchestra 未能启动本次任务' : 'Orchestra 未能完成本次操作', body: errorDisplay(outcome, action) }
+      return { heading: 'Orchestra 未能完成本次操作', body: errorDisplay(outcome, action) }
   }
 }
 

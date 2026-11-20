@@ -149,9 +149,8 @@ function policyForReport(tx: Tx, row: NodeRunRow, catalog: WorkflowCatalog, chec
   if (!checkArtifactCompletion || nodeId !== row.node_id || policy.passConditions.length || policy.requiredHashes.length) return policy
   const def = catalog.get(workflowId, run.workflow_version)
   const node = def.nodes.find((item) => item.node_id === nodeId)
-  const tools = catalog.toolPolicyFor(workflowId, run.workflow_version, nodeId)
-  return { ...policy, artifactCompletion: node?.side_effect_policy === 'pure' && !node.verifier && !def.verifier
-    && !tools.allow.some((tool) => !tools.deny.includes(tool)) }
+  // The workflow allowlist is a capability ceiling. The approved step and its actual executions govern artifact proof.
+  return { ...policy, artifactCompletion: node?.side_effect_policy === 'pure' && !node.verifier && !def.verifier }
 }
 
 /**

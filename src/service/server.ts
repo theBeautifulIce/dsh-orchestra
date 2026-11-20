@@ -130,7 +130,7 @@ export type ServerQueries = {
 
 import type { CreateWorkflowParams, OpenDraftParams, PublishParams, UpdateDraftParams } from './commands/workflows.ts'
 import type { SetWorkflowStatusParams, WorkflowDraftTest } from './commands/workflows.ts'
-import { validateSaveLayer } from '../core/workflow-doc.ts'
+import { fitGeneratedWorkflowLayout, validateSaveLayer } from '../core/workflow-doc.ts'
 
 export type NodeCommands = {
   acquireLease: (body: { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }) => {
@@ -888,7 +888,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         deps.workflowGeneratorStreamProgress ? budget.stage : budget.workflow,
         deps.workflowGeneratorStreamProgress ? budget.idle : null,
       )))
-      const saved = validateSaveLayer(proposed)
+      const saved = validateSaveLayer(fitGeneratedWorkflowLayout(proposed))
       if (!saved.saved || saved.report.errors.length > 0 || saved.saved.scope === 'task_local') {
         throw new OrchError('WORKFLOW_VALIDATION_FAILED', '生成的可复用 Workflow 草稿结构不合法', { errors: saved.report.errors })
       }
