@@ -2,11 +2,11 @@
 import { hasUnresolvedRework } from '../rework-runtime.ts'
 import { hasDeliveryReviewHold } from '../delivery-review.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
-import { appendEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
+import { appendEvent } from '../../infra/db/ledger.ts'
 import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
 import { applyRunAcceptance } from './run-acceptance.ts'
-import { finishSubworkflowChild } from './subworkflow.ts'
+import { finishSubworkflowChild, nodeRunChainIsIntact } from './subworkflow.ts'
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
 
@@ -61,7 +61,7 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
   // 断链闸门：run 里只要有一个节点的链断了，就不按它的状态收口。
   // 放在所有早退之后：只有真要收口时才做整链校验，不给每轮扫描加固定开销（S3 r19 P1-1）
   for (const node of nodes) {
-    if (chainBreakOf(secret, readChain(tx, node.node_run_id))) return null
+    if (!nodeRunChainIsIntact(tx, secret, node.node_run_id)) return null
   }
 
   const unverified = (node: NodeRow) => node.unverified === 1
@@ -110,7 +110,7 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
   })
   // A superseded control node cannot keep an open parent from closing. Settle it before this child commit becomes visible.
   if (tx.get("SELECT 1 FROM runs child JOIN node_runs n ON n.node_run_id=child.parent_node_run_id AND n.run_id=child.parent_run_id WHERE child.run_id=? AND n.node_type='subworkflow' AND n.status='superseded'", [runId])) {
-    finishSubworkflowChild(tx, secret, { childRunId: runId, now })
+    finishSubworkflowChild(tx, secret, { childRunId: runId, now, closeHealthyChild: true })
   }
   return terminalStatus
 }

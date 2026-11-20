@@ -12,6 +12,7 @@ import { closeRun } from '../../src/service/commands/run-close.ts'
 import { applyCancel } from '../../src/service/commands/cancel.ts'
 import { resolveEffect } from '../../src/service/commands/effects.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
+import { appendNodeRunEvent, readChain, readChainHead } from '../../src/infra/db/ledger.ts'
 import { TEST_CLOCK } from '../fixtures/clock.ts'
 
 const NOW = '2026-11-14T12:00:00.000Z'
@@ -381,6 +382,68 @@ describe('节点级取消后子运行的未核实事实', () => {
       // 父 run 没有取消请求：终态必须继承子运行的未核实，而不是普通 succeeded
       expect(closeRun(tx, SECRET, 'r1', NOW)).toBe('succeeded_with_unverified')
     })
+  })
+})
+
+describe('已取消父节点的子运行收口', () => {
+  it.each([
+    ['healthy', 'pure'], ['missing head', 'pure'], ['invalid hash', 'pure'],
+    ['healthy', 'irreversible'], ['missing head', 'irreversible'], ['invalid hash', 'irreversible'],
+    ['uncertain sibling', 'pure'],
+  ] as const)('seals the child exactly once with parent state=%s and child policy=%s', (integrity, childPolicy) => {
+    const db = memoryDb()
+    const parentId = 'nr-parent'
+    try {
+      const childId = withTx(db, tx => {
+        const child = startSubworkflowNode(tx, SECRET, catalog(), {
+          nodeRunId: parentId, attempt: 1, workflowId: 'child', workflowVersion: 2, now: NOW,
+        })
+        const parent = tx.get<{ attempt: number; revision: number }>(
+          'SELECT attempt, revision FROM node_runs WHERE node_run_id=?', [parentId])!
+        applyCancel(tx, SECRET, { clock: TEST_CLOCK, nodeRunId: parentId, attempt: parent.attempt,
+          revision: parent.revision, cancelResult: 'interrupted', now: NOW, graceMs: 1000 })
+        const childNode = tx.get<{ node_run_id: string }>('SELECT node_run_id FROM node_runs WHERE run_id=?', [child.run_id])!
+        tx.run("UPDATE node_runs SET status='done', side_effect_policy=?, side_effect_verified_none=? WHERE node_run_id=?",
+          [childPolicy, childPolicy === 'pure' ? 1 : 0, childNode.node_run_id])
+        appendNodeRunEvent(tx, SECRET, childNode.node_run_id, 'fixture.child_stopped', {})
+        tx.run("UPDATE runs SET cancel_requested_at=?,cancel_result='interrupted' WHERE run_id=?", [NOW, child.run_id])
+        if (integrity === 'missing head') {
+          // Restrict the incomplete projection fixture to this disposable memory database.
+          tx.exec('DROP TRIGGER trg_node_run_chain_heads_no_delete')
+          tx.run('DELETE FROM node_run_chain_heads WHERE node_run_id=?', [parentId])
+        } else if (integrity === 'invalid hash') {
+          appendNodeRunEvent(tx, 'different fixture signer', parentId, 'fixture.untrusted_event', {})
+        } else if (integrity === 'uncertain sibling') {
+          tx.run("INSERT INTO node_runs (node_run_id,run_id,node_id,seq,node_type,status,revision,recovery_uncertain,created_at,updated_at)"
+            + " VALUES ('nr-sibling','r1','sibling',2,'agent','queued',1,'fixture reason',?,?)", [NOW, NOW])
+        }
+        return child.run_id
+      })
+      const parentNode = () => db.raw.prepare('SELECT * FROM node_runs WHERE node_run_id=?').get(parentId)!
+      const parentRun = () => db.raw.prepare("SELECT * FROM runs WHERE run_id='r1'").get()!
+      const parentChains = () => withTx(db, tx => ({ rows: readChain(tx, parentId), head: readChainHead(tx, parentId) }))
+      const before = parentNode()
+      expect(before).toMatchObject({ status: 'superseded', side_effect_policy: 'compensable' })
+      const beforeRun = parentRun()
+      const beforeChain = parentChains()
+      expect(withTx(db, tx => closeRun(tx, SECRET, childId, NOW))).toBe('cancelled')
+      expect(withTx(db, tx => closeRun(tx, SECRET, childId, NOW))).toBeNull()
+      expect(db.raw.prepare('SELECT status FROM runs WHERE run_id=?').get(childId)).toMatchObject({ status: 'cancelled' })
+      const receipts = db.raw.prepare("SELECT json_extract(payload_redacted,'$.outcome') AS outcome FROM events WHERE run_id=? AND type='run.terminal'").all(childId)
+      expect(receipts).toEqual([{ outcome: childPolicy === 'pure' ? 'succeeded' : 'succeeded_with_unverified' }])
+      if (integrity === 'healthy') {
+        expect(parentNode()).toMatchObject({ status: 'superseded', side_effect_policy: childPolicy, revision: Number(before.revision) + 1 })
+        expect(parentChains().rows.at(-1)?.type).toBe(childPolicy === 'pure' ? 'subworkflow.pure_child_confirmed' : 'subworkflow.unverified_inherited')
+      } else {
+        expect(() => withTx(db, tx => finishSubworkflowChild(tx, SECRET, { childRunId: childId, now: NOW })))
+          .toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+        expect(withTx(db, tx => closeRun(tx, SECRET, 'r1', NOW))).toBeNull()
+        expect(parentNode()).toEqual(before)
+        expect(parentRun()).toEqual(beforeRun)
+        expect(parentChains()).toEqual(beforeChain)
+        expect(db.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id='r1' AND type='run.terminal'").get()).toEqual({ n: 0 })
+      }
+    } finally { db.raw.close() }
   })
 })
 
