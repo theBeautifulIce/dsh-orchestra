@@ -86,3 +86,35 @@ it('迁移旧映射，重放既有操作，并按修订保存或清空已批准�
     db.raw.close()
   }
 })
+
+it('迁移 S6 开发态五档后保留说明和旧操作回执，旧写入只覆盖三个旧键', () => {
+  const db = openDb(':memory:')
+  try {
+    const steps = loadSteps(defaultMigrationsDir())
+    applySteps(db, steps.filter(({ version }) => version < 60))
+    const request = { operation_id: uuidv7(), expected_revision: 0,
+      mapping: { routine: 'fast', standard: null, advanced: 'analyst', complex: null, expert: 'expert' },
+      model_notes: [{ ref: 'analyst', note: '多源核验' }] }
+    const now = '2026-11-20T02:00:00.000Z'
+    withTx(db, (tx) => runIdempotentCommand(tx, {
+      kind: 'model_routing.save', operationId: request.operation_id, now,
+      requestHash: requestHashOf('model_routing.save', { actor: 'operator', ...request }),
+    }, () => {
+      tx.run('INSERT INTO model_routing_settings VALUES (1,1,?,?,?,?)', [
+        JSON.stringify(request.mapping), 'operator', now, JSON.stringify(request.model_notes),
+      ])
+      return { revision: 1 }
+    }))
+    applySteps(db, steps)
+    const host = createModelRoutingSettingsHost(db, [
+      { ref: 'fast', capacity: 'routine' }, { ref: 'analyst', capacity: 'advanced' }, { ref: 'expert', capacity: 'expert' },
+    ])
+    expect(host.get().item).toMatchObject({ revision: 1, mapping: request.mapping, model_notes: request.model_notes })
+    expect(host.save(request, 'operator', now)).toEqual({ revision: 1 })
+    const oldRow = db.raw.prepare('SELECT mapping_json FROM model_routing_settings WHERE id=1').get() as { mapping_json: string }
+    expect(JSON.parse(oldRow.mapping_json)).toEqual({ routine: 'fast', standard: null, complex: null })
+    db.raw.prepare('UPDATE model_routing_settings SET revision=2,mapping_json=? WHERE id=1')
+      .run(JSON.stringify({ routine: null, standard: null, complex: null }))
+    expect(host.get().item).toMatchObject({ revision: 2, mapping: { ...request.mapping, routine: null }, model_notes: request.model_notes })
+  } finally { db.raw.close() }
+})

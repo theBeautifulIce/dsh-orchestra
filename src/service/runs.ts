@@ -293,9 +293,9 @@ export type RunRowInput = {
 }
 
 /** 事务内建 run 行：createRun 与记忆发起共用，保证 run 与业务写入同一笔事务提交 */
-export function insertRunInTx(tx: Tx, row: RunRowInput): void {
+export function insertRunInTx(tx: Tx, row: RunRowInput, admittedFlow: Pick<RunRowInput, 'workflow_id' | 'workflow_definition_hash'> = row): void {
   requireRunIntake(tx)
-  requireTrialFlow(tx, row.workflow_id, row.workflow_definition_hash)
+  requireTrialFlow(tx, admittedFlow.workflow_id, admittedFlow.workflow_definition_hash)
   const rootRunId = row.root_run_id ?? row.run_id
   const depth = row.subworkflow_depth ?? 0
   tx.run(

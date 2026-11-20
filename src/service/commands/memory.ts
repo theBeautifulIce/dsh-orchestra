@@ -78,6 +78,8 @@ type MemoryStartRequestPayload = {
 type MemoryStartOutcome = Omit<MemoryRunStartResult, 'replayed'>
 
 type SourceRunRow = {
+  workflow_id: string | null
+  workflow_definition_hash: string | null
   run_id: string
   task_id: string
   status: string
@@ -154,7 +156,7 @@ export function startMemoryRun(db: Db, params: StartMemoryRunParams): MemoryRunS
 
 function applyMemoryStart(tx: Tx, params: StartMemoryRunParams, requestKey: string, onRepeat: () => void): MemoryStartOutcome {
   const source = tx.get<SourceRunRow>(
-    'SELECT run_id, task_id, status, root_run_id, subworkflow_depth FROM runs WHERE run_id = ?',
+    'SELECT run_id, task_id, status, root_run_id, subworkflow_depth, workflow_id, workflow_definition_hash FROM runs WHERE run_id = ?',
     [params.source_run_id],
   )
   if (!source) {
@@ -240,7 +242,7 @@ function applyMemoryStart(tx: Tx, params: StartMemoryRunParams, requestKey: stri
     started_at: params.now,
     created_at: params.now,
     updated_at: params.now,
-  })
+  }, source)
   // 固定图的节点行跟记忆 run 同一笔事务落库（不另开事务）
   const nodes = createMemoryRunNodeRuns(tx, memoryRunId, params.now)
   const prepareNodeRunId = nodes.find((node) => node.node_id === 'mem_prepare')?.node_run_id ?? null
