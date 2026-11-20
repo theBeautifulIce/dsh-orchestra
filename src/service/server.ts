@@ -56,7 +56,7 @@ import { localPlanInput, localPlanApproval, type createReworkPlanningHost } from
 import { reworkInspectionInput, type createReworkInspectionHost } from './rework-inspection.ts'
 import { modelRoutingSettingsSchema, type ModelRoutingSettingsHost } from './model-routing-settings.ts'
 import { modelEscalationInput, type createModelEscalationHost } from './model-escalation.ts'
-import type { DispatchOutcome, NodeSpec } from './dispatcher.ts'
+import type { DispatchOutcome, DispatchProgress, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
 import type { ToolPolicy } from '../executor/session.ts'
 
@@ -242,7 +242,7 @@ export type NodeCommands = {
     ownerEpoch?: number
     leaseTtlMs?: number
     leaseRenewIntervalMs?: number
-  }) => Promise<DispatchOutcome[]>
+  }, progress?: DispatchProgress) => Promise<DispatchOutcome[]>
   // 恢复不确定的节点：可查、可确认（评审 P2-4）
   listRecoveryUncertain: () => RecoveryUncertainItem[]
   resolveRecoveryUncertain: (body: {

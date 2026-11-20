@@ -28,11 +28,11 @@ const allNames = roles.map((role) => role + '核对')
 const descriptor = { name: 'ro.check', capability: 'read_only' as const, command: { bin: 'check', args: [] } }
 const goal = '分别核对十类交付内容，然后汇总审核结论'
 
-it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败', '部分汇合'] as const)('具名分支共享一个运行与并发上限：%s', async (scenario) => {
+it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败', '部分汇合', '停机后续跑'] as const)('具名分支共享一个运行与并发上限：%s', async (scenario) => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-parallel-plan-'))
   const secret = 'parallel-plan-contract-secret'
   const registry = new ToolRegistry()
-  const partialJoin = scenario === '部分汇合'
+  const partialJoin = scenario === '部分汇合' || scenario === '停机后续跑'
   const branchIds = partialJoin ? allBranchIds.slice(0, 4) : allBranchIds
   const names = partialJoin ? allNames.slice(0, 4) : allNames
   const joinSources = partialJoin ? branchIds.slice(0, 2) : branchIds
@@ -184,6 +184,7 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
     } },
   })
   let service = await boot()
+  let closing: Promise<void> | undefined
   function connect() {
     const api = createApiClient(service.endpoint, (input, init) => {
       const headers = new Headers(init?.headers)
@@ -221,13 +222,34 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       leaseTtlMs: 60_000, now: new Date().toISOString(),
     })).toThrow(expect.objectContaining({ code: 'RESOLUTION_NOT_AVAILABLE' }))
 
-    if (partialJoin) {
+    if (scenario === '停机后续跑') {
+      const unfinished = service.orchestra.db.raw.prepare('SELECT status FROM node_runs WHERE node_run_id=?')
+      closing = service.close()
+      releaseInitialBranches.resolve()
+      await expect.poll(() => names.slice(2).every((name) => spawned.some((input) => stepOf(input) === name))).toBe(true)
+      expect(unfinished.get(joinNode.node_run_id)).toEqual({ status: 'queued' })
+      expect(spawned.map(stepOf)).not.toContain('汇总审核')
+      releaseIndependentBranches.resolve()
+      await closing
+      expect(spawned.map(stepOf)).not.toContain('汇总审核')
+
+      service = await boot()
+      closing = undefined
+      reads = connect().reads
+      releaseJoin.resolve()
+      await expect.poll(async () => (await reads.getRun(run_id)).data.status).toBe('succeeded')
+      expect(spawned.map(stepOf).toSorted()).toEqual([...names, '汇总审核'].toSorted())
+      expect(joinTexts.toSorted()).toEqual(names.slice(0, 2).map((name) => name + '完成').toSorted())
+      return
+    }
+
+    if (scenario === '部分汇合') {
       releaseInitialBranches.resolve()
       // 无关分支继续占两个名额。仅完成两条必要上游，汇总必须拿到剩下的名额。
       await expect.poll(async () => (await nodes()).map((node) => [node.node_id, node.status]), { timeout: 6_000 })
         .toEqual([[branchIds[0], 'done'], [branchIds[1], 'done'], [branchIds[2], 'started'], [branchIds[3], 'started'], ['join_review', 'started']])
       expect(spawned.map(stepOf).filter((name) => name === '汇总审核')).toHaveLength(1)
-      expect(joinTexts.toSorted()).toEqual(names.slice(0, 2).map((name) => name + '完成').toSorted())
+      await expect.poll(() => joinTexts.toSorted()).toEqual(names.slice(0, 2).map((name) => name + '完成').toSorted())
       releaseJoin.resolve()
       await expect.poll(async () => (await nodes()).find((node) => node.node_id === 'join_review')?.status).toBe('done')
       expect((await reads.getRun(run_id)).data.status).toBe('running')
@@ -348,7 +370,7 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
     releaseInitialBranches.resolve()
     releaseIndependentBranches.resolve()
     releaseJoin.resolve()
-    await service.close()
+    await (closing ?? service.close())
     await rm(dir, { recursive: true, force: true })
   }
 }, 20_000)

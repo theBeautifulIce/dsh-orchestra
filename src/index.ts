@@ -537,7 +537,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       }
       return response
     },
-    dispatch: async (b) => {
+    dispatch: async (b, progress) => {
       assertOrdinaryRun(b.runId)
       if (registry && ['S5','S6'].includes(opts.phase)) inTx(db, tx => rememberManualDispatchSpecs(tx, opts.secret, catalog, registry, b.runId, b.nodes, b.now))
       // 控制节点（wait / subworkflow）不需要宿主执行器：只跑它们的工作流在无执行器进程里也能推进。
@@ -562,7 +562,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         ownerEpoch: b.ownerEpoch ?? db.epoch,
         leaseTtlMs: b.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
         leaseRenewIntervalMs: b.leaseRenewIntervalMs,
-      })
+      }, progress)
     },
     runNode: async (b) => {
       assertOrdinaryRun(b.nodeRunId, true)
@@ -684,7 +684,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const triggerDispatch = (triggerResolver || planResolver || manualResolver) && createTriggerDispatchPump(
     orchestra.db,
     triggerResolver,
-    (run, nodes) => orchestra.commands.dispatch({ runId: run.run_id, nodes, now: new Date().toISOString() }),
+    (run, nodes, progress) => orchestra.commands.dispatch({ runId: run.run_id, nodes, now: new Date().toISOString() }, progress),
     (error) => log.error('运行自动派发失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }),
     planResolver,
     { secret: opts.secret, resolveManual: manualResolver },
