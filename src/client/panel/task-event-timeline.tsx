@@ -10,7 +10,7 @@ type Scope = { taskId: string; runId?: never } | { runId: string; taskId?: never
 type Props = { api: ResourcesApi; scope: Scope; reloadVersion: number }
 type Source = 'activity' | 'execution'
 type Filter = 'all' | 'attention' | 'tool' | 'report' | 'model'
-type Event = { id: number; time: string; title: string; type: string; context?: string; attention?: boolean; details: NonNullable<ActivityItem['details']> }
+type Event = { id: number; time: string; title: string; type: string; attention?: boolean; details: NonNullable<ActivityItem['details']> }
 type Page = { key: string; events: Event[]; next: number | null }
 
 const attentionOptions = [
@@ -47,7 +47,7 @@ function ledgerEvent(row: ActivityItem): Event {
   const status = row.type === 'run.terminal' ? details.find((detail) => detail.label === '状态')?.value : undefined
   const outcome = details.find((detail) => detail.label === '业务结果')?.value
   const title = status === 'cancelled' && row.attention && statusTitle(outcome)
-    ? `运行已取消 · ${statusTitle(outcome)}` : statusTitle(status) ?? (label === row.type ? '其他账本记录' : label)
+    ? `运行已取消 · ${statusTitle(outcome)}` : statusTitle(status) ?? label
   return { id: row.seq, title,
     type: row.type, time: row.occurred_at, attention: row.attention, details: [
       ...details,
@@ -62,8 +62,8 @@ function executionEvent(row: ExecutionEntry): Event {
   const label = Object.hasOwn(executionTitles, row.type) ? executionTitles[row.type] : row.title
   const title = statusTitle(status) ?? (row.attention && exitCode !== undefined
     ? `工具调用结束（退出码 ${exitCode}）` : label && label !== row.type ? label : '其他执行记录')
-  return { id: row.id, title, type: row.type, time: row.created_at, attention: row.attention, context: row.node_id, details: [
-    ...row.details, { label: '运行 ID', value: row.run_id }, { label: '节点运行 ID', value: row.node_run_id },
+  return { id: row.id, title, type: row.type, time: row.created_at, attention: row.attention, details: [
+    ...row.details, { label: '步骤 ID', value: row.node_id }, { label: '运行 ID', value: row.run_id }, { label: '节点运行 ID', value: row.node_run_id },
   ] }
 }
 
@@ -168,7 +168,7 @@ function Timeline({ api, scope, reloadVersion }: Props) {
     <header style={header}>
       <div>
         <h3 id={heading} style={title}>{taskId ? '任务事件' : '运行事件'}</h3>
-        <p className="ops-meta" style={caption}>最新入账在前，每页最多 {pageSize} 条。展开记录可查看技术详情。</p>
+        <p className="ops-meta" style={caption}>最新记录在前，每页最多 {pageSize} 条。</p>
       </div>
       <button type="button" className="ops-button" onClick={reset}>刷新到最新</button>
     </header>
@@ -205,7 +205,6 @@ function Timeline({ api, scope, reloadVersion }: Props) {
               <span style={eventTitle}>
                 <strong>{event.title}</strong>
                 {event.attention && <span style={badge}>需留意</span>}
-                {event.context && <span className="ops-meta">步骤 {event.context}</span>}
               </span>
               <time className="ops-meta" dateTime={event.time} style={timestamp}>{eventTime(event.time)}</time>
             </span>

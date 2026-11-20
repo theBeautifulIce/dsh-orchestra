@@ -1,4 +1,4 @@
-import { runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
+import { currentAttempts, runtimeCanvasDoc, useRunTopology } from './runtime-topology.ts'
 import { ReworkPanel } from './rework-panel.tsx'
 import type { ReworkApi } from '../api/rework.ts'
 import type { ModelEscalationApi } from '../api/model-escalation.ts'
@@ -23,6 +23,8 @@ import { TaskPlanBrief } from './task-plan-form.tsx'
 import { TaskRunSteps, formatTaskDate, runDuration, usePinnedWorkflow } from './task-run-steps.tsx'
 import { NodeEffectFacts, NodeEvidence } from './task-run-evidence.tsx'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
+import { operatorReason } from '../../core/operator-language.ts'
+import { nodeExecutionLabel } from './task-node-status.ts'
 
 export type TaskDetailScreenProps = {
   api: ResourcesApi
@@ -161,7 +163,9 @@ export function TaskDetailScreen({
       {showRun && <div className="task-inspector-back"><button className="task-quiet-button" type="button" onClick={returnToTask}>返回任务</button></div>}
       {showRun && !failed && detailFailed && <ReadError onRetry={() => setReload((n) => n + 1)} />}
       {showRun && task && run && <>
-        <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision} />
+        <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation}
+          reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision}
+          onOpenResult={() => { setReviewRunId(run.run_id); setRunTab('结果'); resetScroll() }} />
         {rework && reviewRunId === run.run_id && <div hidden={runTab !== '结果'}><ReworkPanel key={run.run_id} api={api} commands={rework} runId={run.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} /></div>}
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
@@ -192,7 +196,7 @@ function TaskOverview({ data, latest, api, reloadVersion, commands, triggerComma
       <div className="task-drawer-card">
         <strong>{task.title || '未命名任务'}</strong>
         <TaskPlanBrief api={api} taskId={task.task_id} />
-        {task.attention_reason && <p style={mutedStyle}>{task.attention_reason}</p>}
+        {task.attention_reason && <p style={mutedStyle}>{operatorReason(task.attention_reason)}</p>}
         {workflow?.doc && <p style={mutedStyle}>按固定流程 {workflow.doc.name} v{nextVersion} 执行。</p>}
         <PendingNotices task={task} />
       </div>
@@ -216,10 +220,14 @@ function TaskOverview({ data, latest, api, reloadVersion, commands, triggerComma
       <header><h3>编排与资源</h3></header>
       <div className="task-drawer-card">
         <dl className="task-run-facts">
-          <div><dt>工作流</dt><dd>{workflow?.doc?.name || latest?.workflow_id || task.workflow_id || '未关联'}</dd></div>
+          <div><dt>工作流</dt><dd>{workflow?.doc?.name || (latest?.workflow_id || task.workflow_id ? '已关联，名称暂不可用' : '未关联')}</dd></div>
           <div><dt>固定版本</dt><dd>{nextVersion != null ? `v${nextVersion}` : '未记录'}</dd></div>
           <div><dt>自治档位</dt><dd>{taskAutonomyLabel(task)}</dd></div>
         </dl>
+        <details><summary>查看任务登记明细</summary>
+          <p>任务编号 <code>{task.task_id}</code>{(latest?.workflow_id || task.workflow_id) && <> · 流程编号 <code>{latest?.workflow_id || task.workflow_id}</code></>}</p>
+          <p>状态 <code>{task.status}</code>{task.attention_reason && <> · 原因 <code>{task.attention_reason}</code></>}</p>
+        </details>
       </div>
     </section>
     {(commands || task.archived_at) && <section className="task-drawer-section">
@@ -353,7 +361,7 @@ function TaskOrchestration({ api, task, run, reloadVersion, reworkEnabled, onOpe
     {failed && <ReadError onRetry={() => setRetry((n) => n + 1)} />}
     {!failed && run && !nodes && <p role="status" style={mutedStyle}>正在读取执行步骤…</p>}
     {workflow?.error && <p role="status" style={mutedStyle}>固定版本流程定义暂时不可读取。</p>}
-    {(nodes || !run) && <TaskRunSteps key={run?.run_id ?? 'planned'} nodes={nodes ?? []} doc={runtimeDoc} run={run}
+    {(nodes || !run) && <TaskRunSteps key={run?.run_id ?? 'planned'} nodes={nodes ?? []} doc={runtimeDoc} run={run} onOpenDecision={onOpenDecision}
       renderEvidence={(node) => <><ExecutionHistory key={node.node_run_id} api={api} nodeId={node.node_run_id} reloadVersion={reloadVersion} />
         <section><h4>执行证据</h4><NodeEvidence key={node.node_run_id} api={api} node={node} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} /></section></>} />}
     {topology.loading && <p role="status">正在读取本次运行拓扑…</p>}
@@ -437,10 +445,10 @@ function ArchiveAction({ task, commands, onChange }: { task: TaskSummary; comman
 }
 
 type RunDetailsProps = Pick<TaskDetailScreenProps, 'api' | 'onSnapshot' | 'onOpenDecision' | 'modelEscalation'> & {
-  run: RunSummary; task: TaskSummary; tab: RunTab; reloadVersion: number; reworkEnabled: boolean
+  run: RunSummary; task: TaskSummary; tab: RunTab; reloadVersion: number; reworkEnabled: boolean; onOpenResult: () => void
 }
 
-function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDecision, modelEscalation, reworkEnabled }: RunDetailsProps) {
+function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDecision, onOpenResult, modelEscalation, reworkEnabled }: RunDetailsProps) {
   const [nodes, setNodes] = useState<NodeRunView[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
@@ -455,6 +463,10 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
     return () => { current = false }
   }, [api, run.run_id, reloadVersion, onSnapshot, retry])
   const stepsTab = tab === '步骤'
+  const verificationStatuses = ['verifying', 'blocked_post']
+  const verifying = Boolean(run.counts?.some((item) => item.count > 0 && verificationStatuses.includes(item.status))
+    || nodes?.some((node) => verificationStatuses.includes(node.status)))
+  const delivery = useRunDelivery(api, run, tab === '结果' || (stepsTab && verifying), verifying, reloadVersion)
   const workflow = usePinnedWorkflow(api, stepsTab ? run.workflow_id : undefined, run.workflow_version)
   const topology = useRunTopology(api, stepsTab ? run.run_id : undefined, reworkEnabled, reloadVersion + retry)
   return <>
@@ -468,13 +480,21 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
         <div><dt>运行用时</dt><dd>{runDuration(run.started_at, run.ended_at) ?? '未记录'}</dd></div>
         {run.workflow_version != null && <div><dt>流程版本</dt><dd>v{run.workflow_version}</dd></div>}
       </dl>
+      <details><summary>查看运行登记明细</summary>
+        <p>运行编号 <code>{run.run_id}</code> · 状态 <code>{run.status}</code></p>
+      </details>
     </div>}
-    {tab === '结果' && <RunResult api={api} run={run} reloadVersion={reloadVersion} />}
+    {tab === '步骤' && verifying && delivery.artifacts && !delivery.failed && <section className="task-drawer-card">
+      <h3 style={sectionTitleStyle}>交付进展</h3>
+      <DeliveryProgress artifacts={delivery.artifacts} requirements={delivery.requirements} nodes={nodes} />
+      <button type="button" className="task-quiet-button" onClick={onOpenResult}>查看交付产物</button>
+    </section>}
+    {tab === '结果' && <RunResult api={api} run={run} delivery={delivery} verifying={verifying} nodes={nodes} />}
     {tab === '事件' && <TaskEventTimeline api={api} scope={{ runId: run.run_id }} reloadVersion={reloadVersion} />}
     {(tab === '步骤' || tab === '证据') && <>
       {failed && <ReadError onRetry={() => setRetry((value) => value + 1)} />}
       {!failed && !nodes && <p role="status" style={mutedStyle}>正在读取执行步骤…</p>}
-      {!failed && nodes && tab === '步骤' && <TaskRunSteps nodes={nodes} run={run} runDetails
+      {!failed && nodes && tab === '步骤' && <TaskRunSteps nodes={nodes} run={run} runDetails onOpenDecision={onOpenDecision} onOpenResult={onOpenResult}
         doc={!nodes.length || topology.failed || topology.loading ? null : runtimeCanvasDoc(workflow?.definition, topology.data)}
         renderEvidence={(node) => <>
           {(node.declared_effect || node.verified_effect || node.evidence_state_reason || node.status === 'done') && <NodeEffectFacts node={node} onOpenDecision={onOpenDecision} />}
@@ -524,34 +544,95 @@ function RunProjectContext({ context }: { context: NonNullable<RunSummary['proje
   </details>
 }
 
-function RunResult({ api, run, reloadVersion }: { api: ResourcesApi; run: RunSummary; reloadVersion: number }) {
-  const [artifacts, setArtifacts] = useState<Awaited<ReturnType<ResourcesApi['listRunArtifacts']>>['data'] | null>(null)
+type RunArtifacts = Awaited<ReturnType<ResourcesApi['listRunArtifacts']>>['data']
+type ArtifactRequirement = { fileName: string; minimumBytes: number; nodeId: string }
+
+function useRunDelivery(api: ResourcesApi, run: RunSummary, enabled: boolean, verifying: boolean, reloadVersion: number) {
+  const [artifacts, setArtifacts] = useState<RunArtifacts | null>(null)
+  const [requirements, setRequirements] = useState<ArtifactRequirement[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
   useEffect(() => {
+    if (!enabled) return
     let current = true
     setFailed(false)
-    void api.listRunArtifacts(run.run_id).then(({ data }) => { if (current) setArtifacts(data) })
+    setArtifacts(null)
+    void api.listRunArtifacts(run.run_id).then(({ data }) => {
+      if (!Array.isArray(data?.items) || data.items.some((artifact) => artifact.run_id !== run.run_id)) {
+        throw new Error('未读取到本次运行的产物记录')
+      }
+      if (current) setArtifacts(data)
+    })
       .catch(() => { if (current) setFailed(true) })
     return () => { current = false }
-  }, [api, run.run_id, reloadVersion, retry])
+  }, [api, enabled, run.run_id, reloadVersion, retry])
+  useEffect(() => {
+    if (!enabled || !verifying) return
+    let current = true
+    void api.getTaskPlanForTask(run.task_id).then(({ data }) => {
+      if (!current) return
+      const matching = data?.launch?.task_id === run.task_id && data.launch.run_id === run.run_id
+      setRequirements(matching && Array.isArray(data.proposal?.deliverables) ? data.proposal.deliverables.flatMap(({ acceptance, node_id }) =>
+        acceptance.kind === 'artifact' ? [{ fileName: acceptance.file_name, minimumBytes: acceptance.minimum_bytes, nodeId: node_id }] : []) : null)
+    }).catch(() => { if (current) setRequirements(null) })
+    return () => { current = false }
+  }, [api, enabled, verifying, run.task_id, run.run_id, reloadVersion])
+  return { artifacts, requirements, failed, retry: () => setRetry((value) => value + 1) }
+}
+
+function DeliveryProgress({ artifacts, requirements, nodes }: { artifacts: RunArtifacts; requirements: ArtifactRequirement[] | null; nodes: NodeRunView[] | null }) {
+  const files = [...new Set(artifacts.items.flatMap((item) => item.file_name ? [item.file_name] : []))]
+  const canConfirmMissing = artifacts.has_more === false && artifacts.items.every((item) => item.file_name)
+  const steps = currentAttempts(nodes ?? [])
+  return <>
+    {files.length > 0 && <p style={mutedStyle}>{artifacts.has_more ? '最近登记的文件' : '已登记的文件'}：{files.join('、')}</p>}
+    {requirements?.map(({ fileName, minimumBytes, nodeId }, index) => {
+      const step = steps.get(nodeId)
+      const submittedByStep = step && artifacts.items.some((file) => file.file_name === fileName && file.source_node_run_id === step.node_run_id)
+      const status = submittedByStep ? '指定步骤已登记此文件，验收仍待确认。'
+        : files.includes(fileName) ? '已登记同名文件，提交步骤仍待确认。'
+        : canConfirmMissing ? '尚未登记该文件。' : '本页未显示该文件。'
+      return <div key={index} style={mutedStyle}>
+        <p style={mutedStyle}>计划要求「{fileName}」{step?.title && <>由「{step.title}」提交</>}。{status}</p>
+        <details><summary>查看文件验收要求</summary><p>至少 {minimumBytes} 字节，须由计划指定的步骤提交。</p></details>
+      </div>
+    })}
+    {!files.length && !requirements?.length && <p style={mutedStyle}>暂无已登记文件可查看。</p>}
+  </>
+}
+
+function RunResult({ api, run, delivery, verifying, nodes }: {
+  api: ResourcesApi; run: RunSummary; delivery: ReturnType<typeof useRunDelivery>; verifying: boolean; nodes: NodeRunView[] | null
+}) {
+  const { artifacts, requirements, failed, retry } = delivery
+  const issues = run.delivery_checks?.items.filter((check) => check.outcome !== 'passed')
+  const sources = new Map(nodes?.map((node) => [node.node_run_id, node.title]))
   return <>
     <section style={cardStyle}>
       <h3 style={sectionTitleStyle}>运行结果</h3>
       <div><RunStatusLabel status={run.status} displayStatus={run.display_status} />{run.settling ? ' · 正在收尾' : ''}</div>
       <p style={mutedStyle}>{doneCount(run)} / {run.total} 个步骤已完成</p>
+      {!failed && artifacts && verifying && <DeliveryProgress artifacts={artifacts} requirements={requirements} nodes={nodes} />}
+      {!!issues?.length && <ul>
+        {issues.map((check) => <li key={check.result_id}>{check.file_name ?? check.tool ?? '交付项'} · {DELIVERY_OUTCOME[check.outcome]}。{check.reason && deliveryReason(check.reason)}</li>)}
+      </ul>}
     </section>
     <section>
       <h3 style={sectionTitleStyle}>交付产物</h3>
-      {failed && <ReadError onRetry={() => setRetry((value) => value + 1)} />}
+      {failed && <ReadError onRetry={retry} />}
       {!failed && !artifacts && <p role="status" style={mutedStyle}>正在读取产物…</p>}
       {artifacts?.items.length === 0 && <p style={mutedStyle}>这次运行尚无产物记录。</p>}
       {artifacts?.items.map((artifact) => <details key={artifact.artifact_id} style={cardStyle}>
-        <summary>{artifact.file_name || artifact.artifact_id}{artifact.expired ? ' · 已超过保留期限' : ''}</summary>
+        <summary>{artifact.file_name || '未命名产物'}{artifact.expired ? ' · 已超过保留期限' : ''}</summary>
+        {artifact.source_node_run_id && <p style={mutedStyle}>提交步骤 · {sources.get(artifact.source_node_run_id) || '步骤名称暂不可用'}</p>}
         <p style={mutedStyle}>记录于 {formatDate(artifact.created_at)}</p>
         {artifact.retain_until && <p style={mutedStyle}>保留至 {formatDate(artifact.retain_until)}</p>}
-        <p style={mutedStyle}>SHA-256 <code>{artifact.sha256}</code></p>
         <ArtifactContent api={api} artifact={artifact} />
+        <details>
+          <summary>查看产物登记明细</summary>
+          <p style={mutedStyle}>产物编号 <code>{artifact.artifact_id}</code> · SHA-256 <code>{artifact.sha256}</code></p>
+          {artifact.source_node_run_id && <p style={mutedStyle}>提交步骤编号 <code>{artifact.source_node_run_id}</code></p>}
+        </details>
       </details>)}
       {artifacts?.has_more && <p style={mutedStyle}>显示最近 50 份产物。</p>}
     </section>
@@ -569,6 +650,8 @@ const DELIVERY_REASON: Record<string, string> = {
   tool_exit_code_mismatch: '工具实际退出码与验收规则不符。',
 }
 
+const deliveryReason = (reason: string) => Object.hasOwn(DELIVERY_REASON, reason) ? DELIVERY_REASON[reason] : operatorReason(reason)
+
 function DeliveryChecks({ checks }: { checks: RunSummary['delivery_checks'] }) {
   return <section>
     <h3 style={sectionTitleStyle}>交付验收</h3>
@@ -577,15 +660,15 @@ function DeliveryChecks({ checks }: { checks: RunSummary['delivery_checks'] }) {
       <h4 style={evidenceHeadingStyle}>{check.kind === 'artifact' ? '产物' : '工具验收'}
         {(check.file_name ?? check.tool) && ` · ${check.file_name ?? check.tool}`} · {DELIVERY_OUTCOME[check.outcome] ?? '结果未记录'}</h4>
       {check.kind === 'artifact' ? <>
-        {check.minimum_bytes !== undefined && <p style={mutedStyle}>要求至少 {check.minimum_bytes} 字节{check.bytes !== undefined && ` · 记录大小 ${check.bytes} 字节`}</p>}
         <p style={mutedStyle}>规则核对产物名称、来源步骤和文件大小。内容可在「结果」中查看。</p>
       </> : <>
-        {check.expected_exit_code !== undefined && <p style={mutedStyle}>要求退出码 {check.expected_exit_code}{!!check.exit_codes?.length && ` · 记录退出码 ${check.exit_codes.join('、')}`}</p>}
-        <p style={mutedStyle}>规则核对指定步骤的工具和退出码。</p>
+        <p style={mutedStyle}>规则核对指定步骤的工具执行结果。</p>
       </>}
-      {check.reason && <p>{DELIVERY_REASON[check.reason] ?? '现有记录未能说明具体原因。'}</p>}
+      {check.reason && <p>{deliveryReason(check.reason)}</p>}
       <details>
         <summary>查看验收记录明细</summary>
+        {check.minimum_bytes !== undefined && <p style={mutedStyle}>要求至少 {check.minimum_bytes} 字节{check.bytes !== undefined && ` · 记录大小 ${check.bytes} 字节`}</p>}
+        {check.expected_exit_code !== undefined && <p style={mutedStyle}>要求退出码 {check.expected_exit_code}{!!check.exit_codes?.length && ` · 记录退出码 ${check.exit_codes.join('、')}`}</p>}
         <p style={mutedStyle}>记录于 {formatDate(check.evaluated_at)}</p>
         <p style={mutedStyle}>规则版本 <code>{check.rule_version}</code></p>
         {check.reason && <p style={mutedStyle}>原因代码 <code>{check.reason}</code></p>}
@@ -609,10 +692,12 @@ function EvidenceList({ api, nodes, reloadVersion, onOpenDecision }: {
     || EVIDENCE_ATTENTION_STATES.has(node.status))
   const visibleIds = new Set(visible.map((node) => node.node_run_id))
   const remaining = nodes.filter((node) => !visibleIds.has(node.node_run_id))
+  const positions = new Map([...new Set(nodes.map((node) => node.node_id))].map((id, index) => [id, index + 1]))
   const attempt = (node: NodeRunView) => <section key={node.node_run_id} style={cardStyle}>
-    <h4 style={evidenceHeadingStyle}>{node.title || node.node_id} · 第 {node.attempt} 次尝试</h4>
-    <p style={mutedStyle}>{node.status_label || '执行状态未记录'}</p>
+    <h4 style={evidenceHeadingStyle}>{node.title || `未命名步骤 ${positions.get(node.node_id)}`} · 第 {node.attempt} 次尝试</h4>
+    <p style={mutedStyle}>{nodeExecutionLabel(node)}</p>
     <NodeEvidence api={api} node={node} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} />
+    <details><summary>查看步骤登记明细</summary><p>步骤编号 <code>{node.node_id}</code> · 尝试编号 <code>{node.node_run_id}</code></p></details>
   </section>
   return <section>
     <h3 style={sectionTitleStyle}>执行证据</h3>

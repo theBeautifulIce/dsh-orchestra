@@ -1,6 +1,7 @@
 import { useSyncExternalStore, type ReactElement } from 'react'
 import { DshLocalPanel, isDshLocalShell } from './dsh-local-panel.tsx'
 import { registerNativeOrchestraSlash, type NativeOrchestraSlashContext } from './dsh-orchestra-slash.ts'
+import { registerNativeOrchestraToolView, type NativeOrchestraToolViewContext } from './dsh-orchestra-toolview.tsx'
 import { createPanelHost, type PanelHostProps } from './panel-host.tsx'
 
 const panelId = 'dsh-orchestra'
@@ -21,7 +22,7 @@ export type DshPanelContext = {
 export type DshOrchestraPanelTransport = PanelHostProps & { fetcher: NonNullable<PanelHostProps['fetcher']> }
 
 type Panel = () => ReactElement
-type DshClientContext = DshPanelContext & NativeOrchestraSlashContext & {
+type DshClientContext = DshPanelContext & NativeOrchestraSlashContext & NativeOrchestraToolViewContext & {
   inject(names: string[], callback: (ctx: DshClientContext) => void): unknown
   orchestraPanelTransport: DshOrchestraPanelTransport
 }
@@ -30,6 +31,7 @@ export const inject = ['slots']
 
 /** Activate the host panel while a trusted transport is available in this scope. */
 export function apply(ctx: DshClientContext): void {
+  registerNativeOrchestraToolView(ctx)
   let explicit: Panel | undefined
   let local: Panel | undefined
   let unmount: (() => unknown) | undefined

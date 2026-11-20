@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { postWithOperationReceipt } from '../api/commands.ts'
 import type { ApiClient } from '../api/client.ts'
+import { operatorReason } from '../../core/operator-language.ts'
+import { evidenceToolLabel } from './task-run-evidence.tsx'
 import type { EffectReview, ResourcesApi } from '../api/resources.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
 import { PanelCommandButton } from './shell.tsx'
@@ -19,7 +21,7 @@ export function EffectEvidenceReview({ api, client, nodeId, onResolved }: {
     setReview(null)
     setEvidenceId('')
     try { setReview((await api.getEffectReview(nodeId)).data) }
-    catch (error) { setNotice(error instanceof Error ? error.message : '证据查询没有完成。') }
+    catch (error) { setNotice(error instanceof Error ? operatorReason(error.message) : '证据查询没有完成。') }
     finally { setBusy(false) }
   }
   async function confirm() {
@@ -39,17 +41,20 @@ export function EffectEvidenceReview({ api, client, nodeId, onResolved }: {
       onResolved()
     } catch (error) {
       setReview(null)
-      setNotice(error instanceof Error ? error.message : '暂时无法确认核实结果。')
+      setNotice(error instanceof Error ? operatorReason(error.message) : '暂时无法确认核实结果。')
     } finally { setBusy(false) }
   }
   return <section aria-label="核对系统证据" style={{ display: 'grid', gap: 7, marginTop: 10 }}>
     <button type="button" onClick={() => { void inspect() }} disabled={busy} style={control}>核对系统证据</button>
     {review?.evidence.length === 0 && <p style={hint}>目前没有能用于这次核实的系统证据。</p>}
-    {review?.evidence.map((item) => <label key={item.evidence_id} style={hint}>
-      <input type="radio" name={`verify-${nodeId}`} value={item.evidence_id} checked={evidenceId === item.evidence_id}
-        onChange={() => setEvidenceId(item.evidence_id)} disabled={busy} />
-      {item.verdict === 'not_applied' ? '已核实未发生' : '已核实已发生'} · {item.tool} · {new Date(item.finished_at).toLocaleString()} · {item.evidence_id}
-    </label>)}
+    {review?.evidence.map((item, index) => <div key={item.evidence_id} style={hint}>
+      <label>
+        <input type="radio" name={`verify-${nodeId}`} value={item.evidence_id} checked={evidenceId === item.evidence_id}
+          onChange={() => setEvidenceId(item.evidence_id)} disabled={busy} />
+        证据 {index + 1} · {item.verdict === 'not_applied' ? '外部操作未发生' : '外部操作已发生'} · {evidenceToolLabel(item.tool, '工具执行记录')} · {new Date(item.finished_at).toLocaleString()}
+      </label>
+      <details><summary>查看证据明细</summary><p>工具 <code>{item.tool}</code> · 证据编号 <code>{item.evidence_id}</code></p></details>
+    </div>)}
     {evidenceId && review && <PanelCommandButton style={control} disabled={busy} onClick={() => { void confirm() }}>用所选证据记录核实</PanelCommandButton>}
     {notice && <p style={hint} role="status">{notice}</p>}
   </section>

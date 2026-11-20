@@ -49,9 +49,9 @@ export function PanelCommandButton(props: ButtonHTMLAttributes<HTMLButtonElement
   />
 }
 
-export function UnknownState({ value }: { value: string }) {
-  return <span role="status" title={value} style={{ color: COLOR.warning }}>
-    {COPY.oldPanel}：{value}
+export function UnknownState(_props: { value: string }) {
+  return <span role="status" style={{ color: COLOR.warning }}>
+    {COPY.oldPanel}
   </span>
 }
 

@@ -9,6 +9,7 @@ import type { TaskCommands } from '../api/task-commands.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
+import { operatorReason } from '../../core/operator-language.ts'
 import { TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
 import { TaskStepOverview, useRunStepSnapshot } from './task-step-overview.tsx'
 import { readDisplayPreferences, TASK_VIEWS } from './display-preferences.ts'
@@ -18,7 +19,7 @@ const ATTENTION_LABEL: Record<string, string> = {
 }
 const STATUS_LABEL: Record<string, string> = {
   reserved: '已接收', queued: '排队中', running: '进行中', waiting: '等待中', succeeded: '已完成', failed: '未成功', cancelled: '已取消',
-  paused: '已暂停', settling: '正在收尾', orphaned: '等待接手',
+  paused: '已暂停', settling: '正在收尾', orphaned: '等待接手', blocked: '执行受阻',
 }
 const EFFECT_LABEL: Record<string, string> = { pure: '只读步骤', compensable: '可能需要补偿', irreversible: '涉及不可逆操作' }
 
@@ -65,7 +66,7 @@ export function taskCardStatus(task: TaskSummary) {
   // 执行完成不等于目标达成：验收没过时把验收结论接在执行状态后面，别折叠成「已完成」
   const acceptance = task.delivery_acceptance ? ACCEPTANCE_STATUS[task.delivery_acceptance] : undefined
   if (acceptance) {
-    const execution = taskStatusView(task.status, task.display_status).label ?? task.status
+    const execution = taskStatusView(task.status, task.display_status).label ?? COPY.oldPanel
     return { label: `${execution} · ${acceptance.label}`, tone: acceptance.tone }
   }
   return taskStatusView(task.status, task.display_status)
@@ -261,7 +262,7 @@ function TaskTable({ tasks, archived, selectedTaskId, onSelect }: { tasks: TaskS
       <td><button className="task-link" type="button" onClick={(event) => onSelect(task.task_id, event.currentTarget)}>{task.title || '未命名任务'}</button>
         <small>{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</small></td>
       <td>{taskCardStatus(task).label ?? <UnknownState value={task.status} />}</td>
-      <td>{task.attention_reason ?? '—'}
+      <td>{task.attention_reason ? operatorReason(task.attention_reason) : '—'}
         <small>{task.open_decision_count} 项{COPY.awaitingDecision}</small>
         <small><TaskWaitAndHeartbeat task={task} /></small>
         <small><TaskRisk level={task.max_side_effect_level} /></small>
@@ -310,7 +311,7 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, api, 
     <h3 className="task-card-title"><button type="button" onClick={(event) => onSelect(event.currentTarget)} title={task.title} style={compact ? compactTitleStyle : taskTitleStyle}
       aria-expanded={selected} aria-controls={selected ? 'task-inspector' : undefined}>{task.title || '未命名任务'}</button></h3>
     <p className="task-card-type">{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</p>
-    {task.attention_reason && <p className="task-card-reason">{task.attention_reason}</p>}
+    {task.attention_reason && <p className="task-card-reason">{operatorReason(task.attention_reason)}</p>}
     {actionable && <div className="task-card-attention">
       {task.open_decision_count > 0 && <strong>{task.open_decision_count} 项{COPY.awaitingDecision}</strong>}
       {hasUnverified && <strong><span style={{ color: tone }}>{task.unverified_count} {tone ? COPY.unverifiedBadge : '项待核实'}</span></strong>}

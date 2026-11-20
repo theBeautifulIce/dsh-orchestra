@@ -1,0 +1,248 @@
+import { operatorReason, operatorStatus } from '../core/operator-language.ts'
+import type { AnyOrchErrorCode } from '../core/errors.ts'
+import type { RunDeliveryCheck } from './queries/runs.ts'
+
+type Step = { title?: string | null; status: string; node_id?: string; waiting_on?: string[] }
+type BlockingStep = Step & { action_required: boolean; reason: string | null; missing: string[]; outstanding_files?: string[] }
+type Decision = { title: string | null; kind: string; choices: string[] | null; reason?: string | null; required_evidence: string[] | null }
+type RunDisplay = {
+  title?: string | null
+  status: string
+  terminal: boolean
+  acceptance?: string
+  settling: boolean
+  counts: Array<{ status: string; count: number }>
+  blocking: BlockingStep[]
+  decisions: Decision[]
+  delivery_checks: RunDeliveryCheck[]
+  nodes?: Step[]
+  artifacts: Array<{ artifact_id: string; file_name?: string }>
+}
+
+const PENDING_EFFECT = new Set(['succeeded_with_unverified', 'failed_with_unverified', 'abandoned_unverified', 'indeterminate_side_effect'])
+const ATTENTION_STEP = new Set(['started', 'verifying', 'waiting', 'failed', 'timeout', 'failed_with_unverified', 'orphaned', 'abandoned_unverified'])
+const RUN_LABEL = new Map([
+  ['succeeded', '本次执行已结束'],
+  ['succeeded_with_unverified', '本次执行已结束，部分外部影响仍待核实'],
+  ['failed', '本次运行失败'],
+  ['failed_with_unverified', '本次运行失败，部分外部影响仍待核实'],
+  ['orphaned', '本次运行失去执行联系'],
+  ['cancelled', '本次运行已停止'],
+])
+const ACCEPTANCE = new Map([
+  ['passed', '交付验收已通过。'],
+  ['failed', '交付验收未通过。'],
+  ['unverifiable', '现有证据不足以确认交付是否达到验收要求。'],
+  ['not_applicable', '这次任务没有可用于确认交付结果的自动验收结论。'],
+  ['pending', '交付验收还没有结论。'],
+])
+
+const PLANNING_ISSUES = new Map<string, readonly [string, string]>([
+  ['quota', ['规划模型额度不足', '请在 DSH 检查模型额度，或选择其他可用的主脑模型，再发送任务。']],
+  ['access', ['规划请求被拒绝', '请检查当前模型的访问权限，或选择一个已授权的主脑模型。']],
+  ['length', ['计划超出模型的输出长度', '规划模型在完成计划前达到了输出上限。可缩小单次任务范围，或切换主脑模型后再试。']],
+  ['connection', ['规划模型暂时不可用', '请检查模型服务的连接状态，恢复后再发送任务。']],
+  ['format', ['规划模型返回的计划无法读取', '请重新生成计划，或切换主脑模型后再试。']],
+])
+
+function displayTitle(title?: string | null): string {
+  return title?.replace(/\s+/gu, ' ').trim().slice(0, 120) ?? ''
+}
+
+function taskHeading(title: string | null | undefined, state: string): string {
+  const name = title?.trim()
+  return name ? `Orchestra ${state} · ${name}` : `Orchestra ${state}`
+}
+
+function sentence(value: string): string {
+  return /[。？！.!?]$/u.test(value) ? value : value + '。'
+}
+
+function stepTitle(step: Step): string {
+  const title = displayTitle(step.title)
+  return title && title !== step.node_id ? `「${title}」` : '一个未命名步骤'
+}
+
+function evidenceNames(items: string[]): string[] {
+  return [...new Set(items.map((item) => /^[\p{L}\p{N}_ -]+\.[\p{L}\p{N}]{1,12}$/u.test(item) ? `「${item}」` : operatorReason(item)))]
+}
+
+export function chatDecisionTitle(title: string | null, kind: string): string {
+  return displayTitle(title) || ({
+    pre_execution: '执行前审批', verify_human: '核验执行结果', audit_result: '审核结果',
+    rule_ambiguous: '确认后续分支', manual_gate: '人工确认',
+    action_overrun: '核对已超时的操作', report_contradicted: '核对不一致的执行记录',
+  } as Record<string, string>)[kind] || '本次待处理事项'
+}
+
+function decisionDescription(decision: Decision, unique: boolean): string {
+  const title = chatDecisionTitle(decision.title, decision.kind)
+  const evidence = evidenceNames(decision.required_evidence ?? [])
+  const available = decision.choices?.includes('approved')
+  const next = unique && !evidence.length && !decision.reason && available
+    ? '请在聊天审批卡中查看并选择。'
+    : '请在 Orchestra 面板打开待办，查看核验材料和可用的处理方式。'
+  return `「${title}」。${decision.reason ? sentence(operatorReason(decision.reason)) : ''}${evidence.length
+    ? `需要补充或核对：${evidence.join('、')}。` : ''}${next}`
+}
+
+function blockingDescription(step: BlockingStep): string {
+  const state = ({
+    blocked_pre: '执行前暂停',
+    blocked_post: '执行结果待核验',
+    startup_unknown: '启动情况待核实',
+    indeterminate_side_effect: '外部影响待核实',
+  } as Record<string, string>)[step.status] ?? operatorStatus(step.status)
+  const evidence = evidenceNames(step.missing)
+  const files = [...new Set(step.outstanding_files ?? [])].map((file) => `「${file}」`)
+  return `${stepTitle(step)}${state}。${step.reason ? sentence(operatorReason(step.reason)) : ''}${evidence.length
+    ? `待补或待核对：${evidence.join('、')}。` : ''}${files.length
+    ? `当前计划还缺${files.join('、')}的交付记录。如果原要求只是保留这些文件，请先核对计划里的交付要求。` : ''}`
+}
+
+export function describeChatRun(view: RunDisplay, proactive = false): { heading: string; body: string } {
+  const actions = view.blocking.filter((step) => !proactive || step.action_required)
+  const humanActions = actions.some((step) => step.action_required)
+  const state = view.decisions.length ? '等待人工处理' : humanActions ? '执行受阻'
+    : view.settling && !view.terminal ? '正在确认执行结果' : RUN_LABEL.get(view.status) ?? operatorStatus(view.status)
+  const heading = taskHeading(view.title, state)
+  const lines: string[] = []
+  const decisionTitles = view.decisions.map((decision) => chatDecisionTitle(decision.title, decision.kind))
+  for (const [index, decision] of view.decisions.entries()) {
+    lines.push(decisionDescription(decision, decisionTitles.filter((title) => title === decisionTitles[index]).length === 1))
+  }
+  for (const step of actions) lines.push(blockingDescription(step))
+  if (humanActions && (!view.decisions.length || actions.some((step) => step.missing.length > 0 || step.outstanding_files?.length))) {
+    const verify = actions.some((step) => step.action_required && step.status !== 'blocked_pre')
+    lines.push(verify
+      ? '请在 Orchestra 面板打开这次运行的「结果」，查看已登记文件，再核对对应步骤和计划里的交付要求。'
+      : '请在 Orchestra 面板打开对应步骤，查看仍需满足的执行条件。')
+  }
+  if (humanActions) {
+    const finished = view.counts.find(({ status }) => status === 'done')?.count
+    if (finished) lines.push(`已有 ${finished} 个步骤完成执行。`)
+  }
+  if (!view.terminal && !view.decisions.length && !actions.length && !proactive && view.counts.length) {
+    const counts = view.counts.map(({ status, count }) => `${operatorStatus(status)} ${count} 项`)
+    lines.push(`步骤情况：${counts.join('，')}。`)
+  }
+  const nodes = view.nodes ?? []
+  const listed = new Set(actions.map((step) => step.node_id))
+  const highlighted = nodes.filter((node) => ATTENTION_STEP.has(node.status) && !listed.has(node.node_id))
+    .filter((node) => !view.terminal || node.status !== 'started' && node.status !== 'verifying' && node.status !== 'waiting')
+  for (const node of highlighted.slice(0, 5)) {
+    const dependencies = (node.waiting_on ?? []).flatMap((id) => {
+      const dependency = nodes.find((candidate) => candidate.node_id === id)
+      return dependency?.title ? [stepTitle(dependency)] : []
+    })
+    lines.push(`${stepTitle(node)}${operatorStatus(node.status)}${dependencies.length ? `，还在等待${dependencies.join('、')}` : ''}。`)
+  }
+  if (view.terminal || view.delivery_checks.length > 0) {
+    lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
+    for (const check of view.delivery_checks.filter(({ outcome }) => outcome !== 'passed').slice(0, 5)) {
+      const title = check.file_name || (check.kind === 'tool_evidence' ? '工具执行证据' : '交付文件')
+      if (check.reason) lines.push(`「${title}」${check.outcome === 'failed' ? '未达到验收要求' : '验收结果待核实'}。${sentence(operatorReason(check.reason))}`)
+    }
+  }
+  const accepted = new Set(view.delivery_checks.flatMap(({ artifact_id, kind, outcome }) =>
+    artifact_id && kind === 'artifact' && outcome === 'passed' ? [artifact_id] : []))
+  const registered = view.artifacts.flatMap(({ artifact_id, file_name }) => file_name ? [{ artifact_id, file_name }] : [])
+  const acceptedFiles = registered.filter(({ artifact_id, file_name }) =>
+    accepted.has(artifact_id) && registered.filter((file) => file.file_name === file_name).length === 1)
+    .map(({ file_name }) => file_name)
+  const registeredFiles = [...new Set(registered.map(({ file_name }) => file_name))].filter((name) => !acceptedFiles.includes(name))
+  const fileList = (files: string[]) => files.map((name) => `「${name}」`).join('、')
+  if (acceptedFiles.length) lines.push(`已通过验收的文件：${fileList(acceptedFiles)}。`)
+  if (registeredFiles.length) lines.push(`已登记文件：${fileList(registeredFiles)}。${!view.terminal
+    ? '任务的交付验收尚无通过结论。' : ''}`)
+  if (view.terminal && (PENDING_EFFECT.has(view.status) || nodes.some((step) => PENDING_EFFECT.has(step.status)))) {
+    lines.push('请在 Orchestra 面板核对尚未确认的外部影响，再决定是否重试。')
+  } else if (view.terminal && (view.acceptance === 'failed' || view.acceptance === 'unverifiable')) {
+    lines.push('请在 Orchestra 面板查看交付验收详情，根据缺失材料或未通过的项目补齐交付。')
+  } else if (view.status === 'failed' || view.status === 'orphaned') {
+    lines.push('请在 Orchestra 面板查看执行记录，确认受影响的步骤后再决定是否重试。')
+  }
+  return { heading, body: lines.join('\n') }
+}
+
+export type ChatOutcome =
+  | { state: 'started'; title: string; run_id: string }
+  | { state: 'quality_blocked'; issues: string[]; plan_id: string; title: string }
+  | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
+  | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
+  | { state: 'clarification_required' | 'usage' | 'queued'; message: string }
+  | { state: 'error'; code: AnyOrchErrorCode; message: string; retryable: boolean; planning_issue?: string }
+
+function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?: 'start' | 'status' | 'artifact' | 'review'): string {
+  switch (outcome.code) {
+    case 'NOT_FOUND':
+      return action === 'artifact' ? '这次运行里没有找到该文件。请先查看已登记的文件，再选择要打开的一份。'
+        : action === 'status' ? '这次查询没有找到匹配的任务。请在 Orchestra 面板选择要查看的任务。'
+        : '当前会话中找不到对应的任务或处理事项。请回到原会话，或在 Orchestra 面板打开对应任务。'
+    case 'FORBIDDEN':
+      return '当前会话无法执行这项操作。请回到发起任务的会话，打开对应任务或待办后重试。'
+    case 'CONFIRMATION_REQUIRED':
+      return action === 'start' ? '这条消息没有对应的编排任务。需要派单时，请用「/orchestra 任务内容」说明交付目标。'
+        : '这项操作需要人工确认。请在 Orchestra 面板打开待办处理。'
+    case 'CONFIRMATION_EXPIRED':
+    case 'DECISION_REVISION_CONFLICT':
+    case 'CONFIRMATION_MISMATCH':
+      return action === 'artifact'
+        ? '文件内容与登记记录不一致，暂时无法展示。请核对该文件的来源并重新登记。'
+        : '这次确认已经失效或待办内容已更新。请重新打开待办，核对当前内容后再决定。'
+    case 'OPERATION_EXPIRED':
+      return action === 'artifact' ? '文件已超过保留期限。请联系负责这项任务的人获取原件。'
+        : '这项操作已过期。请从 Orchestra 面板重新打开对应任务后再试。'
+    case 'EVIDENCE_SOURCE_UNAVAILABLE':
+      return '当前无法读取所需的文件内容或核验材料。请打开对应步骤核对材料是否已登记。'
+    case 'RESOLUTION_NOT_AVAILABLE':
+      return action === 'artifact' ? '这份文件暂时无法在聊天中打开。请在 Orchestra 面板的产物列表选择对应文件预览或下载。'
+        : action === 'status' ? '当前会话里有多个同名任务。请在 Orchestra 面板选择要查看的任务。'
+        : '当前不能在聊天中处理这项待办。请到 Orchestra 面板查看可用操作和所需材料。'
+    case 'RANGE_TOO_LARGE':
+      return '本次读取超出限制。请缩小查询范围，或在 Orchestra 面板选择具体文件。'
+    case 'PAYLOAD_SCHEMA_INVALID':
+      return action === 'start' ? '请用 1 至 2000 个字符说明要交付的结果，以及本次可使用的材料。'
+        : '这次操作的参数不完整。请说明要查看的任务、文件或待办。'
+    default:
+      return outcome.retryable
+        ? 'Orchestra 暂时无法完成这项操作。请刷新任务状态后再试。'
+        : 'Orchestra 无法完成这项操作。请在面板打开对应任务查看当前状态。'
+  }
+}
+
+export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'status' | 'artifact' | 'review') {
+  switch (outcome.state) {
+    case 'started':
+      return { heading: taskHeading(outcome.title, '已接单'), body: '已接收任务，执行进度可在 Orchestra 面板查看。' }
+    case 'quality_blocked':
+      return { heading: taskHeading(outcome.title, '未启动本次任务'), body: [
+        ...new Set(outcome.issues.slice(0, 5).map((issue) => sentence(operatorReason(issue)))),
+        '请根据提示补充交付目标、材料或必要的执行条件，再提交任务。',
+      ].join('\n') }
+    case 'approval_pending':
+      return { heading: taskHeading(outcome.title, '等待人工批准'), body: '目前没有记录新的批准决定。要继续处理，可重新打开审批卡或在 Orchestra 面板查看待办。' }
+    case 'approved':
+    case 'rejected':
+      return { heading: taskHeading(outcome.title, outcome.state === 'approved' ? '已登记批准' : '已登记拒绝'),
+        body: '后续执行状态可在 Orchestra 面板查看。' }
+    case 'clarification_required':
+      return { heading: 'Orchestra 需要明确的交付目标', body: outcome.message }
+    case 'usage':
+      return { heading: 'Orchestra 用法 · /orchestra 任务内容', body: outcome.message }
+    case 'queued':
+      return { heading: 'Orchestra 已排队新消息', body: outcome.message }
+    case 'error':
+      if (action === 'start') {
+        const hint = PLANNING_ISSUES.get(outcome.planning_issue ?? '')
+        if (hint) return { heading: 'Orchestra ' + hint[0], body: hint[1] }
+        if (outcome.code === 'OPERATION_TIMEOUT') return { heading: 'Orchestra 规划超时',
+          body: '规划时间已用完。可在「设置 → 规划时限」延长时间，或更换主脑模型后再发送任务。' }
+      }
+      return { heading: action === 'start' ? 'Orchestra 未能启动本次任务' : 'Orchestra 未能完成本次操作', body: errorDisplay(outcome, action) }
+  }
+}
+
+export function chatText({ heading, body }: { heading: string; body: string }): string {
+  return body ? `${heading}\n${body}` : heading
+}

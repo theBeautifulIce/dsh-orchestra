@@ -9,7 +9,7 @@ export const COPY = {
   commandUnknown: '结果未知',
   retry: '重试',
   refresh: '刷新后重试',
-  oldPanel: '面板版本过旧，无法识别这个状态',
+  oldPanel: '当前状态未确认',
   // 等你决定：有待裁决的事项要人拍板。
   awaitingDecision: '待审批',
   // 仍有未结算不可逆动作：settling 里还挂着没结算的不可逆动作。

@@ -6,6 +6,7 @@ import { newOperationId } from '../api/workflow-commands.ts'
 import type { CollaborationHost } from '../../service/collaboration.ts'
 import { PanelCommandButton } from './shell.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { operatorReason, operatorStatus } from '../../core/operator-language.ts'
 
 type Summary = ReturnType<CollaborationHost['listScopes']>['items'][number]
 type ScopeDetail = ReturnType<CollaborationHost['getScope']>['item']
@@ -67,7 +68,7 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
       done(); refresh((value) => value + 1); setNotice('已记录。')
     } catch (error) {
       if (!(error instanceof ApiError && error.code === 'OPERATION_OUTCOME_UNKNOWN')) pending.current.delete(key)
-      setFailed(true); setNotice(error instanceof Error ? error.message : '操作结果暂不可确认。')
+      setFailed(true); setNotice(error instanceof Error ? operatorReason(error.message) : '操作结果暂不可确认。')
     }
     finally { setBusy(false) }
   }
@@ -102,28 +103,33 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
       <section style={card}><div className="ops-toolbar"><strong>参与步骤</strong><span className="ops-meta">有效至 {new Date(shown.scope.expires_at).toLocaleString()}</span></div>
         <div className="ops-actions">{shown.members.map((node) => <button className="ops-button ops-button--link"
           key={node.node_run_id} type="button" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}
-          title={node.node_run_id} onClick={() => onOpenRun(node.task_id, node.run_id)}>{participantNames.get(node.node_run_id)}</button>)}</div>
+          onClick={() => onOpenRun(node.task_id, node.run_id)}>{participantNames.get(node.node_run_id)}</button>)}</div>
       </section>
       {shown.findings.map((finding) => <article key={finding.finding_id} style={card}>
         <h2 style={{ margin: 0, fontSize: FONT_PX.section }}>{finding.title}</h2>
-        <p>{finding.summary}</p><p>原始系统证据 <code>{finding.evidence_id}</code></p>
+        <p>{finding.summary}</p><details><summary>查看原始证据编号</summary><p><code>{finding.evidence_id}</code></p></details>
         {shown.requests.filter((request) => request.finding_id === finding.finding_id).map((request) => {
           const candidates = request.reassignment_candidates
           const actions: Action[] = request.status === 'proposed' ? candidates === null ? ['authorize', 'deny'] : ['deny']
             : request.status === 'completed' && request.adoption === null ? ['adopt', 'dismiss'] : []
           if (candidates?.length) actions.push('reassign')
           return <section id={request.request_id} key={request.request_id} style={{ borderTop: `1px solid ${COLOR.line}`, marginTop: 10, paddingTop: 10 }}>
-            <strong>{LABELS[request.status] ?? request.status}</strong>
+            <strong>{LABELS[request.status] ?? operatorStatus(request.status)}</strong>
             {request.withdrawn_from_status && <span> · 撤回前{LABELS[request.withdrawn_from_status]}</span>}
             <p>{request.question}</p>
-            <p>接收步骤 <span title={request.target_node_run_id}>{participantNames.get(request.target_node_run_id) ?? request.target_node_run_id}</span></p>
-            {request.target_attempt !== null && <p>执行轮次 {request.target_attempt} · 代次 {request.target_generation}</p>}
+            <p>接收步骤 {participantNames.get(request.target_node_run_id) ?? '步骤名称暂不可用'}</p>
+            {request.target_attempt !== null && <p>第 {request.target_attempt} 次尝试</p>}
             {request.replacement_request_id && <p><a href={'#' + request.replacement_request_id}>查看重新指派的请求</a></p>}
             {request.replaces_request_id && <p><a href={'#' + request.replaces_request_id}>查看已撤回的请求</a></p>}
             {candidates?.length === 0 && <p>当前协作范围内没有可用的替代接收方。</p>}
             {request.authorization_note && <p>派发记录 · {request.authorization_note}</p>}
-            {request.result && <p>{LABELS[request.verdict ?? '']} · {request.result} · <code>{request.evidence_id}</code></p>}
+            {request.result && <p>{LABELS[request.verdict ?? '']} · {request.result}</p>}
             {request.adoption && <p>{LABELS[request.adoption]} · {request.adoption_note}</p>}
+            <details><summary>查看核验登记明细</summary>
+              <p>请求编号 <code>{request.request_id}</code> · 接收步骤编号 <code>{request.target_node_run_id}</code></p>
+              {request.target_generation !== null && <p>派发代次 {request.target_generation}</p>}
+              {request.evidence_id && <p>证据编号 <code>{request.evidence_id}</code></p>}
+            </details>
             {actions.map((action) => <PanelCommandButton key={action} disabled={busy} onClick={() => {
               setReview({ id: request.request_id, revision: request.revision, action }); setNote(''); setReplacement('')
             }}>{ACTIONS[action]}</PanelCommandButton>)}

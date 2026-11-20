@@ -6,8 +6,9 @@ import type { DecisionView, MemoryApprovalCard } from '../api/types.ts'
 import { DecisionConfirmationRequired, describeDecisionError, type DecisionCommandsApi, type DecisionResolveInput } from '../api/decision-commands.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
-import { UnknownState, usePanelCommandsEnabled } from './shell.tsx'
+import { usePanelCommandsEnabled } from './shell.tsx'
 import { priorityRank } from '../../core/decision-priority.ts'
+import { operatorReason, operatorStatus } from '../../core/operator-language.ts'
 
 export { priorityRank }
 
@@ -15,13 +16,32 @@ const KIND_LABEL: Record<string, string> = {
   pre_execution: '执行前确认', action_overrun: '操作范围确认', abandon_ack: '停止后确认', verify_human: '人工核验',
   audit_result: '结果复核', rule_ambiguous: '规则待澄清', startup_unknown: '启动状态待确认', report_contradicted: '结果不一致',
 }
-const STATUS_LABEL: Record<string, string> = { pending: '待处理', acknowledged: '已接手', blocked_for_human: '等你处理', resolved: '已处理' }
-const DECISION_OPTIONS: Readonly<Record<string, string>> = { approved: '批准执行', rejected: '拒绝执行' }
+const DECISION_OPTIONS = new Map([
+  ['approved', '批准执行'], ['rejected', '拒绝执行'], ['expired', '按到期处理'],
+  ['continue', '继续执行'], ['abort', '停止执行'],
+  ['confirm_applied', '确认外部操作已发生'], ['confirm_not_applied', '确认外部操作未发生'],
+  ['confirm_started', '确认已启动'], ['confirm_not_started', '确认未启动'],
+  ['continue_tracking', '继续跟踪'], ['continue_wait', '继续等待'], ['abandon', '停止跟踪'],
+  ['uphold_report', '采纳回报'], ['uphold_decision', '保留原处理决定'],
+])
+const PRIORITY_LABEL = new Map([['critical', '最高'], ['urgent', '紧急'], ['high', '高'], ['normal', '普通'], ['low', '低']])
+const FIELD_LABEL = new Map([
+  ['allowed_resolutions', '处理选项'], ['priority', '优先级'], ['priority_reason', '等待原因'],
+  ['required_evidence', '核验材料'], ['target_summary', '事项说明'], ['payload', '事项内容'],
+])
 const APPROVER_LABEL: Readonly<Record<string, string>> = { human: '人工', either: '人工或授权执行主体', agent: '授权执行主体' }
 const EXPIRY_LABEL: Readonly<Record<string, string>> = { auto_resolve: '按已记录的规则自动处理', escalate_only: '升级给人工', none: '无自动动作' }
 
 // 服务端没给的字段一律写明「服务端未提供」，面板不替它编。
 const NOT_PROVIDED = '服务端未提供'
+
+function optionalReason(reason: string | null | undefined, fallback = NOT_PROVIDED): string {
+  return reason ? operatorReason(reason) : fallback
+}
+
+function missingFields(fields: string[]): string {
+  return [...new Set(fields.map((field) => FIELD_LABEL.get(field) ?? '部分事项信息'))].join('、')
+}
 
 /** 同优先级先处理等待时间较长的决定，缺失优先级的决定仍按等待时间排序。 */
 export function sortDecisions(items: DecisionView[]): DecisionView[] {
@@ -295,10 +315,15 @@ function DecisionCard(props: {
   confirmation?: ReactNode
 }) {
   const { decision } = props
-  const kind = KIND_LABEL[decision.kind]
+  const kind = Object.hasOwn(KIND_LABEL, decision.kind) ? KIND_LABEL[decision.kind] : '待确认事项'
   const agentOnly = decision.approver?.startsWith('agent:') === true
-  const status = agentOnly && decision.status !== 'resolved' ? '由授权核验主体处理' : STATUS_LABEL[decision.status]
-  const resolutions = decision.allowed_resolutions ?? []
+  const status = agentOnly && decision.status !== 'resolved' ? '由授权核验主体处理' : operatorStatus(decision.status)
+  const choices = (decision.allowed_resolutions ?? []).flatMap((value) => {
+    const label = DECISION_OPTIONS.get(value)
+    return label ? [{ value, label }] : []
+  })
+  const priority = decision.priority && PRIORITY_LABEL.get(decision.priority)
+  const evidence = [...new Set((decision.required_evidence ?? []).map(operatorReason))]
   const missing = decision.projection_missing ?? []
   // 记忆审批卡：卡上的两个按钮由服务端给的标签与 resolution 组成，前端不猜。
   const memoryCard = useMemo(() => readMemoryApprovalCard(decision.payload), [decision.payload])
@@ -316,33 +341,36 @@ function DecisionCard(props: {
   }
   return <article style={cardStyle}>
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
-      <h2 style={cardTitleStyle}>{kind ?? <UnknownState value={decision.kind} />}</h2>
+      <h2 style={cardTitleStyle}>{kind}</h2>
       <strong style={{ color: !agentOnly && decision.status === 'blocked_for_human' ? COLOR.warning : COLOR.inkMuted, fontSize: FONT_PX.helper }}>
-        {status ?? <UnknownState value={decision.status} />}
+        {status}
       </strong>
     </div>
-    {decision.priority && <p style={mutedStyle}>优先级：{decision.priority}</p>}
+    {priority && <p style={mutedStyle}>优先级：{priority}</p>}
     <dl style={detailGridStyle}>
-      <dt>说明</dt><dd>{decision.target_summary ?? '说明暂不可用'}</dd>
-      <dt>为什么卡</dt><dd>{decision.priority_reason ?? NOT_PROVIDED}</dd>
-      {decision.approver && <><dt>谁能处理</dt><dd>{agentOnly ? APPROVER_LABEL.agent : (APPROVER_LABEL[decision.approver] ?? decision.approver)}</dd></>}
-      <dt>你能选什么</dt><dd>{resolutions.length > 0 ? resolutions.map((value) => DECISION_OPTIONS[value] ?? value).join(' / ') : NOT_PROVIDED}</dd>
-      <dt>需要什么证据</dt><dd>{decision.required_evidence && decision.required_evidence.length > 0 ? decision.required_evidence.join('、') : NOT_PROVIDED}</dd>
+      <dt>说明</dt><dd>{optionalReason(decision.target_summary, '说明暂不可用')}</dd>
+      <dt>为什么卡</dt><dd>{optionalReason(decision.priority_reason)}</dd>
+      {decision.approver && <><dt>谁能处理</dt><dd>{agentOnly ? APPROVER_LABEL.agent
+        : Object.hasOwn(APPROVER_LABEL, decision.approver) ? APPROVER_LABEL[decision.approver] : '处理人待确认'}</dd></>}
+      <dt>你能选什么</dt><dd>{choices.length ? choices.map(({ label }) => label).join(' / ') : NOT_PROVIDED}</dd>
+      <dt>需要什么证据</dt><dd>{evidence.length ? evidence.join('、') : NOT_PROVIDED}</dd>
       <dt>过期会怎样</dt><dd>{decision.kind === 'report_contradicted' ? '仅由人工处理，系统不会自动收口。'
         : memoryCard && decision.expires_at ? formatDate(decision.expires_at) + ' · 到期未批准，批次关闭。'
-        : decision.expires_at ? formatDate(decision.expires_at) + ' · ' + (EXPIRY_LABEL[decision.expiry_effect ?? ''] ?? '截止后的处理方式尚未提供') : NOT_PROVIDED}</dd>
-      {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{DECISION_OPTIONS[decision.closed_reason ?? ''] ?? decision.closed_reason ?? NOT_PROVIDED}</dd></>}
-      {decision.status === 'resolved' && decision.resolved_by && <><dt>处理人</dt><dd>{decision.resolved_by}</dd></>}
+        : decision.expires_at ? formatDate(decision.expires_at) + ' · ' + (decision.expiry_effect && Object.hasOwn(EXPIRY_LABEL, decision.expiry_effect)
+          ? EXPIRY_LABEL[decision.expiry_effect] : '截止后的处理方式尚未提供') : NOT_PROVIDED}</dd>
+      {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{DECISION_OPTIONS.get(decision.closed_reason ?? '') ?? optionalReason(decision.closed_reason)}</dd></>}
+      {decision.status === 'resolved' && decision.resolved_by && <><dt>处理人</dt><dd>{agentOnly ? '授权核验主体' : '已记录，见开发者视图'}</dd></>}
       {decision.status === 'resolved' && decision.decided_at && <><dt>处理时间</dt><dd>{formatDate(decision.decided_at)}</dd></>}
     </dl>
     {props.developerView && <dl style={detailGridStyle}>
       <dt>决定 ID</dt><dd>{decision.decision_id}</dd>
       <dt>运行 ID</dt><dd>{decision.run_id}</dd>
       <dt>节点运行 ID</dt><dd>{decision.node_run_id}</dd>
+      {decision.resolved_by && <><dt>处理人标识</dt><dd>{decision.resolved_by}</dd></>}
+      {missing.length > 0 && <><dt>缺少的字段</dt><dd>{missing.join('、')}</dd></>}
     </dl>}
     {decision.confirm_required && <p style={warningStyle}>处理前需要再次确认。</p>}
-    {missing.length > 0 && <p style={mutedStyle}>部分决策信息尚未持久化，当前无法提供安全的处理选项。</p>}
-    {missing.length > 0 && <p style={mutedStyle}>服务端未持久化的字段：{missing.join('、')}</p>}
+    {missing.length > 0 && <p style={mutedStyle}>当前记录缺少：{missingFields(missing)}。</p>}
     {!agentOnly && decision.status !== 'resolved' && <div style={actionStyle}>
       <label style={toggleStyle}>
         <input
@@ -355,20 +383,18 @@ function DecisionCard(props: {
         选择这条决定
       </label>
       <button type="button" onClick={props.onAcknowledge} disabled={!props.commands || props.busy} style={buttonStyle}>接手</button>
-      {resolutions.length > 0
-        ? resolutions.map((resolution) => <button
-          key={resolution}
+      {choices.length > 0
+        ? choices.map(({ value, label }) => <button
+          key={value}
           type="button"
-          aria-label={`按 ${resolution} 处理`}
-          title={`按 ${resolution} 处理`}
-          onClick={() => props.onResolve(resolution, DECISION_OPTIONS[resolution] ?? resolution)}
+          onClick={() => props.onResolve(value, label)}
           disabled={!props.commands || props.busy}
           style={buttonStyle}
-        >{DECISION_OPTIONS[resolution] ?? resolution}</button>)
+        >{label}</button>)
         : <button type="button" disabled style={buttonStyle}>处理</button>}
     </div>}
     {props.confirmation}
-    {decision.status !== 'resolved' && resolutions.length === 0 && <p style={mutedStyle}>{decision.resolution_unavailable_reason ?? '服务端没有给出可选项，这里不替你编。'}</p>}
+    {decision.status !== 'resolved' && choices.length === 0 && <p style={mutedStyle}>{optionalReason(decision.resolution_unavailable_reason, '当前没有可从这里执行的处理选项。')}</p>}
     {props.notice && (
       <p role={props.notice.tone === 'error' ? 'alert' : 'status'} style={props.notice.tone === 'error' ? errorTextStyle : mutedStyle}>
         {props.notice.text}
@@ -400,7 +426,7 @@ function MemoryApprovalCardView(props: {
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
       <h2 style={cardTitleStyle}>{card.title}</h2>
       <strong style={{ color: decision.status === 'blocked_for_human' ? COLOR.warning : COLOR.inkMuted, fontSize: FONT_PX.helper }}>
-        {STATUS_LABEL[decision.status] ?? <UnknownState value={decision.status} />}
+        {operatorStatus(decision.status)}
       </strong>
     </div>
     <p style={mutedStyle}>{card.summary_line}</p>
@@ -409,13 +435,13 @@ function MemoryApprovalCardView(props: {
       {card.items.map((item, index) => <li key={`${item.layer}-${index}`} style={itemStyle}>
         <p style={itemTitleStyle}>层：{item.layer} · {item.title}</p>
         <p style={mutedStyle}>{item.digest}</p>
-        <p style={mutedStyle}>理由：{item.judge_reason ?? NOT_PROVIDED}</p>
+        <p style={mutedStyle}>理由：{optionalReason(item.judge_reason)}</p>
       </li>)}
     </ul>
     <button type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded} style={buttonStyle}>{card.expand_label}</button>
     {expanded && <div style={detailStyle}>
       {card.items.map((item, index) => <p key={`why-${index}`} style={mutedStyle}>
-        {item.title}：{item.judge_reason ?? NOT_PROVIDED}
+        {item.title}：{optionalReason(item.judge_reason)}
       </p>)}
     </div>}
     {props.developerView && <dl style={detailGridStyle}>
@@ -423,10 +449,11 @@ function MemoryApprovalCardView(props: {
       <dt>评估 ID</dt><dd>evaluation_id: {card.evaluation_id ?? NOT_PROVIDED}</dd>
       <dt>提议哈希</dt><dd>proposal_hash: {card.proposal_hash ?? NOT_PROVIDED}</dd>
       <dt>决定 ID</dt><dd>decision_id: {decision.decision_id}</dd>
+      {missing.length > 0 && <><dt>缺少的字段</dt><dd>{missing.join('、')}</dd></>}
     </dl>}
-    {incomplete && <p style={mutedStyle}>{decision.resolution_unavailable_reason ?? '部分决策信息尚未持久化，当前无法提供安全的处理选项。'}</p>}
-    {incomplete && missing.length > 0 && <p style={mutedStyle}>服务端未持久化的字段：{missing.join('、')}</p>}
-    {incomplete && missing.length === 0 && <p style={mutedStyle}>服务端没有给出可选项，这里不替你编。</p>}
+    {incomplete && decision.resolution_unavailable_reason && <p style={mutedStyle}>{operatorReason(decision.resolution_unavailable_reason)}</p>}
+    {incomplete && missing.length > 0 && <p style={mutedStyle}>当前记录缺少：{missingFields(missing)}。</p>}
+    {incomplete && missing.length === 0 && !decision.resolution_unavailable_reason && <p style={mutedStyle}>当前没有完整的处理选项。</p>}
     <div style={actionStyle}>
       <button
         type="button"

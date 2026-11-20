@@ -189,8 +189,9 @@ function WorkflowRuns({ api, workflowId, reloadVersion, onSnapshot, onOpenRun }:
       <tbody>{runs.map((run) => <tr key={run.run_id}>
         <td>{onOpenRun && run.task_id
           ? <button type="button" className="ops-button ops-button--link" style={{ whiteSpace: 'normal', textAlign: 'left' }} onClick={() => onOpenRun(run.task_id, run.run_id)}>{run.task_title || '查看任务运行'}</button>
-          : <strong>{run.task_title || run.run_id}</strong>}</td>
-        <td><span className="ops-status">{taskStatusView(run.status, run.display_status).label ?? run.status}</span></td>
+          : <strong>{run.task_title || '未命名任务'}</strong>}
+          <details><summary>查看运行登记明细</summary><p>运行编号 <code>{run.run_id}</code> · 状态 <code>{run.status}</code></p></details></td>
+        <td><span className="ops-status">{taskStatusView(run.status, run.display_status).label ?? COPY.oldPanel}</span></td>
         <td>{run.workflow_version === null ? '—' : `v${run.workflow_version}`}</td>
         <td>{taskOriginLabel(run)}</td><td><time dateTime={run.started_at ?? run.created_at}>{formatTaskDate(run.started_at ?? run.created_at)}</time></td>
         <td>{runDuration(run.started_at, run.ended_at) ?? '—'}</td>

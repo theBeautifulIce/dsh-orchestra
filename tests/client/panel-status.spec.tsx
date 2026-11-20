@@ -148,7 +148,7 @@ describe('WP-A 面板侧 G5 门禁', () => {
     await view.flush()
 
     // blocked 与 settling 都还在屏上。
-    expect(view.text()).toContain('blocked')
+    expect(view.text()).toContain('执行受阻')
     expect(view.text()).toContain('正在收尾')
     // 两条提醒同时出现，不只显示 blocked。
     expect(view.text()).toContain(COPY.awaitingDecision)
@@ -244,8 +244,11 @@ describe('WP-A 面板侧 G5 门禁', () => {
     const steps = heading?.closest('section')
     expect([...view.container.querySelectorAll('.task-inspector-badges span')].some((badge) => badge.textContent === '进行中')).toBe(true)
     const rows = [...(steps?.querySelectorAll('.task-flow-step') ?? [])]
+    const currentLabels: Record<string, string> = {
+      verifying: '核验中', blocked_post: '执行结束，待人工处理', orphaned: '执行者失联，尚未接手', superseded: '已由新尝试接替',
+    }
     expect(rows.map((row) => [row.querySelector('strong')?.textContent, row.querySelector('.task-flow-step-result')?.textContent]))
-      .toEqual(NODE_STATUS_LABELS.map(({ status, status_label }) => ['步骤 ' + status, status_label]))
+      .toEqual(NODE_STATUS_LABELS.map(({ status, status_label }) => ['步骤 ' + status, currentLabels[status] ?? status_label]))
     expect(new Set(rows.map((row) => row.querySelector('.task-flow-step-result')?.textContent)).size).toBe(20)
     await view.click(view.findAll('button').find((button) => button.textContent === '返回任务')!)
     await view.click(view.findAll('button').find((button) => button.textContent === '运行 · 3')!)

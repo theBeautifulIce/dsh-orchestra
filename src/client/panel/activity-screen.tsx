@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ActivityItem, ResourcesApi } from '../api/resources.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { EventDetails } from './execution-history.tsx'
+import { operatorReason } from '../../core/operator-language.ts'
 
 const LABELS: Readonly<Record<string, string>> = {
   'task.created': '创建任务', 'task.reserved': '预留任务', 'task.archived': '归档任务', 'task.restored': '取回任务',
@@ -29,7 +30,8 @@ const LABELS: Readonly<Record<string, string>> = {
 }
 
 export function activityTitle(type: string) {
-  return Object.hasOwn(LABELS, type) ? LABELS[type]! : type
+  if (Object.hasOwn(LABELS, type)) return LABELS[type]!
+  return /\p{Script=Han}/u.test(type) ? operatorReason(type) : '其他活动记录'
 }
 
 export function ActivityScreen({ api, reloadVersion, onSnapshot }: { api: ResourcesApi; reloadVersion: number; onSnapshot: (seq: number) => void }) {
@@ -66,9 +68,12 @@ export function ActivityList({ api, runId, taskId, reloadVersion, onSnapshot, co
     {failed && <p role="alert">活动记录读取失败。 <button type="button" onClick={() => { setBefore(undefined); setRetry((value) => value + 1) }}>重试</button></p>}
     {!loading && !failed && items.length === 0 && <p style={muted}>当前没有活动记录。</p>}
     {items.length > 0 && <ol style={timeline}>{items.map((event) => <li key={event.seq} style={row}>
-      <div><strong>{activityTitle(event.type)}</strong><p style={muted}>
-        {[event.run_id, event.node_run_id, event.decision_id].filter(Boolean).join(' · ') || `事件 #${event.seq}`}</p>
-        {!compact && <EventDetails entries={event.details} />}</div>
+      <div><strong>{activityTitle(event.type)}</strong>
+        {!compact && <EventDetails entries={[
+          ...event.details ?? [], { label: '事件类型', value: event.type }, { label: '账本位置', value: String(event.seq) },
+          ...[event.run_id, event.node_run_id, event.decision_id].flatMap((value, index) =>
+            value ? [{ label: ['运行 ID', '步骤 ID', '审批 ID'][index]!, value }] : []),
+        ]} />}</div>
       <time dateTime={event.occurred_at} style={muted}>{new Date(event.occurred_at).toLocaleString()}</time>
     </li>)}</ol>}
     {!compact && next !== null && !failed && <button type="button" disabled={loading} onClick={() => setBefore(next)} style={{ justifySelf: 'start' }}>加载更早活动</button>}

@@ -49,6 +49,15 @@ export function listRunArtifacts(db: Db, runId: string, now = Date.now()) {
   })
 }
 
+export function findRunArtifactIdsByName(db: Db, runId: string, fileName: string, now: number): string[] {
+  return withReadTx(db, ({ tx }) => tx.all<{ artifact_id: string }>(
+    `SELECT a.artifact_id FROM artifacts a JOIN artifact_contents c USING (artifact_id)
+      WHERE a.run_id = ? AND c.file_name = ?
+        AND (a.retain_until IS NULL OR julianday(a.retain_until) > julianday(?))
+      LIMIT 2`, [runId, fileName, new Date(now).toISOString()],
+  ).map(({ artifact_id }) => artifact_id))
+}
+
 function parseEvidenceIndex(raw: unknown): unknown {
   if (typeof raw !== 'string') return null
   try { return JSON.parse(raw) as unknown } catch { return null }

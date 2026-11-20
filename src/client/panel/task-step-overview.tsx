@@ -58,7 +58,7 @@ function StepRows({ nodes, titles, groupTitle }: { nodes: readonly NodeRunView[]
       const waiting = waitingFor(node, titles)
       const label = groupTitle && executionState(node) === 'queued' ? '排队原因未记录' : nodeExecutionLabel(node)
       return <li key={node.node_id} data-tone={nodeExecutionPhase(node).tone}>
-        <strong>{node.title || node.node_id}</strong>
+        <strong>{titles.get(node.node_id)}</strong>
         {label !== groupTitle && <span className="task-step-overview-status">{label}</span>}
         {node.attempt > 1 && <small>第 {node.attempt} 次尝试</small>}
         {waiting && <small className="task-step-waiting">{waiting}</small>}
@@ -69,7 +69,7 @@ function StepRows({ nodes, titles, groupTitle }: { nodes: readonly NodeRunView[]
 
 export function TaskStepOverview({ nodes, queue = false }: { nodes: readonly NodeRunView[]; queue?: boolean }) {
   const steps = [...currentAttempts(nodes).values()]
-  const titles = new Map(steps.map((node) => [node.node_id, node.title || node.node_id]))
+  const titles = new Map(steps.map((node, index) => [node.node_id, node.title || `未命名步骤 ${index + 1}`]))
   const groups = new Map<QueueGroup, NodeRunView[]>()
   if (queue) {
     for (const node of steps) {

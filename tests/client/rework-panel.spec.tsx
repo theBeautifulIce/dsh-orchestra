@@ -127,6 +127,7 @@ describe('成果审核与返工', () => {
       const observed = {
         title: form.querySelector('section')?.getAttribute('aria-label'),
         label: select.selectedOptions[0]?.textContent,
+        selected: select.value,
         text: form.querySelector('pre')?.textContent,
       }
       await view.click(button(form, '通过成果验收'))
@@ -142,8 +143,10 @@ describe('成果审核与返工', () => {
         { path: '/v1/rework/request', body: { run_id: 'r1', target_node_run_id: 'old', source_artifact_id: 'B', source_artifact_hash: b.metadata.sha256, expected_revision: 7 } },
       ])
       expect(observed).toMatchObject({ title: 'report.txt的内容', text: undefined })
-      expect(observed.label).toContain('B')
-      expect(observed.label).toContain(b.metadata.sha256.slice(0, 12))
+      expect(observed.selected).toBe('B')
+      expect(observed.label).toContain('report.txt · 登记记录 3')
+      expect(observed.label).not.toContain(b.metadata.sha256.slice(0, 12))
+      expect(form.querySelector('details:not([open])')?.textContent).toContain(b.metadata.sha256)
       await view.click(button(form, '预览内容'))
       expect(form.querySelector('pre')?.textContent).toBe('内容 B')
       await view.click(button(form, '下载产物'))

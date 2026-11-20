@@ -27,6 +27,71 @@ function apiFrom(handler: (query: FakeQuery) => FakeReply) {
 const missing = { ok: false, error: { code: 'NOT_FOUND', message: 'missing', retryable: false } } as const
 
 describe('任务工作台与排期详情', () => {
+  it('已提交文件与仍缺少的计划产物同时显示，且能直接进入结果', async () => {
+    const pending = runSummary({ run_id: 'r2', status: 'running', counts: [{ status: 'verifying', count: 1 }] })
+    const artifactHash = 'a'.repeat(64)
+    const { api } = apiFrom(({ path }) => {
+      if (path === '/v1/tasks/get') return { ok: true, data: task }
+      if (path === '/v1/runs') return { ok: true, data: { items: [pending] } }
+      if (path === '/v1/runs/get') return { ok: true, data: pending }
+      if (path === '/v1/node-runs') return { ok: true, data: { items: [
+        nodeRunView({ run_id: 'r2', node_id: 'summarize', node_run_id: 'raw-step-id', title: '汇总分析',
+          status: 'verifying', status_label: 'verifying', hang_reason: 'evidence_missing' }),
+        nodeRunView({ run_id: 'r2', node_id: 'source', node_run_id: 'source-attempt', title: '收集情况', status: 'done' }),
+      ] } }
+      if (path === '/v1/artifacts') return { ok: true, data: { items: [{
+        artifact_id: 'raw-artifact-id', run_id: 'r2', file_name: 'collection-review.md', source_node_run_id: 'source-attempt',
+        sha256: artifactHash, retain_until: null, created_at: now,
+      }], has_more: false } }
+      if (path === '/v1/task-plans/by-task') return { ok: true, data: { launch: { task_id: task.task_id, run_id: 'r2' }, proposal: {
+        deliverables: [
+          { node_id: 'summarize', acceptance: { kind: 'artifact', file_name: 'summary.md', minimum_bytes: 100 } },
+          { node_id: 'summarize', acceptance: { kind: 'artifact', file_name: 'collection-review.md', minimum_bytes: 90 } },
+        ],
+      } } }
+      return missing
+    })
+    const view = await renderPanel(<TaskDetailScreen api={api} taskId={task.task_id} initialRunId="r2" onBack={() => {}} />)
+    try {
+      await view.flush()
+      expect(view.text()).toContain('系统正在核验这一步的执行结果')
+      expect(view.text()).toContain('已登记的文件：collection-review.md')
+      expect(view.text()).toContain('计划要求「summary.md」由「汇总分析」提交。尚未登记该文件。')
+      expect(view.text()).toContain('计划要求「collection-review.md」由「汇总分析」提交。已登记同名文件，提交步骤仍待确认。')
+      expect(view.findAll('details:not([open])').some((element) => element.textContent?.includes('至少 100 字节'))).toBe(true)
+      expect(view.text()).not.toContain('evidence_missing')
+      expect(view.text()).not.toContain('raw-step-id')
+      await view.click(view.findAll('button').find((button) => button.textContent === '查看已登记产物')!)
+      await view.flush()
+      expect(view.text()).toContain('交付产物')
+      expect(view.findAll('summary').some((element) => element.textContent === 'collection-review.md')).toBe(true)
+      expect(view.text()).toContain('提交步骤 · 收集情况')
+      expect(view.findAll('details:not([open]) code').some((element) => element.textContent === artifactHash)).toBe(true)
+    } finally { view.unmount() }
+  })
+
+  it('旧记录没有本次运行绑定的计划时，保留已登记文件且不判断缺交', async () => {
+    const pending = runSummary({ run_id: 'r2', status: 'running', counts: [{ status: 'verifying', count: 1 }] })
+    const { api } = apiFrom(({ path }) => {
+      if (path === '/v1/tasks/get') return { ok: true, data: task }
+      if (path === '/v1/runs') return { ok: true, data: { items: [pending] } }
+      if (path === '/v1/runs/get') return { ok: true, data: pending }
+      if (path === '/v1/node-runs') return { ok: true, data: { items: [] } }
+      if (path === '/v1/artifacts') return { ok: true, data: { items: [{ run_id: 'r2', file_name: 'existing.md' }], has_more: false } }
+      if (path === '/v1/task-plans/by-task') return { ok: true, data: { launch: { task_id: task.task_id, run_id: 'r1' }, proposal: {
+        deliverables: [{ acceptance: { kind: 'artifact', file_name: 'older.md', minimum_bytes: 100 } }],
+      } } }
+      return missing
+    })
+    const view = await renderPanel(<TaskDetailScreen api={api} taskId={task.task_id} initialRunId="r2" onBack={() => {}} />)
+    try {
+      await view.flush()
+      expect(view.text()).toContain('已登记的文件：existing.md')
+      expect(view.text()).not.toContain('older.md')
+      expect(view.text()).not.toContain('尚未登记该文件')
+    } finally { view.unmount() }
+  })
+
   it('单步只有一处摘要，主动展开后加载该次尝试的日志与证据', async () => {
     const node = nodeRunView({ node_id: 'review', node_run_id: 'review-2', title: '核对记忆', attempt: 2 })
     const opened: string[] = []

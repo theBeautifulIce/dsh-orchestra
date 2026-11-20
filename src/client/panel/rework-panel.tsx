@@ -7,6 +7,8 @@ import type { NodeRunView, RunArtifact } from '../api/types.ts'
 import type { ReworkInspection } from '../../service/rework-inspection.ts'
 import { ArtifactContent, artifactContentKey, matchesArtifactContent, useArtifactRetention } from './artifact-content.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { operatorReason, operatorStatus } from '../../core/operator-language.ts'
+import { nodeExecutionLabel } from './task-node-status.ts'
 
 const labels: Record<string, string> = { proposed: '等待授权', evaluating: '正在评估', needs_human_approval: '等待人工授权', authorized: '已授权', scheduled: '等待返工', executing: '正在返工', awaiting_review: '等待重新验收', accepted: '验收通过', closed: '已完成', declined: '未批准', escalated: '等待人工处理', cancelled: '已取消' }
 const scopes: Record<string, string> = { targeted_revision: '针对性修改', rerun_node: '重新执行当前节点', replan_subgraph: '局部重规划' }
@@ -31,23 +33,24 @@ export function ReworkPanel({ api, commands, runId, reloadVersion = 0, plannerEn
     {loading && <p role="status">正在读取返工记录…</p>}
     {failed && <p role="alert">返工记录读取失败。<button type="button" onClick={() => setRetry(n => n + 1)}>重试</button></p>}
     {!loading && !failed && items.length === 0 && <p>暂无返工记录。</p>}
-    {items.filter(item => !runId || item.run_id === runId).map(item => compact ? <p key={item.request_id}>{item.target_node_run_id} · {labels[item.status] ?? item.status} · 第 {item.round_no} 轮 · {item.reason}</p>
+    {items.filter(item => !runId || item.run_id === runId).map(item => compact ? <p key={item.request_id}>{labels[item.status] ?? operatorStatus(item.status)} · 第 {item.round_no} 轮 · {item.reason}</p>
       : <ReworkCard key={item.request_id + ':' + item.revision} api={api} item={item} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />)}
     {runId && commands && !compact && <ReworkRequestForm key={runId} api={api} runId={runId} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />}
   </section>
 }
 
 function errorText(error: unknown): string {
-  if (error instanceof ApiError) {
-    const operation = (error.details as { operation_id?: string } | undefined)?.operation_id
-    return error.message + (operation ? ` · 回执编号 ${operation}` : '')
-  }
-  return error instanceof Error ? error.message : '操作未完成'
+  return error instanceof Error ? operatorReason(error.message) : '操作未完成'
 }
 
-function artifactVersionLabel(artifact: RunArtifact): string {
-  const version = artifact.sha256.slice(0, 12) + ' · ' + artifact.artifact_id
-  return artifact.file_name ? artifact.file_name + ' · ' + version : version
+function artifactVersionLabel(artifact: RunArtifact, index: number): string {
+  return `${artifact.file_name || '未命名产物'} · 登记记录 ${index + 1} · ${new Date(artifact.created_at).toLocaleString()}`
+}
+
+function receiptStatus(status: string): string {
+  if (status === 'applied') return '操作已生效'
+  if (status === 'received') return '已收件，等待处理'
+  return operatorStatus(status)
 }
 
 type Comparison = {
@@ -135,28 +138,33 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
   const pending = ['proposed', 'needs_human_approval'].includes(item.status)
   const escalated = item.status === 'escalated'
   const mayDecline = (pending || escalated) && history?.attempts.length === 0
-  return <article style={box} aria-label={'返工 ' + item.request_id}>
-    <h3>{labels[item.status] ?? item.status} · 第 {item.round_no} / {item.max_rounds} 轮</h3>
-    <p>来源：{item.requester_actor} · 节点 {item.target_node_run_id} · 第 {item.target_attempt} 次执行</p>
+  return <article style={box} aria-label={`第 ${item.round_no} 轮返工`}>
+    <h3>{labels[item.status] ?? operatorStatus(item.status)} · 第 {item.round_no} / {item.max_rounds} 轮</h3>
+    <p>原步骤的第 {item.target_attempt} 次尝试{old?.file_name && <> · {old.file_name}</>}</p>
     <p>{item.reason}</p><p>期望结果：{item.expected_result}</p>
-    <p>范围：{scopes[item.suggested_scope] ?? item.suggested_scope}</p>
+    <p>范围：{scopes[item.suggested_scope] ?? '范围未确认'}</p>
     {history?.dispatch_blocks?.filter(block => !block.resolved_at).map(block =>
       <section key={block.node_run_id} aria-label="自动派发受阻">
         <h4>{block.node_id} 的自动派发已暂停</h4>
-        <p>{block.message} <code>{block.reason}</code></p>
+        <p>{operatorReason(block.message || block.reason)}</p>
+        <details><summary>查看暂停记录</summary><p>原因代码 <code>{block.reason}</code></p></details>
       </section>
     )}
     <details><summary>修改前后成果与版本</summary>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 12 }}>
-        <section><h4>修改前</h4><p>{item.source_artifact_id}</p><code style={hash}>{item.source_artifact_hash}</code>{old && <ArtifactContent api={api} artifact={old} />}</section>
-        <section><h4>修订成果</h4>{candidates.length > 1 && <label>选择修订成果<select value={revised?.artifact_id ?? ''} onChange={e => setSelected(e.target.value)}>{candidates.map(a => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a)}</option>)}</select></label>}
-          {revised ? <><p>{revised.artifact_id}</p><code style={hash}>{revised.sha256}</code><ArtifactContent api={api} artifact={revised} /></> : <p>尚无修订成果。</p>}</section>
-      </div><p>验收绑定所选修订成果及其哈希。</p>
+        <section><h4>修改前</h4><p>{old?.file_name ?? '原成果记录'}</p>{old && <ArtifactContent api={api} artifact={old} />}</section>
+        <section><h4>修订成果</h4>{candidates.length > 1 && <label>选择修订成果<select value={revised?.artifact_id ?? ''} onChange={e => setSelected(e.target.value)}>{candidates.map((a, index) => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a, index)}</option>)}</select></label>}
+          {revised ? <><p>{revised.file_name || '未命名产物'}</p><ArtifactContent api={api} artifact={revised} /></> : <p>尚无修订成果。</p>}</section>
+      </div><p>请核对选中的修订文件。本次验收会对应这一份文件。</p>
+      <details><summary>查看成果版本记录</summary>
+        <p>原成果编号 <code>{item.source_artifact_id}</code> · SHA-256 <code>{item.source_artifact_hash}</code></p>
+        {revised && <p>修订成果编号 <code>{revised.artifact_id}</code> · SHA-256 <code>{revised.sha256}</code></p>}
+      </details>
       <button type="button" disabled={interactionBusy || !left || !right} onClick={() => void compare()}>逐行对比修改</button>
       {comparison.key === comparisonKey && comparison.notice && <p role="status">{comparison.notice}</p>}
       {left && right && comparison.key === comparisonKey && comparison.result && <>{comparison.result.truncated && <p>仅对比内容预览，完整成果请分别下载核对。</p>}<LineComparison before={comparison.result.before} after={comparison.result.after} /></>}
     </details>
-    {history?.impacts && history.impacts.length > 0 && <section><h4>受影响步骤</h4><ul>{history.impacts.map(i => <li key={i.node_run_id}>{i.node_id} · {i.released_at ? '已恢复' : '等待返工或验收'}{i.replacement_node_run_id ? ` · 后续执行 ${i.replacement_node_run_id}` : ''}</li>)}</ul></section>}
+    {history?.impacts && history.impacts.length > 0 && <section><h4>受影响步骤</h4><ul>{history.impacts.map(i => <li key={i.node_run_id}>{i.node_id} · {i.released_at ? '已恢复' : '等待返工或验收'}{i.replacement_node_run_id && ' · 已有后续执行'}</li>)}</ul></section>}
     <details><summary>返工与验收历史</summary>{history ? <><ol>{history.attempts.map(a => <li key={a.attempt_id}>第 {a.round_no} 轮 · {labels[a.status] ?? a.status}<p>{a.feedback}</p><p>{a.source_artifact_id} → {a.result_artifact_id ?? '等待修订成果'}</p><p>{a.created_at}</p></li>)}</ol><ol>{history.reviews.map(r => <li key={r.review_id}>第 {r.round_no} 轮 · {r.reviewer_actor} · {r.action === 'accept' ? '验收通过' : r.action === 'request_changes' ? '要求修改' : r.action === 'authorize' ? '授权返工' : r.action === 'reject' ? '不批准' : '升级处理'}<p>{r.note}</p>{r.artifact_id && <p>验收版本 {r.artifact_id} · {r.artifact_hash}</p>}<p>{r.created_at}</p></li>)}</ol></> : <p>尚未读取历史。</p>}</details>
     {commands && (pending || review || escalated) && <fieldset disabled={!canWrite || interactionBusy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
       <label style={field}>具体修改意见或处理说明<textarea value={note} onChange={e => setNote(e.target.value)} rows={3} /></label>
@@ -174,11 +182,15 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
         {Boolean(plan.proposal.additional_edges?.length) && <div>新增执行依赖<ul>{plan.proposal.additional_edges?.map(e =>
           <li key={e.from + '/' + e.to}>{e.from} 完成后执行 {e.to}</li>)}</ul></div>}
         {Boolean(plan.proposal.insert_steps?.length) && <section aria-label="候选新增步骤"><h4>新增步骤（授权后执行）</h4><ul>{plan.proposal.insert_steps?.map(step => <li key={step.node_id}>{step.node_id} · 插入 {step.before_node_id} 之前 · 来源角色：{step.before_node_id}<p>{step.instruction}</p></li>)}</ul></section>}
-        <code style={hash}>{plan.plan_hash}</code><button type="button" disabled={plan.revision !== item.revision} onClick={() => void planAction(true)}>授权此方案</button>
+        <details><summary>查看方案版本记录</summary><code style={hash}>{plan.plan_hash}</code></details>
+        <button type="button" disabled={plan.revision !== item.revision} onClick={() => void planAction(true)}>授权此方案</button>
       </section>}
     </fieldset>}
     {notice && <p role="status">{notice}</p>}
-    {unknownOperation && commands && <button type="button" disabled={interactionBusy} onClick={async () => { setBusy(true); try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${data.status}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } finally { setBusy(false) } }}>查询原操作回执</button>}
+    <details><summary>查看返工登记明细</summary><p>请求编号 <code>{item.request_id}</code> · 原步骤尝试编号 <code>{item.target_node_run_id}</code> · 提出方 <code>{item.requester_actor}</code></p>
+      {unknownOperation && <p>回执编号 <code>{unknownOperation}</code></p>}
+    </details>
+    {unknownOperation && commands && <button type="button" disabled={interactionBusy} onClick={async () => { setBusy(true); try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${receiptStatus(data.status)}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } finally { setBusy(false) } }}>查询原操作回执</button>}
   </article>
 }
 
@@ -229,9 +241,12 @@ function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled }: 
     finally { setBusy(false) }
   }
   return <details><summary>审核成果或提出修改</summary><fieldset disabled={busy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
-    <label style={field}>来源节点<select value={nodeId} onChange={e => { setNodeId(e.target.value); setArtifactId('') }}><option value="">选择节点</option>{nodes.map(n => <option key={n.node_run_id} value={n.node_run_id}>{n.title || n.node_id} · 第 {n.attempt} 次 · {n.status_label}</option>)}</select></label>
-    <label style={field}>成果版本<select value={artifactId} onChange={e => setArtifactId(e.target.value)}><option value="">选择成果</option>{artifacts.filter(a => a.source_node_run_id === nodeId).map(a => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a)}</option>)}</select></label>
+    <label style={field}>来源节点<select value={nodeId} onChange={e => { setNodeId(e.target.value); setArtifactId('') }}><option value="">选择节点</option>{nodes.map(n => <option key={n.node_run_id} value={n.node_run_id}>{n.title || n.node_id} · 第 {n.attempt} 次 · {nodeExecutionLabel(n)}</option>)}</select></label>
+    <label style={field}>成果版本<select value={artifactId} onChange={e => setArtifactId(e.target.value)}><option value="">选择成果</option>{artifacts.filter(a => a.source_node_run_id === nodeId).map((a, index) => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a, index)}</option>)}</select></label>
     {artifact && <ArtifactContent api={api} artifact={artifact} />}
+    {artifact && <details><summary>查看所选成果版本记录</summary>
+      <p>成果编号 <code>{artifact.artifact_id}</code> · SHA-256 <code>{artifact.sha256}</code></p>
+    </details>}
     <div style={actions}><button type="button" disabled={!canWrite || !node || held} onClick={() => void submit('hold')}>等待人工验收后结束</button><button type="button" disabled={!canWrite || !held || !artifact} onClick={() => void submit('accept')}>通过成果验收</button><button type="button" disabled={!canWrite || !held} onClick={() => void submit('withdraw')}>撤销留验</button></div>
     {held && <p role="status">此节点等待人工验收，运行暂不结束。</p>}
     {plannerEnabled && <section aria-label="主脑成果检查">
@@ -245,7 +260,7 @@ function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled }: 
     <label style={field}>保留要求（每行一条）<textarea value={preserve} onChange={e => setPreserve(e.target.value)} rows={2} /></label>
     <label style={field}>修改方式<select value={scope} onChange={e => setScope(e.target.value as ReworkScope)}><option value="targeted_revision">针对性修改</option><option value="rerun_node">重新执行当前节点</option><option value="replan_subgraph">提交局部重规划需求</option></select></label>
     <button type="button" disabled={!canWrite || !artifact || !node || node.status !== 'done' || !reason.trim() || !expected.trim()} onClick={() => void submit('request')}>要求修改</button><p>意见提交后等待授权，旧成果与执行记录保留。</p>
-  </fieldset>{notice && <p role="status">{notice}</p>}{unknownOperation && <button type="button" onClick={async () => { try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${data.status}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } }}>查询原操作回执</button>}</details>
+  </fieldset>{notice && <p role="status">{notice}</p>}{unknownOperation && <button type="button" onClick={async () => { try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${receiptStatus(data.status)}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } }}>查询原操作回执</button>}</details>
 }
 export function LineComparison({ before, after }: { before: string; after: string }) {
   const oldLines = before.split('\n'), newLines = after.split('\n')

@@ -35,6 +35,16 @@ export function chatRun(db: Db, actor: string, runId?: string): string | undefin
   ).get(...(runId ? [actor, runId] : [actor]))?.run_id as string | undefined
 }
 
+export function chatRunByTitle(db: Db, actor: string, title: string): string | undefined {
+  const rows = db.raw.prepare(
+    'SELECT DISTINCT o.run_id FROM chat_task_receipts c JOIN task_plans p USING (plan_id)'
+    + ' JOIN start_run_operations o ON p.launch_operation_id = o.operation_id'
+    + ' JOIN tasks t ON t.task_id = o.task_id WHERE p.created_by = ? AND t.title = ? LIMIT 2',
+  ).all(actor, title)
+  if (rows.length > 1) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '请在面板选择具体的同名任务')
+  return rows[0]?.run_id as string | undefined
+}
+
 export type ChatRunReceipt = { run_id: string; reported_key: string | null; cursor: number }
 
 export function pendingChatReports(db: Db, actor: string, after: number, limit: number): ChatRunReceipt[] {

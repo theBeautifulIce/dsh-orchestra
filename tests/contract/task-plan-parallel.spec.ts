@@ -19,6 +19,7 @@ import { failQueuedNode } from '../../src/service/dispatcher.ts'
 import { callDshRework } from '../../src/service/dsh-rework.ts'
 import { registerRunArtifact } from '../../src/service/artifact-store.ts'
 import { verifyArtifactCompletion } from '../../src/service/artifact-completion.ts'
+import { readOutstandingFiles } from '../../src/service/chat-expected-files.ts'
 import { fakeAgentBridge } from '../fixtures/agent-bridge.ts'
 
 const roles = ['目录', '链接', '术语', '日期', '引用', '数字', '格式', '附件', '重复项', '缺失项']
@@ -245,6 +246,15 @@ it.each(['完成', '纯成果', '成果门槛', '取消', '重启与重试', '�
       const sql = service.orchestra.db.raw
       expect(sql.prepare(`SELECT COUNT(*) AS n FROM node_run_events WHERE type='report_rejected'
         AND json_extract(payload,'$.reason')='evidence_missing'`).get()).toEqual({ n: blockedIds.length })
+      const missing = readOutstandingFiles(service.orchestra.db, run_id)
+      const forBranch = (i: number) => missing.find((record) =>
+        current.find((node) => node.node_id === branchIds[i])?.node_run_id === record.node_run_id)?.file_names
+      expect(forBranch(1)).toEqual([names[1] + '.txt'])
+      expect(forBranch(2)).toEqual([names[2] + '.txt'])
+      // Expired or corrupt submissions still exist. Do not describe those files as never submitted.
+      expect(forBranch(0)).toBeUndefined()
+      expect(forBranch(5)).toBeUndefined()
+      expect(readOutstandingFiles(service.orchestra.db, 'another-run')).toEqual([])
       expect(spawned.map(stepOf).toSorted()).toEqual(names.toSorted())
       return
     }

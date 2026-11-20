@@ -21,11 +21,11 @@ export function runtimeCanvasDoc(definition: unknown, topology?: RunTopology | n
   const base = readCanvasDoc(definition)
   if (!base || !topology) return base
   const nodes = [...base.nodes]
-  for (const step of topology.steps) {
+  for (const [index, step] of topology.steps.entries()) {
     if (nodes.some(n => n.node_id === step.node_id)) continue
     const source = base.nodes.find(n => n.node_id === step.before_node_id)
-    nodes.push({ node_id: step.node_id, type: 'agent', title: `新增步骤 · ${step.node_id}`, position: { x: 40, y: 40 },
-      raw: { contract: { description: step.instruction }, runtime_step: { ...step, source_title: source?.title || step.before_node_id } } })
+    nodes.push({ node_id: step.node_id, type: 'agent', title: `新增步骤 ${index + 1}`, position: { x: 40, y: 40 },
+      raw: { contract: { description: step.instruction }, runtime_step: { ...step, source_title: source?.title || '来源步骤名称暂不可用' } } })
   }
   const edges = [...base.edges]
   for (const edge of topology.edges) {
