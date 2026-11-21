@@ -59,7 +59,12 @@ async function fixture(enableAgent = false) {
       return post('/v1/decisions/resolve', { decisionId: card.decision_id, contentHash: card.content_hash, revision: card.revision,
         resolution: 'approved', operation_id: uuidv7() }, true)
     },
-    node: (runId: string, nodeId: string) => service.orchestra.db.raw.prepare('SELECT node_run_id,status FROM node_runs WHERE run_id=? AND node_id=?').get(runId, nodeId)!,
+    choose: (runId: string, nodeId: string) => {
+      const card = service.orchestra.db.raw.prepare("SELECT decision_id,revision FROM decisions WHERE run_id=? AND kind='rule_ambiguous'").get(runId)!
+      return post('/v1/decisions/resolve', { decisionId: card.decision_id, revision: card.revision,
+        resolution: 'approved', operation_id: uuidv7(), payload: { selected_node_id: nodeId } }, true)
+    },
+    node: (runId: string, nodeId: string) => service.orchestra.db.raw.prepare('SELECT node_run_id,status,lease_id FROM node_runs WHERE run_id=? AND node_id=?').get(runId, nodeId)!,
     run: (runId: string) => service.orchestra.db.raw.prepare('SELECT status,cancel_requested_at FROM runs WHERE run_id=?').get(runId)!,
     subRun: (runId: string) => String(service.orchestra.db.raw.prepare('SELECT run_id FROM runs WHERE parent_run_id=?').get(runId)?.run_id),
     events: (nodeRunId: string, type: string) => service.orchestra.db.raw.prepare('SELECT payload FROM node_run_events WHERE node_run_id=? AND type=?').all(nodeRunId,type)
@@ -204,24 +209,72 @@ it('子运行收口后发生断链时，父规则不会把历史完成记录当�
   } finally { await f.dispose() }
 })
 
-it.each([false,true])('分支只对相交选路验链（相交=%s）', async intersects => {
+it.each(['disjoint','direct_merge','remote_merge'])('健康分支照常选路，公共汇合仍验证坏支证据（%s）', async topology => {
   const f = await fixture()
   try {
+    const rightTarget = topology === 'direct_merge' ? 'left_default' : 'right_default'
+    const remoteJoin = topology === 'remote_merge' ? ['left_default','left_skip','right_default','right_skip'].map(from => edge(from,'merge')) : []
     await f.publish('branches', [trigger, parallel('group',{ join: 'all' }), wait('first'), wait('second'), branch('left'), branch('right'),
-      policy('left_skip'), policy('right_skip'), policy('left_default'), ...(intersects ? [] : [policy('right_default')])],
+      policy('left_skip'), policy('right_skip'), policy('left_default'), ...(topology === 'direct_merge' ? [] : [policy('right_default')]),
+      ...(topology === 'remote_merge' ? [policy('merge')] : [])],
     [edge('trigger','group'),edge('group','first'),edge('group','second'),edge('first','left'),edge('second','right'),
       edge('left','left_default',{ default:true }),edge('left','left_skip',{ priority:1, when:{ path:'result',op:'eq',value:'other' }}),
-      edge('right',intersects ? 'left_default' : 'right_default',{ default:true }),edge('right','right_skip',{ priority:1, when:{ path:'result',op:'eq',value:'other' }})])
+      edge('right',rightTarget,{ default:true }),edge('right','right_skip',{ priority:1, when:{ path:'result',op:'eq',value:'other' }}), ...remoteJoin])
     const run = await f.start('branches')
     await f.dispatch(run,'group')
     await f.dispatch(run,'first','second')
     await f.wake(run,'first')
     await f.wake(run,'second')
     expect(await f.dispatch(run,'left')).toMatchObject({ status: 200, data: expect.arrayContaining([expect.objectContaining({ node_id: 'left', status: 'done' })]) })
+    if (topology === 'remote_merge') expect(await f.dispatch(run,'left_default')).toMatchObject({ status: 200, data: expect.arrayContaining([expect.objectContaining({ node_id: 'left_default', status: 'done' })]) })
     f.breakChain(String(f.node(run,'left').node_run_id),'branch.selected')
     expect(await f.dispatch(run,'right')).toMatchObject({ status: 200, data: expect.arrayContaining([
-      expect.objectContaining(intersects ? { node_id:'right', status:'failed', error_code:'FORBIDDEN' } : { node_id:'right', status:'done' }),
+      expect.objectContaining({ node_id:'right', status:'done' }),
     ]) })
-    if (!intersects) expect(await f.dispatch(run,'right_default')).toMatchObject({ status: 200, data: expect.arrayContaining([expect.objectContaining({ node_id:'right_default', status:'done' })]) })
+    expect(f.events(String(f.node(run,'right').node_run_id),'branch.selected')).toMatchObject([{ target_node_id: rightTarget }])
+    expect(f.events(String(f.node(run,'right_skip').node_run_id),'branch.skipped')).toHaveLength(1)
+    expect(f.events(String(f.node(run,'left_skip').node_run_id),'branch.skipped')).toHaveLength(1)
+    if (topology === 'remote_merge') await f.restart()
+    if (topology !== 'direct_merge') expect(await f.dispatch(run,'right_default')).toMatchObject({ status: 200, data: expect.arrayContaining([expect.objectContaining({ node_id:'right_default', status:'done' })]) })
+    if (topology !== 'disjoint') {
+      const merge = topology === 'direct_merge' ? 'left_default' : 'merge'
+      await f.dispatch(run,merge)
+      expect(f.node(run,merge)).toMatchObject({ status: 'queued', lease_id: null })
+      expect(f.events(String(f.node(run,merge).node_run_id),'branch.skipped')).toHaveLength(0)
+      expect(f.events(String(f.node(run,merge).node_run_id),'lease_acquired')).toHaveLength(0)
+    }
+  } finally { await f.dispose() }
+})
+
+it('当前分支实际依赖坏链时拒绝续行', async () => {
+  const f = await fixture()
+  try {
+    await f.publish('dependent', [trigger,branch('left'),policy('bridge'),branch('right'),policy('after')],
+      [edge('trigger','left'),edge('left','bridge',{ default:true }),edge('bridge','right'),edge('right','after',{ default:true })])
+    const run = await f.start('dependent')
+    await f.dispatch(run,'left')
+    await f.dispatch(run,'bridge')
+    expect(f.node(run,'bridge').status).toBe('done')
+    f.breakChain(String(f.node(run,'left').node_run_id),'branch.selected')
+    const outcome = await f.dispatch(run,'right')
+    expect(outcome).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'right', status: 'failed', error_code: 'FORBIDDEN' })] })
+    expect(f.events(String(f.node(run,'right').node_run_id),'branch.selected')).toHaveLength(0)
+  } finally { await f.dispose() }
+})
+
+it('人工续行也会拒绝在裁决等待期间损坏的真正上游', async () => {
+  const f = await fixture()
+  try {
+    await f.publish('dependent', [trigger,branch('left'),policy('bridge'),branch('right'),policy('after')],
+      [edge('trigger','left'),edge('left','bridge',{ default:true }),edge('bridge','right'),
+        edge('right','after',{ priority:0, when: { path: 'decision', op: 'eq', value: 'pass' } })])
+    const run = await f.start('dependent')
+    await f.dispatch(run,'left')
+    await f.dispatch(run,'bridge')
+    expect(await f.dispatch(run,'right')).toMatchObject({ status: 200, data: [expect.objectContaining({ status: 'waiting' })] })
+    f.breakChain(String(f.node(run,'left').node_run_id),'branch.selected')
+    expect(await f.choose(run,'after')).toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
+    expect(f.node(run,'right').status).toBe('blocked_post')
+    expect(f.events(String(f.node(run,'right').node_run_id),'branch.selected')).toHaveLength(0)
   } finally { await f.dispose() }
 })

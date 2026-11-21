@@ -110,7 +110,7 @@ export function verifiedBranchSkip(tx: ReadTx, secret: string, runId: string, no
   return !!source && intactBranchChain(tx, secret, source.branch_id) && selectedBranchTarget(tx, source.branch_id) === source.target_id
 }
 
-/** A single write commits route authority and prevents every unreachable node from taking a lease. */
+/** Commit route authority and skip only nodes proven unreachable by trustworthy selections. */
 export function persistBranchSelection(tx: Tx, secret: string, definition: WorkflowDefinition, p: {
   runId: string; nodeRunId: string; branchId: string; targetId: string; now: string; decisionId?: string
 }): void {
@@ -141,12 +141,12 @@ export function persistBranchSelection(tx: Tx, secret: string, definition: Workf
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '分支出边必须来自已发布工作流')
   }
   const selected = new Map<string,string>([[p.branchId, p.targetId]])
+  const unknown: string[] = []
   for (const node of current.values()) {
     if (node.node_id === p.branchId || !relevant.has(node.node_id) || !branches.has(node.node_id) || node.status !== 'done') continue
-    if (!intactBranchChain(tx, secret, node.node_run_id)) throw new OrchError('FORBIDDEN', '相交分支的选择证据已断链', { nodeId: node.node_id })
-    const target = selectedBranchTarget(tx, node.node_run_id)
-    if (!target) throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '已完成的分支缺少选路记录', { nodeId: node.node_id })
-    selected.set(node.node_id, target)
+    const target = intactBranchChain(tx, secret, node.node_run_id) ? selectedBranchTarget(tx, node.node_run_id) : undefined
+    if (target && forward.get(node.node_id)?.includes(target)) selected.set(node.node_id, target)
+    else unknown.push(node.node_id)
   }
   const inbound = new Set(edges.map(edge => edge.to))
   const adjacency = new Map<string, string[]>()
@@ -155,6 +155,11 @@ export function persistBranchSelection(tx: Tx, secret: string, definition: Workf
     const next = adjacency.get(edge.from) ?? []
     next.push(edge.to)
     adjacency.set(edge.from, next)
+  }
+  // A later selection reachable from a damaged source cannot supply pruning authority for it.
+  const uncertain = closure(forward, unknown)
+  if (uncertain.has(p.branchId)) {
+    throw new OrchError('FORBIDDEN', '当前分支依赖尚未核实的选路证据', { nodeId: p.branchId })
   }
   const reachable = new Set<string>()
   const pending = [...current.keys()].filter(nodeId => !inbound.has(nodeId))
@@ -166,7 +171,7 @@ export function persistBranchSelection(tx: Tx, secret: string, definition: Workf
   }
   appendNodeRunEvent(tx, secret, p.nodeRunId, 'branch.selected', { target_node_id: p.targetId, ...(p.decisionId ? { decision_ref: p.decisionId } : {}) })
   for (const node of current.values()) {
-    if (!affected.has(node.node_id) || reachable.has(node.node_id)) continue
+    if (!affected.has(node.node_id) || reachable.has(node.node_id) || uncertain.has(node.node_id)) continue
     if (node.status === 'superseded' && branchSkipped(tx, node.node_run_id)) continue
     if (node.status !== 'queued') throw new OrchError('STALE_GENERATION', '未选中的分支已经开始，不能更改执行路径', { nodeId: node.node_id })
     applyTransition(tx, secret, {
