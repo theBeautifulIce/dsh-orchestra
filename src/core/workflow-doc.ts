@@ -6,7 +6,7 @@
 // 两层都返回同一种 issue 形状，path 是 RFC 6901 JSON Pointer，最多 100 条。
 import { z } from 'zod'
 import { OrchError } from './errors.ts'
-import { assertApprovalNodeConfig, assertPolicyNodeConfig } from './workflow-def.ts'
+import { assertApprovalNodeConfig, assertPolicyNodeConfig, assertToolNodeConfig } from './workflow-def.ts'
 import { validatePolicy, type PolicyCondition } from './policy.ts'
 
 export const WORKFLOW_DOC_MAX_BYTES = 1024 * 1024
@@ -353,10 +353,16 @@ const configIssues = (doc: WorkflowDoc): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
   for (const node of doc.nodes) {
     const cfg = (node.config ?? {}) as Record<string, unknown>
-    if (node.type === 'policy' || node.type === 'approval') {
+    if (node.type === 'policy' || node.type === 'approval' || node.type === 'tool') {
       try {
         if (node.type === 'policy') assertPolicyNodeConfig(cfg)
-        else assertApprovalNodeConfig(cfg)
+        else if (node.type === 'approval') assertApprovalNodeConfig(cfg)
+        else {
+          assertToolNodeConfig(cfg)
+          if ('tools' in cfg || ('required_hashes' in cfg && Array.isArray(cfg.required_hashes) && cfg.required_hashes.length)) {
+            throw new Error('独立工具节点的工具和结果哈希由注册表执行结果决定')
+          }
+        }
       } catch (error) {
         issues.push({ path: pointer(nodePath(doc, node.node_id), 'config'), code: 'WORKFLOW_NODE_CONFIG_INVALID', message: (error as Error).message })
       }

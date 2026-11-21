@@ -208,12 +208,13 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
   })
   const runner = new ReadOnlyToolRunner(registry, {
     readonlyAvailable: () => Boolean(parent()) && (options.allowWorkspaceListing || Boolean(sampleFile)),
-    async run({ bin, args, cwd, timeoutMs }) {
+    async run({ bin, args, cwd, timeoutMs, signal: cancel }) {
       if (args.length !== 1 || cwd !== workspace.path || !parent()) {
         throw new OrchError('FORBIDDEN', '工具不属于获准工作区')
       }
       const scope = { sessionId, workspaceRoot: workspace.path }
-      const signal = AbortSignal.timeout(timeoutMs)
+      const timeout = AbortSignal.timeout(timeoutMs)
+      const signal = cancel ? AbortSignal.any([cancel, timeout]) : timeout
       if (bin === 'dsh:workspace.read' && sampleFile && args[0] === sampleFile) {
         const sample = await host.workspaceFiles.read(scope, sampleFile, { offset: 1, limit: 200 }, signal)
         if (!sample.eof || Buffer.byteLength(sample.text, 'utf8') > 16 * 1024) {

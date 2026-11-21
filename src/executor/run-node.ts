@@ -29,6 +29,8 @@ import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
 
 export type RunNodeParams = {
+  /** Internal dispatcher entry. The standalone runner rechecks the persisted node kind and definition. */
+  standaloneTool?: true
   /** The scheduler derives this from the persisted workflow and node identity at admission. */
   workflowHelperLimit?: number
   /** Controlled by the dedicated release entrypoint. */
@@ -67,6 +69,7 @@ export type RunNodeResult = {
   final_status: string
   evidence: StrongEvidence | null
   agent_id: string
+  reason?: string
 }
 
 export type RunNodeDeps = {

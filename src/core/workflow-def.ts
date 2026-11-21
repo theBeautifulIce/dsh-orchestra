@@ -2,15 +2,17 @@
 import { OrchError } from './errors.ts'
 import { PHASE_CAPABILITIES, type Phase } from './config.ts'
 import { assertNoMemoryWriteTool } from './memory-graph.ts'
+import { RELEASE_CHECK_WORKFLOW_ID } from './release-workflow-ids.ts'
 import { validateBranchEdges, validatePolicy, type BranchEdge, type PassCondition, type PolicyCondition } from './policy.ts'
 
-export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait' | 'policy' | 'approval' | 'branch'
+export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait' | 'policy' | 'approval' | 'branch' | 'tool'
 
 export type PolicyNodeConfig = { condition: PolicyCondition; rule_id?: string }
 export type ApprovalNodeConfig = { prompt: string; on_timeout: 'fail' }
+export type ToolNodeConfig = { command: string; cwd: string; timeout_ms: number }
 
 export function isDispatcherWorkflowNode(type: string): boolean {
-  return type === 'policy' || type === 'approval' || type === 'branch'
+  return type === 'policy' || type === 'approval' || type === 'branch' || type === 'tool'
 }
 
 export function isControlWorkflowNode(type: string): boolean {
@@ -32,6 +34,20 @@ export function assertApprovalNodeConfig(config: unknown): asserts config is App
       || !cfg.prompt.trim() || cfg.prompt.length > 800 || cfg.on_timeout !== 'fail') {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'approval 节点需要有效的 prompt 与 on_timeout=fail')
   }
+}
+
+export function assertToolNodeConfig(config: unknown): asserts config is ToolNodeConfig {
+  const cfg = config as Partial<ToolNodeConfig> | undefined
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)
+      || typeof cfg.command !== 'string' || !/^[a-z0-9][a-z0-9_.:-]{0,127}$/i.test(cfg.command)
+      || typeof cfg.cwd !== 'string' || !cfg.cwd.length || cfg.cwd.length > 240
+      || /[\x00-\x1f:]|^[\\/]/.test(cfg.cwd) || cfg.cwd.split(/[\\/]/).includes('..')
+      || typeof cfg.timeout_ms !== 'number' || !Number.isInteger(cfg.timeout_ms) || cfg.timeout_ms < 1 || cfg.timeout_ms > 120_000
+      || Object.hasOwn(cfg, 'args')) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'tool 节点需要注册命令、相对工作区目录和毫秒超时，参数由注册表固定')
+  }
+  assertNoMemoryWriteTool([cfg.command])
+  if (cfg.command === RELEASE_CHECK_WORKFLOW_ID) throw new OrchError('FORBIDDEN', '发布检查只能由专用发布入口调用')
 }
 
 // 子流程嵌套深度上限：根为 0，能挂两层子流程
@@ -68,6 +84,7 @@ export type WorkflowNodeDef = {
   subworkflow?: SubworkflowNodeConfig
   policy?: PolicyNodeConfig
   approval?: ApprovalNodeConfig
+  tool?: ToolNodeConfig
 }
 
 export type WorkflowDefinition = {
@@ -100,6 +117,7 @@ export const NODE_CAPABILITY: Record<NodeType, string> = {
   policy: 'all_nodes',
   approval: 'approval',
   branch: 'all_nodes',
+  tool: 'all_nodes',
 }
 
 export function isKnownNodeType(type: string): type is NodeType {
@@ -189,6 +207,14 @@ function assertControlConfigShape(node: WorkflowNodeDef): void {
   else if (node.approval !== undefined) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '只有 approval 节点能声明 approval 配置', { node_id: node.node_id })
   }
+  if (node.type === 'tool') {
+    assertToolNodeConfig(node.tool)
+    if (node.tools !== undefined || node.required_hashes?.length) {
+      throw new OrchError('WORKFLOW_VALIDATION_FAILED', '独立工具节点的工具和结果哈希由注册表执行结果决定', { node_id: node.node_id })
+    }
+  } else if (node.tool !== undefined) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '只有 tool 节点能声明工具配置', { node_id: node.node_id })
+  }
   if (node.side_effect_policy !== undefined && (node.type !== 'agent' || !['pure','compensable','irreversible'].includes(node.side_effect_policy))) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '智能体步骤的副作用声明无效', { node_id: node.node_id })
   }
@@ -240,6 +266,9 @@ export function assertDefinitionAllowed(def: WorkflowDefinition, phase: Phase): 
     }
     // 阶段闸先判：S2 下的 subworkflow 节点是因为能力不够被拒，而不是配置缺字段
     assertControlConfigShape(node)
+    if (node.type === 'tool' && def.required_hashes?.length) {
+      throw new OrchError('WORKFLOW_VALIDATION_FAILED', '含独立工具的工作流须使用工具自带的系统取证格式', { node_id: node.node_id })
+    }
     if (node.type === 'branch') {
       const routes = branchEdgesOf(def, node.node_id)
       if (!routes.length || new Set(routes.flatMap(route => route.priority === undefined ? [] : [route.priority])).size !== routes.filter(route => route.priority !== undefined).length) {

@@ -238,7 +238,7 @@ describe('工作流命令 HTTP 入口', () => {
         name: '带分支',
         nodes: [
           { node_id: 't', type: 'trigger', title: '入口', position: { x: 0, y: 0 }, config: {} },
-          { node_id: 'b', type: 'tool', title: '未接线的工具', position: { x: 1, y: 0 }, config: {} },
+          { node_id: 'b', type: 'parallel', title: '未接线的并行组', position: { x: 1, y: 0 }, config: {} },
         ],
         edges: [{ from: 't', to: 'b' }],
       },

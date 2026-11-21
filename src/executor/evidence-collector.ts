@@ -67,6 +67,7 @@ export type EvidenceCollectorDeps = {
   lease?: { lease_id: string; action_generation: number }
   nowAt: () => string
   clock?: ClockProvider
+  standalone?: { signal?: AbortSignal }
 }
 
 // 一条工具调用的宿主执行痕迹：收口时按 execution_id 回查，Agent 自报的结果不参与。
@@ -115,6 +116,7 @@ export class EvidenceCollector {
   async collect(raw: unknown): Promise<CollectedToolResult> {
     const call = parseToolCall(raw)
     this.assertAuthorized(call)
+    this.deps.standalone?.signal?.throwIfAborted()
     const requestHash = sha256Hex(canonicalJson({
       tool: call.tool, args: call.args, cwd: call.cwd, timeoutMs: call.timeoutMs,
     }))
@@ -173,6 +175,9 @@ export class EvidenceCollector {
         'INSERT INTO bridge_tool_outbox (node_run_id, attempt, executor_agent_id, call_id, tool, request_hash, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)',
         [this.deps.nodeRunId, this.deps.attempt, this.deps.executorAgentId, call.callId, call.tool, requestHash, 'pending', now, now],
       )
+      if (this.deps.standalone) appendNodeRunEvent(tx, this.deps.secret, this.deps.nodeRunId, 'tool.call', {
+        tool: call.tool, attempt: this.deps.attempt, call_id: call.callId, request_hash: requestHash,
+      })
     })
   }
 
@@ -222,6 +227,7 @@ export class EvidenceCollector {
       cwd: call.cwd,
       timeoutMs: call.timeoutMs,
       workspaceRoot: this.deps.runner.root,
+      signal: this.deps.standalone?.signal,
     })
     const endSample = this.deps.clock?.sample()
     const finishedAt = endSample ? new Date(endSample.wallClockMs).toISOString() : this.deps.nowAt()
@@ -329,7 +335,7 @@ function parseToolCall(raw: unknown): ToolCallPayload {
   return { callId: p.callId, tool: p.tool, args: p.args as string[], cwd, timeoutMs }
 }
 
-function parseStoredResult(raw: string, callId: string): CollectedToolResult {
+export function parseStoredResult(raw: string, callId: string): CollectedToolResult {
   const envelope = JSON.parse(raw) as Record<string, unknown>
   // 兼容旧 outbox 的裸结果；新记录是 { result, trace, evidence }。
   const p = envelope.result && typeof envelope.result === 'object'

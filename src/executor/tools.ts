@@ -174,7 +174,7 @@ export function resolveDeclaredPolicy(declared: SideEffectPolicy, derived: SideE
 // 宿主执行接口：只读身份由宿主保证，本批只负责不越权
 export type HostRunner = {
   readonlyAvailable(): boolean
-  run(input: { bin: string; args: string[]; cwd: string; timeoutMs: number }): Promise<{
+  run(input: { bin: string; args: string[]; cwd: string; timeoutMs: number; signal?: AbortSignal }): Promise<{
     exitCode: number
     stdout: string
     stderr: string
@@ -210,6 +210,7 @@ export type RunToolParams = {
   cwd: string
   timeoutMs: number
   workspaceRoot: string
+  signal?: AbortSignal
 }
 
 export type RunToolResult = {
@@ -238,6 +239,7 @@ export class ReadOnlyToolRunner {
 
   // 执行器只在自己挂载的根里跑，调用方要核命令哈希时得拿到同一个根
   get root(): string { return this.workspaceRoot }
+  readonlyAvailable(): boolean { return this.host.readonlyAvailable() }
 
   async runTool(params: RunToolParams): Promise<RunToolResult> {
     // 命令必须命中注册表，且 capability 必须是 read_only
@@ -260,11 +262,13 @@ export class ReadOnlyToolRunner {
     const cwd = resolveInside(this.workspaceRoot, params.cwd)
     // argv 不经 shell：参数只认注册表里的固定数组，请求里的 args 不许覆盖（第五轮审计 P1-2）
     const args = descriptor.command.args
+    params.signal?.throwIfAborted()
     const res = await this.host.run({
       bin: descriptor.command.bin,
       args,
       cwd,
       timeoutMs: params.timeoutMs,
+      ...(params.signal ? { signal: params.signal } : {}),
     })
     const evidence: StrongEvidence = {
       source: 'run_tool',

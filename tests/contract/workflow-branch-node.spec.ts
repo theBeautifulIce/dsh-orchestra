@@ -16,7 +16,7 @@ it('S6 branch 读取上游结果，持久选路与人工续行使未选路径无
     asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }),
     resolveHttpHuman: request => request.headers.authorization === 'Bearer branch-operator' ? { id: 'fixture:operator' } : null,
-    executor: { registry, bridge: new BridgeClient({ async call() { throw new Error('unexpected agent call') } }),
+    executor: { registry, bridge: new BridgeClient({ async request() { throw new Error('unexpected agent call') }, async *listen() {} }),
       runner: new ReadOnlyToolRunner(registry, { readonlyAvailable: () => false, async run() { throw new Error('unexpected tool call') } }, dir) },
   })
   let service = await boot()
