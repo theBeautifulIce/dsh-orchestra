@@ -15,7 +15,7 @@ type Settlement = {
   stream?: readonly { type: string; chunk?: { type: string; usage?: UsageSample } }[]
 }
 
-function attemptTokens(events: readonly MeteringEvent[]): ModelAttemptMetering['tokens'] {
+function attemptTokens(events: readonly MeteringEvent[], incomplete: boolean): ModelAttemptMetering['tokens'] {
   // Like DSH's tokenUsage fold, replace the sample within a turn/step and
   // close that slot on llm/retry-started. Keep absent counters unknown.
   const samples: (UsageSample | undefined)[] = []
@@ -43,13 +43,19 @@ function attemptTokens(events: readonly MeteringEvent[]): ModelAttemptMetering['
   if (current) samples.push(current.usage)
   const total = (bucket: keyof UsageSample) => {
     if (samples.length === 0) return null
+    let observed = false
     let sum = 0
     for (const sample of samples) {
       const count = observedCount(sample?.[bucket])
-      if (count === null || !Number.isSafeInteger(sum + count)) return null
+      if (count === null) {
+        if (!incomplete) return null
+        continue
+      }
+      if (!Number.isSafeInteger(sum + count)) return null
+      observed = true
       sum += count
     }
-    return sum
+    return observed ? sum : null
   }
   return { uncached_input_tokens: total('inputTokens'), output_tokens: total('outputTokens'),
     cache_read_tokens: total('cacheReadTokens'), cache_write_tokens: total('cacheWriteTokens') }
@@ -78,6 +84,6 @@ function attemptCompactions(events: readonly MeteringEvent[], supported: boolean
 }
 
 /** Only a fresh, trusted DSH child session can contribute metering. */
-export function readDshAttemptMetering(events: readonly MeteringEvent[], compactionAvailable: boolean): ModelAttemptMetering {
-  return { tokens: attemptTokens(events), context_compactions: attemptCompactions(events, compactionAvailable) }
+export function readDshAttemptMetering(events: readonly MeteringEvent[], compactionAvailable: boolean, incomplete = false): ModelAttemptMetering {
+  return { ...(incomplete ? { settlement_incomplete: true } : {}), tokens: attemptTokens(events, incomplete), context_compactions: attemptCompactions(events, compactionAvailable) }
 }

@@ -22,7 +22,7 @@ export const runNoteNodeInput = z.discriminatedUnion('action', [
 ])
 export type RunNoteBinding = { node_run_id: string; attempt: number; action_generation: number; executor_session_id: string }
 type Scope = z.infer<typeof scopes>
-type Reader = { kind: 'node'; nodeRun: string; nodeId: string; predecessors: ReadonlySet<string> } | { kind: 'human' | 'brain' }
+type Reader = { kind: 'node'; nodeRun: string; nodeId: string; predecessors: ReadonlySet<string> } | { kind: 'human' | 'chat' }
 type Authority = {
   run_id: string
   node_run_id: string | null
@@ -54,7 +54,6 @@ function liveNode(tx: ReadTx, binding: RunNoteBinding, now: string) {
 
 function canRead(tx: ReadTx, secret: string, note: NoteRow, payload: NotePayload, reader: Reader): boolean {
   if (payload.scope === 'run') return true
-  if (payload.scope === 'brain') return reader.kind === 'brain'
   if (payload.scope !== 'downstream' || reader.kind !== 'node' || !note.node_run_id) return false
   const source = tx.get<{ node_id: string }>(`SELECT node_id FROM node_runs
     WHERE run_id=? AND node_run_id=? AND attempt=? AND action_generation=? AND replacement_node_run_id IS NULL AND status='done'
@@ -71,7 +70,9 @@ export function createRunNotes(db: Db, secret: string) {
 
   function list(tx: ReadTx, run: string, reader: Reader, before = Number.MAX_SAFE_INTEGER) {
     const available = tx.all<NoteRow>(`SELECT e.seq,e.event_id,e.run_id,e.node_run_id,e.occurred_at,e.payload_redacted,b.body,b.author
-      ${active} AND e.seq<? ORDER BY e.seq DESC LIMIT ${perRun}`, [run, before])
+      ${active} AND e.seq<? AND (json_extract(e.payload_redacted, '$.scope')='run'
+        OR (?=1 AND json_extract(e.payload_redacted, '$.scope')='downstream'))
+      ORDER BY e.seq DESC LIMIT ${perRun}`, [run, before, reader.kind === 'node' ? 1 : 0])
     const visible = available.flatMap((row) => {
       const payload = JSON.parse(row.payload_redacted) as NotePayload
       if (payload.body_digest !== digest(row.run_id, row.node_run_id, payload, row.author, row.body) || !canRead(tx, secret, row, payload, reader)) return []
@@ -126,11 +127,11 @@ export function createRunNotes(db: Db, secret: string) {
         return add(tx, { run_id: body.run_id, node_run_id: null, actor_kind: 'human', author: actor }, 'run', body.body, body.operation_id)
       })
     },
-    listBrain(run: string, actor: string, before?: number) {
-      if (chatRun(db, actor, run) !== run) throw new OrchError('FORBIDDEN', '便条仅供创建本任务的主脑会话读取')
+    listChatShared(run: string, actor: string, before?: number) {
+      if (chatRun(db, actor, run) !== run) throw new OrchError('FORBIDDEN', '请在创建任务的会话查询本次运行便条')
       return withReadTx(db, ({ tx }) => {
         requireReviewOperator(tx, secret, actor, run, true)
-        return list(tx, run, { kind: 'brain' }, before)
+        return list(tx, run, { kind: 'chat' }, before)
       })
     },
     callNode(binding: RunNoteBinding, input: unknown, requestId: string, now: string) {
@@ -139,6 +140,9 @@ export function createRunNotes(db: Db, secret: string) {
       const body = parsed.data
       if (body.action === 'add') return withTx(db, (tx) => {
         const node = liveNode(tx, binding, now)
+        if (body.scope === 'brain') {
+          throw new OrchError('SERVICE_UNAVAILABLE', '主脑专属便条暂不支持新建，已有便条保持原权限')
+        }
         return add(tx, { run_id: node.run_id, node_run_id: binding.node_run_id, actor_kind: 'node', author: node.node_id,
           attempt: binding.attempt, action_generation: binding.action_generation }, body.scope, body.body, requestId)
       })

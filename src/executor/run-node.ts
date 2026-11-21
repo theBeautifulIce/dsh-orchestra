@@ -15,7 +15,7 @@ import { acquireNodeRun, renewNodeLease, submitReport, type RuntimeDeps } from '
 import { buildInstruction, checkToolPolicy, createExecutorAgent, type HostAgentFactory, type ToolPolicy } from './session.ts'
 import { assertToolsAuthorized, type ReadOnlyToolRunner, type StrongEvidence, type ToolRegistry } from './tools.ts'
 import type { BridgeClient } from './bridge.ts'
-import { AgentLifecycle } from './agent-lifecycle.ts'
+import { AgentLifecycle, type AgentReportEnvelope } from './agent-lifecycle.ts'
 import { canTransition } from '../core/state-machine.ts'
 import type { ClockProvider } from '../core/clock.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel, type ModelAssignment, type ModelProfile, type ModelRouting } from './model-routing.ts'
@@ -221,6 +221,26 @@ async function runNodeActions(
   let spawnRejected = false
   let stopFailure: unknown = null
   let assignment: ModelAssignment | undefined
+  let usageRecorded = false
+  const saveModelUse = (use: NonNullable<AgentReportEnvelope['modelUse']>) => {
+    if (usageRecorded) return
+    const selected = assignment
+    if (!selected || use.model_ref !== selected.model_ref
+      || (selected.provider !== undefined && use.provider !== selected.provider)
+      || (selected.model !== undefined && use.model !== selected.model)
+      || (typeof selected.reasoning_effort === 'string' && use.reasoning_effort !== selected.reasoning_effort)) {
+      throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主的实际模型回执与派发模型不一致')
+    }
+    const { model_ref: _ref, ...usage } = use
+    withTx(deps.db, (tx) => {
+      const row = loadNodeRun(tx, p.nodeRunId)
+      if (row.attempt !== p.attempt || row.action_generation !== generation) {
+        throw new OrchError('STALE_GENERATION', '执行模型回执已过期')
+      }
+      recordModel(tx, deps.secret, row, { ...selected, usage }, 'confirmed', 'executor.model_used')
+    })
+    usageRecorded = true
+  }
   try {
     // spawn 回包失败时也可能已经在宿主建了会话；放进 try，外层 catch 至少能 markBlocked，
     // finally 再按 agentId 做有界释放，不能把节点留在 dispatched。
@@ -364,6 +384,7 @@ async function runNodeActions(
       instruction: nodeInstruction(p, feedback, sharedContext),
       timeoutMs: actionTimeoutMs,
       idleTimeoutMs: 5_000,
+      onStopModelUse: saveModelUse,
       nowAt,
       clock: deps.runtime.clock,
       spillDir: deps.spillDir ?? join(tmpdir(), 'dsh-orchestra-bridge'),
@@ -372,21 +393,7 @@ async function runNodeActions(
     if (typeof assignment?.reasoning_effort === 'string' && !envelope.modelUse) {
       throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主未提供指定思考深度的实际请求回执')
     }
-    if (envelope.modelUse) {
-      if (!assignment || envelope.modelUse.model_ref !== assignment.model_ref
-        || (typeof assignment.reasoning_effort === 'string' && envelope.modelUse.reasoning_effort !== assignment.reasoning_effort)) {
-        throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主的实际模型回执与派发模型不一致')
-      }
-      const { model_ref: _ref, ...usage } = envelope.modelUse
-      const selected = assignment
-      withTx(deps.db, (tx) => {
-        const row = loadNodeRun(tx, p.nodeRunId)
-        if (row.attempt !== p.attempt || row.action_generation !== generation) {
-          throw new OrchError('STALE_GENERATION', '执行模型回执已过期')
-        }
-        recordModel(tx, deps.secret, row, { ...selected, usage }, 'confirmed', 'executor.model_used')
-      })
-    }
+    if (envelope.modelUse) saveModelUse(envelope.modelUse)
     // 取消请求可能刚好落在报告与收口之间：此时不能再把 done 写进账本。
     if (deps.cancelSignal?.aborted) {
       throw new OrchError('SERVICE_UNAVAILABLE', '节点执行已被取消', { nodeRunId: p.nodeRunId, attempt: p.attempt })

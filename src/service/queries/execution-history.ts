@@ -75,6 +75,7 @@ export function describeEvent(type: string, payload: string | null): Detail[] {
     add(details, '提供方', usage.provider)
     add(details, '实际模型', usage.model)
     const metering = readModelUse(usage)?.metering
+    if (metering?.settlement_incomplete) add(details, '用量范围', '仅含结束前模型已报告的用量')
     add(details, '输入（未缓存）Token', metering?.tokens.uncached_input_tokens ?? '不可用')
     add(details, '输出 Token', metering?.tokens.output_tokens ?? '不可用')
     add(details, '缓存读取 Token', metering?.tokens.cache_read_tokens ?? '不可用')

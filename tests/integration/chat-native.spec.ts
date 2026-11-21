@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,7 +8,7 @@ import { expect, it, vi } from 'vitest'
 import { serveOrchestra, type serveDshOrchestra } from '../../src/index.ts'
 import { OrchError } from '../../src/core/errors.ts'
 import { decisionId, uuidv7 } from '../../src/core/ids.ts'
-import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
+import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
 import { transitionNode } from '../../src/service/commands/node-state.ts'
@@ -1048,3 +1049,42 @@ it.each(['rejected', 'expired', 'changed'] as const)(
     }
   },
 )
+
+it('keeps brain-only notes out of native result and conversation export content', async () => {
+  const test = await fixture({ routing: { enabled: false } })
+  try {
+    const human = test.session('a', 'brain')
+    await human.admit(user('/orchestra 归纳会议事项，交付清单'))
+    const launched = await human.call()
+    expect(launched).toMatchObject({ state: 'started', run_id: expect.any(String) })
+    const svc = test.services.get('brain')!
+    const run = svc.orchestra.db.raw.prepare("SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=?").get(launched.run_id)!
+    svc.orchestra.db.raw.prepare("UPDATE node_runs SET status='started',executor_session_id='child',lease_expires_at='2099-01-01T00:00:00.000Z' WHERE node_run_id=?").run(String(run.node_run_id))
+    const marker = 'AUDIT_SYNTHETIC_BRAIN_ONLY'
+    const binding = { node_run_id: String(run.node_run_id), attempt: Number(run.attempt),
+      action_generation: Number(run.action_generation), executor_session_id: 'child' }
+    const shared = 'AUDIT_SYNTHETIC_SHARED'
+    // Recreate a valid private record that could have been written by the previous version.
+    const scope = 'brain'
+    const author = 'draft'
+    const bodyDigest = createHmac('sha256', test.secret).update('run-note-body\0')
+      .update(JSON.stringify([launched.run_id, binding.node_run_id, 'node', author, scope,
+        binding.attempt, binding.action_generation, marker])).digest('hex')
+    withTx(svc.orchestra.db, (tx) => {
+      const entry = appendEvent(tx, { type: 'run.note_created', runId: launched.run_id, nodeRunId: binding.node_run_id,
+        payload: { actor_kind: 'node', attempt: binding.attempt, action_generation: binding.action_generation,
+          scope, body_digest: bodyDigest, evidence_strength: 'none' } })
+      tx.run('INSERT INTO run_note_bodies(event_seq,body,author) VALUES (?,?,?)', [entry.seq, marker, author])
+    })
+    svc.runNotes!.callNode(binding, { action: 'add', scope: 'run', body: shared }, 'shared-note', new Date().toISOString())
+    await human.admit(user('查看这次运行的便条'))
+    expect(await human.call({ action: 'status', run_id: launched.run_id })).toMatchObject({ blocking: expect.any(Array) })
+    const args = { action: 'notes', run_id: launched.run_id }
+    const result = await human.invoke(args)
+    const savedHistory = { type: 'tool/result', content: await human.render(args) }
+    expect(JSON.stringify(result)).not.toContain(marker)
+    expect(JSON.stringify(savedHistory)).not.toContain(marker)
+    expect(JSON.stringify(savedHistory)).toContain(shared)
+    expect(svc.orchestra.db.raw.prepare('SELECT COUNT(*) n FROM run_note_bodies WHERE body=?').get(marker)?.n).toBe(1)
+  } finally { await test.close() }
+})
