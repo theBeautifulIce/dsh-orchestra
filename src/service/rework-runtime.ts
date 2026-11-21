@@ -27,6 +27,17 @@ export function assertReworkRunActive(tx: Tx, runId: string): void {
 export function hasUnresolvedRework(tx: Tx, runId: string): boolean {
   return !!tx.get(`SELECT 1 FROM rework_requests WHERE run_id = ? AND status NOT IN ${resolved} LIMIT 1`, [runId])
 }
+/** Direct holds are sufficient for a queued run without an active rework traversal. */
+export function queuedReworkHolds(tx: ReadTx, runId: string): ReadonlySet<string> {
+  const rows = tx.all<{ node_run_id: string }>(`SELECT n.node_run_id FROM node_runs n
+    WHERE n.run_id=? AND n.status='queued' AND (
+      n.replacement_node_run_id IS NOT NULL
+      OR EXISTS (SELECT 1 FROM rework_impacts i WHERE i.node_run_id=n.node_run_id AND i.released_at IS NULL)
+      OR EXISTS (SELECT 1 FROM rework_requests q WHERE q.target_node_run_id=n.node_run_id AND q.status NOT IN ${resolved})
+    )`, [runId])
+  return new Set(rows.map(row => row.node_run_id))
+}
+
 export function reworkBlocksNode(tx: ReadTx, nodeRunId: string): boolean {
   const n = nodeOf(tx, nodeRunId)
   if (n.replacement_node_run_id) return true

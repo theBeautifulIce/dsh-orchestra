@@ -3,7 +3,7 @@ import { resolvePinnedNodeId } from './rework-extra-steps.ts'
 // 评审 P1：agent 执行是长时间任务，不许占着写队列的名额；并发闸由装配层统一注入。
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
-import { reworkBlocksNode } from './rework-runtime.ts'
+import { hasUnresolvedRework, queuedReworkHolds, reworkBlocksNode } from './rework-runtime.ts'
 import { dependencyReadiness, runPredecessors } from './run-readiness.ts'
 import { makeTx } from '../infra/sqlite/driver.ts'
 import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
@@ -118,12 +118,15 @@ export type DispatchDeps = {
 }
 
 type DispatchRow = { node_run_id: string; node_id: string; seq: number; attempt: number }
-type DispatchSelection = { rows: DispatchRow[]; settled: DispatchOutcome[] }
+type DispatchCandidate = DispatchRow & { has_extra_step: 0 | 1 }
+type DispatchSelection = { rows: DispatchCandidate[]; settled: DispatchOutcome[] }
 
 function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: ReadonlySet<string>): DispatchSelection | undefined {
   const all = deps.db.raw.prepare(
-    "SELECT node_run_id, node_id, seq, attempt FROM node_runs WHERE run_id = ? AND status = 'queued' ORDER BY seq ASC",
-  ).all(p.runId) as DispatchRow[]
+    `SELECT n.node_run_id,n.node_id,n.seq,n.attempt,
+      EXISTS (SELECT 1 FROM rework_extra_steps e WHERE e.run_id=n.run_id AND e.node_id=n.node_id) AS has_extra_step
+      FROM node_runs n WHERE n.run_id=? AND n.status='queued' ORDER BY n.seq ASC`,
+  ).all(p.runId) as DispatchCandidate[]
   // 有执行拓扑就按拓扑放行；旧定义没有 edges，保持原来的全量派发
   const runRow = deps.db.raw.prepare('SELECT workflow_id, workflow_version, status, cancel_requested_at FROM runs WHERE run_id = ?').get(p.runId) as
     { workflow_id: string; workflow_version: string; status: string; cancel_requested_at: string | null } | undefined
@@ -140,10 +143,12 @@ function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: Rea
   }
   const tx = makeTx(deps.db.raw)
   const preds = runPredecessors(tx, p.runId, def?.edges ?? [])
-  const rows: DispatchRow[] = []
+  const directReworkHolds = hasUnresolvedRework(tx, p.runId) ? null : queuedReworkHolds(tx, p.runId)
+  const rows: DispatchCandidate[] = []
   const settled: DispatchOutcome[] = []
   for (const row of all) {
-    if (submitted?.has(row.node_run_id) || reworkBlocksNode(tx, row.node_run_id)) continue
+    if (submitted?.has(row.node_run_id)
+      || (directReworkHolds ? directReworkHolds.has(row.node_run_id) : reworkBlocksNode(tx, row.node_run_id))) continue
     const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [], row.node_id, deps.secret)
     if (readiness.ready) {
       rows.push(row)
@@ -259,7 +264,7 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams, progres
 async function dispatchOne(
   deps: DispatchDeps,
   p: DispatchParams,
-  row: DispatchRow,
+  row: DispatchCandidate,
   retryOnQueueFull = false,
 ): Promise<DispatchOutcome> {
   // 取消与派发可能并发：选行之后、真正执行之前再查一次取消位，
@@ -269,6 +274,9 @@ async function dispatchOne(
     | undefined
   if (run?.cancel_requested_at) {
     return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'skipped', reason: 'run_cancelled' }
+  }
+  if (!p.nodes[row.node_id] && !row.has_extra_step) {
+    return { node_run_id: row.node_run_id, node_id: row.node_id, status: 'skipped', reason: 'no_node_spec' }
   }
   const roleId = resolvePinnedNodeId(makeTx(deps.db.raw), row.node_run_id)
   const spec = p.nodes[roleId]
