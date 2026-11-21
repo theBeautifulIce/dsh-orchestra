@@ -670,6 +670,7 @@ export async function openServiceOrchestra(opts: OrchestraOptions): Promise<{
 // 供宿主接进 DSH：返回 endpoint 与关闭句柄
 export async function serveOrchestra(opts: OrchestraOptions & {
   resolveHttpHuman?: ServerDeps['resolveHttpHuman']
+  preferNamedPipe?: boolean
   plannerModelConfigurable?: boolean
   memory?: MemoryHostOptions
   workflowGenerator?: ServerDeps['workflowGenerator']
@@ -679,7 +680,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
-}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; rework?: ReworkHost; runNotes?: RunNotes;
+}): Promise<{ orchestra: Orchestra; endpoint: string; controlPipe?: string; collaboration?: CollaborationHost; rework?: ReworkHost; runNotes?: RunNotes;
     planning: TaskPlanningHost; planningSettings?: PlanningSettingsHost;
     recoverChatModelAssignment?: (input: Parameters<typeof recoverChatModelAssignment>[3]) => Promise<string[]>;
     close: () => Promise<void> }> {
@@ -780,6 +781,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     }
     server = await startServer({
       secret: opts.secret,
+      preferNamedPipe: opts.preferNamedPipe,
       resolveHttpHuman: opts.resolveHttpHuman,
       runNotes,
       phase: opts.phase,
@@ -844,6 +846,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   return {
     orchestra,
     endpoint: server.endpoint,
+    controlPipe: server.controlPipe,
     runNotes,
     planning,
     collaboration,

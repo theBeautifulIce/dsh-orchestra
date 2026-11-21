@@ -15,6 +15,7 @@ import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
 import { createNativeChatRoutingSettings, nativeChatRoutingUpdate } from './native-chat-routing-settings.ts'
 import { PROJECT_CONTEXT_FILE, type ProjectContextSource } from './project-shared-context.ts'
+import { requestControlPipe } from './windows-control-pipe.ts'
 
 const localOptions = z.strictObject({
   enabled: z.union([z.boolean(), z.literal('desktop')]).default(false),
@@ -234,7 +235,7 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
   }, workspace.path)
   let service: LocalService | undefined
   service = await serve({
-    dbFile, secret, phase: 'S6', tools: { registry, runner },
+    dbFile, secret, phase: 'S6', tools: { registry, runner }, preferNamedPipe: true,
     projectContext,
     resolveHttpHuman: (req) => req.headers['x-orchestra-local-proof'] === proof ? { id: human } : null,
     dsh: { context: host, parentForNode: parent, models: [],
@@ -376,7 +377,15 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
         const headers = new Headers({ 'x-orchestra-secret': secret, 'x-orchestra-local-proof': proof })
         const contentType = request.headers.get('content-type')
         if (contentType) headers.set('content-type', contentType)
-        const response = await fetch(new URL(target.pathname + target.search, service.endpoint), {
+        const endpoint = new URL(target.pathname + target.search, service.endpoint)
+        const stream = target.pathname === '/v1/events/stream'
+        const lastEventId = stream ? request.headers.get('last-event-id') : null
+        if (lastEventId !== null) headers.set('last-event-id', lastEventId)
+        const pipe = stream ? undefined : service.controlPipe
+        const body = pipe && request.method === 'POST' && request.body
+          ? new Uint8Array(await request.clone().arrayBuffer()) : undefined
+        const response = (pipe ? await requestControlPipe(pipe, endpoint, { method: request.method, headers, signal, body }) : undefined)
+          ?? await fetch(endpoint, {
           method: request.method, headers, signal, redirect: 'error',
           ...(request.method === 'POST' && request.body ? { body: request.body, duplex: 'half' } : {}),
         })
