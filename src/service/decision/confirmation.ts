@@ -119,8 +119,12 @@ export function runDecisionCommand(
     const scope = tx.get<{ run_id: string; node_run_id: string | null }>('SELECT run_id, node_run_id FROM decisions WHERE decision_id = ?', [decisionId])!
     const evidence = tx.all<{ evidence_id: string }>(
       'SELECT evidence_id FROM memory_write_recoveries WHERE (decision_id = ? OR abandon_ack_id = ?) AND evidence_id IS NOT NULL'
-      + ' UNION SELECT evidence_id FROM unverified_resolutions WHERE decision_id = ? AND evidence_id IS NOT NULL ORDER BY evidence_id',
-      [decisionId, decisionId, decisionId],
+      + ' UNION SELECT evidence_id FROM unverified_resolutions WHERE decision_id = ? AND evidence_id IS NOT NULL'
+      + (resolution === 'uphold_report' ? " UNION SELECT json_extract(payload, '$.execution_id') AS evidence_id"
+        + " FROM node_run_events WHERE node_run_id = ? AND type = 'report_applied' AND json_valid(payload)"
+        + " AND json_extract(payload, '$.decision_id') = ? AND json_type(payload, '$.execution_id') = 'text'" : '')
+      + ' ORDER BY evidence_id',
+      [decisionId, decisionId, decisionId, ...(resolution === 'uphold_report' ? [scope.node_run_id, decisionId] : [])],
     )
     appendEvent(tx, { type: 'decision.command_audited', runId: scope.run_id, nodeRunId: scope.node_run_id,
       decisionId, payload: { operation_id: operationId, actor_id: actor?.id ?? null, actor_kind: actor?.kind ?? null,

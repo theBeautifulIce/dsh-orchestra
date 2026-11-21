@@ -33,6 +33,7 @@ export {
   type TaskTriggerReadiness,
 } from './service/task-triggers.ts'
 import { acknowledgeDecision, resolveDecision } from './service/commands/decisions.ts'
+import { resolveRegisteredReportConflict } from './service/commands/apply-report.ts'
 import { requestHashOf } from './service/commands/idempotency.ts'
 import { runDecisionCommand } from './service/decision/confirmation.ts'
 import { inspectEffectEvidence, resolveEffect } from './service/commands/effects.ts'
@@ -434,6 +435,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     resolveDecision: (input) => inTx(db, (tx) => {
       const { operationId, now, confirmChallenge, bindActor, ...b } = input
       return runDecisionCommand(tx, opts.secret, input, requestHashOf('decision.resolve', b), false, (confirmed, requireEffectSettlement) => {
+        if (b.resolution === 'uphold_report') {
+          return resolveRegisteredReportConflict(tx, opts.secret, { ...b, now, confirm: confirmed }, catalog)
+        }
         const out = resolveDecision(tx, opts.secret, {
           decisionId: b.decisionId,
           revision: b.revision,

@@ -211,6 +211,7 @@ export type DecisionResolution = {
  */
 const MEMORY_RECOVERY = Symbol('memory-recovery')
 const MEMORY_APPROVAL = Symbol('memory-approval')
+const REPORT_CONFLICT = Symbol('report-conflict')
 
 export function resolveMemoryRecoveryDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
   return resolveDecision(tx, secret, req, MEMORY_RECOVERY)
@@ -218,6 +219,12 @@ export function resolveMemoryRecoveryDecision(tx: Tx, secret: string, req: Resol
 
 export function resolveMemoryApprovalDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
   return resolveDecision(tx, secret, req, MEMORY_APPROVAL)
+}
+
+/** Used after applyReport verifies the registered report and checks the conflict resolution. */
+export function resolveReportContradictionDecision(tx: Tx, secret: string, req: ResolveDecisionRequest): DecisionResolution {
+  if (req.actor?.kind !== 'human') throw new OrchError('FORBIDDEN', '报告冲突只能由人工裁决')
+  return resolveDecision(tx, secret, req, REPORT_CONFLICT)
 }
 
 export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequest, scope?: symbol): DecisionResolution {
@@ -228,12 +235,17 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
   if (scope !== MEMORY_APPROVAL && tx.get('SELECT 1 FROM memory_batches WHERE decision_id = ?', [req.decisionId])) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆审批必须同时记录批次批准快照')
   }
-  const current = tx.get<{ status: string; payload_json: string; approver: string; confirm_required: number; run_id: string; node_run_id: string | null }>(
-    'SELECT status, payload_json, approver, confirm_required, run_id, node_run_id FROM decisions WHERE decision_id = ?',
+  const current = tx.get<{ kind: string; status: string; payload_json: string; approver: string; confirm_required: number; run_id: string; node_run_id: string | null }>(
+    'SELECT kind, status, payload_json, approver, confirm_required, run_id, node_run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
   )
   if (!current) {
     throw new OrchError('DECISION_REVISION_CONFLICT', 'decision 不存在', { decisionId: req.decisionId })
+  }
+  const upholding = req.resolution === 'uphold_report' || req.resolution === 'uphold_decision'
+  if ((current.kind === 'report_contradicted' || upholding || scope === REPORT_CONFLICT)
+    && !(current.kind === 'report_contradicted' && upholding && scope === REPORT_CONFLICT)) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '报告冲突必须走已登记回报的收口流程')
   }
   if (current.confirm_required === 1 && req.confirm !== true) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '这张 decision 命中升级规则，必须显式确认', {
@@ -281,9 +293,15 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
       revision: req.revision,
     })
   }
+  const priorExecution = current.node_run_id && (req.resolution === 'confirm_not_started' || req.resolution === 'confirm_not_applied')
+    ? tx.get<{ attempt: number; action_generation: number }>(
+      'SELECT attempt, action_generation FROM node_runs WHERE node_run_id = ? AND run_id = ?',
+      [current.node_run_id, current.run_id],
+    ) : undefined
   appendEvent(tx, {
     type: 'decision.resolved',
     runId: current.run_id,
+    nodeRunId: current.node_run_id,
     decisionId: req.decisionId,
     payload: {
       decisionId: req.decisionId,
@@ -291,6 +309,8 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
       resolution: req.resolution,
       status: nextStatus,
       resolvedBy: actor.id,
+      actorKind: actor.kind,
+      ...priorExecution,
     },
   })
   // 裁决卡收口后，先找回被它压住的节点；生产入口在同一事务里恢复：

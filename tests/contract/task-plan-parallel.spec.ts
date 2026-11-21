@@ -12,7 +12,7 @@ import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { sha256Hex } from '../../src/core/canonical.ts'
-import { raiseReportContradiction } from '../../src/service/commands/apply-report.ts'
+import { raiseReportContradiction, resolveRegisteredReportConflict } from '../../src/service/commands/apply-report.ts'
 import { loadNodeRun } from '../../src/service/commands/lease.ts'
 import { acquireNodeRun, submitReport } from '../../src/service/commands/runtime.ts'
 import { failQueuedNode } from '../../src/service/dispatcher.ts'
@@ -330,16 +330,14 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
 
       const now = new Date().toISOString()
       const reportId = 'uncertain-branch-report'
+      const report = { report_id: reportId, node_run_id: uncertain.node_run_id, attempt: 1, status: 'done' }
       const { decisionId } = withTx(service.orchestra.db, (tx) => raiseReportContradiction(tx, secret, {
         nodeRunId: uncertain.node_run_id, runId: run_id, attempt: 1, reportId, now,
-      }))
+      }, { report, generation: 1, originalDecisionId: 'd-fixture-original', catalog: service.orchestra.catalog }))
       const decision = service.orchestra.db.raw.prepare('SELECT revision FROM decisions WHERE decision_id=?').get(decisionId) as { revision: number }
-      const result = submitReport(service.orchestra.runtime, {
-        nodeRunId: uncertain.node_run_id, attempt: 1, expectedStatus: 'startup_unknown', generation: 1, now,
-        report: { report_id: reportId, node_run_id: uncertain.node_run_id, attempt: 1, status: 'done' },
-        decision: { decisionId, revision: decision.revision, resolution: 'uphold_decision' },
-      })
-      expect(result.next_status).toBe('superseded')
+      withTx(service.orchestra.db, (tx) => resolveRegisteredReportConflict(tx, secret, {
+        decisionId, revision: decision.revision, resolution: 'uphold_decision', now, actor: { kind: 'human', id: 'test:operator' },
+      }, service.orchestra.catalog))
       await expect.poll(async () => (await nodes()).find((node) => node.node_id === 'join_review')?.status,
         { timeout: 10_000 }).toBe('done')
       expect((await nodes()).filter((node) => node.node_id === uncertain.node_id)).toMatchObject([

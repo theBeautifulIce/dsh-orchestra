@@ -1,16 +1,18 @@
 import { resolvePinnedNodeId } from '../rework-extra-steps.ts'
 // src/service/commands/apply-report.ts —— applyReport 六步收口（规格 4.2 行 286-305）
 import { OrchError } from '../../core/errors.ts'
+import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
 import { isReportRegistryState, type ApplyResult, type Report } from '../../core/report.ts'
 import type { PassCondition } from '../../core/policy.ts'
 import { isControlWorkflowNode } from '../../core/workflow-def.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
-import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { appendNodeRunEvent, chainIsIntact, readChainHead } from '../../infra/db/ledger.ts'
 import { transitionNode } from './node-state.ts'
 import { settleEvidenceFromReport } from './effects.ts'
 import { applyTransition, createNodeRun } from './nodes.ts'
 import { loadNodeRun, assertLeaseValid, type NodeRunRow } from './lease.ts'
-import { openDecision, resolveDecision, type Resolution } from './decisions.ts'
+import { openDecision, resolveReportContradictionDecision, type ResolveDecisionRequest } from './decisions.ts'
+import { closeRun } from './run-close.ts'
 import { HANG_REASON_REPORT_CONTRADICTED, type NodeStatus } from '../../core/state-machine.ts'
 import { uuidv7 } from '../../core/ids.ts'
 import { chainBreakOf, readChain } from '../../infra/db/ledger.ts'
@@ -39,10 +41,32 @@ export type ApplyDecision = {
 
 type ContradictionDecisionRow = {
   decision_id: string
-  node_run_id: string | null
+  run_id: string
+  node_run_id: string
   kind: string
   status: string
   revision: number
+  content_hash: string | null
+}
+
+type RegisteredReport = {
+  decision_id: string
+  original_decision_id: string
+  report_id: string
+  report_seq: number
+  report_digest: string
+  attempt: number
+  action_generation: number
+  hung_status: string
+  report: Report
+  product_digests: Record<string, string>
+  evidence_failure: string | null
+}
+
+type ConflictApproval = {
+  decision: ContradictionDecisionRow
+  request: ResolveDecisionRequest
+  registered: RegisteredReport
 }
 
 export type ApplyPolicy = { passConditions: PassCondition[]; requiredHashes?: string[] }
@@ -162,6 +186,7 @@ export function raiseReportContradiction(
   tx: Tx,
   secret: string,
   args: { nodeRunId: string; attempt: number; runId: string; reportId: string; now: string; decisionId?: string },
+  source?: { report: Report; generation: number; originalDecisionId: string; catalog: WorkflowCatalog },
 ): { decisionId: string; created: boolean } {
   const row = loadNodeRun(tx, args.nodeRunId)
   if (row.status !== 'startup_unknown' && row.status !== 'indeterminate_side_effect') {
@@ -175,22 +200,33 @@ export function raiseReportContradiction(
     [args.nodeRunId],
   )
   const decisionId = existing?.decision_id ?? args.decisionId ?? 'dec_' + uuidv7()
-  if (!existing) {
-    openDecision(tx, {
-      decisionId,
-      runId: args.runId,
-      nodeRunId: args.nodeRunId,
-      kind: 'report_contradicted',
-      payload: { report_id: args.reportId, hung_status: row.status },
-      createdAt: args.now,
-    })
-  }
+  if (existing) return { decisionId, created: false }
+  const registered = source && registerConflictReport(tx, row, args, decisionId, source)
+  openDecision(tx, {
+    decisionId,
+    runId: args.runId,
+    nodeRunId: args.nodeRunId,
+    kind: 'report_contradicted',
+    approver: 'human',
+    contentHash: registered?.report_digest,
+    payload: {
+      report_id: args.reportId, hung_status: row.status,
+      ...(registered && { report_status: registered.report.status, report_attempt: registered.attempt,
+        report_digest: registered.report_digest, report_generation: registered.action_generation,
+        original_decision_id: registered.original_decision_id,
+        target_summary: '核对这次执行回报并选择处理结论。',
+        required_evidence: ['已登记回报对应的系统执行证据'],
+      }),
+    },
+    createdAt: args.now,
+  })
   applyTransition(tx, secret, {
     nodeRunId: args.nodeRunId,
     from: [row.status as NodeStatus],
     to: row.status as NodeStatus,
     attempt: args.attempt,
     now: args.now,
+    actionGeneration: source?.generation,
     allowHung: true,
     patch: {
       hang_reason: HANG_REASON_REPORT_CONTRADICTED,
@@ -199,21 +235,70 @@ export function raiseReportContradiction(
       startup_unknown_remaining_ns: null,
     },
   })
-  appendNodeRunEvent(tx, secret, args.nodeRunId, 'report.contradicted', {
-    report_id: args.reportId,
-    decision_id: decisionId,
-    hung_status: row.status,
+  appendNodeRunEvent(tx, secret, args.nodeRunId, 'report.contradicted', registered ?? {
+    report_id: args.reportId, decision_id: decisionId, hung_status: row.status,
   })
-  return { decisionId, created: !existing }
+  return { decisionId, created: true }
 }
 
-function loadContradictionDecision(tx: Tx, params: ApplyReportParams): ContradictionDecisionRow {
+function registerConflictReport(
+  tx: Tx,
+  row: NodeRunRow,
+  args: { nodeRunId: string; attempt: number; runId: string; reportId: string; now: string },
+  decisionId: string,
+  source: { report: Report; generation: number; originalDecisionId: string; catalog: WorkflowCatalog },
+): RegisteredReport {
+  const { report } = source
+  if (row.run_id !== args.runId || row.attempt !== args.attempt || row.action_generation !== source.generation
+    || report.attempt !== args.attempt || report.node_run_id !== args.nodeRunId || report.report_id !== args.reportId
+    || !['done', 'failed'].includes(report.status) || readRegistry(tx, args.reportId)) {
+    throw new OrchError('STALE_GENERATION', '冲突报告与当前执行记录不匹配')
+  }
+  const evidence = report.evidence
+  const evidenceFailure = (report.status === 'done' ? systemEvidenceGate(report) : null)
+    ?? traceBindingGate(tx, { nodeRunId: args.nodeRunId, attempt: args.attempt }, report, {
+      allowFailed: report.status === 'failed', requireFailure: report.status === 'failed', requireExecutionId: true,
+    }).reason
+  const boundEvidence = evidenceFailure ? undefined : evidence
+  const retained: Report = {
+    report_id: report.report_id, node_run_id: report.node_run_id, attempt: report.attempt, status: report.status,
+    ...(boundEvidence && { evidence: { source: boundEvidence.source, exitCode: boundEvidence.exitCode, tool: boundEvidence.tool,
+      commandHash: boundEvidence.commandHash, producedAt: boundEvidence.producedAt, stdoutHash: boundEvidence.stdoutHash,
+      stderrHash: boundEvidence.stderrHash, hashes: boundEvidence.hashes },
+      output: { evidence_trace: traceEntriesOf(report).filter(entry => tx.get(
+        'SELECT 1 FROM tool_executions WHERE node_run_id = ? AND attempt = ? AND execution_id = ?'
+        + ' AND tool = ? AND exit_code = ? AND stdout_hash IS ? AND stderr_hash IS ? AND command_hash IS ?'
+        + ' AND (? IS NULL OR tool_seq = ?)',
+        [args.nodeRunId, args.attempt, entry.executionId, entry.tool, entry.exitCode, entry.stdoutHash, entry.stderrHash,
+          entry.commandHash, entry.toolSeq, entry.toolSeq],
+      )) },
+    }),
+  }
+  const productDigests = Object.create(null) as Record<string, string>
+  if (report.status === 'done' && report.output !== null && typeof report.output === 'object' && !Array.isArray(report.output)) {
+    const output = report.output as Record<string, unknown>
+    for (const key of policyForReport(tx, row, source.catalog, false).requiredHashes ?? []) {
+      if (Object.hasOwn(output, key) && output[key] != null) productDigests[key] = sha256Hex(canonicalJson(output[key]))
+    }
+  }
+  const reportSeq = nextReportSeq(tx, args.nodeRunId)
+  tx.run('INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at)'
+    + " VALUES (?, ?, ?, ?, 'rejected', ?, ?)", [args.reportId, args.nodeRunId, args.attempt, reportSeq, args.now, args.now])
+  return {
+    decision_id: decisionId, original_decision_id: source.originalDecisionId, report_id: args.reportId,
+    report_seq: reportSeq, report_digest: sha256Hex(canonicalJson(report)), attempt: args.attempt,
+    action_generation: source.generation, hung_status: row.status, report: retained,
+    product_digests: productDigests, evidence_failure: evidenceFailure,
+  }
+}
+
+function loadContradictionDecision(tx: Tx, request: ResolveDecisionRequest): ContradictionDecisionRow {
   const decision = tx.get<ContradictionDecisionRow>(
-    'SELECT decision_id, node_run_id, kind, status, revision FROM decisions WHERE decision_id = ?',
-    [params.decision?.decisionId ?? ''],
+    'SELECT decision_id, run_id, node_run_id, kind, status, revision, content_hash FROM decisions WHERE decision_id = ?',
+    [request.decisionId],
   )
   if (!decision) throw new OrchError('DECISION_REQUIRED', '冲突收口没有对应的裁决卡', {})
-  if (decision.kind !== 'report_contradicted' || decision.node_run_id !== params.nodeRunId) {
+  if (decision.kind !== 'report_contradicted' || !decision.node_run_id) {
     throw new OrchError('DECISION_REQUIRED', '裁决卡不是这个节点的报告冲突卡', {
       decisionId: decision.decision_id,
       kind: decision.kind,
@@ -222,13 +307,61 @@ function loadContradictionDecision(tx: Tx, params: ApplyReportParams): Contradic
   if (!['pending', 'acknowledged', 'blocked_for_human'].includes(decision.status)) {
     throw new OrchError('DECISION_REVISION_CONFLICT', '裁决卡已经收口', { status: decision.status })
   }
-  if (decision.revision !== params.decision?.revision) {
+  if (decision.revision !== request.revision) {
     throw new OrchError('DECISION_REVISION_CONFLICT', '裁决卡 revision 已过期', {
-      expected: params.decision?.revision,
+      expected: request.revision,
       actual: decision.revision,
     })
   }
   return decision
+}
+
+export function resolveRegisteredReportConflict(tx: Tx, secret: string, request: ResolveDecisionRequest, catalog: WorkflowCatalog) {
+  if (request.resolution !== 'uphold_report' && request.resolution !== 'uphold_decision') {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '处理报告冲突需要明确的裁决结论')
+  }
+  if (request.actor?.kind !== 'human' || !request.actor.id.trim() || /^(?:service|agent|system):/i.test(request.actor.id)) {
+    throw new OrchError('FORBIDDEN', '报告冲突只能由已认证的人工会话处理')
+  }
+  if (request.payload !== undefined) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '报告冲突只能处理已登记回报')
+  const decision = loadContradictionDecision(tx, request)
+  const row = loadNodeRun(tx, decision.node_run_id)
+  if (row.run_id !== decision.run_id || row.hang_reason !== HANG_REASON_REPORT_CONTRADICTED
+    || row.contradiction_decision_id !== decision.decision_id) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '步骤没有挂起在这张报告冲突卡上')
+  }
+  const chain = readChain(tx, row.node_run_id)
+  if (!chainIsIntact(secret, chain, readChainHead(tx, row.node_run_id), true)) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '报告登记账本无法核验')
+  }
+  const registered = chain.filter(event => event.type === 'report.contradicted')
+    .map(event => JSON.parse(event.payload) as Partial<RegisteredReport>)
+    .find(event => event.decision_id === decision.decision_id)
+  if (!registered?.report || registered.report.report_id !== registered.report_id || !registered.product_digests
+    || registered.report_digest !== decision.content_hash
+    || (request.contentHash != null && request.contentHash !== registered.report_digest)) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '这张冲突卡缺少可核验的报告登记')
+  }
+  const binding = registered as RegisteredReport
+  const registry = readRegistry(tx, binding.report_id)
+  if (!registry || registry.state !== 'rejected' || registry.node_run_id !== row.node_run_id
+    || registry.attempt !== binding.attempt || registry.report_seq !== binding.report_seq
+    || binding.attempt !== row.attempt || binding.action_generation !== row.action_generation
+    || binding.hung_status !== row.status) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '报告登记与当前执行代次或步骤状态不一致')
+  }
+  if (request.resolution === 'uphold_report' && binding.evidence_failure) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '已登记回报未通过系统证据核验，冲突保持待处理', { reason: binding.evidence_failure })
+  }
+  const result = applyReportInternal(tx, secret, {
+    nodeRunId: row.node_run_id, attempt: binding.attempt, report: binding.report, expectedStatus: binding.hung_status,
+    generation: binding.action_generation, now: request.now,
+  }, catalog, false, { decision, request, registered: binding })
+  if (!result.accepted && result.registry_state !== 'stale') {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '已登记回报未通过系统证据核验，冲突保持待处理', { reason: result.reason })
+  }
+  closeRun(tx, secret, decision.run_id, request.now)
+  return { decisionId: decision.decision_id, revision: decision.revision + 1 }
 }
 
 /**
@@ -241,15 +374,9 @@ function upholdDecision(
   params: ApplyReportParams,
   row: NodeRunRow,
   reportSeq: number,
+  approval: ConflictApproval,
 ): ApplyResult {
-  const decision = loadContradictionDecision(tx, params)
-  resolveDecision(tx, secret, {
-    decisionId: decision.decision_id,
-    revision: decision.revision,
-    resolution: 'uphold_decision' satisfies Resolution,
-    now: params.now,
-    actor: { kind: 'human', id: 'human:uphold' },
-  })
+  resolveReportContradictionDecision(tx, secret, approval.request)
   const newNodeRunId = 'nrun_' + uuidv7()
   applyTransition(tx, secret, {
     nodeRunId: params.nodeRunId,
@@ -293,7 +420,7 @@ function upholdDecision(
   appendNodeRunEvent(tx, secret, params.nodeRunId, 'report.stale', {
     report_id: params.report.report_id,
     report_seq: reportSeq,
-    decision_id: decision.decision_id,
+    decision_id: approval.decision.decision_id,
     reason: 'uphold_decision',
   })
   return { accepted: false, reason: 'uphold_decision', next_status: 'superseded', registry_state: 'stale' }
@@ -307,10 +434,22 @@ export function applyReport(
   catalog: WorkflowCatalog,
   allowArtifactCompletion = false,
 ): ApplyResult {
+  if (params.decision) throw new OrchError('FORBIDDEN', '报告入口不能代替人工裁决')
+  return applyReportInternal(tx, secret, params, catalog, allowArtifactCompletion)
+}
+
+function applyReportInternal(
+  tx: Tx,
+  secret: string,
+  params: ApplyReportParams,
+  catalog: WorkflowCatalog,
+  allowArtifactCompletion: boolean,
+  approval?: ConflictApproval,
+): ApplyResult {
   const report = params.report
   // 第一步：幂等查重
   const existing = readRegistry(tx, report.report_id)
-  if (existing) {
+  if (existing && !approval) {
     if (!isReportRegistryState(existing.state)) {
       throw new OrchError('STALE_GENERATION', 'registry 状态不在枚举里', { state: existing.state })
     }
@@ -321,6 +460,9 @@ export function applyReport(
         registered: existing.node_run_id,
         requested: params.nodeRunId,
       })
+    }
+    if (existing.state === 'rejected' && hasNodeRunEvent(tx, params.nodeRunId, 'report.contradicted', report.report_id)) {
+      throw new OrchError('STALE_HANG', '已登记的冲突回报只能由人工审批处理')
     }
     if (existing.state === 'applied') {
       // 已经落过账：不许再落一次，只把状态记成 replayed
@@ -402,30 +544,42 @@ export function applyReport(
     // 围栏立着时上报一律排队，撤销后只重放队头（规格 4.5 行 358）
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'fence_armed', now: params.now })
   }
+  if (!approval && !existing && !row.hang_reason && row.action_generation === params.generation
+    && ['startup_unknown', 'indeterminate_side_effect'].includes(row.status) && ['done', 'failed'].includes(report.status)) {
+    const prior = tx.get<{ decision_id: string }>(
+      "SELECT d.decision_id FROM decisions d JOIN events e ON e.decision_id = d.decision_id AND e.run_id = d.run_id "
+      + "WHERE d.node_run_id = ? AND d.run_id = ? AND d.kind IN ('startup_unknown','verify_human','action_overrun') "
+      + "AND e.type = 'decision.resolved' AND json_valid(e.payload_redacted) "
+      + "AND json_extract(e.payload_redacted,'$.revision') = d.revision "
+      + "AND json_extract(e.payload_redacted,'$.actorKind') = 'human' "
+      + "AND json_extract(e.payload_redacted,'$.attempt') = ? AND json_extract(e.payload_redacted,'$.action_generation') = ? "
+      + "AND lower(d.resolved_by) NOT LIKE 'service:%' AND lower(d.resolved_by) NOT LIKE 'agent:%' AND lower(d.resolved_by) NOT LIKE 'system:%' "
+      + "AND json_extract(e.payload_redacted,'$.resolution') IN ('confirm_not_started','confirm_not_applied') ORDER BY e.seq DESC LIMIT 1",
+      [row.node_run_id, row.run_id, row.attempt, row.action_generation],
+    )
+    if (prior) {
+      raiseReportContradiction(tx, secret, { nodeRunId: row.node_run_id, runId: row.run_id,
+        attempt: params.attempt, reportId: report.report_id, now: params.now },
+      { report, generation: params.generation, originalDecisionId: prior.decision_id, catalog })
+      return { accepted: false, reason: 'report_contradicted', registry_state: 'rejected' }
+    }
+  }
   if (row.status !== params.expectedStatus) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'status_mismatch', now: params.now })
   }
   // 挂起闸：报告与人裁决冲突时，普通出口一律 STALE_HANG；
   // 只有 uphold_report / uphold_decision 两张明确的收口口能穿过（M-59/M-60）。
-  let upheldDecision: ContradictionDecisionRow | undefined
   if (row.hang_reason === HANG_REASON_REPORT_CONTRADICTED) {
-    if (!params.decision) {
+    if (!approval) {
       throw new OrchError('STALE_HANG', '节点挂在报告冲突上，普通出口不许推进', {
         nodeRunId: params.nodeRunId,
         hangReason: row.hang_reason,
         decisionId: row.contradiction_decision_id,
       })
     }
-    if (params.decision.resolution === 'uphold_decision') {
-      return upholdDecision(tx, secret, params, row, reportSeq)
+    if (approval.request.resolution === 'uphold_decision') {
+      return upholdDecision(tx, secret, params, row, reportSeq, approval)
     }
-    if (params.decision.resolution !== 'uphold_report') {
-      throw new OrchError('STALE_HANG', '挂起冲突只能用 uphold_report / uphold_decision 收口', {
-        nodeRunId: params.nodeRunId,
-        resolution: params.decision.resolution,
-      })
-    }
-    upheldDecision = loadContradictionDecision(tx, params)
   }
   if (row.action_generation !== params.generation) {
     // 动作代对不上：旧执行器的过期写，按 STALE_GENERATION 处理（规格 4.3 行 309）
@@ -435,11 +589,13 @@ export function applyReport(
       actual: row.action_generation,
     })
   }
-  assertLeaseValid(row, params.now)
+  if (!approval) assertLeaseValid(row, params.now)
   // 目标状态必须在合法迁移表里：非法迁移按拒绝处理，不许绕过状态机
   if (!canReportTransition(row.status, report.status)) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'illegal_transition', now: params.now })
   }
+  let evidenceDigest: string | null = null
+  let boundExecutionId: string | undefined
   // 失败/超时终态也要有可核对的服务端证据：证据必须与同 attempt 的工具痕迹与 tool_finished 对齐，
   // 不能凭一条自报的 exitCode 收口（S2 第二十三轮 P1-1、第二十四轮 P1-2）。
   if (report.status === 'failed' || report.status === 'timeout') {
@@ -448,17 +604,21 @@ export function applyReport(
       // 失败与超时都必须对一条失败行：超时也要在账本里留下失败/被杀的工具痕迹，
       // 只拿一条成功行收口会把超时盖过去（S2 第二十五轮 P1-2、第二十八轮 P2-1）。
       requireFailure: true,
+      requireExecutionId: Boolean(approval),
     })
     if (terminal.reason) {
       return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: terminal.reason, now: params.now })
     }
+    if (approval) {
+      boundExecutionId = terminal.executionId
+      evidenceDigest = evaluateEvidence(report, [], {}).digest
+    }
   }
   // 第四、五步只对“完成”上报做通过证据与判定：失败、阻塞的回报不该被要求带通过证据
-  let evidenceDigest: string | null = null
   let artifactProof: ReturnType<typeof verifyArtifactCompletion> = null
   if (report.status === 'done') {
     // 判定条件只从 run 绑定的工作流版本取，不在请求体、也不在函数参数里（规格 4.2 行 293）
-    const policy = policyForReport(tx, row, catalog, allowArtifactCompletion && !report.evidence && !params.decision)
+    const policy = policyForReport(tx, row, catalog, allowArtifactCompletion && !report.evidence && !approval)
     if (policy.artifactCompletion) artifactProof = verifyArtifactCompletion(tx, secret, row, params.now)
     if (artifactProof) {
       evidenceDigest = artifactProof.digest
@@ -468,12 +628,15 @@ export function applyReport(
         return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: systemReason, now: params.now })
       }
       // 工具证据须绑定账本中的执行痕迹（审计 R3-03）。
-      const trace = traceBindingGate(tx, params, report)
+      const trace = traceBindingGate(tx, params, report, { requireExecutionId: Boolean(approval) })
       if (trace.reason) {
         return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: trace.reason, now: params.now })
       }
+      boundExecutionId = trace.executionId
       // requiredHashes 的每个键都必须绑定 report.output 中该字段的内容（审计 P1-1）。
-      const evidence = evaluateEvidence(report, policy.requiredHashes ?? [], { output: report.output })
+      const evidence = evaluateEvidence(report, policy.requiredHashes ?? [], {
+        output: report.output, registeredProductDigests: approval?.registered.product_digests,
+      })
       if (!evidence.ok) {
         return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: evidence.reason ?? 'evidence_rejected', now: params.now })
       }
@@ -505,28 +668,24 @@ export function applyReport(
       missing: Array.isArray(request?.missing) ? request.missing.map(String) : [],
     }
   }
-  if (upheldDecision) {
-    resolveDecision(tx, secret, {
-      decisionId: upheldDecision.decision_id,
-      revision: upheldDecision.revision,
-      resolution: 'uphold_report',
-      now: params.now,
-      actor: { kind: 'human', id: 'human:uphold' },
-    })
+  if (approval) {
+    resolveReportContradictionDecision(tx, secret, approval.request)
     applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,
       from: [row.status as NodeStatus],
       to: report.status as NodeStatus,
-      // 迟到报告的两条出口各自有明确规则：startup_unknown 走 M-11，indeterminate 走 M-59。
-      // 不写死就会撞上同一对状态的通用失败边（M-48），把“维持报告”变成普通失败。
-      ruleId: row.status === 'startup_unknown' ? 'M-11' : 'M-59',
+      ruleId: 'M-59',
       attempt: params.attempt,
+      actionGeneration: params.generation,
+      expectedRevision: row.revision,
       now: params.now,
       allowHung: true,
       patch: {
         hang_reason: null,
         contradiction_decision_id: null,
         startup_unknown_deadline_at: null,
+        startup_unknown_boot_id: null,
+        startup_unknown_monotonic_ns: null,
         startup_unknown_remaining_ns: null,
       },
     })
@@ -534,7 +693,13 @@ export function applyReport(
       from: row.status,
       to: report.status,
       reason: 'uphold_report',
-      decision_id: params.decision?.decisionId,
+      decision_id: approval.decision.decision_id,
+      decision_revision: approval.decision.revision,
+      original_decision_id: approval.registered.original_decision_id,
+      report_id: report.report_id,
+      report_digest: approval.registered.report_digest,
+      action_generation: params.generation,
+      attempt: params.attempt,
     })
   } else {
     transitionNode(tx, secret, {
@@ -549,7 +714,14 @@ export function applyReport(
     })
   }
   if (existing) {
-    tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['applied', params.now, report.report_id])
+    if (approval) {
+      const updated = tx.run("UPDATE report_registry SET state = 'applied', updated_at = ? WHERE report_id = ?"
+        + " AND node_run_id = ? AND attempt = ? AND report_seq = ? AND state = 'rejected'",
+      [params.now, report.report_id, params.nodeRunId, params.attempt, reportSeq])
+      if (updated.changes !== 1) throw new OrchError('STALE_GENERATION', '已登记报告身份发生变化')
+    } else {
+      tx.run('UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?', ['applied', params.now, report.report_id])
+    }
   } else {
     tx.run(
       'INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -561,6 +733,7 @@ export function applyReport(
     report_seq: reportSeq,
     next_status: report.status,
     evidence_digest: evidenceDigest,
+    ...(approval && { decision_id: approval.decision.decision_id, report_digest: approval.registered.report_digest, execution_id: boundExecutionId }),
     ...(artifactProof ? { artifact_proof: artifactProof.proof } : {}),
   })
   // 副作用结算：done 收口的同一笔事务里落 evidence 分支结算行（附录 §4）。
@@ -598,6 +771,7 @@ type ToolExecutionRow = {
 
 type TraceBinding = {
   reason: string | null
+  executionId?: string
 }
 
 // 报告里的工具执行回执：执行器把 execution_id 写进 report.output.evidence_trace，
@@ -644,9 +818,9 @@ function traceEntriesOf(report: Report): TraceEntry[] {
 // 报告带了执行身份时按 execution_id 认行：同名工具跑两次也不许张冠李戴（评审《第二次意见.md》P1）。
 function traceBindingGate(
   tx: Tx,
-  params: ApplyReportParams,
+  params: Pick<ApplyReportParams, 'nodeRunId' | 'attempt'>,
   report: Report,
-  opts: { allowFailed?: boolean; requireFailure?: boolean } = {},
+  opts: { allowFailed?: boolean; requireFailure?: boolean; requireExecutionId?: boolean } = {},
 ): TraceBinding {
   const ev = report.evidence
   if (!ev) return { reason: 'evidence_missing' }
@@ -683,6 +857,7 @@ function traceBindingGate(
   }
   // 报告带了执行身份：按 execution_id 认「哪一次执行」，认不出、对不上都不许收口
   const entries = traceEntriesOf(report)
+  if (opts.requireExecutionId && entries.length === 0) return { reason: 'evidence_unverifiable' }
   let boundExecutionId: string | null = null
   if (entries.length > 0) {
     const entry = entries.find((e) => (
@@ -725,5 +900,5 @@ function traceBindingGate(
     }
   })
   if (!eventMatched) return { reason: 'evidence_unverifiable' }
-  return { reason: null }
+  return { reason: null, executionId: boundExecutionId ?? undefined }
 }

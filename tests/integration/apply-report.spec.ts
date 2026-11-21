@@ -4,7 +4,7 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { acquireLease } from '../../src/service/commands/lease.ts'
 import { createNodeRun } from '../../src/service/commands/nodes.ts'
-import { applyReport, raiseReportContradiction } from '../../src/service/commands/apply-report.ts'
+import { applyReport, raiseReportContradiction, resolveRegisteredReportConflict } from '../../src/service/commands/apply-report.ts'
 import { escalateDecisions } from '../../src/service/commands/decisions.ts'
 import type { Report } from '../../src/core/report.ts'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
@@ -678,21 +678,19 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
   function errorCode(fn: () => unknown): string | null {
     try { fn(); return null } catch (error) { return (error as { code?: string }).code ?? null }
   }
-  function hang(db: any) {
+  function hang(db: any, report = rep({ report_id: 'rep_conflict' })) {
     withTx(db, (tx) => tx.run("UPDATE node_runs SET status='startup_unknown' WHERE node_run_id='nr_ar'"))
     return withTx(db, (tx) => raiseReportContradiction(tx, TEST_SECRET, {
       nodeRunId: 'nr_ar', attempt: 2, runId: 'r1', reportId: 'rep_conflict', now: NOW,
-    }))
+    }, { report, generation: 1, originalDecisionId: 'd-original', catalog: CATALOG }))
   }
   function applyUphold(
     db: any,
     decision: { decisionId: string; revision: number; resolution: 'uphold_report' | 'uphold_decision' },
     now = NOW,
-    report = rep({ report_id: 'rep_conflict' }),
   ) {
-    return withTx(db, (tx) => applyReport(tx, TEST_SECRET, {
-      nodeRunId: 'nr_ar', attempt: 2, report,
-      expectedStatus: 'startup_unknown', generation: 1, now, decision,
+    return withTx(db, (tx) => resolveRegisteredReportConflict(tx, TEST_SECRET, {
+      ...decision, now, actor: { kind: 'human', id: 'test:human' },
     }, CATALOG))
   }
 
@@ -712,7 +710,7 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     const { decisionId } = hang(db)
     const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
     const out = applyUphold(db, { decisionId, revision: card.revision, resolution: 'uphold_report' })
-    expect(out).toEqual({ accepted: true, next_status: 'done', registry_state: 'applied' })
+    expect(out).toEqual({ decisionId, revision: 2 })
     const row = nodeRow(db)
     expect(row.status).toBe('done')
     expect(row.hang_reason).toBeNull()
@@ -725,10 +723,9 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
 
   it('uphold_report：证据未通过时保留挂起和原裁决修订', () => {
     const db = setup()
-    const { decisionId } = hang(db)
-    const report = rep({ report_id: 'rep_conflict', evidence: undefined })
-    const result = applyUphold(db, { decisionId, revision: 1, resolution: 'uphold_report' }, NOW, report)
-    expect(result).toMatchObject({ accepted: false, reason: 'evidence_missing' })
+    const { decisionId } = hang(db, rep({ report_id: 'rep_conflict', evidence: undefined }))
+    expect(errorCode(() => applyUphold(db, { decisionId, revision: 1, resolution: 'uphold_report' })))
+      .toBe('RESOLUTION_NOT_AVAILABLE')
     expect(nodeRow(db)).toMatchObject({ status: 'startup_unknown', contradiction_decision_id: decisionId })
     expect(db.raw.prepare('SELECT status, revision, closed_reason FROM decisions WHERE decision_id=?').get(decisionId))
       .toEqual({ status: 'pending', revision: 1, closed_reason: null })
@@ -740,7 +737,7 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
     const resolution = { decisionId, revision: card.revision, resolution: 'uphold_decision' as const }
     const out = applyUphold(db, resolution)
-    expect(out).toEqual({ accepted: false, reason: 'uphold_decision', next_status: 'superseded', registry_state: 'stale' })
+    expect(out).toEqual({ decisionId, revision: 2 })
     const old = nodeRow(db)
     expect(old.status).toBe('superseded')
     expect(old.replacement_node_run_id).toBeTruthy()
@@ -752,7 +749,7 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
       nodeRunId: next.node_run_id, ownerEpoch: 1, leaseTtlMs: 60_000, now: NOW,
     }))
     expect(lease.actionGeneration).toBe(old.action_generation + 1)
-    expect(applyUphold(db, resolution).accepted).toBe(false)
+    expect(errorCode(() => applyUphold(db, resolution))).toBe('DECISION_REVISION_CONFLICT')
     expect(db.raw.prepare("SELECT status, attempt, action_generation FROM node_runs WHERE origin_node_run_id='nr_ar'").all())
       .toEqual([{ status: 'dispatched', attempt: 3, action_generation: lease.actionGeneration }])
     expect(registry(db, 'rep_conflict').state).toBe('stale')
@@ -783,7 +780,7 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     expect(after.n).toBe(before.n)
   })
 
-  it('报告冲突超时只升级，旧修订和未取得有效租约的报告都保留待裁', () => {
+  it('报告冲突超时只升级，旧修订保留待裁，当前人工修订可采纳已登记回报', () => {
     const db = setup()
     const { decisionId } = hang(db)
     const now = '2026-11-20T00:00:00.000Z'
@@ -792,10 +789,10 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
     expect(card).toMatchObject({ status: 'blocked_for_human', revision: 2, closed_reason: null })
     expect(errorCode(() => applyUphold(db, { decisionId, revision: 1, resolution: 'uphold_report' }, now)))
       .toBe('DECISION_REVISION_CONFLICT')
-    expect(errorCode(() => applyUphold(db, { decisionId, revision: 2, resolution: 'uphold_report' }, now)))
-      .toBe('LEASE_EXPIRED')
     expect(db.raw.prepare('SELECT status, revision, closed_reason FROM decisions WHERE decision_id=?').get(decisionId))
       .toEqual({ status: 'blocked_for_human', revision: 2, closed_reason: null })
     expect(nodeRow(db)).toMatchObject({ status: 'startup_unknown', contradiction_decision_id: decisionId })
+    expect(applyUphold(db, { decisionId, revision: 2, resolution: 'uphold_report' }, now)).toEqual({ decisionId, revision: 3 })
+    expect(nodeRow(db)).toMatchObject({ status: 'done', contradiction_decision_id: null })
   })
 })
