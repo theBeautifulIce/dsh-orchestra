@@ -65,6 +65,7 @@ const chatRoutingPath = '/v1/settings/chat-routing'
 const responseHeaders = ['content-type', 'content-disposition', 'cache-control', 'x-content-type-options']
 const catalog = {
   GET: new Set([
+    '/v1/run-notes',
     chatRoutingPath,
     '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/health', '/v1/activity', '/v1/artifacts', '/v1/artifacts/content', '/v1/artifacts/get', '/v1/attestations/get',
@@ -76,6 +77,7 @@ const catalog = {
     '/v1/workflows', '/v1/workflows/generate/capability', '/v1/workflows/get', '/v1/workflows/versions/get', '/v1/workspace/overview',
   ]),
   POST: new Set([
+    '/v1/run-notes',
     chatRoutingPath,
     '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/v1/collaboration/reassign', '/v1/collaboration/review', '/v1/collaboration/scopes', '/v1/decisions/acknowledge',

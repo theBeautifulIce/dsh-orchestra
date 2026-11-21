@@ -80,6 +80,7 @@ import {
 import { bridgeHostAgentFactory } from './executor/bridge.ts'
 import { createDshExecutor, createDshPlanningCallback } from './executor/dsh-host.ts'
 import { createCollaborationHost, type CollaborationHost } from './service/collaboration.ts'
+import { createRunNotes, type RunNotes } from './service/run-notes.ts'
 import { callDshCollaboration } from './service/dsh-collaboration.ts'
 import { createReworkHost, type ReworkHost } from './service/rework-coordinator.ts'
 import { createDeliveryReviewHost } from './service/delivery-review.ts'
@@ -116,8 +117,13 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   const { dsh, dshPlanner, tools, ...serviceOptions } = options
   let plannerDb: Db | undefined
   let collaboration: CollaborationHost | undefined
+  let runNotes: RunNotes | undefined
   let installed: { db: Db; feedback: ReworkHost } | undefined
   const host = createDshExecutor({ ...dsh,
+    ...(serviceOptions.phase === 'S6' ? { runNote(binding, input, requestId, now) {
+      if (!runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '运行便条服务尚未就绪')
+      return runNotes.callNode(binding, input, requestId, now)
+    } } : {}),
     ...(serviceOptions.phase === 'S5' || serviceOptions.phase === 'S6' ? {
       rework(binding, input) {
         if (!installed) throw new OrchError('SERVICE_UNAVAILABLE', '成果审核服务尚未就绪')
@@ -160,6 +166,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     })
     plannerDb = service.orchestra.db
     collaboration = service.collaboration
+    runNotes = service.runNotes
     if (service.rework) installed = { db: service.orchestra.db, feedback: service.rework }
     return { ...service, close: async () => {
       host.stopModelRefresh()
@@ -672,7 +679,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
-}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; rework?: ReworkHost;
+}): Promise<{ orchestra: Orchestra; endpoint: string; collaboration?: CollaborationHost; rework?: ReworkHost; runNotes?: RunNotes;
     planning: TaskPlanningHost; planningSettings?: PlanningSettingsHost;
     recoverChatModelAssignment?: (input: Parameters<typeof recoverChatModelAssignment>[3]) => Promise<string[]>;
     close: () => Promise<void> }> {
@@ -685,6 +692,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const service = await openServiceOrchestra({ ...opts, scheduler })
   const orchestra = service.orchestra
   const collaboration = opts.collaboration ? createCollaborationHost(orchestra.db, opts.secret) : undefined
+  const runNotes = opts.phase === 'S6' ? createRunNotes(orchestra.db, opts.secret) : undefined
   const humanReviewOnly = opts.phase === 'S6'
   const rework = opts.phase === 'S5' || humanReviewOnly
     ? createReworkHost(orchestra.db, opts.secret, { clock: orchestra.runtime.clock, humanOnly: humanReviewOnly }) : undefined
@@ -773,6 +781,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     server = await startServer({
       secret: opts.secret,
       resolveHttpHuman: opts.resolveHttpHuman,
+      runNotes,
       phase: opts.phase,
       epoch: orchestra.db.epoch,
       asOfSeq: opts.asOfSeq,
@@ -835,6 +844,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   return {
     orchestra,
     endpoint: server.endpoint,
+    runNotes,
     planning,
     collaboration,
     rework,

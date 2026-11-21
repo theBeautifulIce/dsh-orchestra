@@ -1,0 +1,91 @@
+{
+  "item": "WF-23",
+  "method": "DSH Desktop 0.2.2-rc.5 bundled CLI, isolated DSH_HOME and SQLite, real DSH agents and service, loopback synthetic model",
+  "runtime_phase": "S6",
+  "run_id": "run_01a1fbed678a7646bfc4d9b399f6930c",
+  "workflow_status": "succeeded",
+  "native_session_count": 6,
+  "scope_receipts": {
+    "created": [
+      "run",
+      "downstream",
+      "brain"
+    ],
+    "operatorPanel": [
+      "run"
+    ],
+    "nonOwner": "FORBIDDEN",
+    "publicLedgerIncludesPlaintext": false,
+    "directBeforeRework": [
+      "downstream",
+      "run"
+    ],
+    "directAfterRework": [
+      "run"
+    ],
+    "indirect": [
+      "run"
+    ]
+  },
+  "native_tool_trace": [
+    {
+      "node_attempt": "A1",
+      "action": "add"
+    },
+    {
+      "node_attempt": "A1",
+      "action": "add"
+    },
+    {
+      "node_attempt": "A1",
+      "action": "add"
+    },
+    {
+      "node_attempt": "B1",
+      "action": "list"
+    },
+    {
+      "node_attempt": "B2",
+      "action": "list"
+    },
+    {
+      "node_attempt": "C1",
+      "action": "list"
+    }
+  ],
+  "node_outcomes": [
+    {
+      "id": "a",
+      "attempt": 1,
+      "status": "done"
+    },
+    {
+      "id": "a",
+      "attempt": 2,
+      "status": "done"
+    },
+    {
+      "id": "b",
+      "attempt": 1,
+      "status": "superseded"
+    },
+    {
+      "id": "b",
+      "attempt": 2,
+      "status": "done"
+    },
+    {
+      "id": "c",
+      "attempt": 1,
+      "status": "done"
+    },
+    {
+      "id": "c",
+      "attempt": 2,
+      "status": "done"
+    }
+  ],
+  "surface_boundary": "Read receipt used authenticated service HTTP. Native chat brain-only receipt binding and panel renderer use separate targeted tests, not this CLI probe.",
+  "local_probe": "tmp/closeout-run-notes/dsh-run-notes-probe.mjs",
+  "local_raw_log": "tmp/closeout-run-notes/native.log"
+}

@@ -340,6 +340,9 @@ async function runNodeActions(
         nodeRunId: p.nodeRunId, from: 'dispatched', to: 'started',
         attempt: row.attempt, revision: row.revision, now: startedAt, reason: 'executor_started',
       })
+      if (deps.runtime.phase === 'S6') {
+        tx.run('UPDATE node_runs SET executor_session_id=? WHERE node_run_id=?', [created.sessionId, p.nodeRunId])
+      }
       if (deps.modelEscalation) tx.run('UPDATE node_runs SET started_at=? WHERE node_run_id=?', [startedAt, p.nodeRunId])
     })
     const feedback = ['S5','S6'].includes(deps.runtime.phase)
