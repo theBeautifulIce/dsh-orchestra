@@ -1,0 +1,76 @@
+{
+  "source_commit": "96f639f11466470211ac90a4a9ed7b8546c6ba18",
+  "package_sha256": "e03f48032c29e8439f7403880eb7d35f7e2cdcfa9b209d62b9e1aac90fc82928",
+  "package_files": 76,
+  "identical_historical_migrations": 66,
+  "new_migrations": [
+    "067_run_note_bodies.sql"
+  ],
+  "closeout_cases": {
+    "符合": 15,
+    "部分符合": 5,
+    "待正式验收": 8
+  },
+  "main_suite": {
+    "numTotalTests": 2016,
+    "numPassedTests": 2008,
+    "numFailedTests": 0,
+    "numPendingTests": 8
+  },
+  "typecheck": "passed",
+  "installed_package_suite": {
+    "passed": 6,
+    "failed": 0
+  },
+  "native_probes": [
+    "three-independent",
+    "four-partial-strict",
+    "one-to-two",
+    "consult",
+    "routing-off",
+    "quota-retry",
+    "blocked",
+    "two-full-join",
+    "routing-default"
+  ],
+  "strict_read_p95_ms": {
+    "list_tasks": 7.3,
+    "get_run": 6.546,
+    "list_nodes": 26.882,
+    "list_events": 3.974
+  },
+  "g09": {
+    "case": "G-09",
+    "commit": "96f639f11466470211ac90a4a9ed7b8546c6ba18",
+    "candidate_dirty": false,
+    "actual_offline_ms": 600014.346,
+    "offline_and_recovery_events": 425,
+    "replay_pages": [
+      200,
+      200,
+      25
+    ],
+    "ledger_events_independently_matched": 429,
+    "producer_checks": 14,
+    "verified_evidence_sha256": "65724605e8ce76defc16183a230250fe52874b326a8019807acb5dd7ea6e8a0e",
+    "source_report_sha256": "36b86015d06ffb619804de21e19b12725e3762bb995584a5a47dee40f5677bb5",
+    "passed": true
+  },
+  "q63": "passed",
+  "g13_short_window": "passed",
+  "independent_audit": {
+    "final_tests_passed": 128,
+    "blocking_p0_p1_remaining": 0,
+    "engineering": "conditional_pass",
+    "formal_g6": "pending"
+  },
+  "local_desktop": {
+    "desktop_version": "0.2.2.0",
+    "exact_installed_files": 76,
+    "changed_other_dependencies": 0,
+    "normalized_offline_lock_and_archive_integrity_match": true,
+    "profile_config_bytes_unchanged": true,
+    "application_restarted": false,
+    "running_host_loaded_new_candidate_verified": false
+  }
+}

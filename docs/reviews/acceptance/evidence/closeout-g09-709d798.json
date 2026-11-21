@@ -1,0 +1,17 @@
+{
+  "case": "G-09",
+  "commit": "709d798ea45a9f05ec6b7b8a5ea8134524891456",
+  "candidate_dirty": false,
+  "actual_offline_ms": 600002.2921000001,
+  "offline_and_recovery_events": 425,
+  "replay_pages": [
+    200,
+    200,
+    25
+  ],
+  "ledger_events_independently_matched": 429,
+  "producer_checks": 14,
+  "verified_evidence_sha256": "65724605e8ce76defc16183a230250fe52874b326a8019807acb5dd7ea6e8a0e",
+  "source_report_sha256": "600f89d1b04cc821345d1a66c242103f027b0b7f0b179e727110a3859657b53a",
+  "passed": true
+}
