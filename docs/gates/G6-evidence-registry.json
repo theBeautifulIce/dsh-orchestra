@@ -179,6 +179,7 @@
     {"evidence_id":"G-16/unverified-pending.db","file":"docs/gates/evidence/G6/G-16/unverified-pending.db","strength":"strong","source":"fault:G-16"},
     {"evidence_id":"G-16/failed-pending.db","file":"docs/gates/evidence/G6/G-16/failed-pending.db","strength":"strong","source":"fault:G-16"},
     {"evidence_id":"perf/perf-report.json","file":"docs/gates/evidence/G6/perf/perf-report.json","strength":"strong","source":"control-read-budgets"},
+    {"evidence_id":"lag/lag-samples.json","file":"docs/gates/evidence/G6/lag/lag-samples.json","strength":"strong","source":"office-event-lag"},
     {"evidence_id":"soak/launch.json","file":"docs/gates/evidence/G6/soak/launch.json","strength":"strong","source":"continuous-observation"},
     {"evidence_id":"soak/detached.json","file":"docs/gates/evidence/G6/soak/detached.json","strength":"strong","source":"continuous-observation"},
     {"evidence_id":"soak/host.json","file":"docs/gates/evidence/G6/soak/host.json","strength":"strong","source":"continuous-observation"},
@@ -244,7 +245,7 @@
     "G-16": ["G-16/report.json","G-16/orchestra.db","G-16/clean-pending.db","G-16/unverified-pending.db","G-16/failed-pending.db"],
     "control_p95": ["perf/perf-report.json"],
     "soak_24h": ["soak/launch.json","soak/detached.json","soak/host.json","soak/soak-config.json","soak/workspace/sample.txt","soak/manifest.json","soak/points.ndjson","soak/events.ndjson","soak/end.json","soak/soak-report.json","soak/ledger.db","soak/hashes.json"],
-    "event_lag": ["soak/launch.json","soak/detached.json","soak/host.json","soak/soak-config.json","soak/workspace/sample.txt","soak/manifest.json","soak/points.ndjson","soak/events.ndjson","soak/end.json","soak/soak-report.json","soak/ledger.db","soak/hashes.json"],
+    "event_lag": ["lag/lag-samples.json"],
     "upgrade": ["operations/upgrade.json","G-13/1-backup.json","G-13/2-verify-copy.json","G-13/3-quiesce.json","G-13/4-healthcheck.json","G-13/5-synthetic-run.json","G-13/6-observe.json"],
     "load_rollback": ["operations/load_rollback.json","G-13/1-backup.json","G-13/2-verify-copy.json","G-13/3-quiesce.json","G-13/4-healthcheck.json","G-13/5-synthetic-run.json","G-13/6-observe.json","G-13/T14-rollback-fault.json","G-13/settings-read-by-s5.db","G-13/compatibility.db","G-13/rollback-waiting.db","G-13/7-rollback-table.json"],
     "oncall_drill": ["operations/oncall_drill.json","oncall/inbox-alert.json","oncall/human-ack.json","oncall/intake-paused.json","oncall/restore-verified.json","oncall/qq-delivery.json"]
