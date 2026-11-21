@@ -20,6 +20,7 @@ import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
 import { canReportTransition } from '../../core/state-machine.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 import { verifyArtifactCompletion } from '../artifact-completion.ts'
+import { retireOrdinaryStartupDecision } from '../decision/ordinary-recovery.ts'
 
 export type ApplyReportParams = {
   nodeRunId: string
@@ -760,6 +761,7 @@ function applyReportInternal(
       verifyHuman,
     })
   }
+  if (row.status === 'startup_unknown') retireOrdinaryStartupDecision(tx, secret, row.node_run_id, params.now, 'cancelled')
   if (existing) {
     if (approval) {
       const updated = tx.run("UPDATE report_registry SET state = 'applied', updated_at = ? WHERE report_id = ?"

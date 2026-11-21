@@ -504,7 +504,10 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       actor: b.actor,
       now: b.now,
     })),
-    confirmStart: (b) => confirmStartup(db, opts.secret, { ...b, clock }),
+    confirmStart: (b) => {
+      if (opts.phase === 'S6') throw new OrchError('RESOLUTION_NOT_AVAILABLE', '确认启动需要重接当前执行尝试的宿主事件流')
+      return confirmStartup(db, opts.secret, { ...b, clock })
+    },
     startCompensation: (b) => inTx(db, (tx) => startCompensation(tx, opts.secret, {
       nodeRunId: b.nodeRunId,
       attempt: b.attempt,

@@ -165,6 +165,11 @@ it('真实执行入口保留在跑步骤时限，在排队节点开跑时读取�
     for (const response of await Promise.all([first, second])) {
       expect(await response.json()).toMatchObject({ ok: true, data: { final_status: 'done' } })
     }
+    const stopped = db.raw.prepare("SELECT node_run_id,payload FROM node_run_events WHERE type='recovery.host_stopped' ORDER BY node_run_id")
+      .all() as { node_run_id: string; payload: string }[]
+    expect(stopped.map(({ node_run_id, payload }) => ({ node_run_id, ...JSON.parse(payload) }))).toMatchObject(
+      nodeIds.map(node_run_id => ({ node_run_id, attempt: 1, action_generation: 1, executor_agent_id: 'agent_1', stopped_at: expect.any(String) })),
+    )
     expect(timers.mock.calls.filter(([, timeout]) => timeout === defaults.action_timeout_ms)).toHaveLength(1)
     expect(timers.mock.calls.filter(([, timeout]) => timeout === action_timeout_ms)).toHaveLength(1)
   } finally {

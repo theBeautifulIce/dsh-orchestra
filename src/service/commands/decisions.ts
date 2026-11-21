@@ -10,7 +10,8 @@ import { applyTransition } from './nodes.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand } from './idempotency.ts'
-import { abandonOrdinaryRecovery, applyOrdinaryEffectResolution, expireOrdinaryAbandon, ordinaryEffectResolution, signOrdinaryAbandon } from '../decision/ordinary-recovery.ts'
+import { abandonOrdinaryRecovery, applyOrdinaryEffectResolution, confirmOrdinaryUnsentAttempt, expireOrdinaryAbandon,
+  ordinaryEffectResolution, ordinaryRecoveryBound, signOrdinaryAbandon } from '../decision/ordinary-recovery.ts'
 
 export const DECISION_KINDS: readonly DecisionKind[] = [
   'pre_execution',
@@ -273,22 +274,25 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
     evidenceProducers: producers,
   })
   const abandoning = scope === undefined && req.resolution === 'abandon'
+  const confirmingUnsent = scope === undefined && current.kind === 'startup_unknown'
+    && req.resolution === 'confirm_not_started' && ordinaryRecoveryBound(current)
   const ordinaryEffect = scope === undefined && req.requireEffectSettlement
     && (req.resolution === 'confirm_applied' || req.resolution === 'confirm_not_applied')
     ? ordinaryEffectResolution(tx, secret, current, req) : undefined
   if (abandoning) abandonOrdinaryRecovery(tx, secret, current, req)
+  if (confirmingUnsent) confirmOrdinaryUnsentAttempt(tx, secret, current, req)
   if (scope === undefined && current.kind === 'abandon_ack' && req.resolution === 'approved') signOrdinaryAbandon(tx, secret, current, req)
-  const closing = abandoning || !!ordinaryEffect || FINAL_RESOLUTIONS.includes(req.resolution)
+  const closing = abandoning || confirmingUnsent || !!ordinaryEffect || FINAL_RESOLUTIONS.includes(req.resolution)
   const nextStatus = closing ? 'resolved' : current.status
   const closedReason = closing
     ? req.resolution === 'expired'
       ? 'expired_final'
       : req.resolution === 'uphold_report'
         ? 'approved'
-        : req.resolution === 'uphold_decision' ? 'rejected' : abandoning || ordinaryEffect ? 'approved' : req.resolution
+        : req.resolution === 'uphold_decision' ? 'rejected' : abandoning || confirmingUnsent || ordinaryEffect ? 'approved' : req.resolution
     : null
   const payload = ordinaryEffect ? { ...req.payload, effect_verdict: ordinaryEffect.verdict, resolution: req.resolution }
-    : abandoning ? { resolution: req.resolution } : req.payload
+    : abandoning || confirmingUnsent ? { resolution: req.resolution } : req.payload
   const payloadJson = payload
     ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...payload })
     : current.payload_json

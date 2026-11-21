@@ -45,6 +45,11 @@ it.each(['signed', 'expired'] as const)('opens ordinary recovery cards from main
           (node_run_id,run_id,node_id,seq,node_type,status,attempt,action_generation,rearm_generation,side_effect_policy,executor_agent_id,created_at,updated_at)
           VALUES (?,'run',?,?,'agent',?,2,7,3,'irreversible',?,?,?)`, [id, id, seq, status, id + ':executor', at, at])
       }
+      const clock = service.orchestra.runtime.clock.sample()
+      const remainingNs = 120_000 * 1e6
+      tx.run("UPDATE node_runs SET startup_unknown_deadline_at=?,startup_unknown_boot_id=?,startup_unknown_monotonic_ns=?,"
+        + "startup_unknown_remaining_ns=? WHERE node_run_id='uncertain'",
+      [new Date(clock.wallClockMs + 120_000).toISOString(), clock.bootId, clock.monotonicNs + remainingNs, remainingNs])
     })
     sweepNow(service.orchestra.runtime, now())
     const first = card('startup_unknown')

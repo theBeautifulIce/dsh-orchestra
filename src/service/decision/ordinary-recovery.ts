@@ -4,6 +4,7 @@ import { isReleaseWorkflow } from '../../core/release-workflow-ids.ts'
 import type { NodeStatus } from '../../core/state-machine.ts'
 import { appendEvent, appendNodeRunEvent, assertChainIntact, chainIsIntact, readChain, readChainHead } from '../../infra/db/ledger.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
+import type { UnsentAttemptBinding } from '../../executor/bridge.ts'
 import { activeDecision, cancelDecision, openDecision, type ResolveDecisionRequest } from '../commands/decisions.ts'
 import { releaseLease } from '../commands/lease.ts'
 import { applyTransition } from '../commands/nodes.ts'
@@ -13,6 +14,7 @@ const sourceOf = { startup_unknown: 'startup_unknown', action_overrun: 'stopping
 const abandonRule = { startup_unknown: 'M-10', action_overrun: 'M-36', verify_human: 'M-53' } as const
 const active = "('pending','acknowledged','blocked_for_human')"
 const stopEvent = 'recovery.host_stopped'
+const unsentEvent = 'recovery.host_retired_unsent_attempt'
 const abandonEvent = 'decision.abandoned'
 const abandonAckWindowMs = 24 * 60 * 60 * 1000
 const clearStartupClock = {
@@ -24,6 +26,7 @@ type Node = {
   node_run_id: string; run_id: string; node_type: string; workflow_id: string | null
   status: NodeStatus; attempt: number; action_generation: number; rearm_generation: number; revision: number
   hang_reason: string | null; executor_agent_id: string | null; fence_state: string | null
+  cancel_requested_at: string | null; run_cancel_requested_at: string | null
 }
 type Card = { decision_id: string; run_id: string; node_run_id: string | null; kind: string; payload_json: string }
 type Target = { node_run_id: string; attempt: number; action_generation: number; rearm_generation: number }
@@ -31,7 +34,7 @@ type RecoveryRead = Pick<Tx, 'get' | 'all'>
 
 function ordinaryNode(tx: RecoveryRead, id: string): Node | undefined {
   const node = tx.get<Node>(`
-    SELECT n.*, r.workflow_id FROM node_runs n JOIN runs r USING(run_id)
+    SELECT n.*, r.workflow_id, r.cancel_requested_at AS run_cancel_requested_at FROM node_runs n JOIN runs r USING(run_id)
     WHERE n.node_run_id=? AND n.node_type='agent' AND r.status IN ('running','paused')
       AND NOT EXISTS (SELECT 1 FROM memory_batches b WHERE b.memory_run_id=n.run_id)
   `, [id])
@@ -75,6 +78,61 @@ function parseCard(card: Card): { ordinary_recovery?: Target; affected?: Target[
 export function ordinaryRecoveryBound(card: Card): boolean {
   const payload = parseCard(card)
   return card.kind === 'abandon_ack' ? Array.isArray(payload.affected) : !!payload.ordinary_recovery
+}
+
+export function retireOrdinaryStartupDecision(tx: Tx, secret: string, nodeId: string, now: string, reason: 'cancelled' | 'expired_final'): void {
+  const card = tx.get<Card>("SELECT decision_id,run_id,node_run_id,kind,payload_json FROM decisions"
+    + " WHERE node_run_id=? AND kind='startup_unknown' AND status IN " + active, [nodeId])
+  if (card && ordinaryRecoveryBound(card)) cancelDecision(tx, secret, { decisionId: card.decision_id, reason, now })
+}
+
+function canRecordUnsentAttempt(tx: RecoveryRead, node: Node): boolean {
+  if (node.status !== 'startup_unknown' || node.executor_agent_id !== null || node.fence_state === 'armed'
+    || node.hang_reason !== null || node.cancel_requested_at !== null || node.run_cancel_requested_at !== null) return false
+  return !tx.get(`SELECT 1 FROM bridge_event_receipts WHERE node_run_id=?1 AND attempt=?2
+    UNION ALL SELECT 1 FROM bridge_tool_outbox WHERE node_run_id=?1 AND attempt=?2
+    UNION ALL SELECT 1 FROM tool_executions WHERE node_run_id=?1 AND attempt=?2
+    UNION ALL SELECT 1 FROM report_registry WHERE node_run_id=?1 AND attempt=?2 LIMIT 1`, [node.node_run_id, node.attempt])
+}
+
+export function recordOrdinaryUnsentAttempt(tx: Tx, secret: string, binding: UnsentAttemptBinding, rearm: number, at: string): void {
+  const node = ordinaryNode(tx, binding.nodeRunId)
+  if (!node || node.attempt !== binding.attempt || node.action_generation !== binding.actionGeneration
+    || node.rearm_generation !== rearm || !canRecordUnsentAttempt(tx, node)) return
+  assertChainIntact(tx, secret, binding.nodeRunId)
+  appendNodeRunEvent(tx, secret, binding.nodeRunId, unsentEvent, {
+    ...identity(node), executor_agent_id: binding.executorAgentId, stopped_at: at,
+  })
+}
+
+export function ordinaryUnsentAttempt(tx: RecoveryRead, node: Node): { executor_agent_id: string; stopped_at: string } | undefined {
+  if (!canRecordUnsentAttempt(tx, node)) return undefined
+  return tx.get(`SELECT json_extract(payload,'$.executor_agent_id') AS executor_agent_id,
+    json_extract(payload,'$.stopped_at') AS stopped_at FROM node_run_events
+    WHERE node_run_id=? AND type=? AND json_valid(payload) AND json_extract(payload,'$.attempt')=?
+      AND json_extract(payload,'$.action_generation')=? AND json_extract(payload,'$.rearm_generation')=?
+      AND json_type(payload,'$.executor_agent_id')='text' AND json_type(payload,'$.stopped_at')='text'
+    ORDER BY seq DESC LIMIT 1`, [node.node_run_id, unsentEvent, node.attempt, node.action_generation, node.rearm_generation])
+}
+
+export function confirmOrdinaryUnsentAttempt(tx: Tx, secret: string, card: Card, req: ResolveDecisionRequest): void {
+  const node = ordinaryRecoveryTarget(tx, card)
+  const receipt = node && ordinaryUnsentAttempt(tx, node)
+  if (card.kind !== 'startup_unknown' || !node || !receipt || !(Date.parse(receipt.stopped_at) <= Date.parse(req.now))
+    || req.actor?.kind !== 'human' || Object.keys(req.payload ?? {}).length !== 0) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '确认未启动需要当前执行尝试的宿主停止凭据')
+  }
+  assertChainIntact(tx, secret, node.node_run_id)
+  applyTransition(tx, secret, { nodeRunId: node.node_run_id, from: ['startup_unknown'], to: 'failed', ruleId: 'M-07',
+    attempt: node.attempt, expectedRevision: node.revision, actionGeneration: node.action_generation,
+    rearmGeneration: node.rearm_generation, now: req.now,
+    context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: false },
+    patch: { ...clearStartupClock, deadline_at: null, deadline_boot_id: null, deadline_monotonic_ns: null, action_remaining_ns: null } })
+  releaseLease(tx, { nodeRunId: node.node_run_id, now: req.now })
+  appendNodeRunEvent(tx, secret, node.node_run_id, 'decision.startup_confirmed_unsent', {
+    ...identity(node), ...receipt, decision_id: card.decision_id, decision_revision: req.revision + 1,
+    actor_id: req.actor.id, occurred_at: req.now,
+  })
 }
 
 export function ordinaryAbandonTargets(tx: RecoveryRead, card: Card): Node[] {

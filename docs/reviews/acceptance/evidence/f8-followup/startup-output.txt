@@ -1,0 +1,15 @@
+Vitest v4.1.8, Node v26.13.1, Windows PowerShell
+
+node ../../node_modules/vitest/vitest.mjs run tests/contract/decision-ordinary-startup.spec.ts tests/contract/decision-ordinary-abandon.spec.ts tests/contract/decision-exit-matrix.spec.ts tests/contract/report-conflict-approval.spec.ts tests/integration/apply-report.spec.ts tests/integration/confirm-start.spec.ts tests/integration/dsh-model-selection.spec.ts tests/integration/chat-native.spec.ts
+
+ Test Files  8 passed (8)
+      Tests  174 passed (174)
+   Start at  11:30:01
+   Duration  16.20s (transform 8.06s, setup 0ms, import 20.24s, tests 33.07s, environment 1ms)
+
+node ../../node_modules/vitest/vitest.mjs run tests/contract/execution-capacity-settings.spec.ts tests/contract/decision-ordinary-startup.spec.ts
+
+ Test Files  2 passed (2)
+      Tests  8 passed (8)
+   Start at  11:31:46
+   Duration  5.51s (transform 2.42s, setup 0ms, import 6.32s, tests 3.31s, environment 0ms)
