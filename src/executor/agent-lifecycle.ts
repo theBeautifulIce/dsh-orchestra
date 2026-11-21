@@ -1,7 +1,7 @@
 // src/executor/agent-lifecycle.ts —— Agent 会话的生命周期：订阅、事件落账、工具回传、最终结构化输出。
 // 自然语言输出不能直接改账本；这里只收集 Agent 的报告，状态变更仍走 submitReport()/applyReport()。
 import { OrchError } from '../core/errors.ts'
-import type { BridgeClient, BridgeEvent, BridgeEventBuffer } from './bridge.ts'
+import type { BridgeClient, BridgeEvent, BridgeEventBuffer, ResidentAttemptBinding } from './bridge.ts'
 import { BridgeEventBuffer as BufferImpl } from './bridge.ts'
 import { BridgeConsumer } from './bridge-consumer.ts'
 import { BridgeLedger } from './bridge-ledger.ts'
@@ -14,14 +14,23 @@ import type { ExecutorAgent } from './session.ts'
 import { readModelUse, type ModelUse } from './model-routing.ts'
 
 const DEFAULT_STOP_RPC_TIMEOUT_MS = 2_000
+const OBSERVATION_POLL_MS = 100
 
 export type AgentReportEnvelope = {
   report: unknown
   evidence: unknown | null
+  bridgeSeq?: number
   modelUse?: AttemptModelUse
 }
 
 type AttemptModelUse = ModelUse & { model_ref: string }
+
+export type AttemptSupervision = {
+  binding: ResidentAttemptBinding
+  mayUseTools(): boolean
+  budget(rearmGeneration: number): number
+  poll(finalReport?: BridgeEvent): boolean
+}
 
 export type AgentLifecycleDeps = {
   db: Db
@@ -37,6 +46,7 @@ export type AgentLifecycleDeps = {
   agent: ExecutorAgent
   instruction: string
   timeoutMs: number
+  supervision?: AttemptSupervision
   idleTimeoutMs: number
   // 收口 RPC 的单次上限：cancel/state/dispose 由宿主实现，编排层不能无限等。
   stopRpcTimeoutMs?: number
@@ -59,8 +69,11 @@ export class AgentLifecycle {
   private readonly consumer: BridgeConsumer
   private readonly deps: AgentLifecycleDeps
   private readonly controller = new AbortController()
+  private readonly toolAuthority = new AbortController()
   private waiter: ReportWaiter | null = null
   private reportSeen = false
+  private listening = false
+  private monitored = false
   private running: Promise<void> | null = null
   private stopTask: Promise<void> | null = null
 
@@ -81,6 +94,7 @@ export class AgentLifecycle {
       lease: deps.lease,
       nowAt: deps.nowAt,
       clock: deps.clock,
+      signal: deps.supervision ? this.toolAuthority.signal : undefined,
     })
     const cursor = this.ledger.handled()
     this.buffer = new BufferImpl({
@@ -117,14 +131,22 @@ export class AgentLifecycle {
     return this.buffer.lastSeq
   }
 
+  get hasMonitor(): boolean {
+    return this.monitored
+  }
+
   // 启动事件流并发出任务；只有收到结构化 report 才收口，自然语言文本不触发完成。
   async run(signal: AbortSignal): Promise<AgentReportEnvelope> {
-    const timeout = setTimeout(() => {
+    const expire = (): void => {
       this.controller.abort(new OrchError('OPERATION_TIMEOUT', 'Agent 生命周期超过节点动作上限', {
         nodeRunId: this.deps.nodeRunId, attempt: this.deps.attempt, timeoutMs: this.deps.timeoutMs,
       }))
-    }, this.deps.timeoutMs)
-    const onAbort = (): void => { this.controller.abort(signal.reason) }
+    }
+    const closeToolAuthority = (): void => {
+      this.toolAuthority.abort(new OrchError('STALE_GENERATION', '执行授权已结束，继续观察原尝试'))
+    }
+    const timeout = setTimeout(() => { if (this.monitored) closeToolAuthority(); else expire() }, this.deps.timeoutMs)
+    const onAbort = (): void => { this.toolAuthority.abort(signal.reason); this.controller.abort(signal.reason) }
     if (signal.aborted) onAbort()
     else signal.addEventListener('abort', onAbort, { once: true })
     // 中止竞速必须从 subscribe 之前就存在：订阅或发送挂住时，动作超时同样要能打穿。
@@ -136,6 +158,8 @@ export class AgentLifecycle {
     // 若超时先发生、后续才走到 race，这个拒绝仍然必须被视为已处理，不能让进程因 unhandledRejection 退出。
     void aborted.catch(() => {})
     const guarded = <T>(task: Promise<T>): Promise<T> => Promise.race([task, aborted])
+    let removeMonitor: (() => void) | undefined
+    let pollTimer: ReturnType<typeof setInterval> | undefined
     try {
       const fromSeq = this.ledger.handled()
       const subscribed = await guarded(this.deps.client.subscribe({
@@ -143,6 +167,27 @@ export class AgentLifecycle {
       }))
       if (!subscribed.subscribed) {
         throw new OrchError('BRIDGE_NOT_SUBSCRIBED', 'Agent 订阅未确认，不能开始执行', { agentId: this.agentId })
+      }
+      const supervision = this.deps.supervision
+      if (supervision) {
+        removeMonitor = this.deps.client.installAttemptMonitor({
+          binding: supervision.binding,
+          budget: (rearmGeneration) => this.listening && !this.controller.signal.aborted && !this.reportSeen
+            ? supervision.budget(rearmGeneration) : 0,
+          actionTimeoutMs: this.deps.timeoutMs,
+        }, () => this.canUseTools(), this.toolAuthority.signal)
+        if (removeMonitor) {
+          this.monitored = true
+          pollTimer = setInterval(() => {
+            try {
+              if (!this.canUseTools()) closeToolAuthority()
+              if (!this.reportSeen && !supervision.poll()) expire()
+            } catch (error) {
+              this.toolAuthority.abort(error)
+              this.controller.abort(error)
+            }
+          }, OBSERVATION_POLL_MS)
+        }
       }
       const report = new Promise<AgentReportEnvelope>((resolve, reject) => {
         this.waiter = { resolve, reject }
@@ -168,6 +213,9 @@ export class AgentLifecycle {
       throw err
     } finally {
       clearTimeout(timeout)
+      if (pollTimer) clearInterval(pollTimer)
+      this.toolAuthority.abort()
+      removeMonitor?.()
       signal.removeEventListener('abort', onAbort)
     }
   }
@@ -184,7 +232,9 @@ export class AgentLifecycle {
           { executorAgentId: this.agentId, attempt: this.deps.attempt, fromSeq },
           signal,
         )
-        await this.consumer.run(stream, signal)
+        this.listening = true
+        try { await this.consumer.run(stream, signal) }
+        finally { this.listening = false }
         if (signal.aborted) return
         lastError = new OrchError('SERVICE_UNAVAILABLE', '桥事件流提前结束，等待重连', { fromSeq })
       } catch (err) {
@@ -240,6 +290,7 @@ export class AgentLifecycle {
   // 顺序不能反：工具执行中的 run() 会卡在 onEvent 的宿主工具上，若先 await running，
   // cancel 永远发不出去，B07 的真实进程取消会死锁。
   private async stopInternal(): Promise<void> {
+    this.toolAuthority.abort()
     this.controller.abort(new OrchError('SERVICE_UNAVAILABLE', '节点收口，停止监听', {}))
     try {
       await this.bounded(this.deps.client.cancel({ executorAgentId: this.agentId, attempt: this.deps.attempt }), 'cancel')
@@ -295,7 +346,14 @@ export class AgentLifecycle {
   private async onEvent(ev: BridgeEvent): Promise<void> {
     const payload = ev.payload as Record<string, unknown> | null
     if (ev.type === 'tool.call') {
-      const result = await this.collector.collect(payload)
+      if (!this.canUseTools()) return
+      let result: Awaited<ReturnType<EvidenceCollector['collect']>>
+      try { result = await this.collector.collect(payload) }
+      catch (error) {
+        if (this.monitored && !this.canUseTools()) return
+        throw error
+      }
+      if (!this.canUseTools()) return
       await this.deps.client.toolResult({
         executorAgentId: this.agentId,
         attempt: this.deps.attempt,
@@ -306,6 +364,9 @@ export class AgentLifecycle {
       return
     }
     if (!this.reportSeen && isReportEnvelope(payload)) {
+      if (this.monitored && !this.deps.supervision!.poll(ev)) {
+        throw new OrchError('OPERATION_TIMEOUT', '回报到达时本次执行的观察窗口已结束')
+      }
       const raw = (payload as Record<string, unknown>).model_use
       const modelUse = raw === undefined ? undefined : decodeModelUse(raw)
       this.reportSeen = true
@@ -313,12 +374,17 @@ export class AgentLifecycle {
       // 不能在这里 await flush：本条事件的 ACK 要等 onEvent 返回后由消费器推进，
       // 在 onEvent 里等确认位会自我等待到超时。交给后台追平，run() 仍等确认后再收口。
       void this.flush(5_000).then((persisted) => {
-        if (persisted) this.waiter?.resolve({ report, evidence: this.collector.lastEvidence, modelUse })
+        if (persisted) this.waiter?.resolve({ report, evidence: this.collector.lastEvidence, modelUse,
+          ...(this.monitored ? { bridgeSeq: ev.seq } : {}) })
         else this.waiter?.reject(new OrchError('SERVICE_UNAVAILABLE', 'Agent 报告未落账，不能收口', {
           lastSeq: this.buffer.lastSeq, cursor: this.ledger.handled(),
         }))
       }, (err: unknown) => { this.waiter?.reject(err) })
     }
+  }
+
+  private canUseTools(): boolean {
+    return !this.toolAuthority.signal.aborted && (!this.monitored || this.deps.supervision!.mayUseTools())
   }
 }
 

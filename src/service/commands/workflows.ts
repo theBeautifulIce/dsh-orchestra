@@ -130,6 +130,7 @@ export function runtimeProjection(workflowId: string, version: string, doc: Work
     }
     if (cfg.tools !== undefined) out.tools = cfg.tools as WorkflowNodeDef['tools']
     if (cfg.side_effect_policy !== undefined) out.side_effect_policy = cfg.side_effect_policy as WorkflowNodeDef['side_effect_policy']
+    if (cfg.recovery_retry_idempotent !== undefined) out.recovery_retry_idempotent = cfg.recovery_retry_idempotent as boolean
     if (cfg.pass_conditions !== undefined) out.pass_conditions = cfg.pass_conditions as WorkflowNodeDef['pass_conditions']
     if (cfg.required_hashes !== undefined) out.required_hashes = cfg.required_hashes as WorkflowNodeDef['required_hashes']
     if (node.type === 'policy') {

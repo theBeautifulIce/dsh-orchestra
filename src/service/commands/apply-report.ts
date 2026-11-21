@@ -20,7 +20,7 @@ import { evaluateEvidence, evaluatePassConditions } from '../../core/policy.ts'
 import { canReportTransition } from '../../core/state-machine.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 import { verifyArtifactCompletion } from '../artifact-completion.ts'
-import { retireOrdinaryStartupDecision } from '../decision/ordinary-recovery.ts'
+import { ordinaryHostStop, retireOrdinaryActionDecision, retireOrdinaryStartupDecision } from '../decision/ordinary-recovery.ts'
 
 export type ApplyReportParams = {
   nodeRunId: string
@@ -496,6 +496,52 @@ export function applyReport(
   return applyReportInternal(tx, secret, params, catalog, allowArtifactCompletion)
 }
 
+/** Internal local lifecycle only. The native stream and its final stop must both be in the signed ledger. */
+export function applyObservedReport(
+  tx: Tx,
+  secret: string,
+  params: ApplyReportParams,
+  catalog: WorkflowCatalog,
+  observation: { executorAgentId: string; executorSessionId: string; rearmGeneration: number; bridgeSeq: number },
+  allowArtifactCompletion: boolean,
+): ApplyResult {
+  if (params.decision) throw new OrchError('FORBIDDEN', '执行器回报不能代替人工裁决')
+  const node = tx.get<NodeRunRow & { executor_agent_id: string; executor_session_id: string }>(`
+    SELECT n.* FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=? AND n.node_type='agent'
+    AND n.cancel_requested_at IS NULL AND r.cancel_requested_at IS NULL AND r.status IN ('running','paused')`, [params.nodeRunId])
+  const receipt = node && tx.get<{ payload: string }>(`
+    SELECT e.payload FROM bridge_event_receipts b JOIN node_run_events e ON e.node_run_id=b.node_run_id AND e.seq=b.ledger_seq
+    JOIN bridge_stream_cursors c USING(node_run_id,attempt,executor_agent_id)
+    WHERE b.node_run_id=? AND b.attempt=? AND b.executor_agent_id=? AND b.bridge_seq=?
+    AND b.event_type='bridge.turn' AND e.type='bridge.turn' AND c.last_handled_seq>=b.bridge_seq`,
+  [params.nodeRunId, params.attempt, observation.executorAgentId, observation.bridgeSeq])
+  if (!node || node.attempt !== params.attempt || node.action_generation !== params.generation
+    || node.rearm_generation !== observation.rearmGeneration || node.status !== params.expectedStatus
+    || !['startup_unknown', 'stopping', 'abandoned_unverified'].includes(node.status)
+    || node.executor_agent_id !== observation.executorAgentId || node.executor_session_id !== observation.executorSessionId
+    || !receipt || !ordinaryHostStop(tx, secret, node)) {
+    throw new OrchError('STALE_GENERATION', '观察到的报告与当前原尝试或宿主停止凭据不一致')
+  }
+  const bridge = JSON.parse(receipt.payload) as { attempt?: number; executorAgentId?: string; payload?: { kind?: string; report?: { status?: string; output?: unknown } } }
+  if (bridge.attempt !== params.attempt || bridge.executorAgentId !== node.executor_agent_id || bridge.payload?.kind !== 'report'
+    || bridge.payload.report?.status !== params.report.status) {
+    throw new OrchError('STALE_GENERATION', '原尝试回报缺少桥事件的身份凭据')
+  }
+  const rawOutput = bridge.payload.report.output
+  const payloadOutput = params.report.output
+  if (payloadOutput === null || typeof payloadOutput !== 'object' || Array.isArray(payloadOutput)) {
+    throw new OrchError('STALE_GENERATION', '原尝试回报缺少规范化输出')
+  }
+  const bridgeOutput = rawOutput !== null && typeof rawOutput === 'object' && !Array.isArray(rawOutput) ? rawOutput : {}
+  const finalOutput = { ...bridgeOutput, evidence_trace: (payloadOutput as Record<string, unknown>).evidence_trace }
+  if (params.report.report_id !== 'rep_' + params.nodeRunId + '_' + String(params.attempt) + '_' + params.report.status
+    || canonicalJson(finalOutput) !== canonicalJson(payloadOutput)) {
+    throw new OrchError('STALE_GENERATION', '原尝试回报的标识或业务输出与签名桥回报不一致')
+  }
+  return applyReportInternal(tx, secret, params, catalog,
+    allowArtifactCompletion && node.side_effect_policy === 'pure', undefined, observation.rearmGeneration)
+}
+
 function applyReportInternal(
   tx: Tx,
   secret: string,
@@ -503,6 +549,7 @@ function applyReportInternal(
   catalog: WorkflowCatalog,
   allowArtifactCompletion: boolean,
   approval?: ConflictApproval,
+  observedRearm?: number,
 ): ApplyResult {
   const report = params.report
   // 第一步：幂等查重
@@ -638,7 +685,7 @@ function applyReportInternal(
       actual: row.action_generation,
     })
   }
-  if (!approval) assertLeaseValid(row, params.now)
+  if (!approval && observedRearm === undefined) assertLeaseValid(row, params.now)
   // 目标状态必须在合法迁移表里：非法迁移按拒绝处理，不许绕过状态机
   if (!canReportTransition(row.status, report.status)) {
     return rejectReport(tx, secret, { nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq, reason: 'illegal_transition', now: params.now })
@@ -750,6 +797,16 @@ function applyReportInternal(
       action_generation: params.generation,
       attempt: params.attempt,
     })
+  } else if (observedRearm !== undefined) {
+    applyTransition(tx, secret, {
+      nodeRunId: params.nodeRunId, from: [row.status as NodeStatus], to: report.status as NodeStatus,
+      ruleId: row.status === 'startup_unknown' ? 'M-11' : 'M-32', attempt: params.attempt,
+      actionGeneration: params.generation, rearmGeneration: observedRearm, expectedRevision: row.revision, now: params.now,
+      allowHung: row.hang_reason === 'action_overrun',
+      patch: { hang_reason: null, deadline_at: null, deadline_boot_id: null, deadline_monotonic_ns: null, action_remaining_ns: null,
+        startup_unknown_deadline_at: null, startup_unknown_boot_id: null, startup_unknown_monotonic_ns: null, startup_unknown_remaining_ns: null },
+    })
+    if (row.status === 'stopping') retireOrdinaryActionDecision(tx, secret, row, params.now)
   } else {
     transitionNode(tx, secret, {
       nodeRunId: params.nodeRunId,

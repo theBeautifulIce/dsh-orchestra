@@ -384,6 +384,60 @@ describe('开发者视图', () => {
 })
 
 describe('决定命令客户端', () => {
+  it('只显示宿主可用的同次执行操作，签认提交独立编号', async () => {
+    let item = decisionView({ decision_id: 'd-start', kind: 'startup_unknown', current_revision: 4,
+      allowed_resolutions: ['confirm_started_attested', 'continue_tracking', 'abandon'] })
+    const { api, commands, posts } = panelService(({ path }) => {
+      if (path !== '/v1/decisions/resolve') return { ok: true, data: page([item]) }
+      item = { ...item, current_revision: 5, allowed_resolutions: ['abandon'] }
+      return { ok: true, data: { decisionId: item.decision_id, revision: 5 } }
+    })
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    const button = (label: string) => view.findAll('button').find(candidate => candidate.textContent === label) as HTMLButtonElement | undefined
+    const checkbox = view.findAll('input[type=checkbox]').find(input => input.parentElement?.textContent?.includes('我亲眼看到'))
+    expect(button('确认已启动')).toBeUndefined()
+    expect(button('继续等待')).toBeUndefined()
+    expect(button('继续跟踪')).toBeDefined()
+    expect(view.text()).toContain('再观察这次执行 120 秒')
+    expect(button('签认已启动')?.disabled).toBe(true)
+    await view.click(checkbox!)
+    expect(button('签认已启动')?.disabled).toBe(false)
+    await view.click(button('签认已启动')!)
+    await view.flush()
+    expect(posts).toEqual([{ path: '/v1/decisions/resolve', body: expect.objectContaining({ decisionId: 'd-start', revision: 4,
+      resolution: 'confirm_started_attested', payload: { attestation_id: expect.stringMatching(/^att_/) } }) }])
+    expect(button('签认已启动')).toBeUndefined()
+    expect(button('继续跟踪')).toBeUndefined()
+    view.unmount()
+  })
+
+  it('仅在审批卡允许时显示驳回放弃和重新观察', async () => {
+    const restored = decisionView({ decision_id: 'restore', kind: 'abandon_ack', allowed_resolutions: ['approved', 'rejected'] })
+    const terminal = decisionView({ decision_id: 'terminal', kind: 'abandon_ack', allowed_resolutions: ['approved'] })
+    const { api, commands, posts } = panelService(({ path }) => path === '/v1/decisions/resolve'
+      ? { ok: true, data: { decisionId: restored.decision_id, revision: 2 } }
+      : { ok: true, data: page([restored, terminal]) })
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    const buttons = view.findAll('button').filter(button => button.textContent === '驳回放弃，恢复跟踪')
+    expect(buttons).toHaveLength(1)
+    await view.click(buttons[0]!)
+    expect(posts[0]?.body).toMatchObject({ decisionId: restored.decision_id, resolution: 'rejected' })
+    view.unmount()
+  })
+
+  it('按钮在提交前说明会重试还是结束步骤', async () => {
+    const retry = decisionView({ decision_id: 'retry', kind: 'startup_unknown', allowed_resolutions: ['confirm_not_started'],
+      available_recovery_outcomes: { confirm_not_started: 'retry' } })
+    const failed = decisionView({ decision_id: 'failed', kind: 'verify_human', allowed_resolutions: ['confirm_not_applied'],
+      available_effect_evidence: { not_applied: 'proof' }, available_recovery_outcomes: { confirm_not_applied: 'failed' } })
+    const { api, commands } = panelService(() => ({ ok: true, data: page([retry, failed]) }))
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    const labels = view.findAll('button').map(button => button.textContent)
+    expect(labels).toContain('确认未启动并发起新尝试')
+    expect(labels).toContain('确认外部操作未发生并将此步骤记为失败')
+    view.unmount()
+  })
+
   it('只暴露接手与处理两条命令', () => {
     const { commands } = panelService(() => ({ ok: true, data: page([]) }))
     expect(Object.keys(commands).sort()).toEqual(['acknowledgeDecision', 'resolveDecision'])

@@ -1,5 +1,5 @@
 // R5-D：AgentLifecycle 的生产故障注入（B01/B08/B09/B10）
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -8,10 +8,64 @@ import { join } from 'node:path'
 import { AgentLifecycle } from '../../src/executor/agent-lifecycle.ts'
 import { BridgeClient, BridgeEventBuffer, type BridgeEvent, type BridgeTransport } from '../../src/executor/bridge.ts'
 import { BridgeLedger } from '../../src/executor/bridge-ledger.ts'
+import { superviseOrdinaryAttempt } from '../../src/executor/ordinary-supervision.ts'
+import { ScriptedClock } from '../../src/core/clock.ts'
+import { withTx } from '../../src/infra/sqlite/driver.ts'
+import { acquireLease } from '../../src/service/commands/lease.ts'
 import { ToolRegistry, ReadOnlyToolRunner, type HostRunner } from '../../src/executor/tools.ts'
 import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
+
+it.each([true, false])('bounds signed final receipt intake while the resident native agent is idle (in grace: %s)', (inGrace) => {
+  const { db, dir } = freshLedger()
+  try {
+    seed(db)
+    const lease = withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status='queued',attempt=1 WHERE node_run_id='nr1'")
+      const result = acquireLease(tx, TEST_SECRET, { nodeRunId: 'nr1', ownerEpoch: db.epoch, leaseTtlMs: 1000, now: NOW })
+      tx.run("UPDATE node_runs SET status='started',executor_agent_id='agent_1',executor_session_id='sess_1' WHERE node_run_id='nr1'")
+      return result
+    })
+    vi.useFakeTimers({ toFake: ['performance'] })
+    const binding = { nodeRunId: 'nr1', attempt: 1, actionGeneration: lease.actionGeneration,
+      executorAgentId: 'agent_1', executorSessionId: 'sess_1' }
+    const bridge = new BridgeClient({
+      async request() { throw new Error('Receipt observation must not need an executor RPC') },
+      async *listen() {},
+      fenceAttemptTools: () => true,
+      observeAttempt: () => undefined,
+    })
+    const supervision = superviseOrdinaryAttempt({ db, secret: TEST_SECRET, bridge, binding,
+      clock: new ScriptedClock('fixture-boot', { wallClockMs: Date.parse(NOW) }),
+      leaseId: lease.leaseId, ownerEpoch: db.epoch, nowAt: () => NOW, timeoutMs: 100, unknownWatchdogMs: 120_000 })
+    bridge.installAttemptMonitor({ binding, budget: supervision.budget, actionTimeoutMs: 100 },
+      supervision.mayUseTools, new AbortController().signal)
+    expect(supervision.mayUseTools()).toBe(true)
+    vi.advanceTimersByTime(101)
+    expect(supervision.mayUseTools()).toBe(false)
+    expect(supervision.poll()).toBe(true)
+    const turn = ev(1, 'turn', { kind: 'report', report: { status: 'done', output: {} } })
+    expect(supervision.poll(turn)).toBe(false)
+    const ledger = new BridgeLedger(db, TEST_SECRET, binding)
+    ledger.ingest(turn)
+    expect(supervision.poll({ ...turn, attempt: 2 })).toBe(false)
+    if (!inGrace) {
+      vi.advanceTimersByTime(250)
+      expect(supervision.poll(turn)).toBe(false)
+      return
+    }
+    expect(supervision.poll(turn)).toBe(true)
+    expect(supervision.lateStatus()).toEqual({ status: 'startup_unknown', rearmGeneration: 1 })
+    expect(supervision.mayUseTools()).toBe(false)
+    expect(bridge.liveAttempt({ ...binding, rearmGeneration: 1 })).toBeUndefined()
+    expect(db.raw.prepare("SELECT lease_id FROM node_runs WHERE node_run_id='nr1'").get()).toEqual({ lease_id: null })
+  } finally {
+    vi.useRealTimers()
+    db.raw.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<void> {
   const began = Date.now()

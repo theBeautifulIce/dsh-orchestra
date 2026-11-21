@@ -69,7 +69,7 @@ export type NodeRunView = {
   execution_count: number
   projection_missing: string[]
   attestation_id: string | null
-  action_start_source: 'human_attested' | null
+  action_start_source: 'human_attested' | 'human_confirmed' | null
   stop_evidence: string | null
   hang_reason: string | null
   recovery_uncertain: string | null
@@ -148,7 +148,8 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     execution_count: executionIds.length,
     projection_missing: declared === null && row.side_effect_policy !== 'pure' ? ['declared_effect'] : [],
     attestation_id: typeof row.attestation_id === 'string' ? row.attestation_id : null,
-    action_start_source: typeof row.attestation_id === 'string' ? 'human_attested' : null,
+    action_start_source: row.action_start_source === 'human_confirmed' ? 'human_confirmed'
+      : typeof row.attestation_id === 'string' ? 'human_attested' : null,
     stop_evidence: typeof row.stop_evidence === 'string' ? row.stop_evidence : null,
     hang_reason: typeof row.hang_reason === 'string' ? row.hang_reason : null,
     recovery_uncertain: typeof row.recovery_uncertain === 'string' ? row.recovery_uncertain : null,

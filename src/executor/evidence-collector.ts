@@ -67,6 +67,7 @@ export type EvidenceCollectorDeps = {
   lease?: { lease_id: string; action_generation: number }
   nowAt: () => string
   clock?: ClockProvider
+  signal?: AbortSignal
   standalone?: { signal?: AbortSignal }
 }
 
@@ -116,7 +117,8 @@ export class EvidenceCollector {
   async collect(raw: unknown): Promise<CollectedToolResult> {
     const call = parseToolCall(raw)
     this.assertAuthorized(call)
-    this.deps.standalone?.signal?.throwIfAborted()
+    const signal = this.deps.signal ?? this.deps.standalone?.signal
+    signal?.throwIfAborted()
     const requestHash = sha256Hex(canonicalJson({
       tool: call.tool, args: call.args, cwd: call.cwd, timeoutMs: call.timeoutMs,
     }))
@@ -215,10 +217,14 @@ export class EvidenceCollector {
       appendNodeRunEvent(tx, this.deps.secret, this.deps.nodeRunId, 'tool_started', {
         tool: call.tool,
         attempt: this.deps.attempt,
+        action_generation: this.lease?.action_generation ?? null,
         tool_seq: seq,
         execution_id: executionId,
         call_id: call.callId,
         started_at: startedAt,
+        timeout_ms: call.timeoutMs,
+        started_boot_id: startSample?.bootId ?? null,
+        started_monotonic_ns: startSample?.monotonicNs ?? null,
       })
     })
     const out = await this.deps.runner.runTool({
@@ -227,7 +233,7 @@ export class EvidenceCollector {
       cwd: call.cwd,
       timeoutMs: call.timeoutMs,
       workspaceRoot: this.deps.runner.root,
-      signal: this.deps.standalone?.signal,
+      signal: this.deps.signal ?? this.deps.standalone?.signal,
     })
     const endSample = this.deps.clock?.sample()
     const finishedAt = endSample ? new Date(endSample.wallClockMs).toISOString() : this.deps.nowAt()

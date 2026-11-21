@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
-import { BridgeClient, type BridgeEvent, type BridgeTransport, type SendParams, type SpawnParams } from './bridge.ts'
+import { BridgeClient, type BridgeEvent, type BridgeTransport, type ResidentAttemptBinding, type SendParams, type SpawnParams } from './bridge.ts'
 import { MODEL_COMPLEXITIES, MODEL_LEVELS, MODEL_REF_RE, validModelEffort,
   type ModelCatalogProfile, type ModelCatalogSnapshot, type ModelProfile, type ModelRouting } from './model-routing.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
@@ -37,6 +37,10 @@ type Child = {
   retiring?: true
   activity?: Promise<void>
   error?: Error
+  toolFence?: { mayUseTools: () => boolean; signal: AbortSignal }
+  hasToolCall?: true
+  lastToolCallId?: string
+  fencedToolDenied?: true
 }
 
 const MAX_EVENT_COUNT = 512
@@ -444,6 +448,31 @@ export function createDshExecutor(options: {
     return child
   }
 
+  function residentAttempt(binding: ResidentAttemptBinding): Child | undefined {
+    const child = children.get(binding.executorAgentId)
+    if (!closing && child && !child.retiring && child.nodeRunId === binding.nodeRunId && child.attempt === binding.attempt
+      && child.actionGeneration === binding.actionGeneration && child.handle.agent.session.id === binding.executorSessionId) return child
+  }
+
+  function toolSignal(child: Child | undefined, agent: DshAgent, signal: AbortSignal): AbortSignal {
+    const fence = child?.toolFence
+    if (closing || !child || child.retiring || !child.sent || child.handle.agent !== agent || agent.status !== 'running') {
+      throw new OrchError('FORBIDDEN', '当前执行尝试已停止接受工具调用')
+    }
+    if (fence && (fence.signal.aborted || !fence.mayUseTools())) {
+      child.fencedToolDenied = true
+      throw new OrchError('FORBIDDEN', '当前执行尝试已停止接受工具调用')
+    }
+    return fence ? AbortSignal.any([signal, fence.signal]) : signal
+  }
+
+  function enterTool(child: Child | undefined, agent: DshAgent, signal: AbortSignal, callId?: string): AbortSignal {
+    const active = toolSignal(child, agent, signal)
+    child!.hasToolCall = true
+    child!.lastToolCallId = callId
+    return active
+  }
+
   async function disposeChild(child: Child) {
     try { await child.assist?.close() }
     finally {
@@ -465,7 +494,11 @@ export function createDshExecutor(options: {
     signal.throwIfAborted()
     if (child.tools.has(callId)) throw new OrchError('STALE_GENERATION', 'DSH 工具调用编号重复')
     return new Promise<ToolResult>((resolve, reject) => {
-      function abort() { child.tools.delete(callId); reject(signal.reason) }
+      function abort() {
+        if (child.toolFence?.signal.aborted) child.fencedToolDenied = true
+        child.tools.delete(callId)
+        reject(signal.reason)
+      }
       signal.addEventListener('abort', abort, { once: true })
       child.tools.set(callId, { resolve: (result) => {
         signal.removeEventListener('abort', abort)
@@ -529,6 +562,7 @@ export function createDshExecutor(options: {
               render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }] },
             async execute(input, execution) {
               execution.signal.throwIfAborted()
+              const signal = enterTool(child, agent, execution.signal)
               if (execution.agent !== agent || agent.status !== 'running') throw new OrchError('FORBIDDEN', '便条仅供当前执行节点使用')
               if (input && typeof input === 'object' && 'action' in input && input.action === 'capture_brain') {
                 if (!privateNotes || !privateCaptureInput.safeParse(input).success) {
@@ -536,7 +570,8 @@ export function createDshExecutor(options: {
                 }
                 const dispatched = child?.sent
                 const assertCurrent = () => {
-                  execution.signal.throwIfAborted()
+                  signal.throwIfAborted()
+                  toolSignal(child, agent, signal)
                   if (closing || !dispatched || child?.sent !== dispatched || options.parentForNode(params.nodeRunId) !== parent
                     || options.context.agents.get(parent.session.id) !== parent || options.context.agents.get(agent.session.id) !== agent
                     || agent.status !== 'running') {
@@ -544,9 +579,13 @@ export function createDshExecutor(options: {
                   }
                 }
                 if (!dispatched) throw new OrchError('FORBIDDEN', '主脑便条仅供当前已派发的节点会话使用')
-                const captured = await privateNotes.capture(binding, execution.callId, assertCurrent, () =>
-                  privateNotes.model.capture(route, privateNoteCaptureMaterial(agent, dispatched.instruction), execution.signal, assertCurrent))
-                return { text: JSON.stringify(captured) }
+                try {
+                  const captured = await privateNotes.capture(binding, execution.callId, assertCurrent, () =>
+                    privateNotes.model.capture(route, privateNoteCaptureMaterial(agent, dispatched.instruction), signal, assertCurrent))
+                  return { text: JSON.stringify(captured) }
+                } finally {
+                  if (child?.toolFence?.signal.aborted) child.fencedToolDenied = true
+                }
               }
               return { text: JSON.stringify(runNote(binding, input, execution.callId, new Date().toISOString())) }
             },
@@ -564,6 +603,7 @@ export function createDshExecutor(options: {
           },
           async execute(input, execution) {
             execution.signal.throwIfAborted()
+            const signal = enterTool(child, agent, execution.signal)
             if (closing || !child || !child.sent || execution.agent !== agent || agent.status !== 'running') {
               throw new OrchError('FORBIDDEN', '文本助手只接受当前已派发的节点会话')
             }
@@ -581,7 +621,7 @@ export function createDshExecutor(options: {
             emit(child, 'tool.start', { ...trace, summary: `分派 ${tasks.length} 项文本复核` })
             let completed = 0
             try {
-              const outcomes = await assist.run(tasks, execution.signal, (task, signal) => reviewText(agent, route, task, signal))
+              const outcomes = await assist.run(tasks, signal, (task, signal) => reviewText(agent, route, task, signal))
               const results = outcomes.map((outcome, index) => {
                 const { name } = tasks[index]!
                 if (outcome.status === 'fulfilled') {
@@ -593,9 +633,10 @@ export function createDshExecutor(options: {
                   || (error instanceof OrchError && error.code === 'OPERATION_TIMEOUT'))
                 return { name, status: timedOut ? 'timeout' : 'failed' }
               })
-              execution.signal.throwIfAborted()
+              signal.throwIfAborted()
               return { text: JSON.stringify({ results }) }
             } finally {
+              if (child.toolFence?.signal.aborted) child.fencedToolDenied = true
               emit(child, 'tool.result', { ...trace, summary: `完成 ${completed}/${tasks.length} 项文本复核` })
             }
           },
@@ -620,6 +661,7 @@ export function createDshExecutor(options: {
               render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }] },
             async execute(input, execution) {
               execution.signal.throwIfAborted()
+              enterTool(child, agent, execution.signal)
               if (execution.agent !== agent || agent.status !== 'running') throw new OrchError('FORBIDDEN', '成果工具只接受当前智能体会话')
               const request = input as { action: string; file_name?: string; operation_id?: string }
               if (request.action === 'publish' && request.operation_id === undefined && request.file_name) {
@@ -650,6 +692,7 @@ export function createDshExecutor(options: {
               render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }] },
             async execute(input, execution) {
               execution.signal.throwIfAborted()
+              enterTool(child, agent, execution.signal)
               if (execution.agent !== agent || agent.status !== 'running') {
                 throw new OrchError('FORBIDDEN', '核验工具仅向当前执行节点开放')
               }
@@ -671,10 +714,10 @@ export function createDshExecutor(options: {
           },
           async execute(input, execution) {
             const { tool, args } = input as { tool: string; args: string[] }
-            if (!child || !allowed.includes(tool) || !Array.isArray(args) || !args.every((arg) => typeof arg === 'string')) {
+            if (!child || execution.agent !== agent || !allowed.includes(tool) || !Array.isArray(args) || !args.every((arg) => typeof arg === 'string')) {
               throw new OrchError('FORBIDDEN', 'DSH 子会话工具调用不在允许范围')
             }
-            return forwardTool(child, execution.callId, tool, args, cwd, execution.signal)
+            return forwardTool(child, execution.callId, tool, args, cwd, enterTool(child, agent, execution.signal, execution.callId))
           },
         })
     })
@@ -727,6 +770,9 @@ export function createDshExecutor(options: {
           ...(request.reasoningEffort === undefined ? {} : { reasoning_effort: request.reasoningEffort }) })
       }
       const report = readJsonOutput(agent)
+      if (child.fencedToolDenied) {
+        throw new OrchError('VERDICT_POLICY_UNMET', '执行授权结束后的工具请求未执行，不能接受完成回报')
+      }
       if (typeof report !== 'object' || !report || Array.isArray(report)) {
         throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'DSH 子智能体必须返回 JSON 对象')
       }
@@ -752,6 +798,29 @@ export function createDshExecutor(options: {
 
   type Rpc = { executorAgentId: string; attempt: number; fromSeq: number; pageSize: number; timeoutMs: number; callId: string; result: ToolResult }
   const transport: BridgeTransport = {
+    fenceAttemptTools(binding, mayUseTools, signal) {
+      const child = residentAttempt(binding)
+      if (!child || child.sent || child.toolFence) return false
+      child.toolFence = { mayUseTools, signal }
+      return true
+    },
+    observeAttempt(binding) {
+      const child = residentAttempt(binding)
+      if (!child || child.error || child.sent?.id !== binding.nodeRunId + ':' + String(binding.attempt)
+        || child.handle.agent.status !== 'running') return
+      const agent = child.handle.agent
+      if (options.context.agents.get(agent.session.id) !== agent) return
+      const events = agent.session.snapshotEvents()
+      const observedRunning = events.some((event) => event.type === 'request/header')
+      if (observedRunning) {
+        try { observedModel(events, child.route) } catch { return undefined }
+      }
+      return {
+        observedRunning,
+        hasToolCall: child.hasToolCall === true,
+        ...(child.lastToolCallId === undefined ? {} : { lastToolCallId: child.lastToolCallId }),
+      }
+    },
     async retireUnsentAttempt(binding) {
       const child = children.get(binding.executorAgentId)
       if (closing || !child || child.nodeRunId !== binding.nodeRunId || child.attempt !== binding.attempt

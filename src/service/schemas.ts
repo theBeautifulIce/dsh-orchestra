@@ -160,6 +160,7 @@ export const workflowLoadSchema = z.looseObject({
     // 节点类型不在这里收成枚举：未知类型要落到目录层判 SCHEMA_VERSION_UNSUPPORTED（422）
     type: z.string().min(1).max(LIMITS.statusMaxLength).optional(),
     side_effect_policy: z.enum(['pure', 'compensable', 'irreversible']).optional(),
+    recovery_retry_idempotent: z.boolean().optional(),
     tools: toolPolicySchema.optional(),
     verifier: verifierSchema.optional(),
     pass_conditions: z.array(passConditionSchema).max(LIMITS.passConditionsMaxCount).optional(),
@@ -221,7 +222,7 @@ export const taskArchiveSchema = z.strictObject({
 
 export const RESOLUTIONS = [
   'approved', 'rejected', 'expired', 'confirm_applied', 'confirm_not_applied',
-  'confirm_started', 'confirm_not_started', 'continue_tracking', 'continue_wait',
+  'confirm_started', 'confirm_started_attested', 'confirm_not_started', 'continue_tracking', 'continue_wait',
   'abandon', 'uphold_report', 'uphold_decision',
 ] as const
 

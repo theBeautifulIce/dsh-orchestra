@@ -84,6 +84,7 @@ export type WorkflowNodeDef = {
   node_id: string
   type: NodeType
   side_effect_policy?: 'pure' | 'compensable' | 'irreversible'
+  recovery_retry_idempotent?: boolean
   tools?: { allow?: string[]; deny?: string[] }
   verifier?: { toolPolicy?: { allow?: string[]; deny?: string[] } }
   // 节点自带的通过条件；和模板条件取 AND（规格 6.1 行 837）
@@ -246,6 +247,12 @@ function assertControlConfigShape(node: WorkflowNodeDef): void {
   }
   if (node.side_effect_policy !== undefined && (node.type !== 'agent' || !['pure','compensable','irreversible'].includes(node.side_effect_policy))) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '智能体步骤的副作用声明无效', { node_id: node.node_id })
+  }
+  if (node.recovery_retry_idempotent !== undefined && (node.type !== 'agent' || typeof node.recovery_retry_idempotent !== 'boolean')) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '只有智能体步骤能声明恢复重试的幂等性，且必须使用布尔值', { node_id: node.node_id })
+  }
+  if (node.recovery_retry_idempotent === true && node.side_effect_policy === 'irreversible') {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '不可逆步骤不能启用恢复重试', { node_id: node.node_id })
   }
   const raw = node as WorkflowNodeDef & { control?: unknown }
   if (raw.control !== undefined) {

@@ -9,7 +9,7 @@
 
 import { OrchError } from '../../core/errors.ts'
 import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
-import { appendEvent, appendNodeRunEvent, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
+import { appendEvent, appendNodeRunEvent, assertChainIntact, chainBreakOf, readChain } from '../../infra/db/ledger.ts'
 import { assertOperationId, runIdempotentCommand } from './idempotency.ts'
 import { type Db, type Tx } from '../../infra/sqlite/driver.ts'
 import { withReadTx } from '../queries/read-tx.ts'
@@ -32,6 +32,7 @@ const BASIS_STATUSES: Record<ResolutionBasis, readonly string[]> = {
 
 /** stop_evidence 的 N1 前缀（附录 §2.3 V3）；N2 是 tex_ 开头的执行 ID */
 const N1_PREFIXES = ['no_tool_started:', 'stopped_confirmed:'] as const
+export const ORDINARY_RETIRED_UNSENT_EVENT = 'recovery.host_retired_unsent_attempt'
 
 export type ResolutionBasis = 'verified_none' | 'evidence' | 'decision'
 
@@ -378,6 +379,7 @@ function writeResolution(tx: Tx, secret: string, input: {
   decisionId: string | null
   stopEvidence: string | null
   eventDecisionId?: string | null
+  retiredUnsent?: true
   now: string
   expectedRevision: number
 }): EffectResolutionResult {
@@ -390,7 +392,7 @@ function writeResolution(tx: Tx, secret: string, input: {
         node_run_id: node.node_run_id,
       })
     }
-    const allowed = BASIS_STATUSES.verified_none
+    const allowed = input.retiredUnsent ? ['superseded', 'failed'] : BASIS_STATUSES.verified_none
     const res = tx.run(
       'UPDATE node_runs SET side_effect_verified_none = 1, stop_evidence = ?, revision = revision + 1, updated_at = ?'
       + ' WHERE node_run_id = ? AND revision = ? AND status IN (' + allowed.map(() => '?').join(', ') + ')',
@@ -428,6 +430,27 @@ function writeResolution(tx: Tx, secret: string, input: {
     stop_evidence: input.stopEvidence,
     replayed: false,
   }
+}
+
+/** Only the startup recovery command may settle a retired unsent attempt from the signed host receipt. */
+export function settleRetiredUnsentAttempt(tx: Tx, secret: string, input: {
+  nodeRunId: string; attempt: number; actionGeneration: number; rearmGeneration: number
+  receiptSeq: number; decisionId: string; now: string
+}): void {
+  const node = loadNode(tx, input.nodeRunId)
+  const receipt = tx.get(`SELECT 1 FROM node_run_events e JOIN node_runs n USING(node_run_id)
+    WHERE e.node_run_id=? AND e.seq=? AND e.type=? AND n.attempt=? AND n.action_generation=? AND n.rearm_generation=?
+    AND json_extract(e.payload,'$.attempt')=n.attempt AND json_extract(e.payload,'$.action_generation')=n.action_generation
+    AND json_extract(e.payload,'$.rearm_generation')=n.rearm_generation`,
+  [input.nodeRunId, input.receiptSeq, ORDINARY_RETIRED_UNSENT_EVENT, input.attempt, input.actionGeneration, input.rearmGeneration])
+  if (!node || !receipt || !['superseded', 'failed'].includes(node.status) || loadResolution(tx, node.node_run_id)) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '宿主停止凭据已失效或本次执行已结算')
+  }
+  assertChainIntact(tx, secret, node.node_run_id)
+  const stopEvidence = `no_tool_started:${node.node_run_id}:${node.attempt}:${input.receiptSeq}`
+  assertLedgerStopEvidence(tx, secret, node, stopEvidence)
+  writeResolution(tx, secret, { node, basis: 'verified_none', evidenceId: null, decisionId: null, eventDecisionId: input.decisionId,
+    stopEvidence, now: input.now, expectedRevision: node.revision, retiredUnsent: true })
 }
 
 /**

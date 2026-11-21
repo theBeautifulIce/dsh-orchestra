@@ -380,6 +380,13 @@ const configIssues = (doc: WorkflowDoc, ctx: PublishContext): ValidationIssue[] 
   const issues: ValidationIssue[] = []
   for (const node of doc.nodes) {
     const cfg = (node.config ?? {}) as Record<string, unknown>
+    if (cfg.recovery_retry_idempotent !== undefined && (node.type !== 'agent' || typeof cfg.recovery_retry_idempotent !== 'boolean')) {
+      issues.push({ path: pointer(nodePath(doc, node.node_id), 'config', 'recovery_retry_idempotent'),
+        code: 'WORKFLOW_NODE_CONFIG_INVALID', message: '只有智能体步骤能声明恢复重试的幂等性，且必须使用布尔值' })
+    } else if (cfg.recovery_retry_idempotent === true && cfg.side_effect_policy === 'irreversible') {
+      issues.push({ path: pointer(nodePath(doc, node.node_id), 'config', 'recovery_retry_idempotent'),
+        code: 'WORKFLOW_NODE_CONFIG_INVALID', message: '不可逆步骤不能启用恢复重试' })
+    }
     if (node.type === 'parallel') {
       try {
         const members = parallelMemberIds(doc.edges, node.node_id)
