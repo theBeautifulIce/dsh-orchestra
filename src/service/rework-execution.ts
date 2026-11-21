@@ -5,6 +5,8 @@ import { snapshotArtifactInputs } from './rework-runtime.ts'
 import type { WorkflowCatalog } from './workflows.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { extraStepInstruction } from './rework-extra-steps.ts'
+import { intactBranchChain, selectedBranchTarget, verifiedBranchSkip } from './branch-routing.ts'
+import { parallelMemberMayStart, parallelToleratesMember } from './workflow-parallel.ts'
 
 function localInstruction(tx: Tx, nodeRunId: string, nodeId: string) {
   // First bind the approved plan to an actual successor or a released, previously queued consumer.
@@ -38,18 +40,26 @@ function executionBrief(tx: Tx, nodeRunId: string, nodeId: string, runId: string
     input: original.input_json === null ? undefined : JSON.parse(original.input_json) as unknown, input_hash: original.input_hash }
 }
 
-export function executionFeedbackContext(db: Db, catalog: WorkflowCatalog, nodeRunId: string, now: string, assignedInput?: unknown) {
+export function executionFeedbackContext(db: Db, catalog: WorkflowCatalog, nodeRunId: string, now: string, assignedInput?: unknown, secret?: string) {
   return withTx(db, tx => {
-    const node = tx.get<{ node_id: string; run_id: string; attempt: number; workflow_id: string | null; workflow_version: string }>(
-      'SELECT n.node_id,n.run_id,n.attempt,r.workflow_id,r.workflow_version FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
+    const node = tx.get<{ node_id: string; run_id: string; attempt: number; workflow_id: string | null; workflow_version: string; parent_node_run_id: string | null }>(
+      'SELECT n.node_id,n.run_id,n.attempt,n.parent_node_run_id,r.workflow_id,r.workflow_version FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
       [nodeRunId])
     if (!node) throw new OrchError('NOT_FOUND', '未找到当前执行步骤')
     const def = catalog.get(node.workflow_id ?? 'default', node.workflow_version)
-    const upstream = runtimeEdges(tx, node.run_id, def.edges ?? []).filter(edge => edge.to === node.node_id).map(edge => {
-      const source = tx.get<{ node_run_id: string; revision: number }>(`SELECT node_run_id,revision FROM node_runs
+    const upstream = runtimeEdges(tx, node.run_id, def.edges ?? []).filter(edge => edge.to === node.node_id).flatMap(edge => {
+      const source = tx.get<{ node_run_id: string; node_type: string; status: string; parent_node_run_id: string | null; revision: number }>(`SELECT node_run_id,node_type,status,parent_node_run_id,revision FROM node_runs
         WHERE run_id=? AND node_id=? AND replacement_node_run_id IS NULL ORDER BY attempt DESC LIMIT 1`, [node.run_id, edge.from])
       if (!source) throw new OrchError('STALE_GENERATION', '上游执行记录缺失')
-      return source
+      if (secret) {
+        if (source.node_type === 'parallel' && source.status === 'waiting' && node.parent_node_run_id === source.node_run_id
+          && parallelMemberMayStart(tx, secret, source.node_run_id, nodeRunId)) return []
+        if (source.status === 'superseded' && verifiedBranchSkip(tx, secret, node.run_id, source.node_run_id)) return []
+        if (source.node_type === 'branch' && source.status === 'done' && intactBranchChain(tx, secret, source.node_run_id)
+          && selectedBranchTarget(tx, source.node_run_id) !== node.node_id) return []
+        if (source.parent_node_run_id && parallelToleratesMember(tx, secret, source.parent_node_run_id, source.node_run_id)) return []
+      }
+      return [source]
     })
     const revisions = new Map(upstream.map(n => [n.node_run_id, n.revision]))
     const inputs = snapshotArtifactInputs(tx, nodeRunId, upstream.map(n => n.node_run_id), now)

@@ -27,6 +27,7 @@ import { executionFeedbackContext } from '../service/rework-execution.ts'
 import { noteAgentStopped, type createModelEscalationHost } from '../service/model-escalation.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
+import { isVerifiedParallelMembership, requestedGroupStop } from '../service/workflow-parallel.ts'
 
 export type RunNodeParams = {
   /** Internal dispatcher entry. The standalone runner rechecks the persisted node kind and definition. */
@@ -264,6 +265,7 @@ async function runNodeActions(
         withTx(deps.db, (tx) => {
           const row = loadNodeRun(tx, p.nodeRunId)
           if (row.attempt !== p.attempt || row.action_generation !== generation) return
+          if (!spawnTask && finishParallelAgentStop(tx, deps, row, p, generation, nowAt(), true)) return
           if (!spawnTask && deps.cancelSignal?.aborted && row.status === 'timing_out'
             && row.fence_state === 'armed' && row.side_effect_policy === 'pure') {
             // The bridge was never called. No stop acknowledgement is needed or fabricated.
@@ -341,7 +343,7 @@ async function runNodeActions(
       if (deps.modelEscalation) tx.run('UPDATE node_runs SET started_at=? WHERE node_run_id=?', [startedAt, p.nodeRunId])
     })
     const feedback = ['S5','S6'].includes(deps.runtime.phase)
-      ? executionFeedbackContext(deps.db, deps.runtime.catalog, p.nodeRunId, nowAt(), p.input) : null
+      ? executionFeedbackContext(deps.db, deps.runtime.catalog, p.nodeRunId, nowAt(), p.input, deps.secret) : null
     const sharedContext = await deps.sharedContext?.(p.nodeRunId, p.nodeId, feedback?.inputs ?? [])
     deps.cancelSignal?.throwIfAborted()
     lifecycle = new AgentLifecycle({
@@ -481,6 +483,7 @@ async function runNodeActions(
         withTx(deps.db, (tx) => {
           const row = loadNodeRun(tx, p.nodeRunId)
           if (row.attempt !== p.attempt || row.action_generation !== generation) return
+          if (finishParallelAgentStop(tx, deps, row, p, generation, nowAt(), false)) return
           // Only the confirmed stop of this pure attempt can clear its interruption fence.
           if (deps.cancelSignal?.aborted && row.status === 'timing_out' && row.fence_state === 'armed' && row.side_effect_policy === 'pure') {
             const stoppedAt = nowAt()
@@ -501,6 +504,33 @@ async function runNodeActions(
       await bestEffortReleaseAgent(deps, agent.agentId, p.nodeRunId, p.attempt)
     }
   }
+}
+
+function finishParallelAgentStop(tx: Tx, deps: RunNodeDeps, row: NodeRunRow, p: RunNodeParams, generation: number, now: string, neverLaunched: boolean): boolean {
+  const groupId = row.parent_node_run_id
+  if (!groupId || deps.cancelSignal?.reason !== 'parallel-group:' + groupId || row.side_effect_policy === 'irreversible'
+      || !['dispatched','started','verifying'].includes(row.status)
+      || !isVerifiedParallelMembership(tx, deps.secret, groupId, row.node_run_id) || !requestedGroupStop(tx, row.node_run_id, groupId)) return false
+  const from = row.status as 'dispatched' | 'started' | 'verifying'
+  if (row.side_effect_policy !== 'pure' && !neverLaunched) {
+    if (from === 'verifying') return false
+    applyTransition(tx, deps.secret, { nodeRunId: row.node_run_id, from: [from], to: 'indeterminate_side_effect', ruleId: 'M-30',
+      attempt: p.attempt, actionGeneration: generation, now,
+      context: { hasToolCall: true, cancelResult: 'already_stopped', hangReason: null, sideEffectVerifiedNone: false },
+    })
+    appendNodeRunEvent(tx, deps.secret, row.node_run_id, 'parallel.member_stop_unverified', { group_id: groupId, reason: 'host_stopped' })
+    releaseLease(tx, { nodeRunId: row.node_run_id, now })
+    return true
+  }
+  applyTransition(tx, deps.secret, { nodeRunId: row.node_run_id, from: [from], to: 'timing_out', ruleId: 'M-23',
+    attempt: p.attempt, actionGeneration: generation, now,
+    context: { hasToolCall: false, cancelResult: 'interrupted', hangReason: null, sideEffectVerifiedNone: true },
+  })
+  applyTransition(tx, deps.secret, { nodeRunId: row.node_run_id, from: ['timing_out'], to: 'timeout', ruleId: 'M-24',
+    attempt: p.attempt, actionGeneration: generation, now, patch: { side_effect_policy: 'pure', side_effect_verified_none: 1 } })
+  appendNodeRunEvent(tx, deps.secret, row.node_run_id, 'parallel.member_cancelled', { group_id: groupId, reason: 'host_stopped', from, to: 'timeout' })
+  releaseLease(tx, { nodeRunId: row.node_run_id, now })
+  return true
 }
 
 function chooseModelForAttempt(deps: RunNodeDeps, p: RunNodeParams, generation: number, routing: ModelRouting, now: string): ModelAssignment {

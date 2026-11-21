@@ -16,6 +16,7 @@ import { branchAncestryIsIntact, dependencyReadiness, nodePredecessors, pinnedRu
 import { definitionHashOf } from '../workflows.ts'
 import { indexTopology } from '../pinned-topology.ts'
 import { recoverStandaloneToolResults } from '../../executor/run-tool-node.ts'
+import { refreshWorkflowParallelGroups, type GroupStop } from '../workflow-parallel.ts'
 
 export type RuntimeDeps = {
   db: Db
@@ -24,6 +25,7 @@ export type RuntimeDeps = {
   catalog: WorkflowCatalog
   // 判定用的时钟：生产用系统时钟，测试与注入脚本用可编排时钟（规格 3.4 行 171）
   clock: ClockProvider
+  cancelParallelAttempt?: (intent: GroupStop) => void
 }
 
 export type AcquireNodeRunResult = { lease_id: string; expires_at: string; action_generation: number }
@@ -150,10 +152,12 @@ function bridgeSignals(tx: Tx, now: string): { missing: string[]; restored: stri
 }
 
 export function sweepNow(deps: RuntimeDeps, now: string): SweepResult {
-  const signals = withTx(deps.db, (tx) => {
+  const { signals, stops } = withTx(deps.db, (tx) => {
     recoverStandaloneToolResults(tx, deps, now)
-    return bridgeSignals(tx, now)
+    const groups = tx.all<{ run_id: string }>("SELECT DISTINCT run_id FROM node_runs WHERE node_type='parallel' AND status='waiting'")
+    return { signals: bridgeSignals(tx, now), stops: groups.flatMap(group => refreshWorkflowParallelGroups(tx, deps.secret, group.run_id, now, deps.clock)) }
   })
+  for (const stop of stops) deps.cancelParallelAttempt?.(stop)
   return sweep(deps.db, deps.secret, {
     now,
     clock: deps.clock,

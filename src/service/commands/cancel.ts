@@ -71,7 +71,7 @@ export function applyCancel(tx: Tx, secret: string, params: CancelParams): Cance
   // 纯控制节点（wait/subworkflow）没有宿主执行实例：取消即收口，
   // 不能先立围栏再等一个永远不会回来的执行器。判据是 node_type，不是副作用等级：
   // 子流程父节点可能代表不可逆子图，但它本身仍然不是一个可取消的执行实例。
-  if (row.status === 'waiting' && (row.node_type === 'wait' || row.node_type === 'subworkflow')) {
+  if (row.status === 'waiting' && (row.node_type === 'wait' || row.node_type === 'subworkflow' || row.node_type === 'parallel')) {
     cancelWait(tx, params.nodeRunId, params.now)
     applyTransition(tx, secret, {
       nodeRunId: params.nodeRunId,

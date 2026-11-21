@@ -230,7 +230,7 @@ describe('工作流命令 HTTP 入口', () => {
     expect(body.data.task_id).toBe(reserved.task_id)
   })
 
-  it('发布层不通过：422 + 未注册节点清单', async () => {
+  it('发布层不通过：422 + 并行配置错误清单', async () => {
     const base = await boot()
     await post(base + '/v1/workflows', {
       operation_id: 'fbfd1831-cb33-738b-870a-08cb30c62889', workflow_id: 'wf2', name: '带分支',
@@ -249,6 +249,6 @@ describe('工作流命令 HTTP 入口', () => {
     expect(res.status).toBe(422)
     const body = await res.json() as any
     expect(body.error.code).toBe('WORKFLOW_VALIDATION_FAILED')
-    expect(body.error.details.errors.some((e: { code: string }) => e.code === 'NODE_NOT_SUPPORTED')).toBe(true)
+    expect(body.error.details.errors.some((e: { code: string; path: string }) => e.code === 'WORKFLOW_NODE_CONFIG_INVALID' && e.path === '/nodes/1/config')).toBe(true)
   })
 })

@@ -8,6 +8,7 @@ import { assertDefinitionAllowed, SUBWORKFLOW_MAX_DEPTH, type WorkflowDefinition
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 import { checkToolPolicy, resolveToolSet } from '../executor/session.ts'
 import { ToolRegistry } from '../executor/tools.ts'
+import { MEMORY_WORKFLOW_ID } from './commands/memory.ts'
 
 // 旧版本号没有工作流命名空间：读旧库、旧 run、旧 API 全部归到这个默认空间
 export const DEFAULT_WORKFLOW_ID = 'default'
@@ -136,6 +137,7 @@ export class WorkflowCatalog {
   }
 
   requireWorkflowCapability(workflowId: string | undefined): void {
+    if (workflowId === MEMORY_WORKFLOW_ID) throw new OrchError('FORBIDDEN', '记忆工作流只能由专用受控入口启动')
     if (workflowId === 'wf_release_v1' || workflowId === 'wf_gate_check_v1') requireCapability(this.phase, 'release')
   }
 

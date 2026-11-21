@@ -7,7 +7,8 @@ import { OrchError } from '../../src/core/errors.ts'
 import { MEMORY_TOOLS } from '../../src/core/memory-graph.ts'
 import { findMemoryNode, memoryGraphOrder } from '../../src/core/memory-graph-schema.ts'
 import { isKnownNodeType } from '../../src/core/workflow-def.ts'
-import { ToolRegistry } from '../../src/executor/tools.ts'
+import { MemoryBridgeRegistry, ToolRegistry } from '../../src/executor/tools.ts'
+import { WorkflowCatalog } from '../../src/service/workflows.ts'
 import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { MEMORY_WORKFLOW_ID, startMemoryRun } from '../../src/service/commands/memory.ts'
 import {
@@ -155,13 +156,20 @@ describe('记忆固定图的专用运行骨架', () => {
     for (const node_id of memoryGraphOrder()) {
       expect(isKnownNodeType(node_id)).toBe(false)
     }
-    for (const kind of ['trigger', 'tool', 'branch', 'approval', 'report']) {
+    for (const kind of ['trigger', 'report']) {
       expect(isKnownNodeType(kind)).toBe(false)
     }
+    for (const kind of ['tool', 'branch', 'approval']) expect(isKnownNodeType(kind)).toBe(true)
+    expect(errOf(() => new WorkflowCatalog('S6').requireWorkflowCapability(MEMORY_WORKFLOW_ID)).code).toBe('FORBIDDEN')
     const registry = new ToolRegistry()
-    expect(registry.list().length).toBe(0)
-    expect(registry.lookup(MEMORY_TOOLS.evaluate)).toBeUndefined()
-    expect(registry.lookup(MEMORY_TOOLS.applyGoverned)).toBeUndefined()
-    expect(registry.lookup(MEMORY_TOOLS.inspectBatch)).toBeUndefined()
+    registry.register({ name: 'fixture_read', capability: 'read_only', command: { bin: 'fixture:read', args: [] } })
+    expect(registry.require('fixture_read').capability).toBe('read_only')
+    for (const ref of Object.values(MEMORY_TOOLS)) {
+      expect(errOf(() => registry.register({ name: ref, capability: 'read_only', command: { bin: 'fixture:read', args: [] } })).code).toBe('FORBIDDEN')
+      expect(registry.lookup(ref)).toBeUndefined()
+    }
+    const memoryRegistry = new MemoryBridgeRegistry()
+    memoryRegistry.register({ name: 'memory.evaluate', capability: 'read_only', async invoke() { return {} } })
+    expect(memoryRegistry.require(MEMORY_TOOLS.evaluate).capability).toBe('read_only')
   })
 })

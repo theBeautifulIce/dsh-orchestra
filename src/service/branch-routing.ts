@@ -6,20 +6,30 @@ import { applyTransition } from './commands/nodes.ts'
 import type { ReadTx } from './queries/read-tx.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
+import { isVerifiedParallelMembership, parallelOpening, parallelToleratesMember } from './workflow-parallel.ts'
 
 export function ruleNodeInput(tx: Tx, secret: string, runId: string, nodeId: string, definition: WorkflowDefinition, initialInput: unknown): unknown {
   const predecessors = runtimeEdges(tx, runId, definition.edges ?? []).filter(edge => edge.to === nodeId)
   if (!predecessors.length) return initialInput
   const payloads: [string, unknown][] = []
   for (const predecessor of predecessors) {
-    const previous = tx.get<{ node_run_id: string; node_type: string; status: string }>(
-      'SELECT node_run_id,node_type,status FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1',
+    const previous = tx.get<{ node_run_id: string; node_type: string; status: string; parent_node_run_id: string | null }>(
+      'SELECT node_run_id,node_type,status,parent_node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1',
       [runId, predecessor.from],
     )
     if (!previous) throw new OrchError('VERDICT_UNSUPPORTED', '规则节点缺少上游节点')
     assertChainIntact(tx, secret, previous.node_run_id)
     if (previous.status === 'superseded' && branchSkipped(tx, previous.node_run_id)) continue
+    if (previous.parent_node_run_id && parallelToleratesMember(tx, secret, previous.parent_node_run_id, previous.node_run_id)) continue
     if (previous.node_type === 'branch' && selectedBranchTarget(tx, previous.node_run_id) !== nodeId) continue
+    if (previous.node_type === 'parallel' && previous.status === 'waiting') {
+      const member = tx.get<{ node_run_id: string }>('SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId,nodeId])
+      if (!member || !isVerifiedParallelMembership(tx, secret, previous.node_run_id, member.node_run_id)) {
+        throw new OrchError('VERDICT_UNSUPPORTED', '规则节点缺少已核验的并行成员输入')
+      }
+      payloads.push([predecessor.from, parallelOpening(tx, previous.node_run_id)?.input ?? {}])
+      continue
+    }
     if (previous.status !== 'done') throw new OrchError('VERDICT_UNSUPPORTED', '规则节点缺少上游完成事实')
     if (previous.node_type === 'wait') {
       const waited = tx.get<{ matched_payload_json: string | null }>(

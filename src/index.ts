@@ -42,7 +42,9 @@ import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
 import { runStandaloneToolNode } from './executor/run-tool-node.ts'
+import { MEMORY_WORKFLOW_ID } from './service/commands/memory.ts'
 import { resolveWorkflowBranch } from './service/branch-routing.ts'
+import { refreshWorkflowParallelGroups } from './service/workflow-parallel.ts'
 import { closeRun } from './service/commands/run-close.ts'
 import { settleCompensation, startCompensation } from './service/commands/compensation.ts'
 import { wakeOnEvent } from './service/commands/wait.ts'
@@ -238,7 +240,7 @@ export type Orchestra = {
 // run 终态集合：取消接口只在这些状态下回报 terminalStatus（S1 第 59 轮 P2-4）
 
 // 生产派发真正实现了的节点类型：parallel / decision 只有状态机与测试，允许发布会让 run 起不来（审计 P1-4）
-const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'tool', 'policy', 'branch', 'approval', 'subworkflow', 'wait'])
+const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'tool', 'policy', 'branch', 'approval', 'parallel', 'subworkflow', 'wait'])
 const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
 
 const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
@@ -260,7 +262,12 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
   catalog.hydrate()
   // 生产时钟：墙钟与单调钟同时取样，漂移超过 2 秒就判不确定（规格 3.4 行 171）
   const clock = new SystemClock(randomUUID())
-  const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock }
+  const runtime: RuntimeDeps = { db, secret: opts.secret, phase: opts.phase, catalog, clock,
+    cancelParallelAttempt: ({ nodeRunId, attempt, groupId }) => {
+      opts.scheduler?.cancelWaiting?.(nodeRunId, attempt)
+      cancels.abort(nodeRunId, attempt, 'parallel-group:' + groupId)
+    },
+  }
   const executor = opts.executor
   const routing = executor?.modelRouting
   const modelEscalation = opts.phase === 'S6' && routing
@@ -356,6 +363,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       ? 'SELECT r.workflow_id FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?'
       : 'SELECT workflow_id FROM runs WHERE run_id=?').get(id) as { workflow_id?: string } | undefined
     if (isReleaseWorkflow(row?.workflow_id)) throw new OrchError('FORBIDDEN', '发布运行只能通过专用受信入口推进')
+    if (row?.workflow_id === MEMORY_WORKFLOW_ID) throw new OrchError('FORBIDDEN', '记忆运行只能通过专用受控入口推进')
   }
   const commands: NodeCommands = {
     listRecoveryUncertain: () => listRecoveryUncertain(db),
@@ -507,8 +515,13 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     })),
     wakeOnEvent: (b) => {
       assertOrdinaryRun(b.runId)
-      return inTx(db, (tx) => wakeOnEvent(tx, opts.secret, { runId: b.runId, eventType: b.eventType,
-        payload: b.payload, idempotencyKey: b.idempotencyKey ?? null, now: b.now }))
+      const { outcome, stops } = inTx(db, (tx) => {
+        const outcome = wakeOnEvent(tx, opts.secret, { runId: b.runId, eventType: b.eventType,
+          payload: b.payload, idempotencyKey: b.idempotencyKey ?? null, now: b.now })
+        return { outcome, stops: outcome.woken ? refreshWorkflowParallelGroups(tx, opts.secret, b.runId, b.now, clock) : [] }
+      })
+      for (const stop of stops) runtime.cancelParallelAttempt?.(stop)
+      return outcome
     },
     cancelRun: (b) => {
       assertOrdinaryRun(b.runId)
@@ -552,7 +565,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
       assertOrdinaryRun(b.runId)
       if (registry && ['S5','S6'].includes(opts.phase)) inTx(db, tx => rememberManualDispatchSpecs(tx, opts.secret, catalog, registry, b.runId, b.nodes, b.now))
       // policy、branch、approval、wait 和 subworkflow 不依赖宿主执行器。
-      // tool 在 dispatcher 中检查只读宿主能否承接；parallel/decision 由 dispatcher 拒绝。
+      // tool 在 dispatcher 中检查只读宿主能否承接；parallel 使用已发布的组配置。
       const agentNodes = db.raw.prepare(
         "SELECT COUNT(*) AS n FROM node_runs WHERE run_id = ? AND status = 'queued' AND node_type = 'agent'",
       ).get(b.runId) as { n: number }
@@ -566,6 +579,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
         ...(executorDeps ? { executor: executorDeps, executeNode: executeScheduled } : {}),
         executionLimits,
         catalog,
+        cancelParallelAttempt: runtime.cancelParallelAttempt,
       }, {
         runId: b.runId,
         nodes: b.nodes,

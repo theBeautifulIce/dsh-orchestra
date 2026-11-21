@@ -144,6 +144,10 @@ export function runtimeProjection(workflowId: string, version: string, doc: Work
     if (node.type === 'tool') {
       out.tool = { command: cfg.command as string, cwd: cfg.cwd as string, timeout_ms: cfg.timeout_ms as number }
     }
+    if (node.type === 'parallel') {
+      out.parallel = { join: cfg.join as 'all' | 'any' | 'quorum', quorum: cfg.quorum as number | undefined,
+        allow_irreversible_children: cfg.allow_irreversible_children as boolean | undefined, timeout_ms: cfg.timeout_ms as number | undefined }
+    }
     if (node.type === 'wait') {
       out.wait = {
         wait_kind: cfg.wait_kind as 'event' | 'timer',

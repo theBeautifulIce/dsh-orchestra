@@ -19,12 +19,13 @@ import { closeRun } from './commands/run-close.ts'
 import { applyBranchRoute, applyTransition, enterBlockedPre, recordPolicyEvaluation } from './commands/nodes.ts'
 import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { ExecutionQueueFullError } from './execution-scheduler.ts'
-import { branchEdgesOf, type ApprovalNodeConfig, type PolicyNodeConfig, type WorkflowDefinition } from '../core/workflow-def.ts'
+import { branchEdgesOf, type ApprovalNodeConfig, type PolicyNodeConfig, type WorkflowDefinition, type WorkflowNodeDef } from '../core/workflow-def.ts'
 import { sha256Hex, canonicalJson } from '../core/canonical.ts'
 import { uuidv7 } from '../core/ids.ts'
 import { openDecision } from './commands/decisions.ts'
 import { persistBranchSelection, ruleNodeInput } from './branch-routing.ts'
 import { runStandaloneToolNode } from '../executor/run-tool-node.ts'
+import { openWorkflowParallel, refreshWorkflowParallelGroups } from './workflow-parallel.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
@@ -114,17 +115,18 @@ export type DispatchDeps = {
   executor?: RunNodeDeps
   // 控制节点（wait / subworkflow）要靠已加载的工作流目录固定子流程版本
   catalog?: WorkflowCatalog
+  cancelParallelAttempt?: (intent: { nodeRunId: string; attempt: number; groupId: string }) => void
   // 生产装配从配置读出的执行时限；缺省时由 runNode 使用默认值。
   executionLimits?: Pick<RunNodeParams, 'actionTimeoutMs' | 'startupTimeoutMs' | 'verifyTimeoutMs'>
 }
 
 type DispatchRow = { node_run_id: string; node_id: string; seq: number; attempt: number }
-type DispatchCandidate = DispatchRow & { has_extra_step: 0 | 1 }
+type DispatchCandidate = DispatchRow & { has_extra_step: 0 | 1; parent_node_run_id: string | null }
 type DispatchSelection = { rows: DispatchCandidate[]; settled: DispatchOutcome[] }
 
 function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: ReadonlySet<string>): DispatchSelection | undefined {
   const all = deps.db.raw.prepare(
-    `SELECT n.node_run_id,n.node_id,n.seq,n.attempt,
+    `SELECT n.node_run_id,n.node_id,n.seq,n.attempt,n.parent_node_run_id,
       EXISTS (SELECT 1 FROM rework_extra_steps e WHERE e.run_id=n.run_id AND e.node_id=n.node_id) AS has_extra_step
       FROM node_runs n WHERE n.run_id=? AND n.status='queued' ORDER BY n.seq ASC`,
   ).all(p.runId) as DispatchCandidate[]
@@ -195,7 +197,7 @@ async function dispatchProgressively(deps: DispatchDeps, p: DispatchParams, init
           submitted.add(row.node_run_id)
           inFlight.add(row.node_run_id)
           let queueFull = false
-          void dispatchOne(deps, request, row, true).then(
+          void dispatchWithParallelProgress(deps, request, row, true).then(
             (outcome) => { outcomes.push(outcome) },
             (error: unknown) => {
               queueFull = error instanceof ExecutionQueueFullError
@@ -248,10 +250,10 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams, progres
   // 没给执行函数（老装配/单测）时保持原来的串行次序，不凭空放并发。
   let outcomes: DispatchOutcome[]
   if (progress && deps.executeNode) outcomes = await dispatchProgressively(deps, p, selection, progress)
-  else if (deps.executeNode) outcomes = [...settled, ...await Promise.all(rows.map((row) => dispatchOne(deps, p, row)))]
+  else if (deps.executeNode) outcomes = [...settled, ...await Promise.all(rows.map((row) => dispatchWithParallelProgress(deps, p, row)))]
   else {
     outcomes = settled
-    for (const row of rows) outcomes.push(await dispatchOne(deps, p, row))
+    for (const row of rows) outcomes.push(await dispatchWithParallelProgress(deps, p, row))
   }
   // 这一轮跑完后收口 run：所有子节点都已终态才写，未满足条件保持原状。
   inTx(deps.db, (tx) => {
@@ -260,6 +262,19 @@ export async function dispatchRun(deps: DispatchDeps, p: DispatchParams, progres
     closeRun(tx, deps.secret, p.runId, settledAt)
   })
   return outcomes
+}
+
+async function dispatchWithParallelProgress(deps: DispatchDeps, p: DispatchParams, row: DispatchCandidate, retryOnQueueFull = false): Promise<DispatchOutcome> {
+  try {
+    return await dispatchOne(deps, p, row, retryOnQueueFull)
+  } finally {
+    if (row.parent_node_run_id) {
+      const clock = deps.runtime.clock
+      const now = new Date(Math.max(Date.parse(p.now), clock.sample().wallClockMs)).toISOString()
+      const stops = inTx(deps.db, tx => refreshWorkflowParallelGroups(tx, deps.secret, p.runId, now, clock))
+      for (const stop of stops) deps.cancelParallelAttempt?.(stop)
+    }
+  }
 }
 
 async function dispatchOne(
@@ -362,6 +377,7 @@ type ControlNodeConfig =
   | { kind: 'approval'; config: ApprovalNodeConfig; definitionHash: string }
   | { kind: 'branch'; definition: WorkflowDefinition; branchId: string }
   | { kind: 'tool' }
+  | { kind: 'parallel'; definition: WorkflowDefinition; role: WorkflowNodeDef }
 
 type RunBinding = {
   workflow_id: string | null
@@ -461,6 +477,7 @@ const CONTROL_KINDS: Record<string, ControlNodeConfig['kind'] | null> = {
   approval: 'approval',
   branch: 'branch',
   tool: 'tool',
+  parallel: 'parallel',
 }
 
 /**
@@ -483,7 +500,7 @@ function resolveControlConfig(
   if (kind === undefined) {
     // parallel / decision 目前只有状态机与用例，没有生产派发实现：
     // 明确拒绝并持久化失败，不能悄悄落进 agent 执行路径。
-    const message = nodeType === 'parallel' || nodeType === 'decision'
+    const message = nodeType === 'decision'
       ? nodeType + ' 节点还没有执行实现，不能派发'
       : '未知节点类型，不能派发'
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', message, {
@@ -558,6 +575,10 @@ function resolveControlConfig(
   }
   if (kind === 'branch') return { kind: 'branch', definition: def, branchId: declared.node_id }
   if (kind === 'tool') return { kind: 'tool' }
+  if (kind === 'parallel') {
+    if (!declared.parallel) throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '旧 parallel 定义没有固定汇合策略，不能派发')
+    return { kind: 'parallel', definition: def, role: declared }
+  }
   if (kind === 'wait') {
     const cfg = declared.wait
     if (!cfg) {
@@ -597,6 +618,7 @@ async function dispatchControlNode(
   if (control.kind === 'policy') return dispatchPolicyNode(deps, p, row, control, spec)
   if (control.kind === 'approval') return dispatchApprovalNode(deps, p, row, control, spec)
   if (control.kind === 'branch') return dispatchBranchNode(deps, p, row, control, spec)
+  if (control.kind === 'parallel') return dispatchParallelNode(deps, p, row, control, spec)
   try {
     acquireNodeRun(deps.runtime, {
       nodeRunId: row.node_run_id,
@@ -669,6 +691,24 @@ async function dispatchControlNode(
     // 只返回 failed 而不改库，会留下“API 说失败、节点还 dispatched 且持租约”的分叉，
     // closeRun 也永远等不到终态（审计 P2-2）。
     return outcomeForSettlement(failControlDispatch(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
+  }
+}
+
+function dispatchParallelNode(deps: DispatchDeps, p: DispatchParams, row: DispatchRow,
+  parallel: Extract<ControlNodeConfig, { kind: 'parallel' }>, spec: NodeSpec): DispatchOutcome {
+  const ref = { node_run_id: row.node_run_id, node_id: row.node_id }
+  try {
+    if (spec.tools.length > 0) throw new OrchError('TOOL_NOT_ALLOWED', 'parallel 节点不直接调用工具')
+    inTx(deps.db, tx => {
+      startSynchronousNode(tx, deps, p, row)
+      const input = ruleNodeInput(tx, deps.secret, p.runId, row.node_id, parallel.definition, spec.input ?? {})
+      openWorkflowParallel(tx, deps.secret, deps.runtime.catalog, deps.runtime.clock, {
+        runId: p.runId, nodeRunId: row.node_run_id, definition: parallel.definition, role: parallel.role, input, now: p.now,
+      })
+    })
+    return { ...ref, status: 'waiting', reason: 'parallel_members_pending' }
+  } catch (error) {
+    return settleSynchronousError(deps, p, row, error)
   }
 }
 

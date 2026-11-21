@@ -10,9 +10,10 @@ export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait
 export type PolicyNodeConfig = { condition: PolicyCondition; rule_id?: string }
 export type ApprovalNodeConfig = { prompt: string; on_timeout: 'fail' }
 export type ToolNodeConfig = { command: string; cwd: string; timeout_ms: number }
+export type ParallelNodeConfig = { join: 'all' | 'any' | 'quorum'; quorum?: number; allow_irreversible_children?: boolean; timeout_ms?: number }
 
 export function isDispatcherWorkflowNode(type: string): boolean {
-  return type === 'policy' || type === 'approval' || type === 'branch' || type === 'tool'
+  return type === 'policy' || type === 'approval' || type === 'branch' || type === 'tool' || type === 'parallel'
 }
 
 export function isControlWorkflowNode(type: string): boolean {
@@ -50,6 +51,16 @@ export function assertToolNodeConfig(config: unknown): asserts config is ToolNod
   if (cfg.command === RELEASE_CHECK_WORKFLOW_ID) throw new OrchError('FORBIDDEN', '发布检查只能由专用发布入口调用')
 }
 
+export function assertParallelNodeConfig(config: unknown, members: number): asserts config is ParallelNodeConfig {
+  const cfg = config as Partial<ParallelNodeConfig> | undefined
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || !['all', 'any', 'quorum'].includes(cfg.join ?? '')
+      || (cfg.join === 'quorum' ? typeof cfg.quorum !== 'number' || !Number.isInteger(cfg.quorum) || cfg.quorum < 1 || cfg.quorum > members : cfg.quorum !== undefined)
+      || (cfg.allow_irreversible_children !== undefined && typeof cfg.allow_irreversible_children !== 'boolean')
+      || (cfg.timeout_ms !== undefined && (!Number.isInteger(cfg.timeout_ms) || cfg.timeout_ms < 1 || cfg.timeout_ms > 604_800_000))) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'parallel 需要 all、any 或 quorum 汇合，quorum 必须在成员数内')
+  }
+}
+
 // 子流程嵌套深度上限：根为 0，能挂两层子流程
 export const SUBWORKFLOW_MAX_DEPTH = 2
 
@@ -85,6 +96,7 @@ export type WorkflowNodeDef = {
   policy?: PolicyNodeConfig
   approval?: ApprovalNodeConfig
   tool?: ToolNodeConfig
+  parallel?: ParallelNodeConfig
 }
 
 export type WorkflowDefinition = {
@@ -105,6 +117,25 @@ export type WorkflowEdge = { from: string; to: string; route?: Omit<BranchEdge, 
 
 export function branchEdgesOf(def: WorkflowDefinition, nodeId: string): BranchEdge[] {
   return (def.edges ?? []).filter(edge => edge.from === nodeId).map(edge => ({ ...edge.route, to: edge.to }))
+}
+
+export function parallelMemberIds(edges: readonly WorkflowEdge[], nodeId: string): string[] {
+  return edges.filter(edge => edge.from === nodeId).map(edge => edge.to)
+}
+
+export function assertParallelTopology(edges: readonly WorkflowEdge[], nodeId: string, config: ParallelNodeConfig): void {
+  const members = parallelMemberIds(edges, nodeId)
+  const memberIds = new Set(members)
+  if (!members.length || memberIds.size !== members.length || edges.some(edge => memberIds.has(edge.to) && edge.from !== nodeId)) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'parallel 的直接成员必须归属同一并行组，且不能同时有其他前置')
+  }
+  if (config.join !== 'all') {
+    const continuation = edges.filter(edge => memberIds.has(edge.from))
+    const targets = new Set(continuation.map(edge => edge.to))
+    if (targets.size > 1 || (targets.size === 1 && continuation.length !== members.length)) {
+      throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'any 和 quorum 并行组的成员需要连接到同一汇合节点，或都作为末端')
+    }
+  }
 }
 
 // 节点类型对应的能力名
@@ -215,6 +246,9 @@ function assertControlConfigShape(node: WorkflowNodeDef): void {
   } else if (node.tool !== undefined) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '只有 tool 节点能声明工具配置', { node_id: node.node_id })
   }
+  if (node.type !== 'parallel' && node.parallel !== undefined) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '只有 parallel 节点能声明并行配置', { node_id: node.node_id })
+  }
   if (node.side_effect_policy !== undefined && (node.type !== 'agent' || !['pure','compensable','irreversible'].includes(node.side_effect_policy))) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '智能体步骤的副作用声明无效', { node_id: node.node_id })
   }
@@ -268,6 +302,15 @@ export function assertDefinitionAllowed(def: WorkflowDefinition, phase: Phase): 
     assertControlConfigShape(node)
     if (node.type === 'tool' && def.required_hashes?.length) {
       throw new OrchError('WORKFLOW_VALIDATION_FAILED', '含独立工具的工作流须使用工具自带的系统取证格式', { node_id: node.node_id })
+    }
+    if (node.type === 'parallel' && node.parallel !== undefined) {
+      const edges = def.edges ?? []
+      const members = parallelMemberIds(edges, node.node_id)
+      assertParallelNodeConfig(node.parallel, members.length)
+      assertParallelTopology(edges, node.node_id, node.parallel)
+      if (!node.parallel.allow_irreversible_children && def.nodes.some(member => members.includes(member.node_id) && member.side_effect_policy === 'irreversible')) {
+        throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'parallel 需要显式允许不可逆成员', { node_id: node.node_id })
+      }
     }
     if (node.type === 'branch') {
       const routes = branchEdgesOf(def, node.node_id)

@@ -489,7 +489,7 @@ export function startSubworkflowNode(
   // 父节点在子运行收口前不声明“干净”：子流程里可能含不可逆动作，
   // 先按保守的 compensable 落库（不依赖 DDL 默认值），收口时再按子运行实际节点重算。
   // 这样节点级取消失败时也不会出现“父节点 pure + 子 run 未核实”的假成功。
-  tx.run("UPDATE node_runs SET side_effect_policy = 'compensable' WHERE node_run_id = ?", [p.nodeRunId])
+  tx.run("UPDATE node_runs SET side_effect_policy = 'compensable' WHERE node_run_id = ? AND side_effect_policy <> 'irreversible'", [p.nodeRunId])
   applyTransition(tx, secret, {
     nodeRunId: p.nodeRunId,
     from: ['started'],
