@@ -1,0 +1,8 @@
+
+ RUN  v4.1.8 D:/aboutAI/dsh-orchestra/tmp/s6-dispatch-views
+
+
+ Test Files  6 passed (6)
+      Tests  70 passed (70)
+   Start at  11:18:09
+   Duration  8.63s (transform 6.93s, setup 0ms, import 17.80s, tests 11.46s, environment 795ms)

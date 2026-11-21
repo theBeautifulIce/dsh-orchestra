@@ -9,7 +9,7 @@ import { recordOrdinaryHostStop } from '../../src/service/decision/ordinary-reco
 import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 
-it('opens ordinary recovery cards from maintenance and signs an aggregated abandonment through HTTP', async () => {
+it.each(['signed', 'expired'] as const)('opens ordinary recovery cards from maintenance and handles an aggregated abandonment when %s', async (mode) => {
   const directory = mkdtempSync(join(tmpdir(), 'orchestra-ordinary-abandon-'))
   const secret = 'ordinary-abandon-ledger'
   const options = { dbFile: join(directory, 'service.db'), secret, phase: 'S6' as const,
@@ -67,6 +67,16 @@ it('opens ordinary recovery cards from maintenance and signs an aggregated aband
     expect((await submit(command(ack, 'approved'))).body).toMatchObject({ error: { code: 'DECISION_REVISION_CONFLICT' } })
     expect((await view(combined.decision_id)).body).toMatchObject({ data: { allowed_resolutions: ['approved'] } })
     const sign = command(combined, 'approved')
+    if (mode === 'expired') {
+      const expiresAt = db().raw.prepare('SELECT expires_at FROM decisions WHERE decision_id=?').get(combined.decision_id) as { expires_at: string }
+      sweepNow(service.orchestra.runtime, expiresAt.expires_at)
+      expect(run()).toEqual({ status: 'paused' })
+      expect(db().raw.prepare('SELECT status,closed_reason FROM decisions WHERE decision_id=?').get(combined.decision_id))
+        .toEqual({ status: 'resolved', closed_reason: 'expired_final' })
+      expect((await submit(sign)).body).toMatchObject({ error: { code: 'DECISION_REVISION_CONFLICT' } })
+      expect(db().raw.prepare('SELECT COUNT(*) AS n FROM unverified_resolutions').get()).toEqual({ n: 0 })
+      return
+    }
     expect((await submit(sign)).status).toBe(200)
     expect(run()).toEqual({ status: 'running' })
     expect(db().raw.prepare('SELECT COUNT(*) AS n FROM unverified_resolutions').get()).toEqual({ n: 0 })

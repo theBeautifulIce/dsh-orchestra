@@ -14,6 +14,7 @@ const abandonRule = { startup_unknown: 'M-10', action_overrun: 'M-36', verify_hu
 const active = "('pending','acknowledged','blocked_for_human')"
 const stopEvent = 'recovery.host_stopped'
 const abandonEvent = 'decision.abandoned'
+const abandonAckWindowMs = 24 * 60 * 60 * 1000
 const clearStartupClock = {
   startup_unknown_deadline_at: null, startup_unknown_boot_id: null,
   startup_unknown_monotonic_ns: null, startup_unknown_remaining_ns: null,
@@ -119,6 +120,7 @@ export function abandonOrdinaryRecovery(tx: Tx, secret: string, card: Card, req:
     if (changed.changes !== 1) throw new OrchError('DECISION_REVISION_CONFLICT', '放弃跟踪签字卡已变更')
   } else {
     openDecision(tx, { decisionId: ackId, runId: node.run_id, nodeRunId: null, kind: 'abandon_ack', approver: 'human', createdAt: req.now,
+      expiresAt: new Date(Date.parse(req.now) + abandonAckWindowMs).toISOString(),
       payload: { affected: [affected], target_summary: '签字接受所列步骤的副作用仍未核实。' } })
   }
   applyTransition(tx, secret, { nodeRunId: node.node_run_id, from: [node.status], to: 'abandoned_unverified',
@@ -230,9 +232,24 @@ export function applyOrdinaryEffectResolution(tx: Tx, secret: string, req: Resol
 
 /** An abandonment signature releases the human gate, while shutdown remains independently required. */
 export function hasUnfinishedOrdinaryAbandon(tx: Tx, secret: string, runId: string): boolean {
-  const nodes = tx.all<Node>(`SELECT n.* FROM node_runs n WHERE n.run_id=? AND n.status='abandoned_unverified'
-    AND EXISTS(SELECT 1 FROM node_run_events e WHERE e.node_run_id=n.node_run_id AND e.type=?)`, [runId, abandonEvent])
-  return nodes.some(node => !ordinaryHostStop(tx, secret, node))
+  const nodes = tx.all<Node & { abandon_ack_id: string }>(`SELECT n.*, json_extract(e.payload,'$.abandon_ack_id') AS abandon_ack_id
+    FROM node_runs n JOIN node_run_events e ON e.node_run_id=n.node_run_id AND e.seq=(
+      SELECT MAX(seq) FROM node_run_events WHERE node_run_id=n.node_run_id AND type=?
+    ) WHERE n.run_id=? AND n.status='abandoned_unverified'`, [abandonEvent, runId])
+  return nodes.some(node => !tx.get(`SELECT 1 FROM node_run_events WHERE node_run_id=? AND type='decision.abandon_signed'
+    AND json_extract(payload,'$.decision_id')=? AND json_extract(payload,'$.attempt')=?
+    AND json_extract(payload,'$.action_generation')=? AND json_extract(payload,'$.rearm_generation')=?`,
+  [node.node_run_id, node.abandon_ack_id, node.attempt, node.action_generation, node.rearm_generation]) || !ordinaryHostStop(tx, secret, node))
+}
+
+export function expireOrdinaryAbandon(tx: Tx, secret: string, card: Card, now: string): boolean {
+  const nodes = ordinaryAbandonTargets(tx, card)
+  if (nodes.length === 0 || nodes.some(node => !chainIsIntact(secret, readChain(tx, node.node_run_id), readChainHead(tx, node.node_run_id), true))) return false
+  if (!cancelDecision(tx, secret, { decisionId: card.decision_id, reason: 'expired_final', now }).changed) return false
+  tx.run("UPDATE runs SET status='paused', revision=revision+1, updated_at=? WHERE run_id=? AND status='running'", [now, card.run_id])
+  appendEvent(tx, { type: 'decision.abandon_ack_expired', decisionId: card.decision_id, runId: card.run_id,
+    payload: { affected: nodes.map(node => node.node_run_id), occurred_at: now, reason: 'unverified_effect_ack_missing' } })
+  return true
 }
 
 export function closeTerminalOrdinaryRecoveryCards(tx: Tx, secret: string, runId: string, now: string): void {
