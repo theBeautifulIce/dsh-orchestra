@@ -264,7 +264,7 @@ export class EvidenceCollector {
       const activeProof = effectProof && tx.get(
         'SELECT 1 FROM node_runs WHERE node_run_id = ? AND attempt = ? AND action_generation = ?',
         [this.deps.nodeRunId, this.deps.attempt, target?.action_generation],
-      ) ? { effect_proof: effectProof } : {}
+      ) ? { effect_proof: effectProof, action_generation: target!.action_generation } : {}
       tx.run(
         'INSERT INTO tool_executions (node_run_id, attempt, tool_seq, tool, execution_id, exit_code, stdout_hash, stderr_hash, command_hash, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [

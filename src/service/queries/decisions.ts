@@ -3,7 +3,7 @@ import { DECISION_PRIORITY_RANK, priorityRank } from '../../core/decision-priori
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx } from './read-tx.ts'
-import { DECISION_CHOICE_COLUMNS, panelDecisionOptions, type DecisionChoiceContext, type MemoryDecisionAccess } from '../decision/choices.ts'
+import { DECISION_CHOICE_COLUMNS, panelDecisionOptions, withOrdinaryRecovery, type DecisionChoiceContext, type MemoryDecisionAccess } from '../decision/choices.ts'
 
 const DECISIONS_LIMIT_MAX = 100
 const PRIORITY_ORDER = "CASE priority " + Object.entries(DECISION_PRIORITY_RANK)
@@ -32,6 +32,7 @@ export type DecisionView = {
   allowed_resolutions: string[] | null
   resolution_unavailable_reason?: string | null
   required_evidence: string[] | null
+  available_effect_evidence?: { applied?: string; not_applied?: string }
   target_summary: string | null
   approver?: string | null
   expiry_effect?: string | null
@@ -42,6 +43,9 @@ type DecisionRow = Record<string, unknown> & DecisionChoiceContext & {
   decision_id: string
   run_id: string
   created_at: string
+  node_run_id: string | null
+  kind: string
+  payload_json: string
 }
 
 export type ListDecisionParams = {
@@ -63,7 +67,7 @@ const DECISION_SELECT = 'SELECT decision_id, run_id, node_run_id, kind, status, 
   + 'expires_at, confirm_required, created_at, decided_at, resolved_by, priority, priority_reason, expiry_effect, approver, '
   + DECISION_CHOICE_COLUMNS + ' FROM decisions d'
 
-function toDecisionView(row: DecisionRow, now: number, memoryEnabled: MemoryDecisionAccess): DecisionView {
+function toDecisionView(tx: Parameters<typeof withOrdinaryRecovery>[0], row: DecisionRow, now: number, memoryEnabled: MemoryDecisionAccess): DecisionView {
   const parsed = parsePayload(row.payload_json)
   const payload = parsed.payload !== null && typeof parsed.payload === 'object' ? parsed.payload as Record<string, unknown> : {}
   const asText = (value: unknown) => typeof value === 'string' && value.trim() ? value.slice(0, 500) : null
@@ -71,7 +75,7 @@ function toDecisionView(row: DecisionRow, now: number, memoryEnabled: MemoryDeci
   const priorityReason = asText(row.priority_reason)
   const target = asText(payload.target_summary) ?? asText(payload.title) ?? asText(payload.summary)
   const required = Array.isArray(payload.required_evidence) ? payload.required_evidence.filter((item): item is string => typeof item === 'string').slice(0, 12) : null
-  const { choices, unavailableReason } = panelDecisionOptions(row, now, memoryEnabled)
+  const { choices, unavailableReason } = panelDecisionOptions(withOrdinaryRecovery(tx, row), now, memoryEnabled)
   return {
     decision_id: row.decision_id,
     run_id: row.run_id,
@@ -89,6 +93,7 @@ function toDecisionView(row: DecisionRow, now: number, memoryEnabled: MemoryDeci
     resolved_by: asText(row.resolved_by),
     priority, priority_reason: priorityReason, allowed_resolutions: choices, resolution_unavailable_reason: unavailableReason,
     required_evidence: required, target_summary: target,
+    ...(row.ordinary_effect_evidence && { available_effect_evidence: row.ordinary_effect_evidence }),
     approver: asText(row.approver),
     // The memory approval sweep uses the card's deadline even when its task is supervised.
     expiry_effect: row.memory_approval_status != null && typeof row.expires_at === 'string'
@@ -106,7 +111,7 @@ export function getDecisionSnapshot(db: Db, decisionId: string, now = Date.now()
       [decisionId],
     )
     if (!row) throw new OrchError('NOT_FOUND', '没找到这条裁决', { decision_id: decisionId })
-    return { item: toDecisionView(row, now, memoryEnabled), as_of_seq: ctx.as_of_seq }
+    return { item: toDecisionView(ctx.tx, row, now, memoryEnabled), as_of_seq: ctx.as_of_seq }
   })
 }
 
@@ -164,6 +169,6 @@ export function listDecisions(db: Db, params: ListDecisionParams = {}): {
       ? encodeCursor(makeCursor('decisions', filter,
         byPriority ? `${PRIORITY_CURSOR}${priorityRank(last.priority)}:${last.created_at}` : last.created_at, last.decision_id, ctx.as_of_seq, now))
       : null
-    return { items: page.map((row) => toDecisionView(row, now, params.memoryEnabled ?? false)), next_cursor, as_of_seq: ctx.as_of_seq }
+    return { items: page.map((row) => toDecisionView(ctx.tx, row, now, params.memoryEnabled ?? false)), next_cursor, as_of_seq: ctx.as_of_seq }
   })
 }

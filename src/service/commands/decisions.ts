@@ -10,6 +10,7 @@ import { applyTransition } from './nodes.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand } from './idempotency.ts'
+import { abandonOrdinaryRecovery, applyOrdinaryEffectResolution, ordinaryEffectResolution, signOrdinaryAbandon } from '../decision/ordinary-recovery.ts'
 
 export const DECISION_KINDS: readonly DecisionKind[] = [
   'pre_execution',
@@ -235,8 +236,8 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
   if (scope !== MEMORY_APPROVAL && tx.get('SELECT 1 FROM memory_batches WHERE decision_id = ?', [req.decisionId])) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆审批必须同时记录批次批准快照')
   }
-  const current = tx.get<{ kind: string; status: string; payload_json: string; approver: string; confirm_required: number; run_id: string; node_run_id: string | null }>(
-    'SELECT kind, status, payload_json, approver, confirm_required, run_id, node_run_id FROM decisions WHERE decision_id = ?',
+  const current = tx.get<{ decision_id: string; kind: string; status: string; payload_json: string; approver: string; confirm_required: number; run_id: string; node_run_id: string | null }>(
+    'SELECT decision_id, kind, status, payload_json, approver, confirm_required, run_id, node_run_id FROM decisions WHERE decision_id = ?',
     [req.decisionId],
   )
   if (!current) {
@@ -270,17 +271,25 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
     actor,
     evidenceProducers: producers,
   })
-  const closing = FINAL_RESOLUTIONS.includes(req.resolution)
+  const abandoning = scope === undefined && req.resolution === 'abandon'
+  const ordinaryEffect = scope === undefined && req.requireEffectSettlement
+    && (req.resolution === 'confirm_applied' || req.resolution === 'confirm_not_applied')
+    ? ordinaryEffectResolution(tx, secret, current, req) : undefined
+  if (abandoning) abandonOrdinaryRecovery(tx, secret, current, req)
+  if (scope === undefined && current.kind === 'abandon_ack' && req.resolution === 'approved') signOrdinaryAbandon(tx, secret, current, req)
+  const closing = abandoning || !!ordinaryEffect || FINAL_RESOLUTIONS.includes(req.resolution)
   const nextStatus = closing ? 'resolved' : current.status
   const closedReason = closing
     ? req.resolution === 'expired'
       ? 'expired_final'
       : req.resolution === 'uphold_report'
         ? 'approved'
-        : req.resolution === 'uphold_decision' ? 'rejected' : req.resolution
+        : req.resolution === 'uphold_decision' ? 'rejected' : abandoning || ordinaryEffect ? 'approved' : req.resolution
     : null
-  const payloadJson = req.payload
-    ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...req.payload })
+  const payload = ordinaryEffect ? { ...req.payload, effect_verdict: ordinaryEffect.verdict, resolution: req.resolution }
+    : abandoning ? { resolution: req.resolution } : req.payload
+  const payloadJson = payload
+    ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...payload })
     : current.payload_json
   const res = tx.run(
     'UPDATE decisions SET status = ?, revision = revision + 1, closed_reason = ?, decided_at = ?, payload_json = ?, resolved_by = COALESCE(?, resolved_by) ' +
@@ -335,6 +344,7 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
     if (req.requireEffectSettlement && !settled) {
       throw new OrchError('RESOLUTION_NOT_AVAILABLE', '裁决需要绑定当前运行与尝试的系统核验证据')
     }
+    if (ordinaryEffect) applyOrdinaryEffectResolution(tx, secret, req, ordinaryEffect)
   }
   // 裁决卡收口后，若所有节点都已到终态，run 也要在同一笔事务里收口。
   if (closing) closeRun(tx, secret, current.run_id, req.now)
@@ -504,7 +514,7 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     const age = nowMs - Date.parse(row.created_at)
     const reportConflict = row.kind === 'report_contradicted'
     // blocked_post 压在人工核验上：证据门只能由人关，自动过期会留下“卡没了、节点还卡着”的死角
-    const holdForHuman = reportConflict || row.node_status === 'blocked_post' || (row.human_attention === null
+    const holdForHuman = reportConflict || row.kind === 'abandon_ack' || row.node_status === 'blocked_post' || (row.human_attention === null
       ? timeoutDisposition(row.autonomy) === 'hold_for_human'
       : row.expiry_effect === 'escalate_only')
     // 自主审计的静默卡不走人工升级，继续按现有的创建时间计时。

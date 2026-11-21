@@ -8,6 +8,7 @@ import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
 import { applyRunAcceptance } from './run-acceptance.ts'
 import { finishSubworkflowChild, nodeRunChainIsIntact } from './subworkflow.ts'
 import { parallelToleratesMember, refreshWorkflowParallelGroups } from '../workflow-parallel.ts'
+import { closeTerminalOrdinaryRecoveryCards, hasUnfinishedOrdinaryAbandon } from '../decision/ordinary-recovery.ts'
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
 
@@ -51,11 +52,16 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
   )
   const terminal = new Set(['done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded'])
   if (nodes.length === 0 || nodes.some((node) => !terminal.has(node.status))) return null
+  closeTerminalOrdinaryRecoveryCards(tx, secret, runId, now)
   const openDecisions = tx.get<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM decisions WHERE node_run_id IN (SELECT node_run_id FROM node_runs WHERE run_id = ?) AND status IN ('pending','acknowledged','blocked_for_human')",
-    [runId],
+    "SELECT COUNT(*) AS n FROM decisions WHERE (node_run_id IN (SELECT node_run_id FROM node_runs WHERE run_id = ?)"
+    + " OR (run_id=? AND node_run_id IS NULL AND kind='abandon_ack'"
+    + " AND json_type(CASE WHEN json_valid(payload_json) THEN payload_json END,'$.affected')='array'))"
+    + " AND status IN ('pending','acknowledged','blocked_for_human')",
+    [runId, runId],
   )
   if (Number(openDecisions?.n ?? 0) > 0) return null
+  if (hasUnfinishedOrdinaryAbandon(tx, secret, runId)) return null
   try {
     assertRunCanTerminal(tx, runId)
   } catch {

@@ -11,7 +11,8 @@ import { applyReport } from './commands/apply-report.ts'
 import { sweepWaitTimeouts } from './commands/wait.ts'
 import { finishSubworkflowChild } from './commands/subworkflow.ts'
 import { closeRun } from './commands/run-close.ts'
-import { activeDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
+import { activeDecision, cancelDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
+import { openOrdinaryRecoveryDecision } from './decision/ordinary-recovery.ts'
 import { IN_FLIGHT_COMMAND_STATUSES } from './commands/idempotency.ts'
 import { receiptRetention } from './receipt-retention.ts'
 import type { WorkflowCatalog } from './workflows.ts'
@@ -25,6 +26,7 @@ import { deadlineFromAnchors, deadlineFromSample } from '../core/clock.ts'
 export type SweepParams = {
   now: string
   clock: ClockProvider
+  ordinaryRecovery?: boolean
   // 运行时观察到的桥断节点：只有拿到显式信号才挂起，不猜
   bridgeMissing?: readonly string[]
   // 桥恢复信号：按 resume_state 逐态重入，重挂剩余预算，不把未知态续成满额
@@ -189,12 +191,13 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
     // startup_unknown 按钟：到点转 indeterminate_side_effect，保留 uncertainty，不直接判终态
     const unknownExpired: string[] = []
-    const unknownRows = tx.all<{ node_run_id: string; attempt: number; status: string; hang_reason: string | null; startup_unknown_deadline_at: string | null; startup_unknown_boot_id: string | null; startup_unknown_monotonic_ns: number | null; startup_unknown_remaining_ns: number | null }>(
-      'SELECT node_run_id, attempt, status, hang_reason, startup_unknown_deadline_at, startup_unknown_boot_id, startup_unknown_monotonic_ns, startup_unknown_remaining_ns FROM node_runs WHERE status = ?',
+    const unknownRows = tx.all<{ node_run_id: string; run_id: string; attempt: number; status: string; hang_reason: string | null; startup_unknown_deadline_at: string | null; startup_unknown_boot_id: string | null; startup_unknown_monotonic_ns: number | null; startup_unknown_remaining_ns: number | null }>(
+      'SELECT node_run_id, run_id, attempt, status, hang_reason, startup_unknown_deadline_at, startup_unknown_boot_id, startup_unknown_monotonic_ns, startup_unknown_remaining_ns FROM node_runs WHERE status = ?',
       ['startup_unknown'],
     )
     for (const row of unknownRows) {
       if (skipNodes.has(row.node_run_id) || row.hang_reason !== null) continue
+      if (params.ordinaryRecovery) openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'startup_unknown', params.now)
       if (!row.startup_unknown_deadline_at) continue
       const anchored = deadlineFromAnchors({
         deadlineAt: row.startup_unknown_deadline_at,
@@ -228,6 +231,10 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
           deadline_at: row.startup_unknown_deadline_at,
         })
         unknownExpired.push(row.node_run_id)
+        if (params.ordinaryRecovery) {
+          const startup = activeDecision(tx, row.run_id, 'startup_unknown', row.node_run_id)
+          if (startup) cancelDecision(tx, secret, { decisionId: startup.decision_id, reason: 'expired_final', now: params.now })
+        }
       } catch {
         // 并发流程已经改过这一行：跳过
       }
@@ -343,7 +350,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       if (!expired) continue
       if (activeDecision(tx, row.run_id, 'action_overrun', row.node_run_id)) continue
       const decisionId = 'dec_' + uuidv7()
-      openDecision(tx, {
+      if (!(params.ordinaryRecovery && openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'action_overrun', params.now, decisionId))) openDecision(tx, {
         decisionId,
         runId: row.run_id,
         nodeRunId: row.node_run_id,
@@ -416,6 +423,11 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     }
 
     const receipts = sweepInboxReceipts(tx, params.now)
+    if (params.ordinaryRecovery) {
+      for (const row of tx.all<{ node_run_id: string }>("SELECT node_run_id FROM node_runs WHERE status='indeterminate_side_effect' AND node_type='agent' AND hang_reason IS NULL")) {
+        if (!skipNodes.has(row.node_run_id)) openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'verify_human', params.now)
+      }
+    }
     // 决策超时：2h 升级、24h 按默认动作过期。必须进维护扫描，
     // 否则服务每两秒扫一次租约/Wait，却永远不处理挂在人身上的卡（审计 P1-3）。
     const decisions = sweepDecisions(tx, secret, { now: params.now, skipNodeRunIds: skipNodes, skipRunIds: taintedRuns })

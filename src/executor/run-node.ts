@@ -28,6 +28,7 @@ import { noteAgentStopped, type createModelEscalationHost } from '../service/mod
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
 import { groupStopIntent, isVerifiedParallelMembership, verifiedPropagatedGroupStop } from '../service/workflow-parallel.ts'
+import { recordOrdinaryHostStop } from '../service/decision/ordinary-recovery.ts'
 
 export type RunNodeParams = {
   /** Internal dispatcher entry. The standalone runner rechecks the persisted node kind and definition. */
@@ -405,6 +406,9 @@ async function runNodeActions(
     try {
       await lifecycle.stop()
       stopped = true
+      if (deps.runtime.phase === 'S6') withTx(deps.db, (tx) => recordOrdinaryHostStop(tx, deps.secret, {
+        nodeRunId: p.nodeRunId, attempt: p.attempt, generation, agentId: created.agentId, stoppedAt: nowAt(),
+      }))
       if (deps.modelEscalation) withTx(deps.db, (tx) => noteAgentStopped(tx, deps.secret, loadNodeRun(tx, p.nodeRunId), p.attempt, generation))
     } catch (stopErr) {
       stopFailure = stopErr
@@ -481,6 +485,12 @@ async function runNodeActions(
         try {
           await lifecycle.stop()
           stopped = true
+          if (deps.runtime.phase === 'S6' && agent) {
+            const agentId = agent.agentId
+            withTx(deps.db, (tx) => recordOrdinaryHostStop(tx, deps.secret, {
+              nodeRunId: p.nodeRunId, attempt: p.attempt, generation, agentId, stoppedAt: nowAt(),
+            }))
+          }
           if (deps.modelEscalation) withTx(deps.db, (tx) => noteAgentStopped(tx, deps.secret, loadNodeRun(tx, p.nodeRunId), p.attempt, generation))
         } catch (stopErr) {
           if (failed === null) {
