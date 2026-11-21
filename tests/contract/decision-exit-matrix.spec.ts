@@ -31,7 +31,7 @@ const cases: readonly Case[] = [
   { kind: 'rule_ambiguous', visible: [], requested: 'approved', error: 'RESOLUTION_NOT_AVAILABLE' },
   { kind: 'startup_unknown', initial: 'startup_unknown', visible: [], requested: 'confirm_started', error: 'RESOLUTION_NOT_AVAILABLE' },
   { kind: 'startup_unknown', initial: 'startup_unknown', visible: [], requested: 'confirm_not_started', error: 'RESOLUTION_NOT_AVAILABLE' },
-  { kind: 'startup_unknown', initial: 'startup_unknown', visible: [], requested: 'confirm_started_attested', error: 'PAYLOAD_SCHEMA_INVALID' },
+  { kind: 'startup_unknown', initial: 'startup_unknown', visible: [], requested: 'confirm_started_attested', error: 'RESOLUTION_NOT_AVAILABLE' },
   { kind: 'startup_unknown', initial: 'startup_unknown', visible: [], requested: 'continue_tracking', error: 'RESOLUTION_NOT_AVAILABLE' },
   { kind: 'startup_unknown', initial: 'startup_unknown', visible: [], requested: 'abandon', error: 'RESOLUTION_NOT_AVAILABLE' },
   { kind: 'report_contradicted', initial: 'startup_unknown', visible: [], requested: 'uphold_report', error: 'RESOLUTION_NOT_AVAILABLE' },
