@@ -8,6 +8,7 @@ import { uuidv7 } from '../../src/core/ids.ts'
 import { appendEvent, appendNodeRunEvent, type EventInput } from '../../src/infra/db/ledger.ts'
 import { withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { escalateDecisions, openDecision, resolveDecision } from '../../src/service/commands/decisions.ts'
+import { openOrdinaryRecoveryDecision } from '../../src/service/decision/ordinary-recovery.ts'
 import { bindRunVersion } from '../fixtures/ledger.ts'
 
 it.each(['done', 'failed', 'weak', 'keep-retry', 'keep-stop', 'untrusted-original'] as const)('WF-52 / F8 生产报告登记、人工审批与原子结算：%s', async (scenario) => {
@@ -59,6 +60,7 @@ it.each(['done', 'failed', 'weak', 'keep-retry', 'keep-stop', 'untrusted-origina
       if (keepOriginal) {
         // Model a historical D1 that already recorded and closed its finding.
         tx.run("UPDATE decisions SET status='resolved',closed_reason='approved',decided_at=? WHERE decision_id='prior'", [now])
+        expect(openOrdinaryRecoveryDecision(tx, secret, nodeId, 'startup_unknown', now, 'pending-startup')).toBe(true)
       }
       tx.run("INSERT INTO tool_executions (node_run_id,attempt,tool_seq,tool,execution_id,exit_code,stdout_hash,command_hash,started_at,finished_at)"
         + " VALUES (?,2,1,'ro.check',?,?,?,?,?,?)", [nodeId, executionId, exitCode, hash, cmd, now, now])
@@ -176,6 +178,8 @@ it.each(['done', 'failed', 'weak', 'keep-retry', 'keep-stop', 'untrusted-origina
       contradiction_decision_id: null, startup_unknown_deadline_at: null })
     expect(reloaded.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get('prior')).toEqual(prior)
     if (keepOriginal) {
+      expect(reloaded.raw.prepare('SELECT status,closed_reason FROM decisions WHERE decision_id=?').get('pending-startup'))
+        .toEqual({ status: 'resolved', closed_reason: 'cancelled' })
       const replacements = reloaded.raw.prepare('SELECT node_run_id,attempt,status,action_generation FROM node_runs WHERE origin_node_run_id=?').all(nodeId)
       if (scenario === 'keep-retry') {
         expect(replacements).toEqual([{ node_run_id: node()?.replacement_node_run_id, attempt: 3, status: 'queued', action_generation: 7 }])

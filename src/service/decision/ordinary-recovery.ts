@@ -63,12 +63,15 @@ export function ordinaryRecoveryTarget(tx: RecoveryRead, card: Card): Node | und
   const expected = parseCard(card).ordinary_recovery
   if (!expected || expected.node_run_id !== node.node_run_id || expected.attempt !== node.attempt
     || expected.action_generation !== node.action_generation || expected.rearm_generation !== node.rearm_generation) return undefined
-  const event = tx.get(`SELECT 1 FROM node_run_events WHERE node_run_id=? AND type='decision.recovery_opened'
+  return hasRecoveryOpening(tx, card, expected) ? node : undefined
+}
+
+function hasRecoveryOpening(tx: RecoveryRead, card: Card, target: Target): boolean {
+  return Boolean(tx.get(`SELECT 1 FROM node_run_events WHERE node_run_id=? AND type='decision.recovery_opened'
     AND json_extract(payload,'$.decision_id')=? AND json_extract(payload,'$.kind')=?
     AND json_extract(payload,'$.attempt')=? AND json_extract(payload,'$.action_generation')=?
     AND json_extract(payload,'$.rearm_generation')=?`,
-  [node.node_run_id, card.decision_id, kind, node.attempt, node.action_generation, node.rearm_generation])
-  return event ? node : undefined
+  [target.node_run_id, card.decision_id, card.kind, target.attempt, target.action_generation, target.rearm_generation]))
 }
 
 function parseCard(card: Card): { ordinary_recovery?: Target; affected?: Target[] } {
@@ -81,9 +84,15 @@ export function ordinaryRecoveryBound(card: Card): boolean {
 }
 
 export function retireOrdinaryStartupDecision(tx: Tx, secret: string, nodeId: string, now: string, reason: 'cancelled' | 'expired_final'): void {
-  const card = tx.get<Card>("SELECT decision_id,run_id,node_run_id,kind,payload_json FROM decisions"
-    + " WHERE node_run_id=? AND kind='startup_unknown' AND status IN " + active, [nodeId])
-  if (card && ordinaryRecoveryBound(card)) cancelDecision(tx, secret, { decisionId: card.decision_id, reason, now })
+  const card = tx.get<Card>("SELECT d.decision_id,d.run_id,d.node_run_id,d.kind,d.payload_json FROM decisions d"
+    + " JOIN node_runs n ON n.node_run_id=d.node_run_id AND n.run_id=d.run_id"
+    + " WHERE n.node_run_id=? AND n.status<>'startup_unknown' AND d.kind='startup_unknown' AND d.status IN " + active, [nodeId])
+  const target = card && parseCard(card).ordinary_recovery
+  if (card && target?.node_run_id === nodeId
+    && chainIsIntact(secret, readChain(tx, nodeId), readChainHead(tx, nodeId), true)
+    && hasRecoveryOpening(tx, card, target)) {
+    cancelDecision(tx, secret, { decisionId: card.decision_id, reason, now })
+  }
 }
 
 function canRecordUnsentAttempt(tx: RecoveryRead, node: Node): boolean {

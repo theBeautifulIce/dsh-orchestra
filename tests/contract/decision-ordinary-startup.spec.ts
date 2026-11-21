@@ -12,7 +12,8 @@ import { serveOrchestra, sweepNow } from '../../src/index.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { bindRunVersion } from '../fixtures/ledger.ts'
 
-it.each(['durable', 'uncorrelated', 'unsupported', 'cancelled', 'watchdog'] as const)('accepts only positively retired startup attempts (%s)', async (mode) => {
+it.each(['durable', 'uncorrelated', 'unsupported', 'cancelled', 'watchdog', 'uncertain-clock'] as const)(
+  'accepts only positively retired startup attempts (%s)', async (mode) => {
   const directory = mkdtempSync(join(tmpdir(), 'orchestra-startup-'))
   const configPath = join(directory, 'orchestra.config.json')
   const config = JSON.parse(readFileSync('orchestra.config.json', 'utf8'))
@@ -105,9 +106,29 @@ it.each(['durable', 'uncorrelated', 'unsupported', 'cancelled', 'watchdog'] as c
       const cancellation = await call('/v1/runs/cancel', { runId: 'run', cancelResult: 'unknown', graceMs: 0 })
       expect(cancellation).toMatchObject({ ok: true })
     }
-    if (mode === 'uncorrelated') {
+    if (mode === 'uncertain-clock') {
+      withTx(db(), tx => tx.run('UPDATE node_runs SET startup_unknown_remaining_ns=NULL WHERE node_run_id=?', [nodeRunId]))
+    }
+    if (mode === 'uncorrelated' || mode === 'uncertain-clock') {
       await service.close()
       service = await serveOrchestra(options)
+    }
+    if (mode === 'uncertain-clock') {
+      sweepNow(service.orchestra.runtime, new Date().toISOString())
+      const uncertain = await call('/v1/recovery/uncertain')
+      expect(uncertain.data.items).toMatchObject([{ node_run_id: nodeRunId, status: 'startup_unknown', channel: 'startup_unknown' }])
+      const recover = { nodeRunId, revision: uncertain.data.items[0].revision, resolution: 'mark_indeterminate_side_effect' }
+      expect(await call('/v1/recovery/resolve', { ...recover, revision: recover.revision + 1 }))
+        .toMatchObject({ error: { code: 'STALE_GENERATION' } })
+      const decisionState = () => db().raw.prepare('SELECT status,closed_reason FROM decisions WHERE decision_id=?').get(decision.decision_id)
+      expect(decisionState()).toMatchObject({ status: 'pending' })
+      expect(await call('/v1/recovery/resolve', recover)).toMatchObject({
+        data: { node_run_id: nodeRunId, from: 'startup_unknown', to: 'indeterminate_side_effect', channel: 'startup_unknown' },
+      })
+      expect(row()).toMatchObject({ status: 'indeterminate_side_effect', attempt: 1, action_generation: 1, rearm_generation: 1,
+        startup_unknown_deadline_at: null })
+      expect(decisionState()).toEqual({ status: 'resolved', closed_reason: 'cancelled' })
+      expect(await call('/v1/recovery/resolve', recover)).toMatchObject({ error: { code: 'STALE_GENERATION' } })
     }
     if (mode === 'watchdog') {
       const sample = service.orchestra.runtime.clock.sample()
@@ -142,7 +163,7 @@ it.each(['durable', 'uncorrelated', 'unsupported', 'cancelled', 'watchdog'] as c
         report: { report_id: 'late', node_run_id: nodeRunId, attempt: 1, status: 'failed' } }))
         .toMatchObject({ data: { accepted: false } })
       expect(row()).toMatchObject({ status: 'failed', attempt: 1, action_generation: 1 })
-    } else if (mode === 'watchdog') {
+    } else if (mode === 'watchdog' || mode === 'uncertain-clock') {
       expect(await choices()).toEqual([])
       expect(await submit()).toMatchObject({ error: { code: 'DECISION_REVISION_CONFLICT' } })
       expect(receipt()).toBeUndefined()

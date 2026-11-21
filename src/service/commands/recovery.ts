@@ -9,6 +9,7 @@ import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { applyTransition } from './nodes.ts'
 import { cancelWait } from './wait.ts'
 import { RECOVERY_CHANNEL_COLUMNS } from '../queries/recovery.ts'
+import { retireOrdinaryStartupDecision } from '../decision/ordinary-recovery.ts'
 
 export type RecoveryResolution = 'mark_indeterminate_side_effect'
 
@@ -79,5 +80,6 @@ export function resolveRecoveryUncertain(tx: Tx, secret: string, req: RecoveryRe
     channel: row.recovery_uncertain,
     resolution: req.resolution,
   })
+  if (row.status === 'startup_unknown') retireOrdinaryStartupDecision(tx, secret, req.nodeRunId, req.now, 'cancelled')
   return { node_run_id: req.nodeRunId, from: row.status, to: 'indeterminate_side_effect', channel: row.recovery_uncertain }
 }
