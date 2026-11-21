@@ -349,17 +349,43 @@ const cycleIssues = (doc: WorkflowDoc): ValidationIssue[] => {
   return issues
 }
 
-const configIssues = (doc: WorkflowDoc): ValidationIssue[] => {
+/** Check explicit effects through nested membership and pinned subworkflows at rehearsal and publish time. */
+function hasIrreversibleParallelMember(doc: WorkflowDoc, nodeId: string, ctx: PublishContext): boolean {
+  const seenNodes = new Set<string>()
+  const seenVersions = new Set<string>()
+  const contains = (current: WorkflowDoc, ids: readonly string[]): boolean => ids.some(id => {
+    const node = current.nodes.find(candidate => candidate.node_id === id)
+    if (node?.type === 'agent') return node.config?.side_effect_policy === 'irreversible'
+    if (node?.type === 'parallel') {
+      const key = current === doc ? id : undefined
+      if (key !== undefined && seenNodes.has(key)) return false
+      if (key !== undefined) seenNodes.add(key)
+      return contains(current, parallelMemberIds(current.edges, id))
+    }
+    if (node?.type !== 'subworkflow') return false
+    const target = node.config?.workflow_id
+    const version = node.config?.pinned_version
+    if (typeof target !== 'string' || typeof version !== 'number') return false
+    const key = JSON.stringify([target,version])
+    if (seenVersions.has(key)) return false
+    seenVersions.add(key)
+    const child = ctx.subworkflowOf?.(target, version)
+    return !!child && child.nodes.some(member => member.config?.side_effect_policy === 'irreversible'
+      || (member.type === 'subworkflow' && contains(child, [member.node_id])))
+  })
+  return contains(doc, parallelMemberIds(doc.edges, nodeId))
+}
+
+const configIssues = (doc: WorkflowDoc, ctx: PublishContext): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
   for (const node of doc.nodes) {
     const cfg = (node.config ?? {}) as Record<string, unknown>
     if (node.type === 'parallel') {
       try {
-        const edges = doc.edges.map(({ from, to }) => ({ from, to }))
-        const members = parallelMemberIds(edges, node.node_id)
+        const members = parallelMemberIds(doc.edges, node.node_id)
         assertParallelNodeConfig(cfg, members.length)
-        assertParallelTopology(edges, node.node_id, cfg)
-        if (!cfg.allow_irreversible_children && doc.nodes.some(member => members.includes(member.node_id) && member.config?.side_effect_policy === 'irreversible')) {
+        assertParallelTopology(doc.edges, node.node_id)
+        if (!cfg.allow_irreversible_children && hasIrreversibleParallelMember(doc, node.node_id, ctx)) {
           throw new Error('parallel 需要显式允许不可逆成员')
         }
       } catch (error) {
@@ -465,7 +491,7 @@ export function validatePublishLayer(doc: WorkflowDoc, ctx: PublishContext): Val
   issues.push(...branchIssues(doc))
   issues.push(...reachabilityIssues(doc))
   issues.push(...cycleIssues(doc))
-  issues.push(...configIssues(doc))
+  issues.push(...configIssues(doc, ctx))
   issues.push(...subworkflowIssues(doc, ctx))
   return issues
 }
