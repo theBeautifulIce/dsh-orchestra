@@ -10,7 +10,7 @@ import { applyTransition } from './nodes.ts'
 import { decisionConfirmRequired } from './start-run.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand } from './idempotency.ts'
-import { abandonOrdinaryRecovery, applyOrdinaryEffectResolution, ordinaryEffectResolution, signOrdinaryAbandon } from '../decision/ordinary-recovery.ts'
+import { abandonOrdinaryRecovery, applyOrdinaryEffectResolution, expireOrdinaryAbandon, ordinaryEffectResolution, signOrdinaryAbandon } from '../decision/ordinary-recovery.ts'
 
 export const DECISION_KINDS: readonly DecisionKind[] = [
   'pre_execution',
@@ -111,7 +111,8 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
   const workflowApproval = draft.kind === 'pre_execution' && nodeType === 'approval' && draft.expiresAt !== undefined
   const expiry = draft.kind === 'report_contradicted'
     ? { effect: 'none', reason: '报告冲突只由人工裁决。' }
-    : expiresByEscalation && !workflowApproval ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' }
+      : draft.kind === 'abandon_ack' && draft.expiresAt ? { effect: 'escalate_only', reason: '签字超时后暂停运行并交人工处理。' }
+        : expiresByEscalation && !workflowApproval ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' }
       : { effect: 'auto_resolve', reason: '超时后按已记录的默认规则处理。' }
   tx.run(
     'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, approver, '
@@ -495,8 +496,9 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     node_type: string | null
     expires_at: string | null
     node_run_id: string | null
+    payload_json: string
   }>(
-    'SELECT d.decision_id, d.run_id, d.kind, d.status, d.revision, d.created_at, d.node_run_id, d.human_attention, d.expiry_effect, d.expires_at, '
+    'SELECT d.decision_id, d.run_id, d.kind, d.status, d.revision, d.created_at, d.node_run_id, d.human_attention, d.expiry_effect, d.expires_at, d.payload_json, '
       + 'COALESCE(t.autonomy, \'autonomous\') AS autonomy, r.status AS run_status, n.status AS node_status, n.node_type '
       + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
       + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
@@ -511,6 +513,10 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     if (opts.skipRunIds?.has(row.run_id)) continue
     // run 已终态：这张卡不再有业务含义，不自动改写也不尝试收口
     if (row.run_status !== null && (RUN_TERMINAL_STATUSES as readonly string[]).includes(row.run_status)) continue
+    if (row.kind === 'abandon_ack' && row.expires_at !== null && Date.parse(row.expires_at) <= nowMs) {
+      if (expireOrdinaryAbandon(tx, secret, row, opts.now)) out.expired += 1
+      continue
+    }
     const age = nowMs - Date.parse(row.created_at)
     const reportConflict = row.kind === 'report_contradicted'
     // blocked_post 压在人工核验上：证据门只能由人关，自动过期会留下“卡没了、节点还卡着”的死角
