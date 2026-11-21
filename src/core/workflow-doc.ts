@@ -6,7 +6,7 @@
 // 两层都返回同一种 issue 形状，path 是 RFC 6901 JSON Pointer，最多 100 条。
 import { z } from 'zod'
 import { OrchError } from './errors.ts'
-import { assertApprovalNodeConfig, assertPolicyNodeConfig, assertToolNodeConfig } from './workflow-def.ts'
+import { assertApprovalNodeConfig, assertParallelNodeConfig, assertParallelTopology, assertPolicyNodeConfig, assertToolNodeConfig, parallelMemberIds } from './workflow-def.ts'
 import { validatePolicy, type PolicyCondition } from './policy.ts'
 
 export const WORKFLOW_DOC_MAX_BYTES = 1024 * 1024
@@ -353,7 +353,19 @@ const configIssues = (doc: WorkflowDoc): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
   for (const node of doc.nodes) {
     const cfg = (node.config ?? {}) as Record<string, unknown>
-    if (node.type === 'policy' || node.type === 'approval' || node.type === 'tool') {
+    if (node.type === 'parallel') {
+      try {
+        const edges = doc.edges.map(({ from, to }) => ({ from, to }))
+        const members = parallelMemberIds(edges, node.node_id)
+        assertParallelNodeConfig(cfg, members.length)
+        assertParallelTopology(edges, node.node_id, cfg)
+        if (!cfg.allow_irreversible_children && doc.nodes.some(member => members.includes(member.node_id) && member.config?.side_effect_policy === 'irreversible')) {
+          throw new Error('parallel 需要显式允许不可逆成员')
+        }
+      } catch (error) {
+        issues.push({ path: pointer(nodePath(doc, node.node_id), 'config'), code: 'WORKFLOW_NODE_CONFIG_INVALID', message: (error as Error).message })
+      }
+    } else if (node.type === 'policy' || node.type === 'approval' || node.type === 'tool') {
       try {
         if (node.type === 'policy') assertPolicyNodeConfig(cfg)
         else if (node.type === 'approval') assertApprovalNodeConfig(cfg)

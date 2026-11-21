@@ -5,7 +5,7 @@ import { expect, it } from 'vitest'
 import { serveOrchestra } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 
-it.each(['parallel'])('S6 通用流程拒绝发布独立 %s 节点', async (type) => {
+it('S6 通用流程拒绝发布缺少固定汇合策略的并行组', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'orch-design-node-readiness-'))
   const secret = 'fixture-workflow-design-node-readiness'
   const service = await serveOrchestra({
@@ -18,13 +18,13 @@ it.each(['parallel'])('S6 通用流程拒绝发布独立 %s 节点', async (type
       method: 'POST', body: JSON.stringify(body),
       headers: { 'content-type': 'application/json', 'x-orchestra-secret': secret },
     })
-    const workflow_id = 'acceptance_' + type
+    const workflow_id = 'acceptance_invalid_parallel'
     const name = '独立节点发布能力核对'
     const definition = {
       name,
       nodes: [
         { node_id: 'start', type: 'trigger', title: '开始', position: { x: 0, y: 0 } },
-        { node_id: 'candidate', type, title: '待核对', position: { x: 100, y: 0 } },
+        { node_id: 'candidate', type: 'parallel', title: '待核对', position: { x: 100, y: 0 } },
         { node_id: 'end', type: 'agent', title: '执行', position: { x: 200, y: 0 } },
       ],
       edges: [
@@ -36,7 +36,7 @@ it.each(['parallel'])('S6 通用流程拒绝发布独立 %s 节点', async (type
 
     const rehearsal = await post('/v1/workflows/test', { workflow_id, revision: 1 })
     expect(rehearsal.status).toBe(200)
-    const issues = [{ path: '/nodes/1', code: 'NODE_NOT_SUPPORTED', message: '节点类型未注册：' + type }]
+    const issues = [expect.objectContaining({ path: '/nodes/1/config', code: 'WORKFLOW_NODE_CONFIG_INVALID' })]
     expect(await rehearsal.json()).toMatchObject({ data: { revision: 1, passed: false, issues: { errors: issues }, order: [] } })
 
     const published = await post('/v1/workflows/publish', {

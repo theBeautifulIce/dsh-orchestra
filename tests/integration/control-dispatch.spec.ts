@@ -395,7 +395,7 @@ describe('控制节点初始化失败必须收干净（审计 P2-2）', () => {
 })
 
 describe('没有执行实现的节点类型必须明确拒绝', () => {
-  it('parallel 节点：拒绝派发、节点落 failed，不悄悄走 agent 路径', async () => {
+  it('旧 parallel 节点没有已发布组配置：拒绝派发、节点落 failed', async () => {
     const service = await boot()
     try {
       withTx(service.orchestra.db, (tx) => {
@@ -410,7 +410,7 @@ describe('没有执行实现的节点类型必须明确拒绝', () => {
         nodes: { p_one: { tools: [] } },
       })
       expect(out[0]).toMatchObject({ node_run_id: 'nr5', status: 'failed', error_code: 'SCHEMA_VERSION_UNSUPPORTED' })
-      expect(out[0]!.reason).toMatch(/还没有执行实现/)
+      expect(out[0]!.reason).toMatch(/没有绑定工作流定义/)
       const node = service.orchestra.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id = 'nr5'").get() as { status: string }
       expect(node.status).toBe('failed')
     } finally {

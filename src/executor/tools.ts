@@ -78,6 +78,9 @@ export class ToolRegistry {
   private readonly tools = new Map<string, ToolDescriptor>()
 
   register(descriptor: ToolDescriptor): void {
+    if (descriptor.name.startsWith(MEMORY_TOOL_PREFIX)) {
+      throw new OrchError('FORBIDDEN', '记忆桥端口只能进入专用注册表', { tool: descriptor.name })
+    }
     if (descriptor.effectVerifier && descriptor.capability !== 'read_only') {
       throw new OrchError('SIDE_EFFECT_UNDECLARED', '副作用核实器必须是只读工具', { tool: descriptor.name })
     }

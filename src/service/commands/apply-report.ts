@@ -786,7 +786,7 @@ function applyReportInternal(
     if (run) {
       const definition = catalog.get(run.workflow_id ?? 'default', run.workflow_version)
       const roleId = resolvePinnedNodeId(tx, row.node_run_id)
-      const consumesOutput = definition.edges?.some(edge => edge.from === roleId && definition.nodes.some(node => node.node_id === edge.to && (node.type === 'branch' || node.type === 'policy')))
+      const consumesOutput = definition.edges?.some(edge => edge.from === roleId && definition.nodes.some(node => node.node_id === edge.to && ['branch','policy','parallel'].includes(node.type)))
       const output = report.output ?? {}
       if (consumesOutput && Buffer.byteLength(canonicalJson(output)) <= 65_536) {
         appendNodeRunEvent(tx, secret, params.nodeRunId, 'workflow.output', output)

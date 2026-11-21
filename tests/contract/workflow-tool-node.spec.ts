@@ -11,6 +11,7 @@ import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { acquireNodeRunInTx } from '../../src/service/commands/runtime.ts'
 import { applyTransition } from '../../src/service/commands/nodes.ts'
+import { startMemoryRun } from '../../src/service/commands/memory.ts'
 
 it('S6 独立工具由只读宿主执行固定命令，并用可核对收据收口和恢复', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'orch-tool-node-'))
@@ -96,6 +97,12 @@ it('S6 独立工具由只读宿主执行固定命令，并用可核对收据收�
     expect(receipt).toMatchObject({ tool: 'fixture_read', exit_code: 0, stdout_hash: sha256Hex('fixture evidence'), command_hash: expect.stringMatching(/^[0-9a-f]{64}$/) })
     const phases = db.raw.prepare("SELECT type FROM node_run_events WHERE node_run_id=? AND type IN ('tool.call','tool_started','tool_finished','tool.completed') ORDER BY seq").all(good.node().node_run_id!)
     expect(phases.map(event => event.type)).toEqual(['tool.call','tool_started','tool_finished','tool.completed'])
+    const memory = startMemoryRun(db, { source_run_id: good.runId, reason: '隔离核对', request_key: 'fixture-memory', operation_id: uuidv7(), now: new Date().toISOString() })
+    expect(await post('/v1/runs/dispatch', { runId: memory.memory_run_id, nodes: { mem_check: { tools: [] } } }))
+      .toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
+    const memoryNode = db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id='mem_prepare'").get(memory.memory_run_id)?.node_run_id
+    expect(await post('/v1/node-runs/lease', { nodeRunId: memoryNode, ownerEpoch: db.epoch, leaseTtlMs: 30_000 }))
+      .toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
 
     code = 7
     const bad = await start()

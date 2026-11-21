@@ -7,6 +7,7 @@ import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
 import { assertRunCanTerminal, refreshRunSettling } from './parallel.ts'
 import { applyRunAcceptance } from './run-acceptance.ts'
 import { finishSubworkflowChild, nodeRunChainIsIntact } from './subworkflow.ts'
+import { parallelToleratesMember, refreshWorkflowParallelGroups } from '../workflow-parallel.ts'
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
 
@@ -21,6 +22,7 @@ type NodeRow = {
   status: string
   unverified: number
   replacement_node_run_id: string | null
+  parent_node_run_id: string | null
 }
 
 /**
@@ -41,9 +43,10 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
     return null
   }
   if (!run.cancel_requested_at && (hasUnresolvedRework(tx,runId) || hasDeliveryReviewHold(tx,runId))) return null
+  refreshWorkflowParallelGroups(tx, secret, runId, now)
   refreshRunSettling(tx, runId, now)
   const nodes = tx.all<NodeRow>(
-    `SELECT node_run_id, status, replacement_node_run_id, (${UNVERIFIED_EFFECT}) AS unverified FROM node_runs n WHERE run_id = ?`,
+    `SELECT node_run_id, status, replacement_node_run_id, parent_node_run_id, (${UNVERIFIED_EFFECT}) AS unverified FROM node_runs n WHERE run_id = ?`,
     [runId],
   )
   const terminal = new Set(['done', 'failed', 'timeout', 'abandoned_unverified', 'failed_with_unverified', 'orphaned', 'superseded'])
@@ -65,8 +68,11 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
   }
 
   const unverified = (node: NodeRow) => node.unverified === 1
-  const failed = nodes.some((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status))
-  const orphaned = nodes.some((node) => node.status === 'orphaned' && !node.replacement_node_run_id)
+  const isTolerated = (node: NodeRow) => !!node.parent_node_run_id && !unverified(node)
+    && parallelToleratesMember(tx, undefined, node.parent_node_run_id, node.node_run_id)
+  const isFailed = (node: NodeRow) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status) && !isTolerated(node)
+  const failed = nodes.some(isFailed)
+  const orphaned = nodes.some((node) => node.status === 'orphaned' && !node.replacement_node_run_id && !isTolerated(node))
   const hasUnverified = nodes.some(unverified)
   // 业务结果：不看取消意图，只按节点事实算，供调用方与面板区分“停了”和“成了/败了”
   const outcome: RunTerminal = failed
@@ -102,7 +108,7 @@ export function closeRun(tx: Tx, secret: string, runId: string, now: string): Ru
       outcome,
       cancel_result: run.cancel_result,
       cancel_requested: run.cancel_requested_at !== null,
-      failed_nodes: nodes.filter((node) => ['failed', 'timeout', 'failed_with_unverified'].includes(node.status)).map((node) => node.node_run_id),
+      failed_nodes: nodes.filter(isFailed).map((node) => node.node_run_id),
       unverified_nodes: nodes.filter(unverified).map((node) => node.node_run_id),
       orphaned_nodes: nodes.filter((node) => node.status === 'orphaned' && !node.replacement_node_run_id).map((node) => node.node_run_id),
       superseded_nodes: nodes.filter((node) => node.status === 'superseded').map((node) => node.node_run_id),
