@@ -25,6 +25,8 @@ import { NodeEffectFacts, NodeEvidence } from './task-run-evidence.tsx'
 import { WorkflowCanvasView } from './workflow-canvas-view.tsx'
 import { operatorReason } from '../../core/operator-language.ts'
 import { nodeExecutionLabel } from './task-node-status.ts'
+import { RunNotes } from './run-notes.tsx'
+import type { ApiClient } from '../api/client.ts'
 
 export type TaskDetailScreenProps = {
   api: ResourcesApi
@@ -41,16 +43,17 @@ export type TaskDetailScreenProps = {
   onArchiveChanged?: () => void
   onOpenMemory?: () => void
   onOpenDecision?: (id: string) => void
+  notesClient?: ApiClient
 }
 type DetailData = { task: TaskSummary; runs: RunSummary[]; next: string | null }
 type RunRead = { api: ResourcesApi; taskId: string; runId: string; revision: number; retry: number; run?: RunSummary; failed?: boolean }
 const TASK_TABS = ['概览', '运行', '编排', '事件'] as const
-const RUN_TABS = ['步骤', '结果', '证据', '事件'] as const
+const RUN_TABS = ['步骤', '结果', '证据', '事件', '便条'] as const
 type TaskTab = (typeof TASK_TABS)[number]
 type RunTab = (typeof RUN_TABS)[number]
 
 export function TaskDetailScreen({
-  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision,
+  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision, notesClient,
 }: TaskDetailScreenProps) {
   const [loaded, setLoaded] = useState<{ api: ResourcesApi; taskId: string; data: DetailData }>()
   const data = loaded?.api === api && loaded.taskId === taskId ? loaded.data : undefined
@@ -146,7 +149,7 @@ export function TaskDetailScreen({
         {task.archived_at && <span className="task-type-badge">已归档</span>}
       </div>}
       {showRun ? <div className="task-inspector-tabs" role="group" aria-label="运行详情视图">
-        {RUN_TABS.map((label) => <button key={label} type="button" aria-pressed={runTab === label} onClick={() => {
+        {RUN_TABS.filter((label) => label !== '便条' || notesClient).map((label) => <button key={label} type="button" aria-pressed={runTab === label} onClick={() => {
           if (label === '结果') setReviewRunId(selectedRunId)
           setRunTab(label)
           resetScroll()
@@ -163,9 +166,11 @@ export function TaskDetailScreen({
       {showRun && <div className="task-inspector-back"><button className="task-quiet-button" type="button" onClick={returnToTask}>返回任务</button></div>}
       {showRun && !failed && detailFailed && <ReadError onRetry={() => setReload((n) => n + 1)} />}
       {showRun && task && run && <>
-        <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation}
+        {runTab === '便条' && notesClient
+          ? <RunNotes key={run.run_id} client={notesClient} runId={run.run_id} reloadVersion={reloadVersion} />
+          : <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab === '便条' ? '步骤' : runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation}
           reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision}
-          onOpenResult={() => { setReviewRunId(run.run_id); setRunTab('结果'); resetScroll() }} />
+          onOpenResult={() => { setReviewRunId(run.run_id); setRunTab('结果'); resetScroll() }} />}
         {rework && reviewRunId === run.run_id && <div hidden={runTab !== '结果'}><ReworkPanel key={run.run_id} api={api} commands={rework} runId={run.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} /></div>}
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}

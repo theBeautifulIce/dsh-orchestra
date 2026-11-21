@@ -12,6 +12,7 @@ import { callPlanningStage } from './task-planning.ts'
 import { planningSettingsSchema, planningTimeoutDefaults, withPlanningBudget, type PlanningSettingsHost } from './planning-settings.ts'
 import { executionCapacitySettingsSchema, type ExecutionCapacitySettingsHost } from './execution-capacity-settings.ts'
 import { workflowConcurrencySchema, type WorkflowConcurrencyHost } from './workflow-concurrency-settings.ts'
+import { runNoteHumanInput, type RunNotes } from './run-notes.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
 import type { ListTaskParams, TaskSummary, WorkspaceOverview } from './queries/tasks.ts'
@@ -66,6 +67,7 @@ export type ResolveHttpHuman = (request: IncomingMessage) => { id: string } | nu
 export type ServerDeps = {
   secret: string
   resolveHttpHuman?: ResolveHttpHuman
+  runNotes?: RunNotes
   phase: string
   epoch: number
   asOfSeq: () => number
@@ -360,6 +362,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         planning_timeouts_enabled: Boolean(deps.planningSettings),
         execution_capacity_enabled: Boolean(deps.executionCapacitySettings && deps.resolveHttpHuman),
         workflow_concurrency_enabled: Boolean(deps.workflowConcurrencySettings && deps.resolveHttpHuman),
+        run_notes_enabled: Boolean(deps.runNotes && deps.resolveHttpHuman),
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
         rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
         model_escalation_enabled: Boolean(deps.modelEscalation),
@@ -370,6 +373,21 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     const bound = deps.phase === 'S6' ? await deps.resolveHttpHuman?.(req) : undefined
     const human = () => authenticatedHuman(deps, serviceActor, bound)
     const actor = bound ? human().id : serviceActor
+    if (deps.runNotes && deps.resolveHttpHuman && url.pathname === '/v1/run-notes') {
+      const notes = deps.runNotes
+      if (req.method === 'GET') {
+        const { as_of_seq, ...page } = notes.listHuman(stringParam(url, 'run_id') ?? '', human().id)
+        sendJson(res, 200, okEnvelope(as_of_seq, page))
+        return
+      }
+      if (req.method === 'POST') {
+        const actorId = human().id
+        const body = parseBody(runNoteHumanInput, await readJsonBody(req), '添加运行便条')
+        const result = await queue.run(() => notes.addHuman(body, actorId))
+        sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+        return
+      }
+    }
     if (deps.modelEscalation && url.pathname === '/v1/model-escalation') {
       if (req.method === 'GET') {
         const { as_of_seq, ...view } = deps.modelEscalation.get(stringParam(url, 'run_id') ?? '', stringParam(url, 'node_run_id') ?? '', human().id)
@@ -1187,6 +1205,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     if (req.method === 'POST' && url.pathname === '/v1/ledger/events') {
       const body = parseBody(ledgerEventSchema, await readJsonBody(req), '写账本事件')
+      if (String(body.type).startsWith('run.note_') || String(body.idempotencyKey ?? '').startsWith('run-note-')) {
+        throw new OrchError('FORBIDDEN', '运行便条账本事件只由便条服务记录')
+      }
       if (body.type === 'decision.command_audited') throw new OrchError('FORBIDDEN', '裁决审计只由命令处理器记录')
       const out = await queue.run(() => deps.appendLedgerEvent(body, serviceActor))
       sendJson(res, 200, okEnvelope(out.seq, { seq: out.seq, event_id: out.event_id, actor: serviceActor }))
