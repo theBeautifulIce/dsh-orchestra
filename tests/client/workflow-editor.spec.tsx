@@ -151,6 +151,12 @@ describe('流程草稿编辑屏', () => {
     expect(calls).toHaveLength(0)
     await view.click(checkbox()!)
     expect(JSON.parse(editorOf(view).value).nodes[1].config).toEqual({ side_effect_policy: 'pure' })
+    const definition = JSON.parse(editorOf(view).value)
+    definition.nodes[1].config.side_effect_policy = 'irreversible'
+    await typeText(editorOf(view), JSON.stringify(definition))
+    expect(checkbox()?.disabled).toBe(true)
+    definition.nodes[1].config.side_effect_policy = 'pure'
+    await typeText(editorOf(view), JSON.stringify(definition))
     await view.click(checkbox()!)
     await clickButton(view, '保存草稿')
     expect(calls).toHaveLength(1)

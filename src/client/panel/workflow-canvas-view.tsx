@@ -258,6 +258,8 @@ export function WorkflowCanvasView({
   const edges = doc?.edges ?? []
   const selected = nodes.find((node) => node.node_id === selectedId) ?? (workspace ? nodes[0] : undefined)
   const selectedConfig = selected?.type === 'agent' ? nodeConfig(selected) : undefined
+  const retryEnabled = selectedConfig?.recovery_retry_idempotent === true
+  const irreversible = selectedConfig?.side_effect_policy === 'irreversible'
   const runtimeByNode = currentAttempts(runtimeNodes ?? [])
   const runtimeLabel = (id: string) => {
     const attempt = runtimeByNode.get(id)
@@ -403,12 +405,14 @@ export function WorkflowCanvasView({
         <p style={mutedStyle}>{NODE_TYPE_LABEL[selected.type] ?? '步骤类型未记录'}{!compact && ` · ${selected.node_id}`}</p>
         {selectedConfig && !readOnly && onChange && <div>
           <label>
-            <input type="checkbox" disabled={!editRecoveryRetry} aria-describedby={retryHelpId}
-              checked={selectedConfig.recovery_retry_idempotent === true}
+            <input type="checkbox" disabled={!editRecoveryRetry || (irreversible && !retryEnabled)} aria-describedby={retryHelpId}
+              checked={retryEnabled}
               onChange={(event) => setRecoveryRetry(selected, event.currentTarget.checked)} />
             核实后允许重试
           </label>
-          <p id={retryHelpId} style={mutedStyle}>仅为可安全重复执行的步骤开启。发布后，新运行中确认上次未启动或副作用未发生时，才可创建新尝试。</p>
+          <p id={retryHelpId} style={mutedStyle}>{irreversible
+            ? '这一步含不可逆操作，发布前请关闭重试。'
+            : '仅为可安全重复执行的步骤开启。发布后，新运行中确认上次未启动或副作用未发生时，才可创建新尝试。'}</p>
         </div>}
         {runtimeByNode.get(selected.node_id) && <p>{runtimeLabel(selected.node_id)} · 第 {runtimeByNode.get(selected.node_id)?.attempt ?? '未知'} 次执行</p>}
         {selected.raw.runtime_step != null && <><p>来源角色：{String((selected.raw.runtime_step as {source_title: string}).source_title)}</p><p>{String((selected.raw.runtime_step as {instruction: string}).instruction)}</p></>}
