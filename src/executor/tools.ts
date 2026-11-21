@@ -174,13 +174,16 @@ export function resolveDeclaredPolicy(declared: SideEffectPolicy, derived: SideE
 
 // —— 只读执行器与强证据（规格 7.2 行 588、4.7 行 380-384）——
 
-// 宿主执行接口：只读身份由宿主保证，本批只负责不越权
+export type ToolExecutionBoundary = 'windows_appcontainer_bfs' | 'dsh_workspace_rpc'
+
+// Execution confinement belongs to the trusted host. Existing host receipts may omit the boundary.
 export type HostRunner = {
-  readonlyAvailable(): boolean
+  readonlyAvailable(bin?: string): boolean
   run(input: { bin: string; args: string[]; cwd: string; timeoutMs: number; signal?: AbortSignal }): Promise<{
     exitCode: number
     stdout: string
     stderr: string
+    boundary?: ToolExecutionBoundary
   }>
 }
 
@@ -197,6 +200,7 @@ export function resolveInside(root: string, target: string): string {
 export type StrongEvidence = {
   // 来源标记：run_tool 是强证据，模型侧 tool_result 是弱证据（规格 4.7 行 380-383）
   source: 'run_tool'
+  boundary?: ToolExecutionBoundary
   exitCode: number
   stdoutHash: string
   stderrHash: string
@@ -242,7 +246,11 @@ export class ReadOnlyToolRunner {
 
   // 执行器只在自己挂载的根里跑，调用方要核命令哈希时得拿到同一个根
   get root(): string { return this.workspaceRoot }
-  readonlyAvailable(): boolean { return this.host.readonlyAvailable() }
+  readonlyAvailable(command?: string): boolean {
+    if (command === undefined) return this.host.readonlyAvailable()
+    const descriptor = this.registry.lookup(command)
+    return descriptor?.capability === 'read_only' && this.host.readonlyAvailable(descriptor.command.bin)
+  }
 
   async runTool(params: RunToolParams): Promise<RunToolResult> {
     // 命令必须命中注册表，且 capability 必须是 read_only
@@ -257,7 +265,7 @@ export class ReadOnlyToolRunner {
       })
     }
     // 宿主没有只读挂载就报，不降级（规格 4.7 行 381）
-    if (!this.host.readonlyAvailable()) {
+    if (!this.host.readonlyAvailable(descriptor.command.bin)) {
       throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '宿主没有只读挂载，强证据不可得', {
         command: params.command,
       })
@@ -275,6 +283,7 @@ export class ReadOnlyToolRunner {
     })
     const evidence: StrongEvidence = {
       source: 'run_tool',
+      ...(res.boundary ? { boundary: res.boundary } : {}),
       exitCode: res.exitCode,
       stdoutHash: sha256Hex(res.stdout),
       stderrHash: sha256Hex(res.stderr),

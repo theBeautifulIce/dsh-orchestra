@@ -54,6 +54,7 @@ describe('runTool 只读执行与强证据', () => {
     const { runner, run } = setup()
     const res = await runner.runTool({ command: 'git', args: ['rm', '-rf', '.'], cwd: 'sub', timeoutMs: 5000, workspaceRoot: ROOT })
     expect(res.evidence.source).toBe('run_tool')
+    expect(res.evidence.boundary).toBeUndefined()
     expect(res.evidence.exitCode).toBe(0)
     expect(res.evidence.stdoutHash).toBe(sha256Hex('ok'))
     expect(res.evidence.stderrHash).toBe(sha256Hex(''))
