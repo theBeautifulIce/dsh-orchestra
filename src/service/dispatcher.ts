@@ -144,7 +144,7 @@ function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: Rea
   const settled: DispatchOutcome[] = []
   for (const row of all) {
     if (submitted?.has(row.node_run_id) || reworkBlocksNode(tx, row.node_run_id)) continue
-    const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [], row.node_id)
+    const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [], row.node_id, deps.secret)
     if (readiness.ready) {
       rows.push(row)
       continue

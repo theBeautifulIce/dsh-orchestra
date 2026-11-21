@@ -4,15 +4,20 @@ import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { serveOrchestra } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
+import { BridgeClient } from '../../src/executor/bridge.ts'
+import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 
 it('S6 branch 读取上游结果，持久选路与人工续行使未选路径无法派发', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'orch-branch-node-'))
   const secret = 'fixture-branch-node'
+  const registry = new ToolRegistry()
   const boot = () => serveOrchestra({
     dbFile: join(dir, 'orchestra.db'), phase: 'S6', secret,
     asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }),
     resolveHttpHuman: request => request.headers.authorization === 'Bearer branch-operator' ? { id: 'fixture:operator' } : null,
+    executor: { registry, bridge: new BridgeClient({ async call() { throw new Error('unexpected agent call') } }),
+      runner: new ReadOnlyToolRunner(registry, { readonlyAvailable: () => false, async run() { throw new Error('unexpected tool call') } }, dir) },
   })
   let service = await boot()
   const post = async (path: string, body: unknown, operator = false) => {
@@ -104,6 +109,23 @@ it('S6 branch 读取上游结果，持久选路与人工续行使未选路径无
     expect(await waiting.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'left', status: 'done' })] })
     expect(await waiting.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'merge', status: 'done' })] })
     expect(service.orchestra.db.raw.prepare('SELECT status FROM runs WHERE run_id=?').get(waiting.runId)?.status).toBe('succeeded')
+
+    const corruptId = 'corrupt_route_authority'
+    const corrupt = doc({ default: true })
+    corrupt.nodes = corrupt.nodes.filter(node => node.node_id !== 'right').map(node => node.node_id === 'merge' ? { ...node, type: 'agent' } : node)
+    corrupt.edges = corrupt.edges.filter(edge => edge.from !== 'right' && edge.to !== 'right')
+    expect(await post('/v1/workflows', { operation_id: uuidv7(), workflow_id: corruptId, name, definition: corrupt })).toMatchObject({ status: 200 })
+    expect(await post('/v1/workflows/test', { workflow_id: corruptId, revision: 1 })).toMatchObject({ status: 200, data: { passed: true } })
+    expect(await post('/v1/workflows/publish', { operation_id: uuidv7(), workflow_id: corruptId, revision: 1, base_version: 0, publish_note: '断链反例' })).toMatchObject({ status: 200 })
+    const guarded = await start(corruptId, 'pass')
+    expect(await guarded.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'choose', status: 'done' })] })
+    expect(await guarded.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'left', status: 'done' })] })
+    const db = service.orchestra.db
+    db.raw.exec('DROP TRIGGER trg_node_run_events_no_update')
+    db.raw.prepare("UPDATE node_run_events SET hash='tampered' WHERE node_run_id=? AND type='branch.selected'").run(guarded.node('choose').node_run_id!)
+    expect(await post('/v1/node-runs/lease', { nodeRunId: guarded.node('merge').node_run_id, ownerEpoch: db.epoch, leaseTtlMs: 30_000 }))
+      .toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
+    expect(guarded.node('merge')).toMatchObject({ status: 'queued', lease_id: null })
   } finally {
     await service.close()
     await rm(dir, { recursive: true, force: true })

@@ -85,7 +85,7 @@ export function readChain(tx: Pick<Tx, 'all'>, nodeRunIdValue: string): ChainRow
 }
 
 // 读链头：校验端与排障用
-export function readChainHead(tx: Tx, nodeRunIdValue: string): ChainHead | undefined {
+export function readChainHead(tx: Pick<Tx, 'get'>, nodeRunIdValue: string): ChainHead | undefined {
   return tx.get<ChainHead>('SELECT node_run_id, last_seq, last_hash, event_count, updated_at FROM node_run_chain_heads WHERE node_run_id = ?', [nodeRunIdValue])
 }
 
