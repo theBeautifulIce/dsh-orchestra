@@ -100,8 +100,9 @@ describe('branch 路由细则（P2-1）', () => {
   })
 
   it('合法的 priority 或 default 通过', () => {
-    expect(run({ priority: 1 })).toEqual([])
+    expect(run({ priority: 1, when: { path: 'ready', op: 'exists' } })).toEqual([])
     expect(run({ default: true })).toEqual([])
+    expect(run({ priority: 1 })).toContainEqual(expect.objectContaining({ path: '/edges/1/route/when', code: 'WORKFLOW_BRANCH_ROUTE_INVALID' }))
   })
 
   it('priority 超范围不会让保存层整份解析失败，只作提示', () => {

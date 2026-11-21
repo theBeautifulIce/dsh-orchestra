@@ -515,6 +515,7 @@ export type ApplyBranchRouteRequest = {
   // 无命中时生成的 rule_ambiguous 卡；缺省自动生成
   decisionId?: string
   runId?: string
+  approver?: 'human'
 }
 
 /**
@@ -545,7 +546,9 @@ export function applyBranchRoute(tx: Tx, secret: string, req: ApplyBranchRouteRe
     runId,
     nodeRunId: req.nodeRunId,
     kind: 'rule_ambiguous',
-    payload: { matched: choice.matched, edges: req.edges.map((edge) => edge.to) },
+    payload: { matched: choice.matched, edges: req.edges.map((edge) => edge.to),
+      ...(req.approver === 'human' ? { target_summary: '没有规则命中，请选择后续分支或结束此次运行。' } : {}) },
+    approver: req.approver,
     createdAt: req.now,
   })
   for (const from of req.from) {
@@ -560,7 +563,7 @@ export function applyBranchRoute(tx: Tx, secret: string, req: ApplyBranchRouteRe
       to: 'blocked_post',
       attempt: req.attempt,
       now: req.now,
-      patch: { resume_state: null },
+      patch: { resume_state: null, blocked_decision_id: decisionId },
     })
     appendNodeRunEvent(tx, secret, req.nodeRunId, 'policy.evaluated', branchPolicyOutcome(choice))
     appendNodeRunEvent(tx, secret, req.nodeRunId, 'status_changed', {

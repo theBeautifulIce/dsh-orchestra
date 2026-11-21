@@ -241,9 +241,10 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
       notice={cardNotices[decision.decision_id]}
       onToggle={() => toggleSelected(decision.decision_id)}
       onAcknowledge={() => { void acknowledgeDecision(decision) }}
-      onResolve={(resolution, label) => { void resolveDecision({
+      onResolve={(resolution, label, selectedNodeId) => { void resolveDecision({
         decisionId: decision.decision_id, revision: decision.current_revision, resolution,
         ...(decision.content_hash ? { contentHash: decision.content_hash } : {}),
+        ...(selectedNodeId ? { selectedNodeId } : {}),
       }, label) }}
       confirmation={!history && pending?.input.decisionId === decision.decision_id
         && pending.input.revision === decision.current_revision && pending.input.contentHash === (decision.content_hash ?? undefined)
@@ -311,17 +312,20 @@ function DecisionCard(props: {
   notice?: Notice
   onToggle: () => void
   onAcknowledge: () => void
-  onResolve: (resolution: string, label: string) => void
+  onResolve: (resolution: string, label: string, selectedNodeId?: string) => void
   confirmation?: ReactNode
 }) {
   const { decision } = props
+  const [selectedBranch, setSelectedBranch] = useState('')
   const kind = Object.hasOwn(KIND_LABEL, decision.kind) ? KIND_LABEL[decision.kind] : '待确认事项'
   const agentOnly = decision.approver?.startsWith('agent:') === true
   const status = agentOnly && decision.status !== 'resolved' ? '由授权核验主体处理' : operatorStatus(decision.status)
   const choices = (decision.allowed_resolutions ?? []).flatMap((value) => {
-    const label = DECISION_OPTIONS.get(value)
+    const label = decision.kind === 'rule_ambiguous' && value === 'approved' ? '继续所选分支' : DECISION_OPTIONS.get(value)
     return label ? [{ value, label }] : []
   })
+  const branches = decision.kind === 'rule_ambiguous' && isRecord(decision.payload) && Array.isArray(decision.payload.edges)
+    ? decision.payload.edges.filter((value): value is string => typeof value === 'string') : []
   const priority = decision.priority && PRIORITY_LABEL.get(decision.priority)
   const evidence = [...new Set((decision.required_evidence ?? []).map(operatorReason))]
   const missing = decision.projection_missing ?? []
@@ -388,12 +392,19 @@ function DecisionCard(props: {
         选择这条决定
       </label>
       <button type="button" onClick={props.onAcknowledge} disabled={!props.commands || props.busy} style={buttonStyle}>接手</button>
+      {branches.length > 0 && choices.some(({ value }) => value === 'approved') && <label style={toggleStyle}>
+        后续分支
+        <select aria-label="后续分支" value={selectedBranch} onChange={event => setSelectedBranch(event.target.value)}>
+          <option value="">请选择分支</option>
+          {branches.map(id => <option key={id} value={id}>{id}</option>)}
+        </select>
+      </label>}
       {choices.length > 0
         ? choices.map(({ value, label }) => <button
           key={value}
           type="button"
-          onClick={() => props.onResolve(value, label)}
-          disabled={!props.commands || props.busy}
+          onClick={() => props.onResolve(value, label, value === 'approved' && branches.length ? selectedBranch : undefined)}
+          disabled={!props.commands || props.busy || (value === 'approved' && branches.length > 0 && !branches.includes(selectedBranch))}
           style={buttonStyle}
         >{label}</button>)
         : <button type="button" disabled style={buttonStyle}>处理</button>}

@@ -16,13 +16,14 @@ import { startSubworkflowNode } from './commands/subworkflow.ts'
 import { loadNodeRun, releaseLease } from './commands/lease.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
 import { closeRun } from './commands/run-close.ts'
-import { applyTransition, enterBlockedPre, recordPolicyEvaluation } from './commands/nodes.ts'
+import { applyBranchRoute, applyTransition, enterBlockedPre, recordPolicyEvaluation } from './commands/nodes.ts'
 import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { ExecutionQueueFullError } from './execution-scheduler.ts'
-import type { ApprovalNodeConfig, PolicyNodeConfig } from '../core/workflow-def.ts'
+import { branchEdgesOf, type ApprovalNodeConfig, type PolicyNodeConfig, type WorkflowDefinition } from '../core/workflow-def.ts'
 import { sha256Hex, canonicalJson } from '../core/canonical.ts'
 import { uuidv7 } from '../core/ids.ts'
 import { openDecision } from './commands/decisions.ts'
+import { persistBranchSelection, ruleNodeInput } from './branch-routing.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
@@ -143,7 +144,7 @@ function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: Rea
   const settled: DispatchOutcome[] = []
   for (const row of all) {
     if (submitted?.has(row.node_run_id) || reworkBlocksNode(tx, row.node_run_id)) continue
-    const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [])
+    const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [], row.node_id)
     if (readiness.ready) {
       rows.push(row)
       continue
@@ -347,8 +348,9 @@ async function dispatchOne(
 type ControlNodeConfig =
   | { kind: 'wait'; waitKind: WaitKind; match: WaitMatch; idempotencyKey: string; fromSeq?: number; maxWaitMs: number }
   | { kind: 'subworkflow'; workflowId: string; workflowVersion: number; resumeFrom: string | null }
-  | { kind: 'policy'; config: PolicyNodeConfig }
+  | { kind: 'policy'; config: PolicyNodeConfig; definition: WorkflowDefinition }
   | { kind: 'approval'; config: ApprovalNodeConfig; definitionHash: string }
+  | { kind: 'branch'; definition: WorkflowDefinition; branchId: string }
 
 type RunBinding = {
   workflow_id: string | null
@@ -446,6 +448,7 @@ const CONTROL_KINDS: Record<string, ControlNodeConfig['kind'] | null> = {
   agent: null,
   policy: 'policy',
   approval: 'approval',
+  branch: 'branch',
 }
 
 /**
@@ -533,7 +536,7 @@ function resolveControlConfig(
     if (!declared.policy) {
       throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'policy 节点缺少已发布的规则', { nodeId: row.node_id })
     }
-    return { kind: 'policy', config: declared.policy }
+    return { kind: 'policy', config: declared.policy, definition: def }
   }
   if (kind === 'approval') {
     if (!declared.approval) {
@@ -541,6 +544,7 @@ function resolveControlConfig(
     }
     return { kind: 'approval', config: declared.approval, definitionHash: run!.workflow_definition_hash }
   }
+  if (kind === 'branch') return { kind: 'branch', definition: def, branchId: declared.node_id }
   if (kind === 'wait') {
     const cfg = declared.wait
     if (!cfg) {
@@ -577,8 +581,9 @@ async function dispatchControlNode(
   control: ControlNodeConfig,
   spec: NodeSpec,
 ): Promise<DispatchOutcome> {
-  if (control.kind === 'policy') return dispatchPolicyNode(deps, p, row, control.config, spec)
+  if (control.kind === 'policy') return dispatchPolicyNode(deps, p, row, control, spec)
   if (control.kind === 'approval') return dispatchApprovalNode(deps, p, row, control, spec)
+  if (control.kind === 'branch') return dispatchBranchNode(deps, p, row, control, spec)
   try {
     acquireNodeRun(deps.runtime, {
       nodeRunId: row.node_run_id,
@@ -654,17 +659,49 @@ async function dispatchControlNode(
   }
 }
 
-function dispatchPolicyNode(deps: DispatchDeps, p: DispatchParams, row: DispatchRow, policy: PolicyNodeConfig, spec: NodeSpec): DispatchOutcome {
+function dispatchPolicyNode(
+  deps: DispatchDeps, p: DispatchParams, row: DispatchRow, policy: Extract<ControlNodeConfig, { kind: 'policy' }>, spec: NodeSpec,
+): DispatchOutcome {
   const nodeRunId = row.node_run_id
   const nodeId = row.node_id
   try {
     if (spec.tools.length > 0) throw new OrchError('TOOL_NOT_ALLOWED', 'policy 节点不允许调用工具')
     inTx(deps.db, (tx) => {
       startSynchronousNode(tx, deps, p, row)
-      const outcome = recordPolicyEvaluation(tx, deps.secret, nodeRunId, policy.condition, spec.input ?? {}, { ruleId: policy.rule_id ?? nodeId })
+      const input = ruleNodeInput(tx, deps.secret, p.runId, nodeId, policy.definition, spec.input ?? {})
+      const outcome = recordPolicyEvaluation(tx, deps.secret, nodeRunId, policy.config.condition, input, { ruleId: policy.config.rule_id ?? nodeId })
       finishSynchronousNode(tx, deps, p, row, { reason: 'policy_evaluated', decision: outcome.decision })
     })
     return { node_run_id: nodeRunId, node_id: nodeId, status: 'done' }
+  } catch (error) {
+    return settleSynchronousError(deps, p, row, error)
+  }
+}
+
+function dispatchBranchNode(
+  deps: DispatchDeps, p: DispatchParams, row: DispatchRow, branch: Extract<ControlNodeConfig, { kind: 'branch' }>, spec: NodeSpec,
+): DispatchOutcome {
+  const nodeRunId = row.node_run_id
+  try {
+    if (spec.tools.length > 0) throw new OrchError('TOOL_NOT_ALLOWED', 'branch 节点不允许调用工具')
+    const output = inTx(deps.db, (tx) => {
+      startSynchronousNode(tx, deps, p, row)
+      const input = ruleNodeInput(tx, deps.secret, p.runId, row.node_id, branch.definition, {})
+      const decisionId = 'dec_' + uuidv7()
+      const choice = applyBranchRoute(tx, deps.secret, { nodeRunId, attempt: row.attempt, from: ['started'],
+        edges: branchEdgesOf(branch.definition, branch.branchId), input, now: p.now, decisionId, runId: p.runId, approver: 'human',
+      })
+      if (choice.kind === 'blocked') {
+        releaseLease(tx, { nodeRunId, now: p.now })
+        tx.run("UPDATE node_runs SET side_effect_policy='pure', side_effect_verified_none=1 WHERE node_run_id=?", [nodeRunId])
+        appendEvent(tx, { type: 'decision.created', runId: p.runId, nodeRunId, decisionId, payload: { kind: 'rule_ambiguous' } })
+        return { status: 'waiting' as const, reason: 'rule_ambiguous' }
+      }
+      persistBranchSelection(tx, deps.secret, branch.definition, { runId: p.runId, nodeRunId, branchId: branch.branchId, targetId: choice.to, now: p.now })
+      finishSynchronousNode(tx, deps, p, row, { reason: 'branch_selected', target_node_id: choice.to })
+      return { status: 'done' as const }
+    })
+    return { node_run_id: nodeRunId, node_id: row.node_id, ...output }
   } catch (error) {
     return settleSynchronousError(deps, p, row, error)
   }
@@ -699,7 +736,7 @@ function dispatchApprovalNode(
       assertNodeRunReadyInTx(tx, deps.runtime, nodeRunId)
       const decisionId = 'dec_' + uuidv7()
       openDecision(tx, { decisionId, runId: p.runId, nodeRunId, kind: 'pre_execution', approver: 'human', contentHash: hash,
-        payload: { node_type: 'approval', prompt: approval.config.prompt, on_timeout: approval.config.on_timeout },
+        payload: { node_type: 'approval', target_summary: approval.config.prompt, on_timeout: approval.config.on_timeout },
         createdAt: p.now, expiresAt: new Date(Date.parse(p.now) + 24 * 60 * 60 * 1000).toISOString(),
       })
       tx.run("UPDATE node_runs SET side_effect_policy='pure', side_effect_verified_none=1 WHERE node_run_id=?", [nodeRunId])

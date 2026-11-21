@@ -161,8 +161,9 @@ export function runtimeProjection(workflowId: string, version: string, doc: Work
   // 边也要进运行定义：definition_hash 必须覆盖真实拓扑，不能只 hash 节点数组（审计 P1-3）。
   // 触发器不进运行面，碰到它的边要一并裁掉，否则前置判断会去等一个不存在的节点。
   const ids = new Set(nodes.map((n) => n.node_id))
+  const branches = new Set(nodes.filter(n => n.type === 'branch').map(n => n.node_id))
   const edges = doc.edges
-    .map((e) => ({ from: e.from, to: e.to }))
+    .map((e) => ({ from: e.from, to: e.to, ...(branches.has(e.from) ? { route: e.route as NonNullable<WorkflowDefinition['edges']>[number]['route'] } : {}) }))
     .filter((e) => ids.has(e.from) && ids.has(e.to))
   return { workflow_id: workflowId, workflow_version: version, nodes, edges }
 }

@@ -2,15 +2,15 @@
 import { OrchError } from './errors.ts'
 import { PHASE_CAPABILITIES, type Phase } from './config.ts'
 import { assertNoMemoryWriteTool } from './memory-graph.ts'
-import { validatePolicy, type PassCondition, type PolicyCondition } from './policy.ts'
+import { validateBranchEdges, validatePolicy, type BranchEdge, type PassCondition, type PolicyCondition } from './policy.ts'
 
-export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait' | 'policy' | 'approval'
+export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait' | 'policy' | 'approval' | 'branch'
 
 export type PolicyNodeConfig = { condition: PolicyCondition; rule_id?: string }
 export type ApprovalNodeConfig = { prompt: string; on_timeout: 'fail' }
 
 export function isDispatcherWorkflowNode(type: string): boolean {
-  return type === 'policy' || type === 'approval'
+  return type === 'policy' || type === 'approval' || type === 'branch'
 }
 
 export function isControlWorkflowNode(type: string): boolean {
@@ -81,7 +81,13 @@ export type WorkflowDefinition = {
   verifier?: WorkflowNodeDef['verifier']
   nodes: WorkflowNodeDef[]
   // 执行拓扑：B 必须等 A 时给一条 a→b。没有边 = 全部可并行（旧定义兼容）。
-  edges?: Array<{ from: string; to: string }>
+  edges?: WorkflowEdge[]
+}
+
+export type WorkflowEdge = { from: string; to: string; route?: Omit<BranchEdge, 'to'> }
+
+export function branchEdgesOf(def: WorkflowDefinition, nodeId: string): BranchEdge[] {
+  return (def.edges ?? []).filter(edge => edge.from === nodeId).map(edge => ({ ...edge.route, to: edge.to }))
 }
 
 // 节点类型对应的能力名
@@ -93,6 +99,7 @@ export const NODE_CAPABILITY: Record<NodeType, string> = {
   wait: 'wait',
   policy: 'all_nodes',
   approval: 'approval',
+  branch: 'all_nodes',
 }
 
 export function isKnownNodeType(type: string): type is NodeType {
@@ -233,6 +240,18 @@ export function assertDefinitionAllowed(def: WorkflowDefinition, phase: Phase): 
     }
     // 阶段闸先判：S2 下的 subworkflow 节点是因为能力不够被拒，而不是配置缺字段
     assertControlConfigShape(node)
+    if (node.type === 'branch') {
+      const routes = branchEdgesOf(def, node.node_id)
+      if (!routes.length || new Set(routes.flatMap(route => route.priority === undefined ? [] : [route.priority])).size !== routes.filter(route => route.priority !== undefined).length) {
+        throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'branch 必须有出边，且 priority 不可重复', { node_id: node.node_id })
+      }
+      validateBranchEdges(routes)
+      for (const route of routes) {
+        if (route.default === true) continue
+        if (route.when === undefined) throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'branch 的非默认出边必须声明条件', { node_id: node.node_id, to: route.to })
+        validatePolicy(route.when)
+      }
+    }
   }
 }
 

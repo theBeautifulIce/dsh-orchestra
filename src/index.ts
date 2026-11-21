@@ -41,6 +41,7 @@ import { recoverChatModelAssignment } from './service/chat-model-recovery.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
 import { confirmStartup } from './service/commands/confirm-start.ts'
 import { dispatchRun } from './service/dispatcher.ts'
+import { resolveWorkflowBranch } from './service/branch-routing.ts'
 import { closeRun } from './service/commands/run-close.ts'
 import { settleCompensation, startCompensation } from './service/commands/compensation.ts'
 import { wakeOnEvent } from './service/commands/wait.ts'
@@ -236,7 +237,7 @@ export type Orchestra = {
 // run 终态集合：取消接口只在这些状态下回报 terminalStatus（S1 第 59 轮 P2-4）
 
 // 生产派发真正实现了的节点类型：parallel / decision 只有状态机与测试，允许发布会让 run 起不来（审计 P1-4）
-const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'policy', 'approval', 'subworkflow', 'wait'])
+const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'policy', 'branch', 'approval', 'subworkflow', 'wait'])
 const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
 
 const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
@@ -450,6 +451,10 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
           contentHash: b.contentHash,
           now,
         })
+        const branchRunId = resolveWorkflowBranch(tx, opts.secret, catalog, {
+          decisionId: out.decisionId, resolution: b.resolution, targetId: b.payload?.selected_node_id, now,
+        })
+        if (branchRunId) closeRun(tx, opts.secret, branchRunId, now)
         // 生产入口必须把审批结论落回节点：批准回 queued，拒绝/过期落 failed。
         // 两步在同一事务里，不会出现“卡已 resolved、节点还卡在 blocked_pre”。
         if (out.blockedNode && (out.closedReason === 'approved' || out.closedReason === 'rejected' || out.closedReason === 'expired_final')) {
@@ -544,7 +549,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     dispatch: async (b, progress) => {
       assertOrdinaryRun(b.runId)
       if (registry && ['S5','S6'].includes(opts.phase)) inTx(db, tx => rememberManualDispatchSpecs(tx, opts.secret, catalog, registry, b.runId, b.nodes, b.now))
-      // policy、approval、wait 和 subworkflow 不依赖宿主执行器。
+      // policy、branch、approval、wait 和 subworkflow 不依赖宿主执行器。
       // 只有 agent 节点必须要有执行器；parallel / decision 没有执行实现，交给 dispatcher 明确拒绝。
       const agentNodes = db.raw.prepare(
         "SELECT COUNT(*) AS n FROM node_runs WHERE run_id = ? AND status = 'queued' AND node_type = 'agent'",

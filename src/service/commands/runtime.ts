@@ -62,7 +62,7 @@ export function assertNodeRunReadyInTx(tx: Tx, deps: RuntimeDeps, nodeRunId: str
   }
   if (!edges) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
   const preds = runPredecessors(tx, node.run_id, edges).get(node.node_id) ?? []
-  const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds)
+  const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds, node.node_id)
   if (!readiness.ready) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '前置节点尚未成功完成，当前节点不能开始', { nodeRunId, ...readiness })
   }

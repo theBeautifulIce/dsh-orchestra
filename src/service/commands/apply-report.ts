@@ -736,6 +736,18 @@ function applyReportInternal(
     ...(approval && { decision_id: approval.decision.decision_id, report_digest: approval.registered.report_digest, execution_id: boundExecutionId }),
     ...(artifactProof ? { artifact_proof: artifactProof.proof } : {}),
   })
+  if (row.node_type === 'agent' && report.status === 'done' && !approval) {
+    const run = tx.get<{ workflow_id: string | null; workflow_version: string }>('SELECT workflow_id,workflow_version FROM runs WHERE run_id=?', [row.run_id])
+    if (run) {
+      const definition = catalog.get(run.workflow_id ?? 'default', run.workflow_version)
+      const roleId = resolvePinnedNodeId(tx, row.node_run_id)
+      const consumesOutput = definition.edges?.some(edge => edge.from === roleId && definition.nodes.some(node => node.node_id === edge.to && (node.type === 'branch' || node.type === 'policy')))
+      const output = report.output ?? {}
+      if (consumesOutput && Buffer.byteLength(canonicalJson(output)) <= 65_536) {
+        appendNodeRunEvent(tx, secret, params.nodeRunId, 'workflow.output', output)
+      }
+    }
+  }
   // 副作用结算：done 收口的同一笔事务里落 evidence 分支结算行（附录 §4）。
   // 证据不合格就不落行（fail closed），但绝不打断报告本身的收口。
   settleEvidenceFromReport(tx, secret, {
