@@ -3,7 +3,7 @@ import { MODEL_COMPLEXITIES, readModelUse, validModelEffort, type ModelAssignmen
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { withReadTx, type ReadCtx, type ReadTx } from './read-tx.ts'
 import type { EffectVerdict } from '../../executor/tools.ts'
-import { dependencyReadiness, pinnedEdges, readRunBinding, runPredecessors } from '../run-readiness.ts'
+import { dependencyReadiness, pinnedRunTopology, readRunBinding, runPredecessors } from '../run-readiness.ts'
 import { reworkBlocksNode } from '../rework-runtime.ts'
 
 export const NODE_TERMINAL = [
@@ -220,8 +220,8 @@ export function readRunNodeDisplay(tx: ReadTx, runId: string) {
 
 function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: string) => boolean) {
   const binding = readRunBinding(tx, runId)
-  const edges = binding ? pinnedEdges(binding) : null
-  const preds = edges ? runPredecessors(tx, runId, edges) : null
+  const topology = binding ? pinnedRunTopology(binding) : null
+  const preds = topology ? runPredecessors(tx, runId, topology.edges) : null
   return (row: NodeRow): Pick<NodeRunView, 'execution_state' | 'depends_on' | 'waiting_on'> => {
     const depends_on = preds?.get(String(row.node_id)) ?? []
     const state = (execution_state: string, waiting_on: string[] = []) => ({
@@ -232,7 +232,7 @@ function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: 
     if (binding?.cancel_requested_at) return state('cancelled')
     if (binding?.status === 'paused' || reworkBlocksNode(tx, row.node_run_id)) return state('paused')
     if (!preds) return state('queued_unknown')
-    const readiness = dependencyReadiness(tx, runId, row.node_run_id, depends_on, String(row.node_id))
+    const readiness = dependencyReadiness(tx, runId, row.node_run_id, depends_on, String(row.node_id), undefined, topology)
     if (!readiness.ready) {
       if (readiness.missingPreds.length > 0) return state('queued_unknown', [...readiness.missingPreds, ...readiness.failedPreds, ...readiness.waitingPreds])
       if (readiness.failedPreds.length > 0) return state('blocked_dependencies', readiness.failedPreds)

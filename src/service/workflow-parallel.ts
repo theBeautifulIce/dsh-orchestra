@@ -16,12 +16,16 @@ import { readBoundSubworkflowRun, verifiedBranchSkip } from './branch-routing.ts
 import { closeRun, isRunTerminal } from './commands/run-close.ts'
 import { finishSubworkflowChild, propagateRunCancellation } from './commands/subworkflow.ts'
 import type { ReadTx } from './queries/read-tx.ts'
-import { pruneInactiveParallelPaths } from './run-readiness.ts'
+import { pinnedTopologyForRun, pruneInactiveParallelPaths } from './run-readiness.ts'
+import type { PinnedTopology } from './pinned-topology.ts'
 
 type Member = { node_run_id: string; node_id: string; attempt: number; status: string; node_type: string; side_effect_policy: SideEffectPolicy; blocked_decision_id: string | null }
 type OpeningMember = Pick<Member, 'node_run_id' | 'node_id' | 'attempt'> & { minimum_effect: SideEffectPolicy; approval?: { id: string; content_hash: string } }
 type GroupOpening = { mode: ParallelGroup['mode']; quorum?: number; allow_irreversible_children: boolean; members: OpeningMember[]; input: unknown }
 export type GroupStop = { nodeRunId: string; attempt: number; groupId: string }
+export type ParallelPathNode = Pick<Member, 'node_run_id' | 'node_id' | 'attempt' | 'status' | 'node_type'> & { parent_node_run_id: string | null }
+type ParallelBinding = { owner: ParallelPathNode; child: ParallelPathNode; receipt: OpeningMember }
+const NO_BINDINGS: readonly ParallelBinding[] = []
 const EFFECT_RANK = { pure: 0, compensable: 1, irreversible: 2 } as const
 const TOLERABLE_FAILURE = new Set(['failed','timeout','superseded','orphaned'])
 
@@ -105,75 +109,100 @@ export function parallelOpening(tx: ReadTx, nodeRunId: string): GroupOpening | u
 }
 
 export function isVerifiedParallelMembership(tx: ReadTx, secret: string | undefined, parentId: string, childId: string): boolean {
-  if (secret && !intact(tx, secret, parentId, true)) return false
-  return parallelOpening(tx, parentId)?.members.some(member => member.node_run_id === childId) === true
+  const child = tx.get<Pick<Member, 'node_run_id' | 'node_id' | 'attempt'>>(`SELECT c.node_run_id,c.node_id,c.attempt FROM node_runs c
+    JOIN node_runs p ON p.node_run_id=c.parent_node_run_id AND p.run_id=c.run_id AND p.node_type='parallel'
+    WHERE c.node_run_id=? AND p.node_run_id=?`, [childId,parentId])
+  return !!child && !!openingMember(tx, secret, parentId, child)
 }
 
-export function parallelMemberMayStart(tx: ReadTx, secret: string | undefined, parentId: string, childId: string): boolean {
-  if (secret && !intact(tx, secret, parentId, true)) return false
-  const member = parallelOpening(tx, parentId)?.members.find(candidate => candidate.node_run_id === childId)
-  if (!member) return false
+function openingMember(tx: ReadTx, secret: string | undefined, parentId: string, child: Pick<Member, 'node_run_id' | 'node_id' | 'attempt'>) {
+  if (secret && !intact(tx, secret, parentId, true)) return undefined
+  return parallelOpening(tx, parentId)?.members.find(candidate => candidate.node_run_id === child.node_run_id
+    && candidate.node_id === child.node_id && candidate.attempt === child.attempt)
+}
+
+function currentParallelOwner(tx: ReadTx, runId: string, nodeId: string): ParallelPathNode | undefined {
+  const row = tx.get<ParallelPathNode>(`SELECT node_run_id,node_id,attempt,status,node_type,parent_node_run_id FROM node_runs
+    WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1`, [runId,nodeId])
+  return row?.node_type === 'parallel' ? row : undefined
+}
+
+/** The fixed graph identifies the logical owner, and only its signed opening authorizes a particular attempt. */
+function membershipChain(tx: ReadTx, secret: string | undefined, runId: string, topology: PinnedTopology | null,
+  member: ParallelPathNode): readonly ParallelBinding[] | undefined {
+  if (!topology) return undefined
+  if (topology.parallelOwner(member.node_id) === undefined) return member.parent_node_run_id === null ? NO_BINDINGS : undefined
+  const bindings: ParallelBinding[] = []
   const seen = new Set<string>()
-  let groupId = parentId
+  let child = member
   for (;;) {
-    if (seen.has(groupId)) return false
-    seen.add(groupId)
-    const group = tx.get<{ run_id: string; parent_node_run_id: string | null }>(
-      "SELECT run_id,parent_node_run_id FROM node_runs WHERE node_run_id=? AND node_type='parallel' AND status='waiting'", [groupId])
-    if (!group) return false
-    if (!group.parent_node_run_id) break
-    const ancestorId: string = group.parent_node_run_id
-    if (!tx.get("SELECT 1 FROM node_runs WHERE node_run_id=? AND run_id=?", [ancestorId,group.run_id])
-        || !isVerifiedParallelMembership(tx, secret, ancestorId, groupId) || groupStopIntent(tx, groupId, ancestorId)) return false
-    groupId = ancestorId
+    if (seen.has(child.node_id)) return undefined
+    seen.add(child.node_id)
+    const ownerId = topology.parallelOwner(child.node_id)
+    if (ownerId === undefined) return child.parent_node_run_id === null ? bindings : undefined
+    if (ownerId === null || child.parent_node_run_id === null) return undefined
+    const owner = currentParallelOwner(tx, runId, ownerId)
+    if (!owner || owner.node_run_id !== child.parent_node_run_id) return undefined
+    const receipt = openingMember(tx, secret, owner.node_run_id, child)
+    if (!receipt) return undefined
+    bindings.push({ owner, child, receipt })
+    child = owner
   }
+}
+
+export function parallelMembershipIsConsistent(tx: ReadTx, secret: string, runId: string, topology: PinnedTopology, node: ParallelPathNode): boolean {
+  return membershipChain(tx, secret, runId, topology, node) !== undefined
+}
+
+/** Signed pruning may explain a member reached only through an owner which never opened. */
+export function unopenedParallelMember(tx: ReadTx, secret: string | undefined, runId: string, topology: PinnedTopology, node: ParallelPathNode): boolean {
+  const ownerId = topology.parallelOwner(node.node_id)
+  if (!ownerId || node.parent_node_run_id !== null) return false
+  const owner = currentParallelOwner(tx, runId, ownerId)
+  return !!owner && owner.status === 'superseded' && (!secret || intact(tx, secret, owner.node_run_id, true))
+    && !parallelOpening(tx, owner.node_run_id)
+}
+
+export function parallelMemberMayStart(tx: ReadTx, secret: string | undefined, parentId: string, childId: string,
+  topology?: PinnedTopology | null): boolean {
+  const child = tx.get<ParallelPathNode & { run_id: string }>(
+    'SELECT node_run_id,node_id,attempt,status,node_type,parent_node_run_id,run_id FROM node_runs WHERE node_run_id=? AND replacement_node_run_id IS NULL', [childId])
+  if (!child) return false
+  const bindings = membershipChain(tx, secret, child.run_id, topology === undefined ? pinnedTopologyForRun(tx, child.run_id) : topology, child)
+  if (!bindings?.length || bindings[0]!.owner.node_run_id !== parentId || bindings.some(({ owner, child: member }) =>
+    owner.status !== 'waiting' || groupStopIntent(tx, member.node_run_id, owner.node_run_id) || parallelResult(tx, owner.node_run_id))) return false
+  const member = bindings[0]!.receipt
   if (!member.approval) return member.minimum_effect !== 'irreversible'
   return !!tx.get(`SELECT 1 FROM decisions WHERE decision_id=? AND node_run_id=? AND kind='pre_execution'
     AND status='resolved' AND closed_reason='approved' AND approver='human' AND content_hash=?`, [member.approval.id,childId,member.approval.content_hash])
 }
 
 export function parallelToleratesMember(tx: ReadTx, secret: string | undefined, parentId: string, memberId: string): boolean {
-  const member = tx.get<{ run_id: string; status: string; side_effect_policy: SideEffectPolicy }>(
-    'SELECT run_id,status,side_effect_policy FROM node_runs WHERE node_run_id=? AND parent_node_run_id=?', [memberId,parentId])
+  const member = tx.get<ParallelPathNode & { run_id: string; side_effect_policy: SideEffectPolicy }>(
+    'SELECT node_run_id,node_id,attempt,status,node_type,parent_node_run_id,run_id,side_effect_policy FROM node_runs WHERE node_run_id=? AND parent_node_run_id=?', [memberId,parentId])
   return !!member && member.side_effect_policy === 'pure' && TOLERABLE_FAILURE.has(member.status)
-    && parallelMemberPath(tx, secret, member.run_id, memberId, parentId) === 'inactive'
+    && parallelMemberPath(tx, secret, member.run_id, member) === 'inactive'
 }
 
-export function parallelSuccess(tx: ReadTx, secret: string | undefined, parentId: string): { tolerated_member_ids: string[] } | undefined {
-  if (secret && !intact(tx, secret, parentId, true)) return undefined
+function parallelResult(tx: ReadTx, parentId: string): { status: string; tolerated_member_ids: string[] } | undefined {
   const result = tx.get<{ payload: string }>("SELECT payload FROM node_run_events WHERE node_run_id=? AND type='parallel.result' ORDER BY seq DESC LIMIT 1", [parentId])
-  if (!result) return undefined
-  const payload = JSON.parse(result.payload) as { status: string; tolerated_member_ids: string[] }
-  return payload.status === 'done' ? payload : undefined
+  return result ? JSON.parse(result.payload) : undefined
 }
 
 /** External edges wait for the entire membership ancestry, including a nested group's owner. */
-export function parallelMemberPath(tx: ReadTx, secret: string | undefined, runId: string, memberId: string,
-  directParentId: string | null): 'active' | 'inactive' | 'waiting' | 'failed' {
-  const seen = new Set([memberId])
-  let childId = memberId
-  let parentId = directParentId
+export function parallelMemberPath(tx: ReadTx, secret: string | undefined, runId: string, member: ParallelPathNode,
+  topology = pinnedTopologyForRun(tx, runId)): 'active' | 'inactive' | 'waiting' | 'failed' {
+  const bindings = membershipChain(tx, secret, runId, topology, member)
+  if (!bindings) return 'waiting'
   let state: ReturnType<typeof parallelMemberPath> = 'active'
-  while (parentId) {
-    if (seen.has(parentId) || !isVerifiedParallelMembership(tx, secret, parentId, childId)) return 'waiting'
-    seen.add(parentId)
-    const parent: { status: string; parent_node_run_id: string | null } | undefined = tx.get(
-      "SELECT status,parent_node_run_id FROM node_runs WHERE node_run_id=? AND run_id=? AND node_type='parallel'", [parentId,runId])
-    if (!parent) return 'waiting'
-    if (parent.status === 'done') {
-      const result = parallelSuccess(tx, secret, parentId)
-      if (!result) return 'waiting'
-      if (result.tolerated_member_ids.includes(childId)) state = 'inactive'
-    } else if (parent.status === 'waiting') {
-      return 'waiting'
-    } else {
-      if (!isTerminal(parent.status)) return 'waiting'
-      state = 'failed'
-    }
-    childId = parentId
-    parentId = parent.parent_node_run_id
+  for (const { owner, child } of bindings) {
+    if (!isTerminal(owner.status)) return 'waiting'
+    const result = parallelResult(tx, owner.node_run_id)
+    if (result?.status !== owner.status) return 'waiting'
+    if (result.status !== 'done') state = 'failed'
+    else if (result.tolerated_member_ids.includes(child.node_run_id)) state = 'inactive'
   }
-  return state === 'inactive' && secret && !intact(tx, secret, memberId, true) ? 'waiting' : state
+  return bindings.length && isTerminal(member.status) && secret && !intact(tx, secret, member.node_run_id, true) ? 'waiting' : state
 }
 
 function groupClockExpired(tx: Tx, parent: { node_run_id: string; wait_remaining_ns: number | null; wait_deadline_at: string | null;
@@ -202,16 +231,17 @@ function groupClockExpired(tx: Tx, parent: { node_run_id: string; wait_remaining
 
 /** Refresh one run from durable membership and receipts. Captured stop intents are delivered separately. */
 export function refreshWorkflowParallelGroups(tx: Tx, secret: string, runId: string, now: string, clock?: ClockProvider): GroupStop[] {
-  const parents = tx.all<{ node_run_id: string; parent_node_run_id: string | null; attempt: number; wait_deadline_at: string | null;
+  const parents = tx.all<ParallelPathNode & { wait_deadline_at: string | null;
     wait_deadline_boot_id: string | null; wait_deadline_monotonic_ns: number | null; wait_remaining_ns: number | null }>(
-    "SELECT node_run_id,parent_node_run_id,attempt,wait_deadline_at,wait_deadline_boot_id,wait_deadline_monotonic_ns,wait_remaining_ns FROM node_runs WHERE run_id=? AND node_type='parallel' AND status='waiting' ORDER BY seq DESC",
+    "SELECT node_run_id,node_id,attempt,status,node_type,parent_node_run_id,wait_deadline_at,wait_deadline_boot_id,wait_deadline_monotonic_ns,wait_remaining_ns FROM node_runs WHERE run_id=? AND node_type='parallel' AND status='waiting' ORDER BY seq DESC",
     [runId],
   )
+  const topology = parents.length ? pinnedTopologyForRun(tx, runId) : null
   const waitingGroups = new Map(parents.map(parent => [parent.node_run_id,parent]))
   const stop: GroupStop[] = []
   for (const parent of parents) {
     const groupId = parent.node_run_id
-    if (!waitingGroups.has(groupId)) continue
+    if (!waitingGroups.has(groupId) || !topology || !parallelMembershipIsConsistent(tx, secret, runId, topology, parent)) continue
     if (!intact(tx, secret, groupId, true)) continue
     const opened = parallelOpening(tx, groupId)
     if (!opened) continue

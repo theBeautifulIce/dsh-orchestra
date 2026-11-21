@@ -62,11 +62,11 @@ export function assertNodeRunReadyInTx(tx: Tx, deps: RuntimeDeps, nodeRunId: str
   // Some in-process integrations load a fixed definition without attaching the catalog to the ledger.
   if (!topology && run.definition_json === null && node.workflow_version !== null && !deps.catalog.hasPersistedStorage()) {
     const def = deps.catalog.getImmutable(node.workflow_id ?? 'default', node.workflow_version)
-    if (definitionHashOf(def) === run.workflow_definition_hash) topology = indexTopology(def.edges ?? [])
+    if (definitionHashOf(def) === run.workflow_definition_hash) topology = indexTopology(def.edges ?? [], def.nodes)
   }
   if (!topology) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
   const preds = nodePredecessors(tx, node.run_id, topology, node.node_id)
-  const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds, node.node_id, deps.secret)
+  const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds, node.node_id, deps.secret, topology)
   if (!readiness.ready) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '前置节点尚未成功完成，当前节点不能开始', { nodeRunId, ...readiness })
   }

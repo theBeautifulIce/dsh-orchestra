@@ -6,24 +6,25 @@ import { applyTransition } from './commands/nodes.ts'
 import type { ReadTx } from './queries/read-tx.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
-import { isVerifiedParallelMembership, parallelMemberPath, parallelOpening } from './workflow-parallel.ts'
+import { isVerifiedParallelMembership, parallelMemberPath, parallelOpening, type ParallelPathNode } from './workflow-parallel.ts'
 import { resolvePinnedNodeId } from './rework-extra-steps.ts'
-import { verifiedParallelSkip } from './run-readiness.ts'
+import { pinnedTopologyForRun, verifiedParallelSkip } from './run-readiness.ts'
 
 export function ruleNodeInput(tx: Tx, secret: string, runId: string, nodeId: string, definition: WorkflowDefinition, initialInput: unknown): unknown {
   const predecessors = runtimeEdges(tx, runId, definition.edges ?? []).filter(edge => edge.to === nodeId)
   if (!predecessors.length) return initialInput
+  const topology = pinnedTopologyForRun(tx, runId)
   const payloads: [string, unknown][] = []
   for (const predecessor of predecessors) {
-    const previous = tx.get<{ node_run_id: string; node_type: string; status: string; parent_node_run_id: string | null }>(
-      'SELECT node_run_id,node_type,status,parent_node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1',
+    const previous = tx.get<ParallelPathNode>(
+      'SELECT node_run_id,node_id,attempt,node_type,status,parent_node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1',
       [runId, predecessor.from],
     )
     if (!previous) throw new OrchError('VERDICT_UNSUPPORTED', '规则节点缺少上游节点')
     assertChainIntact(tx, secret, previous.node_run_id)
     if (previous.status === 'superseded' && branchSkipped(tx, previous.node_run_id)) continue
-    if (parallelMemberPath(tx, secret, runId, previous.node_run_id, previous.parent_node_run_id) === 'inactive') continue
-    if (previous.status === 'superseded' && verifiedParallelSkip(tx, secret, runId, predecessor.from, previous.node_run_id)) continue
+    if (parallelMemberPath(tx, secret, runId, previous, topology) === 'inactive') continue
+    if (previous.status === 'superseded' && verifiedParallelSkip(tx, secret, runId, predecessor.from, previous.node_run_id, topology)) continue
     if (previous.node_type === 'branch' && selectedBranchTarget(tx, previous.node_run_id) !== nodeId) continue
     if (previous.node_type === 'parallel' && previous.status === 'waiting') {
       const member = tx.get<{ node_run_id: string }>('SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId,nodeId])
@@ -109,11 +110,12 @@ export function verifiedBranchSkip(tx: ReadTx, secret: string, runId: string, no
 
 export function verifiedBranchSkipSource(tx: ReadTx, secret: string, runId: string, nodeRunId: string) {
   if (!intactBranchChain(tx, secret, nodeRunId)) return undefined
-  const source = tx.get<{ branch_id: string; target_id: string; parent_node_run_id: string | null }>(`SELECT json_extract(e.payload,'$.branch_node_run_id') AS branch_id,
+  const source = tx.get<ParallelPathNode & { target_id: string }>(`SELECT n.node_run_id,n.node_id,n.attempt,n.status,n.node_type,
       json_extract(e.payload,'$.target_node_id') AS target_id,n.parent_node_run_id FROM node_run_events e JOIN node_runs n
-      ON n.node_run_id=json_extract(e.payload,'$.branch_node_run_id') AND n.run_id=? AND n.node_type='branch' AND n.status='done'
+      ON n.node_run_id=json_extract(e.payload,'$.branch_node_run_id') AND n.run_id=? AND n.node_type='branch'
+        AND n.status='done' AND n.replacement_node_run_id IS NULL
       WHERE e.type='branch.skipped' AND e.node_run_id=? ORDER BY e.seq DESC LIMIT 1`, [runId,nodeRunId])
-  return source && intactBranchChain(tx, secret, source.branch_id) && selectedBranchTarget(tx, source.branch_id) === source.target_id ? source : undefined
+  return source && intactBranchChain(tx, secret, source.node_run_id) && selectedBranchTarget(tx, source.node_run_id) === source.target_id ? source : undefined
 }
 
 /** Commit route authority and skip only nodes proven unreachable by trustworthy selections. */

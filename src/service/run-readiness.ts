@@ -7,21 +7,20 @@ import { isCandidateReviewer, reworkBlocksNode } from './rework-runtime.ts'
 import { indexTopology, verifiedTopology, type PinnedTopology } from './pinned-topology.ts'
 import { branchSkipped, intactBranchChain, selectedBranchTarget, verifiedBranchSkipSource } from './branch-routing.ts'
 import { applyTransition } from './commands/nodes.ts'
-import { isVerifiedParallelMembership, parallelMemberMayStart, parallelMemberPath } from './workflow-parallel.ts'
+import { parallelMemberMayStart, parallelMemberPath, parallelMembershipIsConsistent, unopenedParallelMember, type ParallelPathNode } from './workflow-parallel.ts'
 
 const SUCCESS_STATUS: ReadonlySet<string> = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
 const FAILED_STATUS: ReadonlySet<string> = new Set(TERMINAL_STATUSES.filter((status) => !SUCCESS_STATUS.has(status)))
-type PathNode = { node_run_id: string; status: string; node_type: string; parent_node_run_id: string | null }
 type PathLookup = (nodeId: string) => readonly string[]
 
-function runPathNode(tx: ReadTx, runId: string, nodeId: string): PathNode | undefined {
-  return tx.get('SELECT node_run_id,status,node_type,parent_node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1',
+function runPathNode(tx: ReadTx, runId: string, nodeId: string): ParallelPathNode | undefined {
+  return tx.get('SELECT node_run_id,node_id,attempt,status,node_type,parent_node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1',
     [runId,nodeId])
 }
 
-function branchSkipPath(tx: ReadTx, secret: string, runId: string, nodeRunId: string): ReturnType<typeof parallelMemberPath> {
+function branchSkipPath(tx: ReadTx, secret: string, runId: string, nodeRunId: string, topology: PinnedTopology | null): ReturnType<typeof parallelMemberPath> {
   const source = verifiedBranchSkipSource(tx, secret, runId, nodeRunId)
-  return source ? parallelMemberPath(tx, secret, runId, source.branch_id, source.parent_node_run_id) : 'waiting'
+  return source ? parallelMemberPath(tx, secret, runId, source, topology) : 'waiting'
 }
 
 export type DependencyReadiness =
@@ -30,9 +29,11 @@ export type DependencyReadiness =
 
 export function readRunBinding(tx: ReadTx, runId: string) {
   return tx.get<{
+    workflow_id: string; workflow_version: string;
     status: string; cancel_requested_at: string | null; workflow_definition_hash: string | null;
     definition_json: string | null; content_hash: string | null
-  }>(`SELECT r.status,r.cancel_requested_at,r.workflow_definition_hash,w.definition_json,w.content_hash FROM runs r
+  }>(`SELECT COALESCE(r.workflow_id,'default') AS workflow_id,r.workflow_version,
+    r.status,r.cancel_requested_at,r.workflow_definition_hash,w.definition_json,w.content_hash FROM runs r
     LEFT JOIN workflow_versions w ON w.workflow_id=COALESCE(r.workflow_id,'default') AND w.version=r.workflow_version
     WHERE r.run_id=?`, [runId])
 }
@@ -46,8 +47,9 @@ export function pinnedRunTopology(binding: NonNullable<ReturnType<typeof readRun
   return verifiedTopology(binding.definition_json, binding.workflow_definition_hash)
 }
 
-export function pinnedEdges(binding: NonNullable<ReturnType<typeof readRunBinding>>): readonly RuntimeEdge[] | null {
-  return pinnedRunTopology(binding)?.edges ?? null
+export function pinnedTopologyForRun(tx: ReadTx, runId: string): PinnedTopology | null {
+  const binding = readRunBinding(tx, runId)
+  return binding ? pinnedRunTopology(binding) : null
 }
 
 export function nodePredecessors(tx: ReadTx, runId: string, topology: PinnedTopology, nodeId: string): readonly string[] {
@@ -67,7 +69,10 @@ export function runPredecessors(tx: ReadTx, runId: string, edges: readonly Runti
 }
 
 /** Superseded attempts never release a downstream node. A revision awaiting acceptance only releases its reviewer. */
-export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: string, preds: readonly string[], consumerNodeId?: string, secret?: string): DependencyReadiness {
+export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: string, preds: readonly string[], consumerNodeId?: string,
+  secret?: string, pinned?: PinnedTopology | null): DependencyReadiness {
+  if (!preds.length) return { ready: true }
+  const topology = pinned === undefined ? pinnedTopologyForRun(tx, runId) : pinned
   const missing: string[] = []
   const failed: string[] = []
   const waiting: string[] = []
@@ -79,36 +84,42 @@ export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: strin
       missing.push(pred)
       continue
     }
-    if (row.node_type === 'parallel' && row.status === 'waiting') {
-      const consumer = tx.get<{ parent_node_run_id: string | null }>('SELECT parent_node_run_id FROM node_runs WHERE node_run_id=? AND run_id=?', [consumerId,runId])
-      if (consumer?.parent_node_run_id === row.node_run_id && parallelMemberMayStart(tx, secret, row.node_run_id, consumerId)) continue
+    if (consumerNodeId && topology?.parallelOwner(consumerNodeId) === pred) {
+      if (row.status === 'waiting' && parallelMemberMayStart(tx, secret, row.node_run_id, consumerId, topology)) continue
+      if (row.status === 'done') {
+        // A completed owner cannot authorize the lease of an unbound replacement.
+        waiting.push(pred)
+        continue
+      }
     }
-    const path = parallelMemberPath(tx, secret, runId, row.node_run_id, row.parent_node_run_id)
+    const path = parallelMemberPath(tx, secret, runId, row, topology)
     if (path === 'inactive' && !reworkBlocksNode(tx, row.node_run_id)) {
       inactive++
       parallel = true
       continue
     }
-    if (path !== 'active') {
-      (path === 'failed' ? failed : waiting).push(pred)
-      continue
-    }
-    if (row.status === 'superseded' && parallelSkipReceipt(tx, row.node_run_id)) {
-      if (secret && !verifiedParallelSkip(tx, secret, runId, pred, row.node_run_id)) waiting.push(pred)
+    const mayUseSkip = row.status === 'superseded' && (path === 'active'
+      || (path === 'waiting' && !!topology && unopenedParallelMember(tx, secret, runId, topology, row)))
+    if (mayUseSkip && parallelSkipReceipt(tx, row.node_run_id)) {
+      if (secret && !verifiedParallelSkip(tx, secret, runId, pred, row.node_run_id, topology)) waiting.push(pred)
       else {
         inactive++
         parallel = true
       }
       continue
     }
-    if (row.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
-      const branchPath = secret ? branchSkipPath(tx, secret, runId, row.node_run_id) : 'active'
+    if (mayUseSkip && branchSkipped(tx, row.node_run_id)) {
+      const branchPath = secret ? branchSkipPath(tx, secret, runId, row.node_run_id, topology) : 'active'
       if (branchPath === 'failed') failed.push(pred)
       else if (branchPath === 'waiting') waiting.push(pred)
       else {
         inactive++
         parallel ||= branchPath === 'inactive'
       }
+      continue
+    }
+    if (path !== 'active') {
+      (path === 'failed' ? failed : waiting).push(pred)
       continue
     }
     if (row.status === 'done' && row.node_type === 'branch') {
@@ -148,7 +159,7 @@ function proofTopology(tx: ReadTx, runId: string): PinnedTopology | null {
 /** A shared join has at least one live input. Skip only when every edge is proven inactive,
  * and at least one was disabled by a successful parallel result. */
 function parallelInactiveInputs(tx: ReadTx, secret: string, runId: string, nodeId: string, preds: readonly string[],
-  lookup?: PathLookup, active = new Set<string>()): string[] {
+  topology: PinnedTopology, lookup: PathLookup, active = new Set<string>()): string[] {
   if (active.has(nodeId)) return []
   const inputs: string[] = []
   let parallel = false
@@ -157,17 +168,16 @@ function parallelInactiveInputs(tx: ReadTx, secret: string, runId: string, nodeI
     for (const id of preds) {
       const row = runPathNode(tx, runId, id)
       if (!row || reworkBlocksNode(tx, row.node_run_id)) return []
-      const path = parallelMemberPath(tx, secret, runId, row.node_run_id, row.parent_node_run_id)
-      if (path === 'inactive' || (row.status === 'superseded'
-          && verifiedParallelSkip(tx, secret, runId, id, row.node_run_id, lookup, active))) {
+      const path = parallelMemberPath(tx, secret, runId, row, topology)
+      const mayUseSkip = row.status === 'superseded' && (path === 'active'
+        || (path === 'waiting' && unopenedParallelMember(tx, secret, runId, topology, row)))
+      if (path === 'inactive' || (mayUseSkip && verifiedParallelSkip(tx, secret, runId, id, row.node_run_id, topology, lookup, active))) {
         parallel = true
-      } else if (path !== 'active') {
-        return []
-      } else if (row.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
-        const branchPath = branchSkipPath(tx, secret, runId, row.node_run_id)
+      } else if (mayUseSkip && branchSkipped(tx, row.node_run_id)) {
+        const branchPath = branchSkipPath(tx, secret, runId, row.node_run_id, topology)
         if (branchPath === 'failed' || branchPath === 'waiting') return []
         parallel ||= branchPath === 'inactive'
-      } else if (row.node_type === 'branch' && row.status === 'done' && intactBranchChain(tx, secret, row.node_run_id)) {
+      } else if (path === 'active' && row.node_type === 'branch' && row.status === 'done' && intactBranchChain(tx, secret, row.node_run_id)) {
         const target = selectedBranchTarget(tx, row.node_run_id)
         if (!target || target === nodeId) return []
       } else {
@@ -182,15 +192,12 @@ function parallelInactiveInputs(tx: ReadTx, secret: string, runId: string, nodeI
 }
 
 export function verifiedParallelSkip(tx: ReadTx, secret: string, runId: string, nodeId: string, nodeRunId: string,
-  lookup?: PathLookup, active?: Set<string>): boolean {
+  topology = proofTopology(tx, runId), lookup?: PathLookup, active?: Set<string>): boolean {
   const receipt = parallelSkipReceipt(tx, nodeRunId)
   if (!receipt || !chainIsIntact(secret, readChain(tx, nodeRunId), readChainHead(tx, nodeRunId), true)) return false
-  if (!lookup) {
-    const topology = proofTopology(tx, runId)
-    if (!topology) return false
-    lookup = id => nodePredecessors(tx, runId, topology, id)
-  }
-  const inputs = parallelInactiveInputs(tx, secret, runId, nodeId, lookup(nodeId), lookup, active)
+  if (!topology) return false
+  lookup ??= id => nodePredecessors(tx, runId, topology, id)
+  const inputs = parallelInactiveInputs(tx, secret, runId, nodeId, lookup(nodeId), topology, lookup, active)
   return inputs.length > 0 && JSON.stringify(inputs) === JSON.stringify(JSON.parse(receipt.payload).inactive_predecessors)
 }
 
@@ -213,10 +220,12 @@ export function pruneInactiveParallelPaths(tx: Tx, secret: string, runId: string
   for (let changed = true; changed;) {
     changed = false
     for (const row of remaining) {
-      const inputs = parallelInactiveInputs(tx, secret, runId, row.node_id, lookup(row.node_id), lookup)
+      const inputs = parallelInactiveInputs(tx, secret, runId, row.node_id, lookup(row.node_id), topology, lookup)
+      const current = inputs.length ? runPathNode(tx, runId, row.node_id) : undefined
       if (!inputs.length || reworkBlocksNode(tx, row.node_run_id)
           || !chainIsIntact(secret, readChain(tx, row.node_run_id), readChainHead(tx, row.node_run_id))
-          || runPathNode(tx, runId, row.node_id)?.node_run_id !== row.node_run_id) continue
+          || current?.node_run_id !== row.node_run_id || (topology.parallelOwner(row.node_id) !== undefined
+            && !unopenedParallelMember(tx, secret, runId, topology, current))) continue
       applyTransition(tx, secret, { nodeRunId: row.node_run_id, from: ['queued'], to: 'superseded', ruleId: 'M-62', attempt: row.attempt, now,
         patch: { side_effect_policy: 'pure', side_effect_verified_none: 1 } })
       appendNodeRunEvent(tx, secret, row.node_run_id, 'parallel.path_skipped',
@@ -229,7 +238,7 @@ export function pruneInactiveParallelPaths(tx: Tx, secret: string, runId: string
 
 /** A later node still depends on the route that enabled its already-completed predecessors. */
 export function branchAncestryIsIntact(tx: ReadTx, secret: string, runId: string, topology: PinnedTopology, direct: readonly string[]): boolean {
-  if (!topology.hasRoutes && !tx.get("SELECT 1 FROM node_runs WHERE run_id=? AND node_type='parallel' LIMIT 1", [runId])) return true
+  if (!topology.hasRoutes && !topology.hasParallel) return true
   const visited = new Set<string>()
   const pending = [...direct]
   while (pending.length) {
@@ -237,16 +246,18 @@ export function branchAncestryIsIntact(tx: ReadTx, secret: string, runId: string
     if (visited.has(nodeId)) continue
     visited.add(nodeId)
     const row = runPathNode(tx, runId, nodeId)
+    if (row) {
+      const consistent = isTerminal(row.status)
+        ? parallelMemberPath(tx, secret, runId, row, topology) !== 'waiting'
+        : parallelMembershipIsConsistent(tx, secret, runId, topology, row)
+      if (!consistent && !(row.status === 'superseded' && unopenedParallelMember(tx, secret, runId, topology, row))) return false
+    }
     if (row?.status === 'superseded' && parallelSkipReceipt(tx, row.node_run_id)) {
-      if (!verifiedParallelSkip(tx, secret, runId, nodeId, row.node_run_id, id => nodePredecessors(tx, runId, topology, id))) return false
+      if (!verifiedParallelSkip(tx, secret, runId, nodeId, row.node_run_id, topology, id => nodePredecessors(tx, runId, topology, id))) return false
       continue
     }
-    if (row?.parent_node_run_id) {
-      if (!isVerifiedParallelMembership(tx, secret, row.parent_node_run_id, row.node_run_id)
-          || (isTerminal(row.status) && !intactBranchChain(tx, secret, row.node_run_id))) return false
-    }
     if (row?.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
-      const path = branchSkipPath(tx, secret, runId, row.node_run_id)
+      const path = branchSkipPath(tx, secret, runId, row.node_run_id, topology)
       if (path === 'waiting' || path === 'failed') return false
       continue
     }
