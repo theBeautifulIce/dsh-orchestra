@@ -1,4 +1,5 @@
 import type { Resolution } from '../commands/decisions.ts'
+import { ordinaryAbandonTargets, ordinaryEffectEvidence, ordinaryRecoveryBound, ordinaryRecoveryTarget, type OrdinaryEffectEvidence } from './ordinary-recovery.ts'
 
 export type DecisionChoiceContext = {
   kind: unknown
@@ -10,6 +11,23 @@ export type DecisionChoiceContext = {
   registered_report?: unknown
   report_original_available?: unknown
   workflow_branch?: unknown
+  ordinary_recovery_available?: boolean
+  ordinary_recovery_bound?: boolean
+  ordinary_effect_evidence?: OrdinaryEffectEvidence
+}
+
+export function withOrdinaryRecovery<T extends DecisionChoiceContext & Parameters<typeof ordinaryRecoveryTarget>[1]>(
+  tx: Parameters<typeof ordinaryRecoveryTarget>[0], card: T,
+): T {
+  if (card.memory_recovery !== 1) {
+    card.ordinary_recovery_bound = ordinaryRecoveryBound(card)
+    if (!card.ordinary_recovery_bound) return card
+    const node = ordinaryRecoveryTarget(tx, card)
+    card.ordinary_recovery_available = card.kind === 'abandon_ack'
+      ? ordinaryAbandonTargets(tx, card).length > 0 : !!node
+    if (node) card.ordinary_effect_evidence = ordinaryEffectEvidence(tx, node)
+  }
+  return card
 }
 
 export type MemoryDecisionAccess = boolean | 'proposal_only'
@@ -19,6 +37,13 @@ export function panelDecisionOptions(decision: DecisionChoiceContext, now: numbe
   const unavailable = (unavailableReason: string) => ({ choices: [], unavailableReason })
   const restricted = panelDecisionRestriction(decision, now)
   if (restricted) return unavailable(restricted)
+  if (decision.ordinary_recovery_available) {
+    if (decision.kind === 'abandon_ack') return { choices: ['approved'], unavailableReason: null }
+    const choices: Resolution[] = ['abandon']
+    if (decision.ordinary_effect_evidence?.applied) choices.unshift('confirm_applied')
+    if (decision.ordinary_effect_evidence?.not_applied) choices.unshift('confirm_not_applied')
+    return { choices, unavailableReason: null }
+  }
   if (isEffectDecision(decision)) return unavailable('此裁决必须提交对应节点的系统核验证据。')
   if (decision.kind === 'report_contradicted') return decision.registered_report === 1
     ? { choices: decision.report_original_available === 1 ? ['uphold_report', 'uphold_decision'] : ['uphold_report'], unavailableReason: null }

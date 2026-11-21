@@ -161,6 +161,7 @@ export function sweepNow(deps: RuntimeDeps, now: string): SweepResult {
   return sweep(deps.db, deps.secret, {
     now,
     clock: deps.clock,
+    ordinaryRecovery: deps.phase === 'S6',
     catalog: deps.catalog,
     bridgeMissing: signals.missing,
     bridgeRestored: signals.restored,

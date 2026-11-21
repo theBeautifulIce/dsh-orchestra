@@ -13,7 +13,7 @@ import { operatorReason, operatorStatus } from '../../core/operator-language.ts'
 export { priorityRank }
 
 const KIND_LABEL: Record<string, string> = {
-  pre_execution: '执行前确认', action_overrun: '操作范围确认', abandon_ack: '停止后确认', verify_human: '人工核验',
+  pre_execution: '执行前确认', action_overrun: '操作范围确认', abandon_ack: '确认放弃跟踪', verify_human: '人工核验',
   audit_result: '结果复核', rule_ambiguous: '规则待澄清', startup_unknown: '启动状态待确认', report_contradicted: '结果不一致',
 }
 const DECISION_OPTIONS = new Map([
@@ -241,10 +241,11 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
       notice={cardNotices[decision.decision_id]}
       onToggle={() => toggleSelected(decision.decision_id)}
       onAcknowledge={() => { void acknowledgeDecision(decision) }}
-      onResolve={(resolution, label, selectedNodeId) => { void resolveDecision({
+      onResolve={(resolution, label, selectedNodeId, evidenceId) => { void resolveDecision({
         decisionId: decision.decision_id, revision: decision.current_revision, resolution,
         ...(decision.content_hash ? { contentHash: decision.content_hash } : {}),
         ...(selectedNodeId ? { selectedNodeId } : {}),
+        ...(evidenceId ? { evidenceId } : {}),
       }, label) }}
       confirmation={!history && pending?.input.decisionId === decision.decision_id
         && pending.input.revision === decision.current_revision && pending.input.contentHash === (decision.content_hash ?? undefined)
@@ -312,7 +313,7 @@ function DecisionCard(props: {
   notice?: Notice
   onToggle: () => void
   onAcknowledge: () => void
-  onResolve: (resolution: string, label: string, selectedNodeId?: string) => void
+  onResolve: (resolution: string, label: string, selectedNodeId?: string, evidenceId?: string) => void
   confirmation?: ReactNode
 }) {
   const { decision } = props
@@ -321,8 +322,12 @@ function DecisionCard(props: {
   const agentOnly = decision.approver?.startsWith('agent:') === true
   const status = agentOnly && decision.status !== 'resolved' ? '由授权核验主体处理' : operatorStatus(decision.status)
   const choices = (decision.allowed_resolutions ?? []).flatMap((value) => {
-    const label = decision.kind === 'rule_ambiguous' && value === 'approved' ? '继续所选分支' : DECISION_OPTIONS.get(value)
-    return label ? [{ value, label }] : []
+    const verdict = value === 'confirm_applied' ? 'applied' : value === 'confirm_not_applied' ? 'not_applied' : null
+    const evidenceId = verdict ? decision.available_effect_evidence?.[verdict] : undefined
+    if (verdict && !evidenceId) return []
+    const label = decision.kind === 'rule_ambiguous' && value === 'approved' ? '继续所选分支'
+      : decision.kind === 'abandon_ack' && value === 'approved' ? '签字接受未核实的副作用' : DECISION_OPTIONS.get(value)
+    return label ? [{ value, label, evidenceId }] : []
   })
   const branches = decision.kind === 'rule_ambiguous' && isRecord(decision.payload) && Array.isArray(decision.payload.edges)
     ? decision.payload.edges.filter((value): value is string => typeof value === 'string') : []
@@ -402,10 +407,10 @@ function DecisionCard(props: {
         </select>
       </label>}
       {choices.length > 0
-        ? choices.map(({ value, label }) => <button
+        ? choices.map(({ value, label, evidenceId }) => <button
           key={value}
           type="button"
-          onClick={() => props.onResolve(value, label, value === 'approved' && branches.length ? selectedBranch : undefined)}
+          onClick={() => props.onResolve(value, label, value === 'approved' && branches.length ? selectedBranch : undefined, evidenceId)}
           disabled={!props.commands || props.busy || (value === 'approved' && branches.length > 0 && !branches.includes(selectedBranch))}
           style={buttonStyle}
         >{label}</button>)

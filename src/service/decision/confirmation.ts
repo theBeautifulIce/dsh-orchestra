@@ -5,7 +5,7 @@ import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendEvent } from '../../infra/db/ledger.ts'
 import type { ResolveDecisionRequest } from '../commands/decisions.ts'
 import { assertOperationId, runIdempotentCommand } from '../commands/idempotency.ts'
-import { DECISION_CHOICE_COLUMNS, isEffectDecision, panelDecisionOptions, panelDecisionRestriction, type DecisionChoiceContext } from './choices.ts'
+import { DECISION_CHOICE_COLUMNS, isEffectDecision, panelDecisionOptions, panelDecisionRestriction, withOrdinaryRecovery, type DecisionChoiceContext } from './choices.ts'
 
 const KIND = 'decision.resolve'
 const CHALLENGE_TTL_MS = 120_000
@@ -66,26 +66,30 @@ export function runDecisionCommand(
     payload: { resolution, payload, contentHash, evidenceProducers, confirm },
     ...(input.bindActor ? { actor: { kind: actor?.kind, id: actor?.id } } : {}),
   }))
-  const read = () => tx.get<DecisionChoiceContext & { revision: number; confirm_required: number }>(
-    'SELECT d.revision, d.confirm_required, d.kind, d.status, d.approver, d.expires_at, '
-    + DECISION_CHOICE_COLUMNS + ' FROM decisions d WHERE d.decision_id = ?', [decisionId],
-  )
+  const read = () => {
+    const card = tx.get<DecisionChoiceContext & {
+      decision_id: string; run_id: string; node_run_id: string | null; kind: string; payload_json: string
+      revision: number; confirm_required: number
+    }>('SELECT d.decision_id, d.run_id, d.node_run_id, d.payload_json, d.revision, d.confirm_required, d.kind, d.status, d.approver, d.expires_at, '
+      + DECISION_CHOICE_COLUMNS + ' FROM decisions d WHERE d.decision_id = ?', [decisionId])
+    return card && withOrdinaryRecovery(tx, card)
+  }
   const now = Date.parse(input.now)
   const validate = (current: ReturnType<typeof read>) => {
     if (!current || current.revision !== revision || current.status === 'resolved') {
       throw new OrchError('DECISION_REVISION_CONFLICT', '裁决修订已改变，请重新选择')
     }
-    if (resolution === 'approved' && isEffectDecision(current) && !panelDecisionRestriction(current, now)) return true
+    if (resolution === 'approved' && isEffectDecision(current) && !current.ordinary_recovery_bound && !panelDecisionRestriction(current, now)) return true
     const options = panelDecisionOptions(current, now, memoryEnabled)
     if (!options.choices.includes(resolution)) {
       throw new OrchError('RESOLUTION_NOT_AVAILABLE', options.unavailableReason ?? '此裁决不允许该处理方式')
     }
-    return false
+    return resolution === 'confirm_applied' || resolution === 'confirm_not_applied'
   }
   if (!input.operationId && !input.confirmChallenge) {
     const current = read()
     const requireEffectSettlement = validate(current)
-    if (current?.confirm_required !== 1) return apply(false, requireEffectSettlement)
+    if (current?.confirm_required !== 1 && !current?.ordinary_recovery_bound) return apply(false, requireEffectSettlement)
   }
   const operationId = assertOperationId(input.operationId)
   const binding: Binding = {
