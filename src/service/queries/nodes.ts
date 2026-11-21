@@ -89,6 +89,7 @@ function wasCancelled(row: NodeRow): boolean {
 }
 
 const NODE_VIEW_SELECT = `SELECT n.*, s.resolution_basis,
+  CASE WHEN n.status='superseded' THEN EXISTS(SELECT 1 FROM node_run_events e WHERE e.node_run_id=n.node_run_id AND e.type='branch.skipped') ELSE 0 END AS branch_skipped,
   COALESCE(s.decision_id, (
     SELECT d.decision_id FROM node_run_events e JOIN decisions d
     ON d.decision_id = CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.decision_id') END
@@ -109,7 +110,8 @@ const NODE_VIEW_SELECT = `SELECT n.*, s.resolution_basis,
 function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], executionIds: string[], model?: NodeRunView['model_assignment'],
   doc?: { title: string; declaredEffect: EffectVerdict | null }): NodeRunView {
   const replacement = typeof row.replacement_node_run_id === 'string' ? row.replacement_node_run_id : null
-  const label = wasCancelled(row) ? '已取消' : row.status === 'superseded' && replacement ? '已由新尝试接替' : NODE_LABEL[row.status] ?? row.status
+  const label = row.branch_skipped === 1 ? '分支未选中' : wasCancelled(row) ? '已取消'
+    : row.status === 'superseded' && replacement ? '已由新尝试接替' : NODE_LABEL[row.status] ?? row.status
   const declared = doc?.declaredEffect ?? null
   const verified = row.resolution_basis === 'verified_none' ? 'not_applied'
     : row.resolution_basis === 'evidence' || row.resolution_basis === 'decision' ? 'applied' : null
@@ -230,7 +232,7 @@ function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: 
     if (binding?.cancel_requested_at) return state('cancelled')
     if (binding?.status === 'paused' || reworkBlocksNode(tx, row.node_run_id)) return state('paused')
     if (!preds) return state('queued_unknown')
-    const readiness = dependencyReadiness(tx, runId, row.node_run_id, depends_on)
+    const readiness = dependencyReadiness(tx, runId, row.node_run_id, depends_on, String(row.node_id))
     if (!readiness.ready) {
       if (readiness.missingPreds.length > 0) return state('queued_unknown', [...readiness.missingPreds, ...readiness.failedPreds, ...readiness.waitingPreds])
       if (readiness.failedPreds.length > 0) return state('blocked_dependencies', readiness.failedPreds)

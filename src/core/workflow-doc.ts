@@ -7,6 +7,7 @@
 import { z } from 'zod'
 import { OrchError } from './errors.ts'
 import { assertApprovalNodeConfig, assertPolicyNodeConfig } from './workflow-def.ts'
+import { validatePolicy, type PolicyCondition } from './policy.ts'
 
 export const WORKFLOW_DOC_MAX_BYTES = 1024 * 1024
 export const VALIDATION_LIMIT = 100
@@ -67,6 +68,7 @@ export function fitGeneratedWorkflowLayout(draft: unknown): unknown {
 const RouteSchema = z.object({
   priority: z.number().int().optional(),
   default: z.boolean().optional(),
+  when: z.unknown().optional(),
 })
 
 const NodeSchema = z.object({
@@ -260,7 +262,16 @@ const branchIssues = (doc: WorkflowDoc): ValidationIssue[] => {
           issues.push({ path: at, code: 'WORKFLOW_BRANCH_PRIORITY_DUPLICATE', message: '同一条 branch 的 priority 不许重复' })
         }
         priorities.add(priority)
+        try {
+          if (route?.when === undefined) throw new Error('branch 的非默认出边必须声明条件')
+          validatePolicy(route.when as PolicyCondition)
+        } catch (error) {
+          issues.push({ path: pointer(at, 'when'), code: 'WORKFLOW_BRANCH_ROUTE_INVALID', message: (error as Error).message })
+        }
         continue
+      }
+      if (route?.when !== undefined) {
+        issues.push({ path: pointer(at, 'when'), code: 'WORKFLOW_BRANCH_ROUTE_INVALID', message: 'branch 的默认出边不接受条件' })
       }
       defaults++
       if (defaults > 1) {

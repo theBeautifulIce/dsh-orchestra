@@ -4,6 +4,7 @@ import type { ReadTx } from './queries/read-tx.ts'
 import { runtimeEdges, type RuntimeEdge } from './rework-edges.ts'
 import { isCandidateReviewer, reworkBlocksNode } from './rework-runtime.ts'
 import { definitionHashOf } from './workflows.ts'
+import { branchSkipped, selectedBranchTarget } from './branch-routing.ts'
 
 const SUCCESS_STATUS: ReadonlySet<string> = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
 const FAILED_STATUS: ReadonlySet<string> = new Set(TERMINAL_STATUSES.filter((status) => !SUCCESS_STATUS.has(status)))
@@ -44,15 +45,19 @@ export function runPredecessors(tx: ReadTx, runId: string, edges: readonly Runti
 }
 
 /** Superseded attempts never release a downstream node. A revision awaiting acceptance only releases its reviewer. */
-export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: string, preds: readonly string[]): DependencyReadiness {
+export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: string, preds: readonly string[], consumerNodeId?: string): DependencyReadiness {
   const missing: string[] = []
   const failed: string[] = []
   const waiting: string[] = []
   for (const pred of preds) {
-    const row = tx.get<{ node_run_id: string; status: string }>(
-      'SELECT node_run_id,status FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId, pred],
+    const row = tx.get<{ node_run_id: string; status: string; node_type: string }>(
+      'SELECT node_run_id,status,node_type FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId, pred],
     )
     if (!row) missing.push(pred)
+    else if (row.status === 'superseded' && branchSkipped(tx, row.node_run_id)) continue
+    else if (row.status === 'done' && row.node_type === 'branch' && !selectedBranchTarget(tx, row.node_run_id)) failed.push(pred)
+    else if (row.status === 'done' && row.node_type === 'branch' && consumerNodeId !== undefined
+      && selectedBranchTarget(tx, row.node_run_id) !== consumerNodeId) continue
     else if (row.status === 'done' && isCandidateReviewer(tx, consumerId, row.node_run_id)) continue
     else if (reworkBlocksNode(tx, row.node_run_id)) waiting.push(pred)
     else if (SUCCESS_STATUS.has(row.status)) continue

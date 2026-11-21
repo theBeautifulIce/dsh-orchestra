@@ -14,7 +14,7 @@ export const DECISION_COMMAND_KINDS: readonly DecisionCommandKind[] = ['decision
 export type DecisionAcknowledgeInput = { decisionId: string; revision: number }
 
 export type DecisionConfirmation = { operationId: string; challenge: string }
-export type DecisionResolveInput = { decisionId: string; revision: number; resolution: string; contentHash?: string; confirmation?: DecisionConfirmation }
+export type DecisionResolveInput = { decisionId: string; revision: number; resolution: string; contentHash?: string; selectedNodeId?: string; confirmation?: DecisionConfirmation }
 
 export class DecisionConfirmationRequired extends Error {
   readonly confirmation: DecisionConfirmation
@@ -136,6 +136,7 @@ export function createDecisionCommandsApi(client: ApiClient): DecisionCommandsAp
         revision: input.revision,
         resolution: input.resolution,
         ...(input.contentHash ? { contentHash: input.contentHash } : {}),
+        ...(input.selectedNodeId ? { payload: { selected_node_id: input.selectedNodeId } } : {}),
         ...(input.confirmation ? { confirm_challenge: input.confirmation.challenge } : {}),
       },
       input.confirmation?.operationId,

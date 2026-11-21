@@ -146,6 +146,13 @@ export function createRunInTx(
     }
   }
   const picked = def.nodes.filter((n) => (wanted ? wanted.has(n.node_id) : true))
+  if (wanted) {
+    const branchIds = new Set(picked.filter(n => n.type === 'branch').map(n => n.node_id))
+    const missingTargets = (def.edges ?? []).filter(edge => branchIds.has(edge.from) && !wanted.has(edge.to))
+    if (missingTargets.length > 0) {
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '分支节点启动时必须包含所有可选的直接后继', { missing_targets: missingTargets.map(edge => edge.to) })
+    }
+  }
   if (picked.length === 0) {
     throw new OrchError('NOT_FOUND', '这个工作流版本里没有要跑的节点', {
       workflow_id: workflowIdOf(def),

@@ -5,7 +5,7 @@ import { expect, it } from 'vitest'
 import { serveOrchestra } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 
-it.each(['tool', 'branch', 'parallel'])('S6 通用流程拒绝发布独立 %s 节点', async (type) => {
+it.each(['tool', 'parallel'])('S6 通用流程拒绝发布独立 %s 节点', async (type) => {
   const dir = await mkdtemp(join(tmpdir(), 'orch-design-node-readiness-'))
   const secret = 'fixture-workflow-design-node-readiness'
   const service = await serveOrchestra({
@@ -29,7 +29,7 @@ it.each(['tool', 'branch', 'parallel'])('S6 通用流程拒绝发布独立 %s �
       ],
       edges: [
         { from: 'start', to: 'candidate' },
-        { from: 'candidate', to: 'end', ...(type === 'branch' ? { route: { default: true } } : {}) },
+        { from: 'candidate', to: 'end' },
       ],
     }
     expect((await post('/v1/workflows', { operation_id: uuidv7(), workflow_id, name, definition })).status).toBe(200)

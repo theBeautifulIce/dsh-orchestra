@@ -8,6 +8,7 @@ export type DecisionChoiceContext = {
   memory_approval_status: unknown
   memory_recovery: unknown
   registered_report?: unknown
+  workflow_branch?: unknown
 }
 
 export type MemoryDecisionAccess = boolean | 'proposal_only'
@@ -21,6 +22,9 @@ export function panelDecisionOptions(decision: DecisionChoiceContext, now: numbe
   if (decision.kind === 'report_contradicted') return decision.registered_report === 1
     ? { choices: ['uphold_report'], unavailableReason: null }
     : unavailable('这张冲突卡缺少可核验的报告登记。')
+  if (decision.kind === 'rule_ambiguous' && decision.workflow_branch === 1) {
+    return { choices: ['approved', 'rejected'], unavailableReason: null }
+  }
   if (memoryEnabled === 'proposal_only' && decision.kind === 'audit_result' && decision.memory_approval_status === 'awaiting_human') {
     return { choices: ['rejected'], unavailableReason: '当前试用圈只开放记忆提议。' }
   }
@@ -55,4 +59,7 @@ export const DECISION_CHOICE_COLUMNS = '(SELECT b.status FROM memory_batches b W
   + " AND n.hang_reason = 'report_contradicted' AND n.contradiction_decision_id = d.decision_id"
   + " AND n.status = json_extract(d.payload_json, '$.hung_status') AND n.attempt = p.attempt"
   + " AND n.action_generation = json_extract(d.payload_json, '$.report_generation'))"
-  + ") ELSE 0 END AS registered_report"
+  + ") ELSE 0 END AS registered_report, "
+  + "CASE WHEN d.kind='rule_ambiguous' THEN EXISTS(SELECT 1 FROM node_runs n WHERE n.node_run_id=d.node_run_id"
+  + " AND n.run_id=d.run_id AND n.node_type='branch' AND n.status='blocked_post' AND n.blocked_decision_id=d.decision_id)"
+  + " ELSE 0 END AS workflow_branch"
