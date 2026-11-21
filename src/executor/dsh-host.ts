@@ -11,6 +11,7 @@ import { BridgeClient, type BridgeEvent, type BridgeTransport, type SendParams, 
 import { MODEL_COMPLEXITIES, MODEL_LEVELS, MODEL_REF_RE, validModelEffort,
   type ModelCatalogProfile, type ModelCatalogSnapshot, type ModelProfile, type ModelRouting } from './model-routing.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
+import { readDshAttemptMetering } from './dsh-attempt-metering.ts'
 
 export type DshExecutionModel = ModelProfile & { provider: string; model: string }
 type DshAgent = AgentHandle['agent']
@@ -671,6 +672,7 @@ export function createDshExecutor(options: {
         ? latestEffort ?? null : undefined
       emit(child, 'turn', { kind: 'report', report, model_use: {
         model_ref: child.route.ref, provider: child.route.provider, model: child.route.model, observed_request_headers: requests.length,
+        metering: readDshAttemptMetering(agent.session.snapshotEvents(), Boolean(options.context.get?.('compaction'))),
         ...(observedEffort !== undefined && (latestEffort !== undefined || child.route.reasoningEffort !== undefined)
           ? { reasoning_effort: observedEffort } : {}),
       } })

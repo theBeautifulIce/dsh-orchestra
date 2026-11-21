@@ -31,7 +31,20 @@ export type ModelCatalogSnapshot = {
 }
 export type ModelPlanningProfile = ModelProfile & { user_note: string }
 export type ModelRecommendation = { complexity: ModelComplexity; reason: string; preferredModel?: string }
-export type ModelUse = { provider: string; model: string; observed_request_headers: number; reasoning_effort?: string | null }
+export type ModelTokenUsage = {
+  uncached_input_tokens: number | null
+  output_tokens: number | null
+  cache_read_tokens: number | null
+  cache_write_tokens: number | null
+}
+export type ModelAttemptMetering = {
+  tokens: ModelTokenUsage
+  context_compactions: { summaries: number; tool_result_prunes: number } | null
+}
+export type ModelUse = {
+  provider: string; model: string; observed_request_headers: number; reasoning_effort?: string | null
+  metering?: ModelAttemptMetering
+}
 export type ModelAssignment = {
   model_ref: string; complexity: ModelComplexity; reason: string; usage?: ModelUse; settings_revision?: number
   provider?: string; model?: string
@@ -43,13 +56,32 @@ export function validModelEffort(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= MODEL_EFFORT_MAX_LENGTH && !/[\x00-\x1f\x7f]/u.test(value)
 }
 
+export function observedCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function readAttemptMetering(value: unknown): ModelAttemptMetering | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const { tokens, context_compactions } = value as Partial<ModelAttemptMetering>
+  const summaries = observedCount(context_compactions?.summaries)
+  const prunes = observedCount(context_compactions?.tool_result_prunes)
+  return { tokens: {
+    uncached_input_tokens: observedCount(tokens?.uncached_input_tokens),
+    output_tokens: observedCount(tokens?.output_tokens),
+    cache_read_tokens: observedCount(tokens?.cache_read_tokens),
+    cache_write_tokens: observedCount(tokens?.cache_write_tokens),
+  }, context_compactions: summaries === null || prunes === null ? null : { summaries, tool_result_prunes: prunes } }
+}
+
 export function readModelUse(value: unknown): ModelUse | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const use = value as Partial<ModelUse>
   if (typeof use.provider !== 'string' || !use.provider || use.provider.length > 128
     || typeof use.model !== 'string' || !use.model || use.model.length > 256
     || !Number.isSafeInteger(use.observed_request_headers) || use.observed_request_headers! < 1) return undefined
+  const metering = readAttemptMetering(use.metering)
   return { provider: use.provider, model: use.model, observed_request_headers: use.observed_request_headers!,
+    ...(metering ? { metering } : {}),
     ...(use.reasoning_effort === null || validModelEffort(use.reasoning_effort) ? { reasoning_effort: use.reasoning_effort } : {}) }
 }
 export type ModelRoutingContext = {

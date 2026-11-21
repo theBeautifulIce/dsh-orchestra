@@ -1,4 +1,5 @@
 import { OrchError } from '../../core/errors.ts'
+import { readModelUse } from '../../executor/model-routing.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { withReadTx } from './read-tx.ts'
 
@@ -73,6 +74,13 @@ export function describeEvent(type: string, payload: string | null): Detail[] {
     const usage = object(body.usage)
     add(details, '提供方', usage.provider)
     add(details, '实际模型', usage.model)
+    const metering = readModelUse(usage)?.metering
+    add(details, '输入（未缓存）Token', metering?.tokens.uncached_input_tokens ?? '不可用')
+    add(details, '输出 Token', metering?.tokens.output_tokens ?? '不可用')
+    add(details, '缓存读取 Token', metering?.tokens.cache_read_tokens ?? '不可用')
+    add(details, '缓存写入 Token', metering?.tokens.cache_write_tokens ?? '不可用')
+    add(details, '上下文摘要次数', metering?.context_compactions?.summaries ?? '不可用')
+    add(details, '工具结果裁剪次数', metering?.context_compactions?.tool_result_prunes ?? '不可用')
   }
   if (type === 'bridge.turn' && body.kind === 'report') {
     const output = object(report.output)
