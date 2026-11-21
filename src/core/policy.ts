@@ -230,12 +230,18 @@ export function validatePolicy(condition: PolicyCondition, depth = 0): void {
   }
   const cond = condition as { path?: unknown; op?: unknown; value?: unknown }
   if (typeof cond.path !== 'string' || cond.path.length === 0) policyError('policy 条件缺 path')
+  if (cond.path.split('.').some((segment) => !segment)) policyError('policy 路径含空段', { path: cond.path })
   if (typeof cond.op !== 'string' || !(POLICY_OPERATORS as readonly string[]).includes(cond.op)) {
     policyError('policy 算子不在白名单', { op: cond.op })
   }
   if (cond.op === 'match' && typeof cond.value !== 'string') {
     policyError('match 的 value 必须是正则字符串', { path: cond.path })
   }
+  if (cond.op === 'in' && !Array.isArray(cond.value)) policyError('in 的 value 必须是数组', { path: cond.path })
+  if (['gt', 'gte', 'lt', 'lte'].includes(cond.op) && (typeof cond.value !== 'number' || !Number.isFinite(cond.value))) {
+    policyError('gt/gte/lt/lte 只接受数字', { path: cond.path })
+  }
+  if ((cond.op === 'eq' || cond.op === 'ne') && cond.value === undefined) policyError('比较条件缺少 value', { path: cond.path })
   if (cond.op === 'match') {
     try {
       new RegExp(String(cond.value))
@@ -250,6 +256,7 @@ function evaluateConditionNode(condition: PolicyCondition, input: unknown): bool
   if ('any' in condition) return condition.any.some((child) => evaluateConditionNode(child, input))
   if ('not' in condition) return !evaluateConditionNode(condition.not, input)
   const actual = readPath(input, condition.path)
+  if (actual === undefined && condition.op !== 'exists') return false
   switch (condition.op) {
     case 'exists':
       return actual !== undefined && actual !== null

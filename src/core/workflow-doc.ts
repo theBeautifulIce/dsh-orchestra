@@ -6,6 +6,7 @@
 // 两层都返回同一种 issue 形状，path 是 RFC 6901 JSON Pointer，最多 100 条。
 import { z } from 'zod'
 import { OrchError } from './errors.ts'
+import { assertApprovalNodeConfig, assertPolicyNodeConfig } from './workflow-def.ts'
 
 export const WORKFLOW_DOC_MAX_BYTES = 1024 * 1024
 export const VALIDATION_LIMIT = 100
@@ -341,7 +342,14 @@ const configIssues = (doc: WorkflowDoc): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
   for (const node of doc.nodes) {
     const cfg = (node.config ?? {}) as Record<string, unknown>
-    if (node.type === 'wait') {
+    if (node.type === 'policy' || node.type === 'approval') {
+      try {
+        if (node.type === 'policy') assertPolicyNodeConfig(cfg)
+        else assertApprovalNodeConfig(cfg)
+      } catch (error) {
+        issues.push({ path: pointer(nodePath(doc, node.node_id), 'config'), code: 'WORKFLOW_NODE_CONFIG_INVALID', message: (error as Error).message })
+      }
+    } else if (node.type === 'wait') {
       const kind = cfg.wait_kind
       const maxWait = cfg.max_wait_ms
       const match = cfg.match as Record<string, unknown> | undefined
@@ -349,8 +357,7 @@ const configIssues = (doc: WorkflowDoc): ValidationIssue[] => {
         || typeof maxWait !== 'number' || !Number.isInteger(maxWait) || maxWait <= 0) {
         issues.push({ path: pointer(nodePath(doc, node.node_id), 'config'), code: 'WORKFLOW_NODE_CONFIG_INVALID', message: 'wait 节点需要 wait_kind / match.type / 正整数 max_wait_ms' })
       }
-    }
-    if (node.type === 'subworkflow') {
+    } else if (node.type === 'subworkflow') {
       const target = cfg.workflow_id
       const pinned = cfg.pinned_version
       if (typeof target !== 'string' || target.length === 0 || typeof pinned !== 'number' || !Number.isInteger(pinned) || pinned < 1) {

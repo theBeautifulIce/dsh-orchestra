@@ -235,7 +235,7 @@ export type Orchestra = {
 // run 终态集合：取消接口只在这些状态下回报 terminalStatus（S1 第 59 轮 P2-4）
 
 // 生产派发真正实现了的节点类型：parallel / decision 只有状态机与测试，允许发布会让 run 起不来（审计 P1-4）
-const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'subworkflow', 'wait'])
+const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'policy', 'approval', 'subworkflow', 'wait'])
 const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
 
 const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
@@ -540,7 +540,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     dispatch: async (b, progress) => {
       assertOrdinaryRun(b.runId)
       if (registry && ['S5','S6'].includes(opts.phase)) inTx(db, tx => rememberManualDispatchSpecs(tx, opts.secret, catalog, registry, b.runId, b.nodes, b.now))
-      // 控制节点（wait / subworkflow）不需要宿主执行器：只跑它们的工作流在无执行器进程里也能推进。
+      // policy、approval、wait 和 subworkflow 不依赖宿主执行器。
       // 只有 agent 节点必须要有执行器；parallel / decision 没有执行实现，交给 dispatcher 明确拒绝。
       const agentNodes = db.raw.prepare(
         "SELECT COUNT(*) AS n FROM node_runs WHERE run_id = ? AND status = 'queued' AND node_type = 'agent'",

@@ -1,6 +1,7 @@
 // src/service/commands/runtime.ts —— 生产路径的命令装配（规格 12.5 行 1088-1092）
 import type { Phase } from '../../core/config.ts'
 import type { Db, Tx } from '../../infra/sqlite/driver.ts'
+import { isDispatcherWorkflowNode } from '../../core/workflow-def.ts'
 import { withTx } from '../../infra/sqlite/driver.ts'
 import type { Report } from '../../core/report.ts'
 import { applyCancel, type CancelOutcome, type CancelResult } from './cancel.ts'
@@ -25,32 +26,51 @@ export type RuntimeDeps = {
 
 export type AcquireNodeRunResult = { lease_id: string; expires_at: string; action_generation: number }
 
-export function acquireNodeRun(deps: RuntimeDeps, p: { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }): AcquireNodeRunResult {
+type AcquireNodeRunParams = { nodeRunId: string; ownerEpoch: number; leaseTtlMs: number; now: string }
+
+export function acquireNodeRun(deps: RuntimeDeps, p: AcquireNodeRunParams): AcquireNodeRunResult {
   return withTx(deps.db, (tx) => {
-    const node = tx.get<{ run_id: string; node_id: string; workflow_id: string | null; workflow_version: string | null }>(
-      'SELECT n.run_id,n.node_id,r.workflow_id,r.workflow_version FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
-      [p.nodeRunId],
-    )
-    if (!node) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId: p.nodeRunId })
-    const run = readRunBinding(tx, node.run_id)!
-    if (run.cancel_requested_at || run.status === 'paused') {
-      throw new OrchError('STALE_GENERATION', '运行已暂停或取消，当前节点不能开始', { runId: node.run_id })
-    }
-    let edges = pinnedEdges(run)
-    // Some in-process integrations load a fixed definition without attaching the catalog to the ledger.
-    if (!edges && !run.definition_json && node.workflow_version !== null) {
-      const def = deps.catalog.get(node.workflow_id ?? 'default', node.workflow_version)
-      if (definitionHashOf(def) === run.workflow_definition_hash) edges = def.edges ?? []
-    }
-    if (!edges) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
-    const preds = runPredecessors(tx, node.run_id, edges).get(node.node_id) ?? []
-    const readiness = dependencyReadiness(tx, node.run_id, p.nodeRunId, preds)
-    if (!readiness.ready) {
-      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '前置节点尚未成功完成，当前节点不能开始', { nodeRunId: p.nodeRunId, ...readiness })
-    }
-    const out = acquireLease(tx, deps.secret, p)
-    return { lease_id: out.leaseId, expires_at: out.expiresAt, action_generation: out.actionGeneration }
+    assertNodeRunReadyInTx(tx, deps, p.nodeRunId, false)
+    return takeNodeRunLease(tx, deps, p)
   })
+}
+
+/** Run the lease and its synchronous control action in the same write transaction. */
+export function acquireNodeRunInTx(tx: Tx, deps: RuntimeDeps, p: AcquireNodeRunParams): AcquireNodeRunResult {
+  assertNodeRunReadyInTx(tx, deps, p.nodeRunId)
+  return takeNodeRunLease(tx, deps, p)
+}
+
+export function assertNodeRunReadyInTx(tx: Tx, deps: RuntimeDeps, nodeRunId: string, fromDispatcher = true): void {
+  const node = tx.get<{ run_id: string; node_id: string; node_type: string; workflow_id: string | null; workflow_version: string | null }>(
+    'SELECT n.run_id,n.node_id,n.node_type,r.workflow_id,r.workflow_version FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
+    [nodeRunId],
+  )
+  if (!node) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId })
+  if (!fromDispatcher && isDispatcherWorkflowNode(node.node_type)) {
+    throw new OrchError('FORBIDDEN', '此节点只能由工作流调度器执行', { nodeRunId })
+  }
+  const run = readRunBinding(tx, node.run_id)!
+  if (run.cancel_requested_at || run.status === 'paused') {
+    throw new OrchError('STALE_GENERATION', '运行已暂停或取消，当前节点不能开始', { runId: node.run_id })
+  }
+  let edges = pinnedEdges(run)
+  // Some in-process integrations load a fixed definition without attaching the catalog to the ledger.
+  if (!edges && !run.definition_json && node.workflow_version !== null) {
+    const def = deps.catalog.get(node.workflow_id ?? 'default', node.workflow_version)
+    if (definitionHashOf(def) === run.workflow_definition_hash) edges = def.edges ?? []
+  }
+  if (!edges) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
+  const preds = runPredecessors(tx, node.run_id, edges).get(node.node_id) ?? []
+  const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds)
+  if (!readiness.ready) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '前置节点尚未成功完成，当前节点不能开始', { nodeRunId, ...readiness })
+  }
+}
+
+function takeNodeRunLease(tx: Tx, deps: RuntimeDeps, p: AcquireNodeRunParams): AcquireNodeRunResult {
+  const out = acquireLease(tx, deps.secret, p)
+  return { lease_id: out.leaseId, expires_at: out.expiresAt, action_generation: out.actionGeneration }
 }
 
 export function renewNodeLease(deps: RuntimeDeps, p: { nodeRunId: string; leaseTtlMs: number; now: string }): { expires_at: string } {

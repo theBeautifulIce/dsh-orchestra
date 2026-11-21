@@ -132,6 +132,15 @@ export function runtimeProjection(workflowId: string, version: string, doc: Work
     if (cfg.side_effect_policy !== undefined) out.side_effect_policy = cfg.side_effect_policy as WorkflowNodeDef['side_effect_policy']
     if (cfg.pass_conditions !== undefined) out.pass_conditions = cfg.pass_conditions as WorkflowNodeDef['pass_conditions']
     if (cfg.required_hashes !== undefined) out.required_hashes = cfg.required_hashes as WorkflowNodeDef['required_hashes']
+    if (node.type === 'policy') {
+      out.policy = {
+        condition: cfg.condition as NonNullable<WorkflowNodeDef['policy']>['condition'],
+        rule_id: cfg.rule_id as string | undefined,
+      }
+    }
+    if (node.type === 'approval') {
+      out.approval = { prompt: cfg.prompt as string, on_timeout: cfg.on_timeout as 'fail' }
+    }
     if (node.type === 'wait') {
       out.wait = {
         wait_kind: cfg.wait_kind as 'event' | 'timer',

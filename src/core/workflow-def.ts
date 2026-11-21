@@ -2,9 +2,37 @@
 import { OrchError } from './errors.ts'
 import { PHASE_CAPABILITIES, type Phase } from './config.ts'
 import { assertNoMemoryWriteTool } from './memory-graph.ts'
-import type { PassCondition } from './policy.ts'
+import { validatePolicy, type PassCondition, type PolicyCondition } from './policy.ts'
 
-export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait'
+export type NodeType = 'agent' | 'parallel' | 'subworkflow' | 'decision' | 'wait' | 'policy' | 'approval'
+
+export type PolicyNodeConfig = { condition: PolicyCondition; rule_id?: string }
+export type ApprovalNodeConfig = { prompt: string; on_timeout: 'fail' }
+
+export function isDispatcherWorkflowNode(type: string): boolean {
+  return type === 'policy' || type === 'approval'
+}
+
+export function isControlWorkflowNode(type: string): boolean {
+  return type === 'wait' || type === 'subworkflow' || isDispatcherWorkflowNode(type)
+}
+
+export function assertPolicyNodeConfig(config: unknown): asserts config is PolicyNodeConfig {
+  const cfg = config as Partial<PolicyNodeConfig> | undefined
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || !Object.hasOwn(cfg, 'condition')
+      || (cfg.rule_id !== undefined && (typeof cfg.rule_id !== 'string' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(cfg.rule_id)))) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'policy 节点需要 condition，rule_id 必须是有效标识')
+  }
+  validatePolicy(cfg.condition as PolicyCondition)
+}
+
+export function assertApprovalNodeConfig(config: unknown): asserts config is ApprovalNodeConfig {
+  const cfg = config as Partial<ApprovalNodeConfig> | undefined
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg) || typeof cfg.prompt !== 'string'
+      || !cfg.prompt.trim() || cfg.prompt.length > 800 || cfg.on_timeout !== 'fail') {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'approval 节点需要有效的 prompt 与 on_timeout=fail')
+  }
+}
 
 // 子流程嵌套深度上限：根为 0，能挂两层子流程
 export const SUBWORKFLOW_MAX_DEPTH = 2
@@ -38,6 +66,8 @@ export type WorkflowNodeDef = {
   // 控制节点配置：只有 wait / subworkflow 节点能有，其余类型带上就是定义错误
   wait?: WaitNodeConfig
   subworkflow?: SubworkflowNodeConfig
+  policy?: PolicyNodeConfig
+  approval?: ApprovalNodeConfig
 }
 
 export type WorkflowDefinition = {
@@ -61,6 +91,8 @@ export const NODE_CAPABILITY: Record<NodeType, string> = {
   subworkflow: 'subworkflow',
   decision: 'decision',
   wait: 'wait',
+  policy: 'all_nodes',
+  approval: 'approval',
 }
 
 export function isKnownNodeType(type: string): type is NodeType {
@@ -142,6 +174,14 @@ function assertSubworkflowConfig(node: WorkflowNodeDef): void {
 // 控制配置只能长在对应类型的节点上：agent/parallel/decision 带上它就是定义被写错了。
 // 旧定义里若还带着请求体形态的 control，也在这里拒掉，避免“看起来配了、实际没生效”。
 function assertControlConfigShape(node: WorkflowNodeDef): void {
+  if (node.type === 'policy') assertPolicyNodeConfig(node.policy)
+  else if (node.policy !== undefined) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '只有 policy 节点能声明 policy 配置', { node_id: node.node_id })
+  }
+  if (node.type === 'approval') assertApprovalNodeConfig(node.approval)
+  else if (node.approval !== undefined) {
+    throw new OrchError('WORKFLOW_VALIDATION_FAILED', '只有 approval 节点能声明 approval 配置', { node_id: node.node_id })
+  }
   if (node.side_effect_policy !== undefined && (node.type !== 'agent' || !['pure','compensable','irreversible'].includes(node.side_effect_policy))) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', '智能体步骤的副作用声明无效', { node_id: node.node_id })
   }

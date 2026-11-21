@@ -2,6 +2,7 @@
 import { assertReworkExecutionAllowed } from '../rework-runtime.ts'
 import { OrchError, proposedError } from '../../core/errors.ts'
 import { canTransition } from '../../core/state-machine.ts'
+import { isControlWorkflowNode } from '../../core/workflow-def.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { runCas } from '../../infra/db/tx.ts'
 import { appendNodeRunEvent, assertChainIntact } from '../../infra/db/ledger.ts'
@@ -43,7 +44,7 @@ export function transitionNode(tx: Tx, secret: string, params: TransitionParams)
   // 控制节点没有宿主执行实例，只能走 applyTransition；这条入口是执行器/上报那条路径。
   // 不挡住的话，waiting→failed 可以借 M-48 绕过 controlCompletion（G3 r11 P1-1）。
   const node = tx.get<{ node_type: string }>('SELECT node_type FROM node_runs WHERE node_run_id = ?', [params.nodeRunId])
-  if (node && (node.node_type === 'wait' || node.node_type === 'subworkflow')) {
+  if (node && isControlWorkflowNode(node.node_type)) {
     throw new OrchError('STALE_GENERATION', '控制节点迁移必须走 applyTransition', {
       nodeRunId: params.nodeRunId,
       nodeType: node.node_type,
