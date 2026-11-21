@@ -12,6 +12,7 @@ import { applyTransition } from './nodes.ts'
 import { loadNodeRun, type NodeRunRow } from './lease.ts'
 import { applyCancel, type CancelResult } from './cancel.ts'
 import { cancelDecision } from './decisions.ts'
+import { groupStopIntent, isVerifiedParallelMembership } from '../workflow-parallel.ts'
 
 import { SUBWORKFLOW_MAX_DEPTH } from '../../core/workflow-def.ts'
 export { SUBWORKFLOW_MAX_DEPTH }
@@ -668,18 +669,24 @@ export function finishSubworkflowChild(
     'SELECT cancel_requested_at FROM runs WHERE run_id = ?', [node.run_id],
   )?.cancel_requested_at != null
   const childCancelled = (CHILD_CANCELLED as readonly string[]).includes(child.status)
+  const groupStop = child.status === 'cancelled' && !childUnverified && aggregate.policy === 'pure' && node.parent_node_run_id
+    && nodeRunChainIsIntact(tx, secret, node.node_run_id, true)
+    && isVerifiedParallelMembership(tx, secret, node.parent_node_run_id, node.node_run_id)
+    ? groupStopIntent(tx, node.node_run_id, node.parent_node_run_id) : undefined
+  const verifiedGroupStop = groupStop?.child_run_id === child.run_id && !!tx.get(`SELECT 1 FROM events
+    WHERE run_id=? AND type='run.terminal' AND json_extract(payload_redacted,'$.status')='cancelled'`, [child.run_id])
   // 子 run 的“成功族”包含 succeeded_with_unverified：它算完成，但不算已核实。
   const childSucceeded = (CHILD_SUCCESS as readonly string[]).includes(child.status)
   const target: 'done' | 'failed' | 'superseded' = childSucceeded
     ? 'done'
-    : childCancelled && parentCancelled ? 'superseded' : 'failed'
+    : childCancelled && (parentCancelled || verifiedGroupStop) ? 'superseded' : 'failed'
   // 父节点自己不再产生副作用，但它代表子流程这段执行：
   // - 干净成功：沿用子图策略，并标记“已核实”（不会再被 run-close 当成未核实）；
   // - 失败/取消/未核实：至少抬到 compensable 且清掉核实位，父 run 才能继承未核实事实。
-  const parentPolicy: SideEffectPolicy = childSucceeded && !childUnverified
+  const parentPolicy: SideEffectPolicy = verifiedGroupStop ? 'pure' : childSucceeded && !childUnverified
     ? aggregate.policy
     : (aggregate.policy === 'pure' ? 'compensable' : aggregate.policy)
-  const verifiedNone = childSucceeded && !childUnverified ? 1 : 0
+  const verifiedNone = (verifiedGroupStop || (childSucceeded && !childUnverified)) ? 1 : 0
   const ruleId = target === 'done' ? 'M-63' : target === 'failed' ? 'M-64' : 'M-65'
   applyTransition(tx, secret, {
     nodeRunId: node.node_run_id,
@@ -710,6 +717,9 @@ export function finishSubworkflowChild(
     child_side_effect_policy: aggregate.policy,
     child_unverified_nodes: aggregate.unverified,
     parent_side_effect_policy: parentPolicy,
+  })
+  if (verifiedGroupStop) appendNodeRunEvent(tx, secret, node.node_run_id, 'parallel.member_cancelled', {
+    group_id: node.parent_node_run_id, reason: groupStop.reason, child_run_id: child.run_id, from: 'waiting', to: target,
   })
   return { parentNodeRunId: node.node_run_id, status: target }
 }
