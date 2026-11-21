@@ -1,0 +1,89 @@
+{
+  "candidate": "7e3cdbc8ff1539c4f55993816989854d8b5e784d",
+  "previousEvidenceCommit": "c70598d06a63fa09fd41d1d86a6769c4dca8c62c",
+  "remoteMain": "a21e813684a06934048b9ac3300e9c38016cbac8",
+  "status": "pass",
+  "packed": {
+    "source": "7e3cdbc8ff1539c4f55993816989854d8b5e784d",
+    "sha256": "84ce18e0d7f3e0e0cc78fd41c086e030801883e0bcf81b062253f807be33ab89",
+    "archive": "D:\\aboutAI\\dsh-orchestra\\tmp\\office-install\\7e3cdbc8ff1539c4f55993816989854d8b5e784d\\dsh-orchestra-0.1.0.tgz",
+    "files": 77,
+    "identical_migrations": 67,
+    "new_migrations": [
+      "068_ordinary_recovery_controls.sql"
+    ]
+  },
+  "typecheck": "pass",
+  "mainTests": {
+    "passed": 2052,
+    "failed": 0,
+    "conditional": 12,
+    "sha256": "0459555f2dc98e10513d434a68799c41302ddca9e5e25cc7588a284ce43e13da"
+  },
+  "isolatedPackage": {
+    "passed": 6,
+    "failed": 0,
+    "conditional": 0,
+    "sha256": "3601bac3dd240e961ef77520f27588e75a2be32b54ce2d826af0a961d442ab16"
+  },
+  "native": {
+    "version": "0.2.2-rc.5",
+    "rules": [
+      "M-08",
+      "M-09",
+      "M-34",
+      "M-36",
+      "M-37",
+      "M-57",
+      "M-61"
+    ],
+    "same_session": true,
+    "original_tool_executions": 2,
+    "post_deadline_tool_executions": 0,
+    "tracked_final_status": "done",
+    "logSha256": "6761c0c4c8bc9bcc696dc6ff102f8d637050c43832df794e6e4699be5f192409",
+    "qualifiedScope": "bundled candidate entry, original DSH executable, isolated profile, loopback synthetic provider"
+  },
+  "nativeRouting": {
+    "passed": 9,
+    "total": 9
+  },
+  "independent": {
+    "files": 10,
+    "passed": 92,
+    "newP0": 0,
+    "newP1": 0,
+    "method": "clean frozen source and authorized local loopback"
+  },
+  "protectedDshAndProfileBytes": [
+    {
+      "name": "DeepSeek Harness.exe",
+      "unchanged": true
+    },
+    {
+      "name": "app.asar",
+      "unchanged": true
+    },
+    {
+      "name": "package.json",
+      "unchanged": true
+    },
+    {
+      "name": "pnpm-lock.yaml",
+      "unchanged": true
+    },
+    {
+      "name": "pnpm-workspace.yaml",
+      "unchanged": true
+    },
+    {
+      "name": "cordis.yml",
+      "unchanged": true
+    },
+    {
+      "name": "cordis.patch.yml",
+      "unchanged": true
+    }
+  ],
+  "installedToDailyProfile": false
+}
