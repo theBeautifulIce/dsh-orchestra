@@ -452,6 +452,7 @@ function upholdDecision(
       startup_unknown_remaining_ns: null,
     },
   })
+  if (row.status === 'startup_unknown') retireOrdinaryStartupDecision(tx, secret, row.node_run_id, params.now, 'cancelled')
   let replacement: string | null = null
   if (nextStatus === 'superseded') {
     replacement = 'nrun_' + uuidv7()
