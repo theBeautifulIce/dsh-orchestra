@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { SystemClock } from '../../src/core/clock.ts'
 import { parseConfig } from '../../src/core/config.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
-import { openDb, type Db } from '../../src/infra/sqlite/driver.ts'
+import { openDb } from '../../src/infra/sqlite/driver.ts'
 import { dispatchRun, type DispatchDeps } from '../../src/service/dispatcher.ts'
 import { definitionHashOf, WorkflowCatalog } from '../../src/service/workflows.ts'
 import {
@@ -404,44 +404,38 @@ describe('dispatcher 与调度器接线', () => {
   })
 
   it('dispatcher 只调注入的已调度执行函数，自己不再排一次队', async () => {
-    const rows = [
-      { node_run_id: 'nr1', node_id: 'check', seq: 1, attempt: 1 },
-      { node_run_id: 'nr2', node_id: 'check', seq: 2, attempt: 1 },
-    ]
-    // 只假造 dispatcher 用到的那几次查表：节点行要能被认出是 agent 节点
-    const fakeDb = {
-      raw: {
-        prepare: (sql: string) => ({
-          all: () => sql.includes("status = 'queued'") ? rows : [],
-          get: (id: string) => sql.includes('FROM node_runs') && (id === 'nr1' || id === 'nr2')
-            ? { node_run_id: id, run_id: 'run1', node_id: 'check', node_type: 'agent', status: 'queued', replacement_node_run_id: null }
-            : undefined,
-        }),
-        exec: () => {},
-      },
-      epoch: 0,
-    } as unknown as Db
+    const db = openDb(':memory:')
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    const now = '2026-11-14T00:00:00.000Z'
+    const secret = 'unit-dispatch-scheduler'
+    const catalog = new WorkflowCatalog('S2')
+    const runtime = { db, secret, catalog, phase: 'S2' as const, clock: new SystemClock('unit-boot') }
+    const nodeIds = ['check-one', 'check-two']
+    db.raw.prepare("INSERT INTO tasks (task_id,title,status,created_at,updated_at) VALUES ('task','Check','running',?,?)").run(now, now)
+    db.raw.prepare("INSERT INTO runs (run_id,task_id,status,created_at,updated_at) VALUES ('run1','task','running',?,?)").run(now, now)
+    const insert = db.raw.prepare("INSERT INTO node_runs (node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at)"
+      + " VALUES (?,'run1',?,?,'agent','queued','pure',?,?)")
+    for (const [seq, id] of nodeIds.entries()) insert.run(id, id, seq + 1, now, now)
     const base = createExecutionScheduler({ concurrency: 2 })
-    let calls = 0
+    const calls: string[] = []
     let inFlight = 0
     let maxInFlight = 0
-    const executeNode = async () => {
-      calls += 1
-      inFlight += 1
-      maxInFlight = Math.max(maxInFlight, inFlight)
-      await new Promise((resolve) => setTimeout(resolve, 5))
+    const executeNode: DispatchDeps['executeNode'] = ({ nodeRunId }) => runThroughScheduler(base, async () => {
+      calls.push(nodeRunId)
+      maxInFlight = Math.max(maxInFlight, ++inFlight)
+      await delay(5)
       inFlight -= 1
-      throw Object.assign(new Error('节点不存在'), { code: 'NOT_FOUND' })
-    }
-    const outcome = await dispatchRun(
-      { db: fakeDb, executeNode } as unknown as DispatchDeps,
-      { runId: 'run1', nodes: { check: { tools: [] } }, now: '2026-11-14T00:00:00.000Z' },
-    )
-    // 两个节点各执行一次，没有因为 dispatcher 自己再包一层而翻倍
-    expect(calls).toBe(2)
-    for (const row of outcome) {
-      expect(row.status).toBe('failed')
-      expect(row.error_code).toBe('NOT_FOUND')
+      throw Object.assign(new Error('执行器无法启动测试节点'), { code: 'NOT_FOUND' })
+    })
+    try {
+      const nodes = Object.fromEntries(nodeIds.map(id => [id, { tools: [] }]))
+      const outcome = await dispatchRun({ db, secret, runtime, executeNode }, { runId: 'run1', nodes, now })
+      expect(calls).toEqual(nodeIds)
+      expect(maxInFlight).toBe(2)
+      expect(outcome).toMatchObject(nodeIds.map(id => ({ node_run_id: id, status: 'failed', error_code: 'NOT_FOUND' })))
+    } finally {
+      await base.close()
+      db.raw.close()
     }
   })
 })
