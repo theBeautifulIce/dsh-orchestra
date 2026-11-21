@@ -143,6 +143,7 @@ function StepInspection({ step, steps, doc, titles, onOpenRun, onOpenResult, onO
   const outgoing = [...downstream].map(name)
   const assignment = node?.model_assignment
   const model = assignment?.usage
+  const metering = model?.metering
   const contract = step.definition?.raw.contract as { description?: unknown } | undefined
   const description = typeof contract?.description === 'string' ? contract.description : null
   const waiting = node && waitingFor(node, titles)
@@ -182,10 +183,17 @@ function StepInspection({ step, steps, doc, titles, onOpenRun, onOpenResult, onO
       {!allUpstreamWaiting && !!incoming?.length && <><dt>上游</dt><dd>{incoming.join('、')}</dd></>}
       {outgoing.length > 0 && <><dt>下游</dt><dd>{outgoing.join('、')}</dd></>}
     </dl>}
-    {assignment && <div className="task-step-model">
-      <p><strong>{modelLabel}</strong> · {modelName}</p>
-      {assignment.reasoning_effort !== undefined && <span>派发思考深度 · {assignment.reasoning_effort ?? '模型默认'}</span>}
+    {(assignment || node?.node_type === 'agent') && <div className="task-step-model">
+      {assignment && <p><strong>{modelLabel}</strong> · {modelName}</p>}
+      {assignment?.reasoning_effort !== undefined && <span>派发思考深度 · {assignment.reasoning_effort ?? '模型默认'}</span>}
       {model?.reasoning_effort && <span>实际请求思考深度 · {model.reasoning_effort}</span>}
+      <p>本次尝试模型用量（Token）{metering
+        ? <> · 输入（未缓存）{metering.tokens.uncached_input_tokens ?? '不可用'} · 输出{metering.tokens.output_tokens ?? '不可用'}
+          {' · 缓存读取'}{metering.tokens.cache_read_tokens ?? '不可用'} · 缓存写入{metering.tokens.cache_write_tokens ?? '不可用'}</>
+        : ' · 不可用'}</p>
+      <p>上下文压缩{metering?.context_compactions
+        ? <> · 摘要 {metering.context_compactions.summaries} 次 · 工具结果裁剪 {metering.context_compactions.tool_result_prunes} 次</>
+        : ' · 不可用'}</p>
     </div>}
     {(assignment || description || step.definition?.raw.runtime_step != null || node) && <details className="task-step-more"
       onToggle={(event) => setOpen(event.currentTarget.open)}>

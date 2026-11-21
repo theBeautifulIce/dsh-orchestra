@@ -1,0 +1,103 @@
+{
+  "case": "N3",
+  "scope": "真实 DSH Desktop 随包 0.2.2-rc.5 CLI 启动独立 headless profile，Orchestra 源码运行，回环合成 OpenAI 兼容模型。无真实用户历史。",
+  "evidence_level": "原生 DSH 子会话、合成模型；探针明确调用宿主已注册的裁剪与摘要服务。",
+  "run_id": "run_01a1fbd9d49d7148abd8063773ab5a66",
+  "run_status": "succeeded",
+  "independent_dsh_sessions": 6,
+  "attempts": [
+    {
+      "nodeRunId": "nrun_01a1fbd9d4a07c3bba9936f2bd154e2a",
+      "attempt": 1,
+      "metering": {
+        "tokens": {
+          "uncached_input_tokens": 57,
+          "output_tokens": 21,
+          "cache_read_tokens": 15,
+          "cache_write_tokens": null
+        },
+        "context_compactions": {
+          "summaries": 0,
+          "tool_result_prunes": 1
+        }
+      }
+    },
+    {
+      "nodeRunId": "nrun_01a1fbd9-d7c4-7624-a577-0e6460f3b3e1",
+      "attempt": 2,
+      "metering": {
+        "tokens": {
+          "uncached_input_tokens": 172,
+          "output_tokens": 44,
+          "cache_read_tokens": 52,
+          "cache_write_tokens": null
+        },
+        "context_compactions": {
+          "summaries": 1,
+          "tool_result_prunes": 0
+        }
+      }
+    }
+  ],
+  "native_compactions": [
+    {
+      "phase": "A1",
+      "prunes": 1,
+      "removed": 5279
+    },
+    {
+      "phase": "A2",
+      "summary": 29
+    }
+  ],
+  "history_after_service_restart": [
+    {
+      "nodeRunId": "nrun_01a1fbd9-d7c4-7624-a577-0e6460f3b3e1",
+      "fields": {
+        "原因": "真实返工工具验收",
+        "尝试次数": "2",
+        "派发代次": "2",
+        "模型配置": "approved/source",
+        "复杂度": "routine",
+        "提供方": "orchestra-rework-probe",
+        "实际模型": "probe-source",
+        "输入（未缓存）Token": "172",
+        "输出 Token": "44",
+        "缓存读取 Token": "52",
+        "缓存写入 Token": "不可用",
+        "上下文摘要次数": "1",
+        "工具结果裁剪次数": "0"
+      }
+    },
+    {
+      "nodeRunId": "nrun_01a1fbd9d4a07c3bba9936f2bd154e2a",
+      "fields": {
+        "原因": "真实返工工具验收",
+        "尝试次数": "1",
+        "派发代次": "1",
+        "模型配置": "approved/source",
+        "复杂度": "routine",
+        "提供方": "orchestra-rework-probe",
+        "实际模型": "probe-source",
+        "输入（未缓存）Token": "57",
+        "输出 Token": "21",
+        "缓存读取 Token": "15",
+        "缓存写入 Token": "不可用",
+        "上下文摘要次数": "0",
+        "工具结果裁剪次数": "1"
+      }
+    }
+  ],
+  "readbacks": [
+    "reopen SQLite",
+    "restart Orchestra service + GET /v1/node-runs",
+    "GET /v1/execution-history?filter=model"
+  ],
+  "forged_report_output_tokens_ignored": 99999999,
+  "cache_write_unavailable": "合成兼容提供方未报告缓存写入；账本为 null，历史为不可用。非零缓存写入加总由定向回归覆盖。",
+  "summary_usage_scope": "四桶对应普通助手请求。摘要辅助请求作为独立的上下文操作计一次，辅助请求计量不重复加入四桶。",
+  "raw_proof": {
+    "path": "tmp/closeout-metering/final-restart.log",
+    "sha256": "31a1a364112a3a76983c2868fc94a9e90e68218f124f415cc7ac2fbe394d240c"
+  }
+}
