@@ -18,6 +18,8 @@ export type PanelHostProps = {
   panelVersion?: string
   /** 首屏路由；不给就是任务页。 */
   initialRoute?: PanelRoute
+  /** 宿主要求从已发布流程启动前先确认任务计划。 */
+  workflowLaunchRequiresPlan?: boolean
 }
 
 export type PanelHostStatus = {
@@ -124,6 +126,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     serviceConnected={status.serviceConnected ?? false}
     protocolMismatch={status.protocolMismatch ?? false}
     initialRoute={props.initialRoute}
+    workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan}
     memoryEnabled={status.serviceConnected ? status.memoryEnabled : false}
     memoryProposalOnly={status.serviceConnected && status.memoryProposalOnly}
     modelRoutingEnabled={status.modelRoutingEnabled}

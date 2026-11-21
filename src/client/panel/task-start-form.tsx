@@ -14,10 +14,11 @@ const AUTONOMY_HELP: Record<Autonomy, string> = {
   supervised: '你可处理的决定会进入「审批中心 → 待处理」。超时仍等待获授权的处理。',
 }
 
-export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborationEnabled }: {
+export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborationEnabled, onPlanWorkflow }: {
   api: ResourcesApi; commands: TaskCommands; onCreated: () => void
   collaborationEnabled?: boolean
   onOpenRun?: (taskId: string, trigger: HTMLButtonElement, runId: string) => void
+  onPlanWorkflow?: (workflow: WorkflowListItem & { current_version: number }, title: string) => void
 }) {
   const [workflows, setWorkflows] = useState<WorkflowListItem[] | null>(null)
   const [failed, setFailed] = useState(false)
@@ -39,8 +40,15 @@ export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborati
   async function submit(event: FormEvent) {
     event.preventDefault()
     const workflow = workflows?.find((item) => item.workflow_id === selected)
-    const input = pending ?? (workflow && workflow.current_version !== null && title.trim() ? {
-      operationId: newOperationId(), title: title.trim(), workflowId: workflow.workflow_id, version: String(workflow.current_version), autonomy,
+    const trimmedTitle = title.trim()
+    if (onPlanWorkflow) {
+      if (workflow && workflow.current_version !== null && trimmedTitle) {
+        onPlanWorkflow({ ...workflow, current_version: workflow.current_version }, trimmedTitle)
+      }
+      return
+    }
+    const input = pending ?? (workflow && workflow.current_version !== null && trimmedTitle ? {
+      operationId: newOperationId(), title: trimmedTitle, workflowId: workflow.workflow_id, version: String(workflow.current_version), autonomy,
     } : null)
     if (!input || busy) return
     setBusy(true)
@@ -68,13 +76,17 @@ export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborati
       <label>已发布流程 <select value={selected} disabled={busy || Boolean(pending)} onChange={(event) => setSelected(event.target.value)}>
         <option value="">选择流程</option>{workflows.map((item) => <option key={item.workflow_id} value={item.workflow_id}>{item.name} · v{item.current_version}</option>)}
       </select></label>
-      <label>审批提醒与等待方式 <select value={autonomy} aria-describedby={autonomyHelpId} disabled={busy || Boolean(pending)}
-        onChange={(event) => setAutonomy(event.target.value as Autonomy)}>
-        <option value="autonomous">自主执行（默认）</option><option value="assisted">协助执行</option><option value="supervised">人工监督</option>
-      </select></label>
-      <p id={autonomyHelpId}>{AUTONOMY_HELP[autonomy]}</p>
-      {collaborationEnabled && <p>需要两个步骤互相检查时，可在「协作核验」选择参与步骤。</p>}
-      <PanelCommandButton type="submit" disabled={busy || (!pending && (!title.trim() || !selected))}>{pending ? '查询或重试' : '创建并排队'}</PanelCommandButton>
+      {onPlanWorkflow ? <p>补充本次的交付物和验收条件，确认固定流程版本后再启动。</p> : <>
+        <label>审批提醒与等待方式 <select value={autonomy} aria-describedby={autonomyHelpId} disabled={busy || Boolean(pending)}
+          onChange={(event) => setAutonomy(event.target.value as Autonomy)}>
+          <option value="autonomous">自主执行（默认）</option><option value="assisted">协助执行</option><option value="supervised">人工监督</option>
+        </select></label>
+        <p id={autonomyHelpId}>{AUTONOMY_HELP[autonomy]}</p>
+        {collaborationEnabled && <p>需要两个步骤互相检查时，可在「协作核验」选择参与步骤。</p>}
+      </>}
+      <PanelCommandButton type="submit" disabled={busy || (!pending && (!title.trim() || !selected))}>
+        {onPlanWorkflow ? '用此流程规划任务' : pending ? '查询或重试' : '创建并排队'}
+      </PanelCommandButton>
     </>}
     {notice && <p role="status">{notice}</p>}
     {receipt && onOpenRun && <button type="button" onClick={(event) => onOpenRun(receipt.taskId, event.currentTarget, receipt.runId)}>查看本次运行</button>}

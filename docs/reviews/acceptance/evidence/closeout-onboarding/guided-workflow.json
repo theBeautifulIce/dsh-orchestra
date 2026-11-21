@@ -1,0 +1,19 @@
+{
+  "status": "passed",
+  "development_archive_sha256": "42790478e7973dd46b806d663f3be0c6df0ab69b7572d686d94c2b286d62a039",
+  "deployed_client_sha256": "81a549d8befe15ab6f03e0fbb03a432cc1490b8240c81d2a9586256a2663a5fa",
+  "title_and_workflow_prefill": "请使用已发布流程「新人可复用流水流程」v2（wf_onboarding_fixture）完成任务「新人全链路合成任务」。",
+  "initial_launch_action_available": false,
+  "intended_flow": "wf_onboarding_fixture",
+  "version": 2,
+  "confirmation_required_and_used": true,
+  "preview": "reused-current.md",
+  "verified_amount": "101.25",
+  "return_filter": {
+    "value": "succeeded",
+    "label": "已完成"
+  },
+  "successful_task_count": 5,
+  "new_run_id": "run_01a1fbc43f557663ac9cb60b276ddef5",
+  "scope": "Official CLI installed a development tarball with only the candidate client asset replaced. Actual authenticated Web renderer of the isolated Electron Desktop host."
+}

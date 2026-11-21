@@ -50,6 +50,7 @@ export type PanelAppProps = {
   reworkEnabled?: boolean
   reworkPlannerEnabled?: boolean
   initialRoute?: PanelRoute
+  workflowLaunchRequiresPlan?: boolean
   createEventStream?: (onInvalidate: (type: string) => void, onStatus: (status: StreamStatus) => void) => EventStream
   additionalScreens?: Partial<Record<Exclude<PanelRoute, 'tasks'>, ReactNode>>
 }
@@ -205,7 +206,8 @@ export function PanelApp(props: PanelAppProps) {
     screen = <OverviewScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onNavigate={setRoute} />
   } else if (route === 'tasks') {
     screen = <div className="task-workspace">
-      <TaskListScreen reworkEnabled={props.reworkEnabled} collaborationEnabled={props.collaborationEnabled} api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
+      <TaskListScreen reworkEnabled={props.reworkEnabled} collaborationEnabled={props.collaborationEnabled}
+        workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan} api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
         <TaskTriggerManager api={api} commands={triggerCommands} onChanged={() => setReloadVersion((version) => version + 1)} />
       } onSelectTask={(id, trigger, runId) => {
         taskTrigger.current = trigger

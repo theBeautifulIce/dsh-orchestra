@@ -3,7 +3,7 @@ import type { ListTasksParams, ResourcesApi } from '../api/resources.ts'
 import type { TaskSummary } from '../api/types.ts'
 import { TASK_LANES, type TaskLane } from '../../core/task-workspace.ts'
 import { TaskFlowView } from './task-flow-view.tsx'
-import { TaskPlanForm } from './task-plan-form.tsx'
+import { TaskPlanForm, type WorkflowPlanRequest } from './task-plan-form.tsx'
 import { TaskStartForm } from './task-start-form.tsx'
 import type { TaskCommands } from '../api/task-commands.ts'
 import { COPY } from './copy.ts'
@@ -50,6 +50,7 @@ export type TaskListScreenProps = {
   triggerManager?: ReactNode
   reworkEnabled?: boolean
   collaborationEnabled?: boolean
+  workflowLaunchRequiresPlan?: boolean
 }
 
 /** 任务状态文案与色板：display_status 优先，未验证终态走独立文案。 */
@@ -126,7 +127,7 @@ class TaskBoardScroll extends Component<{ children: ReactNode }> {
   }
 }
 
-export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled }: TaskListScreenProps) {
+export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled, workflowLaunchRequiresPlan }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
   const [view, setView] = useState(() => readDisplayPreferences().preferences.taskView)
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
@@ -137,6 +138,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   const [dateTo, setDateTo] = useState('')
   const [dateInvalid, setDateInvalid] = useState(false)
   const [startOpen, setStartOpen] = useState(false)
+  const [workflowPlan, setWorkflowPlan] = useState<{ sequence: number; request: WorkflowPlanRequest }>()
   const [cursor, setCursor] = useState<string | undefined>()
   const [items, setItems] = useState<TaskSummary[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -210,12 +212,24 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
       <p style={mutedStyle}>{filter.archived ? '归档任务仍可查看运行记录、结果与证据，也可以取回。' : '在看板展开步骤看进度，打开任务查看结果和证据。'}</p>
       </div>
       {!filter.archived && <div className="task-page-actions">
-        {commands && <button type="button" aria-expanded={startOpen} onClick={() => setStartOpen(!startOpen)} style={buttonStyle}>从流程新建任务</button>}
+        {commands && <button type="button" aria-expanded={startOpen} onClick={() => setStartOpen(!startOpen)} style={buttonStyle}>
+          {workflowLaunchRequiresPlan ? '从流程规划任务' : '从流程新建任务'}
+        </button>}
         {triggerManager}
       </div>}
     </header>
-    {!filter.archived && commands && startOpen && <TaskStartForm api={api} commands={commands} onCreated={refresh} onOpenRun={onSelectTask} collaborationEnabled={collaborationEnabled} />}
-    {!filter.archived && commands && <div className="task-plan-entry"><TaskPlanForm api={api} commands={commands} onStarted={refresh} onOpenRun={onSelectTask} /></div>}
+    {!filter.archived && commands && startOpen && <TaskStartForm api={api} commands={commands} onCreated={refresh}
+      onOpenRun={onSelectTask} collaborationEnabled={collaborationEnabled} onPlanWorkflow={workflowLaunchRequiresPlan ? (workflow, title) => {
+        setWorkflowPlan((previous) => ({ sequence: (previous?.sequence ?? 0) + 1, request: {
+          id: workflow.workflow_id,
+          version: String(workflow.current_version),
+          goal: `请使用已发布流程「${workflow.name}」v${workflow.current_version}（${workflow.workflow_id}）完成任务「${title}」。`,
+        } }))
+        setStartOpen(false)
+      } : undefined} />}
+    {!filter.archived && commands && <div className="task-plan-entry"><TaskPlanForm key={workflowPlan?.sequence}
+      workflowRequest={workflowPlan?.request} onClearWorkflow={() => setWorkflowPlan(undefined)}
+      api={api} commands={commands} onStarted={refresh} onOpenRun={onSelectTask} /></div>}
     <div className="task-toolbar">
       <label>状态 <select value={status} onChange={(event) => {
         const value = event.target.value

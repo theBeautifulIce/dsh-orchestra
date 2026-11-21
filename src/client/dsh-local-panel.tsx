@@ -101,5 +101,5 @@ export function DshLocalPanel({ sessions, workspaces }: DshLocalPanelSources) {
     <h1>Orchestra</h1>
     <p role="status">请在 DSH 的工作区中打开一个会话，再返回 Orchestra。</p>
   </main>
-  return <PanelHost key={JSON.stringify([workspaceId, sessionId])} baseUrl={panelBase} fetcher={fetcher} />
+  return <PanelHost key={JSON.stringify([workspaceId, sessionId])} baseUrl={panelBase} fetcher={fetcher} workflowLaunchRequiresPlan />
 }
