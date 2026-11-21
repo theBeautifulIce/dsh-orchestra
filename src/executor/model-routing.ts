@@ -39,6 +39,7 @@ export type ModelTokenUsage = {
 }
 export type ModelAttemptMetering = {
   tokens: ModelTokenUsage
+  settlement_incomplete?: true
   context_compactions: { summaries: number; tool_result_prunes: number } | null
 }
 export type ModelUse = {
@@ -62,10 +63,10 @@ export function observedCount(value: unknown): number | null {
 
 function readAttemptMetering(value: unknown): ModelAttemptMetering | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const { tokens, context_compactions } = value as Partial<ModelAttemptMetering>
+  const { tokens, context_compactions, settlement_incomplete } = value as Partial<ModelAttemptMetering>
   const summaries = observedCount(context_compactions?.summaries)
   const prunes = observedCount(context_compactions?.tool_result_prunes)
-  return { tokens: {
+  return { ...(settlement_incomplete === true ? { settlement_incomplete } : {}), tokens: {
     uncached_input_tokens: observedCount(tokens?.uncached_input_tokens),
     output_tokens: observedCount(tokens?.output_tokens),
     cache_read_tokens: observedCount(tokens?.cache_read_tokens),

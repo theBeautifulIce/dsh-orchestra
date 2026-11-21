@@ -1,0 +1,102 @@
+{
+  "item": "N3",
+  "comparison_baseline": "26a77cd",
+  "method": "DSH Desktop 0.2.2-rc.5 bundled CLI, fresh isolated DSH_HOME/SQLite per trial, actual child sessions, synthetic loopback provider",
+  "trigger": "Malformed JSON after a provider settlement; 2500 ms action timeout during second streaming request; authenticated cancel after the first billed tool step settled.",
+  "results": {
+    "red": [
+      {
+        "phase": "BAD",
+        "code": "PAYLOAD_SCHEMA_INVALID",
+        "nodeRunId": "nrun_01a1fbfcf5ec762f8bd9f6e1937250e0",
+        "status": "blocked_post",
+        "metering": null,
+        "ledgerReceipts": 0
+      },
+      {
+        "phase": "TIMEOUT",
+        "code": "OPERATION_TIMEOUT",
+        "nodeRunId": "nrun_01a1fbfcf6e0752caa2444339ab52300",
+        "status": "blocked_post",
+        "metering": null,
+        "ledgerReceipts": 0
+      },
+      {
+        "phase": "CANCEL",
+        "code": "SERVICE_UNAVAILABLE",
+        "nodeRunId": "nrun_01a1fbfd00fb787cb73d56e0f2c5eac2",
+        "status": "timeout",
+        "metering": null,
+        "ledgerReceipts": 0
+      }
+    ],
+    "green": [
+      {
+        "phase": "BAD",
+        "code": "PAYLOAD_SCHEMA_INVALID",
+        "nodeRunId": "nrun_01a1fbfd01ac7482a19f8f10c2dc8b2e",
+        "status": "blocked_post",
+        "metering": {
+          "tokens": {
+            "uncached_input_tokens": 19,
+            "output_tokens": 7,
+            "cache_read_tokens": 5,
+            "cache_write_tokens": null
+          },
+          "context_compactions": {
+            "summaries": 0,
+            "tool_result_prunes": 0
+          }
+        },
+        "ledgerReceipts": 1
+      },
+      {
+        "phase": "TIMEOUT",
+        "code": "OPERATION_TIMEOUT",
+        "nodeRunId": "nrun_01a1fbfd02927d4b97d9c169bc618590",
+        "status": "blocked_post",
+        "metering": {
+          "settlement_incomplete": true,
+          "tokens": {
+            "uncached_input_tokens": 19,
+            "output_tokens": 7,
+            "cache_read_tokens": 5,
+            "cache_write_tokens": null
+          },
+          "context_compactions": {
+            "summaries": 0,
+            "tool_result_prunes": 0
+          }
+        },
+        "ledgerReceipts": 1
+      },
+      {
+        "phase": "CANCEL",
+        "code": "SERVICE_UNAVAILABLE",
+        "nodeRunId": "nrun_01a1fbfd0ca375c5b90559e469bc18a8",
+        "status": "timeout",
+        "metering": {
+          "settlement_incomplete": true,
+          "tokens": {
+            "uncached_input_tokens": 19,
+            "output_tokens": 7,
+            "cache_read_tokens": 5,
+            "cache_write_tokens": null
+          },
+          "context_compactions": {
+            "summaries": 0,
+            "tool_result_prunes": 0
+          }
+        },
+        "ledgerReceipts": 1
+      }
+    ]
+  },
+  "reopen": "Each recorded event was read from a fresh read-only SQLite connection and compared with the node detail HTTP response.",
+  "partial_rule": "Interrupted attempts retain only reported bucket subtotals; missing buckets stay null and the UI marks the subtotal incomplete.",
+  "local_reproduction": "tmp\\closeout-metering-failures\\probe.mjs",
+  "local_logs": [
+    "tmp\\closeout-metering-failures\\red-final.log",
+    "tmp\\closeout-metering-failures\\green-final.log"
+  ]
+}

@@ -85,7 +85,13 @@
       "status": "done"
     }
   ],
-  "surface_boundary": "Read receipt used authenticated service HTTP. Native chat brain-only receipt binding and panel renderer use separate targeted tests, not this CLI probe.",
+  "surface_boundary": "Original rc.5 CLI scope receipt predates the privacy correction. The separate regression exercises the registered native tool result and renderer used by session history. It does not repeat a full Desktop ZIP export.",
   "local_probe": "tmp/closeout-run-notes/dsh-run-notes-probe.mjs",
-  "local_raw_log": "tmp/closeout-run-notes/native.log"
+  "local_raw_log": "tmp/closeout-run-notes/native.log",
+  "privacy_correction": {
+    "initial_finding": "A standard DSH session export can contain text returned by a native tool renderer. The previous registered notes tool returned the private fixture in both execute text and rendered history.",
+    "observed_after": "The same source session receives only shared notes. The persisted private fixture is retained and omitted from execute text/preview and rendered tool result. Requests to create new brain-only notes receive SERVICE_UNAVAILABLE.",
+    "availability": "Existing brain-only records remain private under the original retention policy. A separately verified, non-exportable model read channel is still unavailable.",
+    "regression": "tests/integration/chat-native.spec.ts (keeps brain-only notes out of native result and conversation export content); tests/contract/run-notes.spec.ts"
+  }
 }

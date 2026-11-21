@@ -41,7 +41,7 @@ function fixtureRun(db: Db) {
   return { run: run.run_id, bind, attachChatReceipt }
 }
 
-it('binds downstream and brain visibility to authoritative run, attempt, topology and creator receipt', () => {
+it('keeps private notes out of ordinary reads while enforcing run, attempt, topology and creator receipt', () => {
   const { db, dir } = freshLedger()
   try {
     const first = fixtureRun(db)
@@ -58,7 +58,8 @@ it('binds downstream and brain visibility to authoritative run, attempt, topolog
     const beforeStatuses = statuses()
     notes.callNode(a, { action: 'add', scope: 'run', body: 'public-reference' }, 'run', now)
     notes.callNode(a, { action: 'add', scope: 'downstream', body: 'private-direct-reference' }, 'downstream', now)
-    notes.callNode(a, { action: 'add', scope: 'brain', body: 'private-brain-reference' }, 'brain', now)
+    expect(() => notes.callNode(a, { action: 'add', scope: 'brain', body: 'private-brain-reference' }, 'brain', now))
+      .toThrow(expect.objectContaining({ code: 'SERVICE_UNAVAILABLE' }))
     db.raw.prepare("UPDATE node_runs SET status='done' WHERE node_run_id=?").run(a.node_run_id)
     const beforeReads = statuses()
     const human = notes.addHuman({ run_id: first.run, body: 'human-reference', operation_id: uuidv7() }, author)
@@ -74,12 +75,12 @@ it('binds downstream and brain visibility to authoritative run, attempt, topolog
     expect(bodies(sibling)).toEqual(['human-reference', 'public-reference'])
     expect(bodies(indirect)).toEqual(['human-reference', 'public-reference'])
     expect(bodies(crossRun)).toEqual([])
-    expect(() => notes.listBrain(first.run, author)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    expect(() => notes.listChatShared(first.run, author)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
     first.attachChatReceipt()
-    expect(notes.listBrain(first.run, author).items.map(({ body }) => body))
-      .toEqual(['human-reference', 'private-brain-reference', 'public-reference'])
-    expect(() => notes.listBrain(first.run, intruder)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
-    expect(() => notes.listBrain(other.run, author)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    expect(notes.listChatShared(first.run, author).items.map(({ body }) => body))
+      .toEqual(['human-reference', 'public-reference'])
+    expect(() => notes.listChatShared(first.run, intruder)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+    expect(() => notes.listChatShared(other.run, author)).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
     const publicEvents = JSON.stringify(db.raw.prepare("SELECT * FROM events WHERE type LIKE 'run.note_%'").all())
     for (const value of [author, 'private-direct-reference', 'private-brain-reference', 'human-reference', 'public-reference']) {
       expect(publicEvents).not.toContain(value)

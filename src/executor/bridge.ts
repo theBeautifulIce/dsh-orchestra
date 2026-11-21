@@ -16,6 +16,8 @@ export type BridgeEventSource = {
 // 宿主侧传输契约：方法名 + 参数，返回值由宿主给；listen 是持续事件流
 export type BridgeTransport = BridgeEventSource & {
   request<T>(method: string, params: unknown): Promise<T>
+  /** Optional local host snapshot before disposal. Never comes from an agent report. */
+  snapshotAttemptModelUse?(params: { executorAgentId: string; attempt: number }): unknown
 }
 
 // 事件类型固定五类，写别的直接拒（规格 7.2 行 590）
@@ -107,6 +109,10 @@ export class BridgeClient {
     const res = await this.transport.request<SubscribeResult>('executor.subscribe', params)
     if (res.subscribed) this.subscribed.add(params.executorAgentId)
     return res
+  }
+
+  snapshotAttemptModelUse(params: { executorAgentId: string; attempt: number }): unknown {
+    return this.transport.snapshotAttemptModelUse?.(params)
   }
 
   // send 必须在 subscribe 确认之后，否则 BRIDGE_NOT_SUBSCRIBED（规格 7.2 行 584）

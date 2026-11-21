@@ -18,8 +18,10 @@ const DEFAULT_STOP_RPC_TIMEOUT_MS = 2_000
 export type AgentReportEnvelope = {
   report: unknown
   evidence: unknown | null
-  modelUse?: ModelUse & { model_ref: string }
+  modelUse?: AttemptModelUse
 }
+
+type AttemptModelUse = ModelUse & { model_ref: string }
 
 export type AgentLifecycleDeps = {
   db: Db
@@ -38,6 +40,7 @@ export type AgentLifecycleDeps = {
   idleTimeoutMs: number
   // 收口 RPC 的单次上限：cancel/state/dispose 由宿主实现，编排层不能无限等。
   stopRpcTimeoutMs?: number
+  onStopModelUse?: (usage: AttemptModelUse) => void
   nowAt: () => string
   clock?: ClockProvider
   spillDir: string
@@ -263,6 +266,14 @@ export class AgentLifecycle {
     } catch {
       state = null
     }
+    if (this.deps.onStopModelUse) {
+      try {
+        const use = this.deps.client.snapshotAttemptModelUse({ executorAgentId: this.agentId, attempt: this.deps.attempt })
+        if (use !== undefined) this.deps.onStopModelUse(decodeModelUse(use))
+      } catch {
+        // Optional billing metadata cannot change the execution or stop outcome.
+      }
+    }
     // 两个条件都要成立：whenIdle 只说明“当前没在跑”，state 才说明会话确实落到可释放的终态；
     // idle:true + state:running 这种矛盾回包不能直接 dispose。
     const idleOk = idle?.idle === true
@@ -296,13 +307,7 @@ export class AgentLifecycle {
     }
     if (!this.reportSeen && isReportEnvelope(payload)) {
       const raw = (payload as Record<string, unknown>).model_use
-      let modelUse: AgentReportEnvelope['modelUse']
-      if (raw !== undefined) {
-        const usage = readModelUse(raw)
-        const modelRef = (raw as { model_ref?: unknown } | null)?.model_ref
-        if (!usage || typeof modelRef !== 'string') throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主的模型请求回执格式不合法')
-        modelUse = { ...usage, model_ref: modelRef }
-      }
+      const modelUse = raw === undefined ? undefined : decodeModelUse(raw)
       this.reportSeen = true
       const report = payload.report
       // 不能在这里 await flush：本条事件的 ACK 要等 onEvent 返回后由消费器推进，
@@ -315,6 +320,13 @@ export class AgentLifecycle {
       }, (err: unknown) => { this.waiter?.reject(err) })
     }
   }
+}
+
+function decodeModelUse(raw: unknown): AttemptModelUse {
+  const usage = readModelUse(raw)
+  const modelRef = (raw as { model_ref?: unknown } | null)?.model_ref
+  if (!usage || typeof modelRef !== 'string') throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主的模型请求回执格式不合法')
+  return { ...usage, model_ref: modelRef }
 }
 
 function isReportEnvelope(payload: Record<string, unknown> | null): payload is { report: unknown } {

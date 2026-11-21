@@ -187,6 +187,7 @@ function StepInspection({ step, steps, doc, titles, onOpenRun, onOpenResult, onO
       {assignment && <p><strong>{modelLabel}</strong> · {modelName}</p>}
       {assignment?.reasoning_effort !== undefined && <span>派发思考深度 · {assignment.reasoning_effort ?? '模型默认'}</span>}
       {model?.reasoning_effort && <span>实际请求思考深度 · {model.reasoning_effort}</span>}
+      {metering?.settlement_incomplete && <p>执行提前结束，仅显示模型已报告的用量。</p>}
       <p>本次尝试模型用量（Token）{metering
         ? <> · 输入（未缓存）{metering.tokens.uncached_input_tokens ?? '不可用'} · 输出{metering.tokens.output_tokens ?? '不可用'}
           {' · 缓存读取'}{metering.tokens.cache_read_tokens ?? '不可用'} · 缓存写入{metering.tokens.cache_write_tokens ?? '不可用'}</>

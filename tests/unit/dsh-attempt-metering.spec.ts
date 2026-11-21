@@ -36,6 +36,20 @@ it('does not turn absent, invalid or overflowing counters into zeros or partial 
     .tokens.output_tokens).toBeNull()
 })
 
+it('preserves settled subtotals after interruption and keeps unreported buckets unknown', () => {
+  const events = [
+    { seq: 1, type: 'assistant/message', data: { turn: 1, step: 1,
+      usage: { inputTokens: 19, outputTokens: 0, cacheReadTokens: 5 } } },
+    { seq: 2, type: 'assistant/attempt', data: { turn: 1, step: 2, stream: [] } },
+  ]
+  expect(readDshAttemptMetering(events, true, true)).toEqual({
+    settlement_incomplete: true,
+    tokens: { uncached_input_tokens: 19, output_tokens: 0, cache_read_tokens: 5, cache_write_tokens: null },
+    context_compactions: { summaries: 0, tool_result_prunes: 0 },
+  })
+  expect(readDshAttemptMetering(events.slice(1), true, true).tokens.output_tokens).toBeNull()
+})
+
 it('counts only the matching replacement pairs and ignores other compaction lifecycle records', () => {
   const shadowedRange = { start: 12, end: 4 }
   const surfaceOp = { op: 'replace', startSeq: 12, endSeq: 4 }
@@ -71,10 +85,10 @@ it('preserves old model receipts and accepts only whitelisted numeric metering f
 it('shows historical attempts from host metering and ignores model-supplied report counters', () => {
   const host = describeEvent('executor.model_used', JSON.stringify({ attempt: 2, usage: {
     provider: 'fixture', model: 'meter', observed_request_headers: 1,
-    metering: { tokens: { output_tokens: 0 }, context_compactions: { summaries: 1, tool_result_prunes: 0 } },
+    metering: { settlement_incomplete: true, tokens: { output_tokens: 0 }, context_compactions: { summaries: 1, tool_result_prunes: 0 } },
   } }))
   expect(host).toEqual(expect.arrayContaining([
-    { label: '尝试次数', value: '2' }, { label: '输入（未缓存）Token', value: '不可用' },
+    { label: '尝试次数', value: '2' }, { label: '用量范围', value: '仅含结束前模型已报告的用量' }, { label: '输入（未缓存）Token', value: '不可用' },
     { label: '输出 Token', value: '0' }, { label: '上下文摘要次数', value: '1' },
   ]))
   expect(describeEvent('bridge.turn', JSON.stringify({ attempt: 3, payload: {
