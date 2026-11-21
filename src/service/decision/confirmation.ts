@@ -6,6 +6,7 @@ import { appendEvent } from '../../infra/db/ledger.ts'
 import type { ResolveDecisionRequest } from '../commands/decisions.ts'
 import { assertOperationId, runIdempotentCommand } from '../commands/idempotency.ts'
 import { DECISION_CHOICE_COLUMNS, isEffectDecision, panelDecisionOptions, panelDecisionRestriction, withOrdinaryRecovery, type DecisionChoiceContext } from './choices.ts'
+import type { OrdinaryLiveRecovery } from './ordinary-live-recovery.ts'
 
 const KIND = 'decision.resolve'
 const CHALLENGE_TTL_MS = 120_000
@@ -59,6 +60,7 @@ export function runDecisionCommand(
   legacyRequestHash: string,
   memoryEnabled: boolean,
   apply: (confirmed: boolean, requireEffectSettlement: boolean) => DecisionCommandResult,
+  liveRecovery?: OrdinaryLiveRecovery,
 ): DecisionCommandResult {
   const { decisionId, revision, resolution, payload, contentHash, evidenceProducers, confirm, actor } = input
   const requestHash = sha256Hex(canonicalJson({
@@ -69,10 +71,10 @@ export function runDecisionCommand(
   const read = () => {
     const card = tx.get<DecisionChoiceContext & {
       decision_id: string; run_id: string; node_run_id: string | null; kind: string; payload_json: string
-      revision: number; confirm_required: number
+      revision: number; confirm_required: number; status: string
     }>('SELECT d.decision_id, d.run_id, d.node_run_id, d.payload_json, d.revision, d.confirm_required, d.kind, d.status, d.approver, d.expires_at, '
       + DECISION_CHOICE_COLUMNS + ' FROM decisions d WHERE d.decision_id = ?', [decisionId])
-    return card && withOrdinaryRecovery(tx, card)
+    return card && withOrdinaryRecovery(tx, card, liveRecovery)
   }
   const now = Date.parse(input.now)
   const validate = (current: ReturnType<typeof read>) => {

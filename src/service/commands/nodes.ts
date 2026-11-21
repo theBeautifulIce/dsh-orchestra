@@ -22,6 +22,8 @@ const PATCH_COLUMNS = new Set([
   'startup_unknown_remaining_ns',
   // 跨 boot 恢复检查点：剩余预算快照，重启后按它续算（评审 P1-2）
   'action_remaining_ns',
+  'action_start_source',
+  'wait_extensions',
   'wait_remaining_ns',
   'fence_remaining_ns',
   'recovery_uncertain',
@@ -254,6 +256,7 @@ export type CreateNodeRunRequest = {
   originNodeRunId: string
   previousActionGeneration?: number
   reworkRequestId?: string
+  preserveOriginSideEffectPolicy?: boolean
   now: string
 }
 
@@ -265,11 +268,19 @@ export function createNodeRun(tx: Tx, req: CreateNodeRunRequest): void {
   if (req.attempt < 1) {
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'attempt 必须从 1 开始', { attempt: req.attempt })
   }
-  if (req.originNodeRunId) {
-    const origin = tx.get<{ hang_reason: string | null; status: string; run_id: string; node_id: string; node_type: string; attempt: number; seq: number }>('SELECT hang_reason,status,run_id,node_id,node_type,attempt,seq FROM node_runs WHERE node_run_id = ?', [req.originNodeRunId])
+  let sideEffectPolicy: string | undefined
+  if (req.originNodeRunId || req.preserveOriginSideEffectPolicy) {
+    const origin = tx.get<{ hang_reason: string | null; status: string; run_id: string; node_id: string; node_type: string; attempt: number; seq: number; side_effect_policy: string }>(
+      'SELECT hang_reason,status,run_id,node_id,node_type,attempt,seq,side_effect_policy FROM node_runs WHERE node_run_id = ?', [req.originNodeRunId])
     if (origin?.status === 'done' && (!req.reworkRequestId || !tx.get("SELECT 1 FROM rework_requests r LEFT JOIN rework_impacts i ON i.request_id=r.request_id AND i.node_run_id=? WHERE r.request_id=? AND ((r.target_node_run_id=? AND r.status='authorized') OR (i.node_run_id IS NOT NULL AND r.status IN ('authorized','awaiting_review')))",[req.originNodeRunId,req.reworkRequestId,req.originNodeRunId]))) throw new OrchError('FORBIDDEN','completed attempts require dedicated persisted rework authority')
-    if (req.reworkRequestId && origin && (origin.run_id !== req.runId || origin.node_id !== req.nodeId || origin.node_type !== req.nodeType || origin.seq !== req.seq || req.attempt !== origin.attempt + 1)) {
+    const sameNode = origin && origin.run_id === req.runId && origin.node_id === req.nodeId && origin.node_type === req.nodeType
+      && origin.seq === req.seq && req.attempt === origin.attempt + 1
+    if (req.reworkRequestId && origin && !sameNode) {
       throw new OrchError('STALE_GENERATION', 'rework successor identity must match its origin')
+    }
+    if (req.preserveOriginSideEffectPolicy) {
+      if (!sameNode || origin.status !== 'superseded') throw new OrchError('STALE_GENERATION', '新尝试必须对应已接替的原步骤')
+      sideEffectPolicy = origin.side_effect_policy
     }
     if (origin?.hang_reason) {
       throw new OrchError('STALE_HANG', '旧 attempt 挂在冲突上，新 attempt 要被挡住', {
@@ -279,9 +290,11 @@ export function createNodeRun(tx: Tx, req: CreateNodeRunRequest): void {
     }
   }
   tx.run(
-    'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, origin_node_run_id, created_at, updated_at, action_generation) ' +
-      "VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?)",
-    [req.newNodeRunId, req.runId, req.nodeId, req.seq, req.nodeType, req.attempt, req.originNodeRunId, req.now, req.now, req.previousActionGeneration ?? 0],
+    'INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, origin_node_run_id, created_at, updated_at, action_generation'
+      + (sideEffectPolicy === undefined ? ") VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?)"
+        : ", side_effect_policy) VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?)"),
+    [req.newNodeRunId, req.runId, req.nodeId, req.seq, req.nodeType, req.attempt, req.originNodeRunId, req.now, req.now,
+      req.previousActionGeneration ?? 0, ...(sideEffectPolicy === undefined ? [] : [sideEffectPolicy])],
   )
   const res = tx.run(
     'UPDATE node_runs SET replacement_node_run_id = ?, updated_at = ?' + (req.reworkRequestId ? ', revision = revision + 1' : '') + ' WHERE node_run_id = ? AND replacement_node_run_id IS NULL',

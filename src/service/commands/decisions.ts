@@ -12,6 +12,7 @@ import type { Tx } from '../../infra/sqlite/driver.ts'
 import { requestHashOf, runIdempotentCommand } from './idempotency.ts'
 import { abandonOrdinaryRecovery, applyOrdinaryEffectResolution, confirmOrdinaryUnsentAttempt, expireOrdinaryAbandon,
   ordinaryEffectResolution, ordinaryRecoveryBound, signOrdinaryAbandon } from '../decision/ordinary-recovery.ts'
+import { applyOrdinaryLiveResolution, isOrdinaryLiveResolution, type OrdinaryLiveRecovery } from '../decision/ordinary-live-recovery.ts'
 
 export const DECISION_KINDS: readonly DecisionKind[] = [
   'pre_execution',
@@ -172,6 +173,7 @@ export type Resolution =
   | 'confirm_applied'
   | 'confirm_not_applied'
   | 'confirm_started'
+  | 'confirm_started_attested'
   | 'confirm_not_started'
   | 'continue_tracking'
   | 'continue_wait'
@@ -230,7 +232,8 @@ export function resolveReportContradictionDecision(tx: Tx, secret: string, req: 
   return resolveDecision(tx, secret, req, REPORT_CONFLICT)
 }
 
-export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequest, scope?: symbol): DecisionResolution {
+export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequest, scope?: symbol,
+  liveRecovery?: OrdinaryLiveRecovery): DecisionResolution {
   if (scope !== MEMORY_RECOVERY && tx.get(
     'SELECT 1 FROM memory_write_recoveries WHERE decision_id = ? OR abandon_ack_id = ?',
     [req.decisionId, req.decisionId],
@@ -238,8 +241,8 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
   if (scope !== MEMORY_APPROVAL && tx.get('SELECT 1 FROM memory_batches WHERE decision_id = ?', [req.decisionId])) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '记忆审批必须同时记录批次批准快照')
   }
-  const current = tx.get<{ decision_id: string; kind: string; status: string; payload_json: string; approver: string; confirm_required: number; run_id: string; node_run_id: string | null }>(
-    'SELECT decision_id, kind, status, payload_json, approver, confirm_required, run_id, node_run_id FROM decisions WHERE decision_id = ?',
+  const current = tx.get<{ decision_id: string; kind: string; status: string; payload_json: string; approver: string; confirm_required: number; run_id: string; node_run_id: string | null; revision: number; expires_at: string | null }>(
+    'SELECT decision_id, kind, status, payload_json, approver, confirm_required, run_id, node_run_id, revision, expires_at FROM decisions WHERE decision_id = ?',
     [req.decisionId],
   )
   if (!current) {
@@ -273,6 +276,16 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
     actor,
     evidenceProducers: producers,
   })
+  let ordinaryLive: ReturnType<typeof applyOrdinaryLiveResolution> | undefined
+  if (scope === undefined && ordinaryRecoveryBound(current) && isOrdinaryLiveResolution(current, req.resolution)) {
+    if (current.revision !== req.revision || !['pending', 'acknowledged', 'blocked_for_human'].includes(current.status)) {
+      throw new OrchError('DECISION_REVISION_CONFLICT', '裁决修订已改变，请重新选择')
+    }
+    if (current.expires_at && !(Date.parse(current.expires_at) > (liveRecovery?.clock.sample().wallClockMs ?? Date.parse(req.now)))) {
+      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '这条裁决已到期')
+    }
+    ordinaryLive = applyOrdinaryLiveResolution(tx, current, { ...req, resolution: req.resolution }, liveRecovery)
+  }
   const abandoning = scope === undefined && req.resolution === 'abandon'
   const confirmingUnsent = scope === undefined && current.kind === 'startup_unknown'
     && req.resolution === 'confirm_not_started' && ordinaryRecoveryBound(current)
@@ -282,17 +295,18 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
   if (abandoning) abandonOrdinaryRecovery(tx, secret, current, req)
   if (confirmingUnsent) confirmOrdinaryUnsentAttempt(tx, secret, current, req)
   if (scope === undefined && current.kind === 'abandon_ack' && req.resolution === 'approved') signOrdinaryAbandon(tx, secret, current, req)
-  const closing = abandoning || confirmingUnsent || !!ordinaryEffect || FINAL_RESOLUTIONS.includes(req.resolution)
+  const closing = abandoning || confirmingUnsent || !!ordinaryEffect || ordinaryLive?.closing || FINAL_RESOLUTIONS.includes(req.resolution)
   const nextStatus = closing ? 'resolved' : current.status
   const closedReason = closing
     ? req.resolution === 'expired'
       ? 'expired_final'
       : req.resolution === 'uphold_report'
         ? 'approved'
-        : req.resolution === 'uphold_decision' ? 'rejected' : abandoning || confirmingUnsent || ordinaryEffect ? 'approved' : req.resolution
+        : req.resolution === 'uphold_decision' || req.resolution === 'rejected' ? 'rejected'
+          : abandoning || confirmingUnsent || ordinaryEffect || ordinaryLive ? 'approved' : req.resolution
     : null
-  const payload = ordinaryEffect ? { ...req.payload, effect_verdict: ordinaryEffect.verdict, resolution: req.resolution }
-    : abandoning || confirmingUnsent ? { resolution: req.resolution } : req.payload
+  const payload = ordinaryLive?.payload ?? (ordinaryEffect ? { ...req.payload, effect_verdict: ordinaryEffect.verdict, resolution: req.resolution }
+    : abandoning || confirmingUnsent ? { resolution: req.resolution } : req.payload)
   const payloadJson = payload
     ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...payload })
     : current.payload_json

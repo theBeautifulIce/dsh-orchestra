@@ -29,6 +29,8 @@ import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
 import { groupStopIntent, isVerifiedParallelMembership, verifiedPropagatedGroupStop } from '../service/workflow-parallel.ts'
 import { recordOrdinaryHostStop, recordOrdinaryUnsentAttempt } from '../service/decision/ordinary-recovery.ts'
+import { applyObservedReport } from '../service/commands/apply-report.ts'
+import { superviseOrdinaryAttempt } from './ordinary-supervision.ts'
 
 export type RunNodeParams = {
   /** Internal dispatcher entry. The standalone runner rechecks the persisted node kind and definition. */
@@ -119,9 +121,10 @@ export async function runNode(deps: RunNodeDeps, p: RunNodeParams): Promise<RunN
   // 执行期心跳：动作比租约长时把租约往后推，合法动作不许被扫描判成租约过期（规格 4.3 行 309-310；第四轮审计 M4）
   const nowAt = startElapsedClock(deps, p.now)
   // 续租失败不再空吞：留一条 lease_lost 事件，动作结束前按租约丢失收口（第五轮审计 P2-1）
-  const leaseState: { lost: string | null } = { lost: null }
+  const leaseState: { lost: string | null; allowRenew?: () => boolean } = { lost: null }
   const renewTimer = setInterval(() => {
     try {
+      if (leaseState.allowRenew?.() === false) return
       renewNodeLease(deps.runtime, { nodeRunId: p.nodeRunId, leaseTtlMs, now: nowAt() })
     } catch (err) {
       const code = err instanceof OrchError ? err.code : 'SERVICE_UNAVAILABLE'
@@ -209,7 +212,7 @@ async function runNodeActions(
   lease: { lease_id: string; action_generation: number },
   nowAt: () => string,
   policy: ToolPolicy,
-  leaseState: { lost: string | null },
+  leaseState: { lost: string | null; allowRenew?: () => boolean },
 ): Promise<RunNodeResult> {
   const generation = lease.action_generation
   const actionTimeoutMs = p.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS
@@ -392,6 +395,13 @@ async function runNodeActions(
       ? executionFeedbackContext(deps.db, deps.runtime.catalog, p.nodeRunId, nowAt(), p.input, deps.secret) : null
     const sharedContext = await deps.sharedContext?.(p.nodeRunId, p.nodeId, feedback?.inputs ?? [])
     deps.cancelSignal?.throwIfAborted()
+    const supervision = deps.runtime.phase === 'S6' && deps.runtime.clock && !p.releaseCheckCwd ? superviseOrdinaryAttempt({
+      db: deps.db, secret: deps.secret, clock: deps.runtime.clock, bridge: deps.bridge, nowAt, timeoutMs: actionTimeoutMs,
+      leaseId: lease.lease_id, ownerEpoch: p.ownerEpoch, unknownWatchdogMs: p.unknownWatchdogMs ?? 120_000,
+      binding: { nodeRunId: p.nodeRunId, attempt: p.attempt, actionGeneration: generation,
+        executorAgentId: created.agentId, executorSessionId: created.sessionId },
+      signal: deps.cancelSignal,
+    }) : undefined
     lifecycle = new AgentLifecycle({
       db: deps.db,
       secret: deps.secret,
@@ -406,13 +416,16 @@ async function runNodeActions(
       lease,
       instruction: nodeInstruction(p, feedback, sharedContext),
       timeoutMs: actionTimeoutMs,
+      supervision,
       idleTimeoutMs: 5_000,
       onStopModelUse: saveModelUse,
       nowAt,
       clock: deps.runtime.clock,
       spillDir: deps.spillDir ?? join(tmpdir(), 'dsh-orchestra-bridge'),
     })
+    if (supervision) leaseState.allowRenew = () => !lifecycle?.hasMonitor || supervision.mayUseTools()
     const envelope = await lifecycle.run(deps.cancelSignal ?? new AbortController().signal)
+    const late = lifecycle.hasMonitor ? supervision?.lateStatus() : undefined
     if (typeof assignment?.reasoning_effort === 'string' && !envelope.modelUse) {
       throw new OrchError('PROTOCOL_VERSION_MISMATCH', '宿主未提供指定思考深度的实际请求回执')
     }
@@ -435,6 +448,17 @@ async function runNodeActions(
     } catch (stopErr) {
       stopFailure = stopErr
       throw stopErr
+    }
+
+    if (late && envelope.bridgeSeq !== undefined) {
+      const report = reportFromAgent(p, envelope.report, evidence, trace)
+      const applied = withTx(deps.db, (tx) => applyObservedReport(tx, deps.secret, {
+        nodeRunId: p.nodeRunId, attempt: p.attempt, report, expectedStatus: late.status, generation, now: nowAt(),
+      }, deps.runtime.catalog, {
+        executorAgentId: created.agentId, executorSessionId: created.sessionId, rearmGeneration: late.rearmGeneration, bridgeSeq: envelope.bridgeSeq!,
+      }, p.tools.length === 0 && trace.length === 0 && evidence === null))
+      if (!applied.accepted) throw new OrchError('VERDICT_POLICY_UNMET', '观察到的原尝试报告未通过结算', { reason: applied.reason })
+      return { node_run_id: p.nodeRunId, final_status: applied.next_status ?? 'unknown', evidence, agent_id: created.agentId }
     }
 
     // 续租失败过：动作已经失去合法租约，不许再进 verifying 收口（第五轮审计 P2-1）

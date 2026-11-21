@@ -20,6 +20,9 @@ export type BridgeTransport = BridgeEventSource & {
   retireUnsentAttempt?(binding: UnsentAttemptBinding): Promise<boolean>
   /** Optional local host snapshot before disposal. Never comes from an agent report. */
   snapshotAttemptModelUse?(params: { executorAgentId: string; attempt: number }): unknown
+  /** Available only on a local host that can inspect the same resident child. */
+  observeAttempt?(binding: ResidentAttemptBinding): Pick<LiveAttemptObservation, 'hasToolCall' | 'observedRunning' | 'lastToolCallId'> | undefined
+  fenceAttemptTools?(binding: ResidentAttemptBinding, mayUseTools: () => boolean, signal: AbortSignal): boolean
 }
 
 // 事件类型固定五类，写别的直接拒（规格 7.2 行 590）
@@ -67,6 +70,21 @@ export type ExecutorState = 'loaded' | 'unloaded' | 'deleted' | 'running' | 'idl
 export type StateResult = { state: ExecutorState; toolCallSeq: number; hasToolCall: boolean }
 
 export type UnsentAttemptBinding = { nodeRunId: string; attempt: number; actionGeneration: number; executorAgentId: string }
+export type ResidentAttemptBinding = UnsentAttemptBinding & { executorSessionId: string }
+export type LiveAttemptBinding = ResidentAttemptBinding & { rearmGeneration: number }
+export type LiveAttemptObservation = {
+  hasToolCall: boolean
+  observedRunning: boolean
+  lastToolCallId?: string
+  observationBudgetMs: number
+  actionTimeoutMs: number
+}
+
+type LiveAttemptMonitor = {
+  binding: ResidentAttemptBinding
+  budget: (rearmGeneration: number) => number
+  actionTimeoutMs: number
+}
 
 export type WhenIdleParams = { executorAgentId: string; timeoutMs: number }
 
@@ -95,6 +113,7 @@ export class BridgeClient {
   private readonly transport: BridgeTransport
   // 已经确认订阅的 executor；没进这个集合就不许 send（规格 7.2 行 584）
   private readonly subscribed = new Set<string>()
+  private readonly monitors = new Map<string, LiveAttemptMonitor>()
 
   constructor(transport: BridgeTransport) {
     this.transport = transport
@@ -117,6 +136,24 @@ export class BridgeClient {
 
   snapshotAttemptModelUse(params: { executorAgentId: string; attempt: number }): unknown {
     return this.transport.snapshotAttemptModelUse?.(params)
+  }
+
+  installAttemptMonitor(monitor: LiveAttemptMonitor, mayUseTools: () => boolean, signal: AbortSignal): (() => void) | undefined {
+    const key = monitor.binding.executorAgentId
+    if (!this.transport.observeAttempt || this.monitors.has(key)
+      || !this.transport.fenceAttemptTools?.(monitor.binding, mayUseTools, signal)) return undefined
+    this.monitors.set(key, monitor)
+    return () => { if (this.monitors.get(key) === monitor) this.monitors.delete(key) }
+  }
+
+  liveAttempt(binding: LiveAttemptBinding): LiveAttemptObservation | undefined {
+    const monitor = this.monitors.get(binding.executorAgentId)
+    if (!monitor || monitor.binding.nodeRunId !== binding.nodeRunId || monitor.binding.attempt !== binding.attempt
+      || monitor.binding.actionGeneration !== binding.actionGeneration || monitor.binding.executorSessionId !== binding.executorSessionId) return
+    const observationBudgetMs = monitor.budget(binding.rearmGeneration)
+    if (observationBudgetMs <= 0) return
+    const host = this.transport.observeAttempt?.(binding)
+    if (host) return { ...host, observationBudgetMs, actionTimeoutMs: monitor.actionTimeoutMs }
   }
 
   async retireUnsentAttempt(binding: UnsentAttemptBinding): Promise<boolean> {

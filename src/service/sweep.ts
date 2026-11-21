@@ -12,7 +12,7 @@ import { sweepWaitTimeouts } from './commands/wait.ts'
 import { finishSubworkflowChild } from './commands/subworkflow.ts'
 import { closeRun } from './commands/run-close.ts'
 import { activeDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
-import { openOrdinaryRecoveryDecision, retireOrdinaryStartupDecision } from './decision/ordinary-recovery.ts'
+import { openOrdinaryRecoveryDecision, ordinaryRecoveryTarget, retireOrdinaryStartupDecision, type OrdinaryRecoveryCard } from './decision/ordinary-recovery.ts'
 import { IN_FLIGHT_COMMAND_STATUSES } from './commands/idempotency.ts'
 import { receiptRetention } from './receipt-retention.ts'
 import type { WorkflowCatalog } from './workflows.ts'
@@ -352,9 +352,14 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       const expired = anchored !== null && params.clock !== undefined
         && params.clock.decide(anchored).kind === 'expired'
       if (!expired) continue
-      if (activeDecision(tx, row.run_id, 'action_overrun', row.node_run_id)) continue
-      const decisionId = 'dec_' + uuidv7()
-      if (!(params.ordinaryRecovery && openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'action_overrun', params.now, decisionId))) openDecision(tx, {
+      const existing = activeDecision(tx, row.run_id, 'action_overrun', row.node_run_id)
+      if (existing) {
+        const card = params.ordinaryRecovery && tx.get<OrdinaryRecoveryCard>(
+          'SELECT decision_id,run_id,node_run_id,kind,payload_json FROM decisions WHERE decision_id=?', [existing.decision_id])
+        if (!card || !ordinaryRecoveryTarget(tx, card)) continue
+      }
+      const decisionId = existing?.decision_id ?? 'dec_' + uuidv7()
+      if (!existing && !(params.ordinaryRecovery && openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'action_overrun', params.now, decisionId))) openDecision(tx, {
         decisionId,
         runId: row.run_id,
         nodeRunId: row.node_run_id,

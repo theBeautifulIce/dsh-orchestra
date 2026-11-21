@@ -8,13 +8,16 @@ import type { UnsentAttemptBinding } from '../../executor/bridge.ts'
 import { activeDecision, cancelDecision, openDecision, type ResolveDecisionRequest } from '../commands/decisions.ts'
 import { releaseLease } from '../commands/lease.ts'
 import { applyTransition } from '../commands/nodes.ts'
+import { ORDINARY_RETIRED_UNSENT_EVENT as unsentEvent, settleRetiredUnsentAttempt } from '../commands/effects.ts'
+import { createOrdinaryRetry, ordinaryRetryAuthority } from './ordinary-retry.ts'
 
 type RecoveryKind = 'startup_unknown' | 'action_overrun' | 'verify_human'
 const sourceOf = { startup_unknown: 'startup_unknown', action_overrun: 'stopping', verify_human: 'indeterminate_side_effect' } as const
 const abandonRule = { startup_unknown: 'M-10', action_overrun: 'M-36', verify_human: 'M-53' } as const
+const targetSummary = { startup_unknown: '这次执行的启动状态有待确认。', action_overrun: '这次执行已达到等待时限。',
+  verify_human: '需要核实这次执行是否产生了外部操作。' } as const
 const active = "('pending','acknowledged','blocked_for_human')"
 const stopEvent = 'recovery.host_stopped'
-const unsentEvent = 'recovery.host_retired_unsent_attempt'
 const abandonEvent = 'decision.abandoned'
 const abandonAckWindowMs = 24 * 60 * 60 * 1000
 const clearStartupClock = {
@@ -22,13 +25,20 @@ const clearStartupClock = {
   startup_unknown_monotonic_ns: null, startup_unknown_remaining_ns: null,
 }
 
-type Node = {
-  node_run_id: string; run_id: string; node_type: string; workflow_id: string | null
+export type OrdinaryRecoveryNode = {
+  node_run_id: string; run_id: string; node_id: string; node_type: string; workflow_id: string | null
+  seq: number
   status: NodeStatus; attempt: number; action_generation: number; rearm_generation: number; revision: number
   hang_reason: string | null; executor_agent_id: string | null; fence_state: string | null
   cancel_requested_at: string | null; run_cancel_requested_at: string | null
+  executor_session_id: string | null; lease_id: string | null; lease_expires_at: string | null; owner_epoch: number | null
+  replacement_node_run_id: string | null; side_effect_policy: string; wait_extensions: number
+  startup_unknown_deadline_at: string | null; startup_unknown_boot_id: string | null; startup_unknown_monotonic_ns: number | null
+  deadline_at: string | null; deadline_boot_id: string | null; deadline_monotonic_ns: number | null
 }
-type Card = { decision_id: string; run_id: string; node_run_id: string | null; kind: string; payload_json: string }
+type Node = OrdinaryRecoveryNode
+export type OrdinaryRecoveryCard = { decision_id: string; run_id: string; node_run_id: string | null; kind: string; payload_json: string }
+type Card = OrdinaryRecoveryCard
 type Target = { node_run_id: string; attempt: number; action_generation: number; rearm_generation: number }
 type RecoveryRead = Pick<Tx, 'get' | 'all'>
 
@@ -49,7 +59,8 @@ export function openOrdinaryRecoveryDecision(tx: Tx, secret: string, nodeId: str
   const node = ordinaryNode(tx, nodeId)
   if (!node || node.status !== sourceOf[kind] || node.hang_reason !== null || activeDecision(tx, node.run_id, kind, nodeId)) return false
   openDecision(tx, { decisionId: id, runId: node.run_id, nodeRunId: nodeId, kind, approver: 'human', createdAt: now,
-    payload: { ordinary_recovery: identity(node), required_evidence: kind === 'verify_human' ? ['宿主停止记录', '系统副作用核验证据'] : [] } })
+    payload: { ordinary_recovery: identity(node), target_summary: targetSummary[kind],
+      required_evidence: kind === 'verify_human' ? ['宿主停止记录', '系统副作用核验证据'] : [] } })
   appendNodeRunEvent(tx, secret, nodeId, 'decision.recovery_opened', { decision_id: id, kind, ...identity(node) })
   return true
 }
@@ -67,7 +78,7 @@ export function ordinaryRecoveryTarget(tx: RecoveryRead, card: Card): Node | und
 }
 
 function hasRecoveryOpening(tx: RecoveryRead, card: Card, target: Target): boolean {
-  return Boolean(tx.get(`SELECT 1 FROM node_run_events WHERE node_run_id=? AND type='decision.recovery_opened'
+  return Boolean(tx.get(`SELECT 1 FROM node_run_events WHERE node_run_id=? AND type IN ('decision.recovery_opened','decision.recovery_rearmed')
     AND json_extract(payload,'$.decision_id')=? AND json_extract(payload,'$.kind')=?
     AND json_extract(payload,'$.attempt')=? AND json_extract(payload,'$.action_generation')=?
     AND json_extract(payload,'$.rearm_generation')=?`,
@@ -95,6 +106,18 @@ export function retireOrdinaryStartupDecision(tx: Tx, secret: string, nodeId: st
   }
 }
 
+export function retireOrdinaryActionDecision(tx: Tx, secret: string, node: Target & { run_id: string }, now: string): void {
+  const card = tx.get<Card>(`SELECT decision_id,run_id,node_run_id,kind,payload_json FROM decisions
+    WHERE node_run_id=? AND run_id=? AND kind='action_overrun' AND status IN ${active}`, [node.node_run_id, node.run_id])
+  const target = card && parseCard(card).ordinary_recovery
+  if (card && target?.node_run_id === node.node_run_id && target.attempt === node.attempt
+    && target.action_generation === node.action_generation && target.rearm_generation === node.rearm_generation
+    && chainIsIntact(secret, readChain(tx, node.node_run_id), readChainHead(tx, node.node_run_id), true)
+    && hasRecoveryOpening(tx, card, target)) {
+    cancelDecision(tx, secret, { decisionId: card.decision_id, reason: 'cancelled', now })
+  }
+}
+
 function canRecordUnsentAttempt(tx: RecoveryRead, node: Node): boolean {
   if (node.status !== 'startup_unknown' || node.executor_agent_id !== null || node.fence_state === 'armed'
     || node.hang_reason !== null || node.cancel_requested_at !== null || node.run_cancel_requested_at !== null) return false
@@ -114,9 +137,9 @@ export function recordOrdinaryUnsentAttempt(tx: Tx, secret: string, binding: Uns
   })
 }
 
-export function ordinaryUnsentAttempt(tx: RecoveryRead, node: Node): { executor_agent_id: string; stopped_at: string } | undefined {
+export function ordinaryUnsentAttempt(tx: RecoveryRead, node: Node): { seq: number; executor_agent_id: string; stopped_at: string } | undefined {
   if (!canRecordUnsentAttempt(tx, node)) return undefined
-  return tx.get(`SELECT json_extract(payload,'$.executor_agent_id') AS executor_agent_id,
+  return tx.get(`SELECT seq, json_extract(payload,'$.executor_agent_id') AS executor_agent_id,
     json_extract(payload,'$.stopped_at') AS stopped_at FROM node_run_events
     WHERE node_run_id=? AND type=? AND json_valid(payload) AND json_extract(payload,'$.attempt')=?
       AND json_extract(payload,'$.action_generation')=? AND json_extract(payload,'$.rearm_generation')=?
@@ -132,15 +155,23 @@ export function confirmOrdinaryUnsentAttempt(tx: Tx, secret: string, card: Card,
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '确认未启动需要当前执行尝试的宿主停止凭据')
   }
   assertChainIntact(tx, secret, node.node_run_id)
-  applyTransition(tx, secret, { nodeRunId: node.node_run_id, from: ['startup_unknown'], to: 'failed', ruleId: 'M-07',
+  const retry = ordinaryRetryAuthority(tx, node)
+  applyTransition(tx, secret, { nodeRunId: node.node_run_id, from: ['startup_unknown'],
+    to: retry ? 'superseded' : 'failed', ruleId: retry ? 'M-06' : 'M-07',
     attempt: node.attempt, expectedRevision: node.revision, actionGeneration: node.action_generation,
     rearmGeneration: node.rearm_generation, now: req.now,
     context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: false },
     patch: { ...clearStartupClock, deadline_at: null, deadline_boot_id: null, deadline_monotonic_ns: null, action_remaining_ns: null } })
   releaseLease(tx, { nodeRunId: node.node_run_id, now: req.now })
+  settleRetiredUnsentAttempt(tx, secret, { nodeRunId: node.node_run_id, attempt: node.attempt, actionGeneration: node.action_generation,
+    rearmGeneration: node.rearm_generation, receiptSeq: receipt.seq, decisionId: card.decision_id, now: req.now })
   appendNodeRunEvent(tx, secret, node.node_run_id, 'decision.startup_confirmed_unsent', {
-    ...identity(node), ...receipt, decision_id: card.decision_id, decision_revision: req.revision + 1,
+    ...identity(node), executor_agent_id: receipt.executor_agent_id, stopped_at: receipt.stopped_at,
+    stop_receipt_seq: receipt.seq, decision_id: card.decision_id, decision_revision: req.revision + 1,
     actor_id: req.actor.id, occurred_at: req.now,
+  })
+  if (retry) createOrdinaryRetry(tx, secret, node, {
+    decisionId: card.decision_id, revision: req.revision + 1, definitionHash: retry, now: req.now,
   })
 }
 
@@ -233,7 +264,7 @@ export function recordOrdinaryHostStop(tx: Tx, secret: string, p: {
   })
 }
 
-export function ordinaryHostStop(tx: Tx, secret: string, node: Pick<Node, 'node_run_id' | 'attempt' | 'action_generation' | 'executor_agent_id'>): string | undefined {
+export function ordinaryHostStop(tx: RecoveryRead, secret: string, node: Pick<Node, 'node_run_id' | 'attempt' | 'action_generation' | 'executor_agent_id'>): string | undefined {
   const stopped = tx.get<{ stopped_at: string }>(`SELECT json_extract(payload,'$.stopped_at') AS stopped_at
     FROM node_run_events WHERE node_run_id=? AND type=? AND json_extract(payload,'$.attempt')=?
       AND json_extract(payload,'$.action_generation')=? AND json_extract(payload,'$.executor_agent_id')=? ORDER BY seq DESC LIMIT 1`,
@@ -275,16 +306,17 @@ export function ordinaryEffectResolution(tx: Tx, secret: string, card: Card, req
     || ordinaryEffectEvidence(tx, node)[verdict] !== evidenceIds[0]) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '需要当前尝试的宿主停止记录和对应业务核验证据')
   }
-  return { node, verdict, evidenceId: evidenceIds[0] as string, stoppedAt }
+  const retry = verdict === 'not_applied' ? ordinaryRetryAuthority(tx, node) : undefined
+  return { node, verdict, evidenceId: evidenceIds[0] as string, stoppedAt, retry }
 }
 
 export function applyOrdinaryEffectResolution(tx: Tx, secret: string, req: ResolveDecisionRequest,
   result: ReturnType<typeof ordinaryEffectResolution>,
 ): void {
-  const { node, verdict, stoppedAt, evidenceId } = result
+  const { node, verdict, stoppedAt, evidenceId, retry } = result
   const current = tx.get<{ revision: number }>('SELECT revision FROM node_runs WHERE node_run_id=?', [node.node_run_id])!
   applyTransition(tx, secret, {
-    nodeRunId: node.node_run_id, from: [node.status], to: verdict === 'applied' ? 'done' : 'failed',
+    nodeRunId: node.node_run_id, from: [node.status], to: verdict === 'applied' ? 'done' : retry ? 'superseded' : 'failed',
     ruleId: verdict === 'not_applied' ? 'M-52' : node.status === 'stopping' ? 'M-33' : 'M-51',
     attempt: node.attempt, actionGeneration: node.action_generation, rearmGeneration: node.rearm_generation,
     expectedRevision: current.revision, now: req.now, allowHung: node.hang_reason === 'action_overrun',
@@ -294,6 +326,9 @@ export function applyOrdinaryEffectResolution(tx: Tx, secret: string, req: Resol
   appendNodeRunEvent(tx, secret, node.node_run_id, 'decision.effect_reconciled', {
     ...identity(node), decision_id: req.decisionId, revision: req.revision + 1,
     verdict, evidence_id: evidenceId, stopped_at: stoppedAt, actor_id: req.actor!.id,
+  })
+  if (retry) createOrdinaryRetry(tx, secret, node, {
+    decisionId: req.decisionId, revision: req.revision + 1, definitionHash: retry, now: req.now,
   })
 }
 

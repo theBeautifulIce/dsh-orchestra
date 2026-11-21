@@ -36,6 +36,7 @@ import { acknowledgeDecision, resolveDecision } from './service/commands/decisio
 import { resolveRegisteredReportConflict } from './service/commands/apply-report.ts'
 import { requestHashOf } from './service/commands/idempotency.ts'
 import { runDecisionCommand } from './service/decision/confirmation.ts'
+import type { OrdinaryLiveRecovery } from './service/decision/ordinary-live-recovery.ts'
 import { inspectEffectEvidence, resolveEffect } from './service/commands/effects.ts'
 import { recoverChatModelAssignment } from './service/chat-model-recovery.ts'
 import { resumeFromBlockedPre } from './service/commands/nodes.ts'
@@ -266,6 +267,7 @@ export type Orchestra = {
   modelEscalation?: ReturnType<typeof createModelEscalationHost>
   executionCapacitySettings?: ExecutionCapacitySettingsHost
   workflowConcurrencySettings?: WorkflowConcurrencyHost
+  ordinaryLiveRecovery?: OrdinaryLiveRecovery
   release?: ReturnType<typeof createReleaseWorkflowHost>
   // 执行中取消的进程内注册表：账本记取消事实，这里把 AbortSignal 送到对应的 runNode
   cancels: ExecutionCancels
@@ -305,6 +307,9 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     },
   }
   const executor = opts.executor
+  const ordinaryLiveRecovery: OrdinaryLiveRecovery | undefined = opts.phase === 'S6' && executor
+    ? { secret: opts.secret, ownerEpoch: db.epoch, clock, liveAttempt: (binding) => executor.bridge.liveAttempt(binding) }
+    : undefined
   const routing = executor?.modelRouting
   const modelEscalation = opts.phase === 'S6' && routing
     ? createModelEscalationHost(db, opts.secret, (tx) => approvedModelProfiles(effectiveModelCatalog(
@@ -496,7 +501,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
           requireEffectSettlement,
           contentHash: b.contentHash,
           now,
-        })
+        }, undefined, ordinaryLiveRecovery)
         const branchRunId = resolveWorkflowBranch(tx, opts.secret, catalog, {
           decisionId: out.decisionId, resolution: b.resolution, targetId: b.payload?.selected_node_id, now,
         })
@@ -515,7 +520,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
           if (out.closedReason !== 'approved') closeRun(tx, opts.secret, out.runId, now)
         }
         return { decisionId: out.decisionId, revision: b.revision + 1 }
-      })
+      }, ordinaryLiveRecovery)
     }),
     resolveEffect: (b) => inTx(db, (tx) => resolveEffect(tx, opts.secret, {
       basis: b.basis,
@@ -660,6 +665,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     modelEscalation,
     executionCapacitySettings,
     workflowConcurrencySettings,
+    ordinaryLiveRecovery,
     release,
     trial,
     cancels,
@@ -836,8 +842,8 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getArtifactContent: (runId, artifactId, mode, now) => getArtifactContent(orchestra.db, runId, artifactId, mode, now),
         listRunArtifacts: (runId, now) => listRunArtifacts(orchestra.db, runId, now),
         getAttestation: (attestationId) => getAttestationSnapshot(orchestra.db, attestationId),
-        listDecisions: (params) => listDecisions(orchestra.db, { ...params, memoryEnabled: memoryDecisionAccess() }),
-        getDecision: (decisionId, now) => getDecisionSnapshot(orchestra.db, decisionId, now, memoryDecisionAccess()),
+        listDecisions: (params) => listDecisions(orchestra.db, { ...params, memoryEnabled: memoryDecisionAccess(), liveRecovery: orchestra.ordinaryLiveRecovery }),
+        getDecision: (decisionId, now) => getDecisionSnapshot(orchestra.db, decisionId, now, memoryDecisionAccess(), orchestra.ordinaryLiveRecovery),
         getEvidence: (evidenceId) => getEvidenceSnapshot(orchestra.db, opts.secret, evidenceId),
         verifyLedger: () => verifyLedgerSnapshot(orchestra.db, opts.secret),
         listWorkflows: (params) => listWorkflowQuery(orchestra.db, params),
