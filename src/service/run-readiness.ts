@@ -3,7 +3,7 @@ import type { ReadTx } from './queries/read-tx.ts'
 import { approvedRuntimeEdges, runtimeEdges, type RuntimeEdge } from './rework-edges.ts'
 import { isCandidateReviewer, reworkBlocksNode } from './rework-runtime.ts'
 import { indexTopology, verifiedTopology, type PinnedTopology } from './pinned-topology.ts'
-import { branchSkipped, selectedBranchTarget } from './branch-routing.ts'
+import { branchSkipped, intactBranchChain, selectedBranchTarget, verifiedBranchSkip } from './branch-routing.ts'
 
 const SUCCESS_STATUS: ReadonlySet<string> = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
 const FAILED_STATUS: ReadonlySet<string> = new Set(TERMINAL_STATUSES.filter((status) => !SUCCESS_STATUS.has(status)))
@@ -51,7 +51,7 @@ export function runPredecessors(tx: ReadTx, runId: string, edges: readonly Runti
 }
 
 /** Superseded attempts never release a downstream node. A revision awaiting acceptance only releases its reviewer. */
-export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: string, preds: readonly string[], consumerNodeId?: string): DependencyReadiness {
+export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: string, preds: readonly string[], consumerNodeId?: string, secret?: string): DependencyReadiness {
   const missing: string[] = []
   const failed: string[] = []
   const waiting: string[] = []
@@ -59,12 +59,23 @@ export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: strin
     const row = tx.get<{ node_run_id: string; status: string; node_type: string }>(
       'SELECT node_run_id,status,node_type FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId, pred],
     )
-    if (!row) missing.push(pred)
-    else if (row.status === 'superseded' && branchSkipped(tx, row.node_run_id)) continue
-    else if (row.status === 'done' && row.node_type === 'branch' && !selectedBranchTarget(tx, row.node_run_id)) failed.push(pred)
-    else if (row.status === 'done' && row.node_type === 'branch' && consumerNodeId !== undefined
-      && selectedBranchTarget(tx, row.node_run_id) !== consumerNodeId) continue
-    else if (row.status === 'done' && isCandidateReviewer(tx, consumerId, row.node_run_id)) continue
+    if (!row) {
+      missing.push(pred)
+      continue
+    }
+    if (row.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
+      if (secret && !verifiedBranchSkip(tx, secret, runId, row.node_run_id)) waiting.push(pred)
+      continue
+    }
+    if (row.status === 'done' && row.node_type === 'branch') {
+      const target = selectedBranchTarget(tx, row.node_run_id)
+      if (!target || (secret && !intactBranchChain(tx, secret, row.node_run_id))) {
+        waiting.push(pred)
+        continue
+      }
+      if (consumerNodeId !== undefined && target !== consumerNodeId) continue
+    }
+    if (row.status === 'done' && isCandidateReviewer(tx, consumerId, row.node_run_id)) continue
     else if (reworkBlocksNode(tx, row.node_run_id)) waiting.push(pred)
     else if (SUCCESS_STATUS.has(row.status)) continue
     else if (FAILED_STATUS.has(row.status)) failed.push(pred)
@@ -73,4 +84,28 @@ export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: strin
   return missing.length + failed.length + waiting.length === 0
     ? { ready: true }
     : { ready: false, missingPreds: missing, failedPreds: failed, waitingPreds: waiting }
+}
+
+/** A later node still depends on the route that enabled its already-completed predecessors. */
+export function branchAncestryIsIntact(tx: ReadTx, secret: string, runId: string, topology: PinnedTopology, direct: readonly string[]): boolean {
+  if (!topology.hasRoutes) return true
+  const visited = new Set<string>()
+  const pending = [...direct]
+  while (pending.length) {
+    const nodeId = pending.pop()!
+    if (visited.has(nodeId)) continue
+    visited.add(nodeId)
+    const row = tx.get<{ node_run_id: string; status: string; node_type: string }>(
+      'SELECT node_run_id,status,node_type FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId, nodeId],
+    )
+    if (row?.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
+      if (!verifiedBranchSkip(tx, secret, runId, row.node_run_id)) return false
+      continue
+    }
+    if (row?.node_type === 'branch' && row.status === 'done') {
+      if (!selectedBranchTarget(tx, row.node_run_id) || !intactBranchChain(tx, secret, row.node_run_id)) return false
+    }
+    pending.push(...nodePredecessors(tx, runId, topology, nodeId))
+  }
+  return true
 }

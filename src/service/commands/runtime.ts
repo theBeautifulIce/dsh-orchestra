@@ -12,7 +12,7 @@ import { sweep, type SweepResult } from '../sweep.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 import type { ClockProvider } from '../../core/clock.ts'
 import { OrchError } from '../../core/errors.ts'
-import { dependencyReadiness, nodePredecessors, pinnedRunTopology, readRunBinding } from '../run-readiness.ts'
+import { branchAncestryIsIntact, dependencyReadiness, nodePredecessors, pinnedRunTopology, readRunBinding } from '../run-readiness.ts'
 import { definitionHashOf } from '../workflows.ts'
 import { indexTopology } from '../pinned-topology.ts'
 
@@ -63,9 +63,12 @@ export function assertNodeRunReadyInTx(tx: Tx, deps: RuntimeDeps, nodeRunId: str
   }
   if (!topology) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
   const preds = nodePredecessors(tx, node.run_id, topology, node.node_id)
-  const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds, node.node_id)
+  const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds, node.node_id, deps.secret)
   if (!readiness.ready) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '前置节点尚未成功完成，当前节点不能开始', { nodeRunId, ...readiness })
+  }
+  if (!branchAncestryIsIntact(tx, deps.secret, node.run_id, topology, preds)) {
+    throw new OrchError('FORBIDDEN', '此前的分支选择证据已断链，当前节点不能开始', { nodeRunId, reason: 'chain_broken' })
   }
 }
 

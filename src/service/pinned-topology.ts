@@ -5,6 +5,7 @@ import { definitionHashOf } from './workflows.ts'
 
 export type PinnedTopology = {
   edges: readonly RuntimeEdge[]
+  hasRoutes: boolean
   predecessors: (nodeId: string) => readonly string[]
 }
 
@@ -20,7 +21,7 @@ export function indexTopology(edges: readonly RuntimeEdge[]): PinnedTopology {
     else byTarget.set(to, new Set([from]))
   }
   const predecessors = new Map(Array.from(byTarget, ([to, from]) => [to, Object.freeze([...from])]))
-  return { edges, predecessors: nodeId => predecessors.get(nodeId) ?? NO_PREDECESSORS }
+  return { edges, hasRoutes: edges.some(edge => Object.hasOwn(edge, 'route')), predecessors: nodeId => predecessors.get(nodeId) ?? NO_PREDECESSORS }
 }
 
 /** Cache static topology only. The exact persisted bytes must still match on every use. */

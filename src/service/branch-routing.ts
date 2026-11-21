@@ -1,6 +1,6 @@
 import { OrchError } from '../core/errors.ts'
 import { branchEdgesOf, type WorkflowDefinition } from '../core/workflow-def.ts'
-import { appendNodeRunEvent, assertChainIntact } from '../infra/db/ledger.ts'
+import { appendNodeRunEvent, assertChainIntact, chainIsIntact, readChain, readChainHead } from '../infra/db/ledger.ts'
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { applyTransition } from './commands/nodes.ts'
 import type { ReadTx } from './queries/read-tx.ts'
@@ -49,6 +49,20 @@ export function selectedBranchTarget(tx: ReadTx, nodeRunId: string): string | un
 
 export function branchSkipped(tx: ReadTx, nodeRunId: string): boolean {
   return tx.get("SELECT 1 FROM node_run_events WHERE node_run_id=? AND type='branch.skipped' LIMIT 1", [nodeRunId]) !== undefined
+}
+
+export function intactBranchChain(tx: ReadTx, secret: string, nodeRunId: string): boolean {
+  return chainIsIntact(secret, readChain(tx, nodeRunId), readChainHead(tx, nodeRunId), true)
+}
+
+/** A skipped prerequisite is neutral only while both its ledger and its source route are intact. */
+export function verifiedBranchSkip(tx: ReadTx, secret: string, runId: string, nodeRunId: string): boolean {
+  if (!intactBranchChain(tx, secret, nodeRunId)) return false
+  const source = tx.get<{ branch_id: string; target_id: string }>(`SELECT json_extract(e.payload,'$.branch_node_run_id') AS branch_id,
+      json_extract(e.payload,'$.target_node_id') AS target_id FROM node_run_events e JOIN node_runs n
+      ON n.node_run_id=json_extract(e.payload,'$.branch_node_run_id') AND n.run_id=? AND n.node_type='branch' AND n.status='done'
+      WHERE e.type='branch.skipped' AND e.node_run_id=? ORDER BY e.seq DESC LIMIT 1`, [runId,nodeRunId])
+  return !!source && intactBranchChain(tx, secret, source.branch_id) && selectedBranchTarget(tx, source.branch_id) === source.target_id
 }
 
 /** A single write commits route authority and prevents every unreachable node from taking a lease. */
