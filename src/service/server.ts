@@ -60,12 +60,14 @@ import { modelEscalationInput, type createModelEscalationHost } from './model-es
 import type { DispatchOutcome, DispatchProgress, NodeSpec } from './dispatcher.ts'
 import type { RunNodeResult } from '../executor/run-node.ts'
 import type { ToolPolicy } from '../executor/session.ts'
+import { openWindowsControlPipe } from './windows-control-pipe.ts'
 
 /** Host-owned verification of a human session on this request. Use authenticated host context. */
 export type ResolveHttpHuman = (request: IncomingMessage) => { id: string } | null | Promise<{ id: string } | null>
 
 export type ServerDeps = {
   secret: string
+  preferNamedPipe?: boolean
   resolveHttpHuman?: ResolveHttpHuman
   runNotes?: RunNotes
   phase: string
@@ -1222,19 +1224,30 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
   }
 }
 
-export function startServer(deps: ServerDeps): Promise<{ endpoint: string; close: () => Promise<void>; server: Server }> {
+export async function startServer(deps: ServerDeps): Promise<{ endpoint: string; controlPipe?: string; close: () => Promise<void>; server: Server }> {
   const queue = deps.queue ?? new WriteQueue(1000, deps.log ?? nullLogger)
-  const server = createServer((req, res) => { void handle(req, res, deps, queue) })
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address()
-      const port = typeof addr === 'object' && addr ? addr.port : 0
-      resolve({
-        endpoint: 'http://127.0.0.1:' + String(port),
-        close: () => new Promise<void>((r) => { server.close(() => { r() }) }),
-        server,
-      })
-    })
+  const streams = new Set<ServerResponse>()
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url?.split('?', 1)[0] === '/v1/events/stream') {
+      streams.add(res)
+      res.once('close', () => { streams.delete(res) })
+    }
+    void handle(req, res, deps, queue)
   })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const port = (server.address() as import('node:net').AddressInfo).port
+  const pipe = deps.preferNamedPipe ? await openWindowsControlPipe(port).catch(() => undefined) : undefined
+  return {
+    endpoint: 'http://127.0.0.1:' + String(port),
+    controlPipe: pipe?.path,
+    async close() {
+      const closing = new Promise<void>((resolve) => { server.close(() => { resolve() }) })
+      for (const stream of streams) stream.destroy()
+      try { await closing } finally { await pipe?.close() }
+    },
+    server,
+  }
 }
