@@ -56,13 +56,17 @@ export function TaskPlanBrief({ api, taskId }: { api: ResourcesApi; taskId: stri
   </section>
 }
 
-export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
+export type WorkflowPlanRequest = { id: string; version: string; goal: string }
+
+export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequest, onClearWorkflow }: {
   api: ResourcesApi; commands: TaskCommands; onStarted?: (taskId: string) => void
   onOpenRun?: (taskId: string, trigger: HTMLButtonElement, runId: string) => void
+  workflowRequest?: WorkflowPlanRequest
+  onClearWorkflow?: () => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(Boolean(workflowRequest))
   const [capability, setCapability] = useState<'loading' | 'enabled' | 'unavailable' | 'error'>('loading')
-  const [goal, setGoal] = useState('')
+  const [goal, setGoal] = useState(workflowRequest?.goal ?? '')
   const [criteria, setCriteria] = useState('')
   const [plan, setPlan] = useState<TaskPlanView | null>(null)
   const [confirmed, setConfirmed] = useState(false)
@@ -103,7 +107,13 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
     setConfirmed(false)
     try {
       const proposed = await commands.proposeTaskPlan(goal.trim(), requirements, request.signal)
-      if (proposal.current === request) setPlan(proposed)
+      if (proposal.current !== request) return
+      if (workflowRequest && (proposed.proposal.workflow_id !== workflowRequest.id
+        || proposed.proposal.workflow_version !== workflowRequest.version)) {
+        setFailure('主脑给出的流程或版本与所选流程不同。请调整目标或重新选择已发布流程。')
+        return
+      }
+      setPlan(proposed)
     } catch (error) {
       if (proposal.current === request) setFailure(proposalFailure(error))
     } finally {
@@ -126,7 +136,7 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
     finally { setBusy(null) }
   }
 
-  return <details style={panelStyle} onToggle={(event) => {
+  return <details style={panelStyle} open={open} onToggle={(event) => {
     if (event.target !== event.currentTarget) return
     const opened = event.currentTarget.open
     if (!opened && proposal.current) {
@@ -139,13 +149,16 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun }: {
   }}>
     <summary>用自然语言规划任务</summary>
     <div style={contentStyle}>
+      {workflowRequest && <button type="button" disabled={busy === 'start'} style={editStyle} onClick={onClearWorkflow}>
+        不指定流程，从目标开始
+      </button>}
       {capability === 'loading' && <p role="status" style={descriptionStyle}>检查主脑规划服务…</p>}
       {capability === 'unavailable' && <p role="status" style={descriptionStyle}>当前宿主尚未启用主脑规划。</p>}
       {capability === 'error' && <p role="alert" style={descriptionStyle}>暂时无法获取主脑规划状态。</p>}
       {capability === 'enabled' && !plan && <div>
         <form onSubmit={(event) => { void propose(event) }} style={contentStyle} aria-busy={busy === 'propose'}>
           <label style={contentStyle}>要完成什么
-            <textarea required rows={3} maxLength={2000} value={goal} disabled={busy !== null}
+            <textarea required rows={3} maxLength={2000} value={goal} disabled={busy !== null} autoFocus={Boolean(workflowRequest)}
               placeholder="例如，复核本周项目交付清单并整理差异" onChange={(event) => setGoal(event.target.value)} />
           </label>
           <label style={contentStyle}>必须满足的要求（可选，每行一项）

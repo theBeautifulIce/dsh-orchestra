@@ -155,6 +155,58 @@ it.each(['workflow', 'goal'])('opens only the confirmed task and run after a %s 
   } finally { view.unmount() }
 })
 
+it('uses the approved planning entry point when the host requires a plan for published workflows', async () => {
+  const writes: Array<{ path: string; body: Record<string, unknown> }> = []
+  const service = createFakeService(({ path }) => {
+    if (path === '/v1/tasks') return { ok: true, data: page([]) }
+    if (path === '/v1/workflows') return { ok: true, data: page([workflowItem({ name: '月报复核', current_version: 2 })]) }
+    if (path === '/v1/task-plans/capability') return { ok: true, data: { enabled: true } }
+    if (path === '/v1/task-plans') return { ok: true, data: {
+      plan_id: 'p', content_hash: 'hash', brief: { goal: '同名任务', requirements: [] },
+      proposal: { title: '同名任务', workflow_id: 'wf1', workflow_version: writes.length === 1 ? '1' : '2',
+        steps: [], deliverables: [], risks: [] },
+      quality: { ready: true, checks: [] }, launch: null,
+    } }
+    if (path === '/v1/task-plans/confirm') return { ok: true, data: { task_id: 'new-task', run_id: 'new-run' } }
+    throw new Error(path)
+  })
+  const client = createApiClient('http://panel.test', async (url, init) => {
+    if (init?.method === 'POST') writes.push({ path: new URL(String(url)).pathname, body: JSON.parse(String(init.body)) })
+    return service.fetcher(url, init)
+  })
+  const view = await renderPanel(<PanelApp client={client} serviceConnected workflowLaunchRequiresPlan />)
+  const button = (label: string) => view.findAll('button').find((item) => item.textContent?.trim() === label)!
+  try {
+    expect(button('从流程新建任务')).toBeUndefined()
+    await view.click(button('从流程规划任务'))
+    await view.flush()
+    const form = view.container.querySelector<HTMLFormElement>('.task-launch-form')!
+    await change(form.querySelector('input')!, '同名任务')
+    await change(form.querySelector('select')!, 'wf1')
+    expect(button('创建并排队')).toBeUndefined()
+    await view.click(button('用此流程规划任务'))
+    await view.flush()
+    expect(writes).toEqual([])
+    const [goal, requirements] = view.container.querySelectorAll<HTMLTextAreaElement>('.task-plan-entry textarea')
+    expect(goal?.value).toContain('月报复核」v2（wf1）完成任务「同名任务」')
+    await change(requirements!, '交付本次报告')
+
+    await view.click(button('生成计划'))
+    expect(view.text()).toContain('流程或版本与所选流程不同')
+    expect(button('确认后启动任务')).toBeUndefined()
+    await view.click(button('生成计划'))
+    expect(button('确认后启动任务').hasAttribute('disabled')).toBe(true)
+    await view.click(view.container.querySelector('.task-plan-entry input[type="checkbox"]')!)
+    await view.click(button('确认后启动任务'))
+    expect(writes).toEqual([
+      { path: '/v1/task-plans', body: { goal: goal?.value, requirements: ['交付本次报告'] } },
+      { path: '/v1/task-plans', body: { goal: goal?.value, requirements: ['交付本次报告'] } },
+      { path: '/v1/task-plans/confirm', body: { plan_id: 'p', content_hash: 'hash', confirmed: true } },
+    ])
+    expect(button('查看本次运行')).toBeDefined()
+  } finally { view.unmount() }
+})
+
 it.each([
   ['inactivity', '等待可用的规划回复超时'],
   ['maximum', '规划已达到服务的处理时限'],

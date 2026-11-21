@@ -1,0 +1,16 @@
+{
+  "type": "real DSH Desktop cold profile via bundled dsh plugin CLI",
+  "runtime": "0.2.2-rc.5",
+  "source_commit": "709d798ea45a9f05ec6b7b8a5ea8134524891456",
+  "archive_sha256": "9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc",
+  "installed_version": "0.1.0",
+  "initial_direct_dependencies": 0,
+  "final_direct_dependencies": [
+    "dsh-orchestra"
+  ],
+  "byte_matched_files": 75,
+  "mismatches": [],
+  "downloaded_dependencies": 0,
+  "pnpm_version": "11.28.5",
+  "isolated_configuration": "fresh DSH_HOME, APPDATA, LOCALAPPDATA, Electron user-data-dir"
+}

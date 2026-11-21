@@ -1,0 +1,135 @@
+{
+  "scope": "Installed Electron DSH Desktop 0.2.2-rc.5 cold-start in disposable DSH_HOME and Electron user-data tree. Interaction through its real authenticated localhost Web renderer in a separate Chromium profile. Native first-run Electron welcome was not exercised.",
+  "package": {
+    "type": "real DSH Desktop cold profile via bundled dsh plugin CLI",
+    "runtime": "0.2.2-rc.5",
+    "source_commit": "709d798ea45a9f05ec6b7b8a5ea8134524891456",
+    "archive_sha256": "9960cd65659e193ef60665a7509e19a27624647184a62a7db68a6aa2233721bc",
+    "installed_version": "0.1.0",
+    "initial_direct_dependencies": 0,
+    "final_direct_dependencies": [
+      "dsh-orchestra"
+    ],
+    "byte_matched_files": 75,
+    "mismatches": [],
+    "downloaded_dependencies": 0,
+    "pnpm_version": "11.28.5",
+    "isolated_configuration": "fresh DSH_HOME, APPDATA, LOCALAPPDATA, Electron user-data-dir"
+  },
+  "P47": {
+    "startup": {
+      "detected_sidebar": "Orchestra",
+      "realtime": "实时更新",
+      "fresh_profile": true
+    },
+    "authorization": {
+      "correct_workspace": {
+        "status": 200,
+        "phase": "S6",
+        "native_chat_routing_enabled": true
+      },
+      "wrong_workspace": {
+        "status": 403,
+        "code": "FORBIDDEN",
+        "display": "请选择该工作区中未归档的 DSH 会话"
+      }
+    },
+    "accepted_model": "onboarding-local/onboarding-fixture-model",
+    "no_default_read_only_workspace_tool": "Initial package only enables local Desktop. It does not enable allowWorkspaceListing or sampleFile. Child execution requests in this fixture list orchestra_rework only.",
+    "permission_boundary": "No platform login, account key, operating system permission or ACL changed. Published results remain in Orchestra only."
+  },
+  "P24": {
+    "missing_model": {
+      "display": "DSH 模型目录不包含指定模型",
+      "tasks_after_attempt": 0,
+      "screenshot": "no-model-planning-result.png"
+    },
+    "published_workflow_setup": "Published an artificial flow via the authenticated app endpoints, then published v2 with pure step policy.",
+    "old_direct_button_mismatch": {
+      "display": "个人宿主请使用「用自然语言规划任务」，注明要使用的已发布流程及交付物，核对计划后再启动。",
+      "tasks_after_attempt": 0,
+      "screenshot": "reusable-direct-rejected.png"
+    },
+    "same_title_historical_successes": 2,
+    "binding": "All four successful tasks have the same title but distinct task, run and artifact identities. Exact outputs were checked by database read-only recomputation and through previews in the two current runs.",
+    "same_name_cases": [
+      {
+        "task_id": "tsk_01a1fb8db67b719892a346c4599cc6ef",
+        "title": "新人全链路合成任务",
+        "run_id": "run_01a1fb8db67b7ba99c5eb5450bb08ff9",
+        "status": "succeeded",
+        "workflow_id": "wf_onboarding_fixture",
+        "workflow_version": 2,
+        "scope": "reusable",
+        "file_name": "history-alpha.md",
+        "sha256": "45bf2f0ab1134bdd83cf5189227dbc4de66da72232903b707a8ba04e4c0937d7",
+        "text": "# 历史甲\n\n合成复核金额 76.50 元。此值只用于新人验收。\n"
+      },
+      {
+        "task_id": "tsk_01a1fb8e780f7045a97c9654b55c7c96",
+        "title": "新人全链路合成任务",
+        "run_id": "run_01a1fb8e780f79ee8220d4349b9c8fc3",
+        "status": "succeeded",
+        "workflow_id": "wf_onboarding_fixture",
+        "workflow_version": 2,
+        "scope": "reusable",
+        "file_name": "history-beta.md",
+        "sha256": "ac5b6828b4897f8bf638067b9a4bba94654c4c1bc3910866b9a12520579d3e3d",
+        "text": "# 历史乙\n\n合成复核金额 92.00 元。此值只用于新人验收。\n"
+      },
+      {
+        "task_id": "tsk_01a1fb8f671478edac0a325841823bff",
+        "title": "新人全链路合成任务",
+        "run_id": "run_01a1fb8f67147aff9c6f70390205511a",
+        "status": "succeeded",
+        "workflow_id": "wf_onboarding_fixture",
+        "workflow_version": 2,
+        "scope": "reusable",
+        "file_name": "reused-current.md",
+        "sha256": "d2b5a2d8e5541c4a8f4bad8913338cb93c6f7071a7aeec2546233ff7b993e469",
+        "text": "# 复用成果\n\n合成复核金额 101.25 元。此值只用于新人验收。\n",
+        "ui": {
+          "launch_receipt_visible": true,
+          "filter_before": {
+            "value": "succeeded",
+            "label": "已完成"
+          },
+          "filter_after": {
+            "value": "succeeded",
+            "label": "已完成"
+          },
+          "results_drawer": "reused-current.md",
+          "preview_body_verified": true,
+          "screenshot": "reused-results.png"
+        }
+      },
+      {
+        "task_id": "tsk_01a1fb8fbb2170ae945eb8446fcee40c",
+        "title": "新人全链路合成任务",
+        "run_id": "run_01a1fb8fc5f572bf83aa8ae9223d992b",
+        "status": "succeeded",
+        "workflow_id": "tl_01a1fb8fb9bf7b80b573c7f677f99723",
+        "workflow_version": 1,
+        "scope": "task_local",
+        "file_name": "local-current.md",
+        "sha256": "b9424cae69d40012d476a264117f81fe2db240b8e48ed6751cfde9840c44d63d",
+        "text": "# 专属成果\n\n合成复核金额 133.75 元。此值只用于新人验收。\n",
+        "ui": {
+          "launch_receipt_visible": true,
+          "filter_before": {
+            "value": "succeeded",
+            "label": "已完成"
+          },
+          "filter_after": {
+            "value": "succeeded",
+            "label": "已完成"
+          },
+          "results_drawer": "local-current.md",
+          "preview_body_verified": true,
+          "screenshot": "local-results.png"
+        }
+      }
+    ],
+    "returned_filter_screenshot": "return-retained-filter.png"
+  }
+}
