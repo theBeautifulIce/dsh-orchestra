@@ -119,22 +119,17 @@ export function branchEdgesOf(def: WorkflowDefinition, nodeId: string): BranchEd
   return (def.edges ?? []).filter(edge => edge.from === nodeId).map(edge => ({ ...edge.route, to: edge.to }))
 }
 
-export function parallelMemberIds(edges: readonly WorkflowEdge[], nodeId: string): string[] {
+type DependencyEdge = Pick<WorkflowEdge, 'from' | 'to'>
+
+export function parallelMemberIds(edges: readonly DependencyEdge[], nodeId: string): string[] {
   return edges.filter(edge => edge.from === nodeId).map(edge => edge.to)
 }
 
-export function assertParallelTopology(edges: readonly WorkflowEdge[], nodeId: string, config: ParallelNodeConfig): void {
+export function assertParallelTopology(edges: readonly DependencyEdge[], nodeId: string): void {
   const members = parallelMemberIds(edges, nodeId)
   const memberIds = new Set(members)
   if (!members.length || memberIds.size !== members.length || edges.some(edge => memberIds.has(edge.to) && edge.from !== nodeId)) {
     throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'parallel 的直接成员必须归属同一并行组，且不能同时有其他前置')
-  }
-  if (config.join !== 'all') {
-    const continuation = edges.filter(edge => memberIds.has(edge.from))
-    const targets = new Set(continuation.map(edge => edge.to))
-    if (targets.size > 1 || (targets.size === 1 && continuation.length !== members.length)) {
-      throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'any 和 quorum 并行组的成员需要连接到同一汇合节点，或都作为末端')
-    }
   }
 }
 
@@ -307,7 +302,7 @@ export function assertDefinitionAllowed(def: WorkflowDefinition, phase: Phase): 
       const edges = def.edges ?? []
       const members = parallelMemberIds(edges, node.node_id)
       assertParallelNodeConfig(node.parallel, members.length)
-      assertParallelTopology(edges, node.node_id, node.parallel)
+      assertParallelTopology(edges, node.node_id)
       if (!node.parallel.allow_irreversible_children && def.nodes.some(member => members.includes(member.node_id) && member.side_effect_policy === 'irreversible')) {
         throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'parallel 需要显式允许不可逆成员', { node_id: node.node_id })
       }

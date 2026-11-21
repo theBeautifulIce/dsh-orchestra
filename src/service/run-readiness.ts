@@ -1,13 +1,28 @@
-import { TERMINAL_STATUSES } from '../core/state-machine.ts'
+import { isTerminal, TERMINAL_STATUSES } from '../core/state-machine.ts'
+import { appendNodeRunEvent, chainIsIntact, readChain, readChainHead } from '../infra/db/ledger.ts'
+import type { Tx } from '../infra/sqlite/driver.ts'
 import type { ReadTx } from './queries/read-tx.ts'
 import { approvedRuntimeEdges, runtimeEdges, type RuntimeEdge } from './rework-edges.ts'
 import { isCandidateReviewer, reworkBlocksNode } from './rework-runtime.ts'
 import { indexTopology, verifiedTopology, type PinnedTopology } from './pinned-topology.ts'
-import { branchSkipped, intactBranchChain, selectedBranchTarget, verifiedBranchSkip } from './branch-routing.ts'
-import { isVerifiedParallelMembership, parallelMemberMayStart, parallelSuccess } from './workflow-parallel.ts'
+import { branchSkipped, intactBranchChain, selectedBranchTarget, verifiedBranchSkipSource } from './branch-routing.ts'
+import { applyTransition } from './commands/nodes.ts'
+import { isVerifiedParallelMembership, parallelMemberMayStart, parallelMemberPath } from './workflow-parallel.ts'
 
 const SUCCESS_STATUS: ReadonlySet<string> = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
 const FAILED_STATUS: ReadonlySet<string> = new Set(TERMINAL_STATUSES.filter((status) => !SUCCESS_STATUS.has(status)))
+type PathNode = { node_run_id: string; status: string; node_type: string; parent_node_run_id: string | null }
+type PathLookup = (nodeId: string) => readonly string[]
+
+function runPathNode(tx: ReadTx, runId: string, nodeId: string): PathNode | undefined {
+  return tx.get('SELECT node_run_id,status,node_type,parent_node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1',
+    [runId,nodeId])
+}
+
+function branchSkipPath(tx: ReadTx, secret: string, runId: string, nodeRunId: string): ReturnType<typeof parallelMemberPath> {
+  const source = verifiedBranchSkipSource(tx, secret, runId, nodeRunId)
+  return source ? parallelMemberPath(tx, secret, runId, source.branch_id, source.parent_node_run_id) : 'waiting'
+}
 
 export type DependencyReadiness =
   | { ready: true }
@@ -56,10 +71,10 @@ export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: strin
   const missing: string[] = []
   const failed: string[] = []
   const waiting: string[] = []
+  let inactive = 0
+  let parallel = false
   for (const pred of preds) {
-    const row = tx.get<{ node_run_id: string; status: string; node_type: string; parent_node_run_id: string | null }>(
-      'SELECT node_run_id,status,node_type,parent_node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId, pred],
-    )
+    const row = runPathNode(tx, runId, pred)
     if (!row) {
       missing.push(pred)
       continue
@@ -68,32 +83,32 @@ export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: strin
       const consumer = tx.get<{ parent_node_run_id: string | null }>('SELECT parent_node_run_id FROM node_runs WHERE node_run_id=? AND run_id=?', [consumerId,runId])
       if (consumer?.parent_node_run_id === row.node_run_id && parallelMemberMayStart(tx, secret, row.node_run_id, consumerId)) continue
     }
-    if (row.parent_node_run_id) {
-      const group = tx.get<{ status: string; node_type: string }>('SELECT status,node_type FROM node_runs WHERE run_id=? AND node_run_id=?', [runId,row.parent_node_run_id])
-      if (group?.node_type === 'parallel') {
-        if (group.status === 'waiting' || !isVerifiedParallelMembership(tx, secret, row.parent_node_run_id, row.node_run_id)) {
-          waiting.push(pred)
-          continue
-        }
-        if (group.status !== 'done') {
-          failed.push(pred)
-          continue
-        }
-        const outcome = parallelSuccess(tx, secret, row.parent_node_run_id)
-        if (!outcome) {
-          waiting.push(pred)
-          continue
-        }
-        const ancestors = parallelAncestors(tx, secret, runId, row.parent_node_run_id)
-        if (ancestors !== 'ready') {
-          (ancestors === 'waiting' ? waiting : failed).push(pred)
-          continue
-        }
-        if (outcome.tolerated_member_ids.includes(row.node_run_id)) continue
+    const path = parallelMemberPath(tx, secret, runId, row.node_run_id, row.parent_node_run_id)
+    if (path === 'inactive' && !reworkBlocksNode(tx, row.node_run_id)) {
+      inactive++
+      parallel = true
+      continue
+    }
+    if (path !== 'active') {
+      (path === 'failed' ? failed : waiting).push(pred)
+      continue
+    }
+    if (row.status === 'superseded' && parallelSkipReceipt(tx, row.node_run_id)) {
+      if (secret && !verifiedParallelSkip(tx, secret, runId, pred, row.node_run_id)) waiting.push(pred)
+      else {
+        inactive++
+        parallel = true
       }
+      continue
     }
     if (row.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
-      if (secret && !verifiedBranchSkip(tx, secret, runId, row.node_run_id)) waiting.push(pred)
+      const branchPath = secret ? branchSkipPath(tx, secret, runId, row.node_run_id) : 'active'
+      if (branchPath === 'failed') failed.push(pred)
+      else if (branchPath === 'waiting') waiting.push(pred)
+      else {
+        inactive++
+        parallel ||= branchPath === 'inactive'
+      }
       continue
     }
     if (row.status === 'done' && row.node_type === 'branch') {
@@ -102,7 +117,10 @@ export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: strin
         waiting.push(pred)
         continue
       }
-      if (consumerNodeId !== undefined && target !== consumerNodeId) continue
+      if (consumerNodeId !== undefined && target !== consumerNodeId) {
+        inactive++
+        continue
+      }
     }
     if (row.status === 'done' && isCandidateReviewer(tx, consumerId, row.node_run_id)) continue
     else if (reworkBlocksNode(tx, row.node_run_id)) waiting.push(pred)
@@ -110,42 +128,126 @@ export function dependencyReadiness(tx: ReadTx, runId: string, consumerId: strin
     else if (FAILED_STATUS.has(row.status)) failed.push(pred)
     else waiting.push(pred)
   }
+  // A wholly inactive path is settled without taking a lease. In particular, an explicit
+  // acquire request must not race the pruning sweep and start a dead member's successor.
+  if (consumerNodeId && parallel && inactive === preds.length) waiting.push(...preds)
   return missing.length + failed.length + waiting.length === 0
     ? { ready: true }
     : { ready: false, missingPreds: missing, failedPreds: failed, waitingPreds: waiting }
 }
 
-function parallelAncestors(tx: ReadTx, secret: string | undefined, runId: string, directParentId: string): 'ready' | 'waiting' | 'failed' {
-  const visited = new Set<string>()
-  let childId = directParentId
-  for (;;) {
-    if (visited.has(childId)) return 'waiting'
-    visited.add(childId)
-    const child = tx.get<{ parent_node_run_id: string | null }>('SELECT parent_node_run_id FROM node_runs WHERE run_id=? AND node_run_id=?', [runId, childId])
-    if (!child?.parent_node_run_id) return 'ready'
-    const parentId: string = child.parent_node_run_id
-    const parent = tx.get<{ status: string }>("SELECT status FROM node_runs WHERE run_id=? AND node_run_id=? AND node_type='parallel'", [runId,parentId])
-    if (!parent || parent.status === 'waiting' || !isVerifiedParallelMembership(tx, secret, parentId, childId)) return 'waiting'
-    if (parent.status !== 'done') return 'failed'
-    if (!parallelSuccess(tx, secret, parentId)) return 'waiting'
-    childId = parentId
+function parallelSkipReceipt(tx: ReadTx, nodeRunId: string): { payload: string } | undefined {
+  return tx.get("SELECT payload FROM node_run_events WHERE node_run_id=? AND type='parallel.path_skipped' ORDER BY seq DESC LIMIT 1", [nodeRunId])
+}
+
+function proofTopology(tx: ReadTx, runId: string): PinnedTopology | null {
+  const binding = readRunBinding(tx, runId)
+  return binding?.workflow_definition_hash ? pinnedRunTopology(binding) : null
+}
+
+/** A shared join has at least one live input. Skip only when every edge is proven inactive,
+ * and at least one was disabled by a successful parallel result. */
+function parallelInactiveInputs(tx: ReadTx, secret: string, runId: string, nodeId: string, preds: readonly string[],
+  lookup?: PathLookup, active = new Set<string>()): string[] {
+  if (active.has(nodeId)) return []
+  const inputs: string[] = []
+  let parallel = false
+  active.add(nodeId)
+  try {
+    for (const id of preds) {
+      const row = runPathNode(tx, runId, id)
+      if (!row || reworkBlocksNode(tx, row.node_run_id)) return []
+      const path = parallelMemberPath(tx, secret, runId, row.node_run_id, row.parent_node_run_id)
+      if (path === 'inactive' || (row.status === 'superseded'
+          && verifiedParallelSkip(tx, secret, runId, id, row.node_run_id, lookup, active))) {
+        parallel = true
+      } else if (path !== 'active') {
+        return []
+      } else if (row.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
+        const branchPath = branchSkipPath(tx, secret, runId, row.node_run_id)
+        if (branchPath === 'failed' || branchPath === 'waiting') return []
+        parallel ||= branchPath === 'inactive'
+      } else if (row.node_type === 'branch' && row.status === 'done' && intactBranchChain(tx, secret, row.node_run_id)) {
+        const target = selectedBranchTarget(tx, row.node_run_id)
+        if (!target || target === nodeId) return []
+      } else {
+        return []
+      }
+      inputs.push(row.node_run_id)
+    }
+    return parallel ? inputs.sort() : []
+  } finally {
+    active.delete(nodeId)
+  }
+}
+
+export function verifiedParallelSkip(tx: ReadTx, secret: string, runId: string, nodeId: string, nodeRunId: string,
+  lookup?: PathLookup, active?: Set<string>): boolean {
+  const receipt = parallelSkipReceipt(tx, nodeRunId)
+  if (!receipt || !chainIsIntact(secret, readChain(tx, nodeRunId), readChainHead(tx, nodeRunId), true)) return false
+  if (!lookup) {
+    const topology = proofTopology(tx, runId)
+    if (!topology) return false
+    lookup = id => nodePredecessors(tx, runId, topology, id)
+  }
+  const inputs = parallelInactiveInputs(tx, secret, runId, nodeId, lookup(nodeId), lookup, active)
+  return inputs.length > 0 && JSON.stringify(inputs) === JSON.stringify(JSON.parse(receipt.payload).inactive_predecessors)
+}
+
+/** Record a signed, attempt-bound explanation before a dead path can become neutral at a later join. */
+export function pruneInactiveParallelPaths(tx: Tx, secret: string, runId: string, now: string): void {
+  if (!tx.get(`SELECT 1 FROM node_run_events e JOIN node_runs n USING(node_run_id)
+    WHERE n.run_id=? AND e.type='parallel.result'
+      AND CASE WHEN json_valid(e.payload) THEN json_array_length(e.payload,'$.tolerated_member_ids') END > 0 LIMIT 1`, [runId])) return
+  const binding = readRunBinding(tx, runId)
+  const topology = binding?.workflow_definition_hash && !binding.cancel_requested_at && binding.status !== 'paused'
+    ? pinnedRunTopology(binding) : null
+  if (!topology) return
+  const preds = runPredecessors(tx, runId, topology.edges)
+  const lookup = (id: string) => preds.get(id) ?? []
+  const queued = tx.all<{ node_id: string; node_run_id: string; attempt: number; side_effect_policy: string }>(
+    "SELECT node_id,node_run_id,attempt,side_effect_policy FROM node_runs WHERE run_id=? AND status='queued' AND parent_node_run_id IS NULL",
+    [runId],
+  )
+  const remaining = new Set(queued)
+  for (let changed = true; changed;) {
+    changed = false
+    for (const row of remaining) {
+      const inputs = parallelInactiveInputs(tx, secret, runId, row.node_id, lookup(row.node_id), lookup)
+      if (!inputs.length || reworkBlocksNode(tx, row.node_run_id)
+          || !chainIsIntact(secret, readChain(tx, row.node_run_id), readChainHead(tx, row.node_run_id))
+          || runPathNode(tx, runId, row.node_id)?.node_run_id !== row.node_run_id) continue
+      applyTransition(tx, secret, { nodeRunId: row.node_run_id, from: ['queued'], to: 'superseded', ruleId: 'M-62', attempt: row.attempt, now,
+        patch: { side_effect_policy: 'pure', side_effect_verified_none: 1 } })
+      appendNodeRunEvent(tx, secret, row.node_run_id, 'parallel.path_skipped',
+        { inactive_predecessors: inputs, previous_side_effect_policy: row.side_effect_policy })
+      remaining.delete(row)
+      changed = true
+    }
   }
 }
 
 /** A later node still depends on the route that enabled its already-completed predecessors. */
 export function branchAncestryIsIntact(tx: ReadTx, secret: string, runId: string, topology: PinnedTopology, direct: readonly string[]): boolean {
-  if (!topology.hasRoutes) return true
+  if (!topology.hasRoutes && !tx.get("SELECT 1 FROM node_runs WHERE run_id=? AND node_type='parallel' LIMIT 1", [runId])) return true
   const visited = new Set<string>()
   const pending = [...direct]
   while (pending.length) {
     const nodeId = pending.pop()!
     if (visited.has(nodeId)) continue
     visited.add(nodeId)
-    const row = tx.get<{ node_run_id: string; status: string; node_type: string }>(
-      'SELECT node_run_id,status,node_type FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId, nodeId],
-    )
+    const row = runPathNode(tx, runId, nodeId)
+    if (row?.status === 'superseded' && parallelSkipReceipt(tx, row.node_run_id)) {
+      if (!verifiedParallelSkip(tx, secret, runId, nodeId, row.node_run_id, id => nodePredecessors(tx, runId, topology, id))) return false
+      continue
+    }
+    if (row?.parent_node_run_id) {
+      if (!isVerifiedParallelMembership(tx, secret, row.parent_node_run_id, row.node_run_id)
+          || (isTerminal(row.status) && !intactBranchChain(tx, secret, row.node_run_id))) return false
+    }
     if (row?.status === 'superseded' && branchSkipped(tx, row.node_run_id)) {
-      if (!verifiedBranchSkip(tx, secret, runId, row.node_run_id)) return false
+      const path = branchSkipPath(tx, secret, runId, row.node_run_id)
+      if (path === 'waiting' || path === 'failed') return false
       continue
     }
     if (row?.node_type === 'branch' && row.status === 'done') {

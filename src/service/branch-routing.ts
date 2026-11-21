@@ -6,8 +6,9 @@ import { applyTransition } from './commands/nodes.ts'
 import type { ReadTx } from './queries/read-tx.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
-import { isVerifiedParallelMembership, parallelOpening, parallelToleratesMember } from './workflow-parallel.ts'
+import { isVerifiedParallelMembership, parallelMemberPath, parallelOpening } from './workflow-parallel.ts'
 import { resolvePinnedNodeId } from './rework-extra-steps.ts'
+import { verifiedParallelSkip } from './run-readiness.ts'
 
 export function ruleNodeInput(tx: Tx, secret: string, runId: string, nodeId: string, definition: WorkflowDefinition, initialInput: unknown): unknown {
   const predecessors = runtimeEdges(tx, runId, definition.edges ?? []).filter(edge => edge.to === nodeId)
@@ -21,7 +22,8 @@ export function ruleNodeInput(tx: Tx, secret: string, runId: string, nodeId: str
     if (!previous) throw new OrchError('VERDICT_UNSUPPORTED', '规则节点缺少上游节点')
     assertChainIntact(tx, secret, previous.node_run_id)
     if (previous.status === 'superseded' && branchSkipped(tx, previous.node_run_id)) continue
-    if (previous.parent_node_run_id && parallelToleratesMember(tx, secret, previous.parent_node_run_id, previous.node_run_id)) continue
+    if (parallelMemberPath(tx, secret, runId, previous.node_run_id, previous.parent_node_run_id) === 'inactive') continue
+    if (previous.status === 'superseded' && verifiedParallelSkip(tx, secret, runId, predecessor.from, previous.node_run_id)) continue
     if (previous.node_type === 'branch' && selectedBranchTarget(tx, previous.node_run_id) !== nodeId) continue
     if (previous.node_type === 'parallel' && previous.status === 'waiting') {
       const member = tx.get<{ node_run_id: string }>('SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC,seq DESC LIMIT 1', [runId,nodeId])
@@ -102,12 +104,16 @@ export function intactBranchChain(tx: ReadTx, secret: string, nodeRunId: string)
 
 /** A skipped prerequisite is neutral only while both its ledger and its source route are intact. */
 export function verifiedBranchSkip(tx: ReadTx, secret: string, runId: string, nodeRunId: string): boolean {
-  if (!intactBranchChain(tx, secret, nodeRunId)) return false
-  const source = tx.get<{ branch_id: string; target_id: string }>(`SELECT json_extract(e.payload,'$.branch_node_run_id') AS branch_id,
-      json_extract(e.payload,'$.target_node_id') AS target_id FROM node_run_events e JOIN node_runs n
+  return !!verifiedBranchSkipSource(tx, secret, runId, nodeRunId)
+}
+
+export function verifiedBranchSkipSource(tx: ReadTx, secret: string, runId: string, nodeRunId: string) {
+  if (!intactBranchChain(tx, secret, nodeRunId)) return undefined
+  const source = tx.get<{ branch_id: string; target_id: string; parent_node_run_id: string | null }>(`SELECT json_extract(e.payload,'$.branch_node_run_id') AS branch_id,
+      json_extract(e.payload,'$.target_node_id') AS target_id,n.parent_node_run_id FROM node_run_events e JOIN node_runs n
       ON n.node_run_id=json_extract(e.payload,'$.branch_node_run_id') AND n.run_id=? AND n.node_type='branch' AND n.status='done'
       WHERE e.type='branch.skipped' AND e.node_run_id=? ORDER BY e.seq DESC LIMIT 1`, [runId,nodeRunId])
-  return !!source && intactBranchChain(tx, secret, source.branch_id) && selectedBranchTarget(tx, source.branch_id) === source.target_id
+  return source && intactBranchChain(tx, secret, source.branch_id) && selectedBranchTarget(tx, source.branch_id) === source.target_id ? source : undefined
 }
 
 /** Commit route authority and skip only nodes proven unreachable by trustworthy selections. */
