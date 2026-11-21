@@ -28,7 +28,7 @@ import { noteAgentStopped, type createModelEscalationHost } from '../service/mod
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
 import { groupStopIntent, isVerifiedParallelMembership, verifiedPropagatedGroupStop } from '../service/workflow-parallel.ts'
-import { recordOrdinaryHostStop } from '../service/decision/ordinary-recovery.ts'
+import { recordOrdinaryHostStop, recordOrdinaryUnsentAttempt } from '../service/decision/ordinary-recovery.ts'
 
 export type RunNodeParams = {
   /** Internal dispatcher entry. The standalone runner rechecks the persisted node kind and definition. */
@@ -260,6 +260,14 @@ async function runNodeActions(
           throw new OrchError('FORBIDDEN', '当前节点无法取得可信的模型分配建议')
         }
       }
+      if (deps.runtime.phase === 'S6') {
+        const row = loadNodeRun(makeTx(deps.db.raw), p.nodeRunId)
+        deps.cancelSignal?.throwIfAborted()
+        if (row.status !== 'dispatched' || row.attempt !== p.attempt || row.action_generation !== generation
+          || row.lease_id !== lease.lease_id || row.hang_reason !== null) {
+          throw new OrchError('STALE_GENERATION', '当前执行尝试已不可创建宿主会话')
+        }
+      }
       spawnTask = createExecutorAgent(deps.agents, deps.registry, {
         nodeRunId: p.nodeRunId,
         attempt: p.attempt,
@@ -270,7 +278,7 @@ async function runNodeActions(
         modelRef: assignment?.model_ref,
         sessionModelFallback: assignment?.session_model_fallback,
         reasoningEffort: assignment?.reasoning_effort,
-        ...(deps.modelRouting ? { actionGeneration: generation } : {}),
+        ...(deps.modelRouting || deps.runtime.phase === 'S6' ? { actionGeneration: generation } : {}),
       })
       agent = await withTimeout(
         spawnTask,
@@ -313,7 +321,7 @@ async function runNodeActions(
       }
       // spawn 回包失败时宿主可能已经建了会话，但我们拿不到 agentId：不能声称已停，
       // 也不能留在 dispatched。按规格落 startup_unknown，交给 sweep/人工核副作用。
-      withTx(deps.db, (tx) => {
+      const unknownRearm = withTx(deps.db, (tx) => {
         const row = loadNodeRun(tx, p.nodeRunId)
         if (row.status === 'dispatched' && row.attempt === p.attempt && row.action_generation === generation) {
           transitionNode(tx, deps.secret, {
@@ -322,15 +330,28 @@ async function runNodeActions(
             unknownWatchdogMs: p.unknownWatchdogMs,
             startupUnknownAnchor: deps.runtime.clock?.sample(),
           })
+          return row.rearm_generation
         }
+        return undefined
       })
       spawnUnknown = true
       // 超时后底层 spawn 仍可能晚到；晚到的会话必须被释放，不能变成无人认领的孤儿。
       if (spawnTask) {
-        void spawnTask.then(
-          (late) => bestEffortReleaseAgent(deps, late.agentId, p.nodeRunId, p.attempt),
-          () => undefined,
-        )
+        void spawnTask.then(async (late) => {
+          if (deps.runtime.phase === 'S6' && unknownRearm !== undefined && !deps.cancelSignal?.aborted) {
+            const binding = { nodeRunId: p.nodeRunId, attempt: p.attempt, actionGeneration: generation, executorAgentId: late.agentId }
+            const retired = await withTimeout(deps.bridge.retireUnsentAttempt(binding), STOP_RPC_TIMEOUT_MS, () =>
+              new OrchError('OPERATION_TIMEOUT', '未发送请求的宿主会话停止确认超时'))
+            if (retired) {
+              if (!deps.cancelSignal?.aborted) withTx(deps.db, (tx) =>
+                recordOrdinaryUnsentAttempt(tx, deps.secret, binding, unknownRearm, nowAt()))
+              return
+            }
+          }
+          await bestEffortReleaseAgent(deps, late.agentId, p.nodeRunId, p.attempt)
+        }).catch(() => {
+          // A lost response or closed database cannot establish an authoritative receipt.
+        })
       }
       throw err
     }
@@ -362,7 +383,8 @@ async function runNodeActions(
         attempt: row.attempt, revision: row.revision, now: startedAt, reason: 'executor_started',
       })
       if (deps.runtime.phase === 'S6') {
-        tx.run('UPDATE node_runs SET executor_session_id=? WHERE node_run_id=?', [created.sessionId, p.nodeRunId])
+        tx.run('UPDATE node_runs SET executor_session_id=?, executor_agent_id=? WHERE node_run_id=?',
+          [created.sessionId, created.agentId, p.nodeRunId])
       }
       if (deps.modelEscalation) tx.run('UPDATE node_runs SET started_at=? WHERE node_run_id=?', [startedAt, p.nodeRunId])
     })

@@ -26,12 +26,14 @@ type Child = {
   handle: AgentHandle
   nodeRunId: string
   attempt: number
+  actionGeneration?: number
   route: CatalogRoute & PinnedModel
   changed: EventEmitter
   events: BridgeEvent[]
   tools: Map<string, PendingTool>
   assist?: ReturnType<typeof createAttemptAssist>
   sent?: { id: string; instruction: string }
+  retiring?: true
   activity?: Promise<void>
   error?: Error
 }
@@ -658,7 +660,8 @@ export function createDshExecutor(options: {
       await handle.dispose()
       throw new OrchError('SERVICE_UNAVAILABLE', 'DSH 执行宿主正在关闭')
     }
-    child = { handle, nodeRunId: params.nodeRunId, attempt: params.attempt, route, events: [], changed: new EventEmitter(), tools: new Map(), assist }
+    child = { handle, nodeRunId: params.nodeRunId, attempt: params.attempt, actionGeneration: params.actionGeneration,
+      route, events: [], changed: new EventEmitter(), tools: new Map(), assist }
     const sessionId = handle.agent.session.id
     children.set(sessionId, child)
     return { sessionId, agentId: sessionId,
@@ -678,6 +681,7 @@ export function createDshExecutor(options: {
   }
 
   function send(child: Child, params: SendParams) {
+    if (closing || child.retiring) throw new OrchError('STALE_GENERATION', '当前 DSH 执行尝试已停止接收请求')
     if (child.sent) {
       if (child.sent.id === params.attemptId && child.sent.instruction === params.instruction) return
       throw new OrchError('STALE_GENERATION', '一次 DSH 子会话只接受一个执行请求')
@@ -725,6 +729,17 @@ export function createDshExecutor(options: {
 
   type Rpc = { executorAgentId: string; attempt: number; fromSeq: number; pageSize: number; timeoutMs: number; callId: string; result: ToolResult }
   const transport: BridgeTransport = {
+    async retireUnsentAttempt(binding) {
+      const child = children.get(binding.executorAgentId)
+      if (closing || !child || child.nodeRunId !== binding.nodeRunId || child.attempt !== binding.attempt
+        || child.actionGeneration !== binding.actionGeneration || child.retiring || child.sent || child.activity
+        || child.events.length !== 0 || child.tools.size !== 0 || child.handle.agent.status !== 'idle'
+        || child.handle.agent.session.snapshotEvents().some((event) => event.type === 'request/header')) return false
+      // Both send and retirement update the child synchronously before entering DSH.
+      child.retiring = true
+      await disposeChild(child)
+      return !closing
+    },
     snapshotAttemptModelUse(params) {
       const child = childFor(params)
       if (!child.sent) return

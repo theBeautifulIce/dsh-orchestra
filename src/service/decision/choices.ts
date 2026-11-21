@@ -1,5 +1,6 @@
 import type { Resolution } from '../commands/decisions.ts'
-import { ordinaryAbandonTargets, ordinaryEffectEvidence, ordinaryRecoveryBound, ordinaryRecoveryTarget, type OrdinaryEffectEvidence } from './ordinary-recovery.ts'
+import { ordinaryAbandonTargets, ordinaryEffectEvidence, ordinaryRecoveryBound, ordinaryRecoveryTarget,
+  ordinaryUnsentAttempt, type OrdinaryEffectEvidence } from './ordinary-recovery.ts'
 
 export type DecisionChoiceContext = {
   kind: unknown
@@ -14,6 +15,7 @@ export type DecisionChoiceContext = {
   ordinary_recovery_available?: boolean
   ordinary_recovery_bound?: boolean
   ordinary_effect_evidence?: OrdinaryEffectEvidence
+  ordinary_unsent_attempt?: boolean
 }
 
 export function withOrdinaryRecovery<T extends DecisionChoiceContext & Parameters<typeof ordinaryRecoveryTarget>[1]>(
@@ -26,6 +28,7 @@ export function withOrdinaryRecovery<T extends DecisionChoiceContext & Parameter
     card.ordinary_recovery_available = card.kind === 'abandon_ack'
       ? ordinaryAbandonTargets(tx, card).length > 0 : !!node
     if (node) card.ordinary_effect_evidence = ordinaryEffectEvidence(tx, node)
+    if (node && card.kind === 'startup_unknown') card.ordinary_unsent_attempt = ordinaryUnsentAttempt(tx, node) !== undefined
   }
   return card
 }
@@ -40,6 +43,7 @@ export function panelDecisionOptions(decision: DecisionChoiceContext, now: numbe
   if (decision.ordinary_recovery_available) {
     if (decision.kind === 'abandon_ack') return { choices: ['approved'], unavailableReason: null }
     const choices: Resolution[] = ['abandon']
+    if (decision.kind === 'startup_unknown' && decision.ordinary_unsent_attempt) choices.unshift('confirm_not_started')
     if (decision.ordinary_effect_evidence?.applied) choices.unshift('confirm_applied')
     if (decision.ordinary_effect_evidence?.not_applied) choices.unshift('confirm_not_applied')
     return { choices, unavailableReason: null }

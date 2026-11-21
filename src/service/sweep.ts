@@ -11,8 +11,8 @@ import { applyReport } from './commands/apply-report.ts'
 import { sweepWaitTimeouts } from './commands/wait.ts'
 import { finishSubworkflowChild } from './commands/subworkflow.ts'
 import { closeRun } from './commands/run-close.ts'
-import { activeDecision, cancelDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
-import { openOrdinaryRecoveryDecision } from './decision/ordinary-recovery.ts'
+import { activeDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
+import { openOrdinaryRecoveryDecision, retireOrdinaryStartupDecision } from './decision/ordinary-recovery.ts'
 import { IN_FLIGHT_COMMAND_STATUSES } from './commands/idempotency.ts'
 import { receiptRetention } from './receipt-retention.ts'
 import type { WorkflowCatalog } from './workflows.ts'
@@ -197,7 +197,6 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
     )
     for (const row of unknownRows) {
       if (skipNodes.has(row.node_run_id) || row.hang_reason !== null) continue
-      if (params.ordinaryRecovery) openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'startup_unknown', params.now)
       if (!row.startup_unknown_deadline_at) continue
       const anchored = deadlineFromAnchors({
         deadlineAt: row.startup_unknown_deadline_at,
@@ -207,7 +206,12 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
       // 有锚点只看单调钟；缺锚点的旧行不能拿墙钟硬判超时，直接按“不确定”收口。
       if (anchored && params.clock) {
         const decision = params.clock.decide(anchored)
-        if (decision.kind === 'pending') continue
+        if (decision.kind === 'pending') {
+          if (params.ordinaryRecovery && Number.isSafeInteger(row.startup_unknown_remaining_ns) && row.startup_unknown_remaining_ns! > 0) {
+            openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'startup_unknown', params.now)
+          }
+          continue
+        }
         if (decision.kind === 'uncertain') continue
       }
       try {
@@ -231,10 +235,7 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
           deadline_at: row.startup_unknown_deadline_at,
         })
         unknownExpired.push(row.node_run_id)
-        if (params.ordinaryRecovery) {
-          const startup = activeDecision(tx, row.run_id, 'startup_unknown', row.node_run_id)
-          if (startup) cancelDecision(tx, secret, { decisionId: startup.decision_id, reason: 'expired_final', now: params.now })
-        }
+        if (params.ordinaryRecovery) retireOrdinaryStartupDecision(tx, secret, row.node_run_id, params.now, 'expired_final')
       } catch {
         // 并发流程已经改过这一行：跳过
       }
@@ -264,6 +265,9 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
           to: 'paused_bridge_missing',
           resume_state: row.status,
         })
+        if (params.ordinaryRecovery && row.status === 'startup_unknown') {
+          retireOrdinaryStartupDecision(tx, secret, nodeRunId, params.now, 'cancelled')
+        }
         bridgePaused.push(nodeRunId)
       } catch {
         // 并发流程已经改过这一行：跳过

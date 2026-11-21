@@ -16,6 +16,8 @@ export type BridgeEventSource = {
 // 宿主侧传输契约：方法名 + 参数，返回值由宿主给；listen 是持续事件流
 export type BridgeTransport = BridgeEventSource & {
   request<T>(method: string, params: unknown): Promise<T>
+  /** Atomically fences send and retires a live child whose instruction was never admitted. */
+  retireUnsentAttempt?(binding: UnsentAttemptBinding): Promise<boolean>
   /** Optional local host snapshot before disposal. Never comes from an agent report. */
   snapshotAttemptModelUse?(params: { executorAgentId: string; attempt: number }): unknown
 }
@@ -63,6 +65,8 @@ export type CancelResult = 'interrupted' | 'not_interruptible' | 'already_stoppe
 export type ExecutorState = 'loaded' | 'unloaded' | 'deleted' | 'running' | 'idle'
 
 export type StateResult = { state: ExecutorState; toolCallSeq: number; hasToolCall: boolean }
+
+export type UnsentAttemptBinding = { nodeRunId: string; attempt: number; actionGeneration: number; executorAgentId: string }
 
 export type WhenIdleParams = { executorAgentId: string; timeoutMs: number }
 
@@ -113,6 +117,13 @@ export class BridgeClient {
 
   snapshotAttemptModelUse(params: { executorAgentId: string; attempt: number }): unknown {
     return this.transport.snapshotAttemptModelUse?.(params)
+  }
+
+  async retireUnsentAttempt(binding: UnsentAttemptBinding): Promise<boolean> {
+    const retired = await this.transport.retireUnsentAttempt?.(binding)
+    if (retired !== true) return false
+    this.subscribed.delete(binding.executorAgentId)
+    return true
   }
 
   // send 必须在 subscribe 确认之后，否则 BRIDGE_NOT_SUBSCRIBED（规格 7.2 行 584）
