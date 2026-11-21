@@ -1,0 +1,355 @@
+{
+  "candidate": "f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3",
+  "previousInstalled": "96f639f11466470211ac90a4a9ed7b8546c6ba18",
+  "provisional": "9c9ee770026f2b73f509c1d968a9e24147213166",
+  "mainTests": {
+    "passed": 2030,
+    "failed": 0,
+    "conditionallySkipped": 12,
+    "sha256": "68ac9c6fa4c3d1f5514ca6e11a52fddba7996bd898e187089a741cf8eee38183"
+  },
+  "windows": {
+    "passed": 14,
+    "failed": 0,
+    "conditionallySkipped": 0,
+    "sha256": "2e1c94803e4fad3f5ec1cfabeb38d78caa9823acc1688d89009fc68b47726b71"
+  },
+  "isolatedRelease": {
+    "passed": 17,
+    "failed": 0,
+    "conditionallySkipped": 0,
+    "sha256": "141ec8c4fe6aa77307c82306ecb1022d467e589db7293eaf01402e55a6e8a553"
+  },
+  "installedPair": {
+    "passed": 6,
+    "failed": 0,
+    "conditionallySkipped": 0,
+    "sha256": "a208c3ba2175a2261b99f908030d84050813f9981520bc331c8f82eb67679fdd"
+  },
+  "archivedG13": {
+    "passed": 2,
+    "failed": 0,
+    "conditionallySkipped": 0,
+    "sha256": "2d4563c78f6c826b36c1d0eaf64f6648732334c0b2f7f9c439aa874dd680a09c"
+  },
+  "historicalGates": [
+    "gate G1 通过（13 项必过、13 份证据哈希复核，artifact_hash=d6872d18470d… body_hash=57e576985e22…）",
+    "gate G2 通过（20 项必过、20 份证据哈希复核，artifact_hash=eefbc2d2fa7e… body_hash=51f5e72511e7…）",
+    "gate G3 通过（20 项必过、20 份证据哈希复核，artifact_hash=b474d9ff0681… body_hash=d7f6ab40964a…）",
+    "gate G4 通过（14 项必过、15 份证据哈希复核，artifact_hash=041dbbb9ff6a… body_hash=9a0863fe9418…）",
+    "gate G5 通过（73 项必过、73 份证据哈希复核，artifact_hash=f57b6ac7f423… body_hash=66ea72fcbf2c…）"
+  ],
+  "nativeRouting": 9,
+  "independent": {
+    "f8Wf23T08_1": 241,
+    "workflow": 78,
+    "confirmedNewP0": 0,
+    "confirmedNewP1": 0
+  },
+  "installed": {
+    "normalized_offline_lock_and_archive_integrity_match": true,
+    "source": "f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3",
+    "archive_sha256": "98b2f8cef90491330f88443301f9ebbd54e4050ccd20fd3eadf655b5c1008098",
+    "archive": "D:\\aboutAI\\dsh-orchestra\\tmp\\office-install\\f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3\\dsh-orchestra-0.1.0.tgz",
+    "desktop_version": "0.2.2.0",
+    "package_manager": "11.28.5",
+    "installed_path": "C:\\Users\\ASUS\\.dsh\\profiles\\desktop\\node_modules\\dsh-orchestra",
+    "installed_pointer": "file:D:/aboutAI/dsh-orchestra/tmp/office-install/f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3/dsh-orchestra-0.1.0.tgz",
+    "installed_pointer_matches_archive": true,
+    "exact_installed_files": 76,
+    "installed_mismatches": [],
+    "other_direct_dependencies_unchanged": 21,
+    "changed_other_dependencies": 0,
+    "offline_lock_matches": false,
+    "profile_config_bytes_unchanged": true,
+    "desktop_runtime_archive_unchanged": true,
+    "application_restarted": false,
+    "running_host_loaded_new_candidate_verified": false
+  },
+  "archiveInspection": {
+    "source": "f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3",
+    "sha256": "98b2f8cef90491330f88443301f9ebbd54e4050ccd20fd3eadf655b5c1008098",
+    "archive": "D:\\aboutAI\\dsh-orchestra\\tmp\\office-install\\f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3\\dsh-orchestra-0.1.0.tgz",
+    "files": 76,
+    "identical_migrations": 67,
+    "new_migrations": []
+  },
+  "lag": {
+    "candidate": "f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3",
+    "elapsed_ms": 600035.4123999999,
+    "verified_event_rows": 129,
+    "windows": [
+      {
+        "p95_ms": 267.73339999996824,
+        "max_ms": 271.58719999997993,
+        "samples": 129
+      },
+      {
+        "p95_ms": 269.8784999999989,
+        "max_ms": 269.8784999999989,
+        "samples": 12
+      },
+      {
+        "p95_ms": 238.73090000000957,
+        "max_ms": 238.73090000000957,
+        "samples": 12
+      },
+      {
+        "p95_ms": 271.58719999997993,
+        "max_ms": 271.58719999997993,
+        "samples": 12
+      },
+      {
+        "p95_ms": 262.04329999999027,
+        "max_ms": 262.04329999999027,
+        "samples": 15
+      },
+      {
+        "p95_ms": 266.7518000000273,
+        "max_ms": 266.7518000000273,
+        "samples": 12
+      },
+      {
+        "p95_ms": 266.86450000002515,
+        "max_ms": 266.86450000002515,
+        "samples": 12
+      },
+      {
+        "p95_ms": 267.93109999998705,
+        "max_ms": 267.93109999998705,
+        "samples": 15
+      },
+      {
+        "p95_ms": 256.05060000001686,
+        "max_ms": 256.05060000001686,
+        "samples": 12
+      },
+      {
+        "p95_ms": 268.89950000005774,
+        "max_ms": 268.89950000005774,
+        "samples": 12
+      },
+      {
+        "p95_ms": 254.0519000000786,
+        "max_ms": 254.0519000000786,
+        "samples": 15
+      }
+    ],
+    "sha256": {
+      "samples": "8c4423bdaa16c249aa58ed101c3e06a9151521c510fb2735f2662042f2f02ee0",
+      "events": "d390dff5b5bd2c514287ad0fee9160482c08d383ac0e00946bbd1c9641959983",
+      "ledger": "bf11075f9125db83781174881c7ed3b681b88cc0fbe81ac5913d184672523ec6"
+    }
+  },
+  "reconnect": {
+    "case": "G-09",
+    "commit": "f5a88affc9ea14a8bd17b50e6f8d18e5e04fcae3",
+    "candidate_dirty": false,
+    "actual_offline_ms": 600008.3652,
+    "offline_and_recovery_events": 425,
+    "replay_pages": [
+      200,
+      200,
+      25
+    ],
+    "ledger_events_independently_matched": 429,
+    "producer_checks": 14,
+    "verified_evidence_sha256": "65724605e8ce76defc16183a230250fe52874b326a8019807acb5dd7ea6e8a0e",
+    "source_report_sha256": "90278d3d5e4ec82cf0d161e3fcd30103c8a656b9216c8a5cf321c097dd8421c7",
+    "passed": true
+  },
+  "rollback": {
+    "elapsed_ms": 601367.4759999999,
+    "load_runs": 20,
+    "receipt_sha256": "6f1c53eed720c16e94bf36cd7c6ab1fa6589e894fc3a419a5bc783025916d4d2"
+  },
+  "perf": {
+    "pass": true,
+    "errors": [],
+    "statistics": {
+      "list_tasks": {
+        "p50": 5.7137000000002445,
+        "p95": 7.055199999999786,
+        "max": 7.210000000000036,
+        "first_ms": 6.804200000000492
+      },
+      "get_run": {
+        "p50": 4.411499999999251,
+        "p95": 6.578099999999722,
+        "max": 6.608299999999872,
+        "first_ms": 4.431300000000192
+      },
+      "list_nodes": {
+        "p50": 24.27639999999974,
+        "p95": 26.88079999999991,
+        "max": 33.21529999999984,
+        "first_ms": 24.157500000000255
+      },
+      "list_events": {
+        "p50": 3.1304999999993015,
+        "p95": 3.9569000000001324,
+        "max": 4.201200000000426,
+        "first_ms": 2.174199999999473
+      }
+    },
+    "plan_diagnostics": [
+      "list_tasks: SCAN sqlite_master inspects schema metadata for the read connection",
+      "list_tasks: SCAN p bounded by task page LIMIT",
+      "list_tasks: USE TEMP B-TREE FOR group_concat(DISTINCT) deduplicates side-effect policy values for one indexed current run per task",
+      "get_run: SCAN sqlite_master inspects schema metadata for the read connection",
+      "get_run: USE TEMP B-TREE FOR ORDER BY orders confirmed plans for one indexed run receipt range",
+      "get_run: USE TEMP B-TREE FOR GROUP BY operates inside the indexed 1,000-node run or a related run/node lookup",
+      "get_run: USE TEMP B-TREE FOR ORDER BY operates inside the indexed 1,000-node run or a related run/node lookup",
+      "list_nodes: SCAN sqlite_master inspects schema metadata for the read connection",
+      "list_nodes: USE TEMP B-TREE FOR ORDER BY orders approved dependency edges for one indexed run",
+      "list_nodes: USE TEMP B-TREE FOR ORDER BY operates inside the indexed 1,000-node run or a related run/node lookup",
+      "list_nodes: USE TEMP B-TREE FOR LAST TERM OF ORDER BY operates inside the indexed 1,000-node run or a related run/node lookup",
+      "list_nodes: USE TEMP B-TREE FOR ORDER BY sorts facts for one indexed node",
+      "list_events: SCAN sqlite_master inspects schema metadata for the read connection",
+      "list_tasks_filtered: SCAN sqlite_master inspects schema metadata for the read connection",
+      "list_tasks_filtered: SCAN p bounded by task page LIMIT",
+      "list_tasks_filtered: USE TEMP B-TREE FOR group_concat(DISTINCT) deduplicates side-effect policy values for one indexed current run per task"
+    ]
+  },
+  "faultReports": [
+    {
+      "case": "G-01",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-01/report.json",
+      "sha256": "5b5567895ebae83cc195d5407babbc6b7955fe76b667b272b1216df3a72c18b8"
+    },
+    {
+      "case": "G-02",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-02/report.json",
+      "sha256": "6f92513645bdd355fe88d3b066806110d38341352801508dd632a6487145c8b9"
+    },
+    {
+      "case": "G-03",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-03/report.json",
+      "sha256": "f1205d9e7720df6656ac83ea905a50bb30ff1ed662a516854fef70fefe839125"
+    },
+    {
+      "case": "G-04",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-g04/G6/G-04/report.json",
+      "sha256": "4fe6a0898b91170bb4b0a992b3c2bd39886121f7d0b95ed0cd820f99afb6cd46"
+    },
+    {
+      "case": "G-05",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-05/report.json",
+      "sha256": "09c72ad7519aeccb462f9e72d281ac6dcaf80827bdd43f71e5acfe1229245bc7"
+    },
+    {
+      "case": "G-06",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-06/report.json",
+      "sha256": "33b323660cf9a2d69718c1d6b836889759bb18b5bc49c655ae6484323d8b2a3d"
+    },
+    {
+      "case": "G-07",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-07/report.json",
+      "sha256": "dfdbb097e87f555ea18c203f03bc137ee883e5500426c19db0bbe42577faf8fb"
+    },
+    {
+      "case": "G-08",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-08/report.json",
+      "sha256": "85a6fe0d781964436c334828501795b6f8aac80290d148b650a59b7f0394e5ba"
+    },
+    {
+      "case": "G-09",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-reconnect/G6/G-09/report.json",
+      "sha256": "90278d3d5e4ec82cf0d161e3fcd30103c8a656b9216c8a5cf321c097dd8421c7"
+    },
+    {
+      "case": "G-10",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-10/report.json",
+      "sha256": "3bdfc75a0a02a5b3e361d788b628fc9b7ba1c4ca711e83605593092b56f70399"
+    },
+    {
+      "case": "G-11",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-11/report.json",
+      "sha256": "d6e6017f0f1dc4b07de4edbb436daddef738879f3ca3ca63e6ad6cfbf170c8e6"
+    },
+    {
+      "case": "G-12",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-12/report.json",
+      "sha256": "53a4d79eadb4fd14c79f93fe3f466811d00d773cf5dbc30b01df9d9ff5c2aaf9"
+    },
+    {
+      "case": "G-13",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/acceptance-reliability/T14-f5a88af/G6/G-13/report.json",
+      "sha256": "a1cdbff8346442b7a8a08192d85aa62f85af88e0a6998350e4e470a15e8ba5c8"
+    },
+    {
+      "case": "G-14",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-14/report.json",
+      "sha256": "beb177ac009cfaac058d9eb81a579308a91c3dcac4305958b4e104e8384e9caf"
+    },
+    {
+      "case": "G-15",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-15/report.json",
+      "sha256": "17811c7085bbf1e808c32d5429a3a397a33d8fe8d572f2d8b9efeac975747d44"
+    },
+    {
+      "case": "G-16",
+      "passed": true,
+      "report": "../s6-dispatch-frozen-f5a88af/tmp/office-followup-faults/G6/G-16/report.json",
+      "sha256": "1e0aac165f68fe775c48ee6bd07b202ba254a465afc820efbf9436cc523c8405"
+    }
+  ],
+  "privateNotes": {
+    "run": "run_01a1fc445022768fb6807777fdaaa579",
+    "native_export_count": 2,
+    "native_zip_includes_body": false,
+    "persisted_native_log_includes_body": false,
+    "ordinary_model_requests_include_body": false,
+    "sanitized_model_echo_and_failure": true,
+    "fixture_sha256": "36ff95fc498607ea0455466cb62b7c19a2a2a5dd495d29e023a93a49e6b3e9f1",
+    "method": "archive service plus exact frozen chat and UUID fixtures with installed rc.5 SDK exporter"
+  },
+  "isolatedQq": {
+    "package": "dsh-onebot-qq",
+    "version": "0.10.0",
+    "tool": "qq_send_text",
+    "transport": "in-memory",
+    "externalMessages": 0,
+    "callbackCalls": 1,
+    "inboxMatched": true,
+    "senderPermissionChecked": true,
+    "transportReceiptRecorded": true,
+    "separateFixtureAck": true,
+    "liveDrill": false
+  },
+  "counts": {
+    "passed": 21,
+    "partial": 1,
+    "formalPending": 5,
+    "continuousDeferred": 2
+  },
+  "engineeringRemaining": [
+    "F8"
+  ],
+  "formalPending": [
+    "I10",
+    "T12",
+    "T13",
+    "T15",
+    "T17"
+  ],
+  "continuousDeferred": [
+    "T09",
+    "T16"
+  ]
+}
