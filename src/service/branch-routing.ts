@@ -7,6 +7,7 @@ import type { ReadTx } from './queries/read-tx.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
 import { isVerifiedParallelMembership, parallelOpening, parallelToleratesMember } from './workflow-parallel.ts'
+import { resolvePinnedNodeId } from './rework-extra-steps.ts'
 
 export function ruleNodeInput(tx: Tx, secret: string, runId: string, nodeId: string, definition: WorkflowDefinition, initialInput: unknown): unknown {
   const predecessors = runtimeEdges(tx, runId, definition.edges ?? []).filter(edge => edge.to === nodeId)
@@ -31,6 +32,11 @@ export function ruleNodeInput(tx: Tx, secret: string, runId: string, nodeId: str
       continue
     }
     if (previous.status !== 'done') throw new OrchError('VERDICT_UNSUPPORTED', '规则节点缺少上游完成事实')
+    if (previous.node_type === 'subworkflow') {
+      const role = definition.nodes.find(node => node.node_id === resolvePinnedNodeId(tx, previous.node_run_id))
+      payloads.push([predecessor.from, verifiedSubworkflowOutput(tx, secret, runId, previous.node_run_id, role?.subworkflow)])
+      continue
+    }
     if (previous.node_type === 'wait') {
       const waited = tx.get<{ matched_payload_json: string | null }>(
         "SELECT matched_payload_json FROM wait_registrations WHERE node_run_id=? AND state='woken' ORDER BY registration_id DESC LIMIT 1", [previous.node_run_id],
@@ -50,6 +56,35 @@ export function ruleNodeInput(tx: Tx, secret: string, runId: string, nodeId: str
     payloads.push([predecessor.from, JSON.parse(output.payload) as unknown])
   }
   return payloads.length === 1 ? payloads[0]![1] : Object.fromEntries(payloads)
+}
+
+function verifiedSubworkflowOutput(tx: Tx, secret: string, runId: string, nodeRunId: string,
+  pinned: { workflow_id: string; pinned_version: number } | undefined): unknown {
+  const unavailable = () => new OrchError('VERDICT_UNSUPPORTED', '缺少与固定子运行绑定的完成收据', { nodeRunId })
+  const childRun = readBoundSubworkflowRun(tx, secret, runId, nodeRunId)
+  if (!pinned || !childRun || childRun.workflow_id !== pinned.workflow_id || childRun.version !== String(pinned.pinned_version)
+      || !['succeeded','succeeded_with_unverified'].includes(childRun.status)) throw unavailable()
+  const finished = tx.get<{ payload: string }>(`SELECT payload FROM (
+    SELECT payload FROM node_run_events WHERE node_run_id=? AND type='subworkflow.finished' ORDER BY seq DESC LIMIT 1
+    ) WHERE json_extract(payload,'$.child_run_id')=?
+      AND json_extract(payload,'$.parent_status')='done' AND json_extract(payload,'$.child_status')=?
+      AND EXISTS(SELECT 1 FROM events t WHERE t.run_id=? AND t.type='run.terminal' AND json_extract(t.payload_redacted,'$.status')=?)`,
+    [nodeRunId, childRun.id, childRun.status, childRun.id, childRun.status])
+  if (!finished) throw unavailable()
+  const children = tx.all<{ node_run_id: string }>('SELECT node_run_id FROM node_runs WHERE run_id=?', [childRun.id])
+  if (!children.length || children.some(child => !intactBranchChain(tx, secret, child.node_run_id))) throw unavailable()
+  return JSON.parse(finished.payload) as unknown
+}
+
+export function readBoundSubworkflowRun(tx: ReadTx, secret: string, runId: string, nodeRunId: string) {
+  if (!intactBranchChain(tx, secret, nodeRunId)) return undefined
+  return tx.get<{ id: string; workflow_id: string; version: string; status: string; cancel_requested_at: string | null }>(`SELECT c.run_id AS id,
+    c.workflow_id,CAST(c.workflow_version AS TEXT) AS version,c.status,c.cancel_requested_at
+    FROM (SELECT node_run_id,payload FROM node_run_events WHERE node_run_id=? AND type='subworkflow.waiting' ORDER BY seq DESC LIMIT 1) e
+    JOIN runs c ON c.run_id=json_extract(e.payload,'$.child_run_id') AND c.parent_node_run_id=e.node_run_id
+    WHERE c.parent_run_id=?
+      AND json_extract(e.payload,'$.workflow_id')=c.workflow_id
+      AND CAST(json_extract(e.payload,'$.workflow_version') AS TEXT)=CAST(c.workflow_version AS TEXT)`, [nodeRunId,runId])
 }
 
 export function selectedBranchTarget(tx: ReadTx, nodeRunId: string): string | undefined {
@@ -88,18 +123,30 @@ export function persistBranchSelection(tx: Tx, secret: string, definition: Workf
   )
   const current = new Map(nodes.map(node => [node.node_id, node]))
   if (!current.has(p.targetId)) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '所选分支未包含在当前运行中')
+  const immutable = new Set((definition.edges ?? []).map(edge => JSON.stringify([edge.from, edge.to])))
+  const edges = runtimeEdges(tx, p.runId, definition.edges ?? [])
+  const forward = new Map<string,string[]>()
+  const backward = new Map<string,string[]>()
+  for (const edge of edges) {
+    const next = forward.get(edge.from) ?? []
+    next.push(edge.to)
+    forward.set(edge.from, next)
+    const prior = backward.get(edge.to) ?? []
+    prior.push(edge.from)
+    backward.set(edge.to, prior)
+  }
+  const affected = closure(forward, forward.get(p.branchId) ?? [])
+  const relevant = closure(backward, [p.branchId, ...affected])
+  if (edges.some(edge => relevant.has(edge.from) && branches.has(edge.from) && !immutable.has(JSON.stringify([edge.from, edge.to])))) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '分支出边必须来自已发布工作流')
+  }
   const selected = new Map<string,string>([[p.branchId, p.targetId]])
   for (const node of current.values()) {
-    if (node.node_id === p.branchId || !branches.has(node.node_id) || node.status !== 'done') continue
-    assertChainIntact(tx, secret, node.node_run_id)
+    if (node.node_id === p.branchId || !relevant.has(node.node_id) || !branches.has(node.node_id) || node.status !== 'done') continue
+    if (!intactBranchChain(tx, secret, node.node_run_id)) throw new OrchError('FORBIDDEN', '相交分支的选择证据已断链', { nodeId: node.node_id })
     const target = selectedBranchTarget(tx, node.node_run_id)
     if (!target) throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '已完成的分支缺少选路记录', { nodeId: node.node_id })
     selected.set(node.node_id, target)
-  }
-  const immutable = new Set((definition.edges ?? []).map(edge => JSON.stringify([edge.from, edge.to])))
-  const edges = runtimeEdges(tx, p.runId, definition.edges ?? [])
-  if (edges.some(edge => branches.has(edge.from) && !immutable.has(JSON.stringify([edge.from, edge.to])))) {
-    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '分支出边必须来自已发布工作流')
   }
   const inbound = new Set(edges.map(edge => edge.to))
   const adjacency = new Map<string, string[]>()
@@ -119,7 +166,7 @@ export function persistBranchSelection(tx: Tx, secret: string, definition: Workf
   }
   appendNodeRunEvent(tx, secret, p.nodeRunId, 'branch.selected', { target_node_id: p.targetId, ...(p.decisionId ? { decision_ref: p.decisionId } : {}) })
   for (const node of current.values()) {
-    if (reachable.has(node.node_id)) continue
+    if (!affected.has(node.node_id) || reachable.has(node.node_id)) continue
     if (node.status === 'superseded' && branchSkipped(tx, node.node_run_id)) continue
     if (node.status !== 'queued') throw new OrchError('STALE_GENERATION', '未选中的分支已经开始，不能更改执行路径', { nodeId: node.node_id })
     applyTransition(tx, secret, {
@@ -130,6 +177,18 @@ export function persistBranchSelection(tx: Tx, secret: string, definition: Workf
       branch_node_run_id: p.nodeRunId, target_node_id: p.targetId, previous_side_effect_policy: node.side_effect_policy,
     })
   }
+}
+
+function closure(adjacency: Map<string,string[]>, roots: Iterable<string>): Set<string> {
+  const seen = new Set<string>()
+  const pending = [...roots]
+  while (pending.length) {
+    const node = pending.pop()!
+    if (seen.has(node)) continue
+    seen.add(node)
+    for (const next of adjacency.get(node) ?? []) pending.push(next)
+  }
+  return seen
 }
 
 /** The authenticated decision command calls this in the decision's own transaction. */

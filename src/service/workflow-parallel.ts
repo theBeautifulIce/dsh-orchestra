@@ -12,7 +12,9 @@ import { applyTransition, enterBlockedPre } from './commands/nodes.ts'
 import { assertIrreversibleChildrenAllowed, cancelDisposition, deriveGroupState, type ParallelGroup, type SideEffectPolicy } from './commands/parallel.ts'
 import { cancelWait } from './commands/wait.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
-import { branchSkipped } from './branch-routing.ts'
+import { branchSkipped, readBoundSubworkflowRun } from './branch-routing.ts'
+import { closeRun, isRunTerminal } from './commands/run-close.ts'
+import { finishSubworkflowChild, propagateRunCancellation } from './commands/subworkflow.ts'
 import type { ReadTx } from './queries/read-tx.ts'
 
 type Member = { node_run_id: string; node_id: string; attempt: number; status: string; node_type: string; side_effect_policy: SideEffectPolicy; blocked_decision_id: string | null }
@@ -152,9 +154,9 @@ function groupClockExpired(tx: Tx, parent: { node_run_id: string; wait_remaining
 
 /** Refresh one run from durable membership and receipts. Captured stop intents are delivered separately. */
 export function refreshWorkflowParallelGroups(tx: Tx, secret: string, runId: string, now: string, clock?: ClockProvider): GroupStop[] {
-  const parents = tx.all<{ node_run_id: string; attempt: number; side_effect_policy: SideEffectPolicy; wait_deadline_at: string | null;
+  const parents = tx.all<{ node_run_id: string; parent_node_run_id: string | null; attempt: number; wait_deadline_at: string | null;
     wait_deadline_boot_id: string | null; wait_deadline_monotonic_ns: number | null; wait_remaining_ns: number | null }>(
-    "SELECT node_run_id,attempt,side_effect_policy,wait_deadline_at,wait_deadline_boot_id,wait_deadline_monotonic_ns,wait_remaining_ns FROM node_runs WHERE run_id=? AND node_type='parallel' AND status='waiting' ORDER BY seq DESC",
+    "SELECT node_run_id,parent_node_run_id,attempt,wait_deadline_at,wait_deadline_boot_id,wait_deadline_monotonic_ns,wait_remaining_ns FROM node_runs WHERE run_id=? AND node_type='parallel' AND status='waiting' ORDER BY seq DESC",
     [runId],
   )
   const stop: GroupStop[] = []
@@ -179,28 +181,33 @@ export function refreshWorkflowParallelGroups(tx: Tx, secret: string, runId: str
     const state = deriveGroupState(group, members.map(toChild))
     const previousTimeout = tx.get("SELECT 1 FROM node_run_events WHERE node_run_id=? AND type='parallel.timeout'", [groupId])
     const timeout = Boolean(previousTimeout || groupClockExpired(tx, parent, members, clock))
+    const inherited = parent.parent_node_run_id && isVerifiedParallelMembership(tx, secret, parent.parent_node_run_id, groupId)
+      ? groupStopIntent(tx, groupId, parent.parent_node_run_id) : undefined
     if (timeout && !previousTimeout) appendNodeRunEvent(tx, secret, groupId, 'parallel.timeout', { pending_children: members.filter(child => !isTerminal(child.status)).map(child => child.node_run_id) })
     const successful = opened.mode === 'all'
       ? state.settled && members.every(child => child.status === 'done' || (child.status === 'superseded' && branchSkipped(tx, child.node_run_id)))
       : state.settled
-    if (timeout || (successful && opened.mode !== 'all')) {
+    if (timeout || inherited || (successful && opened.mode !== 'all')) {
+      const reason = inherited?.reason ?? (timeout ? 'group_timeout' : 'join_satisfied')
       for (const member of members) {
         if (!cancelDisposition(toChild(member)).cancel) continue
-        const cancelled = cancelUnstartedMember(tx, secret, member, groupId, now, timeout ? 'group_timeout' : 'join_satisfied')
+        const cancelled = cancelUnstartedMember(tx, secret, member, groupId, now, reason)
         if (cancelled) {
           member.status = cancelled
           member.side_effect_policy = 'pure'
         }
-        else if (['dispatched','started','verifying'].includes(member.status)) {
-          if (!requestedGroupStop(tx, member.node_run_id, groupId)) {
-            appendNodeRunEvent(tx, secret, member.node_run_id, 'parallel.cancel_requested', { group_id: groupId, reason: timeout ? 'group_timeout' : 'join_satisfied' })
-          }
+        else if (member.status === 'waiting' && member.node_type === 'subworkflow') {
+          stop.push(...stopSubworkflowMember(tx, secret, runId, groupId, member, now, reason, clock))
+        } else if (member.status === 'waiting' && member.node_type === 'parallel') {
+          recordGroupStop(tx, secret, member.node_run_id, groupId, reason)
+        } else if (['dispatched','started','verifying'].includes(member.status)) {
+          recordGroupStop(tx, secret, member.node_run_id, groupId, reason)
           stop.push({ nodeRunId: member.node_run_id, attempt: member.attempt, groupId })
         }
       }
     }
     const pending = members.filter(child => !isTerminal(child.status))
-    if ((successful || timeout) && pending.length > 0) {
+    if ((successful || timeout || inherited) && pending.length > 0) {
       const projection = { pending_children: pending.map(member => member.node_run_id), pending_irreversible_children: state.pendingIrreversible }
       const prior = tx.get<{ payload: string }>("SELECT payload FROM node_run_events WHERE node_run_id=? AND type='parallel.progress' ORDER BY seq DESC LIMIT 1", [groupId])
       if (prior?.payload !== JSON.stringify(projection)) appendNodeRunEvent(tx, secret, groupId, 'parallel.progress', projection)
@@ -208,7 +215,7 @@ export function refreshWorkflowParallelGroups(tx: Tx, secret: string, runId: str
     if (state.settling || pending.length > 0) continue
     const tolerable = members.every(member => member.status === 'done' || member.side_effect_policy === 'pure'
       || (member.status === 'superseded' && branchSkipped(tx, member.node_run_id)))
-    const status = timeout ? 'timeout' : successful && tolerable ? 'done' : 'failed'
+    const status = inherited ? 'superseded' : timeout ? 'timeout' : successful && tolerable ? 'done' : 'failed'
     const tolerated = status === 'done' && opened.mode !== 'all' ? members.filter(member => member.side_effect_policy === 'pure'
       && ['failed','timeout','superseded','orphaned'].includes(member.status)).map(member => member.node_run_id) : []
     const children = members.map(member => ({ node_run_id: member.node_run_id, node_id: member.node_id, status: member.status,
@@ -216,7 +223,7 @@ export function refreshWorkflowParallelGroups(tx: Tx, secret: string, runId: str
       partial_artifact: tx.get<{ artifact_id: string }>('SELECT artifact_id FROM artifact_contents WHERE node_run_id=? ORDER BY artifact_id LIMIT 1', [member.node_run_id])?.artifact_id ?? null,
     }))
     applyTransition(tx, secret, { nodeRunId: groupId, from: ['waiting'], to: status,
-      ruleId: status === 'done' ? 'M-63' : status === 'failed' ? 'M-64' : 'M-22', attempt: parent.attempt, now,
+      ruleId: status === 'done' ? 'M-63' : status === 'failed' ? 'M-64' : status === 'superseded' ? 'M-65' : 'M-22', attempt: parent.attempt, now,
       context: { hasToolCall: false, cancelResult: null, hangReason: null, sideEffectVerifiedNone: true, controlCompletion: true },
       patch: { wait_started_at: null, wait_deadline_at: null, wait_deadline_boot_id: null, wait_deadline_monotonic_ns: null,
         wait_remaining_ns: null, side_effect_policy: 'pure', side_effect_verified_none: 1 },
@@ -224,8 +231,43 @@ export function refreshWorkflowParallelGroups(tx: Tx, secret: string, runId: str
     const output = { status, join: opened.mode, children, pending_children: [], tolerated_member_ids: tolerated }
     appendNodeRunEvent(tx, secret, groupId, 'parallel.result', output)
     appendNodeRunEvent(tx, secret, groupId, 'workflow.output', output)
+    if (inherited) appendNodeRunEvent(tx, secret, groupId, 'parallel.member_cancelled', { group_id: parent.parent_node_run_id, reason: inherited.reason, from: 'waiting', to: status })
   }
   return stop
+}
+
+function stopSubworkflowMember(tx: Tx, secret: string, runId: string, groupId: string, member: Member,
+  now: string, reason: string, clock?: ClockProvider): GroupStop[] {
+  const bound = readBoundSubworkflowRun(tx, secret, runId, member.node_run_id)
+  if (!bound) return []
+  const descendants = tx.all<{ run_id: string; parent_run_id: string | null; parent_node_run_id: string | null }>(`WITH RECURSIVE scope(id) AS (
+      SELECT ? UNION SELECT r.run_id FROM runs r JOIN scope s ON r.parent_run_id=s.id
+    ) SELECT r.run_id,r.parent_run_id,r.parent_node_run_id FROM runs r JOIN scope s ON s.id=r.run_id`, [bound.id])
+  if (descendants.some(run => !run.parent_run_id || !run.parent_node_run_id
+      || readBoundSubworkflowRun(tx, secret, run.parent_run_id, run.parent_node_run_id)?.id !== run.run_id)) return []
+  const subtree = tx.all<{ node_run_id: string; attempt: number; status: string; side_effect_policy: SideEffectPolicy; recovery_uncertain: string | null }>(`WITH RECURSIVE scope(id) AS (
+      SELECT ? UNION SELECT r.run_id FROM runs r JOIN scope s ON r.parent_run_id=s.id
+    ) SELECT n.node_run_id,n.attempt,n.status,n.side_effect_policy,n.recovery_uncertain FROM node_runs n JOIN scope s ON s.id=n.run_id`, [bound.id])
+  if (subtree.some(node => node.recovery_uncertain !== null || (!isTerminal(node.status) && node.side_effect_policy === 'irreversible')
+      || !intact(tx, secret, node.node_run_id, isTerminal(node.status)))) return []
+
+  recordGroupStop(tx, secret, member.node_run_id, groupId, reason, { child_run_id: bound.id })
+  if (clock && !bound.cancel_requested_at && !isRunTerminal(bound.status)) {
+    const cancellation = propagateRunCancellation(tx, secret, { runId: bound.id, cancelResult: 'unknown', graceMs: 0, extendDeadlineMs: 30_000, now, clock })
+    for (const nodeRunId of cancellation.cancelledNodes) {
+      if (loadNodeRun(tx, nodeRunId).status === 'stopping') recordGroupStop(tx, secret, nodeRunId, groupId, reason, { member_id: member.node_run_id, child_run_id: bound.id })
+    }
+    closeRun(tx, secret, bound.id, now)
+  }
+  const child = tx.get<{ status: string }>('SELECT status FROM runs WHERE run_id=?', [bound.id])
+  if (child && isRunTerminal(child.status)) {
+    finishSubworkflowChild(tx, secret, { childRunId: bound.id, now, closeHealthyChild: true })
+    const settled = loadNodeRun(tx, member.node_run_id)
+    member.status = settled.status
+    member.side_effect_policy = settled.side_effect_policy
+  }
+  return subtree.filter(node => requestedGroupStop(tx, node.node_run_id, groupId) && loadNodeRun(tx, node.node_run_id).status === 'stopping')
+    .map(node => ({ nodeRunId: node.node_run_id, attempt: node.attempt, groupId }))
 }
 
 function cancelUnstartedMember(tx: Tx, secret: string, member: Member, groupId: string, now: string, reason: string): string | undefined {
@@ -247,8 +289,27 @@ function cancelUnstartedMember(tx: Tx, secret: string, member: Member, groupId: 
   return next
 }
 
+export function groupStopIntent(tx: ReadTx, memberId: string, groupId: string) {
+  return tx.get<{ reason: string; member_id: string | null; child_run_id: string | null }>(`SELECT json_extract(payload,'$.reason') AS reason,
+    json_extract(payload,'$.member_id') AS member_id,json_extract(payload,'$.child_run_id') AS child_run_id FROM node_run_events
+    WHERE node_run_id=? AND type='parallel.cancel_requested' AND json_extract(payload,'$.group_id')=? ORDER BY seq DESC LIMIT 1`, [memberId,groupId])
+}
+
+function recordGroupStop(tx: Tx, secret: string, nodeRunId: string, groupId: string, reason: string, binding?: { member_id?: string; child_run_id: string }): void {
+  if (!groupStopIntent(tx, nodeRunId, groupId)) appendNodeRunEvent(tx, secret, nodeRunId, 'parallel.cancel_requested', { group_id: groupId, reason, ...binding })
+}
+
 export function requestedGroupStop(tx: ReadTx, memberId: string, groupId: string): boolean {
-  return tx.get("SELECT 1 FROM node_run_events WHERE node_run_id=? AND type='parallel.cancel_requested' AND json_extract(payload,'$.group_id')=?", [memberId,groupId]) !== undefined
+  return !!groupStopIntent(tx, memberId, groupId)
+}
+
+export function verifiedPropagatedGroupStop(tx: ReadTx, secret: string, groupId: string, targetRunId: string, memberId: string, childRunId: string): boolean {
+  const owner = tx.get<{ run_id: string }>("SELECT run_id FROM node_runs WHERE node_run_id=? AND node_type='parallel' AND status='waiting'", [groupId])
+  if (!owner || !isVerifiedParallelMembership(tx, secret, groupId, memberId)
+      || readBoundSubworkflowRun(tx, secret, owner.run_id, memberId)?.id !== childRunId
+      || groupStopIntent(tx, memberId, groupId)?.child_run_id !== childRunId) return false
+  return !!tx.get(`WITH RECURSIVE scope(id) AS (SELECT ? UNION SELECT r.run_id FROM runs r JOIN scope s ON r.parent_run_id=s.id)
+    SELECT 1 FROM scope WHERE id=?`, [childRunId,targetRunId])
 }
 
 function stoppedByGroup(tx: ReadTx, memberId: string, groupId: string): string | null {

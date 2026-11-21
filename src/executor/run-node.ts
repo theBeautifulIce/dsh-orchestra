@@ -27,7 +27,7 @@ import { executionFeedbackContext } from '../service/rework-execution.ts'
 import { noteAgentStopped, type createModelEscalationHost } from '../service/model-escalation.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
-import { isVerifiedParallelMembership, requestedGroupStop } from '../service/workflow-parallel.ts'
+import { groupStopIntent, isVerifiedParallelMembership, verifiedPropagatedGroupStop } from '../service/workflow-parallel.ts'
 
 export type RunNodeParams = {
   /** Internal dispatcher entry. The standalone runner rechecks the persisted node kind and definition. */
@@ -510,10 +510,25 @@ async function runNodeActions(
 }
 
 function finishParallelAgentStop(tx: Tx, deps: RunNodeDeps, row: NodeRunRow, p: RunNodeParams, generation: number, now: string, neverLaunched: boolean): boolean {
-  const groupId = row.parent_node_run_id
-  if (!groupId || deps.cancelSignal?.reason !== 'parallel-group:' + groupId || row.side_effect_policy === 'irreversible'
-      || !['dispatched','started','verifying'].includes(row.status)
-      || !isVerifiedParallelMembership(tx, deps.secret, groupId, row.node_run_id) || !requestedGroupStop(tx, row.node_run_id, groupId)) return false
+  const reason = deps.cancelSignal?.reason
+  if (typeof reason !== 'string' || !reason.startsWith('parallel-group:') || row.side_effect_policy === 'irreversible') return false
+  const groupId = reason.slice('parallel-group:'.length)
+  const stop = groupStopIntent(tx, row.node_run_id, groupId)
+  if (!stop) return false
+  if (stop.member_id && stop.child_run_id && row.status === 'stopping'
+      && verifiedPropagatedGroupStop(tx, deps.secret, groupId, row.run_id, stop.member_id, stop.child_run_id)) {
+    const pure = row.side_effect_policy === 'pure' || neverLaunched
+    applyTransition(tx, deps.secret, { nodeRunId: row.node_run_id, from: ['stopping'], to: pure ? 'failed' : 'indeterminate_side_effect',
+      ruleId: pure ? 'M-48' : 'M-35', attempt: p.attempt, actionGeneration: generation, now,
+      patch: pure ? { side_effect_policy: 'pure', side_effect_verified_none: 1 } : {},
+    })
+    appendNodeRunEvent(tx, deps.secret, row.node_run_id, pure ? 'parallel.member_cancelled' : 'parallel.member_stop_unverified',
+      { group_id: groupId, member_id: stop.member_id, reason: 'host_stopped' })
+    releaseLease(tx, { nodeRunId: row.node_run_id, now })
+    return true
+  }
+  if (row.parent_node_run_id !== groupId || !['dispatched','started','verifying'].includes(row.status)
+      || !isVerifiedParallelMembership(tx, deps.secret, groupId, row.node_run_id)) return false
   const from = row.status as 'dispatched' | 'started' | 'verifying'
   if (row.side_effect_policy !== 'pure' && !neverLaunched) {
     if (from === 'verifying') return false
