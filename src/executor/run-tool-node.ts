@@ -33,7 +33,7 @@ export async function runStandaloneToolNode(deps: RunNodeDeps, p: RunNodeParams)
   }
   const { command, cwd, timeout_ms } = role.tool
   const descriptor = deps.registry.lookup(command)
-  if (descriptor?.capability !== 'read_only' || !deps.runner.readonlyAvailable()) {
+  if (descriptor?.capability !== 'read_only' || !deps.runner.readonlyAvailable(command)) {
     return result(p, 'waiting', null, 'tool_host_unavailable')
   }
   deps.cancelSignal?.throwIfAborted()
@@ -100,6 +100,7 @@ function finishTool(tx: Tx, runtime: RuntimeDeps, p: Pick<RunNodeParams, 'nodeRu
   if (recorded.node_run_id !== p.nodeRunId || recorded.attempt !== p.attempt || recorded.tool !== command
       || recorded.exit_code !== output.exitCode || recorded.exit_code !== evidence.exitCode
       || recorded.stdout_hash !== sha256Hex(output.stdout) || recorded.stderr_hash !== sha256Hex(output.stderr)
+      || recorded.execution_boundary !== evidence.boundary
       || recorded.command_hash !== trace.commandHash
       || !chainIsIntact(runtime.secret, readChain(tx, p.nodeRunId), readChainHead(tx, p.nodeRunId), true)) {
     throw new OrchError('EVIDENCE_SOURCE_UNAVAILABLE', '独立工具的结果未绑定到有效执行收据')

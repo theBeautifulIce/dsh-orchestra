@@ -9,8 +9,10 @@ import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { sha256Hex } from '../core/canonical.ts'
 import { failEnvelope, okEnvelope, OrchError } from '../core/errors.ts'
+import { MEMORY_TOOL_PREFIX } from '../core/memory-graph.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
-import { ReadOnlyToolRunner, ToolRegistry } from '../executor/tools.ts'
+import { ReadOnlyToolRunner, ToolRegistry, type ToolDescriptor } from '../executor/tools.ts'
+import { createWindowsReadOnlyHost } from '../executor/windows-readonly-host.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
 import { createNativeChatRoutingSettings, nativeChatRoutingUpdate } from './native-chat-routing-settings.ts'
@@ -34,6 +36,8 @@ type Serve = typeof serveDshOrchestra
 type LocalService = Awaited<ReturnType<Serve>>
 type Agent = AgentHandle['agent']
 type Workspace = { id: string; path: string; sessionIds: readonly string[] }
+export type TrustedLocalReadOnlyCommands = (scope: Readonly<{ workspaceId: string; workspaceRoot: string; sessionId: string }>) =>
+  Promise<{ commands: readonly ToolDescriptor[]; populate(view: string): Promise<void> } | undefined>
 type Model = { provider: string; model: string }
 type NativeModelCatalog = {
   groups: readonly { id: string; name?: string; models: readonly { id: string; name?: string; reasoning?: ModelReasoning }[] }[]
@@ -187,6 +191,24 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
     const cwd = parent()?.session.header.cwd
     return Boolean(cwd && relative(workspace.path, cwd) === '')
   }
+  const provider = host.get('orchestraReadonlyCommands') as TrustedLocalReadOnlyCommands | undefined
+  const configured = process.platform === 'win32' && provider && projectAuthorized()
+    ? await Promise.resolve().then(() => provider({ workspaceId: workspace.id, workspaceRoot: workspace.path, sessionId })).catch(() => undefined)
+    : undefined
+  const commands = configured?.commands ?? []
+  const validCommands = commands.length > 0
+    && new Set(commands.map((tool) => tool.name)).size === commands.length
+    && commands.every((tool) => tool.capability === 'read_only' && isAbsolute(tool.command.bin)
+      && tool.command.bin.toLowerCase().endsWith('.exe') && !tool.name.startsWith(MEMORY_TOOL_PREFIX)
+      && tool.name !== 'workspace_read_sample' && tool.name !== 'workspace_list')
+  const commandHost = configured && validCommands
+    ? await createWindowsReadOnlyHost(workspace.path, (view) => configured.populate(view)).catch(() => undefined)
+    : undefined
+  const commandRegistry = new Set<string>()
+  for (const command of commandHost ? commands : []) {
+    registry.register({ ...command, command: { ...command.command, args: [...command.command.args] } })
+    commandRegistry.add(command.command.bin)
+  }
   const projectContext: ProjectContextSource = {
     workspaceRoot: workspace.path, isAuthorized: projectAuthorized, approvedFallback,
     async read(path, signal) {
@@ -210,9 +232,15 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
     name: 'workspace_read_sample', capability: 'read_only', command: { bin: 'dsh:workspace.read', args: [sampleFile] },
   })
   const runner = new ReadOnlyToolRunner(registry, {
-    readonlyAvailable: () => Boolean(parent()) && (options.allowWorkspaceListing || Boolean(sampleFile)),
+    readonlyAvailable: (bin) => projectAuthorized() && (
+      (bin === 'dsh:workspace.read' && Boolean(sampleFile))
+      || (bin === 'dsh:workspace.list' && options.allowWorkspaceListing)
+      || (bin === undefined && (options.allowWorkspaceListing || Boolean(sampleFile) || Boolean(commandHost?.readonlyAvailable())))
+      || (bin !== undefined && commandRegistry.has(bin) && Boolean(commandHost?.readonlyAvailable(bin)))),
     async run({ bin, args, cwd, timeoutMs, signal: cancel }) {
-      if (args.length !== 1 || cwd !== workspace.path || !parent()) {
+      if (!projectAuthorized()) throw new OrchError('FORBIDDEN', '工具不属于获准工作区')
+      if (commandHost && commandRegistry.has(bin)) return commandHost.run({ bin, args, cwd, timeoutMs, signal: cancel })
+      if (args.length !== 1 || relative(workspace.path, cwd) !== '') {
         throw new OrchError('FORBIDDEN', '工具不属于获准工作区')
       }
       const scope = { sessionId, workspaceRoot: workspace.path }
@@ -223,12 +251,13 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
         if (!sample.eof || Buffer.byteLength(sample.text, 'utf8') > 16 * 1024) {
           throw new OrchError('RANGE_TOO_LARGE', '验收样本应不超过 200 行和 16 KiB')
         }
-        return { exitCode: 0, stdout: sample.text, stderr: '' }
+        return { exitCode: 0, stdout: sample.text, stderr: '', boundary: 'dsh_workspace_rpc' }
       }
       if (bin === 'dsh:workspace.list' && options.allowWorkspaceListing && args[0] === '.') {
         const listing = await host.workspaceFiles.list(scope, '.', signal)
         const visible = listing.entries.filter((item) => !item.name.startsWith('.'))
-        return { exitCode: 0, stdout: JSON.stringify({ entries: visible.slice(0, 200), truncated: listing.truncated || visible.length > 200 }), stderr: '' }
+        return { exitCode: 0, stdout: JSON.stringify({ entries: visible.slice(0, 200), truncated: listing.truncated || visible.length > 200 }), stderr: '',
+          boundary: 'dsh_workspace_rpc' }
       }
       throw new OrchError('FORBIDDEN', '工具不属于获准工作区')
     },
@@ -255,7 +284,16 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
     asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events').get()?.n ?? 0),
     listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => { throw new OrchError('FORBIDDEN', '个人面板不提供原始账本写入') },
+  }).catch(async (error) => {
+    await commandHost?.close()
+    throw error
   })
+  if (commandHost) {
+    const close = service.close
+    service.close = async () => {
+      try { await close() } finally { await commandHost.close() }
+    }
+  }
   return { service, secret, proof }
 }
 

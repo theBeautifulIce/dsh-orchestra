@@ -93,6 +93,7 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
     const result = await serve.mock.calls[0]![0].tools.runner.runTool({ command: 'workspace_read_sample', args: ['other.txt'],
       cwd: '.', timeoutMs: 1000, workspaceRoot: dir })
     expect(result.stdout).toBe('sample-row,12')
+    expect(result.evidence.boundary).toBe('dsh_workspace_rpc')
     expect(read).toHaveBeenCalledWith({ sessionId, workspaceRoot: dir }, 'approved.txt', { offset: 1, limit: 200 }, expect.any(AbortSignal))
     archivedSessionIds.push(sessionId)
     expect((await request('/health')).status).toBe(403)

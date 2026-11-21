@@ -235,7 +235,7 @@ export class EvidenceCollector {
       out.evidence,
       commandHashOf(descriptor.command.bin, descriptor.command.args, cwd, this.deps.runner.root),
     )
-    const effectProof = verifier && target && target.workflow_definition_hash === verifier.workflowDefinitionHash
+    const effectProof = out.evidence.boundary !== 'dsh_workspace_rpc' && verifier && target && target.workflow_definition_hash === verifier.workflowDefinitionHash
       && target.node_id === verifier.nodeId && cwd === resolveInside(this.deps.runner.root, verifier.cwd ?? '.')
       ? verifyEffectOutput(verifier, target, out) : null
     const trace: ToolTraceEntry = {
@@ -286,6 +286,7 @@ export class EvidenceCollector {
         started_at: startedAt,
         finished_at: finishedAt,
         duration_ns: startSample && endSample ? Math.max(0, endSample.monotonicNs - startSample.monotonicNs) : null,
+        ...(out.evidence.boundary ? { execution_boundary: out.evidence.boundary } : {}),
         ...activeProof,
       })
       tx.run(

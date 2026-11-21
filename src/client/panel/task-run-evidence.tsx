@@ -102,6 +102,8 @@ function EvidenceRecord({ api, node, record, reloadVersion }: {
       <details>
         <summary>查看核验明细</summary>
         <p style={mutedStyle}>工具 <code>{verified.tool}</code> · 记录于 {formatDate(verified.observed_at)}</p>
+        {verified.execution_boundary === 'dsh_workspace_rpc' && <p style={mutedStyle}>执行环境为 DSH 工作区固定读取接口。</p>}
+        {verified.execution_boundary === 'windows_appcontainer_bfs' && <p style={mutedStyle}>执行环境为 Windows AppContainer 只读工作区。</p>}
         <p style={mutedStyle}>证据编号 <code>{verified.evidence_id}</code></p>
         {verified.stdout_hash && <p style={mutedStyle}>标准输出哈希 <code>{verified.stdout_hash}</code></p>}
         {verified.stderr_hash && <p style={mutedStyle}>标准错误哈希 <code>{verified.stderr_hash}</code></p>}

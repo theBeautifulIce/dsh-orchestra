@@ -1,5 +1,6 @@
 import { OrchError } from '../../core/errors.ts'
 import type { ChainRow } from '../../core/hash-chain.ts'
+import type { ToolExecutionBoundary } from '../../executor/tools.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { chainBreakOf } from '../../infra/db/ledger.ts'
 import { withReadTx, type ReadTx } from './read-tx.ts'
@@ -11,6 +12,7 @@ export type EvidenceView = {
   attempt: number
   strength: 'strong'
   source: 'run_tool'
+  execution_boundary?: ToolExecutionBoundary
   tool: string
   exit_code: number
   stdout_hash: string | null
@@ -82,6 +84,12 @@ export function readStrongEvidence(tx: ReadTx, secret: string, evidenceId: strin
     || payload.finished_at !== row.finished_at) {
     throw evidenceUnavailable(evidenceId, 'tool execution row differs from its ledger event')
   }
+  const boundary = payload.execution_boundary
+  if (boundary !== undefined && boundary !== 'dsh_workspace_rpc' && boundary !== 'windows_appcontainer_bfs') {
+    throw evidenceUnavailable(evidenceId, 'tool execution boundary is unknown')
+  }
+  const source = boundary === 'dsh_workspace_rpc' ? 'DSH 工作区固定读取接口'
+    : boundary === 'windows_appcontainer_bfs' ? 'Windows AppContainer 只读工作区命令' : '宿主只读工具'
 
   return {
     item: {
@@ -91,13 +99,14 @@ export function readStrongEvidence(tx: ReadTx, secret: string, evidenceId: strin
       attempt: row.attempt,
       strength: 'strong',
       source: 'run_tool',
+      ...(boundary ? { execution_boundary: boundary } : {}),
       tool: row.tool,
       exit_code: row.exit_code,
       stdout_hash: row.stdout_hash,
       stderr_hash: row.stderr_hash,
       command_hash: row.command_hash,
       observed_at: row.finished_at,
-      summary: '宿主只读工具执行完成，exit_code=' + String(row.exit_code),
+      summary: source + '执行完成，exit_code=' + String(row.exit_code),
       artifact_id: null,
     },
     completed_seq: finished.seq,
