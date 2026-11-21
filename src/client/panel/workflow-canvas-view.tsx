@@ -3,7 +3,7 @@ import { nodeExecutionLabel } from './task-node-status.ts'
 // 流程画布视图：草稿可拖动 / 连线 / 增删，已发布只读。
 // 画布只认一份定义：definition 由外部给，改动通过 onChange 把新定义交回去，
 // 画布内部不另存一份「自己的」定义，所以画布和 JSON 抽屉永远同步。
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { COLOR, FONT_PX } from './tokens.ts'
 import {
@@ -30,6 +30,7 @@ export type WorkflowCanvasViewProps = {
   /** 给测试与页面区分多块画布用。 */
   canvasId?: string
   inspectNodes?: boolean
+  editRecoveryRetry?: boolean
   runtimeNodes?: readonly RuntimeAttempt[]
   runtimeNodesPartial?: boolean
   runtimeTopology?: RunTopology | null
@@ -51,7 +52,7 @@ type DragState =
   | { kind: 'link'; fromNodeId: string }
 
 export function WorkflowCanvasView({
-  definition, readOnly, onChange, canvasId, inspectNodes = false, runtimeNodes, runtimeNodesPartial = false,
+  definition, readOnly, onChange, canvasId, inspectNodes = false, editRecoveryRetry = false, runtimeNodes, runtimeNodesPartial = false,
   runtimeTopology, runtimeCompact = false, workspace = false,
 }: WorkflowCanvasViewProps) {
   const compact = readOnly && runtimeCompact
@@ -63,6 +64,7 @@ export function WorkflowCanvasView({
   }, [definition, readOnly, runtimeTopology, repairOverlaps, nodeHeight])
   const [alert, setAlert] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const retryHelpId = useId()
 
   // 拖拽与连线跨事件发生：引用里始终放最新的定义、回调与只读标记。
   const docRef = useRef<CanvasDoc | null>(doc)
@@ -89,6 +91,18 @@ export function WorkflowCanvasView({
   function emit(next: CanvasDoc) {
     if (readOnlyRef.current) return
     onChangeRef.current?.(serializeCanvasDoc(next))
+  }
+
+  function setRecoveryRetry(node: CanvasNode, checked: boolean) {
+    const current = docRef.current
+    if (!current || !editRecoveryRetry) return
+    const config = { ...nodeConfig(node) }
+    if (checked) config.recovery_retry_idempotent = true
+    else delete config.recovery_retry_idempotent
+    const raw = { ...node.raw }
+    if (Object.keys(config).length) raw.config = config
+    else delete raw.config
+    emit({ ...current, nodes: current.nodes.map((item) => item === node ? { ...item, raw } : item) })
   }
 
   function addNode(type: string, x: number, y: number) {
@@ -243,6 +257,7 @@ export function WorkflowCanvasView({
   const nodes = doc?.nodes ?? []
   const edges = doc?.edges ?? []
   const selected = nodes.find((node) => node.node_id === selectedId) ?? (workspace ? nodes[0] : undefined)
+  const selectedConfig = selected?.type === 'agent' ? nodeConfig(selected) : undefined
   const runtimeByNode = currentAttempts(runtimeNodes ?? [])
   const runtimeLabel = (id: string) => {
     const attempt = runtimeByNode.get(id)
@@ -386,6 +401,15 @@ export function WorkflowCanvasView({
       {selected && <>
         <p><strong>{selected.title}</strong></p>
         <p style={mutedStyle}>{NODE_TYPE_LABEL[selected.type] ?? '步骤类型未记录'}{!compact && ` · ${selected.node_id}`}</p>
+        {selectedConfig && !readOnly && onChange && <div>
+          <label>
+            <input type="checkbox" disabled={!editRecoveryRetry} aria-describedby={retryHelpId}
+              checked={selectedConfig.recovery_retry_idempotent === true}
+              onChange={(event) => setRecoveryRetry(selected, event.currentTarget.checked)} />
+            核实后允许重试
+          </label>
+          <p id={retryHelpId} style={mutedStyle}>仅为可安全重复执行的步骤开启。发布后，新运行中确认上次未启动或副作用未发生时，才可创建新尝试。</p>
+        </div>}
         {runtimeByNode.get(selected.node_id) && <p>{runtimeLabel(selected.node_id)} · 第 {runtimeByNode.get(selected.node_id)?.attempt ?? '未知'} 次执行</p>}
         {selected.raw.runtime_step != null && <><p>来源角色：{String((selected.raw.runtime_step as {source_title: string}).source_title)}</p><p>{String((selected.raw.runtime_step as {instruction: string}).instruction)}</p></>}
         {runtimeTopology?.requests.filter(r => r.target_node_id === selected.node_id).map(r => <p key={r.request_id}>成果反馈 · 第 {r.round_no} 轮 · {REWORK_STATUS[r.status] ?? '返工状态未确认'}</p>)}
@@ -433,6 +457,12 @@ export function WorkflowCanvasView({
         </ul>}
     </>
   }
+}
+
+function nodeConfig(node: CanvasNode): Record<string, unknown> | undefined {
+  const config = node.raw.config
+  if (config === undefined) return {}
+  if (config && typeof config === 'object' && !Array.isArray(config)) return config as Record<string, unknown>
 }
 
 const rootStyle = { display: 'grid', gap: 12 } as const
