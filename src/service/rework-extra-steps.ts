@@ -9,6 +9,13 @@ import { runtimeEdges } from './rework-edges.ts'
 export type ExtraStep = { node_id: string; before_node_id: string; instruction: string }
 type StepLineage = ExtraStep & { request_id: string; plan_hash: string; run_id: string; workflow_definition_hash: string; status: string }
 type BoundNode = { node_run_id: string; node_id: string; run_id: string; node_type: string; side_effect_policy: string; workflow_definition_hash: string | null; definition_json: string | null; content_hash: string | null }
+type NodeRole = { node_id: string; extra_step: string | null }
+function nodeRole(tx: ReadTx, nodeRunId: string): NodeRole {
+  const role = tx.get<NodeRole>(`SELECT n.node_id,e.request_id AS extra_step FROM node_runs n JOIN runs r USING(run_id)
+    LEFT JOIN rework_extra_steps e ON e.run_id=n.run_id AND e.node_id=n.node_id WHERE n.node_run_id=?`, [nodeRunId])
+  if (!role) throw new OrchError('NOT_FOUND', 'extra step cannot resolve execution record')
+  return role
+}
 function boundNode(tx: ReadTx, nodeRunId: string): BoundNode {
   const node = tx.get<BoundNode>(`SELECT n.node_run_id,n.node_id,n.run_id,n.node_type,n.side_effect_policy,
     r.workflow_definition_hash,w.definition_json,w.content_hash FROM node_runs n JOIN runs r USING(run_id)
@@ -25,6 +32,10 @@ function pinnedDefinition(node: BoundNode): { nodes: {node_id:string;type:string
   return JSON.parse(node.definition_json)
 }
 export function extraStepInstruction(tx: ReadTx, nodeRunId: string): StepLineage | null {
+  return extraStepInstructionFor(tx, nodeRunId, nodeRole(tx, nodeRunId))
+}
+function extraStepInstructionFor(tx: ReadTx, nodeRunId: string, role: NodeRole): StepLineage | null {
+  if (role.extra_step === null) return null
   const node = boundNode(tx,nodeRunId)
   const saved = tx.get<StepLineage>('SELECT e.*,q.status FROM rework_extra_steps e JOIN rework_requests q USING(request_id) WHERE e.run_id=? AND e.node_id=?',[node.run_id,node.node_id])
   if (!saved) return null
@@ -43,8 +54,8 @@ export function extraStepInstruction(tx: ReadTx, nodeRunId: string): StepLineage
 }
 /** Resolve a synthetic role only through its exact approved original signed role. */
 export function resolvePinnedNodeId(tx: ReadTx, nodeRunId: string): string {
-  const lineage=extraStepInstruction(tx,nodeRunId)
-  return lineage?.before_node_id ?? boundNode(tx,nodeRunId).node_id
+  const role = nodeRole(tx, nodeRunId)
+  return extraStepInstructionFor(tx, nodeRunId, role)?.before_node_id ?? role.node_id
 }
 export function insertExtraSteps(tx: Tx, secret: string, input: {requestId:string;runId:string;planHash:string;steps:readonly ExtraStep[]}, now: string): {node_id:string;node_run_id:string;before_node_id:string}[] {
   if (input.steps.length===0) return []

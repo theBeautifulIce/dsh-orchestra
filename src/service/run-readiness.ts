@@ -1,9 +1,8 @@
 import { TERMINAL_STATUSES } from '../core/state-machine.ts'
-import type { WorkflowDefinition } from '../core/workflow-def.ts'
 import type { ReadTx } from './queries/read-tx.ts'
-import { runtimeEdges, type RuntimeEdge } from './rework-edges.ts'
+import { approvedRuntimeEdges, runtimeEdges, type RuntimeEdge } from './rework-edges.ts'
 import { isCandidateReviewer, reworkBlocksNode } from './rework-runtime.ts'
-import { definitionHashOf } from './workflows.ts'
+import { indexTopology, verifiedTopology, type PinnedTopology } from './pinned-topology.ts'
 import { branchSkipped, selectedBranchTarget } from './branch-routing.ts'
 
 const SUCCESS_STATUS: ReadonlySet<string> = new Set(['done', 'succeeded', 'succeeded_with_unverified'])
@@ -15,23 +14,30 @@ export type DependencyReadiness =
 
 export function readRunBinding(tx: ReadTx, runId: string) {
   return tx.get<{
-    status: string; cancel_requested_at: string | null; workflow_definition_hash: string | null; definition_json: string | null
-  }>(`SELECT r.status,r.cancel_requested_at,r.workflow_definition_hash,w.definition_json FROM runs r
+    status: string; cancel_requested_at: string | null; workflow_definition_hash: string | null;
+    definition_json: string | null; content_hash: string | null
+  }>(`SELECT r.status,r.cancel_requested_at,r.workflow_definition_hash,w.definition_json,w.content_hash FROM runs r
     LEFT JOIN workflow_versions w ON w.workflow_id=COALESCE(r.workflow_id,'default') AND w.version=r.workflow_version
-      AND (r.workflow_definition_hash IS NULL OR w.content_hash=r.workflow_definition_hash) WHERE r.run_id=?`, [runId])
+    WHERE r.run_id=?`, [runId])
 }
 
+const EMPTY_TOPOLOGY = indexTopology([])
+
 /** A null result means the persisted topology could not be verified. */
+export function pinnedRunTopology(binding: NonNullable<ReturnType<typeof readRunBinding>>): PinnedTopology | null {
+  if (binding.definition_json === null) return binding.workflow_definition_hash ? null : EMPTY_TOPOLOGY
+  if (binding.workflow_definition_hash && binding.content_hash !== binding.workflow_definition_hash) return null
+  return verifiedTopology(binding.definition_json, binding.workflow_definition_hash)
+}
+
 export function pinnedEdges(binding: NonNullable<ReturnType<typeof readRunBinding>>): readonly RuntimeEdge[] | null {
-  if (!binding.definition_json) return binding.workflow_definition_hash ? null : []
-  try {
-    const definition = JSON.parse(binding.definition_json) as WorkflowDefinition
-    if (binding.workflow_definition_hash && definitionHashOf(definition) !== binding.workflow_definition_hash) return null
-    const edges = definition.edges ?? []
-    return Array.isArray(edges) && edges.every(edge => typeof edge?.from === 'string' && typeof edge.to === 'string') ? edges : null
-  } catch {
-    return null
-  }
+  return pinnedRunTopology(binding)?.edges ?? null
+}
+
+export function nodePredecessors(tx: ReadTx, runId: string, topology: PinnedTopology, nodeId: string): readonly string[] {
+  const base = topology.predecessors(nodeId)
+  const additions = approvedRuntimeEdges(tx, runId, nodeId)
+  return additions.length ? [...new Set([...base, ...additions.map(edge => edge.from)])] : base
 }
 
 export function runPredecessors(tx: ReadTx, runId: string, edges: readonly RuntimeEdge[]): Map<string, string[]> {

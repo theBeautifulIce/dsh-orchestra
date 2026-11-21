@@ -19,6 +19,7 @@ export type LoadWorkflowResult = {
 }
 
 type WorkflowVersionRow = { workflow_id: string; version: string; content_hash: string; definition_json: string }
+const immutableDefinitionHashes = new WeakMap<WorkflowDefinition, string>()
 
 export function workflowIdOf(def: WorkflowDefinition): string {
   return String(def.workflow_id ?? DEFAULT_WORKFLOW_ID)
@@ -55,6 +56,7 @@ function keyOf(workflowId: string, version: string): string {
 // 传了 db 就落 workflow_versions：跨重启同版本改内容必须被拒，在飞 run 的判定条件不跟着变（第六轮审计 P1-1）
 export class WorkflowCatalog {
   private readonly defs = new Map<string, WorkflowDefinition>()
+  private readonly nodes = new WeakMap<WorkflowDefinition, ReadonlyMap<string, WorkflowNodeDef>>()
   private readonly phase: Phase
   private readonly db?: Db
 
@@ -104,7 +106,7 @@ export class WorkflowCatalog {
           workflow_version: row.version,
         })
       }
-      this.remember(row.workflow_id, row.version, snapshot)
+      this.remember(row.workflow_id, row.version, snapshot, row.content_hash)
     }
     return rows.length
   }
@@ -124,7 +126,7 @@ export class WorkflowCatalog {
         workflow_version: key,
       })
     }
-    this.remember(workflowId, key, snapshot)
+    this.remember(workflowId, key, snapshot, expectedHash)
   }
 
   /** 发布前沿用目录的阶段限制和运行配置校验，避免提交目录无法加载的版本。 */
@@ -186,7 +188,7 @@ export class WorkflowCatalog {
         })
       }
     }
-    this.remember(workflowId, key, snapshot)
+    this.remember(workflowId, key, snapshot, hash)
     // 发布期能查的先查：闭包内子流程都已加载时，环与深度在这里就报，不留到派发。
     // 子流程尚未发布的合法顺序（先父后子）交给派发期的强校验，不在这里误拒。
     this.assertSubworkflowClosure(workflowId, key)
@@ -246,6 +248,19 @@ export class WorkflowCatalog {
   get(workflowIdOrVersion: string | number, maybeVersion?: string | number): WorkflowDefinition {
     // 交出去的是深拷贝：调用方拿到的是能随便改的独立副本，目录里的本体不受影响（第二次意见 P1 问题 A）
     return snapshotOf(this.resolve(workflowIdOrVersion, maybeVersion))
+  }
+
+  /** Shares a catalog-owned, deeply frozen definition with internal readers. */
+  getImmutable(workflowId: string, workflowVersion: string | number): WorkflowDefinition {
+    return this.internal(workflowId, String(workflowVersion))
+  }
+
+  getImmutableNode(workflowId: string, workflowVersion: string | number, nodeId: string): WorkflowNodeDef | undefined {
+    return this.nodes.get(this.getImmutable(workflowId, workflowVersion))?.get(nodeId)
+  }
+
+  hasPersistedStorage(): boolean {
+    return this.db !== undefined
   }
 
   // run 绑定的定义哈希：收口时拿它和当前目录比，跨重启改内容的一律拒
@@ -317,7 +332,7 @@ export class WorkflowCatalog {
   }
 
   private nodeOf(def: WorkflowDefinition, workflowId: string | undefined, version: string, nodeId: string): WorkflowNodeDef {
-    const node = def.nodes.find((n) => n.node_id === nodeId)
+    const node = this.nodes.get(def)?.get(nodeId)
     if (!node) {
       throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '节点不在这个工作流版本里', {
         ...(workflowId === undefined ? {} : { workflow_id: workflowId }),
@@ -343,11 +358,17 @@ export class WorkflowCatalog {
     }
   }
 
-  private remember(workflowId: string, key: string, def: WorkflowDefinition): void {
+  private remember(workflowId: string, key: string, def: WorkflowDefinition, hash: string): void {
     // 冻结后进目录：外部拿到过这份引用也改不动它
     const frozen = deepFreeze(def)
+    immutableDefinitionHashes.set(frozen, hash)
     // 别名撞车先判再落 Map：撞上了整份定义就不进目录，不留半份（原来先落 Map 再抛，目录里会多一份没通过检查的定义）
     this.assertAliasFree(workflowId, key, frozen)
+    const byId = new Map<string, WorkflowNodeDef>()
+    for (const node of frozen.nodes) {
+      if (!byId.has(node.node_id)) byId.set(node.node_id, node)
+    }
+    this.nodes.set(frozen, byId)
     this.defs.set(keyOf(workflowId, key), frozen)
     // 账本里 workflow_version 是整数列：'01' 这类版本号存进去会变成 1，别名兜住它
     if (/^\d+$/.test(key)) {
@@ -357,6 +378,8 @@ export class WorkflowCatalog {
 }
 
 export function definitionHashOf(def: WorkflowDefinition): string {
+  const remembered = immutableDefinitionHashes.get(def)
+  if (remembered !== undefined) return remembered
   // default 是旧数据的命名空间，不是定义内容：显式写 default 与省略 id 必须得到同一个哈希。
   // 非 default 的 workflow_id 参与哈希，两个工作流各自版本 1 的内容从此彼此独立。
   const copy = { ...def }
