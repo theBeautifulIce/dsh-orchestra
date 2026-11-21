@@ -147,21 +147,112 @@ function soak(input: Query) {
     p95_ms: report.lag.events.p95Ms, max_ms: report.lag.events.maxMs }
 }
 
-const lagFile = z.strictObject({
-  candidate: z.string(), clean: z.literal(true), observations: z.array(z.strictObject({
-    slot: z.number(), seq: z.number(), committedMs: z.number(), observedMs: z.number().nullable(),
-  })).min(1).max(86_400),
-  window: z.strictObject({ startMs: z.number(), slotMs: z.number(), slots: z.number().int().min(1).max(86_400),
-    slotsPerSlice: z.number().int().positive(),
-  }),
+export const OFFICE_LAG_SCHEMA = 'dsh-office-event-lag/1'
+export const OFFICE_LAG_WINDOW = { slotMs: 5_000, slots: 120, slotsPerSlice: 12 } as const
+export const OFFICE_LAG_ORIGINALS = ['launch.json', 'events.ndjson', 'ledger.db', 'lag-samples.json'] as const
+const officeLagFiles = [...OFFICE_LAG_ORIGINALS, 'end.json'] as const
+const elapsedWindowMs = OFFICE_LAG_WINDOW.slotMs * OFFICE_LAG_WINDOW.slots
+const probeType = 's6.soak_probe'
+const lagInstant = z.number().nonnegative()
+const lagSeq = z.number().int().positive()
+const lagCandidate = z.string().regex(/^[a-f0-9]{40}$/u)
+const lagMeasurement = z.uuid()
+const lagWindow = z.strictObject({
+  startMs: lagInstant, slotMs: z.literal(OFFICE_LAG_WINDOW.slotMs),
+  slots: z.literal(OFFICE_LAG_WINDOW.slots), slotsPerSlice: z.literal(OFFICE_LAG_WINDOW.slotsPerSlice),
 })
+const lagObservation = z.strictObject({
+  slot: z.number().int().min(0).max(OFFICE_LAG_WINDOW.slots - 1),
+  seq: lagSeq, committedMs: lagInstant, observedMs: lagInstant,
+})
+const lagEvent = lagObservation.extend({ type: z.string().min(1), event_id: z.string().min(1) })
+const lagLaunch = z.strictObject({
+  schema: z.literal(OFFICE_LAG_SCHEMA), candidate: lagCandidate, measurement: lagMeasurement, clean: z.literal(true),
+  startedAt: z.iso.datetime(), window: lagWindow, baselineSeq: z.number().int().nonnegative(),
+  platform: z.string().min(1), clock: z.string().min(1), traffic: z.string().min(1),
+})
+const lagFile = z.strictObject({
+  schema: z.literal(OFFICE_LAG_SCHEMA), candidate: lagCandidate, measurement: lagMeasurement, clean: z.literal(true),
+  window: lagWindow, observations: lagObservation.array().length(OFFICE_LAG_WINDOW.slots),
+})
+const lagEnd = z.strictObject({
+  schema: z.literal(OFFICE_LAG_SCHEMA), candidate: lagCandidate, measurement: lagMeasurement, portReleased: z.literal(true),
+  completedAt: z.iso.datetime(), completedMs: lagInstant, elapsedMs: lagInstant, throughSeq: lagSeq,
+  originals: z.record(z.enum(OFFICE_LAG_ORIGINALS), z.string().regex(/^[a-f0-9]{64}$/u)),
+})
+
+function lagStats(samples: number[]) {
+  const ordered = samples.sort((a, b) => a - b)
+  return { samples: ordered.length, p95_ms: ordered[Math.ceil(ordered.length * 0.95) - 1]!, max_ms: ordered.at(-1)! }
+}
+
 function lag(input: Query) {
-  const raw = lagFile.parse(parse(byBasename(input.evidence).get('lag-samples.json')))
-  if (raw.candidate !== input.candidate.git_sha || raw.window.slotMs * raw.window.slots < 600_000) return
-  const result = summarizeLag(raw.observations, raw.window)
-  if (!result.passed) return
-  return { kind: 'event_lag', windows: [{ ...result.full, count: raw.window.slots }, ...result.slices]
-    .map((window) => ({ p95_ms: window.p95Ms, max_ms: window.maxMs, samples: window.count })) }
+  const { files, get } = byBasename(input.evidence)
+  const prefix = posix.dirname(input.evidence[0]?.entry.file ?? '')
+  if (files.size !== officeLagFiles.length || !officeLagFiles.every((file) => files.has(file))
+    || posix.basename(prefix) !== 'lag' || input.evidence.some(({ entry }) => posix.dirname(entry.file) !== prefix
+      || posix.normalize(entry.file) !== entry.file)) return
+  const launch = lagLaunch.parse(parse(get('launch.json')))
+  const raw = lagFile.parse(parse(get('lag-samples.json')))
+  const end = lagEnd.parse(parse(get('end.json')))
+  const { startMs, slotMs, slotsPerSlice } = launch.window
+  const startedAt = Date.parse(launch.startedAt)
+  const completedAt = Date.parse(end.completedAt)
+  if ([launch, raw, end].some((record) => record.candidate !== input.candidate.git_sha || record.measurement !== launch.measurement)
+    || raw.window.startMs !== startMs || end.completedMs - startMs !== end.elapsedMs || end.elapsedMs < elapsedWindowMs
+    || Math.abs(completedAt - startedAt - end.elapsedMs) > 1_000
+    || !OFFICE_LAG_ORIGINALS.every((name) => sha256Hex(Buffer.from(get(name))) === end.originals[name])) return
+
+  const events = lagEvent.array().parse(lines(get('events.ndjson')))
+  if (events.length < launch.window.slots || events.length !== end.throughSeq - launch.baselineSeq
+    || new Set(events.map((event) => event.event_id)).size !== events.length) return
+  const probes = []
+  const slices = Array.from({ length: launch.window.slots / slotsPerSlice }, () => [] as number[])
+  let lastCommit = startMs
+  let lastDelivery = startMs
+  const all = []
+  for (const [index, { event_id: _id, type, ...sample }] of events.entries()) {
+    const { seq, slot, committedMs, observedMs } = sample
+    if (seq !== launch.baselineSeq + index + 1 || slot !== Math.floor((committedMs - startMs) / slotMs)
+      || committedMs < lastCommit || observedMs < committedMs || observedMs < lastDelivery || observedMs > end.completedMs) return
+    lastCommit = committedMs
+    lastDelivery = observedMs
+    const lagMs = observedMs - committedMs
+    all.push(lagMs)
+    slices[Math.floor(slot / slotsPerSlice)]!.push(lagMs)
+    if (type === probeType) probes.push(sample)
+  }
+  if (releaseHash(probes) !== releaseHash(raw.observations) || !summarizeLag(raw.observations, launch.window).complete) return
+
+  const checked = withG6Scratch((directory) => {
+    const dbFile = join(directory, 'ledger.db')
+    writeFileSync(dbFile, get('ledger.db'), { flag: 'wx' })
+    const db = openDb(dbFile, { readonly: true })
+    try {
+      if (db.raw.prepare('PRAGMA integrity_check').get()?.integrity_check !== 'ok'
+        || db.raw.prepare('PRAGMA journal_mode').get()?.journal_mode !== 'delete'
+        || db.raw.prepare('SELECT MAX(seq) AS seq FROM events').get()?.seq !== end.throughSeq) return false
+      if (launch.baselineSeq > 0) {
+        const previous = db.raw.prepare('SELECT created_at FROM events WHERE seq=?').get(launch.baselineSeq)
+        if (!previous || typeof previous.created_at !== 'string' || !(Date.parse(previous.created_at) <= startedAt)
+          || db.raw.prepare('SELECT 1 FROM events WHERE seq<=? AND type=? LIMIT 1').get(launch.baselineSeq, probeType)) return false
+      }
+      const ledger = db.raw.prepare('SELECT seq,event_id,type,created_at FROM events WHERE seq>? ORDER BY seq').all(launch.baselineSeq)
+      return ledger.length === events.length && ledger.every((row, index) => {
+        const observed = events[index]!
+        const createdAt = typeof row.created_at === 'string' ? Date.parse(row.created_at) : NaN
+        // SQLite records insertion wall time, and the collector samples monotonic time after COMMIT.
+        // Allow 10 ms for wall-clock precision and the two start-clock reads.
+        return row.seq === observed.seq && row.event_id === observed.event_id && row.type === observed.type
+          && createdAt >= startedAt - 10 && createdAt <= startedAt + (observed.committedMs - startMs) + 10
+          && createdAt <= completedAt + 10
+      })
+    } finally { db.raw.close() }
+  })
+  if (!checked) return
+  const windows = [all, ...slices].map(lagStats)
+  if (windows.some(({ p95_ms, max_ms }) => p95_ms > 2_000 || max_ms > 10_000)) return
+  return { kind: 'event_lag', windows }
 }
 
 const hash = z.string().regex(/^[0-9a-f]{64}$/).refine((value) => !/^0+$/.test(value))

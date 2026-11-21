@@ -4,9 +4,10 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { DatabaseSync } from 'node:sqlite'
 import { sha256Hex } from '../../src/core/canonical.ts'
 import { releaseHash } from '../../src/core/wf-release-v1.ts'
-import { createG6FileEvidenceReader } from '../../scripts/g6-file-evidence.ts'
+import { createG6FileEvidenceReader, OFFICE_LAG_ORIGINALS, OFFICE_LAG_SCHEMA, OFFICE_LAG_WINDOW, withG6Scratch } from '../../scripts/g6-file-evidence.ts'
 import { assertFormalSoakArchive, FORMAL_SOAK_ARCHIVE } from '../../scripts/soak-archive.ts'
 import type { Manifest } from '../../scripts/soak-judge.ts'
 import { assertG6Body, assertG5History, assertG6R0Evidence, authenticateG6Proof, g6Body, signG6, verifyG6 } from '../../scripts/gate-g6.ts'
@@ -59,10 +60,99 @@ it('拒绝缺少或重复的 R0 原件，以及短窗和错候选、错包的原
   expect(() => assertG6R0Evidence(inputs, blob, expected)).toThrow(/frozen candidate and archive/)
 })
 
-it('derives lag from committed-to-observed samples and rejects fake report conclusions', () => {
+it('requires all five office lag originals and independently recomputes the full window and minute slices', () => {
   const sha = '1'.repeat(40)
-  const seed = { candidate: sha, clean: true, window: { startMs: 0, slotMs: 60_000, slots: 10, slotsPerSlice: 1 },
-    observations: Array.from({ length: 10 }, (_, slot) => ({ seq: slot + 1, slot, committedMs: slot * 60_000, observedMs: slot * 60_000 + 2_000 })) }
+  const header = { schema: OFFICE_LAG_SCHEMA, candidate: sha, measurement: 'dae95922-77fe-49eb-aa56-ed54e8e0e788' }
+  const startedAt = '2026-11-21T03:00:00.000Z'
+  const window = { startMs: 1000, ...OFFICE_LAG_WINDOW }
+  const baselineSeq = 1
+  const observations = Array.from({ length: window.slots }, (_, slot) => {
+    const committedMs = window.startMs + slot * window.slotMs + 100
+    return { seq: slot + 2, slot, committedMs, observedMs: committedMs + 400 }
+  })
+  const nonProbeCommit = observations.at(-1)!.committedMs + 600
+  const events = [...observations.map((probe) => ({ ...probe, type: 's6.soak_probe', event_id: 'evt-' + probe.seq })),
+    ...Array.from({ length: 9 }, (_, index) => {
+      const seq = index + 122
+      const committedMs = nonProbeCommit + index * 10
+      return { slot: 119, seq, type: 'run.terminal', event_id: 'evt-' + seq, committedMs, observedMs: committedMs + 500 }
+    })]
+  const launch = { ...header, clean: true, startedAt, window, baselineSeq, platform: 'win32', clock: 'performance.now()', traffic: 'fixture' }
+  const sampleFile = { ...header, clean: true, window, observations }
+  const dbBytes = withG6Scratch((directory) => {
+    const file = join(directory, 'ledger.db')
+    const db = new DatabaseSync(file)
+    try {
+      db.exec('CREATE TABLE events(seq INTEGER PRIMARY KEY, event_id TEXT, type TEXT, created_at TEXT)')
+      const insert = db.prepare('INSERT INTO events VALUES (?, ?, ?, ?)')
+      insert.run(baselineSeq, 'evt-1', 'run.terminal', '2026-11-21T02:59:59.500Z')
+      for (const event of events) insert.run(event.seq, event.event_id, event.type,
+        new Date(Date.parse(startedAt) + event.committedMs - window.startMs - 1).toISOString())
+    } finally { db.close() }
+    return readFileSync(file)
+  })
+  const originals = new Map<string, Buffer>()
+  const put = (path: string, value: unknown) => originals.set(path, Buffer.from(JSON.stringify(value) + '\n'))
+  const putEvents = (rows: typeof events) => originals.set('events.ndjson', Buffer.from(rows.map((row) => JSON.stringify(row)).join('\n') + '\n'))
+  const seal = (elapsedMs = 607_000, throughSeq = events.at(-1)!.seq, wallElapsedMs = elapsedMs) => put('end.json', { ...header, portReleased: true,
+    completedAt: new Date(Date.parse(startedAt) + wallElapsedMs).toISOString(), completedMs: window.startMs + elapsedMs, elapsedMs, throughSeq,
+    originals: Object.fromEntries(OFFICE_LAG_ORIGINALS.map((name) => [name, sha256Hex(originals.get(name)!)])),
+  })
+  const read = (candidate = sha) => createG6FileEvidenceReader(() => undefined).observe({
+    id: 'event_lag', candidate: { git_sha: candidate, schema_version: 1, phase: 'S6' }, evidence: [...originals].map(([name, bytes]) => ({
+      entry: { evidence_id: 'lag/' + name, file: 'docs/gates/evidence/G6/lag/' + name,
+        source: 'office-event-lag', strength: 'strong', sha256: sha256Hex(bytes) }, bytes,
+    })),
+  })
+  put('launch.json', launch)
+  put('lag-samples.json', sampleFile)
+  originals.set('ledger.db', dbBytes)
+  putEvents(events)
+  seal()
+  const result = read()
+  expect(result).toMatchObject({ kind: 'event_lag', windows: [expect.objectContaining({ samples: 129 }), ...Array.from({ length: 10 }, (_, slice) =>
+    expect.objectContaining({ samples: slice === 9 ? 21 : 12 }))] })
+  expect(read('2'.repeat(40))).toBeUndefined()
+
+  originals.delete('end.json')
+  expect(read()).toBeUndefined()
+  seal(599_999)
+  expect(read()).toBeUndefined()
+  seal(607_000, events.at(-1)!.seq, 1)
+  expect(read()).toBeUndefined()
+  seal()
+  const sparse = { startMs: 1000, slotMs: 600_000, slots: 1, slotsPerSlice: 1 }
+  put('launch.json', { ...launch, window: sparse })
+  put('lag-samples.json', { ...sampleFile, window: sparse, observations: observations.slice(0, 1) })
+  seal()
+  expect(read()).toBeUndefined()
+  put('launch.json', launch)
+  put('lag-samples.json', sampleFile)
+  seal()
+
+  const last = events.at(-1)!
+  putEvents([...events.slice(0, -1), { ...last, event_id: 'tampered' }])
+  expect(read()).toBeUndefined()
+  seal()
+  expect(read()).toBeUndefined()
+  putEvents(events.slice(0, -1))
+  seal(607_000, last.seq - 1)
+  expect(read()).toBeUndefined()
+
+  // All probes still pass. The real last non-probe event alone exceeds the delivery cap.
+  putEvents([...events.slice(0, -1), { ...last, observedMs: last.committedMs + 11_000 }])
+  seal()
+  expect(read()).toBeUndefined()
+  putEvents([...events.slice(0, -1), { ...last, observedMs: last.committedMs + 6_000 }])
+  seal()
+  expect(read()).toMatchObject({ windows: expect.arrayContaining([{ samples: 21, p95_ms: 500, max_ms: 6_000 }]) })
+  putEvents(events)
+  seal()
+  expect(read()).toEqual(result)
+})
+
+it('rejects fake G6 report conclusions', () => {
+  const sha = '1'.repeat(40)
   const reader = createG6FileEvidenceReader(() => undefined)
   const read = (id: string, file: string, value: unknown) => {
     const bytes = Buffer.from(JSON.stringify(value))
@@ -70,9 +160,7 @@ it('derives lag from committed-to-observed samples and rejects fake report concl
       entry: { evidence_id: 'sample', file, strength: 'strong', source: 'fixture', sha256: sha256Hex(bytes) }, bytes,
     }] })
   }
-  expect(read('event_lag', 'lag-samples.json', seed)).toMatchObject({ kind: 'event_lag' })
-  seed.observations[1]!.observedMs += 8010
-  expect(read('event_lag', 'lag-samples.json', seed)).toBeUndefined()
+  expect(read('event_lag', 'lag/lag-samples.json', { conclusion: 'pass' })).toBeUndefined()
   expect(read('soak_24h', 'soak-report.json', { conclusion: 'pass', g6Eligible: true })).toBeUndefined()
   expect(read('G-01', 'report.json', { conclusion: 'pass', passed: true })).toBeUndefined()
   expect(read('control_p95', 'perf-report.json', { conclusion: 'pass', passed: true })).toBeUndefined()
