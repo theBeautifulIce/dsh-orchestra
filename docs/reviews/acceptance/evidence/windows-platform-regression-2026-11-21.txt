@@ -1,0 +1,30 @@
+
+ RUN  v4.1.8 D:/aboutAI/dsh-orchestra/tmp/s6-dispatch-views
+
+ ✓ tests/integration/windows-readonly-host.spec.ts > enforces actual AppContainer BFS reads in a trusted DSH workspace view and records separate RPC provenance 2547ms
+ ✓ tests/integration/windows-readonly-host.spec.ts > blocks a staged Windows junction before issuing an execution receipt 903ms
+ ✓ tests/integration/windows-control-pipe.spec.ts > prefers the SID-restricted Windows pipe for DSH controls and reconnects SSE over loopback 2508ms
+ ✓ tests/integration/windows-readonly-host.spec.ts > blocks a staged Windows hard link before issuing an execution receipt 894ms
+ ✓ tests/integration/lag.spec.ts > recomputes all slots, thresholds and ten-minute alarms independently 4ms
+ ✓ tests/integration/local-dsh-host.spec.ts > binds the native DSH route to one local workspace session and keeps the ledger credentials on the host 39ms
+ ✓ tests/integration/lag.spec.ts > measures a committed ledger event through the production HTTP and panel SSE transport 504ms
+ ✓ tests/integration/lag.spec.ts > reads a file-backed ledger while the default 1000-slot queue is full, rejects the 1001st write and drains in order 1094ms
+ ✓ tests/integration/local-dsh-host.spec.ts > reads real personal ledger memory pages without a writer and isolates workspace sessions 1979ms
+ ✓ tests/contract/workflow-tool-node.spec.ts > S6 独立工具由只读宿主执行固定命令，并用可核对收据收口和恢复 530ms
+ ✓ tests/contract/s6-security.spec.ts > requires a trusted human binding for S6 review writes and preserves the service actor for ordinary writes 250ms
+ ✓ tests/unit/run-tool.spec.ts > runTool 只读执行与强证据 > 命令没注册 → RUN_TOOL_NOT_READ_ONLY，宿主未调用 4ms
+ ✓ tests/unit/run-tool.spec.ts > runTool 只读执行与强证据 > 注册了但 mutating / compensating → RUN_TOOL_NOT_READ_ONLY 且 details.capability 有值 1ms
+ ✓ tests/unit/run-tool.spec.ts > runTool 只读执行与强证据 > 宿主没有只读挂载 → EVIDENCE_SOURCE_UNAVAILABLE，不返回降级证据 0ms
+ ✓ tests/unit/run-tool.spec.ts > runTool 只读执行与强证据 > cwd 越出工作区 → FORBIDDEN 1ms
+ ✓ tests/unit/run-tool.spec.ts > runTool 只读执行与强证据 > 正常执行：强证据字段齐、哈希与命令哈希对得上，请求里的 args 不覆盖注册表 3ms
+ ✓ tests/unit/run-tool.spec.ts > runTool 只读执行与强证据 > args 为空时同样用注册表的固定参数 1ms
+ ✓ tests/unit/run-tool.spec.ts > runTool 只读执行与强证据 > assertCommandHash：对不上 → VERIFICATION_TOO_WEAK；对得上通过 0ms
+ ✓ tests/contract/s6-security.spec.ts > checks fixed and verifier tool declarations against the S6 service registry before admitting a version 195ms
+ ✓ tests/contract/s6-security.spec.ts > derives the producer from the decision scope before an eligible reviewer may resolve it 180ms
+ ✓ tests/contract/s6-security.spec.ts > binds confirmation and replay to the host actor and exports only the applied decision references 248ms
+
+ Test Files  7 passed (7)
+      Tests  21 passed (21)
+   Start at  11:27:24
+   Duration  10.58s (transform 2.27s, setup 0ms, import 7.33s, tests 11.90s, environment 0ms)
+
