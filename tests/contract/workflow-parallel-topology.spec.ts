@@ -7,6 +7,8 @@ import { uuidv7 } from '../../src/core/ids.ts'
 import { BridgeClient } from '../../src/executor/bridge.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 import { fakeAgentBridge } from '../fixtures/agent-bridge.ts'
+import { withTx } from '../../src/infra/sqlite/driver.ts'
+import { applyTransition, createNodeRun } from '../../src/service/commands/nodes.ts'
 
 const name = '并行组的不同出口'
 const condition = { path: 'selected', op: 'eq', value: true }
@@ -71,12 +73,31 @@ async function serviceFixture(dir: string) {
       const runId = started.data.run_id as string
       const specs = Object.fromEntries(definition.nodes.filter(({ type }) => type !== 'agent' && type !== 'trigger')
         .map(({ node_id }) => [node_id, { tools: [], input: { selected: true } }]))
-      const read = (id: string) => service.orchestra.db.raw.prepare('SELECT * FROM node_runs WHERE run_id=? AND node_id=?').get(runId,id)!
+      const read = (id: string) => service.orchestra.db.raw.prepare('SELECT * FROM node_runs WHERE run_id=? AND node_id=? ORDER BY attempt DESC LIMIT 1').get(runId,id)!
       const status = (id: string) => read(id).status
       return {
         read, status,
         run: () => service.orchestra.db.raw.prepare('SELECT * FROM runs WHERE run_id=?').get(runId)!,
-        dispatch: () => post('/v1/runs/dispatch', { runId, nodes: specs }),
+        dispatch: (only?: readonly string[]) => post('/v1/runs/dispatch', {
+          runId, nodes: only ? Object.fromEntries(Object.entries(specs).filter(([id]) => only.includes(id))) : specs,
+        }),
+        acquire: (id: string) => post('/v1/node-runs/lease', {
+          nodeRunId: read(id).node_run_id, ownerEpoch: service.orchestra.db.epoch, leaseTtlMs: 60_000,
+        }),
+        projectOwner: (id: string, owner: string | null) => {
+          service.orchestra.db.raw.prepare('UPDATE node_runs SET parent_node_run_id=? WHERE node_run_id=?')
+            .run(owner === null ? null : read(owner).node_run_id!,read(id).node_run_id!)
+        },
+        replaceUnstarted: (id: string) => {
+          const previous = read(id)
+          const now = new Date().toISOString()
+          withTx(service.orchestra.db, tx => {
+            applyTransition(tx, secret, { nodeRunId: String(previous.node_run_id), from: ['queued'], to: 'superseded', ruleId: 'M-62',
+              attempt: Number(previous.attempt), now, patch: { side_effect_verified_none: 1 } })
+            createNodeRun(tx, { newNodeRunId: 'nrun_' + uuidv7(), originNodeRunId: String(previous.node_run_id),
+              runId, nodeId: id, seq: Number(previous.seq), nodeType: String(previous.node_type), attempt: Number(previous.attempt) + 1, now })
+          })
+        },
         wake: (id: string) => post('/v1/wait/events', { runId, eventType: id, payload: { result: id }, idempotencyKey: uuidv7() }),
         receipt: (id: string, event: string) => {
           const row = service.orchestra.db.raw.prepare('SELECT payload FROM node_run_events WHERE node_run_id=? AND type=? ORDER BY seq DESC LIMIT 1')
@@ -149,6 +170,10 @@ it('composes a branch and a multi-member nested group while keeping its outer qu
   const run = await fixture.start('nested_branch', definition)
   await run.dispatch()
   await run.dispatch()
+  run.projectOwner('inner', null)
+  expect(await run.dispatch()).toMatchObject({ status: 200, data: [] })
+  expect(run.status('choose')).toBe('queued')
+  run.projectOwner('inner', 'outer')
   expect(await run.dispatch()).toMatchObject({ status: 200, data: expect.arrayContaining([
     expect.objectContaining({ node_id: 'choose', status: 'done' }),
   ]) })
@@ -157,11 +182,75 @@ it('composes a branch and a multi-member nested group while keeping its outer qu
   expect(run.receipt('choose', 'branch.selected')).toMatchObject({ target_node_id: 'chosen' })
   expect(run.status('chosen')).toBe('queued')
   expect(run.status('unchosen')).toBe('superseded')
+  run.projectOwner('inner', null)
   expect(await run.dispatch()).toMatchObject({ status: 200, data: [] })
   await fixture.restart()
   expect(await run.wake('guard')).toMatchObject({ status: 200, data: { woken: 1 } })
+  expect(run.status('outer')).toBe('waiting')
+  expect(run.status('chosen')).toBe('queued')
+  run.projectOwner('inner', 'outer')
+  await run.dispatch()
   expect(run.status('outer')).toBe('done')
   expect(await run.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'chosen', status: 'done' })] })
+  expect(await run.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'merge', status: 'done' })] })
+  expect(run.run().status).toBe('succeeded')
+}), 20_000)
+
+it('requires the published owner and the exact opened attempt while another path may run', () => withService(async fixture => {
+  const definition = document([
+    node('setup', 'parallel', { join: 'all' }), policy('left_seed'), policy('right_seed'),
+    node('group', 'parallel', { join: 'all' }), wait('member'), wait('gate'), wait('healthy'),
+    node('protected', 'agent'), policy('healthy_exit'),
+  ], [
+    edge('setup', 'left_seed'), edge('setup', 'right_seed'), edge('left_seed', 'group'), edge('right_seed', 'healthy'),
+    edge('group', 'member'), edge('group', 'gate'), edge('member', 'protected'), edge('healthy', 'healthy_exit'),
+  ])
+  await fixture.publish('exact_membership', definition)
+  const run = await fixture.start('exact_membership', definition)
+  run.replaceUnstarted('member')
+  await run.dispatch()
+  await run.dispatch()
+  await run.dispatch()
+  expect(run.receipt('group', 'parallel.opened')).toMatchObject({ members: expect.arrayContaining([
+    expect.objectContaining({ node_id: 'member', node_run_id: run.read('member').node_run_id, attempt: 2 }),
+  ]) })
+  await run.dispatch()
+  expect(await run.wake('member')).toMatchObject({ status: 200, data: { woken: 1 } })
+  expect(run.status('group')).toBe('waiting')
+  run.projectOwner('member', null)
+  expect(await run.acquire('protected')).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
+  expect(run.read('protected')).toMatchObject({ status: 'queued', lease_id: null })
+  expect(await run.wake('healthy')).toMatchObject({ status: 200, data: { woken: 1 } })
+  expect(await run.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'healthy_exit', status: 'done' })] })
+  run.projectOwner('member', 'setup')
+  expect(await run.acquire('protected')).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
+  expect(await run.wake('gate')).toMatchObject({ status: 200, data: { woken: 1 } })
+  expect(run.status('group')).toBe('waiting')
+  run.projectOwner('member', 'group')
+  await run.dispatch()
+  expect(run.status('group')).toBe('done')
+  expect(await run.acquire('protected')).toMatchObject({ status: 200, data: expect.objectContaining({ lease_id: expect.any(String) }) })
+}), 20_000)
+
+it('prunes members of a nested group cancelled before opening', () => withService(async fixture => {
+  const definition = document([
+    node('outer', 'parallel', { join: 'any' }), wait('winner'),
+    node('inner', 'parallel', { join: 'all' }), wait('first'), wait('second'), policy('merge'),
+  ], [
+    edge('outer', 'winner'), edge('outer', 'inner'), edge('inner', 'first'), edge('inner', 'second'),
+    edge('winner', 'merge'), edge('first', 'merge'), edge('second', 'merge'),
+  ])
+  await fixture.publish('unopened_nested', definition)
+  const run = await fixture.start('unopened_nested', definition)
+  await run.dispatch()
+  await run.dispatch(['winner'])
+  expect(await run.wake('winner')).toMatchObject({ status: 200, data: { woken: 1 } })
+  expect(run.status('outer')).toBe('done')
+  expect(run.receipt('inner', 'parallel.opened')).toBeUndefined()
+  for (const id of ['first', 'second']) {
+    expect(run.read(id)).toMatchObject({ status: 'superseded', parent_node_run_id: null })
+    expect(run.receipt(id, 'parallel.path_skipped')).toMatchObject({ inactive_predecessors: [run.read('inner').node_run_id] })
+  }
   expect(await run.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'merge', status: 'done' })] })
   expect(run.run().status).toBe('succeeded')
 }), 20_000)

@@ -4,7 +4,8 @@ import { resolvePinnedNodeId } from './rework-extra-steps.ts'
 // 调度器不再由 dispatcher 自己持有：否则 /v1/node-runs/run 与 /v1/runs/dispatch 各走一套，
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
 import { hasUnresolvedRework, queuedReworkHolds, reworkBlocksNode } from './rework-runtime.ts'
-import { dependencyReadiness, runPredecessors } from './run-readiness.ts'
+import { dependencyReadiness, pinnedRunTopology, readRunBinding, runPredecessors } from './run-readiness.ts'
+import { indexTopology } from './pinned-topology.ts'
 import { makeTx } from '../infra/sqlite/driver.ts'
 import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
@@ -130,29 +131,26 @@ function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: Rea
       EXISTS (SELECT 1 FROM rework_extra_steps e WHERE e.run_id=n.run_id AND e.node_id=n.node_id) AS has_extra_step
       FROM node_runs n WHERE n.run_id=? AND n.status='queued' ORDER BY n.seq ASC`,
   ).all(p.runId) as DispatchCandidate[]
-  // 有执行拓扑就按拓扑放行；旧定义没有 edges，保持原来的全量派发
-  const runRow = deps.db.raw.prepare('SELECT workflow_id, workflow_version, status, cancel_requested_at FROM runs WHERE run_id = ?').get(p.runId) as
-    { workflow_id: string; workflow_version: string; status: string; cancel_requested_at: string | null } | undefined
-  if (runRow?.cancel_requested_at || runRow?.status === 'paused') return undefined
-  // 目录里没有这个版本就退回全量派发：老装配/直接插行的 run 没有已发布定义，
-  // 依赖闸只在"定义带着拓扑"时才生效
-  let def: { edges?: Array<{ from: string; to: string }> } | undefined
-  if (runRow && deps.catalog) {
-    try {
-      def = deps.catalog.getImmutable(runRow.workflow_id, runRow.workflow_version)
-    } catch {
-      def = undefined
-    }
-  }
   const tx = makeTx(deps.db.raw)
-  const preds = runPredecessors(tx, p.runId, def?.edges ?? [])
+  const run = readRunBinding(tx, p.runId)
+  if (!run || run.cancel_requested_at || run.status === 'paused') return undefined
+  let topology = pinnedRunTopology(run)
+  if (!topology && run.definition_json === null && deps.catalog && !deps.catalog.hasPersistedStorage()) {
+    try {
+      const def = deps.catalog.getImmutable(run.workflow_id, run.workflow_version)
+      if (definitionHashOf(def) === run.workflow_definition_hash) topology = indexTopology(def.edges ?? [], def.nodes)
+    } catch { /* An unavailable definition cannot supply dependency authority. */ }
+  }
+  // Preserve dispatch's deterministic handling of an unavailable definition. Its normal
+  // acquisition path refuses the lease and records the outcome for the supplied nodes.
+  const preds = runPredecessors(tx, p.runId, topology?.edges ?? [])
   const directReworkHolds = hasUnresolvedRework(tx, p.runId) ? null : queuedReworkHolds(tx, p.runId)
   const rows: DispatchCandidate[] = []
   const settled: DispatchOutcome[] = []
   for (const row of all) {
     if (submitted?.has(row.node_run_id)
       || (directReworkHolds ? directReworkHolds.has(row.node_run_id) : reworkBlocksNode(tx, row.node_run_id))) continue
-    const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [], row.node_id, deps.secret)
+    const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [], row.node_id, deps.secret, topology)
     if (readiness.ready) {
       rows.push(row)
       continue
