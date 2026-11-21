@@ -8,6 +8,7 @@ export type DecisionChoiceContext = {
   memory_approval_status: unknown
   memory_recovery: unknown
   registered_report?: unknown
+  report_original_available?: unknown
   workflow_branch?: unknown
 }
 
@@ -20,7 +21,7 @@ export function panelDecisionOptions(decision: DecisionChoiceContext, now: numbe
   if (restricted) return unavailable(restricted)
   if (isEffectDecision(decision)) return unavailable('此裁决必须提交对应节点的系统核验证据。')
   if (decision.kind === 'report_contradicted') return decision.registered_report === 1
-    ? { choices: ['uphold_report'], unavailableReason: null }
+    ? { choices: decision.report_original_available === 1 ? ['uphold_report', 'uphold_decision'] : ['uphold_report'], unavailableReason: null }
     : unavailable('这张冲突卡缺少可核验的报告登记。')
   if (decision.kind === 'rule_ambiguous' && decision.workflow_branch === 1) {
     return { choices: ['approved', 'rejected'], unavailableReason: null }
@@ -60,6 +61,22 @@ export const DECISION_CHOICE_COLUMNS = '(SELECT b.status FROM memory_batches b W
   + " AND n.status = json_extract(d.payload_json, '$.hung_status') AND n.attempt = p.attempt"
   + " AND n.action_generation = json_extract(d.payload_json, '$.report_generation'))"
   + ") ELSE 0 END AS registered_report, "
+  + "CASE WHEN d.kind='report_contradicted' AND json_valid(d.payload_json) THEN EXISTS ("
+  + "SELECT 1 FROM decisions o JOIN node_runs n ON n.node_run_id=o.node_run_id AND n.run_id=o.run_id"
+  + " JOIN node_run_events e ON e.node_run_id=o.node_run_id AND e.type='decision.original_finding'"
+  + " WHERE o.decision_id=json_extract(d.payload_json,'$.original_decision_id') AND o.kind='startup_unknown'"
+  + " AND o.node_run_id=d.node_run_id AND o.run_id=d.run_id AND o.status='resolved' AND o.closed_reason='approved'"
+  + " AND n.rearm_generation=json_extract(d.payload_json,'$.report_rearm_generation') AND n.fence_state IS NOT 'armed'"
+  + " AND json_valid(e.payload) AND json_extract(e.payload,'$.decision_id')=o.decision_id"
+  + " AND json_extract(e.payload,'$.actor_kind')='human'"
+  + " AND lower(json_extract(e.payload,'$.actor_id')) NOT LIKE 'service:%'"
+  + " AND lower(json_extract(e.payload,'$.actor_id')) NOT LIKE 'agent:%'"
+  + " AND lower(json_extract(e.payload,'$.actor_id')) NOT LIKE 'system:%'"
+  + " AND json_extract(e.payload,'$.resolution')='confirm_not_started'"
+  + " AND json_extract(e.payload,'$.revision')=json_extract(d.payload_json,'$.original_decision_revision')"
+  + " AND json_extract(e.payload,'$.revision')=o.revision"
+  + " AND json_extract(e.payload,'$.attempt')=n.attempt AND json_extract(e.payload,'$.action_generation')=n.action_generation"
+  + ") ELSE 0 END AS report_original_available, "
   + "CASE WHEN d.kind='rule_ambiguous' THEN EXISTS(SELECT 1 FROM node_runs n WHERE n.node_run_id=d.node_run_id"
   + " AND n.run_id=d.run_id AND n.node_type='branch' AND n.status='blocked_post' AND n.blocked_decision_id=d.decision_id)"
   + " ELSE 0 END AS workflow_branch"

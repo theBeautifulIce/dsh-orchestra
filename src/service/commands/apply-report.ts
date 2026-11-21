@@ -52,15 +52,26 @@ type ContradictionDecisionRow = {
 type RegisteredReport = {
   decision_id: string
   original_decision_id: string
+  original_decision_revision?: number
+  original_resolution?: string
   report_id: string
   report_seq: number
   report_digest: string
   attempt: number
   action_generation: number
+  rearm_generation?: number
   hung_status: string
   report: Report
   product_digests: Record<string, string>
   evidence_failure: string | null
+}
+type OriginalDecision = { decision_id: string; revision: number; resolution: string }
+type ConflictSource = {
+  report: Report
+  generation: number
+  originalDecisionId: string
+  catalog: WorkflowCatalog
+  original?: OriginalDecision
 }
 
 type ConflictApproval = {
@@ -186,7 +197,7 @@ export function raiseReportContradiction(
   tx: Tx,
   secret: string,
   args: { nodeRunId: string; attempt: number; runId: string; reportId: string; now: string; decisionId?: string },
-  source?: { report: Report; generation: number; originalDecisionId: string; catalog: WorkflowCatalog },
+  source?: ConflictSource,
 ): { decisionId: string; created: boolean } {
   const row = loadNodeRun(tx, args.nodeRunId)
   if (row.status !== 'startup_unknown' && row.status !== 'indeterminate_side_effect') {
@@ -201,6 +212,9 @@ export function raiseReportContradiction(
   )
   const decisionId = existing?.decision_id ?? args.decisionId ?? 'dec_' + uuidv7()
   if (existing) return { decisionId, created: false }
+  if (source?.original && !chainIsIntact(secret, readChain(tx, row.node_run_id), readChainHead(tx, row.node_run_id), true)) {
+    throw new OrchError('RESOLUTION_NOT_AVAILABLE', '原裁决所在的节点账本无法核验')
+  }
   const registered = source && registerConflictReport(tx, row, args, decisionId, source)
   openDecision(tx, {
     decisionId,
@@ -214,6 +228,9 @@ export function raiseReportContradiction(
       ...(registered && { report_status: registered.report.status, report_attempt: registered.attempt,
         report_digest: registered.report_digest, report_generation: registered.action_generation,
         original_decision_id: registered.original_decision_id,
+        original_decision_revision: registered.original_decision_revision,
+        original_resolution: registered.original_resolution,
+        report_rearm_generation: registered.rearm_generation,
         target_summary: '核对这次执行回报并选择处理结论。',
         required_evidence: ['已登记回报对应的系统执行证据'],
       }),
@@ -246,7 +263,7 @@ function registerConflictReport(
   row: NodeRunRow,
   args: { nodeRunId: string; attempt: number; runId: string; reportId: string; now: string },
   decisionId: string,
-  source: { report: Report; generation: number; originalDecisionId: string; catalog: WorkflowCatalog },
+  source: ConflictSource,
 ): RegisteredReport {
   const { report } = source
   if (row.run_id !== args.runId || row.attempt !== args.attempt || row.action_generation !== source.generation
@@ -286,10 +303,33 @@ function registerConflictReport(
     + " VALUES (?, ?, ?, ?, 'rejected', ?, ?)", [args.reportId, args.nodeRunId, args.attempt, reportSeq, args.now, args.now])
   return {
     decision_id: decisionId, original_decision_id: source.originalDecisionId, report_id: args.reportId,
+    original_decision_revision: source.original?.revision, original_resolution: source.original?.resolution,
     report_seq: reportSeq, report_digest: sha256Hex(canonicalJson(report)), attempt: args.attempt,
-    action_generation: source.generation, hung_status: row.status, report: retained,
+    action_generation: source.generation, rearm_generation: row.rearm_generation, hung_status: row.status, report: retained,
     product_digests: productDigests, evidence_failure: evidenceFailure,
   }
+}
+
+/** Only recorded human findings for the same action can authorize filing or preserving a conflict. */
+function originalDecision(tx: Tx, row: NodeRunRow, expected?: { decisionId: string; revision: number }): OriginalDecision | undefined {
+  return tx.get<OriginalDecision>(
+    "SELECT d.decision_id, json_extract(e.payload,'$.revision') AS revision,"
+    + " json_extract(e.payload,'$.resolution') AS resolution FROM decisions d"
+    + " JOIN node_run_events e ON e.node_run_id=d.node_run_id AND e.type='decision.original_finding'"
+    + " WHERE d.node_run_id=? AND d.run_id=? AND d.status IN ('pending','acknowledged','blocked_for_human','resolved')"
+    + " AND (d.closed_reason IS NULL OR d.closed_reason='approved')"
+    + " AND json_valid(e.payload) AND json_extract(e.payload,'$.decision_id')=d.decision_id"
+    + " AND json_extract(e.payload,'$.revision')=d.revision AND json_extract(e.payload,'$.actor_kind')='human'"
+    + " AND json_extract(e.payload,'$.attempt')=? AND json_extract(e.payload,'$.action_generation')=?"
+    + " AND lower(json_extract(e.payload,'$.actor_id')) NOT LIKE 'service:%'"
+    + " AND lower(json_extract(e.payload,'$.actor_id')) NOT LIKE 'agent:%'"
+    + " AND lower(json_extract(e.payload,'$.actor_id')) NOT LIKE 'system:%'"
+    + " AND ((d.kind='startup_unknown' AND json_extract(e.payload,'$.resolution')='confirm_not_started')"
+    + " OR (d.kind IN ('verify_human','action_overrun') AND json_extract(e.payload,'$.resolution')='confirm_not_applied'))"
+    + (expected ? " AND d.decision_id=? AND d.revision=? AND d.status='resolved' AND d.closed_reason='approved'" : '')
+    + ' ORDER BY e.seq DESC LIMIT 1',
+    [row.node_run_id, row.run_id, row.attempt, row.action_generation, ...(expected ? [expected.decisionId, expected.revision] : [])],
+  )
 }
 
 function loadContradictionDecision(tx: Tx, request: ResolveDecisionRequest): ContradictionDecisionRow {
@@ -353,6 +393,16 @@ export function resolveRegisteredReportConflict(tx: Tx, secret: string, request:
   if (request.resolution === 'uphold_report' && binding.evidence_failure) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '已登记回报未通过系统证据核验，冲突保持待处理', { reason: binding.evidence_failure })
   }
+  if (request.resolution === 'uphold_decision') {
+    const original = binding.original_decision_revision === undefined ? undefined : originalDecision(tx, row, {
+      decisionId: binding.original_decision_id, revision: binding.original_decision_revision,
+    })
+    // A negative effect verdict needs the separate, verified absence-of-effect path.
+    if (original?.resolution !== 'confirm_not_started' || binding.original_resolution !== original.resolution
+      || binding.rearm_generation !== row.rearm_generation) {
+      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '原裁决与本次执行的可信记录不匹配')
+    }
+  }
   const result = applyReportInternal(tx, secret, {
     nodeRunId: row.node_run_id, attempt: binding.attempt, report: binding.report, expectedStatus: binding.hung_status,
     generation: binding.action_generation, now: request.now,
@@ -365,7 +415,8 @@ export function resolveRegisteredReportConflict(tx: Tx, secret: string, request:
 }
 
 /**
- * uphold_decision：维持人的原裁决，迟到报告永久标 stale，旧行 superseded，新 attempt 从旧行接班。
+ * uphold_decision keeps the original finding and permanently stales the report.
+ * Only a pure step can be replaced without running an effect again.
  * 裁决 CAS 与节点更新在同一事务里；revision 过期时节点一个字节不动。
  */
 function upholdDecision(
@@ -377,53 +428,56 @@ function upholdDecision(
   approval: ConflictApproval,
 ): ApplyResult {
   resolveReportContradictionDecision(tx, secret, approval.request)
-  const newNodeRunId = 'nrun_' + uuidv7()
+  const nextStatus = row.side_effect_policy === 'pure' ? 'superseded' : 'failed'
   applyTransition(tx, secret, {
     nodeRunId: params.nodeRunId,
     from: [row.status as NodeStatus],
-    to: 'superseded',
+    to: nextStatus,
     // 人维持原裁决 → 旧行作废，固定走 M-60；不能落到无守卫的 M-06
     ruleId: 'M-60',
     attempt: params.attempt,
     now: params.now,
+    expectedRevision: row.revision,
+    rearmGeneration: approval.registered.rearm_generation,
     allowHung: true,
     patch: {
       hang_reason: null,
       contradiction_decision_id: null,
       startup_unknown_deadline_at: null,
+      startup_unknown_boot_id: null,
+      startup_unknown_monotonic_ns: null,
       startup_unknown_remaining_ns: null,
     },
   })
-  createNodeRun(tx, {
-    newNodeRunId,
-    runId: row.run_id,
-    nodeId: row.node_id,
-    seq: row.seq,
-    nodeType: row.node_type,
-    attempt: params.attempt + 1,
-    originNodeRunId: params.nodeRunId,
-    previousActionGeneration: row.action_generation,
-    now: params.now,
-  })
-  // A new attempt of the same fixed pure step preserves its policy and must publish fresh evidence.
-  if (row.side_effect_policy === 'pure') tx.run("UPDATE node_runs SET side_effect_policy='pure' WHERE node_run_id=?", [newNodeRunId])
-  const stale = tx.run(
-    'UPDATE report_registry SET state = ?, updated_at = ? WHERE report_id = ?',
-    ['stale', params.now, params.report.report_id],
-  )
-  if (stale.changes === 0) {
-    tx.run(
-      'INSERT INTO report_registry (report_id, node_run_id, attempt, report_seq, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [params.report.report_id, params.nodeRunId, params.attempt, reportSeq, 'stale', params.now, params.now],
-    )
+  let replacement: string | null = null
+  if (nextStatus === 'superseded') {
+    replacement = 'nrun_' + uuidv7()
+    createNodeRun(tx, {
+      newNodeRunId: replacement, runId: row.run_id, nodeId: row.node_id, seq: row.seq, nodeType: row.node_type,
+      attempt: params.attempt + 1, originNodeRunId: params.nodeRunId,
+      previousActionGeneration: row.action_generation, now: params.now,
+    })
+    tx.run("UPDATE node_runs SET side_effect_policy='pure' WHERE node_run_id=?", [replacement])
   }
+  const stale = tx.run(
+    "UPDATE report_registry SET state='stale', updated_at=? WHERE report_id=?"
+    + " AND node_run_id=? AND attempt=? AND report_seq=? AND state='rejected'",
+    [params.now, params.report.report_id, params.nodeRunId, params.attempt, reportSeq],
+  )
+  if (stale.changes !== 1) throw new OrchError('STALE_GENERATION', '已登记报告身份发生变化')
   appendNodeRunEvent(tx, secret, params.nodeRunId, 'report.stale', {
     report_id: params.report.report_id,
     report_seq: reportSeq,
+    report_digest: approval.registered.report_digest,
     decision_id: approval.decision.decision_id,
+    decision_revision: approval.decision.revision,
+    original_decision_id: approval.registered.original_decision_id,
+    original_decision_revision: approval.registered.original_decision_revision,
+    attempt: params.attempt, rearm_generation: approval.registered.rearm_generation,
+    next_status: nextStatus, replacement_node_run_id: replacement,
     reason: 'uphold_decision',
   })
-  return { accepted: false, reason: 'uphold_decision', next_status: 'superseded', registry_state: 'stale' }
+  return { accepted: false, reason: 'uphold_decision', next_status: nextStatus, registry_state: 'stale' }
 }
 
 
@@ -488,6 +542,7 @@ function applyReportInternal(
       }
       return { accepted: false, reason: 'already_replayed', registry_state: 'replayed' }
     }
+    if (existing.state === 'stale') return { accepted: false, reason: 'report_stale', registry_state: 'stale' }
     // 已 rejected 的走重放路径：先验哈希链，再确认是当前 attempt 的队头（规格 4.2 行 304）
     if (existing.attempt !== params.attempt) {
       return { accepted: false, reason: 'replay_stale_attempt', registry_state: 'rejected' }
@@ -546,21 +601,11 @@ function applyReportInternal(
   }
   if (!approval && !existing && !row.hang_reason && row.action_generation === params.generation
     && ['startup_unknown', 'indeterminate_side_effect'].includes(row.status) && ['done', 'failed'].includes(report.status)) {
-    const prior = tx.get<{ decision_id: string }>(
-      "SELECT d.decision_id FROM decisions d JOIN events e ON e.decision_id = d.decision_id AND e.run_id = d.run_id "
-      + "WHERE d.node_run_id = ? AND d.run_id = ? AND d.kind IN ('startup_unknown','verify_human','action_overrun') "
-      + "AND e.type = 'decision.resolved' AND json_valid(e.payload_redacted) "
-      + "AND json_extract(e.payload_redacted,'$.revision') = d.revision "
-      + "AND json_extract(e.payload_redacted,'$.actorKind') = 'human' "
-      + "AND json_extract(e.payload_redacted,'$.attempt') = ? AND json_extract(e.payload_redacted,'$.action_generation') = ? "
-      + "AND lower(d.resolved_by) NOT LIKE 'service:%' AND lower(d.resolved_by) NOT LIKE 'agent:%' AND lower(d.resolved_by) NOT LIKE 'system:%' "
-      + "AND json_extract(e.payload_redacted,'$.resolution') IN ('confirm_not_started','confirm_not_applied') ORDER BY e.seq DESC LIMIT 1",
-      [row.node_run_id, row.run_id, row.attempt, row.action_generation],
-    )
+    const prior = originalDecision(tx, row)
     if (prior) {
       raiseReportContradiction(tx, secret, { nodeRunId: row.node_run_id, runId: row.run_id,
         attempt: params.attempt, reportId: report.report_id, now: params.now },
-      { report, generation: params.generation, originalDecisionId: prior.decision_id, catalog })
+      { report, generation: params.generation, originalDecisionId: prior.decision_id, catalog, original: prior })
       return { accepted: false, reason: 'report_contradicted', registry_state: 'rejected' }
     }
   }

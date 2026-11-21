@@ -3,7 +3,7 @@ import { OrchError } from '../../core/errors.ts'
 import type { DecisionPriority } from '../../core/decision-priority.ts'
 import type { DecisionKind } from '../../core/state-machine.ts'
 import { assertApprover, defaultApprover, type Actor, type Approver } from '../decision/approver.ts'
-import { appendEvent, appendNodeRunEvent } from '../../infra/db/ledger.ts'
+import { appendEvent, appendNodeRunEvent, assertChainIntact } from '../../infra/db/ledger.ts'
 import { closeRun } from './run-close.ts'
 import { settleDecisionOutcome } from './effects.ts'
 import { applyTransition } from './nodes.ts'
@@ -277,7 +277,7 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
       ? 'expired_final'
       : req.resolution === 'uphold_report'
         ? 'approved'
-        : req.resolution
+        : req.resolution === 'uphold_decision' ? 'rejected' : req.resolution
     : null
   const payloadJson = req.payload
     ? JSON.stringify({ ...(JSON.parse(current.payload_json) as Record<string, unknown>), ...req.payload })
@@ -298,6 +298,13 @@ export function resolveDecision(tx: Tx, secret: string, req: ResolveDecisionRequ
       'SELECT attempt, action_generation FROM node_runs WHERE node_run_id = ? AND run_id = ?',
       [current.node_run_id, current.run_id],
     ) : undefined
+  if (priorExecution && current.node_run_id && actor.kind === 'human') {
+    assertChainIntact(tx, secret, current.node_run_id)
+    appendNodeRunEvent(tx, secret, current.node_run_id, 'decision.original_finding', {
+      decision_id: req.decisionId, revision: req.revision + 1, resolution: req.resolution, actor_kind: actor.kind, actor_id: actor.id,
+      ...priorExecution,
+    })
+  }
   appendEvent(tx, {
     type: 'decision.resolved',
     runId: current.run_id,

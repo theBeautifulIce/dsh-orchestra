@@ -29,9 +29,10 @@ function panelService(handler: (query: FakeQuery) => FakeReply) {
 }
 
 describe('待你决定屏的排序', () => {
-  it('WF-52 冲突卡展示已登记回报，采纳使用当前裁决修订', async () => {
+  it.each([['uphold_report', '采纳回报'], ['uphold_decision', '保留原处理决定']])(
+    'WF-52 / F8 冲突卡使用当前修订提交 %s', async (resolution, label) => {
     const item = decisionView({ decision_id: 'd-report', kind: 'report_contradicted', status: 'blocked_for_human',
-      current_revision: 3, approver: 'human', allowed_resolutions: ['uphold_report'],
+      current_revision: 3, approver: 'human', allowed_resolutions: [resolution],
       payload: { report_id: 'r-original', report_status: 'done', report_attempt: 2 } })
     const { api, commands, posts } = panelService(({ path }) => path === '/v1/decisions/resolve'
       ? { ok: true, data: { decisionId: item.decision_id, revision: 4 } }
@@ -39,9 +40,9 @@ describe('待你决定屏的排序', () => {
     const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
     expect(view.text()).toContain('r-original')
     expect(view.text()).toContain('第 2 次')
-    await view.click(view.findAll('button').find(button => button.textContent === '采纳回报')!)
+    await view.click(view.findAll('button').find(button => button.textContent === label)!)
     expect(posts).toEqual([{ path: '/v1/decisions/resolve', body: {
-      decisionId: 'd-report', revision: 3, resolution: 'uphold_report', contentHash: item.content_hash,
+      decisionId: 'd-report', revision: 3, resolution, contentHash: item.content_hash,
       operation_id: expect.any(String),
     } }])
     view.unmount()

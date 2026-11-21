@@ -438,7 +438,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
     resolveDecision: (input) => inTx(db, (tx) => {
       const { operationId, now, confirmChallenge, bindActor, ...b } = input
       return runDecisionCommand(tx, opts.secret, input, requestHashOf('decision.resolve', b), false, (confirmed, requireEffectSettlement) => {
-        if (b.resolution === 'uphold_report') {
+        if (b.resolution === 'uphold_report' || b.resolution === 'uphold_decision') {
           return resolveRegisteredReportConflict(tx, opts.secret, { ...b, now, confirm: confirmed }, catalog)
         }
         const out = resolveDecision(tx, opts.secret, {
