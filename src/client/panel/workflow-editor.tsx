@@ -269,6 +269,7 @@ export function WorkflowEditor({ commands, workflow, onRefresh, snapshotStale = 
           onChange={(next) => markDirty(JSON.stringify(next, null, 2))}
           canvasId="draft-canvas"
           inspectNodes
+          editRecoveryRetry={canWrite && busy === null}
           workspace
         />
         <details data-definition-drawer="true" style={drawerStyle}>

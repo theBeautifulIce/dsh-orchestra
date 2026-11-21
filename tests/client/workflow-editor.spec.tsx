@@ -121,6 +121,45 @@ async function clickButton(view: PanelView, label: string): Promise<void> {
 }
 
 describe('流程草稿编辑屏', () => {
+  it('在智能体节点配置核实后重试，保留其他配置并用草稿保存', async () => {
+    const calls: UpdateDraftInput[] = []
+    const commands = fakeCommands({
+      updateWorkflowDraft: async (input) => {
+        calls.push(input)
+        return {
+          operation_id: 'retry-opt-in',
+          kind: 'workflow.update',
+          replayed: false,
+          result: { revision: 3, changed: true, validation: { errors: [], truncated: false, total: 0 } },
+          receipt: receiptRow('retry-opt-in', 'workflow.update'),
+        }
+      },
+    })
+    const workflow = viewFixture()
+    const view = await renderPanel(<WorkflowEditor commands={commands} workflow={{
+      ...workflow, draft: {
+        ...workflow.draft!,
+        definition: { ...DOC, nodes: [DOC.nodes[0], { ...DOC.nodes[1], config: { side_effect_policy: 'pure' } }] },
+      },
+    }} onRefresh={() => {}} />)
+    const checkbox = () => view.container.querySelector<HTMLInputElement>('input[type="checkbox"]')
+    expect(checkbox()).toBeNull()
+    await clickButton(view, '第二步')
+    expect(checkbox()?.checked).toBe(false)
+    await view.click(checkbox()!)
+    expect(checkbox()?.checked).toBe(true)
+    expect(calls).toHaveLength(0)
+    await view.click(checkbox()!)
+    expect(JSON.parse(editorOf(view).value).nodes[1].config).toEqual({ side_effect_policy: 'pure' })
+    await view.click(checkbox()!)
+    await clickButton(view, '保存草稿')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.definition).toMatchObject({
+      nodes: [DOC.nodes[0], { ...DOC.nodes[1], config: { side_effect_policy: 'pure', recovery_retry_idempotent: true } }],
+      edges: DOC.edges,
+    })
+  })
+
   it('Q-20 过期快照保留草稿和本地编辑，恢复连接后才发送保存与测试', async () => {
     const writes: string[] = []
     const commands = fakeCommands({
