@@ -21,6 +21,8 @@ export type EvidenceGateOptions = {
   // 这样 commandHash / stdoutHash / 整个 output 的摘要都不能冒充某个具名产物，
   // 两个 required key 也不能填同一个哈希（S2 第二十五轮 P1-1）。
   output?: unknown
+  // A verified ledger can retain the digest of each product instead of its contents.
+  registeredProductDigests?: Readonly<Record<string, string>>
 }
 
 export function evaluateEvidence(
@@ -49,23 +51,24 @@ export function evaluateEvidence(
     const outputObject = output !== null && typeof output === 'object' && !Array.isArray(output)
       ? output as Record<string, unknown>
       : null
-    const invalid = requiredHashes.filter((h) => {
+    const productDigest = (key: string): string | undefined => {
+      const registered = options.registeredProductDigests
+      if (registered) return Object.hasOwn(registered, key) ? registered[key] : undefined
+      if (!outputObject || !Object.hasOwn(outputObject, key)) return undefined
+      const product = outputObject[key]
+      return product === null || product === undefined ? undefined : sha256Hex(canonicalJson(product))
+    }
+    const productDigests = requiredHashes.map(productDigest)
+    const invalid = requiredHashes.some((h, index) => {
       const value = provided[h]
       if (typeof value !== 'string' || !/^[0-9a-f]{64}$/i.test(value)) return true
-      // 键语义必须绑定到 output 的同名字段：没有产物、或产物哈希不等于证据值，都不算。
-      if (outputObject === null || !Object.prototype.hasOwnProperty.call(outputObject, h)) return true
-      // 产物为 null/undefined 时没有可核验内容，不能拿 sha256("null") 当凭据（S2 第二十六轮 P2-1）。
-      const product = outputObject[h]
-      if (product === null || product === undefined) return true
-      const expected = sha256Hex(canonicalJson(product))
-      return value.toLowerCase() !== expected.toLowerCase()
+      return value.toLowerCase() !== productDigests[index]
     })
-    if (invalid.length > 0) {
+    if (invalid) {
       return { ok: false, reason: 'verification_too_weak', strength, digest, normalized }
     }
     // 每个 required key 必须对应一份独立产物：两个键共用同一份内容时，
     // 一个产物只能证明一个 key，不能同时充当两份凭据（S2 第二十六轮 P2-2）。
-    const productDigests = requiredHashes.map((h) => sha256Hex(canonicalJson(outputObject![h])))
     if (new Set(productDigests).size !== productDigests.length) {
       return { ok: false, reason: 'verification_too_weak', strength, digest, normalized }
     }

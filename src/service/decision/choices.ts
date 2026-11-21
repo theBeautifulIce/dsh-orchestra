@@ -7,6 +7,7 @@ export type DecisionChoiceContext = {
   expires_at: unknown
   memory_approval_status: unknown
   memory_recovery: unknown
+  registered_report?: unknown
 }
 
 export type MemoryDecisionAccess = boolean | 'proposal_only'
@@ -17,6 +18,9 @@ export function panelDecisionOptions(decision: DecisionChoiceContext, now: numbe
   const restricted = panelDecisionRestriction(decision, now)
   if (restricted) return unavailable(restricted)
   if (isEffectDecision(decision)) return unavailable('此裁决必须提交对应节点的系统核验证据。')
+  if (decision.kind === 'report_contradicted') return decision.registered_report === 1
+    ? { choices: ['uphold_report'], unavailableReason: null }
+    : unavailable('这张冲突卡缺少可核验的报告登记。')
   if (memoryEnabled === 'proposal_only' && decision.kind === 'audit_result' && decision.memory_approval_status === 'awaiting_human') {
     return { choices: ['rejected'], unavailableReason: '当前试用圈只开放记忆提议。' }
   }
@@ -44,3 +48,11 @@ export function panelDecisionRestriction(decision: DecisionChoiceContext, now: n
 // Both the read model and the write policy use the same batch/decision association.
 export const DECISION_CHOICE_COLUMNS = '(SELECT b.status FROM memory_batches b WHERE b.decision_id = d.decision_id) AS memory_approval_status, '
   + 'EXISTS (SELECT 1 FROM memory_write_recoveries m WHERE m.decision_id = d.decision_id OR m.abandon_ack_id = d.decision_id) AS memory_recovery'
+  + ", CASE WHEN d.kind = 'report_contradicted' AND json_valid(d.payload_json) THEN EXISTS ("
+  + "SELECT 1 FROM report_registry p WHERE p.report_id = json_extract(d.payload_json, '$.report_id')"
+  + " AND p.node_run_id = d.node_run_id AND p.attempt = json_extract(d.payload_json, '$.report_attempt') AND p.state = 'rejected'"
+  + " AND EXISTS (SELECT 1 FROM node_runs n WHERE n.node_run_id = d.node_run_id AND n.run_id = d.run_id"
+  + " AND n.hang_reason = 'report_contradicted' AND n.contradiction_decision_id = d.decision_id"
+  + " AND n.status = json_extract(d.payload_json, '$.hung_status') AND n.attempt = p.attempt"
+  + " AND n.action_generation = json_extract(d.payload_json, '$.report_generation'))"
+  + ") ELSE 0 END AS registered_report"

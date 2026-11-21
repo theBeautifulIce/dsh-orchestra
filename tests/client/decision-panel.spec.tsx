@@ -29,6 +29,24 @@ function panelService(handler: (query: FakeQuery) => FakeReply) {
 }
 
 describe('待你决定屏的排序', () => {
+  it('WF-52 冲突卡展示已登记回报，采纳使用当前裁决修订', async () => {
+    const item = decisionView({ decision_id: 'd-report', kind: 'report_contradicted', status: 'blocked_for_human',
+      current_revision: 3, approver: 'human', allowed_resolutions: ['uphold_report'],
+      payload: { report_id: 'r-original', report_status: 'done', report_attempt: 2 } })
+    const { api, commands, posts } = panelService(({ path }) => path === '/v1/decisions/resolve'
+      ? { ok: true, data: { decisionId: item.decision_id, revision: 4 } }
+      : { ok: true, data: page([item]) })
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    expect(view.text()).toContain('r-original')
+    expect(view.text()).toContain('第 2 次')
+    await view.click(view.findAll('button').find(button => button.textContent === '采纳回报')!)
+    expect(posts).toEqual([{ path: '/v1/decisions/resolve', body: {
+      decisionId: 'd-report', revision: 3, resolution: 'uphold_report', contentHash: item.content_hash,
+      operation_id: expect.any(String),
+    } }])
+    view.unmount()
+  })
+
   it('Q-10 结果不一致只由人工处理，即使旧记录有截止时间也不显示自动收口时间', async () => {
     const { api } = panelService(() => ({ ok: true, data: page([decisionView({ kind: 'report_contradicted',
       expires_at: '2026-11-21T00:00:00.000Z', expiry_effect: 'auto_resolve', allowed_resolutions: [] })]) }))

@@ -325,6 +325,7 @@ function DecisionCard(props: {
   const priority = decision.priority && PRIORITY_LABEL.get(decision.priority)
   const evidence = [...new Set((decision.required_evidence ?? []).map(operatorReason))]
   const missing = decision.projection_missing ?? []
+  const conflict = decision.kind === 'report_contradicted' && isRecord(decision.payload) ? decision.payload : null
   // 记忆审批卡：卡上的两个按钮由服务端给的标签与 resolution 组成，前端不猜。
   const memoryCard = useMemo(() => readMemoryApprovalCard(decision.payload), [decision.payload])
   if (memoryCard && decision.status !== 'resolved') {
@@ -350,6 +351,9 @@ function DecisionCard(props: {
     <dl style={detailGridStyle}>
       <dt>说明</dt><dd>{optionalReason(decision.target_summary, '说明暂不可用')}</dd>
       <dt>为什么卡</dt><dd>{optionalReason(decision.priority_reason)}</dd>
+      {conflict && typeof conflict.report_id === 'string' && <><dt>回报 ID</dt><dd>{conflict.report_id}</dd></>}
+      {conflict && typeof conflict.report_status === 'string' && <><dt>回报结论</dt><dd>{operatorStatus(conflict.report_status)}</dd></>}
+      {conflict && typeof conflict.report_attempt === 'number' && <><dt>执行尝试</dt><dd>第 {conflict.report_attempt} 次</dd></>}
       {decision.approver && <><dt>谁能处理</dt><dd>{agentOnly ? APPROVER_LABEL.agent
         : Object.hasOwn(APPROVER_LABEL, decision.approver) ? APPROVER_LABEL[decision.approver] : '处理人待确认'}</dd></>}
       <dt>你能选什么</dt><dd>{choices.length ? choices.map(({ label }) => label).join(' / ') : NOT_PROVIDED}</dd>
@@ -358,7 +362,8 @@ function DecisionCard(props: {
         : memoryCard && decision.expires_at ? formatDate(decision.expires_at) + ' · 到期未批准，批次关闭。'
         : decision.expires_at ? formatDate(decision.expires_at) + ' · ' + (decision.expiry_effect && Object.hasOwn(EXPIRY_LABEL, decision.expiry_effect)
           ? EXPIRY_LABEL[decision.expiry_effect] : '截止后的处理方式尚未提供') : NOT_PROVIDED}</dd>
-      {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{DECISION_OPTIONS.get(decision.closed_reason ?? '') ?? optionalReason(decision.closed_reason)}</dd></>}
+      {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{decision.kind === 'report_contradicted' && decision.closed_reason === 'approved'
+        ? DECISION_OPTIONS.get('uphold_report') : DECISION_OPTIONS.get(decision.closed_reason ?? '') ?? optionalReason(decision.closed_reason)}</dd></>}
       {decision.status === 'resolved' && decision.resolved_by && <><dt>处理人</dt><dd>{agentOnly ? '授权核验主体' : '已记录，见开发者视图'}</dd></>}
       {decision.status === 'resolved' && decision.decided_at && <><dt>处理时间</dt><dd>{formatDate(decision.decided_at)}</dd></>}
     </dl>
