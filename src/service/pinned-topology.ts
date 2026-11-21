@@ -15,6 +15,7 @@ export type PinnedTopology = {
 const NO_PREDECESSORS: readonly string[] = Object.freeze([])
 const CACHE_LIMIT = 16
 const verifiedTopologies = new Map<string, { json: string; topology: PinnedTopology }>()
+const catalogTopologies = new WeakMap<WorkflowDefinition, { hash: string; topology: PinnedTopology }>()
 
 export function indexTopology(edges: readonly RuntimeEdge[], nodes: readonly WorkflowNodeDef[] = []): PinnedTopology {
   const byTarget = new Map<string, Set<string>>()
@@ -35,6 +36,17 @@ export function indexTopology(edges: readonly RuntimeEdge[], nodes: readonly Wor
     predecessors: nodeId => predecessors.get(nodeId) ?? NO_PREDECESSORS,
     parallelOwner: nodeId => owners.get(nodeId),
   }
+}
+
+/** The catalog supplies a deeply frozen definition that can be checked against the run once per snapshot. */
+export function catalogTopology(definition: WorkflowDefinition, expectedHash: string): PinnedTopology | null {
+  const cached = catalogTopologies.get(definition)
+  if (cached) return cached.hash === expectedHash ? cached.topology : null
+  const hash = definitionHashOf(definition)
+  if (hash !== expectedHash) return null
+  const topology = indexTopology(definition.edges ?? [], definition.nodes)
+  catalogTopologies.set(definition, { hash, topology })
+  return topology
 }
 
 /** Cache static topology only. The exact persisted bytes must still match on every use. */

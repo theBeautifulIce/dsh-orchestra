@@ -4,7 +4,8 @@ import type { Tx } from '../infra/sqlite/driver.ts'
 import type { ReadTx } from './queries/read-tx.ts'
 import { approvedRuntimeEdges, runtimeEdges, type RuntimeEdge } from './rework-edges.ts'
 import { isCandidateReviewer, reworkBlocksNode } from './rework-runtime.ts'
-import { indexTopology, verifiedTopology, type PinnedTopology } from './pinned-topology.ts'
+import { catalogTopology, indexTopology, verifiedTopology, type PinnedTopology } from './pinned-topology.ts'
+import type { WorkflowCatalog } from './workflows.ts'
 import { branchSkipped, intactBranchChain, selectedBranchTarget, verifiedBranchSkipSource } from './branch-routing.ts'
 import { applyTransition } from './commands/nodes.ts'
 import { parallelMemberMayStart, parallelMemberPath, parallelMembershipIsConsistent, unopenedParallelMember, type ParallelPathNode } from './workflow-parallel.ts'
@@ -41,10 +42,20 @@ export function readRunBinding(tx: ReadTx, runId: string) {
 const EMPTY_TOPOLOGY = indexTopology([])
 
 /** A null result means the persisted topology could not be verified. */
-export function pinnedRunTopology(binding: NonNullable<ReturnType<typeof readRunBinding>>): PinnedTopology | null {
-  if (binding.definition_json === null) return binding.workflow_definition_hash ? null : EMPTY_TOPOLOGY
-  if (binding.workflow_definition_hash && binding.content_hash !== binding.workflow_definition_hash) return null
-  return verifiedTopology(binding.definition_json, binding.workflow_definition_hash)
+export function pinnedRunTopology(binding: NonNullable<ReturnType<typeof readRunBinding>>, catalog?: WorkflowCatalog): PinnedTopology | null {
+  const hash = binding.workflow_definition_hash
+  if (binding.definition_json === null && !hash) return EMPTY_TOPOLOGY
+  const stored = binding.definition_json !== null && (!hash || binding.content_hash === hash)
+    ? verifiedTopology(binding.definition_json, hash) : null
+  if (stored || !hash || !catalog || catalog.hasPersistedStorage()) return stored
+
+  // In-process integrations may still have a legacy storage row. Their frozen catalog
+  // can supply the topology only when it matches the exact version hash bound to the run.
+  try {
+    return catalogTopology(catalog.getImmutable(binding.workflow_id, binding.workflow_version), hash)
+  } catch {
+    return null
+  }
 }
 
 export function pinnedTopologyForRun(tx: ReadTx, runId: string): PinnedTopology | null {
@@ -196,6 +207,10 @@ export function verifiedParallelSkip(tx: ReadTx, secret: string, runId: string, 
   const receipt = parallelSkipReceipt(tx, nodeRunId)
   if (!receipt || !chainIsIntact(secret, readChain(tx, nodeRunId), readChainHead(tx, nodeRunId), true)) return false
   if (!topology) return false
+  const node = runPathNode(tx, runId, nodeId)
+  if (!node || node.node_run_id !== nodeRunId || node.status !== 'superseded') return false
+  const path = parallelMemberPath(tx, secret, runId, node, topology)
+  if (path !== 'active' && !(path === 'waiting' && unopenedParallelMember(tx, secret, runId, topology, node))) return false
   lookup ??= id => nodePredecessors(tx, runId, topology, id)
   const inputs = parallelInactiveInputs(tx, secret, runId, nodeId, lookup(nodeId), topology, lookup, active)
   return inputs.length > 0 && JSON.stringify(inputs) === JSON.stringify(JSON.parse(receipt.payload).inactive_predecessors)

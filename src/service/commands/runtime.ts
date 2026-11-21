@@ -13,8 +13,6 @@ import type { WorkflowCatalog } from '../workflows.ts'
 import type { ClockProvider } from '../../core/clock.ts'
 import { OrchError } from '../../core/errors.ts'
 import { branchAncestryIsIntact, dependencyReadiness, nodePredecessors, pinnedRunTopology, readRunBinding } from '../run-readiness.ts'
-import { definitionHashOf } from '../workflows.ts'
-import { indexTopology } from '../pinned-topology.ts'
 import { recoverStandaloneToolResults } from '../../executor/run-tool-node.ts'
 import { refreshWorkflowParallelGroups, type GroupStop } from '../workflow-parallel.ts'
 
@@ -46,8 +44,8 @@ export function acquireNodeRunInTx(tx: Tx, deps: RuntimeDeps, p: AcquireNodeRunP
 }
 
 export function assertNodeRunReadyInTx(tx: Tx, deps: RuntimeDeps, nodeRunId: string, fromDispatcher = true): void {
-  const node = tx.get<{ run_id: string; node_id: string; node_type: string; workflow_id: string | null; workflow_version: string | null }>(
-    'SELECT n.run_id,n.node_id,n.node_type,r.workflow_id,r.workflow_version FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
+  const node = tx.get<{ run_id: string; node_id: string; node_type: string }>(
+    'SELECT run_id,node_id,node_type FROM node_runs WHERE node_run_id=?',
     [nodeRunId],
   )
   if (!node) throw new OrchError('NOT_FOUND', 'node_run 不存在', { nodeRunId })
@@ -58,12 +56,7 @@ export function assertNodeRunReadyInTx(tx: Tx, deps: RuntimeDeps, nodeRunId: str
   if (run.cancel_requested_at || run.status === 'paused') {
     throw new OrchError('STALE_GENERATION', '运行已暂停或取消，当前节点不能开始', { runId: node.run_id })
   }
-  let topology = pinnedRunTopology(run)
-  // Some in-process integrations load a fixed definition without attaching the catalog to the ledger.
-  if (!topology && run.definition_json === null && node.workflow_version !== null && !deps.catalog.hasPersistedStorage()) {
-    const def = deps.catalog.getImmutable(node.workflow_id ?? 'default', node.workflow_version)
-    if (definitionHashOf(def) === run.workflow_definition_hash) topology = indexTopology(def.edges ?? [], def.nodes)
-  }
+  const topology = pinnedRunTopology(run, deps.catalog)
   if (!topology) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
   const preds = nodePredecessors(tx, node.run_id, topology, node.node_id)
   const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds, node.node_id, deps.secret, topology)

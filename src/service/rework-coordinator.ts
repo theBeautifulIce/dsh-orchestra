@@ -12,7 +12,7 @@ import { runtimeEdges } from './rework-edges.ts'
 import { propagateRunCancellation } from './commands/subworkflow.ts'
 import type { ClockProvider } from '../core/clock.ts'
 import { withReadTx, type ReadTx } from './queries/read-tx.ts'
-import { authorizeReworkRuntime, acceptReworkRuntime, prepareReworkReviewer, previewReworkImpact } from './rework-runtime.ts'
+import { assertReworkReplacementAllowed, authorizeReworkRuntime, acceptReworkRuntime, prepareReworkReviewer, previewReworkImpact } from './rework-runtime.ts'
 export type ReworkBinding = {
   node_run_id: string
   attempt: number
@@ -98,6 +98,7 @@ type Node = ReworkBinding & {
   replacement_node_run_id: string | null
   node_type: string
   side_effect_policy: string
+  parent_node_run_id: string | null
 }
 const inactive = new Set(['closed', 'declined', 'cancelled'])
 export function loadReworkRequest(tx: ReadTx, requestId: string): ReworkRequest {
@@ -247,6 +248,7 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
     }
     if (tx.get('SELECT 1 FROM rework_requests WHERE (target_node_run_id=? OR new_node_run_id=?) AND status NOT IN (\'closed\',\'declined\',\'cancelled\')', [target.node_run_id, target.node_run_id]) || tx.get('SELECT 1 FROM rework_impacts WHERE (node_run_id=? OR replacement_node_run_id=?) AND released_at IS NULL', [target.node_run_id, target.node_run_id]))
       throw new OrchError('COMMAND_BUSY', '该成果已有未完成返工请求或依赖保护')
+    assertReworkReplacementAllowed(tx, target)
     const requestId = 'rework_' + uuidv7()
     tx.run('INSERT INTO rework_requests (request_id,run_id,requester_node_run_id,requester_actor,owner_actor,target_node_run_id,target_attempt,source_artifact_id,source_artifact_hash,reason,expected_result,preserve_requirements_json,suggested_scope,status,evidence_ids_json,expires_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [requestId, body.run_id, typeof actor === 'string' ? null : actor.node_run_id, planner ? 'planner:' + owner : actorKey(actor), owner, target.node_run_id, target.attempt, body.source_artifact_id, body.source_artifact_hash, body.reason, body.expected_result, JSON.stringify(body.preserve_requirements), body.suggested_scope, body.suggested_scope === 'replan_subgraph' ? 'needs_human_approval' : 'proposed', JSON.stringify(body.evidence_ids), new Date(Date.parse(now) + 86400000).toISOString(), now, now])
     if (body.verification_request_id)

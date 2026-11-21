@@ -5,7 +5,6 @@ import { resolvePinnedNodeId } from './rework-extra-steps.ts'
 // 或者同一次 runNode 被调度两次、重复占用名额（S2 第三十七轮 P0-01）。
 import { hasUnresolvedRework, queuedReworkHolds, reworkBlocksNode } from './rework-runtime.ts'
 import { dependencyReadiness, pinnedRunTopology, readRunBinding, runPredecessors } from './run-readiness.ts'
-import { indexTopology } from './pinned-topology.ts'
 import { makeTx } from '../infra/sqlite/driver.ts'
 import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
@@ -134,22 +133,22 @@ function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: Rea
   const tx = makeTx(deps.db.raw)
   const run = readRunBinding(tx, p.runId)
   if (!run || run.cancel_requested_at || run.status === 'paused') return undefined
-  let topology = pinnedRunTopology(run)
-  if (!topology && run.definition_json === null && deps.catalog && !deps.catalog.hasPersistedStorage()) {
-    try {
-      const def = deps.catalog.getImmutable(run.workflow_id, run.workflow_version)
-      if (definitionHashOf(def) === run.workflow_definition_hash) topology = indexTopology(def.edges ?? [], def.nodes)
-    } catch { /* An unavailable definition cannot supply dependency authority. */ }
-  }
-  // Preserve dispatch's deterministic handling of an unavailable definition. Its normal
-  // acquisition path refuses the lease and records the outcome for the supplied nodes.
-  const preds = runPredecessors(tx, p.runId, topology?.edges ?? [])
+  const topology = pinnedRunTopology(run, deps.catalog)
+  const preds = topology ? runPredecessors(tx, p.runId, topology.edges) : null
   const directReworkHolds = hasUnresolvedRework(tx, p.runId) ? null : queuedReworkHolds(tx, p.runId)
   const rows: DispatchCandidate[] = []
   const settled: DispatchOutcome[] = []
   for (const row of all) {
     if (submitted?.has(row.node_run_id)
       || (directReworkHolds ? directReworkHolds.has(row.node_run_id) : reworkBlocksNode(tx, row.node_run_id))) continue
+    if (!preds) {
+      if (p.nodes[row.node_id] || row.has_extra_step) {
+        const reason = '运行固定的依赖图不可用'
+        const code = 'WORKFLOW_VERSION_IMMUTABLE'
+        settled.push(outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code))
+      }
+      continue
+    }
     const readiness = dependencyReadiness(tx, p.runId, row.node_run_id, preds.get(row.node_id) ?? [], row.node_id, deps.secret, topology)
     if (readiness.ready) {
       rows.push(row)
