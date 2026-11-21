@@ -9,16 +9,20 @@ import { makeTx } from '../infra/sqlite/driver.ts'
 import { ERROR_STATUS, PROPOSED_ERROR_CODES, OrchError, type AnyOrchErrorCode } from '../core/errors.ts'
 import { DEFAULT_LEASE_TTL_MS, runNode, type RunNodeDeps, type RunNodeParams, type RunNodeResult } from '../executor/run-node.ts'
 import { inTx } from '../infra/db/tx.ts'
-import { acquireNodeRun, type RuntimeDeps } from './commands/runtime.ts'
-import type { Db } from '../infra/sqlite/driver.ts'
+import { acquireNodeRun, acquireNodeRunInTx, assertNodeRunReadyInTx, type RuntimeDeps } from './commands/runtime.ts'
+import type { Db, Tx } from '../infra/sqlite/driver.ts'
 import { enterWaiting, type WaitKind, type WaitMatch } from './commands/wait.ts'
 import { startSubworkflowNode } from './commands/subworkflow.ts'
-import { loadNodeRun } from './commands/lease.ts'
+import { loadNodeRun, releaseLease } from './commands/lease.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
 import { closeRun } from './commands/run-close.ts'
-import { applyTransition } from './commands/nodes.ts'
-import { appendNodeRunEvent } from '../infra/db/ledger.ts'
+import { applyTransition, enterBlockedPre, recordPolicyEvaluation } from './commands/nodes.ts'
+import { appendEvent, appendNodeRunEvent } from '../infra/db/ledger.ts'
 import { ExecutionQueueFullError } from './execution-scheduler.ts'
+import type { ApprovalNodeConfig, PolicyNodeConfig } from '../core/workflow-def.ts'
+import { sha256Hex, canonicalJson } from '../core/canonical.ts'
+import { uuidv7 } from '../core/ids.ts'
+import { openDecision } from './commands/decisions.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
@@ -289,7 +293,7 @@ async function dispatchOne(
     return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
   }
   if (control) {
-    return dispatchControlNode(deps, p, row, control)
+    return dispatchControlNode(deps, p, row, control, spec)
   }
   // 一个节点失败不拖垮同批别的节点：异常在这里收成一条 failed 结果
   try {
@@ -343,6 +347,8 @@ async function dispatchOne(
 type ControlNodeConfig =
   | { kind: 'wait'; waitKind: WaitKind; match: WaitMatch; idempotencyKey: string; fromSeq?: number; maxWaitMs: number }
   | { kind: 'subworkflow'; workflowId: string; workflowVersion: number; resumeFrom: string | null }
+  | { kind: 'policy'; config: PolicyNodeConfig }
+  | { kind: 'approval'; config: ApprovalNodeConfig; definitionHash: string }
 
 type RunBinding = {
   workflow_id: string | null
@@ -434,10 +440,12 @@ function currentStatusOf(deps: Pick<DispatchDeps, 'db'>, nodeRunId: string): str
 
 // 控制节点类型与数据库行上的 node_type 必须一一对应：
 // 请求不能把 agent 节点变成控制节点，也不能把 parallel/decision 当成 wait 执行。
-const CONTROL_KINDS: Record<string, 'wait' | 'subworkflow' | null> = {
+const CONTROL_KINDS: Record<string, ControlNodeConfig['kind'] | null> = {
   wait: 'wait',
   subworkflow: 'subworkflow',
   agent: null,
+  policy: 'policy',
+  approval: 'approval',
 }
 
 /**
@@ -521,6 +529,18 @@ function resolveControlConfig(
     })
   }
   if (kind === null) return null
+  if (kind === 'policy') {
+    if (!declared.policy) {
+      throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'policy 节点缺少已发布的规则', { nodeId: row.node_id })
+    }
+    return { kind: 'policy', config: declared.policy }
+  }
+  if (kind === 'approval') {
+    if (!declared.approval) {
+      throw new OrchError('WORKFLOW_VALIDATION_FAILED', 'approval 节点缺少已发布的审批配置', { nodeId: row.node_id })
+    }
+    return { kind: 'approval', config: declared.approval, definitionHash: run!.workflow_definition_hash }
+  }
   if (kind === 'wait') {
     const cfg = declared.wait
     if (!cfg) {
@@ -555,7 +575,10 @@ async function dispatchControlNode(
   p: DispatchParams,
   row: { node_run_id: string; node_id: string; seq: number; attempt: number },
   control: ControlNodeConfig,
+  spec: NodeSpec,
 ): Promise<DispatchOutcome> {
+  if (control.kind === 'policy') return dispatchPolicyNode(deps, p, row, control.config, spec)
+  if (control.kind === 'approval') return dispatchApprovalNode(deps, p, row, control, spec)
   try {
     acquireNodeRun(deps.runtime, {
       nodeRunId: row.node_run_id,
@@ -629,6 +652,98 @@ async function dispatchControlNode(
     // closeRun 也永远等不到终态（审计 P2-2）。
     return outcomeForSettlement(failControlDispatch(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
   }
+}
+
+function dispatchPolicyNode(deps: DispatchDeps, p: DispatchParams, row: DispatchRow, policy: PolicyNodeConfig, spec: NodeSpec): DispatchOutcome {
+  const nodeRunId = row.node_run_id
+  const nodeId = row.node_id
+  try {
+    if (spec.tools.length > 0) throw new OrchError('TOOL_NOT_ALLOWED', 'policy 节点不允许调用工具')
+    inTx(deps.db, (tx) => {
+      startSynchronousNode(tx, deps, p, row)
+      const outcome = recordPolicyEvaluation(tx, deps.secret, nodeRunId, policy.condition, spec.input ?? {}, { ruleId: policy.rule_id ?? nodeId })
+      finishSynchronousNode(tx, deps, p, row, { reason: 'policy_evaluated', decision: outcome.decision })
+    })
+    return { node_run_id: nodeRunId, node_id: nodeId, status: 'done' }
+  } catch (error) {
+    return settleSynchronousError(deps, p, row, error)
+  }
+}
+
+function dispatchApprovalNode(
+  deps: DispatchDeps, p: DispatchParams, row: DispatchRow, approval: Extract<ControlNodeConfig, { kind: 'approval' }>, spec: NodeSpec,
+): DispatchOutcome {
+  const nodeRunId = row.node_run_id
+  try {
+    if (spec.tools.length > 0) throw new OrchError('TOOL_NOT_ALLOWED', 'approval 节点不允许调用工具')
+    const bound = { run_id: p.runId, node_run_id: nodeRunId, attempt: row.attempt, definition_hash: approval.definitionHash }
+    const hash = sha256Hex(canonicalJson(bound))
+    const result = inTx(deps.db, (tx) => {
+      const current = loadNodeRun(tx, nodeRunId)
+      if (current.status !== 'queued' || current.attempt !== row.attempt) {
+        throw new OrchError('STALE_GENERATION', '审批节点已被处理')
+      }
+      const decision = tx.get<{ decision_id: string; status: string; closed_reason: string | null; approver: string }>(
+        "SELECT decision_id,status,closed_reason,approver FROM decisions WHERE run_id=? AND node_run_id=? AND kind='pre_execution' AND content_hash=?",
+        [p.runId, nodeRunId, hash],
+      )
+      if (decision) {
+        if (decision.approver !== 'human' || decision.status !== 'resolved' || decision.closed_reason !== 'approved') {
+          throw new OrchError('DECISION_REQUIRED', '没有与此审批节点绑定的有效人工批准')
+        }
+        startSynchronousNode(tx, deps, p, row)
+        appendNodeRunEvent(tx, deps.secret, nodeRunId, 'approval.completed', { decision_ref: decision.decision_id, payload: {} })
+        finishSynchronousNode(tx, deps, p, row, { reason: 'approval_approved', decision_id: decision.decision_id })
+        return { status: 'done' as const }
+      }
+      assertNodeRunReadyInTx(tx, deps.runtime, nodeRunId)
+      const decisionId = 'dec_' + uuidv7()
+      openDecision(tx, { decisionId, runId: p.runId, nodeRunId, kind: 'pre_execution', approver: 'human', contentHash: hash,
+        payload: { node_type: 'approval', prompt: approval.config.prompt, on_timeout: approval.config.on_timeout },
+        createdAt: p.now, expiresAt: new Date(Date.parse(p.now) + 24 * 60 * 60 * 1000).toISOString(),
+      })
+      tx.run("UPDATE node_runs SET side_effect_policy='pure', side_effect_verified_none=1 WHERE node_run_id=?", [nodeRunId])
+      enterBlockedPre(tx, deps.secret, { nodeRunId, attempt: row.attempt, decisionId, actionGeneration: current.action_generation, now: p.now })
+      appendEvent(tx, { type: 'decision.created', runId: p.runId, nodeRunId, decisionId, payload: { kind: 'pre_execution' } })
+      return { status: 'waiting' as const, reason: 'approval_required' }
+    })
+    return { node_run_id: nodeRunId, node_id: row.node_id, ...result }
+  } catch (error) {
+    return settleSynchronousError(deps, p, row, error)
+  }
+}
+
+function startSynchronousNode(tx: Tx, deps: DispatchDeps, p: DispatchParams, row: DispatchRow): void {
+  const nodeRunId = row.node_run_id
+  acquireNodeRunInTx(tx, deps.runtime, {
+    nodeRunId,
+    ownerEpoch: p.ownerEpoch ?? deps.db.epoch,
+    leaseTtlMs: p.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
+    now: p.now,
+  })
+  applyTransition(tx, deps.secret, { nodeRunId, from: ['dispatched'], to: 'started', attempt: row.attempt, now: p.now })
+}
+
+function finishSynchronousNode(tx: Tx, deps: DispatchDeps, p: DispatchParams, row: DispatchRow, evidence: object): void {
+  const nodeRunId = row.node_run_id
+  applyTransition(tx, deps.secret, {
+    nodeRunId, from: ['started'], to: 'done', ruleId: 'M-44', attempt: row.attempt, now: p.now,
+    patch: { side_effect_policy: 'pure', side_effect_verified_none: 1 },
+  })
+  releaseLease(tx, { nodeRunId, now: p.now })
+  appendNodeRunEvent(tx, deps.secret, nodeRunId, 'status_changed', { from: 'started', to: 'done', ...evidence })
+}
+
+function settleSynchronousError(deps: DispatchDeps, p: DispatchParams, row: DispatchRow, error: unknown): DispatchOutcome {
+  const reason = error instanceof Error ? error.message : String(error)
+  const code = dispatchErrorCode(error)
+  const currentStatus = currentStatusOf(deps, row.node_run_id)
+  if (currentStatus !== null && (code === 'STALE_GENERATION' || code === 'RESOLUTION_NOT_AVAILABLE')) {
+    return outcomeForSettlement({ kind: 'already_moved', currentStatus }, row, reason, code)
+  }
+  const settled = code ? failQueuedNode(deps, p, row, reason, code)
+    : { kind: 'storage_error' as const, error, persistedStatus: currentStatus ?? undefined }
+  return outcomeForSettlement(settled, row, reason, code)
 }
 
 /**

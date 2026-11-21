@@ -107,9 +107,10 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
   const humanAttention = context?.autonomy !== 'autonomous' || draft.kind !== 'audit_result'
     || approver === 'human' || confirmRequired || actionCategory === 'irreversible'
     || context.side_effect_policy === 'irreversible' || context.node_status === 'blocked_post'
+  const workflowApproval = draft.kind === 'pre_execution' && nodeType === 'approval' && draft.expiresAt !== undefined
   const expiry = draft.kind === 'report_contradicted'
     ? { effect: 'none', reason: '报告冲突只由人工裁决。' }
-    : expiresByEscalation ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' }
+    : expiresByEscalation && !workflowApproval ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' }
       : { effect: 'auto_resolve', reason: '超时后按已记录的默认规则处理。' }
   tx.run(
     'INSERT INTO decisions (decision_id, run_id, node_run_id, kind, status, revision, payload_json, content_hash, expires_at, approver, '
@@ -454,10 +455,12 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     expiry_effect: string | null
     run_status: string | null
     node_status: string | null
+    node_type: string | null
+    expires_at: string | null
     node_run_id: string | null
   }>(
-    'SELECT d.decision_id, d.run_id, d.kind, d.status, d.revision, d.created_at, d.node_run_id, d.human_attention, d.expiry_effect, '
-      + 'COALESCE(t.autonomy, \'autonomous\') AS autonomy, r.status AS run_status, n.status AS node_status '
+    'SELECT d.decision_id, d.run_id, d.kind, d.status, d.revision, d.created_at, d.node_run_id, d.human_attention, d.expiry_effect, d.expires_at, '
+      + 'COALESCE(t.autonomy, \'autonomous\') AS autonomy, r.status AS run_status, n.status AS node_status, n.node_type '
       + 'FROM decisions d LEFT JOIN runs r ON r.run_id = d.run_id LEFT JOIN tasks t ON t.task_id = r.task_id '
       + 'LEFT JOIN node_runs n ON n.node_run_id = d.node_run_id '
       + 'WHERE NOT EXISTS (SELECT 1 FROM memory_batches b WHERE b.decision_id = d.decision_id) '
@@ -482,7 +485,9 @@ export function sweepDecisions(tx: Tx, secret: string, opts: SweepDecisionsOptio
     if (!holdForHuman && row.status === 'blocked_for_human') {
       expiryAge = nowMs - decisionEscalationTime(tx, row, opts.now)
     }
-    if (!holdForHuman && expiryAge !== null && expiryAge >= expireAfterMs) {
+    const workflowApprovalExpired = row.kind === 'pre_execution' && row.node_type === 'approval' && row.expires_at !== null
+      && nowMs >= Date.parse(row.expires_at)
+    if (workflowApprovalExpired || (!holdForHuman && expiryAge !== null && expiryAge >= expireAfterMs)) {
       const closed = cancelDecision(tx, secret, { decisionId: row.decision_id, now: opts.now, reason: 'expired_final' })
       // 并发的人工裁决抢先改了 revision：本轮不算自动处理成功
       if (!closed.changed) continue

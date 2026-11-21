@@ -3,6 +3,7 @@ import { resolvePinnedNodeId } from '../rework-extra-steps.ts'
 import { OrchError } from '../../core/errors.ts'
 import { isReportRegistryState, type ApplyResult, type Report } from '../../core/report.ts'
 import type { PassCondition } from '../../core/policy.ts'
+import { isControlWorkflowNode } from '../../core/workflow-def.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../infra/db/ledger.ts'
 import { transitionNode } from './node-state.ts'
@@ -384,7 +385,7 @@ export function applyReport(
   const row: NodeRunRow = loadNodeRun(tx, params.nodeRunId)
   // 控制节点没有宿主执行实例：任何执行器上报都不该落到它们身上。
   // 否则 waiting→failed 可以借 M-48 这条无守卫规则绕开 controlCompletion（G3 r11 P1-1）。
-  if (row.node_type === 'wait' || row.node_type === 'subworkflow') {
+  if (isControlWorkflowNode(row.node_type)) {
     return rejectReport(tx, secret, {
       nodeRunId: params.nodeRunId, attempt: params.attempt, report, reportSeq,
       reason: 'control_node_report_not_allowed', now: params.now,
