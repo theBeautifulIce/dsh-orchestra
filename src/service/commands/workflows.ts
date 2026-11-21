@@ -141,6 +141,9 @@ export function runtimeProjection(workflowId: string, version: string, doc: Work
     if (node.type === 'approval') {
       out.approval = { prompt: cfg.prompt as string, on_timeout: cfg.on_timeout as 'fail' }
     }
+    if (node.type === 'tool') {
+      out.tool = { command: cfg.command as string, cwd: cfg.cwd as string, timeout_ms: cfg.timeout_ms as number }
+    }
     if (node.type === 'wait') {
       out.wait = {
         wait_kind: cfg.wait_kind as 'event' | 'timer',
@@ -387,6 +390,11 @@ type DraftTestPolicy = { requireTest?: boolean; tools?: ToolRegistry;
 
 function checkDraftTools(doc: WorkflowDoc, registry?: ToolRegistry): ValidationIssue[] {
   return doc.nodes.flatMap((node, index) => {
+    if (node.type === 'tool' && typeof node.config?.command === 'string') {
+      return registry?.lookup(node.config.command)?.capability === 'read_only' ? [] : [{
+        code: 'TOOL_UNAVAILABLE', path: `/nodes/${index}/config/command`, message: `工具 ${node.config.command} 在当前宿主不可用于只读执行`,
+      }]
+    }
     if (node.type !== 'agent' || !node.config || typeof node.config !== 'object') return []
     const tools = node.config.tools as { allow?: unknown; deny?: unknown } | undefined
     const deny = Array.isArray(tools?.deny) ? tools.deny : []

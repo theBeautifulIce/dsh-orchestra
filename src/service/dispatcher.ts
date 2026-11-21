@@ -24,6 +24,7 @@ import { sha256Hex, canonicalJson } from '../core/canonical.ts'
 import { uuidv7 } from '../core/ids.ts'
 import { openDecision } from './commands/decisions.ts'
 import { persistBranchSelection, ruleNodeInput } from './branch-routing.ts'
+import { runStandaloneToolNode } from '../executor/run-tool-node.ts'
 
 export type NodeSpec = {
   tools: { command: string; args: string[]; cwd: string; timeoutMs: number }[]
@@ -301,6 +302,7 @@ async function dispatchOne(
     const code = dispatchErrorCode(err)
     return outcomeForSettlement(failQueuedNode(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
   }
+  if (control?.kind === 'tool') return dispatchToolNode(deps, p, row, spec, retryOnQueueFull)
   if (control) {
     return dispatchControlNode(deps, p, row, control, spec)
   }
@@ -359,6 +361,7 @@ type ControlNodeConfig =
   | { kind: 'policy'; config: PolicyNodeConfig; definition: WorkflowDefinition }
   | { kind: 'approval'; config: ApprovalNodeConfig; definitionHash: string }
   | { kind: 'branch'; definition: WorkflowDefinition; branchId: string }
+  | { kind: 'tool' }
 
 type RunBinding = {
   workflow_id: string | null
@@ -457,6 +460,7 @@ const CONTROL_KINDS: Record<string, ControlNodeConfig['kind'] | null> = {
   policy: 'policy',
   approval: 'approval',
   branch: 'branch',
+  tool: 'tool',
 }
 
 /**
@@ -553,6 +557,7 @@ function resolveControlConfig(
     return { kind: 'approval', config: declared.approval, definitionHash: run!.workflow_definition_hash }
   }
   if (kind === 'branch') return { kind: 'branch', definition: def, branchId: declared.node_id }
+  if (kind === 'tool') return { kind: 'tool' }
   if (kind === 'wait') {
     const cfg = declared.wait
     if (!cfg) {
@@ -585,8 +590,8 @@ function resolveControlConfig(
 async function dispatchControlNode(
   deps: DispatchDeps,
   p: DispatchParams,
-  row: { node_run_id: string; node_id: string; seq: number; attempt: number },
-  control: ControlNodeConfig,
+  row: DispatchRow,
+  control: Exclude<ControlNodeConfig, { kind: 'tool' }>,
   spec: NodeSpec,
 ): Promise<DispatchOutcome> {
   if (control.kind === 'policy') return dispatchPolicyNode(deps, p, row, control, spec)
@@ -664,6 +669,27 @@ async function dispatchControlNode(
     // 只返回 failed 而不改库，会留下“API 说失败、节点还 dispatched 且持租约”的分叉，
     // closeRun 也永远等不到终态（审计 P2-2）。
     return outcomeForSettlement(failControlDispatch(deps, p, row, reason, code), row, reason, code as DispatchOutcomeErrorCode)
+  }
+}
+
+async function dispatchToolNode(deps: DispatchDeps, p: DispatchParams, row: DispatchRow, spec: NodeSpec, retryOnQueueFull: boolean): Promise<DispatchOutcome> {
+  const ref = { node_run_id: row.node_run_id, node_id: row.node_id }
+  if (spec.tools.length > 0) return { ...ref, status: 'skipped', reason: '工具命令只能来自发布版本', error_code: 'TOOL_NOT_ALLOWED' }
+  if (!deps.executeNode && !deps.executor) return { ...ref, status: 'waiting', reason: 'tool_host_unavailable', error_code: 'EVIDENCE_SOURCE_UNAVAILABLE' }
+  const params: RunNodeParams = {
+    standaloneTool: true, nodeRunId: row.node_run_id, nodeId: row.node_id, attempt: row.attempt, tools: [], input: {}, outputSchema: {},
+    now: p.now, ownerEpoch: p.ownerEpoch ?? deps.db.epoch, leaseTtlMs: p.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
+    leaseRenewIntervalMs: p.leaseRenewIntervalMs, ...deps.executionLimits,
+  }
+  try {
+    const outcome = deps.executeNode ? await deps.executeNode(params) : await runStandaloneToolNode(deps.executor!, params)
+    if (outcome.final_status === 'waiting' || outcome.final_status === 'startup_unknown' || outcome.final_status === 'stopping' || outcome.final_status === 'timing_out') {
+      return { ...ref, status: 'waiting', reason: outcome.reason ?? outcome.final_status }
+    }
+    return { ...ref, status: outcome.final_status === 'done' ? 'done' : 'failed', reason: outcome.reason, evidence_source: outcome.evidence?.source }
+  } catch (error) {
+    if (retryOnQueueFull && error instanceof ExecutionQueueFullError) throw error
+    return settleSynchronousError(deps, p, row, error)
   }
 }
 

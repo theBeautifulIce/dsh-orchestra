@@ -15,6 +15,7 @@ import { OrchError } from '../../core/errors.ts'
 import { branchAncestryIsIntact, dependencyReadiness, nodePredecessors, pinnedRunTopology, readRunBinding } from '../run-readiness.ts'
 import { definitionHashOf } from '../workflows.ts'
 import { indexTopology } from '../pinned-topology.ts'
+import { recoverStandaloneToolResults } from '../../executor/run-tool-node.ts'
 
 export type RuntimeDeps = {
   db: Db
@@ -78,7 +79,11 @@ function takeNodeRunLease(tx: Tx, deps: RuntimeDeps, p: AcquireNodeRunParams): A
 }
 
 export function renewNodeLease(deps: RuntimeDeps, p: { nodeRunId: string; leaseTtlMs: number; now: string }): { expires_at: string } {
-  return withTx(deps.db, (tx) => ({ expires_at: renewLease(tx, p) }))
+  return withTx(deps.db, (tx) => {
+    const node = tx.get<{ node_type: string }>('SELECT node_type FROM node_runs WHERE node_run_id=?', [p.nodeRunId])
+    if (node && isDispatcherWorkflowNode(node.node_type)) throw new OrchError('FORBIDDEN', '此节点的租约由工作流调度器管理')
+    return { expires_at: renewLease(tx, p) }
+  })
 }
 
 // 判定条件由服务端按 run 上的 workflow_version 取，请求体里带不了（规格 6.1 行 839）
@@ -145,7 +150,10 @@ function bridgeSignals(tx: Tx, now: string): { missing: string[]; restored: stri
 }
 
 export function sweepNow(deps: RuntimeDeps, now: string): SweepResult {
-  const signals = withTx(deps.db, (tx) => bridgeSignals(tx, now))
+  const signals = withTx(deps.db, (tx) => {
+    recoverStandaloneToolResults(tx, deps, now)
+    return bridgeSignals(tx, now)
+  })
   return sweep(deps.db, deps.secret, {
     now,
     clock: deps.clock,

@@ -204,6 +204,9 @@ export class WorkflowCatalog {
     }
     verify(def.verifier?.toolPolicy)
     for (const node of def.nodes) {
+      if (node.tool && registry.require(node.tool.command).capability !== 'read_only') {
+        throw new OrchError('RUN_TOOL_NOT_READ_ONLY', '独立工具必须由宿主登记为只读', { tool: node.tool.command })
+      }
       checkToolPolicy(registry, { ...node.tools, declaredPolicy: node.side_effect_policy })
       verify(node.verifier?.toolPolicy)
     }
