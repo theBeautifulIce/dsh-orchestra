@@ -366,8 +366,10 @@ function DecisionCard(props: {
         : memoryCard && decision.expires_at ? formatDate(decision.expires_at) + ' · 到期未批准，批次关闭。'
         : decision.expires_at ? formatDate(decision.expires_at) + ' · ' + (decision.expiry_effect && Object.hasOwn(EXPIRY_LABEL, decision.expiry_effect)
           ? EXPIRY_LABEL[decision.expiry_effect] : '截止后的处理方式尚未提供') : NOT_PROVIDED}</dd>
-      {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{decision.kind === 'report_contradicted' && decision.closed_reason === 'approved'
-        ? DECISION_OPTIONS.get('uphold_report') : DECISION_OPTIONS.get(decision.closed_reason ?? '') ?? optionalReason(decision.closed_reason)}</dd></>}
+      {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{decision.kind === 'report_contradicted'
+        && (decision.closed_reason === 'approved' || decision.closed_reason === 'rejected')
+        ? DECISION_OPTIONS.get(decision.closed_reason === 'approved' ? 'uphold_report' : 'uphold_decision')
+        : DECISION_OPTIONS.get(decision.closed_reason ?? '') ?? optionalReason(decision.closed_reason)}</dd></>}
       {decision.status === 'resolved' && decision.resolved_by && <><dt>处理人</dt><dd>{agentOnly ? '授权核验主体' : '已记录，见开发者视图'}</dd></>}
       {decision.status === 'resolved' && decision.decided_at && <><dt>处理时间</dt><dd>{formatDate(decision.decided_at)}</dd></>}
     </dl>

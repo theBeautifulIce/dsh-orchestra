@@ -12,7 +12,8 @@ import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { sha256Hex } from '../../src/core/canonical.ts'
-import { raiseReportContradiction, resolveRegisteredReportConflict } from '../../src/service/commands/apply-report.ts'
+import { resolveRegisteredReportConflict } from '../../src/service/commands/apply-report.ts'
+import { openDecision, resolveDecision } from '../../src/service/commands/decisions.ts'
 import { loadNodeRun } from '../../src/service/commands/lease.ts'
 import { acquireNodeRun, submitReport } from '../../src/service/commands/runtime.ts'
 import { failQueuedNode } from '../../src/service/dispatcher.ts'
@@ -331,9 +332,22 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
       const now = new Date().toISOString()
       const reportId = 'uncertain-branch-report'
       const report = { report_id: reportId, node_run_id: uncertain.node_run_id, attempt: 1, status: 'done' }
-      const { decisionId } = withTx(service.orchestra.db, (tx) => raiseReportContradiction(tx, secret, {
-        nodeRunId: uncertain.node_run_id, runId: run_id, attempt: 1, reportId, now,
-      }, { report, generation: 1, originalDecisionId: 'd-fixture-original', catalog: service.orchestra.catalog }))
+      withTx(service.orchestra.db, tx => {
+        const current = tx.get<{ decision_id: string; revision: number }>(
+          "SELECT decision_id,revision FROM decisions WHERE kind='startup_unknown' AND node_run_id=? AND status IN ('pending','acknowledged','blocked_for_human')",
+          [uncertain.node_run_id],
+        )
+        const prior = current?.decision_id ?? 'd-fixture-original'
+        if (!current) openDecision(tx, { decisionId: prior, kind: 'startup_unknown', nodeRunId: uncertain.node_run_id, runId: run_id,
+          approver: 'human', createdAt: now })
+        resolveDecision(tx, secret, { decisionId: prior, revision: current?.revision ?? 1, now, resolution: 'confirm_not_started',
+          actor: { kind: 'human', id: 'test:operator' }, confirm: true })
+        tx.run("UPDATE decisions SET status='resolved',closed_reason='approved',decided_at=? WHERE decision_id=?", [now, prior])
+      })
+      expect(submitReport(service.orchestra.runtime, { nodeRunId: uncertain.node_run_id, attempt: 1, generation: 1,
+        expectedStatus: 'startup_unknown', report, now })).toMatchObject({ reason: 'report_contradicted' })
+      const decisionId = String(service.orchestra.db.raw.prepare('SELECT contradiction_decision_id FROM node_runs WHERE node_run_id=?')
+        .get(uncertain.node_run_id)?.contradiction_decision_id)
       const decision = service.orchestra.db.raw.prepare('SELECT revision FROM decisions WHERE decision_id=?').get(decisionId) as { revision: number }
       withTx(service.orchestra.db, (tx) => resolveRegisteredReportConflict(tx, secret, {
         decisionId, revision: decision.revision, resolution: 'uphold_decision', now, actor: { kind: 'human', id: 'test:operator' },

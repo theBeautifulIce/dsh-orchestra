@@ -5,7 +5,7 @@ import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { acquireLease } from '../../src/service/commands/lease.ts'
 import { createNodeRun } from '../../src/service/commands/nodes.ts'
 import { applyReport, raiseReportContradiction, resolveRegisteredReportConflict } from '../../src/service/commands/apply-report.ts'
-import { escalateDecisions } from '../../src/service/commands/decisions.ts'
+import { escalateDecisions, openDecision, resolveDecision } from '../../src/service/commands/decisions.ts'
 import type { Report } from '../../src/core/report.ts'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
 
@@ -678,11 +678,17 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
   function errorCode(fn: () => unknown): string | null {
     try { fn(); return null } catch (error) { return (error as { code?: string }).code ?? null }
   }
-  function hang(db: any, report = rep({ report_id: 'rep_conflict' })) {
+  function hang(db: any, report = rep({ report_id: 'rep_conflict' }), closePrior = false) {
     withTx(db, (tx) => tx.run("UPDATE node_runs SET status='startup_unknown' WHERE node_run_id='nr_ar'"))
-    return withTx(db, (tx) => raiseReportContradiction(tx, TEST_SECRET, {
-      nodeRunId: 'nr_ar', attempt: 2, runId: 'r1', reportId: 'rep_conflict', now: NOW,
-    }, { report, generation: 1, originalDecisionId: 'd-original', catalog: CATALOG }))
+    return withTx(db, (tx) => {
+      openDecision(tx, { decisionId: 'd-original', nodeRunId: 'nr_ar', runId: 'r1', kind: 'startup_unknown', approver: 'human', createdAt: NOW })
+      resolveDecision(tx, TEST_SECRET, { decisionId: 'd-original', revision: 1, resolution: 'confirm_not_started', now: NOW,
+        actor: { kind: 'human', id: 'test:operator' } })
+      if (closePrior) tx.run("UPDATE decisions SET status='resolved',closed_reason='approved',decided_at=? WHERE decision_id='d-original'", [NOW])
+      return raiseReportContradiction(tx, TEST_SECRET, { nodeRunId: 'nr_ar', attempt: 2, runId: 'r1', reportId: 'rep_conflict', now: NOW },
+        { report, generation: 1, originalDecisionId: 'd-original', original: { decision_id: 'd-original', revision: 2, resolution: 'confirm_not_started' },
+          catalog: CATALOG })
+    })
   }
   function applyUphold(
     db: any,
@@ -733,7 +739,8 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
 
   it('uphold_decision：新 attempt 以更高动作代接班，重放不会创建或再次派发', () => {
     const db = setup()
-    const { decisionId } = hang(db)
+    db.raw.prepare("UPDATE node_runs SET side_effect_policy='pure' WHERE node_run_id='nr_ar'").run()
+    const { decisionId } = hang(db, undefined, true)
     const card = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
     const resolution = { decisionId, revision: card.revision, resolution: 'uphold_decision' as const }
     const out = applyUphold(db, resolution)
@@ -754,7 +761,7 @@ describe('applyReport 报告冲突与 uphold 收口', () => {
       .toEqual([{ status: 'dispatched', attempt: 3, action_generation: lease.actionGeneration }])
     expect(registry(db, 'rep_conflict').state).toBe('stale')
     const closed = db.raw.prepare('SELECT * FROM decisions WHERE decision_id=?').get(decisionId) as any
-    expect(closed.closed_reason).toBe('uphold_decision')
+    expect(closed.closed_reason).toBe('rejected')
   })
 
   it('裁决 revision 过期：DECISION_REVISION_CONFLICT，节点一个字节不动', () => {
