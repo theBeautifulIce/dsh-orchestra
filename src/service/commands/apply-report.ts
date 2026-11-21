@@ -394,6 +394,8 @@ export function resolveRegisteredReportConflict(tx: Tx, secret: string, request:
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '已登记回报未通过系统证据核验，冲突保持待处理', { reason: binding.evidence_failure })
   }
   if (request.resolution === 'uphold_decision') {
+    const openRun = tx.get("SELECT 1 FROM runs WHERE run_id=? AND status IN ('running','paused') AND cancel_requested_at IS NULL", [row.run_id])
+    if (!openRun) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '运行已取消或收口，不能再按原裁决重试')
     const original = binding.original_decision_revision === undefined ? undefined : originalDecision(tx, row, {
       decisionId: binding.original_decision_id, revision: binding.original_decision_revision,
     })

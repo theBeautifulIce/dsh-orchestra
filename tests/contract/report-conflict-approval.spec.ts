@@ -145,6 +145,13 @@ it.each(['done', 'failed', 'weak', 'keep-retry', 'keep-stop', 'untrusted-origina
       expect(await (await approve()).json()).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
       expect(node()).toEqual(before)
       reloaded.raw.prepare("UPDATE decisions SET closed_reason='approved' WHERE decision_id='prior'").run()
+      reloaded.raw.prepare("UPDATE runs SET cancel_requested_at=? WHERE run_id='r1'").run(now)
+      expect(await (await response('/v1/decisions/get?decision_id=' + decisionId)).json())
+        .toMatchObject({ data: { allowed_resolutions: ['uphold_report'] } })
+      expect(await (await approve()).json()).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
+      expect(node()).toEqual(before)
+      expect(reloaded.raw.prepare('SELECT 1 FROM node_runs WHERE origin_node_run_id=?').get(nodeId)).toBeUndefined()
+      reloaded.raw.prepare("UPDATE runs SET cancel_requested_at=NULL WHERE run_id='r1'").run()
     }
     reloaded.raw.prepare('UPDATE node_runs SET ' + generationColumn + '=? WHERE node_run_id=?').run(startingGeneration + 1, nodeId)
     expect(await (await approve()).json()).toMatchObject({ error: { code: 'RESOLUTION_NOT_AVAILABLE' } })
