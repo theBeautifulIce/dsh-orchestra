@@ -85,13 +85,38 @@
       "status": "done"
     }
   ],
-  "surface_boundary": "Original rc.5 CLI scope receipt predates the privacy correction. The separate regression exercises the registered native tool result and renderer used by session history. It does not repeat a full Desktop ZIP export.",
+  "surface_boundary": "The original scope receipt above predates the privacy correction. Use the host-private path receipt below for the current rc.5 privacy and export checks.",
   "local_probe": "tmp/closeout-run-notes/dsh-run-notes-probe.mjs",
   "local_raw_log": "tmp/closeout-run-notes/native.log",
   "privacy_correction": {
     "initial_finding": "A standard DSH session export can contain text returned by a native tool renderer. The previous registered notes tool returned the private fixture in both execute text and rendered history.",
     "observed_after": "The same source session receives only shared notes. The persisted private fixture is retained and omitted from execute text/preview and rendered tool result. Requests to create new brain-only notes receive SERVICE_UNAVAILABLE.",
-    "availability": "Existing brain-only records remain private under the original retention policy. A separately verified, non-exportable model read channel is still unavailable.",
+    "availability_at_3604236": "Existing brain-only records remained private under the original retention policy. The correction disabled new session-tool writes pending a separately verified model channel.",
     "regression": "tests/integration/chat-native.spec.ts (keeps brain-only notes out of native result and conversation export content); tests/contract/run-notes.spec.ts"
+  },
+  "host_private_path": {
+    "method": "Bundled DSH Desktop 0.2.2-rc.5 CLI, installed Electron Node mode, isolated headless profile and SQLite, repository TypeScript loaded directly, real native agent/tool runtime, native SDK session storage and ZIP exporter, loopback synthetic OpenAI-compatible provider",
+    "command": "D:/NodeJs/node.exe scripts/probes/wf23-private-notes.mjs D:/aboutAI/deepseekharness-desktop tmp/wf23-private-notes/final-verified",
+    "outer_node_version": "v26.13.1",
+    "desktop_executable": "D:/aboutAI/deepseekharness-desktop/DeepSeek Harness.exe",
+    "bundled_cli": "resources/app.asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js",
+    "run_id": "run_01a1fc2d188d7830914bb0c4a7094202",
+    "workflow_status": "succeeded",
+    "capture": { "native_arguments": { "action": "capture_brain" }, "direct_model_requests": 1, "session_id": null, "tool_count": 0 },
+    "review": { "native_arguments": { "action": "review_brain_notes" }, "direct_model_requests_with_canary": 3, "session_id": null, "tool_count": 0, "results": ["fixed follow_up classification", "malicious extra echo rejected", "provider error containing canary sanitized"] },
+    "ordinary_scope_receipts": { "human_panel": ["run"], "direct_successor": ["downstream", "run"], "indirect_successor": ["run"], "sibling": ["run"], "separate_run": [] },
+    "isolation": { "non_owner_denied": true, "other_root_session_denied": true, "synthetic_body_in_ordinary_model_requests": false, "synthetic_body_in_public_events_or_panel": false, "synthetic_body_in_persisted_parent_and_writer_logs": false, "synthetic_body_in_native_zips": false },
+    "archives": { "parent_session_id": "b5234895-efca-4ec9-9d48-5fcf81401da4", "writer_session_id": "91a474e2-43c3-46fe-98f0-552ef5a65c5d", "parent_entries": 6, "writer_entries": 1 },
+    "scoped_tests": { "files": 4, "cases_passed": 90, "typecheck": "passed" },
+    "raw_directory": "tmp/wf23-private-notes/final-verified",
+    "raw_sha256": {
+      "native.log": "21863d48f8d62c706dc6e67df6bb9dc9df2c77c20c5e836f25c9477b07fdb142",
+      "provider-wire.json": "eb549e0d07796b4cf956077249c4ac0df0ed98b49a7853854f7aaea96222f2b7",
+      "main_brain.session.jsonl": "16c00d715c01f15dd55ea9e05abcaf1db303d636f770e2f74f3abe34a8812448",
+      "writer.session.jsonl": "237846f258c639b74ffa587cedf439364504e4ab769aca45dcde5b49215d2cea",
+      "main_brain.zip": "758b03862187821e1c892414f99491245c79497c15c58f0aedf4d73fff3f49b2",
+      "writer.zip": "0ebd2c820b6d22d2f8cc926c9f11eee81f0df9abf026971aca79b05ae0d810c3"
+    },
+    "limits": "The fixture uses a synthetic operator, native message-source metadata and fixture chat receipts. The ZIPs use the installed export implementation without a Desktop UI click. The test uses repository source, not a frozen Orchestra distribution archive. The authorized providers and trusted host middleware can see their direct calls. Prior exports retain the content they originally serialized."
   }
 }

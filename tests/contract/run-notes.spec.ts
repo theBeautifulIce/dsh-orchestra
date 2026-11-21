@@ -1,7 +1,8 @@
 import { rmSync } from 'node:fs'
 import { expect, it } from 'vitest'
 import { uuidv7 } from '../../src/core/ids.ts'
-import { openDb, type Db } from '../../src/infra/sqlite/driver.ts'
+import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
+import { openDb, withTx, type Db } from '../../src/infra/sqlite/driver.ts'
 import { startRun } from '../../src/service/commands/start-run.ts'
 import { createRunNotes, type RunNoteBinding } from '../../src/service/run-notes.ts'
 import { serveOrchestra } from '../../src/index.ts'
@@ -22,12 +23,12 @@ function fixtureRun(db: Db) {
     edges: [{ from: 'source', to: 'direct' }, { from: 'direct', to: 'indirect' }],
   })
   const run = startRun(db, catalog, { workflowId, workflowVersion: '1', taskTitle: 'Note scope', startedBy: author, operationId, now })
-  function bind(node: string): RunNoteBinding {
+  function bind(node: string, expiry = '2026-11-21T01:00:00.000Z'): RunNoteBinding {
     const row = db.raw.prepare('SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_id=?')
       .get(run.run_id, node)!
     const executor_session_id = 'native:' + row.node_run_id
     db.raw.prepare("UPDATE node_runs SET status='started',executor_session_id=?,lease_expires_at=? WHERE node_run_id=?")
-      .run(executor_session_id, '2026-11-21T01:00:00.000Z', String(row.node_run_id))
+      .run(executor_session_id, expiry, String(row.node_run_id))
     return { node_run_id: String(row.node_run_id), attempt: Number(row.attempt),
       action_generation: Number(row.action_generation), executor_session_id }
   }
@@ -40,6 +41,65 @@ function fixtureRun(db: Db) {
   }
   return { run: run.run_id, bind, attachChatReceipt }
 }
+
+it('requires a signed current writer and rechecks private notes after model I/O', async () => {
+  const { db, dir } = freshLedger()
+  try {
+    const first = fixtureRun(db)
+    const unrelated = fixtureRun(db)
+    const source = first.bind('source', new Date(Date.now() + 60_000).toISOString())
+    const notes = createRunNotes(db, secret)
+    let captureCalls = 0
+    let reviewCalls = 0
+    const canary = 'wf23-private-contract-fixture'
+    const capture = async () => { captureCalls++; return canary }
+    const review = async (body: readonly string[]) => { reviewCalls++; expect(body).toEqual([canary]); return 'follow_up' }
+    const current = () => {}
+    await expect(notes.captureBrain(source, 'unsigned', current, capture)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(captureCalls).toBe(0)
+    withTx(db, (tx) => appendNodeRunEvent(tx, secret, source.node_run_id, 'executor.model_confirmed', {
+      state: 'confirmed', attempt: source.attempt, action_generation: source.action_generation,
+    }))
+    await expect(notes.captureBrain({ ...source, executor_session_id: 'sibling' }, 'invalid', current, capture))
+      .rejects.toMatchObject({ code: 'FORBIDDEN' })
+    const before = countOf(db, 'events')
+    db.raw.exec("CREATE TEMP TRIGGER note_failure BEFORE INSERT ON run_note_bodies BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END")
+    await expect(notes.captureBrain(source, 'rollback', current, capture)).rejects.toThrow('fixture rollback')
+    db.raw.exec('DROP TRIGGER note_failure')
+    expect(countOf(db, 'events')).toBe(before)
+    await expect(notes.captureBrain(source, 'oversize', current, async () => '😀'.repeat(501))).rejects.toMatchObject({ code: 'PAYLOAD_SCHEMA_INVALID' })
+    await expect(notes.captureBrain(source, 'empty', current, async () => null)).resolves.toEqual({ captured: false })
+    for (let i = 0; i < 5; i++) await notes.captureBrain(source, 'older-' + i, current, async () => 'older ' + i)
+    const result = await notes.captureBrain(source, 'approved', current, capture)
+    expect(result).toMatchObject({ captured: true, note_id: expect.any(String) })
+    const captured = captureCalls
+    await expect(notes.captureBrain(source, 'approved', current, capture)).resolves.toEqual(result)
+    expect(captureCalls).toBe(captured)
+    expect(countOf(db, 'run_note_bodies')).toBe(5)
+    expect(notes.listHuman(first.run, author).items).toEqual([])
+    await expect(notes.reviewBrain(first.run, author, current, review)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    first.attachChatReceipt()
+    unrelated.attachChatReceipt()
+    await expect(notes.reviewBrain(first.run, intruder, current, review)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    await expect(notes.reviewBrain(unrelated.run, author, current, review)).resolves.toEqual({ classification: 'insufficient', evidence_strength: 'none' })
+    expect(reviewCalls).toBe(0)
+    db.raw.prepare('UPDATE run_note_bodies SET body=? WHERE body<>?').run('forged raw value', canary)
+    const expected = { classification: 'follow_up', evidence_strength: 'none' }
+    await expect(notes.reviewBrain(first.run, author, current, review)).resolves.toEqual(expected)
+    await expect(notes.reviewBrain(first.run, author, current, async () => canary)).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    let live = true
+    const assertCurrent = () => { if (!live) throw new Error('view is stale') }
+    await expect(notes.captureBrain(source, 'stale-view', assertCurrent, async () => { live = false; return canary })).rejects.toThrow('view is stale')
+    expect(countOf(db, 'run_note_bodies')).toBe(5)
+    await expect(notes.reviewBrain(first.run, author, current, async () => {
+      db.raw.prepare('UPDATE node_runs SET action_generation=action_generation+1 WHERE node_run_id=?').run(source.node_run_id)
+      return 'follow_up'
+    })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+    await expect(notes.captureBrain(source, 'stale-attempt', current, capture)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    await expect(notes.reviewBrain(first.run, author, current, review)).resolves.toEqual({ classification: 'insufficient', evidence_strength: 'none' })
+    expect(reviewCalls).toBe(1)
+  } finally { db.raw.close(); rmSync(dir, { recursive: true, force: true }) }
+})
 
 it('keeps private notes out of ordinary reads while enforcing run, attempt, topology and creator receipt', () => {
   const { db, dir } = freshLedger()
