@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto'
 import { z } from 'zod'
 import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
-import { appendEvent } from '../infra/db/ledger.ts'
+import { appendEvent, chainIsIntact, readChain, readChainHead } from '../infra/db/ledger.ts'
 import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { chatRun } from './chat-task-receipts.ts'
 import { requireReviewOperator } from './delivery-review.ts'
@@ -36,6 +36,11 @@ type NotePayload = Omit<Authority, 'run_id' | 'node_run_id' | 'author'> & { scop
 const perNode = 5
 const perRun = 200
 const toolPage = 20
+const brainPage = 10
+const brainClassification = z.enum(['follow_up', 'informational', 'insufficient'])
+const brainPayload = z.object({ actor_kind: z.literal('node'), scope: z.literal('brain'),
+  body_digest: z.string(), attempt: z.number().int().positive(), action_generation: z.number().int().nonnegative() })
+const addKey = (authority: Authority, requestId: string) => 'run-note-add:' + sha256Hex(JSON.stringify([authority, requestId]))
 const active = `
   FROM events e JOIN run_note_bodies b ON b.event_seq=e.seq
   WHERE e.type='run.note_created' AND e.run_id=?
@@ -63,6 +68,15 @@ function canRead(tx: ReadTx, secret: string, note: NoteRow, payload: NotePayload
     && dependencyReadiness(tx, note.run_id, reader.nodeRun, [source.node_id], reader.nodeId, secret).ready)
 }
 
+function signedAttempt(tx: ReadTx, secret: string, nodeRun: string, attempt: number, generation: number) {
+  const chain = readChain(tx, nodeRun)
+  return chainIsIntact(secret, chain, readChainHead(tx, nodeRun), true) && chain.some((event) => {
+    if (event.type !== 'executor.model_confirmed') return false
+    const payload = JSON.parse(event.payload)
+    return payload?.state === 'confirmed' && payload.attempt === attempt && payload.action_generation === generation
+  })
+}
+
 export function createRunNotes(db: Db, secret: string) {
   const digest = (run: string, node: string | null, payload: Omit<NotePayload, 'body_digest'>, author: string, body: string) =>
     createHmac('sha256', secret).update('run-note-body\0')
@@ -87,7 +101,7 @@ export function createRunNotes(db: Db, secret: string) {
 
   function add(tx: Tx, authority: Authority, scope: Scope, text: string, requestId: string) {
     const { run_id, node_run_id, author, ...source } = authority
-    const key = 'run-note-add:' + sha256Hex(JSON.stringify([authority, requestId]))
+    const key = addKey(authority, requestId)
     const body_digest = digest(run_id, node_run_id, { ...source, scope }, author, text)
     const prior = tx.get<{ event_id: string; seq: number; payload_redacted: string }>(
       'SELECT event_id,seq,payload_redacted FROM events WHERE idempotency_key=?', [key])
@@ -113,7 +127,85 @@ export function createRunNotes(db: Db, secret: string) {
     return { note_id: created.event_id, seq: created.seq }
   }
 
+  function brainNotes(tx: ReadTx, run: string, actor: string) {
+    if (chatRun(db, actor, run) !== run) throw new OrchError('FORBIDDEN', '主脑便条只供任务来源会话使用')
+    requireReviewOperator(tx, secret, actor, run, true)
+    const available = tx.all<NoteRow>(`SELECT e.seq,e.event_id,e.run_id,e.node_run_id,e.occurred_at,e.payload_redacted,b.body,b.author
+      ${active} AND json_extract(e.payload_redacted,'$.scope')='brain'
+      ORDER BY e.seq DESC LIMIT ${perRun}`, [run])
+    const checked = new Map<string, boolean>()
+    const visible: NoteRow[] = []
+    for (const row of available) {
+      const payload = brainPayload.safeParse(JSON.parse(row.payload_redacted))
+      if (!payload.success || !row.node_run_id || !bodyText.safeParse(row.body).success
+        || payload.data.body_digest !== digest(run, row.node_run_id, payload.data, row.author, row.body)) continue
+      const { attempt, action_generation } = payload.data
+      const key = JSON.stringify([row.node_run_id, attempt, action_generation, row.author])
+      let current = checked.get(key)
+      if (current === undefined) {
+        current = Boolean(tx.get(`SELECT 1 FROM node_runs n
+          WHERE n.run_id=? AND n.node_run_id=? AND n.node_id=? AND n.attempt=? AND n.action_generation=?
+            AND n.node_type='agent' AND n.executor_session_id IS NOT NULL AND n.replacement_node_run_id IS NULL
+            AND n.status<>'superseded' AND n.node_run_id=(SELECT latest.node_run_id FROM node_runs latest
+              WHERE latest.run_id=n.run_id AND latest.node_id=n.node_id ORDER BY latest.attempt DESC,latest.seq DESC LIMIT 1)`,
+        [run, row.node_run_id, row.author, attempt, action_generation]))
+          && signedAttempt(tx, secret, row.node_run_id, attempt, action_generation)
+        checked.set(key, current)
+      }
+      if (current) visible.push(row)
+      if (visible.length === brainPage) break
+    }
+    return visible
+  }
+
   return {
+    async captureBrain(binding: RunNoteBinding, requestId: string, assertCurrent: () => void, capture: () => Promise<string | null>) {
+      function authority(tx: ReadTx): Authority {
+        assertCurrent()
+        const node = liveNode(tx, binding, new Date().toISOString())
+        if (!signedAttempt(tx, secret, binding.node_run_id, binding.attempt, binding.action_generation)) {
+          throw new OrchError('FORBIDDEN', '主脑便条缺少当前派发的签名记录')
+        }
+        return { run_id: node.run_id, node_run_id: binding.node_run_id, actor_kind: 'node', author: node.node_id,
+          attempt: binding.attempt, action_generation: binding.action_generation }
+      }
+      function replay(tx: ReadTx, writer: Authority) {
+        const prior = tx.get<{ event_id: string; seq: number; scope: string }>(`SELECT event_id,seq,json_extract(payload_redacted,'$.scope') AS scope
+          FROM events WHERE idempotency_key=?`, [addKey(writer, requestId)])
+        if (!prior) return
+        if (prior.scope !== 'brain') throw new OrchError('OPERATION_ID_CONFLICT', '便条操作号已用于另一种权限')
+        return { captured: true as const, note_id: prior.event_id, seq: prior.seq }
+      }
+      const prior = withReadTx(db, ({ tx }) => replay(tx, authority(tx)))
+      if (prior) return prior
+      const captured = await capture()
+      if (captured === null) {
+        return withReadTx(db, ({ tx }) => replay(tx, authority(tx))) ?? { captured: false as const }
+      }
+      const body = bodyText.safeParse(captured)
+      if (!body.success) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑便条正文无效')
+      return withTx(db, (tx) => {
+        const writer = authority(tx)
+        return replay(tx, writer) ?? { captured: true as const, ...add(tx, writer, 'brain', body.data, requestId) }
+      })
+    },
+    async reviewBrain(run: string, actor: string, assertCurrent: () => void,
+      review: (bodies: readonly string[], assertSnapshot: () => void) => Promise<unknown>) {
+      assertCurrent()
+      const notes = withReadTx(db, ({ tx }) => brainNotes(tx, run, actor))
+      if (!notes.length) return { classification: 'insufficient' as const, evidence_strength: 'none' as const }
+      const assertSnapshot = () => {
+        assertCurrent()
+        const current = withReadTx(db, ({ tx }) => brainNotes(tx, run, actor))
+        if (notes.length !== current.length || notes.some(({ event_id, body }, index) => event_id !== current[index]?.event_id || body !== current[index]?.body)) {
+          throw new OrchError('SERVICE_UNAVAILABLE', '主脑专属便条已变化，请重新查询')
+        }
+      }
+      const reviewed = brainClassification.safeParse(await review(notes.map(({ body }) => body), assertSnapshot))
+      if (!reviewed.success) throw new OrchError('SERVICE_UNAVAILABLE', '主脑专属便条处理未完成')
+      assertSnapshot()
+      return { classification: reviewed.data, evidence_strength: 'none' as const }
+    },
     listHuman(run: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
         requireReviewOperator(tx, secret, actor, run, true)
@@ -141,7 +233,7 @@ export function createRunNotes(db: Db, secret: string) {
       if (body.action === 'add') return withTx(db, (tx) => {
         const node = liveNode(tx, binding, now)
         if (body.scope === 'brain') {
-          throw new OrchError('SERVICE_UNAVAILABLE', '主脑专属便条暂不支持新建，已有便条保持原权限')
+          throw new OrchError('SERVICE_UNAVAILABLE', '请使用主脑专属便条的私有采集操作')
         }
         return add(tx, { run_id: node.run_id, node_run_id: binding.node_run_id, actor_kind: 'node', author: node.node_id,
           attempt: binding.attempt, action_generation: binding.action_generation }, body.scope, body.body, requestId)

@@ -79,6 +79,7 @@ import {
 } from './executor/run-node.ts'
 import { bridgeHostAgentFactory } from './executor/bridge.ts'
 import { createDshExecutor, createDshPlanningCallback } from './executor/dsh-host.ts'
+import { createDshPrivateNotes } from './executor/dsh-private-notes.ts'
 import { createCollaborationHost, type CollaborationHost } from './service/collaboration.ts'
 import { createRunNotes, type RunNotes } from './service/run-notes.ts'
 import { callDshCollaboration } from './service/dsh-collaboration.ts'
@@ -119,11 +120,22 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   let collaboration: CollaborationHost | undefined
   let runNotes: RunNotes | undefined
   let installed: { db: Db; feedback: ReworkHost } | undefined
+  const privateNotes = serviceOptions.phase === 'S6' && dshPlanner ? createDshPrivateNotes(dsh.context.llm) : undefined
   const host = createDshExecutor({ ...dsh,
     ...(serviceOptions.phase === 'S6' ? { runNote(binding, input, requestId, now) {
       if (!runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '运行便条服务尚未就绪')
       return runNotes.callNode(binding, input, requestId, now)
     } } : {}),
+    ...(privateNotes ? { privateRunNotes: { model: privateNotes, capture: (...args) => {
+      if (!runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '运行便条服务尚未就绪')
+      const [binding, request, assertAttempt, capture] = args
+      return runNotes.captureBrain(binding, request, () => {
+        assertAttempt()
+        if (serviceOptions.projectContext && !serviceOptions.projectContext.isAuthorized()) {
+          throw new OrchError('FORBIDDEN', '主脑便条需要当前已授权的工作区会话')
+        }
+      }, capture)
+    } } } : {}),
     ...(serviceOptions.phase === 'S5' || serviceOptions.phase === 'S6' ? {
       rework(binding, input) {
         if (!installed) throw new OrchError('SERVICE_UNAVAILABLE', '成果审核服务尚未就绪')
@@ -168,7 +180,24 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     collaboration = service.collaboration
     runNotes = service.runNotes
     if (service.rework) installed = { db: service.orchestra.db, feedback: service.rework }
-    return { ...service, close: async () => {
+    const reviewBrainNotes = planner && privateNotes ? async (
+      agent: NonNullable<ReturnType<typeof planner.parent>>, run: string, actor: string, signal: AbortSignal,
+      assertOrigin: () => void,
+    ) => {
+      const assertCurrent = () => {
+        signal.throwIfAborted()
+        assertOrigin()
+        if (planner.parent() !== agent || dsh.context.agents.get(agent.session.id) !== agent
+          || (serviceOptions.projectContext && !serviceOptions.projectContext.isAuthorized())) {
+          throw new OrchError('FORBIDDEN', '主脑便条需要当前运行的来源工作区会话')
+        }
+      }
+      if (!runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '运行便条服务尚未就绪')
+      return runNotes.reviewBrain(run, actor, assertCurrent, (bodies, assertSnapshot) => privateNotes.review(
+        (lifetime) => typeof planner.model === 'function' ? planner.model(agent, lifetime) : planner.model,
+        bodies, signal, assertSnapshot))
+    } : undefined
+    return { ...service, ...(reviewBrainNotes ? { reviewBrainNotes } : {}), close: async () => {
       host.stopModelRefresh()
       try { await service.close() } finally { await host.close() }
     } }
