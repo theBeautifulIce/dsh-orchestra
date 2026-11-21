@@ -133,7 +133,7 @@ function selectReadyNodes(deps: DispatchDeps, p: DispatchParams, submitted?: Rea
   let def: { edges?: Array<{ from: string; to: string }> } | undefined
   if (runRow && deps.catalog) {
     try {
-      def = deps.catalog.get(runRow.workflow_id, runRow.workflow_version)
+      def = deps.catalog.getImmutable(runRow.workflow_id, runRow.workflow_version)
     } catch {
       def = undefined
     }
@@ -507,7 +507,7 @@ function resolveControlConfig(
       workflow_version: run!.workflow_version,
     })
   }
-  const def = deps.catalog.get(run!.workflow_id!, run!.workflow_version!)
+  const def = deps.catalog.getImmutable(run!.workflow_id!, run!.workflow_version!)
   if (definitionHashOf(def) !== run!.workflow_definition_hash) {
     throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', 'run 绑定的定义哈希与目录不一致，不能派发', {
       runId: p.runId,
@@ -516,7 +516,7 @@ function resolveControlConfig(
     })
   }
   const roleId = resolvePinnedNodeId(makeTx(deps.db.raw), row.node_run_id)
-  const declared = def.nodes.find((item) => item.node_id === roleId)
+  const declared = deps.catalog.getImmutableNode(run!.workflow_id!, run!.workflow_version!, roleId)
   if (!declared) {
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '节点不在已签名的工作流定义里', {
       runId: p.runId,

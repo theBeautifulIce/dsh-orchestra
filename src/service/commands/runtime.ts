@@ -12,8 +12,9 @@ import { sweep, type SweepResult } from '../sweep.ts'
 import type { WorkflowCatalog } from '../workflows.ts'
 import type { ClockProvider } from '../../core/clock.ts'
 import { OrchError } from '../../core/errors.ts'
-import { dependencyReadiness, pinnedEdges, readRunBinding, runPredecessors } from '../run-readiness.ts'
+import { dependencyReadiness, nodePredecessors, pinnedRunTopology, readRunBinding } from '../run-readiness.ts'
 import { definitionHashOf } from '../workflows.ts'
+import { indexTopology } from '../pinned-topology.ts'
 
 export type RuntimeDeps = {
   db: Db
@@ -54,14 +55,14 @@ export function assertNodeRunReadyInTx(tx: Tx, deps: RuntimeDeps, nodeRunId: str
   if (run.cancel_requested_at || run.status === 'paused') {
     throw new OrchError('STALE_GENERATION', '运行已暂停或取消，当前节点不能开始', { runId: node.run_id })
   }
-  let edges = pinnedEdges(run)
+  let topology = pinnedRunTopology(run)
   // Some in-process integrations load a fixed definition without attaching the catalog to the ledger.
-  if (!edges && !run.definition_json && node.workflow_version !== null) {
-    const def = deps.catalog.get(node.workflow_id ?? 'default', node.workflow_version)
-    if (definitionHashOf(def) === run.workflow_definition_hash) edges = def.edges ?? []
+  if (!topology && run.definition_json === null && node.workflow_version !== null && !deps.catalog.hasPersistedStorage()) {
+    const def = deps.catalog.getImmutable(node.workflow_id ?? 'default', node.workflow_version)
+    if (definitionHashOf(def) === run.workflow_definition_hash) topology = indexTopology(def.edges ?? [])
   }
-  if (!edges) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
-  const preds = runPredecessors(tx, node.run_id, edges).get(node.node_id) ?? []
+  if (!topology) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '运行固定的依赖图不可用', { runId: node.run_id })
+  const preds = nodePredecessors(tx, node.run_id, topology, node.node_id)
   const readiness = dependencyReadiness(tx, node.run_id, nodeRunId, preds, node.node_id)
   if (!readiness.ready) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '前置节点尚未成功完成，当前节点不能开始', { nodeRunId, ...readiness })
