@@ -3,10 +3,11 @@ import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { snapshotArtifactInputs } from './rework-runtime.ts'
 import type { WorkflowCatalog } from './workflows.ts'
-import { runtimeEdges } from './rework-edges.ts'
+import { approvedRuntimeEdges, runtimeEdges } from './rework-edges.ts'
 import { extraStepInstruction } from './rework-extra-steps.ts'
 import { intactBranchChain, selectedBranchTarget, verifiedBranchSkip } from './branch-routing.ts'
 import { parallelMemberMayStart, parallelToleratesMember } from './workflow-parallel.ts'
+import { pinnedRunTopology, readRunBinding, verifiedParallelSkip } from './run-readiness.ts'
 
 function localInstruction(tx: Tx, nodeRunId: string, nodeId: string) {
   // First bind the approved plan to an actual successor or a released, previously queued consumer.
@@ -46,15 +47,20 @@ export function executionFeedbackContext(db: Db, catalog: WorkflowCatalog, nodeR
       'SELECT n.node_id,n.run_id,n.attempt,n.parent_node_run_id,r.workflow_id,r.workflow_version FROM node_runs n JOIN runs r USING(run_id) WHERE n.node_run_id=?',
       [nodeRunId])
     if (!node) throw new OrchError('NOT_FOUND', '未找到当前执行步骤')
-    const def = catalog.get(node.workflow_id ?? 'default', node.workflow_version)
+    const def = catalog.getImmutable(node.workflow_id ?? 'default', node.workflow_version)
+    const binding = readRunBinding(tx, node.run_id)
+    const topology = binding ? pinnedRunTopology(binding, catalog) : null
+    const explicitInputs = new Set(approvedRuntimeEdges(tx, node.run_id, node.node_id).map(edge => edge.from))
     const upstream = runtimeEdges(tx, node.run_id, def.edges ?? []).filter(edge => edge.to === node.node_id).flatMap(edge => {
       const source = tx.get<{ node_run_id: string; node_type: string; status: string; parent_node_run_id: string | null; revision: number }>(`SELECT node_run_id,node_type,status,parent_node_run_id,revision FROM node_runs
         WHERE run_id=? AND node_id=? AND replacement_node_run_id IS NULL ORDER BY attempt DESC LIMIT 1`, [node.run_id, edge.from])
       if (!source) throw new OrchError('STALE_GENERATION', '上游执行记录缺失')
       if (secret) {
         if (source.node_type === 'parallel' && source.status === 'waiting' && node.parent_node_run_id === source.node_run_id
-          && parallelMemberMayStart(tx, secret, source.node_run_id, nodeRunId)) return []
+          && parallelMemberMayStart(tx, secret, source.node_run_id, nodeRunId, topology)) return []
         if (source.status === 'superseded' && verifiedBranchSkip(tx, secret, node.run_id, source.node_run_id)) return []
+        if (source.status === 'superseded' && !explicitInputs.has(edge.from)
+          && verifiedParallelSkip(tx, secret, node.run_id, edge.from, source.node_run_id, topology)) return []
         if (source.node_type === 'branch' && source.status === 'done' && intactBranchChain(tx, secret, source.node_run_id)
           && selectedBranchTarget(tx, source.node_run_id) !== node.node_id) return []
         if (source.parent_node_run_id && parallelToleratesMember(tx, secret, source.parent_node_run_id, source.node_run_id)) return []

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { serveOrchestra } from '../../src/index.ts'
+import { registerRunArtifact, serveOrchestra } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { BridgeClient } from '../../src/executor/bridge.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
@@ -12,6 +12,7 @@ import { applyTransition, createNodeRun } from '../../src/service/commands/nodes
 
 const name = '并行组的不同出口'
 const condition = { path: 'selected', op: 'eq', value: true }
+const readonlyTool = 'fixture.read'
 const missing = { path: 'result', op: 'exists' }
 const node = (node_id: string, type: string, config?: object) => ({ node_id, type, config, title: node_id, position: { x: 0, y: 0 } })
 const wait = (id: string) => node(id, 'wait', { wait_kind: 'event', match: { type: id }, max_wait_ms: 600_000 })
@@ -34,20 +35,24 @@ async function withService(run: (fixture: Awaited<ReturnType<typeof serviceFixtu
 async function serviceFixture(dir: string) {
   const secret = 'fixture-parallel-topology'
   const registry = new ToolRegistry()
+  registry.register({ name: readonlyTool, capability: 'read_only', command: { bin: 'fixture-read', args: [] } })
   const runner = new ReadOnlyToolRunner(registry, { readonlyAvailable: () => true,
-    async run() { throw new Error('inactive test path invoked an executor') } }, dir)
-  const bridge = new BridgeClient(fakeAgentBridge({ agentId: 'inactive-path', steps: [], at: new Date().toISOString() }))
+    async run() { return { exitCode: 0, stdout: 'verified fixture output', stderr: '' } } }, dir)
   const boot = () => serveOrchestra({
     dbFile: join(dir, 'orchestra.db'), phase: 'S6', secret,
     asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }),
-    executor: { registry, runner, bridge },
+    resolveHttpHuman: request => request.headers.authorization === 'Bearer parallel-operator' ? { id: 'fixture:operator' } : null,
+    executor: { registry, runner, bridge: new BridgeClient(fakeAgentBridge({
+      agentId: 'parallel-topology-fixture', steps: [{ tool: readonlyTool }], at: new Date().toISOString(),
+    })) },
   })
   let service = await boot()
-  const post = async (path: string, body: unknown) => {
+  const post = async (path: string, body: unknown, operator = false) => {
     const response = await fetch(service.endpoint + path, {
       method: 'POST', signal: AbortSignal.timeout(5000), body: JSON.stringify(body),
-      headers: { 'content-type': 'application/json', 'x-orchestra-secret': secret },
+      headers: { 'content-type': 'application/json', 'x-orchestra-secret': secret,
+        ...(operator ? { authorization: 'Bearer parallel-operator' } : {}) },
     })
     return { status: response.status, ...await response.json() }
   }
@@ -68,7 +73,7 @@ async function serviceFixture(dir: string) {
       if (!valid) expect(service.orchestra.db.raw.prepare('SELECT 1 FROM workflow_versions WHERE workflow_id=?').get(workflow_id)).toBeUndefined()
     },
     async start(workflowId: string, definition: ReturnType<typeof document>) {
-      const started = await post('/v1/runs/start', { taskTitle: name, workflowId, workflowVersion: '1', operationId: uuidv7() })
+      const started = await post('/v1/runs/start', { taskTitle: name, workflowId, workflowVersion: '1', operationId: uuidv7() }, true)
       expect(started).toMatchObject({ status: 200 })
       const runId = started.data.run_id as string
       const specs = Object.fromEntries(definition.nodes.filter(({ type }) => type !== 'agent' && type !== 'trigger')
@@ -81,6 +86,21 @@ async function serviceFixture(dir: string) {
         dispatch: (only?: readonly string[]) => post('/v1/runs/dispatch', {
           runId, nodes: only ? Object.fromEntries(Object.entries(specs).filter(([id]) => only.includes(id))) : specs,
         }),
+        dispatchAgent: (id: string) => post('/v1/runs/dispatch', {
+          runId, nodes: { [id]: { tools: [{ command: readonlyTool, args: [], cwd: '.', timeoutMs: 5_000 }] } },
+        }),
+        hasInputSnapshot: (id: string) => Boolean(service.orchestra.db.raw.prepare('SELECT 1 FROM input_snapshots WHERE consumer_node_run_id=?')
+          .get(read(id).node_run_id!)),
+        requestRework: (id: string) => {
+          const row = read(id)
+          const source_artifact_id = 'rework-source'
+          const artifact = registerRunArtifact(service.orchestra.db, { artifactId: source_artifact_id, runId,
+            nodeRunId: String(row.node_run_id), fileName: 'source.txt', bytes: Buffer.from('fixture bytes') })
+          return post('/v1/rework/request', { operation_id: uuidv7(), run_id: runId, target_node_run_id: row.node_run_id,
+            expected_revision: row.revision, source_artifact_id, source_artifact_hash: artifact.sha256,
+            reason: '修订并行成员成果', expected_result: '新成果', suggested_scope: 'targeted_revision' }, true)
+        },
+        reworkCount: () => service.orchestra.db.raw.prepare('SELECT COUNT(*) AS n FROM rework_requests WHERE run_id=?').get(runId)?.n,
         acquire: (id: string) => post('/v1/node-runs/lease', {
           nodeRunId: read(id).node_run_id, ownerEpoch: service.orchestra.db.epoch, leaseTtlMs: 60_000,
         }),
@@ -120,7 +140,8 @@ it('publishes four-way quorum with individual exits and a reconvergent join', ()
   const definition = document([
     node('race', 'parallel', { join: 'quorum', quorum: 2 }),
     ...['one', 'two', 'three', 'four'].map(wait), policy('one_exit'), policy('two_exit'),
-    node('three_exit', 'agent', { side_effect_policy: 'irreversible' }), policy('deep_skip'), policy('merge'),
+    node('three_exit', 'agent', { side_effect_policy: 'irreversible' }), policy('deep_skip'),
+    node('merge', 'agent', { side_effect_policy: 'pure', tools: { allow: [readonlyTool] } }),
   ], [
     ...['one', 'two', 'three', 'four'].map(id => edge('race', id)), edge('one', 'one_exit'), edge('two', 'two_exit'),
     edge('three', 'three_exit'), edge('three_exit', 'deep_skip'),
@@ -151,7 +172,8 @@ it('publishes four-way quorum with individual exits and a reconvergent join', ()
     expect.objectContaining({ node_id: 'one_exit', status: 'done' }),
     expect.objectContaining({ node_id: 'two_exit', status: 'done' }),
   ]) })
-  expect(await run.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'merge', status: 'done' })] })
+  expect(await run.dispatchAgent('merge')).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'merge', status: 'done' })] })
+  expect(run.hasInputSnapshot('merge')).toBe(true)
   expect(run.run().status).toBe('succeeded')
 }), 20_000)
 
@@ -252,6 +274,34 @@ it('prunes members of a nested group cancelled before opening', () => withServic
     expect(run.receipt(id, 'parallel.path_skipped')).toMatchObject({ inactive_predecessors: [run.read('inner').node_run_id] })
   }
   expect(await run.dispatch()).toMatchObject({ status: 200, data: [expect.objectContaining({ node_id: 'merge', status: 'done' })] })
+  expect(run.run().status).toBe('succeeded')
+}), 20_000)
+
+it('rejects rework on a settled parallel member before writing any replacement or hold', () => withService(async fixture => {
+  const definition = document([
+    node('setup', 'parallel', { join: 'all' }), policy('left_seed'), policy('right_seed'),
+    node('race', 'parallel', { join: 'any' }),
+    node('source', 'agent', { side_effect_policy: 'pure', tools: { allow: [readonlyTool] } }), wait('loser'), wait('continue'),
+  ], [
+    edge('setup', 'left_seed'), edge('setup', 'right_seed'), edge('left_seed', 'race'), edge('right_seed', 'continue'),
+    edge('race', 'source'), edge('race', 'loser'),
+  ])
+  await fixture.publish('parallel_member_rework', definition)
+  const run = await fixture.start('parallel_member_rework', definition)
+  await run.dispatch()
+  await run.dispatch()
+  await run.dispatch()
+  expect(await run.dispatchAgent('source')).toMatchObject({ status: 200, data: expect.arrayContaining([
+    expect.objectContaining({ node_id: 'source', status: 'done' }),
+  ]) })
+  expect(run.status('race')).toBe('done')
+  expect(run.status('continue')).toBe('waiting')
+  expect(await run.requestRework('source')).toMatchObject({ status: 403, error: {
+    code: 'FORBIDDEN', message: expect.stringContaining('当前返工不能替换该成员'),
+  } })
+  expect(run.reworkCount()).toBe(0)
+  expect(run.read('source')).toMatchObject({ status: 'done', attempt: 1, replacement_node_run_id: null })
+  expect(await run.wake('continue')).toMatchObject({ status: 200, data: { woken: 1 } })
   expect(run.run().status).toBe('succeeded')
 }), 20_000)
 

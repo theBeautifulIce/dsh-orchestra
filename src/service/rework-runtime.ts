@@ -7,12 +7,13 @@ import type { ReadTx } from './queries/read-tx.ts'
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { appendNodeRunEvent, assertChainIntact } from '../infra/db/ledger.ts'
 import { applyTransition, createNodeRun } from './commands/nodes.ts'
+import { pinnedTopologyForRun } from './run-readiness.ts'
 
 export type RuntimeReworkRequest = {
   request_id: string; run_id: string; target_node_run_id: string
   approved_scope?: string | null; suggested_scope?: string; status?: string; new_node_run_id?: string | null; requester_node_run_id?: string | null; affected_node_ids?: string[]
 }
-type Node = { node_run_id: string; run_id: string; node_id: string; node_type: string; seq: number; attempt: number; status: string; revision: number; side_effect_policy: string; hang_reason: string | null; replacement_node_run_id: string | null; action_generation: number }
+type Node = { node_run_id: string; run_id: string; node_id: string; node_type: string; seq: number; attempt: number; status: string; revision: number; side_effect_policy: string; hang_reason: string | null; replacement_node_run_id: string | null; action_generation: number; parent_node_run_id: string | null }
 const resolved = "('declined','closed','accepted','cancelled')"
 const terminal = new Set<string>(TERMINAL_STATUSES)
 function nodeOf(tx: ReadTx, id: string): Node {
@@ -117,7 +118,15 @@ function assertSafe(tx: Tx, n: Node): void {
   if (n.node_type !== 'agent' || n.side_effect_policy !== 'pure' || n.hang_reason) throw new OrchError('FORBIDDEN', 'rework requires a pure agent without unresolved side effects')
   if (tx.get("SELECT 1 FROM bridge_tool_outbox WHERE node_run_id=? AND status='pending' LIMIT 1", [n.node_run_id])) throw new OrchError('FORBIDDEN', 'rework cannot repeat external effects')
 }
+
+export function assertReworkReplacementAllowed(tx: ReadTx, node: Pick<Node, 'run_id' | 'node_id' | 'parent_node_run_id'>): void {
+  if (node.parent_node_run_id !== null || pinnedTopologyForRun(tx, node.run_id)?.parallelOwner(node.node_id) !== undefined) {
+    throw new OrchError('FORBIDDEN', '并行组成员的执行授权固定到编组开启时的尝试，当前返工不能替换该成员', { nodeId: node.node_id })
+  }
+}
+
 function successor(tx: Tx, secret: string, n: Node, now: string, requestId: string): string {
+  assertReworkReplacementAllowed(tx, n)
   assertChainIntact(tx, secret, n.node_run_id)
   const id = 'nrun_' + uuidv7()
   createNodeRun(tx, { newNodeRunId: id, runId: n.run_id, nodeId: n.node_id, seq: n.seq, nodeType: n.node_type, attempt: n.attempt + 1, originNodeRunId: n.node_run_id, previousActionGeneration: n.action_generation, reworkRequestId: requestId, now })
@@ -131,6 +140,7 @@ export function authorizeReworkRuntime(tx: Tx, secret: string, req: RuntimeRewor
   const n = nodeOf(tx, req.target_node_run_id)
   if (n.run_id !== req.run_id || n.status !== 'done' || n.replacement_node_run_id) throw new OrchError('STALE_GENERATION', 'rework source must be the current completed attempt')
   assertSafe(tx, n)
+  assertReworkReplacementAllowed(tx, n)
   if ((req.approved_scope ?? req.suggested_scope ?? 'targeted_revision') === 'targeted_revision' && (tx.get<{n:number}>('SELECT COUNT(*) AS n FROM artifact_contents WHERE node_run_id=?',[n.node_run_id])?.n ?? 0) > 1) throw new OrchError('FORBIDDEN','multiple source artifacts require an explicit preservation protocol')
   const affected = descendants(tx, req, n)
   const proposedIds = new Set([n.node_run_id, ...affected.map(node => node.node_run_id)])
@@ -138,7 +148,11 @@ export function authorizeReworkRuntime(tx: Tx, secret: string, req: RuntimeRewor
     const reserved = [other.target_node_run_id, other.new_node_run_id, ...descendants(tx, other, nodeOf(tx, other.target_node_run_id)).map(node => node.node_run_id)]
     if (reserved.some(id => id && proposedIds.has(id))) throw new OrchError('STALE_GENERATION', 'overlapping rework scopes require explicit resolution')
   }
-  for (const d of affected) assertSafe(tx, d)
+  for (const d of affected) {
+    assertSafe(tx, d)
+    if (d.status !== 'queued' || d.node_run_id === req.requester_node_run_id
+        || tx.get('SELECT 1 FROM input_snapshots WHERE consumer_node_run_id=?', [d.node_run_id])) assertReworkReplacementAllowed(tx, d)
+  }
   for (const d of affected) {
     tx.run('INSERT OR IGNORE INTO rework_impacts(request_id,node_run_id,reason,created_at) VALUES(?,?,?,?)', [req.request_id, d.node_run_id, 'consumed or potentially consumed obsolete input', now])
     const boundQueued = d.status === 'queued' && !!tx.get('SELECT 1 FROM input_snapshots WHERE consumer_node_run_id=?', [d.node_run_id])
