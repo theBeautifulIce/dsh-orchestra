@@ -1,6 +1,7 @@
 import { operatorReason, operatorStatus } from '../core/operator-language.ts'
 import type { AnyOrchErrorCode } from '../core/errors.ts'
 import type { RunDeliveryCheck } from './queries/runs.ts'
+import { formatDeliveryReviewNotice, type ChatDeliveryReview } from './chat-delivery-review.ts'
 
 type Step = { title?: string | null; status: string; node_id?: string; waiting_on?: string[] }
 type BlockingStep = Step & { action_required: boolean; reason: string | null; missing: string[]; outstanding_files?: string[] }
@@ -14,6 +15,7 @@ type RunDisplay = {
   counts: Array<{ status: string; count: number }>
   blocking: BlockingStep[]
   decisions: Decision[]
+  deliveryReviews?: ChatDeliveryReview[]
   delivery_checks: RunDeliveryCheck[]
   nodes?: Step[]
   artifacts: Array<{ artifact_id: string; file_name?: string }>
@@ -85,7 +87,7 @@ export function chatDecisionTitle(title: string | null, kind: string): string {
 function decisionDescription(decision: Decision, unique: boolean): string {
   const title = chatDecisionTitle(decision.title, decision.kind)
   const evidence = evidenceNames(decision.required_evidence ?? [])
-  const available = decision.choices?.includes('approved')
+  const available = decision.kind !== 'audit_result' && decision.choices?.includes('approved')
   const next = unique && !evidence.length && !decision.reason && available
     ? '请在聊天审批卡中查看并选择。'
     : '请在 Orchestra 面板打开待办，查看核验材料和可用的处理方式。'
@@ -110,10 +112,11 @@ function blockingDescription(step: BlockingStep): string {
 export function describeChatRun(view: RunDisplay, proactive = false): { heading: string; body: string } {
   const actions = view.blocking.filter((step) => !proactive || step.action_required)
   const humanActions = actions.some((step) => step.action_required)
-  const state = view.decisions.length ? '等待人工处理' : humanActions ? '执行受阻'
+  const state = view.deliveryReviews?.length ? '成果待审核' : view.decisions.length ? '等待人工处理' : humanActions ? '执行受阻'
     : view.settling && !view.terminal ? '正在确认执行结果' : RUN_LABEL.get(view.status) ?? operatorStatus(view.status)
   const heading = taskHeading(view.title, state)
   const lines: string[] = []
+  for (const review of view.deliveryReviews ?? []) lines.push(formatDeliveryReviewNotice(review), '')
   const decisionTitles = view.decisions.map((decision) => chatDecisionTitle(decision.title, decision.kind))
   for (const [index, decision] of view.decisions.entries()) {
     lines.push(decisionDescription(decision, decisionTitles.filter((title) => title === decisionTitles[index]).length === 1))
@@ -129,7 +132,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
     const finished = view.counts.find(({ status }) => status === 'done')?.count
     if (finished) lines.push(`已有 ${finished} 个步骤完成执行。`)
   }
-  if (!view.terminal && !view.decisions.length && !actions.length && !proactive && view.counts.length) {
+  if (!view.terminal && !view.decisions.length && !view.deliveryReviews?.length && !actions.length && !proactive && view.counts.length) {
     const counts = view.counts.map(({ status, count }) => `${operatorStatus(status)} ${count} 项`)
     lines.push(`步骤情况：${counts.join('，')}。`)
   }

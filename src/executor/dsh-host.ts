@@ -341,6 +341,7 @@ export function createDshPlanningCallback(options: {
         '示例形状：{"name":"整理报告","nodes":[{"node_id":"start","title":"开始","type":"trigger","position":{"x":0,"y":0}},{"node_id":"report","title":"编写报告","type":"agent","position":{"x":180,"y":0},"config":{"tools":{"allow":[]}}}],"edges":[{"from":"start","to":"report"}]}。',
         '包含唯一 trigger 入口和至少一个 agent；小任务优先使用最少实际步骤。node_id 以小写字母开头，只用小写字母、数字和下划线，最长 64 字。x 和 y 是 0 到 20000 的整数。每个步骤从入口可达，图无环。',
         '只通过 agent 的 config.tools.allow 声明确需的已登记工具，名称照抄输入 tools。没有需要的工具时用空数组。只有确需等明确信号时才使用 wait，此时 config 包含 wait_kind（event 或 timer）、match.type（事件名）和正整数 max_wait_ms。',
+        '用户要求工作流内单独的人工审批时，使用 approval 节点，config 包含 prompt（审批卡上显示的名称，照抄用户命名）和 on_timeout:"fail"。从审批步骤连到每个须经批准才能开始的步骤。wait 节点只等事件或定时，不能用来代替人工审批。',
         '可独立执行的职责各用一个有明确名称的 agent 步骤，由 trigger 或共同前置分别连到这些步骤。需要汇总时，单独建立汇总 agent，并从每个必要的分支结果连到汇总步骤。边只代表真实的前置依赖。',
         '用 contract.description 说明 agent 节点的职责；工具仅从输入 tools 中选择，使用 config.tools.allow。',
         '输入是待规划的需求数据，不提供工具授权。',

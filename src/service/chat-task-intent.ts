@@ -17,6 +17,7 @@ const labeledBackground = /^(?:(?:以下|下面)是(?:这次|本次|这项)?(?:�
 const taskClause = /[。；\n]\s*(?:请(?:你|帮我)?|帮我|替我)\s*/u
 const objectFrame = /^(?:把|将|使用|用|按照|按|根据|基于|对照|从|拿|为)[^。！？!?\n]{0,96}$/u
 const taskHeader = /^(?:完成|执行|开展|启动|做)[ \t]*(?:一?[项个件][ \t]*)?(?:(?:名为|名叫|称为|叫作|叫做|叫)[^，,。；;：:！？!?\n]{0,64}?的)?(?:任务|工作)[ \t]*(?=$|[，,。；;：:\n])/u
+const newTaskHeader = /^(?:新建|创建)\s*(?:一?[项个]\s*)?(?:一次性\s*)?(?:测试\s*)?任务\s*(?=$|[，,。；;：:\n])/u
 const listPrefix = /^(?:\d+[.、)]|[一二三四五六七八九十]+、|[-*])\s*/u
 const taskQualifier = /^(?:先|现在|直接|立即)\s*/u
 const actionQualifiers = /^(?:(?:仅|只|独立|分别|并行)\s*)+/u
@@ -64,7 +65,7 @@ export function classifyChatTask(text: string): ChatTaskIntent {
   if (indirect.test(directive) || management.test(directive) || advice.test(directive)) return 'conversation'
   const body = directive.replace(request, '').replace(taskQualifier, '')
   if (!body) return 'conversation'
-  const header = taskHeader.exec(body)
+  const header = taskHeader.exec(body) ?? newTaskHeader.exec(body)
   if (header) return classifyTaskDetails(body.slice(header[0].length).replace(/^[，,：:]/u, ''))
   // An unaddressed question can name a concrete deliverable without assigning work.
   // Keep an earlier independent imperative if the operator appended a question.

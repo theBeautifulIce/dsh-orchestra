@@ -1,5 +1,6 @@
 import { useSyncExternalStore, type ReactElement } from 'react'
-import { DshLocalPanel, isDshLocalShell } from './dsh-local-panel.tsx'
+import { DshLocalPanel, isDshLocalShell, type DshLocalPanelSources } from './dsh-local-panel.tsx'
+import { formatNativeOrchestraApprovalCards } from './dsh-orchestra-approval-card.ts'
 import { registerNativeOrchestraSlash, type NativeOrchestraSlashContext } from './dsh-orchestra-slash.ts'
 import { registerNativeOrchestraToolView, type NativeOrchestraToolViewContext } from './dsh-orchestra-toolview.tsx'
 import { createPanelHost, type PanelHostProps } from './panel-host.tsx'
@@ -31,7 +32,8 @@ export const inject = ['slots']
 
 /** Activate the host panel while a trusted transport is available in this scope. */
 export function apply(ctx: DshClientContext): void {
-  registerNativeOrchestraToolView(ctx)
+  let reviewSources: DshLocalPanelSources | undefined
+  registerNativeOrchestraToolView(ctx, () => reviewSources)
   let explicit: Panel | undefined
   let local: Panel | undefined
   let unmount: (() => unknown) | undefined
@@ -73,6 +75,9 @@ export function apply(ctx: DshClientContext): void {
   })
 
   if (typeof window === 'undefined' || !window.location?.href || !isDshLocalShell(window.location.href)) return
+  ctx.effect(function* () {
+    yield formatNativeOrchestraApprovalCards(window.document)
+  }, 'orchestra: native approval fields')
   ctx.inject(['sessions', 'workspaces', 'inputTriggers'], ready => {
     ready.effect(function* () {
       yield registerNativeOrchestraSlash(ready, (input, init) => window.fetch(input, init))
@@ -81,9 +86,10 @@ export function apply(ctx: DshClientContext): void {
   ctx.inject(['slots', 'sessions', 'workspaces'], function bindLocalShell(ready) {
     ready.effect(function* () {
       const { sessions, workspaces } = ready
+      reviewSources = { sessions, workspaces }
       local = () => <DshLocalPanel sessions={sessions} workspaces={workspaces} />
       refresh()
-      yield () => { local = undefined; return refresh() }
+      yield () => { local = undefined; reviewSources = undefined; return refresh() }
     }, 'orchestra: local DSH workspace transport')
   })
 }

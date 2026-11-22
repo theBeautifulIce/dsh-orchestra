@@ -1,8 +1,8 @@
 {
   "name": "dsh-orchestra",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.1",
   "private": true,
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "DSH bundle plugin: cross-session, recoverable workflow orchestration with a deterministic ledger.",
   "type": "module",
   "main": "lib/index.js",
@@ -20,6 +20,9 @@
     "cordis.patch.yml",
     "orchestra.config.json",
     "README.md",
+    "README.en.md",
+    "LICENSE",
+    "docs/assets/readme",
     "docs/runbook.md",
     "docs/trial-circles.md"
   ],
