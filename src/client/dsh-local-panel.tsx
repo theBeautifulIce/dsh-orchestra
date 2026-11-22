@@ -4,7 +4,7 @@ import { PanelHost } from './panel-host.tsx'
 
 const route = '/api/orchestra.request'
 // PanelHost resolves paths as URLs. This routing base never leaves the renderer.
-const panelBase = 'http://orchestra.invalid/'
+export const localPanelBase = 'http://orchestra.invalid/'
 const loopbackNames = new Set(['localhost', '127.0.0.1', '[::1]'])
 
 type Store<T> = {
@@ -54,7 +54,7 @@ function createLocalFetcher(
     const isRead = request.method === 'GET'
     const isCommand = request.method === 'POST' && url.pathname.startsWith('/v1/')
     const isApiPath = url.pathname === '/health' || url.pathname.startsWith('/v1/')
-    if (url.origin !== new URL(panelBase).origin || !isApiPath || (!isRead && !isCommand)) {
+    if (url.origin !== new URL(localPanelBase).origin || !isApiPath || (!isRead && !isCommand)) {
       throw new TypeError('Invalid Orchestra panel request')
     }
     const query = new URLSearchParams({ workspaceId, sessionId, path: url.pathname + url.search })
@@ -80,6 +80,12 @@ function createLocalFetcher(
   }
 }
 
+export function createLocalSessionFetcher(sources: DshLocalPanelSources, workspaceId: string, sessionId: string) {
+  return createLocalFetcher(workspaceId, sessionId, () =>
+    selectedSession(sources.sessions.list.getSnapshot()) === sessionId
+    && workspaceForSession(sessionId, sources.workspaces.list.getSnapshot()) === workspaceId)
+}
+
 export function DshLocalPanel({ sessions, workspaces }: DshLocalPanelSources) {
   const sessionList = useSyncExternalStore(
     listener => sessions.list.subscribe(listener), () => sessions.list.getSnapshot(),
@@ -91,15 +97,12 @@ export function DshLocalPanel({ sessions, workspaces }: DshLocalPanelSources) {
   const workspaceId = workspaceForSession(sessionId, workspaceList)
   const fetcher = useMemo(() => {
     if (!workspaceId || !sessionId) return undefined
-    return createLocalFetcher(workspaceId, sessionId, () =>
-      selectedSession(sessions.list.getSnapshot()) === sessionId
-      && workspaceForSession(sessionId, workspaces.list.getSnapshot()) === workspaceId,
-    )
+    return createLocalSessionFetcher({ sessions, workspaces }, workspaceId, sessionId)
   }, [sessionId, workspaceId, sessions, workspaces])
 
   if (!fetcher) return <main style={{ padding: 24 }}>
     <h1>Orchestra</h1>
     <p role="status">请在 DSH 的工作区中打开一个会话，再返回 Orchestra。</p>
   </main>
-  return <PanelHost key={JSON.stringify([workspaceId, sessionId])} baseUrl={panelBase} fetcher={fetcher} workflowLaunchRequiresPlan />
+  return <PanelHost key={JSON.stringify([workspaceId, sessionId])} baseUrl={localPanelBase} fetcher={fetcher} workflowLaunchRequiresPlan />
 }

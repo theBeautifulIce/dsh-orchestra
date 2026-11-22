@@ -340,6 +340,15 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
           tx.run('UPDATE rework_attempts SET status=?,reviewed_at=? WHERE attempt_id=?', [body.action === 'accept' ? 'accepted' : 'request_changes', now, attempt.attempt_id])
           if (body.action === 'accept') {
             acceptReworkRuntime(tx, secret, row, now)
+            if (typeof actor === 'string' && actor === row.owner_actor) {
+              const held = tx.run(`UPDATE delivery_review_holds
+                SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,updated_at=?
+                WHERE run_id=? AND node_id=(SELECT node_id FROM node_runs WHERE node_run_id=?)
+                  AND owner_actor=? AND (status='held' OR node_run_id<>?)`,
+              [row.new_node_run_id, body.artifact_id, body.artifact_hash, now, row.run_id, row.new_node_run_id, actor, row.new_node_run_id])
+              if (held.changes) appendEvent(tx, { type: 'rework.hold_accept', runId: row.run_id, nodeRunId: row.new_node_run_id,
+                payload: { artifact_id: body.artifact_id, sha256: body.artifact_hash, actor } })
+            }
             tx.run("UPDATE rework_requests SET status='closed',revision=revision+1,updated_at=? WHERE request_id=?", [now, row.request_id])
             closeRun(tx, secret, row.run_id, now)
           }

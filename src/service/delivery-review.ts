@@ -82,6 +82,11 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
           if (body.action === 'withdraw') {
             tx.run('DELETE FROM delivery_review_holds WHERE run_id=? AND node_id=?', key)
           } else {
+            if (tx.get(`SELECT 1 FROM rework_requests WHERE run_id=?
+              AND (target_node_run_id=? OR new_node_run_id=?)
+              AND status NOT IN ('closed','declined','cancelled')`, [body.run_id, body.node_run_id, body.node_run_id])) {
+              throw new OrchError('STALE_GENERATION', '该步骤正在返工，请在修订成果待办中提交验收')
+            }
             const artifact = tx.get<{ bytes: Uint8Array }>(`SELECT c.bytes FROM artifacts a JOIN artifact_contents c USING(artifact_id)
               WHERE a.run_id=? AND c.node_run_id=? AND a.artifact_id=? AND a.sha256=? AND (a.retain_until IS NULL OR a.retain_until>?)`,
             [body.run_id, body.node_run_id, body.artifact_id, body.sha256, now])

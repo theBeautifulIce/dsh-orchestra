@@ -5,9 +5,11 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
-import { serveOrchestra, type serveDshOrchestra } from '../../src/index.ts'
+import { serveOrchestra, type serveDshOrchestra, type TaskPlanProposal } from '../../src/index.ts'
 import { OrchError } from '../../src/core/errors.ts'
 import { decisionId, uuidv7 } from '../../src/core/ids.ts'
+import { BridgeClient } from '../../src/executor/bridge.ts'
+import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 import { appendEvent, appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
@@ -15,6 +17,7 @@ import { transitionNode } from '../../src/service/commands/node-state.ts'
 import { installConfiguredLocalDshHost, localDshHostConfig } from '../../src/service/local-dsh-host.ts'
 import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
 import { registerRunArtifact } from '../../src/service/artifact-store.ts'
+import { createDeliveryReviewHost } from '../../src/service/delivery-review.ts'
 import { recordArtifactPublication } from '../../src/service/artifact-completion.ts'
 import { applyRunAcceptance } from '../../src/service/commands/run-acceptance.ts'
 import { classifyChatTask } from '../../src/service/chat-task-intent.ts'
@@ -28,7 +31,7 @@ type Guard = Parameters<Context['tools']['guard']>[0]
 type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 
 async function fixture(options: { profile?: string; version?: string; enabled?: false | 'desktop'; host?: string;
-  routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError } = {}) {
+  routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError; dispatchPlans?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'orchestra-native-chat-'))
   const ctx = new Context()
   const agents = new Map<string, Agent>()
@@ -46,7 +49,9 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   const approval = vi.fn(async (_request: { agent: Agent; toolName: string; callId: string; reason: string; signal: AbortSignal }) =>
     deny ? 'rejected' : 'allowed-once')
   const services = new Map<string, Service>()
-  const planner = vi.fn(async ({ goal, workflows }: Parameters<NonNullable<Parameters<typeof serveOrchestra>[0]['planning']>['propose']>[0]) => {
+  const spawn = vi.fn()
+  const registry = new ToolRegistry()
+  const planner = vi.fn(async ({ goal, workflows }: Parameters<NonNullable<Parameters<typeof serveOrchestra>[0]['planning']>['propose']>[0]): Promise<TaskPlanProposal> => {
     if (options.planningError) throw options.planningError
     if (plannerUnavailable) throw new Error('fake unavailable host')
     const workflow = workflows[0]!
@@ -94,6 +99,19 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
       dbFile, secret, phase: 'S6', asOfSeq: () => 0, listEvents: () => [], listTasks: () => [],
       appendLedgerEvent: () => { throw new Error('Unexpected raw ledger write') },
       planning: { propose: planner, workflowGenerator },
+      ...(options.dispatchPlans && { executor: {
+        registry,
+        runner: new ReadOnlyToolRunner(registry, {
+          readonlyAvailable: () => true, run: async () => { throw new Error('Unexpected tool call') },
+        }, directory),
+        bridge: new BridgeClient({
+          async request(method, params) {
+            if (method === 'executor.spawn') spawn(params)
+            throw new OrchError('FORBIDDEN', 'Fixture does not start real DSH executors')
+          },
+          async *listen() {},
+        }),
+      } }),
     })
     services.set(sessionId, service)
     return service
@@ -181,7 +199,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     const checkTool = (name: string, parent?: symbol) => guard?.({ agent, name, signal: signal.signal, parent } as Parameters<Guard>[0])
     return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn }
   }
-  return { session, serve, services, planner, workflowGenerator, routes, approval, notices,
+  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn,
     registered: () => ({ activation: activation!, prompt: prompt!, tool: tool! }),
     deny: (value: boolean) => { deny = value }, badPlan: (value: boolean) => { badPlan = value },
     plannerUnavailable: (value: boolean) => { plannerUnavailable = value },
@@ -463,6 +481,72 @@ it.each([
   expect(classifyChatTask(text)).toBe(intent)
 })
 
+it.each(['approval', 'wait', 'no files'] as const)('enforces named approval and delivery constraints in chat planning (%s)', async (scenario) => {
+  const test = await fixture({ routing: { enabled: true }, dispatchPlans: true })
+  const gateType = scenario === 'wait' ? 'wait' : 'approval'
+  const approvalName = '批准合成数据核对'
+  const draft = {
+    name: '合成数据演练',
+    nodes: [
+      { node_id: 'start', type: 'trigger' },
+      { node_id: 'gate', type: gateType, title: approvalName, config: gateType === 'approval'
+        ? { prompt: approvalName, on_timeout: 'fail' }
+        : { wait_kind: 'event', match: { type: 'simulated_approval' }, max_wait_ms: 60_000 } },
+      { node_id: 'draft', type: 'agent' },
+    ],
+    edges: [{ from: 'start', to: 'gate' }, { from: 'gate', to: 'draft' }],
+  }
+  test.workflowGenerator.mockResolvedValue(draft)
+  const originalPlan = test.planner.getMockImplementation()!
+  test.planner.mockImplementation(async (input) => {
+    const plan = await originalPlan(input)
+    const draftStep = plan.steps[0]!
+    return { ...plan, title: 'F8 演练', steps: [
+      { ...draftStep, node_id: 'gate', description: approvalName },
+      { ...draftStep, depends_on: ['gate'] },
+    ], risks: gateType === 'wait' ? [{ severity: 'low', description: '事件可能延迟', mitigation: '等待到期', node_id: 'gate' }] : [] }
+  })
+  try {
+    const human = test.session('work', 'parent')
+    const delivery = scenario === 'no files' ? '在会话中给出结果。不要读写文件。' : '交付 report.md。'
+    await human.admit(user('新建一次性测试任务「F8 演练」。为本次测试单独生成流程，设置人工审批步骤「批准合成数据核对」。在我批准前，计算步骤必须等待。批准后，使用模拟数据计算净额并' + delivery))
+    const receipt = await human.call()
+    const service = test.services.get('parent')!
+    if (scenario !== 'approval') {
+      expect(receipt).toMatchObject({ state: 'quality_blocked', issues: [expect.stringContaining(scenario === 'wait' ? approvalName : '不写文件')] })
+      expect(count(service, 'runs')).toBe(0)
+      expect(test.approval).not.toHaveBeenCalled()
+      return
+    }
+    expect(receipt).toMatchObject({ state: 'started', title: 'F8 演练' })
+    expect(test.approval.mock.calls[0]?.[0].reason.split('\n')).toEqual([
+      'Orchestra 审批', '任务　F8 演练', '步骤　启动前确认（整项任务）',
+      '审批原因　计划包含人工审批步骤，启动前需要你确认这份计划。',
+      '审批内容　批准启动这份计划，共 2 个步骤。',
+      '确认后　按计划启动，流程里的人工审批仍须单独处理。',
+      expect.stringContaining('计划步骤　批准合成数据核对'),
+    ])
+    const steps = () => service.orchestra.db.raw.prepare('SELECT node_id, status FROM node_runs WHERE run_id=? ORDER BY seq').all(receipt.run_id)
+    await expect.poll(steps, { timeout: 5_000 }).toEqual([{ node_id: 'gate', status: 'blocked_pre' }, { node_id: 'draft', status: 'queued' }])
+    expect(test.spawn).not.toHaveBeenCalled()
+    const headers = { 'x-orchestra-secret': test.secret }
+    const list = await fetch(service.endpoint + '/v1/decisions?inbox=human', { headers }).then((response) => response.json())
+    expect(list.data.items).toEqual([expect.objectContaining({ kind: 'pre_execution', status: 'pending', target_summary: approvalName })])
+    const notification = () => test.notices.find(({ message }) => message.content.some((part) => part.type === 'text' && part.text.includes(approvalName)))
+    await expect.poll(notification, { timeout: 5_000 }).toMatchObject({ sessionId: 'parent' })
+    await human.admit(notification()!.message, false)
+    await expect(human.call({ action: 'review', decision_title: approvalName })).resolves.toMatchObject({ state: 'approved' })
+    expect(test.approval.mock.calls[1]?.[0].reason.split('\n')).toEqual([
+      'Orchestra 审批', '任务　F8 演练', '步骤　批准合成数据核对',
+      '审批原因　流程要求你在相关步骤开始前作出人工审批。',
+      '审批内容　批准「批准合成数据核对」',
+      '确认后　此审批步骤通过，依赖它的步骤可继续执行。',
+    ])
+    await expect.poll(() => test.spawn.mock.calls.length, { timeout: 5_000 }).toBe(1)
+    expect(steps()[0]).toEqual({ node_id: 'gate', status: 'done' })
+  } finally { await test.close() }
+}, 15_000)
+
 it('queues fresh owner steering from a managed turn and never returns its older run as the new receipt', async () => {
   const test = await fixture({ routing: { enabled: false } })
   try {
@@ -737,6 +821,91 @@ it('acknowledges once, keeps recoverable progress quiet, and reports a late bloc
   }
 })
 
+it('notifies the source conversation with a fixed delivery review and leaves the review to the operator', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理办公材料并交付审核报告'))
+    const first = await human.call()
+    const service = test.services.get('parent')!
+    const { db } = service.orchestra
+    const actor = String(db.raw.prepare('SELECT created_by FROM task_plans').get()?.created_by)
+    const node = db.raw.prepare("SELECT node_run_id,revision FROM node_runs WHERE run_id=? AND node_id='draft'").get(first.run_id)!
+    const nodeRunId = String(node.node_run_id)
+    const now = new Date().toISOString()
+    const reviewHost = createDeliveryReviewHost(db, test.secret, true)
+    reviewHost.change({ operation_id: uuidv7(), action: 'hold', run_id: first.run_id, node_run_id: nodeRunId }, actor, now)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(0)
+    const artifact = registerRunArtifact(db, {
+      artifactId: uuidv7(), runId: first.run_id, fileName: 'report.md', bytes: Buffer.from('需要核算的测试成果'), nodeRunId,
+    })
+    withTx(db, (tx) => tx.run("UPDATE node_runs SET status='done',side_effect_policy='pure' WHERE node_run_id=?", [nodeRunId]))
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(test.notices).toHaveLength(1)
+    const notice = test.notices[0]!
+    expect(notice.sessionId).toBe('parent')
+    const noticeText = notice.message.content.find((part) => part.type === 'text')?.text ?? ''
+    expect(noticeText.split('\n').slice(1, 7).map(line => line.split('　')[0])).toEqual([
+      '任务', '步骤', '待审成果', '审核原因', '审核标准', '处理方式',
+    ])
+    expect(noticeText).toContain('待审成果　report.md')
+    expect(noticeText).not.toContain(artifact.sha256)
+    await human.admit(notice.message, false)
+    const action = { action: 'review_delivery' }
+    const result = await human.invoke(action)
+    expect(JSON.parse(result.text)).toEqual({ state: 'delivery_review', count: 1 })
+    expect(JSON.stringify(await human.render(action))).not.toContain('需要核算的测试成果')
+    const meta = test.registered().tool.output.presentationMeta?.(action, result)
+    expect(meta).toMatchObject({ deliveryReview: {
+      sessionId: 'parent', reviews: [expect.objectContaining({
+        step: '整理报告', preview: '需要核算的测试成果',
+        artifact: expect.objectContaining({ sha256: artifact.sha256 }),
+      })],
+    } })
+    expect(test.approval).not.toHaveBeenCalled()
+    const feedback = service.rework!.request({
+      operation_id: uuidv7(), run_id: first.run_id, target_node_run_id: nodeRunId, expected_revision: Number(node.revision),
+      source_artifact_id: artifact.artifact_id, source_artifact_hash: artifact.sha256,
+      reason: '合计需复核', expected_result: '列出计算过程',
+    }, actor, now)
+    expect(feedback).toMatchObject({ target_node_run_id: nodeRunId, reason: '合计需复核' })
+    await expect(human.call(action)).resolves.toMatchObject({ state: 'delivery_review', count: 0 })
+    expect(feedback.status).toBe('scheduled')
+    const revisedId = feedback.new_node_run_id!
+    const revised = registerRunArtifact(db, {
+      artifactId: uuidv7(), runId: first.run_id, fileName: 'report.bin', bytes: Buffer.from([0, 1, 2, 3]), nodeRunId: revisedId,
+    })
+    withTx(db, tx => tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?", [revisedId]))
+    service.rework!.recover(now)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(test.notices).toHaveLength(2)
+    const nextNotice = test.notices[1]!.message
+    expect(nextNotice.content.find(part => part.type === 'text')?.text).toContain('report.bin（第 1 轮修订）')
+    await human.admit(nextNotice, false)
+    const resultAfterRework = await human.invoke(action)
+    const nextMeta = test.registered().tool.output.presentationMeta?.(action, resultAfterRework)
+    expect(nextMeta).toMatchObject({ deliveryReview: { reviews: [expect.objectContaining({
+      artifact: expect.objectContaining({ artifact_id: revised.artifact_id, sha256: revised.sha256 }),
+      revised: expect.objectContaining({ requestId: feedback.request_id, round: 1 }),
+      criteria: expect.arrayContaining(['列出计算过程']),
+    })] } })
+    expect(JSON.stringify(nextMeta)).not.toContain('"preview"')
+    expect(test.approval).not.toHaveBeenCalled()
+    const awaiting = service.rework!.list(actor, first.run_id).items[0]!
+    expect(() => reviewHost.change({ action: 'accept', operation_id: uuidv7(), run_id: first.run_id, node_run_id: revisedId,
+      artifact_id: revised.artifact_id, sha256: revised.sha256 }, actor, now)).toThrow(/正在返工/u)
+    service.rework!.review({ operation_id: uuidv7(), request_id: awaiting.request_id, expected_revision: awaiting.revision,
+      action: 'accept', note: '修订符合预期', artifact_id: revised.artifact_id, artifact_hash: revised.sha256 }, actor, now)
+    expect(reviewHost.list(actor, first.run_id).items[0]).toMatchObject({ status: 'accepted', node_run_id: revisedId, artifact_id: revised.artifact_id })
+    await expect(human.call(action)).resolves.toMatchObject({ state: 'delivery_review', count: 0 })
+  } finally {
+    await test.close()
+    vi.useRealTimers()
+  }
+})
+
 it('reports the blocked step and missing planned file separately from its three registered files', async () => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   const test = await fixture({ reportRequirements: ['collection-review.md', 'summary.md'] })
@@ -952,7 +1121,7 @@ it('keeps approval, planning failure and terminal results in the originating DSH
       agent: human.agent, toolName: 'orchestra_task', reason: expect.stringContaining('人工核对报告'),
     }))
     expect(test.approval).toHaveBeenNthCalledWith(3, expect.objectContaining({
-      agent: human.agent, toolName: 'orchestra_task', reason: expect.stringMatching(/二次确认。.*人工核对报告.*有效至/u),
+      agent: human.agent, toolName: 'orchestra_task', reason: expect.stringMatching(/二次确认\n[\s\S]*审批内容　批准「人工核对报告」[\s\S]*有效至　/u),
     }))
     expect(db.raw.prepare('SELECT status, resolved_by FROM decisions WHERE decision_id = ?').get(decision))
       .toMatchObject({ status: 'resolved', resolved_by: expect.stringMatching(/^local-dsh:/) })
@@ -1018,10 +1187,12 @@ it.each(['rejected', 'expired', 'changed'] as const)(
       await expect.poll(() => test.approval.mock.calls.length).toBe(2)
       const second = test.approval.mock.calls[1]![0]
       expect(second.agent).toBe(human.agent)
-      expect(second.reason).toContain('待办「运行前确认」')
+      expect(second.reason.split('\n').slice(1, 5)).toEqual(test.approval.mock.calls[0]![0].reason.split('\n').slice(1, 5))
+      expect(test.approval.mock.calls[0]![0].reason).toContain('确认后　还需在下一张卡片完成二次确认。')
+      expect(second.reason).toContain('审批内容　批准「运行前确认」')
       expect(second.reason).not.toContain(contentHash)
       expect(second.reason).not.toContain(id)
-      expect(second.reason).toMatch(/有效至 .*（UTC）。/u)
+      expect(second.reason).toMatch(/有效至　.*（UTC）$/u)
       expect(second.signal).not.toBe(test.approval.mock.calls[0]![0].signal)
       const decisionState = () => db.raw.prepare('SELECT status, revision, resolved_by FROM decisions WHERE decision_id = ?').get(id)
       expect(decisionState()).toMatchObject({ status: 'pending', revision: 1, resolved_by: null })

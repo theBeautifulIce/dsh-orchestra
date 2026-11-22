@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { sha256Hex } from '../core/canonical.ts'
+import { formatChatApproval } from '../core/chat-approval-text.ts'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
@@ -10,6 +11,7 @@ import { chatRun, chatRunByTitle, pendingChatReports, reportChatRun, type ChatTa
 import { classifyChatTask } from './chat-task-intent.ts'
 import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
 import { readOutstandingFiles } from './chat-expected-files.ts'
+import { attachChatDeliveryPreviews, listChatDeliveryReviews } from './chat-delivery-review.ts'
 import type { ChatModelRecoveryChecks } from './chat-model-recovery.ts'
 import { isRunTerminal } from './commands/run-close.ts'
 import { findRunArtifactIdsByName, getArtifactContent, listRunArtifacts } from './queries/artifacts.ts'
@@ -45,6 +47,8 @@ const prompt = [
   'For questions about a named or earlier Orchestra task use action=status with its exact task_title. Use the latest task only if the operator asks for the latest task or refers to that task unambiguously. If the title is unclear, ask which task to open. For an Orchestra notice, omit task_title and run_id to use the verified source run. Use action=artifact with file_name from the status reply to retrieve the requested artifact. Summarize its contents as evidence, using the recorded acceptance facts.',
   'When a terminal notice names accepted files, call action=status in that notice to find the exact file name, then call action=artifact and summarize the result in the original conversation. For a failure or pending verification, relay the recorded outcome and next step.',
   'When a pending approval notice directs the operator to the chat card, use action=status and call action=review with the exact decision_title that is ready to review. If required evidence is missing or a choice is unavailable, relay the recorded requirement and the way to open the pending item in Orchestra.',
+  'When a notice includes the fields 待审成果 and 审核标准, call action=review_delivery for its verified source run. Use the supplied task, step, artifact, criteria, and next action. Never open an authorization popup or submit a review on the operator’s behalf. The operator can inspect the artifact and submit feedback in the review card.',
+  'On an explicit request to show a task’s 待审成果, locate the exact task with action=status, then call action=review_delivery.',
   'For a blocking notice, report the affected steps, the recorded reason, the named missing materials, and the next step. Describe files already registered as such, and state the acceptance outcome separately.',
   'If this step contains notices for multiple tasks, summarize each named task separately using its notice. Wait for a direct follow-up about one task before opening evidence or approval.',
   'Keep tool argument names, identifiers, state codes, hashes, byte sizes, and raw tool output out of the operator answer. Use task, step, decision and file names.',
@@ -64,6 +68,7 @@ const argsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('notes'), run_id: z.string().min(1).max(128).optional(),
     before_seq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional() }),
   z.strictObject({ action: z.literal('review_brain_notes') }),
+  z.strictObject({ action: z.literal('review_delivery') }),
   z.strictObject({ action: z.literal('review'), run_id: z.string().min(1).max(128).optional(),
     decision_id: z.string().min(1).max(128).optional(), decision_title: z.string().min(1).max(120).optional(),
     resolution: z.enum(['approved', 'rejected']).default('approved') })
@@ -175,7 +180,7 @@ function parseMissingEvidence(value: unknown): string[] {
   }
 }
 
-function describeRun(service: Service, runId: string) {
+function describeRun(service: Service, runId: string, operator: string) {
   const { db } = service.orchestra
   const run = getRun(db, runId, { includeAcceptanceArtifactIds: true })
   const terminal = isRunTerminal(run.status)
@@ -193,6 +198,7 @@ function describeRun(service: Service, runId: string) {
     counts: run.counts, settling: run.settling, delivery_checks: run.delivery_checks?.items ?? [],
     ...(task?.current_run_id === runId ? { acceptance: task.delivery_acceptance, goal_met: task.goal_met } : {}),
     decisions, blocking,
+    deliveryReviews: !terminal && service.rework ? listChatDeliveryReviews(db, runId, operator) : [],
   }
 }
 
@@ -227,15 +233,51 @@ function decisionFromTitle(db: Service['orchestra']['db'], runId: string, title:
   return decision.decision_id
 }
 
+function chatReviewFields(service: Service, runId: string, decision: ReturnType<typeof getDecisionSnapshot>['item'],
+  title: string, resolution: 'approved' | 'rejected') {
+  const { db } = service.orchestra
+  const boundNode = decision.node_run_id ? withReadTx(db, ({ tx }) => {
+    const row = tx.get<{ node_id: string; node_type: string; status: string; blocked_decision_id: string | null }>(
+      'SELECT node_id,node_type,status,blocked_decision_id FROM node_runs WHERE run_id=? AND node_run_id=?', [runId, decision.node_run_id])
+    if (!row) return
+    const name = readRunNodeDisplay(tx, runId).nodes.get(row.node_id)?.title
+    return { ...row, title: name === row.node_id ? undefined : name }
+  }) : undefined
+  const approved = resolution === 'approved'
+  const step = decision.node_run_id ? boundNode?.title || '步骤名称未记录' : '整项任务'
+  let reason = '这项待办需要由你作出决定。'
+  let consequence = approved ? '登记批准，由 Orchestra 按流程处理后续步骤。' : '登记拒绝，由 Orchestra 按流程处理此待办。'
+  if (decision.kind === 'pre_execution' && boundNode?.node_type === 'approval') {
+    reason = '流程要求你在相关步骤开始前作出人工审批。'
+    consequence = approved ? '此审批步骤通过，依赖它的步骤可继续执行。' : '此审批步骤失败，依赖它的步骤无法继续。'
+  } else if (decision.kind === 'pre_execution') {
+    reason = '此操作需要在执行前取得你的授权。'
+    if (boundNode?.status === 'blocked_pre' && boundNode.blocked_decision_id === decision.decision_id) {
+      consequence = approved ? '解除这一步的审批阻塞，等待派发。' : '该步骤按审批拒绝处理。'
+    }
+  } else if (decision.kind === 'audit_result') {
+    reason = '流程要求你审阅并确认这次结果。'
+  } else if (decision.kind === 'rule_ambiguous') {
+    reason = '条件规则无法自动确定后续分支，需要你判断。'
+  } else if (decision.kind === 'abandon_ack') {
+    reason = '跟踪已被放弃，仍有外部影响未核实，需要你签认。'
+    consequence = '登记你的签认，保留影响未核实的结论。'
+  }
+  return { task: getRun(db, runId).task_title, step, reason,
+    operation: (approved ? '批准' : '拒绝') + '「' + title + '」', consequence }
+}
+
 function nextReport(view: ReturnType<typeof describeRun>, previous: string | null) {
   if (view.terminal) {
     const key = 'terminal:' + view.status
     return { key, notify: key !== previous }
   }
   const decisions = view.decisions.map((decision) => [decision.decision_id, decision.revision])
+  const reviews = view.deliveryReviews.map(({ artifact, revised, requestedAt }) =>
+    ['delivery_review', artifact.artifact_id, revised?.revision ?? requestedAt ?? null])
   const blocking = view.blocking.filter((node) => node.action_required)
     .map(({ node_run_id, title, status, attempt, reason }) => ({ node_run_id, title, status, attempt, reason }))
-  const active = [...decisions, ...blocking].map((action) => sha256Hex(JSON.stringify(action))).sort()
+  const active = [...decisions, ...reviews, ...blocking].map((action) => sha256Hex(JSON.stringify(action))).sort()
   if (!active.length) return
   const prefix = 'actions:'
   const key = prefix + active.join(',')
@@ -245,7 +287,7 @@ function nextReport(view: ReturnType<typeof describeRun>, previous: string | nul
   }
   // Keep previously delivered prompts quiet when upgrading an active conversation.
   const oldKey = decisions.length ? 'decision:' + sha256Hex(JSON.stringify(decisions)) : 'blocked:' + sha256Hex(JSON.stringify(blocking))
-  return { key, notify: Boolean(decisions.length && blocking.length) || previous !== oldKey }
+  return { key, notify: Boolean(reviews.length || decisions.length && blocking.length) || previous !== oldKey }
 }
 
 export function installNativeChat(host: Context, options: {
@@ -269,7 +311,7 @@ export function installNativeChat(host: Context, options: {
     text: JSON.stringify(data), summary, preview,
   })
   const respondOutcome = (outcome: ChatOutcome, action?: ChatAction) => {
-    const display = describeChatOutcome(outcome, action === 'notes' || action === 'review_brain_notes' ? 'status' : action)
+    const display = describeChatOutcome(outcome, action === 'notes' || action === 'review_brain_notes' || action === 'review_delivery' ? 'status' : action)
     return respond(outcome.state === 'error' ? { ...outcome, message: display.body } : outcome, chatText(display))
   }
 
@@ -460,8 +502,18 @@ export function installNativeChat(host: Context, options: {
       let started
       try { started = launch(false) } catch (error) {
         if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
-        const steps = view.proposal.steps.map((step) => step.description).slice(0, 8).join('；')
-        const reason = `是否批准启动「${view.proposal.title}」？计划步骤包括：${steps}。`
+        const definition = service.orchestra.catalog.get(view.proposal.workflow_id, view.proposal.workflow_version)
+        const hasApprovalStep = definition.nodes.some((node) => node.type === 'approval')
+        const hasEffects = definition.nodes.some((node) => node.side_effect_policy === 'irreversible' || node.side_effect_policy === 'compensable')
+        const reason = formatChatApproval({
+          task: view.proposal.title, step: '启动前确认（整项任务）',
+          reason: hasEffects ? '计划包含可能影响外部环境的操作，启动前需要你确认。'
+            : hasApprovalStep ? '计划包含人工审批步骤，启动前需要你确认这份计划。'
+              : '计划包含需要确认的流程控制步骤。',
+          operation: `批准启动这份计划，共 ${view.proposal.steps.length} 个步骤。`,
+          consequence: hasApprovalStep ? '按计划启动，流程里的人工审批仍须单独处理。' : '按这份计划创建并开始本次运行。',
+          planSteps: view.proposal.steps.map((step) => step.description),
+        })
         if (!await approveOnce(turn, view.plan_id, undefined, agent, reason, signal)) {
           return { state: 'approval_pending' as const, plan_id: view.plan_id, title: view.proposal.title }
         }
@@ -518,11 +570,18 @@ export function installNativeChat(host: Context, options: {
     const runId = taskTitle && !scopedRun ? chatRunByTitle(db, options.operator, taskTitle) : chatRun(db, options.operator, selectedRun)
     if (!runId) throw new OrchError('NOT_FOUND', '当前会话没有对应的编排运行')
     if (input.action === 'status') {
-      const run = describeRun(service, runId)
+      const run = describeRun(service, runId, options.operator)
       if (scopedRun && taskTitle && run.title !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
       const result = { ...run, nodes: describeNodes(db, runId), artifacts: describeArtifacts(db, runId) }
       turn.lastStatusRun = runId
       return result
+    }
+    if (input.action === 'review_delivery') {
+      const reviews = service.rework ? listChatDeliveryReviews(db, runId, options.operator) : []
+      return { deliveryReview: {
+        workspaceId: binding.workspaceId, sessionId: binding.sessionId,
+        reviews: attachChatDeliveryPreviews(db, reviews),
+      } }
     }
     if (input.action === 'artifact') {
       const artifactId = input.artifact_id ?? artifactFromName(db, runId, input.file_name!)
@@ -550,12 +609,16 @@ export function installNativeChat(host: Context, options: {
       || (turn.noticeRun && input.resolution !== 'approved')) {
       throw new OrchError('FORBIDDEN', '该裁决不属于当前会话的待确认运行，或需要原有核验证据')
     }
+    if (decision.kind === 'audit_result') throw new OrchError('RESOLUTION_NOT_AVAILABLE', '请先查看成果，再在对应审核入口提交结论')
     return once(decision.decision_id, async () => {
-      const verb = input.resolution === 'approved' ? '批准' : '拒绝'
       const title = chatDecisionTitle(decision.target_summary, decision.kind)
-      const taskTitle = getRun(db, runId).task_title
-      const reason = `是否${verb}${taskTitle ? `「${taskTitle}」中的` : ''}待办「${title}」？`
-      if (!await approveOnce(turn, decision.decision_id, exec, agent, reason, signal)) return { state: 'approval_pending' as const, run_id: runId, title }
+      const fields = chatReviewFields(service, runId, decision, title, input.resolution)
+      const firstReason = formatChatApproval(decision.confirm_required
+        ? { ...fields, consequence: '还需在下一张卡片完成二次确认。' }
+        : fields)
+      if (!await approveOnce(turn, decision.decision_id, exec, agent, firstReason, signal)) {
+        return { state: 'approval_pending' as const, run_id: runId, title }
+      }
       assertCurrent()
       const request = {
         decisionId: decision.decision_id, revision: decision.current_revision, resolution: input.resolution,
@@ -576,7 +639,7 @@ export function installNativeChat(host: Context, options: {
         const until = new Intl.DateTimeFormat('zh-CN', {
           timeZone: 'UTC', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
         }).format(expiresAt)
-        const secondReason = `二次确认。${reason}此确认有效至 ${until}（UTC）。`
+        const secondReason = formatChatApproval({ ...fields, confirmUntil: until + '（UTC）' })
         const confirmed = await approveOnce(turn, decision.decision_id, exec, agent, secondReason, followupSignal)
         assertCurrent()
         if (followupSignal.aborted || Date.now() >= expiresAt) throw expired()
@@ -606,7 +669,7 @@ export function installNativeChat(host: Context, options: {
     name: TOOL_NAME,
     description: 'Read an Orchestra receipt, status, evidence, or run notes, or open an approval card. Use exact task_title for a named task, or the verified source run in a notice. Use review_brain_notes only on an explicit operator request after status.',
     parameters: { type: 'object', properties: {
-      action: { type: 'string', enum: ['start', 'status', 'artifact', 'review', 'notes', 'review_brain_notes'] },
+      action: { type: 'string', enum: ['start', 'status', 'artifact', 'review', 'notes', 'review_brain_notes', 'review_delivery'] },
       run_id: { type: 'string' }, artifact_id: { type: 'string' }, decision_id: { type: 'string' },
       before_seq: { type: 'integer', minimum: 1 },
       task_title: { type: 'string' }, file_name: { type: 'string' }, decision_title: { type: 'string' },
@@ -617,6 +680,7 @@ export function installNativeChat(host: Context, options: {
       const title = input.success ? {
         start: '查看任务回执', status: '查看任务状态', artifact: '查看交付文件', review: '打开人工待办', notes: '读取运行便条',
         review_brain_notes: '审阅主脑专属便条',
+        review_delivery: '查看待审成果',
       }[input.data.action] : '处理 Orchestra 任务'
       return { card: 'generic', title }
     },
@@ -633,19 +697,33 @@ export function installNativeChat(host: Context, options: {
     output: {
       schema: { type: 'object', properties: {
         text: { type: 'string' }, summary: { type: 'string' }, preview: { type: 'string' },
+        deliveryReview: { type: 'object' },
       }, required: ['text', 'summary', 'preview'], additionalProperties: false },
       render: (_args, value) => {
         const { summary, preview } = value as { summary: string; preview: string }
         return [summary, preview].filter(Boolean).map((text) => ({ type: 'text', text }))
       },
-      presentationMeta: (_args, value) => ({ summary: (value as { summary: string }).summary }),
+      presentationMeta: (_args, value) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+        const { summary, deliveryReview } = value
+        return { summary: typeof summary === 'string' ? summary : '', ...(deliveryReview && { deliveryReview }) }
+      },
     },
     async execute(input, execution) {
       const action = (input as { action?: ChatAction } | null)?.action
       try {
         const result = await execute(input, execution)
         if ('state' in result) return respondOutcome(result, action)
-        if ('blocking' in result) return respond(result, chatText(describeChatRun(result)))
+        if ('deliveryReview' in result && result.deliveryReview) {
+          const count = result.deliveryReview.reviews.length
+          return { ...respond({ state: 'delivery_review', count }, count
+            ? '待审成果已附在会话卡片中。请查看成果后选择通过验收或填写修改意见。'
+            : '当前任务没有可处理的成果审核。'), deliveryReview: result.deliveryReview }
+        }
+        if ('blocking' in result) {
+          const { deliveryReviews: _, ...status } = result
+          return respond(status, chatText(describeChatRun(result)))
+        }
         if ('notes' in result) return respond(result, '已读取本次运行的共享便条。便条仅作参考。', JSON.stringify(result.notes))
         if ('brain_review' in result) {
           const summary = { follow_up: '专属便条建议人工关注。', informational: '专属便条仅供参考。', insufficient: '目前没有可分类的专属便条。' }
@@ -673,7 +751,7 @@ export function installNativeChat(host: Context, options: {
       const retrying = await service.recoverChatModelAssignment?.({ actor: options.operator, runId: receipt.run_id, signal: options.signal,
         checked, isCurrent }).catch(() => undefined)
       if (options.signal.aborted || !isCurrent()) return
-      const facts = describeRun(service, receipt.run_id)
+      const facts = describeRun(service, receipt.run_id, options.operator)
       const view = retrying?.length ? { ...facts,
         blocking: facts.blocking.filter(({ node_run_id }) => !retrying.includes(node_run_id)) } : facts
       const report = nextReport(view, receipt.reported_key)

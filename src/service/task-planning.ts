@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
-import type { WorkflowDefinition } from '../core/workflow-def.ts'
+import { assertApprovalNodeConfig, type WorkflowDefinition } from '../core/workflow-def.ts'
 import { fitGeneratedWorkflowLayout, validatePublishLayer, validateSaveLayer, type PublishContext, type WorkflowDoc } from '../core/workflow-doc.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel,
   type ModelPlanningProfile, type ModelRecommendation, type ModelRoutingContext } from '../executor/model-routing.ts'
@@ -73,7 +73,7 @@ type Goal = { id: string; text: string }
 type PlanInput = { goal: string; requirements: Goal[] }
 type WorkflowCandidate = {
   workflowId: string; version: string; title: string
-  nodes: Array<{ id: string; type: string; title?: string; description?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[] }>
+  nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[] }>
 }
 type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
@@ -87,7 +87,7 @@ export type TaskPlanningOptions = {
    */
   workflowGenerator?: (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) => Promise<unknown>
   workflowStreamProgress?: boolean
-  /** 运行时允许的节点类型（发布层校验用）；默认只认 agent / wait。 */
+  /** 运行时允许的节点类型（发布层校验用）。 */
   runtimeNodeTypes?: ReadonlySet<string>
 }
 const checks = ['workflow', 'coverage', 'deliverables', 'tools', 'dependencies', 'risks'] as const
@@ -212,7 +212,8 @@ function readChoice(catalog: WorkflowCatalog, registry: ToolRegistry | undefined
     const policy = catalog.toolPolicyFor(row.workflow_id, row.version, node.node_id)
     const declaredTools = [...new Set(policy.allow.filter((tool) => !policy.deny.includes(tool)))]
     return {
-      id: node.node_id, type: node.type, dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
+      id: node.node_id, type: node.type, approvalPrompt: node.approval?.prompt,
+      dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
       declaredTools, toolAllow: declaredTools.filter((tool) => registry?.lookup(tool)?.capability === 'read_only'),
     }
   })
@@ -251,12 +252,41 @@ function toolViolations(registry: ToolRegistry | undefined, proposal: TaskPlanPr
   return violations
 }
 
+function requestedApprovalSteps(brief: PlanInput): string[] {
+  const namedApprovals = [brief.goal, ...brief.requirements.map((item) => item.text)].flatMap((text) =>
+    [...text.matchAll(/(?:^|[，,。；;\n])\s*(?:请\s*)?(?:设置|添加|加入|安排|设立|创建|新增)(?:\s*(?:一个|一道))?(?:\s*独立的?)?\s*人工审批(?:步骤|节点)\s*[「“]([^」”\r\n]{1,80})[」”]/gu)]
+      .map((match) => match[1]!.trim()).filter(Boolean))
+  return [...new Set(namedApprovals)]
+}
+
+function missingApprovalSteps(namedApprovals: string[], workflow: WorkflowCandidate): string[] {
+  if (!namedApprovals.length) return []
+  const nodes = new Map(workflow.nodes.map((node) => [node.id, node]))
+  const ancestors = new Set<string>()
+  const pending = workflow.nodes.filter((node) => node.type === 'agent').flatMap((node) => node.dependsOn)
+  while (pending.length) {
+    const id = pending.pop()!
+    if (ancestors.has(id)) continue
+    ancestors.add(id)
+    pending.push(...(nodes.get(id)?.dependsOn ?? []))
+  }
+  return namedApprovals.filter((name) => !workflow.nodes.some((node) =>
+    node.type === 'approval' && node.approvalPrompt === name && ancestors.has(node.id)))
+}
+
 function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: WorkflowCandidate | undefined): PlanQuality {
   const issues: Record<PlanCheck, string[]> = {
     workflow: [], coverage: [], deliverables: [], tools: [], dependencies: [], risks: [],
   }
   if (!workflow) issues.workflow.push('候选未选中本次提供的活跃、已发布流程版本。')
+  else for (const name of missingApprovalSteps(requestedApprovalSteps(brief), workflow)) {
+    issues.dependencies.push(`缺少作为执行前置条件的人工审批「${name}」。请检查流程后重新规划。`)
+  }
   const goals = [{ id: 'goal', text: brief.goal }, ...brief.requirements]
+  const prohibitsWritingFiles = goals.some(({ text }) => /(?:^|[，,。；;\n])\s*(?:不要|不得|不允许|禁止)\s*(?:读写|写入|写出|写|生成|创建)\s*(?:任何\s*)?文件/u.test(text))
+  if (prohibitsWritingFiles && proposal.deliverables.some(({ acceptance }) => acceptance.kind === 'artifact')) {
+    issues.deliverables.push('任务要求不写文件，但计划安排了文件交付。请调整交付方式后重新规划。')
+  }
   const expectedGoals = new Set(goals.map((item) => item.id))
   const nodes = new Map((workflow?.nodes ?? []).map((node) => [node.id, node]))
   const steps = new Map(proposal.steps.map((step) => [step.node_id, step]))
@@ -342,10 +372,9 @@ export function approvedArtifactRequirements(tx: ReadTx, runId: string, nodeId: 
   }
 }
 
-// 自动生成的流程只认这几种节点：evaluate 会把 subworkflow 节点记成阻断项，所以这里只放 trigger / agent / wait
-const GENERATED_NODE_TYPES = new Set(['trigger', 'agent', 'wait'])
+const GENERATED_NODE_TYPES = new Set(['trigger', 'agent', 'wait', 'approval'])
 /** 默认运行时允许的节点类型（发布层校验用） */
-const DEFAULT_RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'wait'])
+const DEFAULT_RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'wait', 'approval'])
 
 const generatedDocSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -428,6 +457,11 @@ function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtim
     if (type === 'wait' && !validWaitConfig(node.config)) return
     const config: Record<string, unknown> = {}
     if (type === 'wait') Object.assign(config, node.config ?? {})
+    if (type === 'approval') {
+      const approval = node.config
+      assertApprovalNodeConfig(approval)
+      Object.assign(config, { prompt: approval.prompt.trim(), on_timeout: approval.on_timeout })
+    }
     if (type === 'agent') {
       const tools = allowedReadOnlyTools(node.config, registry)
       config.side_effect_policy = 'pure'
@@ -488,6 +522,7 @@ function candidateFromRuntime(def: WorkflowDefinition, doc: WorkflowDoc, registr
     const allow = [...new Set((node.tools?.allow ?? []).filter((tool) => !deny.includes(tool)))]
     return {
       id: node.node_id, type: node.type,
+      approvalPrompt: node.approval?.prompt,
       title: docs.get(node.node_id)?.title,
       description: docs.get(node.node_id)?.contract?.description as string | undefined,
       dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
@@ -648,9 +683,12 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         const choices = withReadTx(db, ({ tx }) => {
           const rows = tx.all<CandidateRow>(CANDIDATE_SELECT)
           const tokens = goalTokens(brief)
+          const approvals = requestedApprovalSteps(brief)
           const scored = rows.flatMap((row) => {
             const choice = readChoice(catalog, registry, row)
-            return choice ? [{ choice, score: relevanceScore(tokens, row) }] : []
+            return choice && missingApprovalSteps(approvals, choice.workflow).length === 0
+              ? [{ choice, score: relevanceScore(tokens, row) }]
+              : []
           })
           scored.sort((left, right) => right.score - left.score
             || compareWorkflowIds(left.choice.workflow.workflowId, right.choice.workflow.workflowId))
