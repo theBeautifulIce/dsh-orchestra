@@ -42,6 +42,7 @@ const GROUPS = [
   { id: 'capacity', title: '等待执行位' },
   { id: 'dependencies', title: '等待上游完成' },
   { id: 'ready', title: '就绪待派发' },
+  { id: 'waiting', title: '等待条件' },
   { id: 'attention', title: '暂停、重试与异常' },
   { id: 'finished', title: '已结束' },
 ] as const
@@ -54,6 +55,8 @@ function queueGroup(node: NodeRunView): QueueGroup {
   if (state === 'waiting_dependencies') return 'dependencies'
   if (state === 'ready') return 'ready'
   if (state === 'done' || state === 'cancelled' || state === 'superseded') return 'finished'
+  // 正常等待不是异常：等外部条件、排队原因未知都单独成组，只有真需要人处理的才进 attention（T09）。
+  if (state === 'waiting' || state === 'queued_unknown') return 'waiting'
   return 'attention'
 }
 

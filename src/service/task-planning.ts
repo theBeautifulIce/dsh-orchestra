@@ -798,7 +798,8 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         }
         const started = withTx(db, (tx) => startTrustedTaskLocalRun(tx, catalog, {
           taskId: ownerTaskId, workflowId: proposal.workflow_id, workflowVersion: proposal.workflow_version,
-          taskTitle: proposal.title, autonomy: 'supervised', operationId: row.launch_operation_id, allowReplay: true, now,
+          taskTitle: proposal.title, autonomy: 'supervised', triggerKind: 'manual', operationId: row.launch_operation_id,
+          allowReplay: true, now,
         }))
         return { task_id: started.task_id, run_id: started.run_id, replayed: started.replayed }
       }
