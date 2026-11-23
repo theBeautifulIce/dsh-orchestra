@@ -367,14 +367,16 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
   const reworkItems = task.rework_count ?? 0
   const actionable = task.open_decision_count > 0 || awaitingReview > 0 || reworkItems > 0
     || hasUnverified || taskColumn(task) === 'attention'
+  // 没有待办也没有异常时，来源/版本这类调试信息让位给标题、进度与结果（T10）。
+  const quiet = !actionable
   return <article className="task-card" data-selected={selected || undefined} data-board-task-id={task.task_id} data-board-run-id={task.current_run_id ?? undefined}>
     <div className="task-card-status">
       <span style={tone ? { color: tone } : undefined}>{status ?? <UnknownState value={task.display_status || task.status} />}</span>
-      {task.workflow_version !== null && <span>v{task.workflow_version}</span>}
+      {!quiet && task.workflow_version !== null && <span>v{task.workflow_version}</span>}
     </div>
     <h3 className="task-card-title"><button type="button" data-task-card-focus="inspect" onClick={(event) => onSelect(event.currentTarget)} title={task.title} style={compact ? compactTitleStyle : taskTitleStyle}
       aria-expanded={selected} aria-controls={selected ? 'task-inspector' : undefined}>{task.title || '未命名任务'}</button></h3>
-    <p className="task-card-type">{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</p>
+    {!quiet && <p className="task-card-type">{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</p>}
     {(task.step_total ?? 0) > 0 && <p className="task-card-progress">{(task.step_done ?? 0)} / {task.step_total} 步已完成</p>}
     {task.attention_reason && <p className="task-card-reason">{operatorReason(task.attention_reason)}</p>}
     {actionable && <div className="task-card-attention">
