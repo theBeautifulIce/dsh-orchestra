@@ -577,6 +577,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(as_of_seq, view))
       return
     }
+    if (req.method === 'GET' && url.pathname === '/v1/task-plans/drafts' && deps.planning) {
+      const { items, as_of_seq } = deps.planning.listDrafts(actor, stringParam(url, 'task_id', 256) ?? undefined)
+      sendJson(res, 200, okEnvelope(as_of_seq, { items }))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/task-plans/by-task' && deps.planning) {
       const { item, as_of_seq } = deps.planning.getForTask(stringParam(url, 'task_id', 256) ?? '', actor)
       sendJson(res, 200, okEnvelope(as_of_seq, item))
