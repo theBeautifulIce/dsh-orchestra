@@ -1,2 +1,4 @@
 scripts/verify-panel-db-isolation-wsl.sh text eol=lf
 docs/gates/evidence/G6/** -text
+# 迁移 SQL 会随发行包分发，检出行尾必须与打包一致（H01）；摘要另按 LF 归一兜底。
+src/infra/sqlite/migrations/*.sql text eol=lf

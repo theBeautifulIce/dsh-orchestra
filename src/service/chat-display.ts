@@ -50,6 +50,21 @@ const PLANNING_ISSUES = {
 
 type PlanningIssue = keyof typeof PLANNING_ISSUES
 
+// 同一错误码下的可操作原因：用户看到的是“哪一步不成立、现在能做什么”，而不是宿主误诊。
+const ERROR_REASONS = {
+  session_capacity: ['没有空闲的编排会话位', '同时打开的编排会话最多 8 个，而且都在使用中。请先在一个闲置会话里结束正在进行的任务或关闭该会话，再重新发送本任务。'],
+  attachments_unsupported: ['附件没有被读入本次任务', '当前编排任务只接收文字目标，随消息附上的图片或文件没有纳入。请把需要的材料以文字说明或在获准的只读材料中提供。'],
+  only_attachments: ['这条消息只有附件，没有任务目标', '请用文字说明要交付的结果，并指出本次可使用的已授权材料。'],
+  goal_empty: ['这条消息没有任务目标', '请说明要交付的结果，以及本次可使用的材料。'],
+  goal_too_long: ['任务目标超过长度上限', '请把目标压缩到 2000 个字符以内，其余材料用已授权的只读文件提供。'],
+} as const
+
+type ChatErrorReason = keyof typeof ERROR_REASONS
+
+export function isChatErrorReason(value: unknown): value is ChatErrorReason {
+  return typeof value === 'string' && Object.hasOwn(ERROR_REASONS, value)
+}
+
 export function isChatPlanningIssue(value: unknown): value is PlanningIssue {
   return typeof value === 'string' && Object.hasOwn(PLANNING_ISSUES, value)
 }
@@ -181,9 +196,10 @@ export type ChatOutcome =
   | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
   | { state: 'clarification_required' | 'usage' | 'queued'; message: string }
-  | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue }
+  | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue; reason?: ChatErrorReason }
 
 function startErrorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>): readonly [string, string] {
+  if (outcome.reason) return ERROR_REASONS[outcome.reason]
   if (outcome.planning_issue) return PLANNING_ISSUES[outcome.planning_issue]
   switch (outcome.code) {
     case 'WORKFLOW_DEFINITION_INVALID':
@@ -215,6 +231,7 @@ function startErrorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>): r
 }
 
 function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?: 'start' | 'status' | 'artifact' | 'review'): string {
+  if (outcome.reason) return ERROR_REASONS[outcome.reason].join('')
   switch (outcome.code) {
     case 'NOT_FOUND':
       return action === 'artifact' ? '这次运行里没有找到该文件。请先查看已登记的文件，再选择要打开的一份。'

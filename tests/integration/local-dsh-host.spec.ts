@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
 import { serveDshOrchestra } from '../../src/index.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
@@ -198,3 +199,63 @@ it('reads real personal ledger memory pages without a writer and isolates worksp
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+it('leases one service per session, reclaims a closed idle session and reports capacity rather than a model fault', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'orch-local-capacity-'))
+  const workspaceId = 'capacity-workspace'
+  const sessionIds = Array.from({ length: 9 }, (_, index) => `capacity-${index}`)
+  const route = { provider: 'fixture', model: 'selected' }
+  const agents = new Map(sessionIds.map((id) => [id, {
+    session: { id, header: { cwd: directory } }, model: { current: () => route },
+  }]))
+  const workspace = { id: workspaceId, path: directory, sessionIds }
+  const ctx = new Context()
+  let handleRequest!: (request: Request) => Promise<Response>
+  ctx.provide('connection', { fetch: { register(options: { fetch: typeof handleRequest }) { handleRequest = options.fetch } } })
+  ctx.provide('workspaceRegistry', {
+    archivedSessionIds: [] as string[],
+    list: () => [workspace],
+    get: (id: string) => id === workspaceId ? workspace : undefined,
+  })
+  ctx.provide('sessionController', {
+    resolveAgent: async (id: string) => ({ agent: agents.get(id) }),
+    modelCatalog: async () => ({ default: route, groups: [{ id: route.provider, models: [{ id: route.model }] }] }),
+  })
+  ctx.provide('credentials', { modifyRecord: async (_key: string, update: (value: undefined) => Promise<unknown>) => update(undefined) })
+  ctx.provide('agents', { get: (id: string) => agents.get(id) })
+  ctx.provide('llm', {})
+  ctx.provide('tools', {})
+  const served: Awaited<ReturnType<typeof serveDshOrchestra>>[] = []
+  const plugin = ctx.plugin((host) => { installLocalDshHost(host, localDshHostConfig.parse({ local: {
+    enabled: true, dataDirectory: join(directory, 'db'),
+  } }).local, async (options) => {
+    const service = await serveDshOrchestra(options)
+    served.push(service)
+    return service
+  }) })
+  const request = (target: string, sessionId: string) => {
+    const query = new URLSearchParams({ workspaceId, sessionId, path: target })
+    return handleRequest(new Request('http://dsh.internal/api/orchestra.request?' + query, {
+      headers: { host: '127.0.0.1:3210' },
+    }))
+  }
+  try {
+    await plugin.await()
+    await expect.poll(() => typeof handleRequest).toBe('function')
+    for (const sessionId of sessionIds.slice(0, 8)) expect((await request('/health', sessionId)).status).toBe(200)
+    // 第 9 个会话：说明是容量上限，而不是让用户去检查会话或默认模型。
+    const ninth = await request('/health', sessionIds[8]!)
+    expect(ninth.status).toBe(503)
+    expect(await ninth.json()).toMatchObject({ error: {
+      code: 'SERVICE_UNAVAILABLE', message: expect.stringContaining('上限 8 个'),
+    } })
+    // 关闭一个没有在跑任务的会话后，服务被回收，第 9 个会话可以直接发单。
+    const first = agents.get(sessionIds[0]!)!
+    await agentEvents(ctx, first as never).emit('agent/disposed', { agent: first })
+    await expect.poll(async () => (await request('/health', sessionIds[8]!)).status, { timeout: 10_000 }).toBe(200)
+    expect(served.length).toBeGreaterThanOrEqual(9)
+  } finally {
+    await plugin.dispose()
+    await rm(directory, { recursive: true, force: true })
+  }
+}, 30_000)
