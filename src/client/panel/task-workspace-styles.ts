@@ -198,3 +198,14 @@ export const TASK_INSPECTOR_CSS = `
   .task-inspector-top, .task-inspector-content { padding-inline: 12px; }
 }
 `
+
+// 窄屏：看板单列、任务名可折两行、页头不挤压（T14）。
+export const NARROW_TASK_CSS = `
+@container (max-width: 520px) {
+  .task-board { grid-template-columns: minmax(0, 1fr); }
+  .task-page-header { flex-direction: column; }
+  .task-card-title button { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .task-card-meta { flex-wrap: wrap; }
+  .task-card-progress { margin: 0 0 4px; }
+}
+`
