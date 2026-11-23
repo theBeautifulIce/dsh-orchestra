@@ -155,8 +155,8 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   useEffect(() => {
     if (lastReloadVersion.current === reloadVersion) return
     lastReloadVersion.current = reloadVersion
-    setCursor(undefined)
-    setNextCursor(null)
+    // 常规刷新不把用户踢回第一页：保留游标与已加载窗口，重读当前页（T07）。
+    // 真正的重建由 search/筛选变化与断流恢复触发。
     setReload((value) => value + 1)
   }, [reloadVersion])
 
