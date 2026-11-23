@@ -197,6 +197,7 @@ export type ChatOutcome =
   | { state: 'quality_blocked'; issues: string[]; plan_id: string; title: string }
   | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
   | { state: 'launch_declined'; plan_id: string; title: string }
+  | { state: 'stop_requested'; run_id: string; status: string; skipped_irreversible: number; pending_decisions: number }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
   | { state: 'clarification_required' | 'usage' | 'queued'; message: string }
   | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue; reason?: ChatErrorReason }
@@ -233,7 +234,7 @@ function startErrorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>): r
   }
 }
 
-function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?: 'start' | 'status' | 'artifact' | 'review'): string {
+function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?: 'start' | 'status' | 'artifact' | 'review' | 'stop'): string {
   if (outcome.reason) return ERROR_REASONS[outcome.reason].join('')
   switch (outcome.code) {
     case 'NOT_FOUND':
@@ -270,7 +271,7 @@ function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?
   }
 }
 
-export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'status' | 'artifact' | 'review') {
+export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'status' | 'artifact' | 'review' | 'stop') {
   switch (outcome.state) {
     case 'started':
       return { heading: taskHeading(outcome.title, '已接单'), body: '已接收任务，执行进度可在 Orchestra 面板查看。' }
@@ -281,6 +282,18 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
       ].join('\n') }
     case 'approval_pending':
       return { heading: taskHeading(outcome.title, '等待人工批准'), body: '目前没有记录新的批准决定。要继续处理，可重新打开审批卡或在 Orchestra 面板查看待办。' }
+    case 'stop_requested': {
+      const stopped = ['cancelled', 'succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned'].includes(outcome.status)
+      const details = [
+        outcome.skipped_irreversible > 0 ? `有 ${outcome.skipped_irreversible} 个不可逆步骤没有中断，需要单独核实。` : '',
+        outcome.pending_decisions > 0 ? `还有 ${outcome.pending_decisions} 项人工决定没有处理。` : '',
+      ].filter(Boolean)
+      return { heading: 'Orchestra ' + (stopped ? '已停止' : '已收到停止请求'), body: [
+        stopped ? '本次运行已停止，执行记录与已交付文件都保留。' : '停止请求已经提交，正在等待执行器确认；期间可能还有一次在途的结果回报。',
+        ...details,
+        stopped ? '外部影响是否已发生仍以执行证据为准，请在结果里核对。' : '确认停止后，请再核对这次尝试的外部影响是否已发生。',
+      ].join('\n') }
+    }
     case 'launch_declined':
       // 启动被拒绝时既没有运行也没有待办，不能指向面板里的空入口（C06）。
       return { heading: taskHeading(outcome.title, '未启动本次任务'), body: '这份计划没有启动，也没有创建运行或待办。需要时把目标重新发一次，就能重新核对计划；放弃的方案不会留在任务表里。' }
