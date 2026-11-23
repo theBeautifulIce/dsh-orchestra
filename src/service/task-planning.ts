@@ -37,6 +37,7 @@ const acceptance = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('artifact'), file_name: z.string().trim().min(1).max(240),
     minimum_bytes: z.number().int().min(1).max(ARTIFACT_MAX_BYTES) }),
   z.strictObject({ kind: z.literal('tool_evidence'), tool: key, exit_code: z.literal(0) }),
+  z.strictObject({ kind: z.literal('chat/text_result') }),
 ])
 const proposalSchema = z.strictObject({
   title: z.string().trim().min(1).max(200),
@@ -345,7 +346,8 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
     if (node && [...new Set([...node.declaredTools, ...step.tools])].some((tool) => !node.toolAllow.includes(tool))) {
       issues.tools.push(step.node_id + ' 的工具未注册、超出授权或无法用于只读执行。')
     }
-    if (node?.type === 'subworkflow') issues.dependencies.push(step.node_id + ' 使用子流程，需另行校验子流程的目标、工具和验收。')
+    // 子流程不再一刀切禁止：工具覆盖仍按上面的通用规则判定，
+    // 子流程自身的工具/文件/审批声明由运行期的 WorkflowReadSource 递归校验（P06）。
     if (node?.type === 'wait' && !proposal.risks.some((risk) => risk.node_id === node.id)) {
       issues.risks.push(step.node_id + ' 是等待节点，须说明超时风险和应对措施。')
     }

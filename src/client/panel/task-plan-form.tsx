@@ -40,7 +40,9 @@ function Brief({ plan }: { plan: TaskPlanView }) {
             <p style={descriptionStyle}>节点 {node_id} · 目标 {goal_ids.join('、')}</p>
             <p style={descriptionStyle}>{acceptance.kind === 'artifact'
               ? `文件规则：至少 ${acceptance.minimum_bytes} 字节。`
-              : `工具规则：${acceptance.tool} 退出码为 ${acceptance.exit_code}。`}</p>
+              : acceptance.kind === 'tool_evidence'
+                ? `工具规则：${acceptance.tool} 退出码为 ${acceptance.exit_code}。`
+                : '会话结果：由操作者人工核对，自动核验待导出文件能力。'}</p>
           </details>
         </li>)}
       </ul>
