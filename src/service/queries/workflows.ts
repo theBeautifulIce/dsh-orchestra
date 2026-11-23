@@ -56,6 +56,8 @@ export type WorkflowView = {
 export type ListWorkflowParams = {
   owner_task_id?: string
   status?: string
+  /** 只取某个使用范围（如 reusable）：先过滤再分页，不靠前端截断（P03）。 */
+  scope?: string
   query?: string
   limit?: number
   cursor?: string
@@ -149,6 +151,7 @@ export function listWorkflowSummaries(db: Db, params: ListWorkflowParams = {}): 
   const filter = {
     owner_task_id: params.owner_task_id ?? null,
     status: params.status ?? null,
+    scope: params.scope ?? null,
     query: params.query?.toLocaleLowerCase() ?? null,
   }
   return withReadTx(db, (ctx) => {
@@ -156,6 +159,7 @@ export function listWorkflowSummaries(db: Db, params: ListWorkflowParams = {}): 
     const values: unknown[] = []
     if (filter.owner_task_id !== null) { where.push('w.owner_task_id = ?'); values.push(filter.owner_task_id) }
     if (filter.status !== null) { where.push('w.status = ?'); values.push(filter.status) }
+    if (filter.scope !== null) { where.push('w.scope = ?'); values.push(filter.scope) }
     if (filter.query !== null) {
       where.push('(INSTR(LOWER(w.name), ?) > 0 OR INSTR(LOWER(w.workflow_id), ?) > 0)')
       values.push(filter.query, filter.query)

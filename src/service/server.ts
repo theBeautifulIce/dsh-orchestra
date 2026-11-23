@@ -980,6 +980,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const out = deps.queries.listWorkflows({
         owner_task_id: stringParam(url, 'owner_task_id', 256),
         status: stringParam(url, 'status', 64),
+        scope: stringParam(url, 'scope', 32),
         query: stringParam(url, 'query', 200),
         limit: Math.min(intParam(url, 'limit', 50), 100),
         cursor: stringParam(url, 'cursor', 4096),
