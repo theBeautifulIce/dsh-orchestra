@@ -1339,3 +1339,17 @@ it('keeps brain-only notes out of native result and conversation export content'
     expect(svc.orchestra.db.raw.prepare('SELECT COUNT(*) n FROM run_note_bodies WHERE body=?').get(marker)?.n).toBe(1)
   } finally { await test.close() }
 })
+
+it('C03 澄清后的补充答复续接草稿，不重新分类成聊天', async () => {
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('帮我整理一下'))
+    expect(await human.call()).toMatchObject({ state: 'clarification_required' })
+    await human.admit(user('按天汇总办公流水并交付 markdown 报告'))
+    await expect(human.call()).resolves.toMatchObject({ state: 'started' })
+    const goal = String(test.planner.mock.calls.at(-1)?.[0].goal ?? '')
+    expect(goal).toContain('帮我整理一下')
+    expect(goal).toContain('按天汇总办公流水')
+  } finally { await test.close() }
+})

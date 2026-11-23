@@ -126,6 +126,20 @@ function resolveWorkflowPin(db: Service['orchestra']['db'], text: string) {
   }
 }
 
+/**
+ * 澄清后的补充答复：保留上一条的目标，只把答复并进去（C03）。
+ * 新工作、提问或纯应答不算补充，仍走完整分类。
+ */
+export function isClarificationAnswer(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed.length < 4 || trimmed.length > 400) return false
+  if (/[？?]\s*$/u.test(trimmed)) return false
+  if (/^(?:好的|收到|可以|谢谢|嗯|行|ok|okay)[。！!,.]?$/iu.test(trimmed)) return false
+  // 显式开一项新工作才算换话题；其余补充都续接草稿。
+  if (/^(?:新建|创建|执行|开展|停一下).{0,12}(?:任务|工作)/u.test(trimmed) || /执行任务「/u.test(trimmed)) return false
+  return true
+}
+
 function validatedTaskText(text: string): string {
   const result = planInputSchema.safeParse({ goal: text })
   if (!result.success) {
@@ -357,6 +371,8 @@ export function installNativeChat(host: Context, options: {
   const issued = new WeakMap<Agent, Map<string, string>>()
   const sessions = new Map<Agent, Binding>()
   const cursors = new WeakMap<Agent, number>()
+  // 澄清草稿跨轮续接：只在这条澄清后的下一条消息里续接（C03）。
+  const clarifications = new WeakMap<Agent, { goal: string; at: number }>()
   const checkedModelRecovery = new WeakMap<Agent, ChatModelRecoveryChecks>()
   const operations = new Map<string, Promise<unknown>>()
   let polling: Promise<void> | undefined
@@ -488,11 +504,17 @@ export function installNativeChat(host: Context, options: {
       state.managed = managed
       return settle({ ...result, messages: [...result.messages, admissionNotice(managed.outcome!)] })
     }
-    const intent = slash ? 'task' : classifyChatTask(text)
+    // 澄清答复跨轮续接：保留上一条目标，把补充并进来（C03）。
+    const pendingClarify = clarifications.get(agent)
+    const continued = !slash && Boolean(pendingClarify) && Date.now() - pendingClarify!.at < 30 * 60_000
+      && isClarificationAnswer(text)
+    if (continued) clarifications.delete(agent)
+    const intent = continued ? 'task' : slash ? 'task' : classifyChatTask(text)
     if (intent === 'conversation') return settle(result)
     const managed: ManagedTask = {}
     state.managed = managed
     if (intent === 'clarify') {
+      clarifications.set(agent, { goal: text.trim(), at: Date.now() })
       managed.outcome = { state: 'clarification_required', message: '请说明希望拿到什么结果，以及本次可以使用哪些已授权的材料。' }
     } else {
       const actionSignal = AbortSignal.any([signal, options.signal])
@@ -501,7 +523,8 @@ export function installNativeChat(host: Context, options: {
         if (!isCurrent(agent, binding, state)) throw new OrchError('FORBIDDEN', '原会话或工作区授权已改变')
       }
       try {
-        const outcome = await startTask(agent, binding, state, state.human, actionSignal, assertCurrent, slash?.[1])
+        const outcome = await startTask(agent, binding, state, state.human, actionSignal, assertCurrent,
+          continued && pendingClarify ? pendingClarify.goal + '。' + text.trim() : slash?.[1])
         managed.outcome = outcome
         if (outcome.state === 'started') managed.runId = outcome.run_id
       } catch (error) {
