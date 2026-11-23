@@ -5,8 +5,9 @@ import type { TaskPlanView } from '../../service/task-planning.ts'
 
 export function createTaskCommands(client: ApiClient) {
   return {
-    async proposeTaskPlan(goal: string, requirements: string[], signal?: AbortSignal) {
-      return (await client.post<TaskPlanView>('/v1/task-plans', { goal, requirements }, signal)).data
+    async proposeTaskPlan(goal: string, requirements: string[], signal?: AbortSignal,
+      pin?: { workflow_id?: string; workflow_version?: string }) {
+      return (await client.post<TaskPlanView>('/v1/task-plans', { goal, requirements, ...pin }, signal)).data
     },
     async confirmTaskPlan(planId: string, contentHash: string) {
       try {

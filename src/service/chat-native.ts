@@ -102,6 +102,30 @@ function taskText(message: Message): string {
   return validatedTaskText(texts)
 }
 
+/**
+ * 「用流程「X」第 2 牨」→ 结构化约束；识别不到就静默回落，不能因为解析失败挡住派单（P02）。
+ */
+export function workflowPinFromText(text: string): { name: string; version?: string } | undefined {
+  const match = /用(?:已发布的)?流程[「"']?([^，,。；\s「」"']{1,60})[」"']?(?:[，,]\s*第?\s*(\d+)\s*版)?/u.exec(text)
+  if (!match?.[1]) return undefined
+  return { name: match[1].trim(), ...(match[2] ? { version: match[2] } : {}) }
+}
+
+function resolveWorkflowPin(db: Service['orchestra']['db'], text: string) {
+  const pin = workflowPinFromText(text)
+  if (!pin) return undefined
+  const rows = db.raw.prepare(`SELECT workflow_id, name, current_version FROM workflows
+    WHERE status='active' AND scope='reusable' AND (name = ? OR workflow_id = ?) LIMIT 2`).all(pin.name, pin.name) as Array<{
+      workflow_id: string; current_version: number | null }>
+  if (rows.length !== 1) return undefined
+  const row = rows[0]!
+  return {
+    workflow_id: row.workflow_id,
+    ...(pin.version ? { workflow_version: pin.version }
+      : row.current_version === null ? {} : { workflow_version: String(row.current_version) }),
+  }
+}
+
 function validatedTaskText(text: string): string {
   const result = planInputSchema.safeParse({ goal: text })
   if (!result.success) {
@@ -536,7 +560,9 @@ export function installNativeChat(host: Context, options: {
     return once(origin.requestKey, async () => {
       const service = await options.serviceFor(binding)
       assertCurrent()
-      const { view } = await service.planning.proposeFromChat({ goal, requirements: [] }, options.operator, new Date().toISOString(), origin)
+      const { view } = await service.planning.proposeFromChat(
+        { goal, requirements: [], ...resolveWorkflowPin(service.orchestra.db, goal) },
+        options.operator, new Date().toISOString(), origin)
       if (!view.quality.ready) return {
         state: 'quality_blocked' as const, plan_id: view.plan_id, title: view.proposal.title,
         issues: view.quality.checks.flatMap((check) => check.issues).slice(0, 12),

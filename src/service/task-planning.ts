@@ -61,6 +61,9 @@ type PlannerOutcome = { kind: 'proposal'; proposal: TaskPlanProposal } | { kind:
 export const planInputSchema = z.strictObject({
   goal: z.string().trim().min(1).max(2000),
   requirements: z.array(z.string().trim().min(1).max(300)).max(12).default([]),
+  // 用户明确指定流程时，约束进结构化字段，而不是让主脑再猜一次（P02）。
+  workflow_id: z.string().trim().min(1).max(120).optional(),
+  workflow_version: z.string().regex(/^[1-9]\d{0,14}$/u).optional(),
 })
 export const planConfirmSchema = z.strictObject({
   plan_id: z.uuidv7(), content_hash: z.string().regex(/^[0-9a-f]{64}$/), confirmed: z.literal(true),
@@ -70,7 +73,7 @@ export type TaskPlanInput = z.infer<typeof planInputSchema>
 export type TaskPlanProposal = z.infer<typeof proposalSchema>
 export type PlanConfirm = z.infer<typeof planConfirmSchema>
 type Goal = { id: string; text: string }
-type PlanInput = { goal: string; requirements: Goal[] }
+type PlanInput = { goal: string; requirements: Goal[]; workflow_id?: string; workflow_version?: string }
 type WorkflowCandidate = {
   workflowId: string; version: string; title: string
   nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[] }>
@@ -309,6 +312,11 @@ export function deliveryCapabilityIssues(deliverables: readonly { node_id: strin
 function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: WorkflowCandidate | undefined): PlanQuality {
   const issues: Record<PlanCheck, string[]> = {
     workflow: [], coverage: [], deliverables: [], tools: [], dependencies: [], risks: [],
+  }
+  if (brief.workflow_id !== undefined
+    && (proposal.workflow_id !== brief.workflow_id
+      || (brief.workflow_version !== undefined && proposal.workflow_version !== brief.workflow_version))) {
+    issues.workflow.push('计划没有使用你指定的流程版本，请重新规划。')
   }
   if (!workflow) issues.workflow.push('候选未选中本次提供的活跃、已发布流程版本。')
   else for (const name of missingApprovalSteps(requestedApprovalSteps(brief), workflow)) {
@@ -711,7 +719,9 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       if (!options?.propose) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
       const budget = readTimeouts()
       return withPlanningBudget(budget.request, callerSignal, async (caller) => {
-        const brief = { goal: input.goal, requirements: input.requirements.map((text, index) => ({ id: 'R' + (index + 1), text })) }
+        const brief = { goal: input.goal, requirements: input.requirements.map((text, index) => ({ id: 'R' + (index + 1), text })),
+          ...(input.workflow_id === undefined ? {} : { workflow_id: input.workflow_id }),
+          ...(input.workflow_version === undefined ? {} : { workflow_version: input.workflow_version }) }
         // 候选检索：先捞一个较大的池子，再按任务适配性排序，最后才截断
         const choices = withReadTx(db, ({ tx }) => {
           const rows = tx.all<CandidateRow>(CANDIDATE_SELECT)
@@ -725,8 +735,17 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
           })
           scored.sort((left, right) => right.score - left.score
             || compareWorkflowIds(left.choice.workflow.workflowId, right.choice.workflow.workflowId))
-          return scored.slice(0, CANDIDATE_LIMIT).map((item) => item.choice)
+          // 指定了流程就只在这个流程（及版本）里选，不把别候选混进池子（P02）。
+          const pinned = brief.workflow_id === undefined ? scored : scored.filter((item) =>
+            item.choice.workflow.workflowId === brief.workflow_id
+            && (brief.workflow_version === undefined || item.choice.workflow.version === brief.workflow_version))
+          return pinned.slice(0, CANDIDATE_LIMIT).map((item) => item.choice)
         })
+        if (brief.workflow_id !== undefined && choices.length === 0) {
+          throw new OrchError('WORKFLOW_NOT_PUBLISHED', '你指定的流程没有可用的已发布版本，请确认流程名与版本', {
+            workflow_id: brief.workflow_id, workflow_version: brief.workflow_version ?? null,
+          })
+        }
         // 候选池里一个都没有：走自动生成；没有生成能力就还是让调用方先去发布流程
         if (choices.length === 0) {
           if (!options.workflowGenerator) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '请先发布至少一个可复用流程')
