@@ -2,6 +2,7 @@ import { OrchError } from '../../core/errors.ts'
 import { sha256Hex } from '../../core/canonical.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { ARTIFACT_MAX_BYTES } from '../artifact-store.ts'
+import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx } from './read-tx.ts'
 
 export type ArtifactView = {
@@ -35,16 +36,37 @@ function artifactMetadata(row: ArtifactRow, now: number) {
 const METADATA_COLUMNS = 'a.artifact_id, a.run_id, a.sha256, a.retain_until, c.file_name, c.node_run_id, length(c.bytes) AS size_bytes'
 const ARTIFACTS_JOIN = ' FROM artifacts a LEFT JOIN artifact_contents c USING (artifact_id)'
 
-export function listRunArtifacts(db: Db, runId: string, now = Date.now()) {
+/**
+ * 运行成果清单：稳定游标 + 可选文件名过滤。
+ * 超过 50 份时也能翻到最早那份，而不是只给最近一页（T06）。
+ */
+export function listRunArtifacts(db: Db, runId: string, now = Date.now(), options: { cursor?: string; fileName?: string } = {}) {
+  const filter = { run_id: runId, file_name: options.fileName ?? null }
   return withReadTx(db, (ctx) => {
     if (!ctx.tx.get('SELECT 1 FROM runs WHERE run_id = ?', [runId])) throw new OrchError('NOT_FOUND', '没找到这次运行')
+    const where = ['a.run_id = ?']
+    const values: unknown[] = [runId]
+    if (filter.file_name) { where.push('c.file_name = ?'); values.push(filter.file_name) }
+    if (options.cursor) {
+      const cursor = decodeCursor(options.cursor, 'artifacts', filter, now)
+      const separator = cursor.last_key.indexOf('\t')
+      const createdAt = cursor.last_key.slice(separator + 1)
+      if (separator < 1 || !createdAt) throw new OrchError('CURSOR_EXPIRED', '游标里的成果位置不合法，请重新加载', { artifact_id: cursor.last_id })
+      where.push('(a.created_at, a.artifact_id) < (?, ?)')
+      values.push(createdAt, cursor.last_id)
+    }
     const rows = ctx.tx.all<ArtifactRow & { created_at: string }>(
       'SELECT ' + METADATA_COLUMNS + ', a.created_at' + ARTIFACTS_JOIN
-      + ' WHERE a.run_id = ? ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 51', [runId],
+      + ' WHERE ' + where.join(' AND ') + ' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 51', values,
     )
+    const page = rows.slice(0, 50)
+    const last = page[page.length - 1]
+    const next_cursor = rows.length > 50 && last
+      ? encodeCursor(makeCursor('artifacts', filter, 'positions\t' + last.created_at, last.artifact_id, ctx.as_of_seq, now))
+      : null
     return {
-      items: rows.slice(0, 50).map((row): RunArtifact => ({ ...artifactMetadata(row, now), created_at: row.created_at })),
-      has_more: rows.length > 50, as_of_seq: ctx.as_of_seq,
+      items: page.map((row): RunArtifact => ({ ...artifactMetadata(row, now), created_at: row.created_at })),
+      has_more: rows.length > 50, next_cursor, as_of_seq: ctx.as_of_seq,
     }
   })
 }

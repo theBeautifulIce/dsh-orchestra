@@ -117,7 +117,8 @@ export type ServerQueries = {
   getNode: (nodeRunId: string) => { item: NodeRunView; as_of_seq: number }
   getArtifact: (artifactId: string, now: number) => { item: ArtifactView; as_of_seq: number }
   getArtifactContent?: (runId: string, artifactId: string, mode: Parameters<typeof getArtifactContent>[3], now: number) => ReturnType<typeof getArtifactContent>
-  listRunArtifacts: (runId: string, now: number) => { items: RunArtifact[]; has_more: boolean; as_of_seq: number }
+  listRunArtifacts: (runId: string, now: number, options?: { cursor?: string; fileName?: string }) =>
+    { items: RunArtifact[]; has_more: boolean; next_cursor?: string | null; as_of_seq: number }
   getAttestation: (attestationId: string) => { item: AttestationView; as_of_seq: number }
   listDecisions: (params: ListDecisionParams) => { items: DecisionView[]; next_cursor: string | null; as_of_seq: number }
   getDecision: (decisionId: string, now?: number) => { item: DecisionView; as_of_seq: number }
@@ -707,8 +708,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/artifacts' && deps.queries) {
-      const result = deps.queries.listRunArtifacts(stringParam(url, 'run_id', 256) ?? '', Date.parse(requestNow))
-      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, has_more: result.has_more }))
+      const cursor = stringParam(url, 'cursor', 512)
+      const fileName = stringParam(url, 'file_name', 240)
+      const result = deps.queries.listRunArtifacts(stringParam(url, 'run_id', 256) ?? '', Date.parse(requestNow), {
+        ...(cursor ? { cursor } : {}), ...(fileName ? { fileName } : {}),
+      })
+      sendJson(res, 200, okEnvelope(result.as_of_seq, {
+        items: result.items, has_more: result.has_more, next_cursor: result.next_cursor ?? null,
+      }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/attestations/get' && deps.queries) {
