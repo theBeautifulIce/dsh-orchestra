@@ -39,7 +39,8 @@
 | D04 | 已修 | `src/service/delivery-review.ts`、`tests/contract/s6-run-ownership.spec.ts`。验收与撤销都按 `status='held'` 比较并交换，旧页面拿不同操作号提交会收到 `STALE_GENERATION`，已提交结论不被覆盖。 |
 | D06 | 部分 | 任务表/看板已把无文件留验投影成“成果待验收”（迁移 069），不再出现“阻塞但无待办”；会话审核卡仍按“必须有文件”渲染，补交/撤销出口待做。 |
 | D07 | 部分 | 返工进入 `proposed/needs_human_approval/escalated` 时已计入任务关注与看板分组；原会话的主动提醒仍待做。 |
-| D03 D05 D10 | 待办 | 多文件同组验收、多文件返工出口、终态后修订入口。需要先落“当轮应审清单”这一层数据。 |
+| D10 | 已修 | `rework-panel.tsx` + `task-detail-screen.tsx`。运行已终态时关闭「要求修改」并说明下一步，不再让人填完才收到 STALE_GENERATION。 |
+| D03 D05 | 待办 | 多文件同组验收、多文件返工出口。需要先落“当轮应审清单”这一层数据。 |
 | D08 D09 D11 | 待办 | 未读先通过的门控、最终版按验收绑定解析、Markdown 安全预览。 |
 
 ## 已知环境限制

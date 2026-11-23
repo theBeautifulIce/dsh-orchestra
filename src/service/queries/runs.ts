@@ -44,6 +44,8 @@ export type RunSummary = {
   settling: boolean
   revision: number
   counts: NodeRunCount[]
+  /** 按当前有效尝试去重后的步骤统计：人读进度用这一组（T04）。 */
+  step_counts?: NodeRunCount[]
   total: number
   top_nodes: NodeRunPreview[]
   last_event_seq: number
@@ -72,6 +74,14 @@ function toRunSummary(ctx: ReadCtx, run: RunRow): RunSummary {
   const counts = ctx.tx.all<{ status: string; n: number }>(
     'SELECT status, COUNT(*) AS n FROM node_runs WHERE run_id = ? GROUP BY status ORDER BY status', [runId],
   ).map((row) => ({ status: row.status, count: Number(row.n) }))
+  // 同一步骤可能重试多次：人读进度按 node_id 的当前尝试去重，明细仍保留全部尝试。
+  const stepCounts = ctx.tx.all<{ status: string; n: number }>(
+    `SELECT status, COUNT(*) AS n FROM node_runs n WHERE n.run_id = ?
+      AND n.replacement_node_run_id IS NULL
+      AND n.attempt = (SELECT MAX(m.attempt) FROM node_runs m
+        WHERE m.run_id = n.run_id AND m.node_id = n.node_id AND m.replacement_node_run_id IS NULL)
+      GROUP BY status ORDER BY status`, [runId],
+  ).map((row) => ({ status: row.status, count: Number(row.n) }))
   const lastEvent = ctx.tx.get<{ seq: number | null }>(
     'SELECT MAX(seq) AS seq FROM events WHERE run_id = ?', [runId],
   )
@@ -93,6 +103,7 @@ function toRunSummary(ctx: ReadCtx, run: RunRow): RunSummary {
     revision: Number(run.revision ?? 0),
     counts,
     total: counts.reduce((sum, row) => sum + row.count, 0),
+    step_counts: stepCounts,
     top_nodes: nodes,
     last_event_seq: Number(lastEvent?.seq ?? 0),
     as_of_seq: ctx.as_of_seq,

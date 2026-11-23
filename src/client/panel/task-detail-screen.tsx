@@ -171,7 +171,7 @@ export function TaskDetailScreen({
           : <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab === '便条' ? '步骤' : runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation}
           reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision}
           onOpenResult={() => { setReviewRunId(run.run_id); setRunTab('结果'); resetScroll() }} />}
-        {rework && reviewRunId === run.run_id && <div hidden={runTab !== '结果'}><ReworkPanel key={run.run_id} api={api} commands={rework} runId={run.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} /></div>}
+        {rework && reviewRunId === run.run_id && <div hidden={runTab !== '结果'}><ReworkPanel key={run.run_id} api={api} commands={rework} runId={run.run_id} runStatus={run.status} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} /></div>}
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
       </>}
@@ -217,7 +217,7 @@ function TaskOverview({ data, latest, api, reloadVersion, commands, triggerComma
         {latest
           ? <><div><RunStatusLabel status={latest.status} displayStatus={latest.display_status} />{latest.settling ? ' · 正在收尾' : ''}</div>
               <p style={mutedStyle}>{formatTaskDate(latest.started_at ?? latest.created_at)} · {taskOriginLabel(latest)}{durationSuffix(latest)}</p>
-              <p style={mutedStyle}>{doneCount(latest)} / {latest.total} 个步骤已完成</p></>
+              <p style={mutedStyle}>{doneCount(latest)} / {stepTotal(latest)} 个步骤已完成</p></>
           : <p style={mutedStyle}>这项任务还没有运行记录。</p>}
       </div>
     </section>
@@ -378,7 +378,10 @@ function TaskOrchestration({ api, task, run, reloadVersion, reworkEnabled, onOpe
   </section>
 }
 
-const doneCount = (run: RunSummary) => run.counts?.find((count) => count.status === 'done')?.count ?? 0
+// 人读进度按“当前有效步骤”计：重试替换后不再把两次尝试算成两步（T04）。
+const stepCounts = (run: RunSummary) => run.step_counts ?? run.counts
+const doneCount = (run: RunSummary) => stepCounts(run)?.find((count) => count.status === 'done')?.count ?? 0
+const stepTotal = (run: RunSummary) => (run.step_counts ?? run.counts ?? []).reduce((sum, count) => sum + count.count, 0) || run.total
 const durationSuffix = (run: RunSummary) => {
   const duration = runDuration(run.started_at, run.ended_at)
   return duration ? ` · 用时 ${duration}` : ''
@@ -616,7 +619,7 @@ function RunResult({ api, run, delivery, verifying, nodes }: {
     <section style={cardStyle}>
       <h3 style={sectionTitleStyle}>运行结果</h3>
       <div><RunStatusLabel status={run.status} displayStatus={run.display_status} />{run.settling ? ' · 正在收尾' : ''}</div>
-      <p style={mutedStyle}>{doneCount(run)} / {run.total} 个步骤已完成</p>
+      <p style={mutedStyle}>{doneCount(run)} / {stepTotal(run)} 个步骤已完成</p>
       {!failed && artifacts && verifying && <DeliveryProgress artifacts={artifacts} requirements={requirements} nodes={nodes} />}
       {!!issues?.length && <ul>
         {issues.map((check) => <li key={check.result_id}>{check.file_name ?? check.tool ?? '交付项'} · {DELIVERY_OUTCOME[check.outcome]}。{check.reason && deliveryReason(check.reason)}</li>)}

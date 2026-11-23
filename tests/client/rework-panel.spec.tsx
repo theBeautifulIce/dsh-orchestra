@@ -337,6 +337,20 @@ describe('成果审核与返工', () => {
     expect(posts).toHaveLength(0)
     view.unmount()
   })
+  it('closes the request entry once the run has ended instead of failing after submit', async () => {
+    const { client, posts } = clientFor()
+    const view = await renderPanel(<ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)} runId="r1" runStatus="succeeded" />)
+    await view.flush()
+    const select = view.findAll('select')[0]!
+    await fill(select, 'old')
+    expect(view.text()).toContain('本次运行已经结束，不能再提交修改意见')
+    const button = view.findAll('button').find(b => b.textContent === '要求修改')!
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    await view.click(button)
+    expect(posts).toHaveLength(0)
+    view.unmount()
+  })
+
   it('loads run-scoped form and records a human hold without accepting an artifact', async () => {
     const { client, posts } = clientFor()
     const view = await renderPanel(<ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)} runId="r1" />)
