@@ -22,6 +22,10 @@ export type TaskSummary = {
   run_count: number
   open_decision_count: number
   oldest_open_decision_age_seconds: number | null
+  /** 当前根运行树里可办理的成果验收（留验）数量。 */
+  delivery_review_count?: number
+  /** 待授权、待人工判断或已升级的返工请求数量。 */
+  rework_count?: number
   unverified_count: number
   max_side_effect_level: SideEffectLevel | null
   max_heartbeat_age_ms: number | null
@@ -77,6 +81,8 @@ function nullableNumber(value: unknown): number | null {
 function taskSummary(row: TaskRow, now: number): TaskSummary {
   const currentRunStatus = nullableString(row.current_run_status)
   const openDecisionCount = Number(row.open_decision_count ?? 0)
+  const deliveryReviewCount = Number(row.delivery_review_count ?? 0)
+  const reworkCount = Number(row.rework_count ?? 0)
   const unverifiedCount = Number(row.unverified_count ?? 0)
   const orphanedNodeCount = Number(row.orphaned_node_count ?? 0)
   const oldestDecisionAt = nullableString(row.oldest_open_decision_at)
@@ -95,6 +101,8 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
   const attention = deriveAttention({
     openDecisionCount,
     oldestOpenDecisionAgeSeconds: oldestDecisionAge,
+    deliveryReviewCount,
+    reworkCount,
     unverifiedCount,
     currentRunStatus,
     orphanedNodeCount,
@@ -114,6 +122,8 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     run_count: Number(row.run_count ?? 0),
     open_decision_count: openDecisionCount,
     oldest_open_decision_age_seconds: oldestDecisionAge,
+    delivery_review_count: deliveryReviewCount,
+    rework_count: reworkCount,
     unverified_count: unverifiedCount,
     max_side_effect_level: maxSideEffectLevel(sideEffectLevels),
     max_heartbeat_age_ms: heartbeatAge,
@@ -132,9 +142,22 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
   }
 }
 
-const OPEN_DECISIONS = 'FROM human_decision_inbox d WHERE d.run_id = t.current_run_id'
-const UNVERIFIED_NODES = `FROM node_runs n WHERE n.run_id = t.current_run_id AND ${UNVERIFIED_EFFECT}`
-const ORPHANED_NODES = `FROM node_runs n WHERE n.run_id = t.current_run_id
+// 当前根运行的整棵运行树：子流程的人工事项也要算在父任务上（T02）。
+const CURRENT_TREE = `(WITH RECURSIVE tree(run_id) AS (
+    SELECT t.current_run_id WHERE t.current_run_id IS NOT NULL
+    UNION ALL SELECT c.run_id FROM runs c JOIN tree ON c.parent_run_id = tree.run_id
+  ) SELECT run_id FROM tree)`
+// 真的开始过执行的步骤才算“外部操作待核验”；排队中的可补偿步骤不算不可逆（T03）。
+const EXECUTED_NODE_STATUS = `n.status NOT IN ('queued','blocked_pre','dispatched','waiting')`
+const OPEN_DECISIONS = `FROM human_decision_inbox d WHERE d.run_id IN ${CURRENT_TREE}`
+const DELIVERY_REVIEWS = `FROM delivery_review_holds h
+  JOIN node_runs hn ON hn.run_id = h.run_id AND hn.node_id = h.node_id AND hn.replacement_node_run_id IS NULL
+  WHERE h.status = 'held' AND hn.status = 'done' AND h.run_id IN ${CURRENT_TREE}`
+const REWORK_ITEMS = `FROM rework_requests q WHERE q.status IN ('proposed','needs_human_approval','escalated')
+  AND q.run_id IN ${CURRENT_TREE}`
+const UNVERIFIED_NODES = `FROM node_runs n WHERE n.run_id IN ${CURRENT_TREE}
+  AND ${EXECUTED_NODE_STATUS} AND ${UNVERIFIED_EFFECT}`
+const ORPHANED_NODES = `FROM node_runs n WHERE n.run_id IN ${CURRENT_TREE}
   AND n.status = 'orphaned' AND n.replacement_node_run_id IS NULL`
 const RUN_ACCEPTANCE = `FROM run_acceptance_results a WHERE a.run_id = t.current_run_id`
 const CURRENT_RUN_JOINS = `LEFT JOIN runs r ON r.run_id = t.current_run_id
@@ -143,7 +166,7 @@ const CURRENT_RUN_JOINS = `LEFT JOIN runs r ON r.run_id = t.current_run_id
 const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_version, t.status, t.display_status,
   t.current_run_id, t.session_id, t.updated_at, t.archived_at, t.trigger_kind, t.autonomy,
   tr.next_fire_at AS next_trigger_at, tr.enabled AS trigger_enabled, r.status AS current_run_status, p.lane, p.sort_at, p.sort_weight,
-  (SELECT COUNT(*) FROM runs r WHERE r.task_id = t.task_id) AS run_count,
+  (SELECT COUNT(*) FROM runs r WHERE r.task_id = t.task_id AND r.parent_run_id IS NULL) AS run_count,
   CASE
     WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'failed') THEN 'failed'
     WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'unverifiable') THEN 'unverifiable'
@@ -154,6 +177,8 @@ const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflo
   END AS delivery_acceptance,
   (SELECT COUNT(*) ${OPEN_DECISIONS}) AS open_decision_count,
   (SELECT MIN(d.created_at) ${OPEN_DECISIONS}) AS oldest_open_decision_at,
+  (SELECT COUNT(*) ${DELIVERY_REVIEWS}) AS delivery_review_count,
+  (SELECT COUNT(*) ${REWORK_ITEMS}) AS rework_count,
   (SELECT COUNT(*) ${UNVERIFIED_NODES}) AS unverified_count,
   (SELECT COUNT(*) ${ORPHANED_NODES}) AS orphaned_node_count,
   (SELECT GROUP_CONCAT(DISTINCT n.side_effect_policy) FROM node_runs n WHERE n.run_id = t.current_run_id) AS side_effect_levels,

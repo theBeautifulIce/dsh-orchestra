@@ -358,7 +358,10 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
   const attention = ATTENTION_LABEL[task.attention]
   const { label: status, tone } = taskCardStatus(task)
   const hasUnverified = task.unverified_count > 0
-  const actionable = task.open_decision_count > 0 || hasUnverified || taskColumn(task) === 'attention'
+  const awaitingReview = task.delivery_review_count ?? 0
+  const reworkItems = task.rework_count ?? 0
+  const actionable = task.open_decision_count > 0 || awaitingReview > 0 || reworkItems > 0
+    || hasUnverified || taskColumn(task) === 'attention'
   return <article className="task-card" data-selected={selected || undefined} data-board-task-id={task.task_id} data-board-run-id={task.current_run_id ?? undefined}>
     <div className="task-card-status">
       <span style={tone ? { color: tone } : undefined}>{status ?? <UnknownState value={task.display_status || task.status} />}</span>
@@ -370,8 +373,10 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
     {task.attention_reason && <p className="task-card-reason">{operatorReason(task.attention_reason)}</p>}
     {actionable && <div className="task-card-attention">
       {task.open_decision_count > 0 && <strong>{task.open_decision_count} 项{COPY.awaitingDecision}</strong>}
+      {awaitingReview > 0 && <strong>{awaitingReview} 项成果待验收</strong>}
+      {reworkItems > 0 && <strong>{reworkItems} 项返工待处理</strong>}
       {hasUnverified && <strong><span style={{ color: tone }}>{task.unverified_count} {tone ? COPY.unverifiedBadge : '项待核实'}</span></strong>}
-      {!task.open_decision_count && !hasUnverified && attention && <strong>{attention}</strong>}
+      {!task.open_decision_count && !awaitingReview && !reworkItems && !hasUnverified && attention && <strong>{attention}</strong>}
       {hasUnverified && <span>{COPY.pendingIrreversible}</span>}
     </div>}
     <div className="task-card-meta">
