@@ -10,6 +10,8 @@ export type SideEffectLevel = (typeof SIDE_EFFECT_LEVEL)[number]
 export type TaskAggregates = {
   open_decision_count: number
   oldest_open_decision_age_seconds: number | null
+  delivery_review_count: number
+  rework_count: number
   unverified_count: number
   max_side_effect_level: SideEffectLevel | null
   max_heartbeat_age_ms: number | null
@@ -18,6 +20,8 @@ export type TaskAggregates = {
 export type AttentionInput = {
   openDecisionCount: number
   oldestOpenDecisionAgeSeconds: number | null
+  deliveryReviewCount?: number
+  reworkCount?: number
   unverifiedCount: number
   currentRunStatus: string | null
   orphanedNodeCount: number
@@ -45,13 +49,21 @@ export function maxSideEffectLevel(levels: readonly string[]): SideEffectLevel |
 }
 
 export function deriveAttention(input: AttentionInput): { attention: Attention; attention_reason: string | null } {
-  if (input.openDecisionCount > 0) {
+  const reviews = input.deliveryReviewCount ?? 0
+  const reworks = input.reworkCount ?? 0
+  // 审批、成果验收与返工都是“等人处理”，一起进同一档，避免任务表把待验收写成执行中（T01/D07）。
+  if (input.openDecisionCount > 0 || reviews > 0 || reworks > 0) {
     const age = input.oldestOpenDecisionAgeSeconds
     const minutes = age === null ? null : Math.max(1, Math.floor(age / 60))
-    return {
-      attention: 'decision',
-      attention_reason: minutes === null ? `${input.openDecisionCount} 项待审批` : `${input.openDecisionCount} 项待审批，最早已等待 ${minutes} 分钟`,
+    const parts: string[] = []
+    if (input.openDecisionCount > 0) {
+      parts.push(minutes === null
+        ? `${input.openDecisionCount} 项待审批`
+        : `${input.openDecisionCount} 项待审批，最早已等待 ${minutes} 分钟`)
     }
+    if (reviews > 0) parts.push(`${reviews} 项成果待验收`)
+    if (reworks > 0) parts.push(`${reworks} 项返工待处理`)
+    return { attention: 'decision', attention_reason: parts.join('，') }
   }
   if (input.unverifiedCount > 0) {
     return { attention: 'unverified', attention_reason: `${input.unverifiedCount} 项外部操作待核验` }

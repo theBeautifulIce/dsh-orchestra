@@ -159,3 +159,51 @@ it('任务触发启停与纯节点孤儿化立即更新可索引筛选范围', (
     db.raw.close()
   }
 })
+
+it('把子流程决定、成果留验与未派发的可补偿步骤分别投影到人读任务', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-attention-human-'))
+  const db = openDb(join(dir, 'orchestra.sqlite'))
+  try {
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    withTx(db, (tx) => {
+      // p：子流程里的人工决定要算到父任务，运行次数只算根启动（T02）。
+      addTask(tx, 'p', 'p-root', 'running')
+      tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at)
+        VALUES('p-sub','p-root','sub',1,'subworkflow','started','pure',?,?)`, [started, started])
+      tx.run(`INSERT INTO runs(run_id,task_id,parent_run_id,parent_node_run_id,status,created_at,updated_at)
+        VALUES('p-child','p','p-root','p-sub','running',?,?)`, [started, started])
+      tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at)
+        VALUES('p-step','p-child','collect',1,'agent','started','pure',?,?)`, [started, started])
+      tx.run(`INSERT INTO decisions(decision_id,run_id,node_run_id,kind,status,revision,payload_json,created_at)
+        VALUES('p-decision','p-child','p-step','verify_human','pending',1,'{}',?)`, [started])
+
+      // q：已完成步骤上有人工留验，即使还没有登记文件也是待办（T01/D06）。
+      addTask(tx, 'q', 'q-run', 'running')
+      tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at)
+        VALUES('q-step','q-run','write',1,'agent','done','pure',?,?)`, [started, started])
+      tx.run(`INSERT INTO delivery_review_holds(run_id,node_id,node_run_id,owner_actor,status,updated_at)
+        VALUES('q-run','write','q-step','human:a','held',?)`, [started])
+
+      // r：只有排队中的可补偿步骤，没有派发记录，不能报成“外部操作待核验”（T03）。
+      addTask(tx, 'r', 'r-run', 'running')
+      tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at)
+        VALUES('r-step','r-run','pay',1,'agent','queued','compensable',?,?)`, [started, started])
+    })
+    const person = getTaskSummarySnapshot(db, 'p', now).item
+    expect(person.run_count).toBe(1)
+    expect(person.open_decision_count).toBe(1)
+    expect(person.attention).toBe('decision')
+    expect(person.lane).toBe('attention')
+
+    const review = getTaskSummarySnapshot(db, 'q', now).item
+    expect(review.delivery_review_count).toBe(1)
+    expect(review.attention).toBe('decision')
+    expect(review.attention_reason).toContain('成果待验收')
+    expect(storedRank(db, 'q')).toBe(attentionWeight('decision'))
+
+    const queued = getTaskSummarySnapshot(db, 'r', now).item
+    expect(queued.unverified_count).toBe(0)
+    expect(queued.attention).not.toBe('unverified')
+    expect(queued.attention_reason ?? '').not.toContain('不可逆')
+  } finally { db.raw.close() }
+})
