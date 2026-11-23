@@ -207,3 +207,28 @@ it('把子流程决定、成果留验与未派发的可补偿步骤分别投影�
     expect(queued.attention_reason ?? '').not.toContain('不可逆')
   } finally { db.raw.close() }
 })
+
+it('keeps an unlaunched task-local plan out of the task board until it really starts (P01)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-plan-draft-'))
+  const db = openDb(join(dir, 'orchestra.sqlite'))
+  try {
+    applySteps(db, loadSteps(defaultMigrationsDir()))
+    withTx(db, (tx) => {
+      addTask(tx, 'draft', 'draft-run', 'reserved')
+      tx.run(`INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, content_hash,
+        launch_operation_id, owner_task_id, created_at) VALUES ('plan-1','human:a','{}','{}','{}','hash','op-1','draft',?)`,
+      [started])
+    })
+    // 只有计划、没有启动记录：任务表里看不到它。
+    expect(getTaskSummarySnapshotOrNull(db, 'draft')).toBeNull()
+    expect(listTaskSummaries(db).items.map((item) => item.task_id)).not.toContain('draft')
+    withTx(db, (tx) => tx.run(`INSERT INTO start_run_operations (operation_id, task_id, run_id, started_by, created_at)
+      VALUES ('op-1','draft','draft-run','human:a',?)`, [started]))
+    // 真正启动后回到任务表。
+    expect(getTaskSummarySnapshotOrNull(db, 'draft')).not.toBeNull()
+  } finally { db.raw.close() }
+})
+
+function getTaskSummarySnapshotOrNull(db: Db, taskId: string) {
+  try { return getTaskSummarySnapshot(db, taskId, now).item } catch { return null }
+}
