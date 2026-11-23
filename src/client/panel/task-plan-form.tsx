@@ -76,6 +76,7 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
   const [goal, setGoal] = useState(workflowRequest?.goal ?? '')
   const [criteria, setCriteria] = useState('')
   const [plan, setPlan] = useState<TaskPlanView | null>(null)
+  const [drafts, setDrafts] = useState<TaskPlanView[]>([])
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState<'propose' | 'start' | null>(null)
   const proposal = useRef<AbortController | null>(null)
@@ -97,6 +98,24 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
     }).catch(() => { if (current) setCapability('error') })
     return () => { current = false }
   }, [api, open])
+
+  // 生成过但没启动的计划可以取回，不必重填目标（P01）。
+  useEffect(() => {
+    if (!open || capability !== 'enabled') return
+    let current = true
+    void api.listPlanDrafts().then(({ data }) => {
+      if (current) setDrafts(data?.items ?? [])
+    }).catch(() => { if (current) setDrafts([]) })
+    return () => { current = false }
+  }, [api, open, capability])
+
+  function resume(draft: TaskPlanView) {
+    setGoal(draft.brief.goal)
+    setCriteria(draft.brief.requirements.map((entry) => entry.text).join('\n'))
+    setFailure('')
+    setConfirmed(false)
+    setPlan(draft)
+  }
 
   async function propose(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -159,6 +178,16 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
       {workflowRequest && <button type="button" disabled={busy === 'start'} style={editStyle} onClick={onClearWorkflow}>
         不指定流程，从目标开始
       </button>}
+      {drafts.length > 0 && <details style={detailStyle} open={!plan && drafts.length > 0}>
+        <summary>继续未启动的计划（{drafts.length}）</summary>
+        <ul style={listStyle}>
+          {drafts.map((draft) => <li key={draft.plan_id}>
+            <button type="button" style={editStyle} disabled={busy !== null} onClick={() => resume(draft)}>{draft.proposal.title}</button>
+            <span style={descriptionStyle}> · {draft.proposal.steps.length} 步 · {formatDraftTime(draft)}</span>
+          </li>)}
+        </ul>
+        <p style={descriptionStyle}>取回后会重新显示计划内容，确认启动前仍可修改目标与要求。</p>
+      </details>}
       {capability === 'loading' && <p role="status" style={descriptionStyle}>检查主脑规划服务…</p>}
       {capability === 'unavailable' && <p role="status" style={descriptionStyle}>当前宿主尚未启用主脑规划。</p>}
       {capability === 'error' && <p role="alert" style={descriptionStyle}>暂时无法获取主脑规划状态。</p>}
@@ -235,5 +264,6 @@ const contentStyle = { display: 'grid', gap: 8, marginTop: 5, fontSize: FONT_PX.
 const headingStyle = { fontSize: FONT_PX.section, margin: '4px 0' }
 const descriptionStyle = { margin: '4px 0', color: COLOR.inkMuted, overflowWrap: 'anywhere' as const }
 const detailStyle = { marginTop: 4, fontSize: FONT_PX.menu, color: COLOR.inkMuted }
+const formatDraftTime = (draft: TaskPlanView) => draft.created_at ? draft.created_at.slice(0, 16).replace('T', ' ') : '时间未记录'
 const listStyle = { margin: '5px 0', paddingLeft: 22, overflowWrap: 'anywhere' as const }
 const editStyle = { justifySelf: 'start' as const, color: COLOR.ink, background: COLOR.surface, border: `1px solid ${COLOR.line}`, borderRadius: 5, minHeight: 36 }
