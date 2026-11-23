@@ -211,7 +211,8 @@ export function getWorkspaceOverview(db: Db, includeRelease = false): { item: Wo
   })
 }
 
-export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items: TaskSummary[]; next_cursor: string | null; as_of_seq: number } {
+export function listTaskSummaries(db: Db, params: ListTaskParams = {}):
+{ items: TaskSummary[]; next_cursor: string | null; lane_counts: Partial<Record<TaskLane, number>>; as_of_seq: number } {
   const limit = params.limit ?? 50
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > TASKS_LIMIT_MAX) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 ' + String(TASKS_LIMIT_MAX) + ' 条', { limit })
@@ -237,6 +238,9 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
           (instr(lower(search.title), lower(?)) > 0 OR instr(lower(search.task_id), lower(?)) > 0))`)
       values.push(filter.query, filter.query)
     }
+    // 同快照的分列计数：用于看板列头与「未加载」判断，不受本页 limit 影响（T08）。
+    const baseWhere = [...where]
+    const baseValues = [...values]
     if (params.cursor) {
       const cursor = decodeCursor(params.cursor, 'tasks', filter, now)
       const separator = cursor.last_key.indexOf('\t')
@@ -253,6 +257,10 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
       + TASK_SUMMARY_SELECT + ' ORDER BY p.sort_weight DESC, p.sort_at DESC, p.task_id DESC',
       [...values, limit + 1],
     )
+    const laneCounts: Partial<Record<TaskLane, number>> = {}
+    for (const row of ctx.tx.all<{ lane: TaskLane; count: number }>(
+      TASK_PAGE_START + baseWhere.join(' AND ') + ') SELECT lane, COUNT(*) AS count FROM task_page GROUP BY lane', baseValues,
+    )) laneCounts[row.lane] = Number(row.count)
     const hasMore = rows.length > limit
     const page = hasMore ? rows.slice(0, limit) : rows
     const items = page.map((row) => taskSummary(row, now))
@@ -260,7 +268,7 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}): { items:
     const nextCursor = hasMore && last
       ? encodeCursor(makeCursor('tasks', filter, `${last.sort_weight}\t${last.sort_at}`, last.task_id, ctx.as_of_seq, now))
       : null
-    return { items, next_cursor: nextCursor, as_of_seq: ctx.as_of_seq }
+    return { items, next_cursor: nextCursor, lane_counts: laneCounts, as_of_seq: ctx.as_of_seq }
   })
 }
 
