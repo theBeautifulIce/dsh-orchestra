@@ -348,9 +348,10 @@ function nextReport(view: ReturnType<typeof describeRun>, previous: string | nul
   const decisions = view.decisions.map((decision) => [decision.decision_id, decision.revision])
   const reviews = view.deliveryReviews.map(({ artifact, runId, nodeRunId, revised, requestedAt }) =>
     ['delivery_review', artifact?.artifact_id ?? nodeRunId, runId, revised?.revision ?? requestedAt ?? null])
+  const rework = (view.rework ?? []).map((item) => ['rework', item.request_id, item.status, item.round_no])
   const blocking = view.blocking.filter((node) => node.action_required)
     .map(({ node_run_id, title, status, attempt, reason }) => ({ node_run_id, title, status, attempt, reason }))
-  const active = [...decisions, ...reviews, ...blocking].map((action) => sha256Hex(JSON.stringify(action))).sort()
+  const active = [...decisions, ...reviews, ...rework, ...blocking].map((action) => sha256Hex(JSON.stringify(action))).sort()
   if (!active.length) return
   const prefix = 'actions:'
   const key = prefix + active.join(',')
