@@ -16,6 +16,7 @@ type RunDisplay = {
   blocking: BlockingStep[]
   decisions: Decision[]
   deliveryReviews?: ChatDeliveryReview[]
+  rework?: Array<{ request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string }>
   delivery_checks: RunDeliveryCheck[]
   nodes?: Step[]
   artifacts: Array<{ artifact_id: string; file_name?: string }>
@@ -127,11 +128,20 @@ function blockingDescription(step: BlockingStep): string {
 export function describeChatRun(view: RunDisplay, proactive = false): { heading: string; body: string } {
   const actions = view.blocking.filter((step) => !proactive || step.action_required)
   const humanActions = actions.some((step) => step.action_required)
-  const state = view.deliveryReviews?.length ? '成果待审核' : view.decisions.length ? '等待人工处理' : humanActions ? '执行受阻'
+  const state = view.deliveryReviews?.length ? '成果待审核'
+    : view.rework?.length ? '返工待处理'
+      : view.decisions.length ? '等待人工处理' : humanActions ? '执行受阻'
     : view.settling && !view.terminal ? '正在确认执行结果' : RUN_LABEL.get(view.status) ?? operatorStatus(view.status)
   const heading = taskHeading(view.title, state)
   const lines: string[] = []
   for (const review of view.deliveryReviews ?? []) lines.push(formatDeliveryReviewNotice(review), '')
+  if (view.rework?.length) {
+    lines.push('返工待处理　' + view.rework.map((item) => {
+      const label = item.status === 'escalated' ? '已升级，需人工判断'
+        : item.status === 'needs_human_approval' ? '等待你批准返工范围' : '等待你确认是否返工'
+      return `第 ${item.round_no} 轮 · ${label} · ${sentence(item.reason)}`
+    }).join('；'), '')
+  }
   const decisionTitles = view.decisions.map((decision) => chatDecisionTitle(decision.title, decision.kind))
   for (const [index, decision] of view.decisions.entries()) {
     lines.push(decisionDescription(decision, decisionTitles.filter((title) => title === decisionTitles[index]).length === 1))

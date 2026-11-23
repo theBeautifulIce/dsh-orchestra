@@ -209,6 +209,11 @@ function describeRun(service: Service, runId: string, operator: string) {
     ...(task?.current_run_id === runId ? { acceptance: task.delivery_acceptance, goal_met: task.goal_met } : {}),
     decisions, blocking,
     deliveryReviews: !terminal && service.rework ? listChatDeliveryReviews(db, runId, operator) : [],
+    // 返工待授权/已升级也算“等你处理”，否则会话只报执行中（D07）。
+    rework: terminal ? [] : db.raw.prepare(`SELECT request_id, target_node_run_id, status, round_no, reason
+      FROM rework_requests WHERE run_id=? AND owner_actor=? AND status IN ('proposed','needs_human_approval','escalated')
+      ORDER BY created_at DESC LIMIT 5`).all(runId, operator) as Array<{
+        request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string }>,
   }
 }
 
