@@ -153,7 +153,7 @@ it('reads real personal ledger memory pages without a writer and isolates worksp
     expect(await empty.json()).toMatchObject({ ok: true, schema_version: 1, data: { items: [], next_cursor: null } })
     const owner = services[0]!
     expect((await fetch(owner.endpoint + path)).status).toBe(401)
-    expect(await (await request('/health')).json()).toMatchObject({ data: { memory_enabled: false } })
+    expect(await (await request('/health')).json()).toMatchObject({ data: { memory_enabled: false, task_triggers_enabled: false } })
 
     const now = '2026-11-20T00:00:00.000Z'
     const { db } = owner.orchestra

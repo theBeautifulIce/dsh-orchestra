@@ -265,7 +265,7 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
   }, workspace.path)
   let service: LocalService | undefined
   service = await serve({
-    dbFile, secret, phase: 'S6', tools: { registry, runner }, preferNamedPipe: true,
+    dbFile, secret, phase: 'S6', tools: { registry, runner }, preferNamedPipe: true, taskTriggersWritable: false,
     projectContext,
     resolveHttpHuman: (req) => req.headers['x-orchestra-local-proof'] === proof ? { id: human } : null,
     dsh: { context: host, parentForNode: parent, models: [],

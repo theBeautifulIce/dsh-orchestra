@@ -37,6 +37,7 @@ export type PanelHostStatus = {
   modelEscalationEnabled?: boolean
   collaborationEnabled?: boolean
   reworkEnabled?: boolean
+  taskTriggersEnabled?: boolean
   reworkPlannerEnabled?: boolean
   runNotesEnabled?: boolean
 }
@@ -71,7 +72,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
   const probe = useCallback(async (): Promise<boolean> => {
     const generation = ++probeGeneration.current
     try {
-      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; memory_proposal_only?: boolean; model_routing_enabled?: boolean; planning_timeouts_enabled?: boolean; execution_capacity_enabled?: boolean; workflow_concurrency_enabled?: boolean; native_chat_routing_enabled?: boolean; model_escalation_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean; run_notes_enabled?: boolean }>('/health')
+      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; memory_proposal_only?: boolean; model_routing_enabled?: boolean; planning_timeouts_enabled?: boolean; execution_capacity_enabled?: boolean; workflow_concurrency_enabled?: boolean; native_chat_routing_enabled?: boolean; model_escalation_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean; run_notes_enabled?: boolean; task_triggers_enabled?: boolean }>('/health')
       if (generation !== probeGeneration.current) return false
       setStatus((previous) => ({
         ...previous,
@@ -89,6 +90,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
         collaborationEnabled: result.data.collaboration_enabled === true,
         runNotesEnabled: result.data.run_notes_enabled === true,
         reworkEnabled: result.data.rework_enabled === true,
+        taskTriggersEnabled: result.data.task_triggers_enabled !== false,
         reworkPlannerEnabled: result.data.rework_planner_enabled === true,
       }))
       return true
@@ -139,6 +141,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     nativeChatRoutingEnabled={status.nativeChatRoutingEnabled}
     collaborationEnabled={status.collaborationEnabled}
     reworkEnabled={status.reworkEnabled}
+    taskTriggersEnabled={status.taskTriggersEnabled}
     modelEscalationEnabled={status.modelEscalationEnabled}
     reworkPlannerEnabled={status.reworkPlannerEnabled}
     createEventStream={createEventStream}
