@@ -27,6 +27,9 @@ export type TaskSummary = {
   /** 待授权、待人工判断或已升级的返工请求数量。 */
   rework_count?: number
   unverified_count: number
+  /** 当前运行的有效步骤数与已完成数：任务行直接给进度（T10）。 */
+  step_total?: number
+  step_done?: number
   max_side_effect_level: SideEffectLevel | null
   max_heartbeat_age_ms: number | null
   attention: Attention
@@ -125,6 +128,8 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     delivery_review_count: deliveryReviewCount,
     rework_count: reworkCount,
     unverified_count: unverifiedCount,
+    step_total: Number(row.step_total ?? 0),
+    step_done: Number(row.step_done ?? 0),
     max_side_effect_level: maxSideEffectLevel(sideEffectLevels),
     max_heartbeat_age_ms: heartbeatAge,
     attention: attention.attention,
@@ -180,6 +185,13 @@ const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflo
   (SELECT COUNT(*) ${DELIVERY_REVIEWS}) AS delivery_review_count,
   (SELECT COUNT(*) ${REWORK_ITEMS}) AS rework_count,
   (SELECT COUNT(*) ${UNVERIFIED_NODES}) AS unverified_count,
+  (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id AND n.replacement_node_run_id IS NULL
+    AND n.attempt = (SELECT MAX(m.attempt) FROM node_runs m WHERE m.run_id = n.run_id AND m.node_id = n.node_id
+      AND m.replacement_node_run_id IS NULL)) AS step_total,
+  (SELECT COUNT(*) FROM node_runs n WHERE n.run_id = t.current_run_id AND n.status = 'done'
+    AND n.replacement_node_run_id IS NULL
+    AND n.attempt = (SELECT MAX(m.attempt) FROM node_runs m WHERE m.run_id = n.run_id AND m.node_id = n.node_id
+      AND m.replacement_node_run_id IS NULL)) AS step_done,
   (SELECT COUNT(*) ${ORPHANED_NODES}) AS orphaned_node_count,
   (SELECT GROUP_CONCAT(DISTINCT n.side_effect_policy) FROM node_runs n WHERE n.run_id = t.current_run_id) AS side_effect_levels,
   (SELECT MIN(n.heartbeat_at) FROM node_runs n WHERE n.run_id = t.current_run_id

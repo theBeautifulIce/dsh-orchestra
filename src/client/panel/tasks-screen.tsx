@@ -10,7 +10,7 @@ import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
 import { operatorReason } from '../../core/operator-language.ts'
-import { TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
+import { NARROW_TASK_CSS, TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
 import { TaskStepOverview, useRunStepSnapshot } from './task-step-overview.tsx'
 import { readDisplayPreferences, TASK_VIEWS } from './display-preferences.ts'
 
@@ -207,7 +207,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   const grouped: Record<TaskLane, TaskSummary[]> = { upcoming: [], running: [], attention: [], finished: [] }
   for (const task of items) grouped[taskColumn(task)].push(task)
   return <section className="task-list" aria-labelledby="tasks-title">
-    <style>{TASK_WORKSPACE_CSS}</style>
+    <style>{TASK_WORKSPACE_CSS}{NARROW_TASK_CSS}</style>
     <header className="task-page-header">
       <div>
       <h1 id="tasks-title" style={titleStyle}>{filter.archived ? '归档箱' : '任务'}</h1>
@@ -375,6 +375,7 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
     <h3 className="task-card-title"><button type="button" data-task-card-focus="inspect" onClick={(event) => onSelect(event.currentTarget)} title={task.title} style={compact ? compactTitleStyle : taskTitleStyle}
       aria-expanded={selected} aria-controls={selected ? 'task-inspector' : undefined}>{task.title || '未命名任务'}</button></h3>
     <p className="task-card-type">{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</p>
+    {(task.step_total ?? 0) > 0 && <p className="task-card-progress">{(task.step_done ?? 0)} / {task.step_total} 步已完成</p>}
     {task.attention_reason && <p className="task-card-reason">{operatorReason(task.attention_reason)}</p>}
     {actionable && <div className="task-card-attention">
       {task.open_decision_count > 0 && <strong>{task.open_decision_count} 项{COPY.awaitingDecision}</strong>}
