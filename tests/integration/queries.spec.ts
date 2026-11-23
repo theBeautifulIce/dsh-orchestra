@@ -316,3 +316,18 @@ describe('账本校验与回执', () => {
     expect(codeOf(() => getOperation(db, 'op2'))).toBe('OPERATION_EXPIRED')
   })
 })
+
+it('T04 步骤进度按当前有效尝试去重，重试不把一次替换算成两步', () => {
+  const db = seeded()
+  withTx(db, (tx) => {
+    // 同一逻辑步骤的第一次尝试被替换，第二次成功。
+    tx.run("UPDATE node_runs SET status='superseded', replacement_node_run_id='n2' WHERE node_run_id='n1'")
+    tx.run(`INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at)
+      VALUES ('n2', 'r1', 'n1', 1, 'agent', 2, 'done', 1, ?, ?)`, ['2026-11-13T01:10:00.000Z', '2026-11-13T01:10:00.000Z'])
+  })
+  const run = getRun(db, 'r1')
+  expect(run.total).toBe(2)
+  expect(run.counts).toEqual(expect.arrayContaining([{ status: 'done', count: 1 }, { status: 'superseded', count: 1 }]))
+  // 人读进度只看到一项当前步骤，且已完成。
+  expect(run.step_counts).toEqual([{ status: 'done', count: 1 }])
+})

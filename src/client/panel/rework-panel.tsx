@@ -13,8 +13,10 @@ import { nodeExecutionLabel } from './task-node-status.ts'
 const labels: Record<string, string> = { proposed: '等待授权', evaluating: '正在评估', needs_human_approval: '等待人工授权', authorized: '已授权', scheduled: '等待返工', executing: '正在返工', awaiting_review: '等待重新验收', accepted: '验收通过', closed: '已完成', declined: '未批准', escalated: '等待人工处理', cancelled: '已取消' }
 const scopes: Record<string, string> = { targeted_revision: '针对性修改', rerun_node: '重新执行当前节点', replan_subgraph: '局部重规划' }
 
-export function ReworkPanel({ api, commands, runId, reloadVersion = 0, plannerEnabled = false, onSnapshot, compact = false }: {
-  api: ResourcesApi; commands?: ReworkApi; runId?: string; reloadVersion?: number; plannerEnabled?: boolean
+// 运行已到终态时再提交修改只会得到 STALE_GENERATION：先把入口关掉并说明下一步（D10）。
+const RUN_ENDED = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
+export function ReworkPanel({ api, commands, runId, runStatus, reloadVersion = 0, plannerEnabled = false, onSnapshot, compact = false }: {
+  api: ResourcesApi; commands?: ReworkApi; runId?: string; runStatus?: string | null; reloadVersion?: number; plannerEnabled?: boolean
   onSnapshot?: (seq: number) => void; compact?: boolean
 }) {
   const [items, setItems] = useState<ReworkItem[]>([])
@@ -35,7 +37,9 @@ export function ReworkPanel({ api, commands, runId, reloadVersion = 0, plannerEn
     {!loading && !failed && items.length === 0 && <p>暂无返工记录。</p>}
     {items.filter(item => !runId || item.run_id === runId).map(item => compact ? <p key={item.request_id}>{labels[item.status] ?? operatorStatus(item.status)} · 第 {item.round_no} 轮 · {item.reason}</p>
       : <ReworkCard key={item.request_id + ':' + item.revision} api={api} item={item} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />)}
-    {runId && commands && !compact && <ReworkRequestForm key={runId} api={api} runId={runId} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />}
+    {runId && commands && !compact && <ReworkRequestForm key={runId} api={api} runId={runId} commands={commands}
+      plannerEnabled={plannerEnabled} runEnded={Boolean(runStatus && RUN_ENDED.has(runStatus))}
+      onChanged={() => setRetry(n => n + 1)} />}
   </section>
 }
 
@@ -194,7 +198,9 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
   </article>
 }
 
-function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled }: { api: ResourcesApi; commands: ReworkApi; runId: string; onChanged: () => void; plannerEnabled: boolean }) {
+function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled, runEnded = false }: {
+  api: ResourcesApi; commands: ReworkApi; runId: string; onChanged: () => void; plannerEnabled: boolean; runEnded?: boolean
+}) {
   const canWrite = usePanelCommandsEnabled(true)
   const [nodes, setNodes] = useState<NodeRunView[]>([])
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([])
@@ -259,7 +265,8 @@ function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled }: 
     <label style={field}>期望结果<textarea value={expected} onChange={e => setExpected(e.target.value)} rows={2} /></label>
     <label style={field}>保留要求（每行一条）<textarea value={preserve} onChange={e => setPreserve(e.target.value)} rows={2} /></label>
     <label style={field}>修改方式<select value={scope} onChange={e => setScope(e.target.value as ReworkScope)}><option value="targeted_revision">针对性修改</option><option value="rerun_node">重新执行当前节点</option><option value="replan_subgraph">提交局部重规划需求</option></select></label>
-    <button type="button" disabled={!canWrite || !artifact || !node || node.status !== 'done' || !reason.trim() || !expected.trim()} onClick={() => void submit('request')}>要求修改</button><p>意见提交后等待授权，旧成果与执行记录保留。</p>
+    <button type="button" disabled={!canWrite || runEnded || !artifact || !node || node.status !== 'done' || !reason.trim() || !expected.trim()} onClick={() => void submit('request')}>要求修改</button>
+    <p>{runEnded ? '本次运行已经结束，不能再提交修改意见。已交付的文件仍可在结果里打开；需要改稿时请新建一项任务并附上这份成果。' : '意见提交后等待授权，旧成果与执行记录保留。'}</p>
   </fieldset>{notice && <p role="status">{notice}</p>}{unknownOperation && <button type="button" onClick={async () => { try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${receiptStatus(data.status)}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } }}>查询原操作回执</button>}</details>
 }
 export function LineComparison({ before, after }: { before: string; after: string }) {
