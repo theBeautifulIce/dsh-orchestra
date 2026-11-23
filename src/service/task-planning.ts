@@ -812,6 +812,16 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     enabled: options !== undefined,
     get requestTimeoutMs() { return readTimeouts().request },
     get,
+    /** 未启动的计划草稿：只有原创建者能看到，用来取回、调整或放弃（P01）。 */
+    listDrafts(actor: string, taskId?: string) {
+      return withReadTx(db, ({ tx, as_of_seq }) => {
+        const rows = tx.all<PlanRow>(PLAN_SELECT + ` WHERE p.created_by = ?
+          AND (? IS NULL OR p.owner_task_id = ?)
+          AND NOT EXISTS (SELECT 1 FROM start_run_operations o2 WHERE o2.operation_id = p.launch_operation_id)
+          ORDER BY p.created_at DESC LIMIT 20`, [actor, taskId ?? null, taskId ?? null])
+        return { items: rows.map(toPlanView), as_of_seq }
+      })
+    },
     getForTask(taskId: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
         const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE o.task_id = ? AND p.created_by = ?', [taskId, actor])

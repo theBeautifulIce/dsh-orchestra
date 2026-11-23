@@ -41,6 +41,8 @@ export function createResourcesApi(client: ApiClient) {
     getTaskPlanCapability: (): Promise<ApiResult<{ enabled: boolean }>> => client.get('/v1/task-plans/capability'),
     getTaskPlan: (plan_id: string): Promise<ApiResult<TaskPlanView>> => client.get('/v1/task-plans/get', { plan_id }),
     getTaskPlanForTask: (task_id: string): Promise<ApiResult<TaskPlanView | null>> => client.get('/v1/task-plans/by-task', { task_id }),
+    listPlanDrafts: (task_id?: string): Promise<ApiResult<{ items: TaskPlanView[] }>> =>
+      client.get('/v1/task-plans/drafts', task_id ? { task_id } : {}),
     listTaskTriggers: (params: { task_id?: string } = {}): Promise<ApiResult<{ items: TaskTriggerView[] }>> =>
       client.get('/v1/task-triggers', compact(params)),
     listRuns: (params: { task_id?: string; workflow_id?: string; limit?: number; cursor?: string } = {}): Promise<ApiResult<{ items: RunSummary[]; next_cursor?: string | null }>> =>
