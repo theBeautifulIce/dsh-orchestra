@@ -77,7 +77,7 @@ type Goal = { id: string; text: string }
 type PlanInput = { goal: string; requirements: Goal[]; workflow_id?: string; workflow_version?: string }
 type WorkflowCandidate = {
   workflowId: string; version: string; title: string
-  nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[] }>
+  nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[]; subflowTools?: string[] }>
 }
 type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
@@ -219,9 +219,25 @@ function readChoice(catalog: WorkflowCatalog, registry: ToolRegistry | undefined
       id: node.node_id, type: node.type, approvalPrompt: node.approval?.prompt,
       dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
       declaredTools, toolAllow: declaredTools.filter((tool) => registry?.lookup(tool)?.capability === 'read_only'),
+      // 子流程声明的只读工具在计划期就摊开，便于递归校验（P06）。
+      ...(node.type === 'subworkflow' && node.subworkflow
+        ? { subflowTools: declaredToolsOfSubflow(catalog, registry, node.subworkflow.workflow_id, String(node.subworkflow.pinned_version)) }
+        : {}),
     }
   })
   return { workflow: { workflowId: row.workflow_id, version: row.version, title: row.name, nodes }, hash: row.content_hash }
+}
+
+/** 子流程声明的只读工具；读不到子流程定义时返回空数组，由调用方决定是否拦。 */
+function declaredToolsOfSubflow(catalog: WorkflowCatalog, registry: ToolRegistry | undefined, workflowId: string, version: string): string[] {
+  try {
+    const child = catalog.get(workflowId, version)
+    return [...new Set(child.nodes.flatMap((node) => {
+      const policy = catalog.toolPolicyFor(workflowId, version, node.node_id)
+      return policy.allow.filter((tool) => !policy.deny.includes(tool)
+        && registry?.lookup(tool)?.capability === 'read_only')
+    }))]
+  } catch { return [] }
 }
 
 /** 版本没加载过时按"固定版本不可用"处理，不让内部错误码漏给调用方 */
@@ -346,8 +362,13 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
     if (node && [...new Set([...node.declaredTools, ...step.tools])].some((tool) => !node.toolAllow.includes(tool))) {
       issues.tools.push(step.node_id + ' 的工具未注册、超出授权或无法用于只读执行。')
     }
-    // 子流程不再一刀切禁止：工具覆盖仍按上面的通用规则判定，
-    // 子流程自身的工具/文件/审批声明由运行期的 WorkflowReadSource 递归校验（P06）。
+    // 子流程不再一刀切禁止：按递归摊开的只读工具做覆盖校验（P06）。
+    if (node?.type === 'subworkflow') {
+      const missing = (node.subflowTools ?? []).filter((tool) => !step.tools.includes(tool))
+      if (missing.length > 0) {
+        issues.tools.push(step.node_id + ' 的子流程还需要这些只读工具：' + missing.join('、') + '。请在步骤里声明后重新规划。')
+      }
+    }
     if (node?.type === 'wait' && !proposal.risks.some((risk) => risk.node_id === node.id)) {
       issues.risks.push(step.node_id + ' 是等待节点，须说明超时风险和应对措施。')
     }
