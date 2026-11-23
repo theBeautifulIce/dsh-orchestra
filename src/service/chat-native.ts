@@ -130,14 +130,20 @@ function resolveWorkflowPin(db: Service['orchestra']['db'], text: string) {
  * 澄清后的补充答复：保留上一条的目标，只把答复并进去（C03）。
  * 新工作、提问或纯应答不算补充，仍走完整分类。
  */
+/**
+ * 只有“补充材料/口径/限制”才续接草稿；自己要一份新交付物就是换一项工作，走完整重分类（C03）。
+ */
 export function isClarificationAnswer(text: string): boolean {
   const trimmed = text.trim()
   if (trimmed.length < 4 || trimmed.length > 400) return false
   if (/[？?]\s*$/u.test(trimmed)) return false
   if (/^(?:好的|收到|可以|谢谢|嗯|行|ok|okay)[。！!,.]?$/iu.test(trimmed)) return false
-  // 显式开一项新工作才算换话题；其余补充都续接草稿。
   if (/^(?:新建|创建|执行|开展|停一下).{0,12}(?:任务|工作)/u.test(trimmed) || /执行任务「/u.test(trimmed)) return false
-  return true
+  // 补充材料、口径与限制：这类答复保留原目标，只把补充并进去。
+  const supplements = /(?:材料|资料|数据|文件|用\s*\S{1,80}\.(?:csv|xlsx|md|txt|json)|只读|不修改|不要修改|按天|按周|按月|分组|口径|范围|排除|只看|仅看|截止|时间范围)/u
+  if (!supplements.test(trimmed)) return false
+  // 自己要一份新交付物的答复，不属于补充。
+  return !/(?:交付|输出|生成|写一份|做一份|作一份|出一份|给出一份)\s*[^，。；]{0,30}(?:报告|清单|汇总|总结|纪要|摘要|表格)/u.test(trimmed)
 }
 
 function validatedTaskText(text: string): string {

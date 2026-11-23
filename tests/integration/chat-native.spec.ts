@@ -1346,10 +1346,10 @@ it('C03 澄清后的补充答复续接草稿，不重新分类成聊天', async 
     const human = test.session('work', 'parent')
     await human.admit(user('帮我整理一下'))
     expect(await human.call()).toMatchObject({ state: 'clarification_required' })
-    await human.admit(user('按天汇总办公流水并交付 markdown 报告'))
+    await human.admit(user('用 office-sample.csv，按天分组，只读不修改原表'))
     await expect(human.call()).resolves.toMatchObject({ state: 'started' })
     const goal = String(test.planner.mock.calls.at(-1)?.[0].goal ?? '')
     expect(goal).toContain('帮我整理一下')
-    expect(goal).toContain('按天汇总办公流水')
+    expect(goal).toContain('office-sample.csv')
   } finally { await test.close() }
 })
