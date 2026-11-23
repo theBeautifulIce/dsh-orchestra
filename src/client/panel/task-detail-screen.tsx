@@ -460,12 +460,15 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
   const [nodes, setNodes] = useState<NodeRunView[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
+  const [nodeCursor, setNodeCursor] = useState<string | null>(null)
+  const [readingMore, setReadingMore] = useState(false)
   useEffect(() => {
     let current = true
     setFailed(false)
     void api.listNodes(run.run_id, 200).then(({ data, as_of_seq }) => {
       if (!current) return
       setNodes(data.items)
+      setNodeCursor(data.next_cursor ?? null)
       onSnapshot?.(as_of_seq)
     }).catch(() => { if (current) setFailed(true) })
     return () => { current = false }
@@ -512,7 +515,17 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
       {tab === '证据' && <DeliveryChecks checks={run.delivery_checks} />}
       {!failed && nodes && tab === '证据' && <EvidenceList api={api} nodes={nodes} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} />}
       {run.project_context && <RunProjectContext context={run.project_context} />}
-      {!failed && nodes && run.total > nodes.length && <p style={mutedStyle}>仅显示本次读取到的 {nodes.length} 条尝试记录</p>}
+      {!failed && nodes && run.total > nodes.length && (nodeCursor
+        ? <button type="button" disabled={readingMore} onClick={() => {
+          setReadingMore(true)
+          void api.listNodes(run.run_id, 200, nodeCursor).then(({ data }) => {
+            setNodes((previous) => previous
+              ? [...previous, ...data.items.filter((item) => !previous.some((old) => old.node_run_id === item.node_run_id))]
+              : data.items)
+            setNodeCursor(data.next_cursor ?? null)
+          }).catch(() => setFailed(true)).finally(() => setReadingMore(false))
+        }}>{readingMore ? '正在读取其余尝试…' : `继续读取其余尝试（还有 ${Math.max(0, run.total - nodes.length)} 条）`}</button>
+        : <p style={mutedStyle}>仅显示本次读取到的 {nodes.length} 条尝试记录</p>)}
     </>}
   </>
 }
@@ -560,6 +573,7 @@ function useRunDelivery(api: ResourcesApi, run: RunSummary, enabled: boolean, ve
   const [requirements, setRequirements] = useState<ArtifactRequirement[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [retry, setRetry] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
   useEffect(() => {
     if (!enabled) return
     let current = true
@@ -585,7 +599,19 @@ function useRunDelivery(api: ResourcesApi, run: RunSummary, enabled: boolean, ve
     }).catch(() => { if (current) setRequirements(null) })
     return () => { current = false }
   }, [api, enabled, verifying, run.task_id, run.run_id, reloadVersion])
-  return { artifacts, requirements, failed, retry: () => setRetry((value) => value + 1) }
+  // 第 51 份及更早的产物靠游标继续读，不再只说“显示最近 50 份”（T06）。
+  const loadMore = async () => {
+    const cursor = artifacts?.next_cursor
+    if (!cursor || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const { data } = await api.listRunArtifacts(run.run_id, { cursor })
+      setArtifacts((previous) => previous
+        ? { ...data, items: [...previous.items, ...data.items.filter((item) => !previous.items.some((old) => old.artifact_id === item.artifact_id))] }
+        : data)
+    } catch { setFailed(true) } finally { setLoadingMore(false) }
+  }
+  return { artifacts, requirements, failed, loadMore, loadingMore, retry: () => setRetry((value) => value + 1) }
 }
 
 function DeliveryProgress({ artifacts, requirements, nodes }: { artifacts: RunArtifacts; requirements: ArtifactRequirement[] | null; nodes: NodeRunView[] | null }) {
@@ -612,7 +638,7 @@ function DeliveryProgress({ artifacts, requirements, nodes }: { artifacts: RunAr
 function RunResult({ api, run, delivery, verifying, nodes }: {
   api: ResourcesApi; run: RunSummary; delivery: ReturnType<typeof useRunDelivery>; verifying: boolean; nodes: NodeRunView[] | null
 }) {
-  const { artifacts, requirements, failed, retry } = delivery
+  const { artifacts, requirements, failed, retry, loadMore, loadingMore } = delivery
   const issues = run.delivery_checks?.items.filter((check) => check.outcome !== 'passed')
   const sources = new Map(nodes?.map((node) => [node.node_run_id, node.title]))
   return <>
@@ -642,7 +668,9 @@ function RunResult({ api, run, delivery, verifying, nodes }: {
           {artifact.source_node_run_id && <p style={mutedStyle}>提交步骤编号 <code>{artifact.source_node_run_id}</code></p>}
         </details>
       </details>)}
-      {artifacts?.has_more && <p style={mutedStyle}>显示最近 50 份产物。</p>}
+      {artifacts?.has_more && (artifacts.next_cursor
+        ? <button type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? '正在读取更早的产物…' : '加载更早的产物'}</button>
+        : <p style={mutedStyle}>显示最近 50 份产物。</p>)}
     </section>
   </>
 }
