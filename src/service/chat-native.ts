@@ -9,7 +9,7 @@ import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
 import { classifyChatTask } from './chat-task-intent.ts'
-import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
+import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatErrorReason, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
 import { readOutstandingFiles } from './chat-expected-files.ts'
 import { attachChatDeliveryPreviews, listChatDeliveryReviews } from './chat-delivery-review.ts'
 import type { ChatModelRecoveryChecks } from './chat-model-recovery.ts'
@@ -90,23 +90,31 @@ function fingerprint(message: Message): string {
 }
 
 function taskText(message: Message): string {
+  const texts = message.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
   if (message.content.some((block) => block.type !== 'text')) {
-    throw new OrchError('PAYLOAD_SCHEMA_INVALID', '当前编排任务需要文字目标。请用文字指定已获授权的数据来源。')
+    // 附件与长度错误不能再共用一个“字数不合规”：用户缩短请求也解决不了附件没被读入。
+    throw texts.trim()
+      ? new OrchError('PAYLOAD_SCHEMA_INVALID', '附件没有纳入本次任务', { reason: 'attachments_unsupported' })
+      : new OrchError('PAYLOAD_SCHEMA_INVALID', '这条消息只有附件，没有任务目标', { reason: 'only_attachments' })
   }
-  return validatedTaskText(message.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n'))
+  return validatedTaskText(texts)
 }
 
 function validatedTaskText(text: string): string {
   const result = planInputSchema.safeParse({ goal: text })
-  if (!result.success) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '任务目标需要 1 至 2000 个字符')
+  if (!result.success) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', text.trim() ? '任务目标超过长度上限' : '这条消息没有任务目标',
+      { reason: text.trim() ? 'goal_too_long' : 'goal_empty' })
+  }
   return result.data.goal
 }
 
 function errorReceipt(error: unknown): Extract<ChatOutcome, { state: 'error' }> {
   if (!(error instanceof OrchError)) return { state: 'error', code: 'SERVICE_UNAVAILABLE', retryable: true }
-  const { planning_issue } = error.details
+  const { planning_issue, reason } = error.details
   return { state: 'error', code: error.code, retryable: error.retryable,
-    ...(isChatPlanningIssue(planning_issue) && { planning_issue }) }
+    ...(isChatPlanningIssue(planning_issue) && { planning_issue }),
+    ...(isChatErrorReason(reason) && { reason }) }
 }
 
 function noticeMessage(id: Message['id'], display: ReturnType<typeof describeChatRun>): Message {
@@ -368,8 +376,8 @@ export function installNativeChat(host: Context, options: {
       for (const message of newInputs) agent.followup(message)
       state.deferredInput = true
       const deferred = new Set(newInputs.map(({ id }) => id))
-      const outcome = { state: 'queued' as const, message: '新消息已排到当前会话的下一轮。' }
-      return { ...result, messages: [...result.messages.filter(({ id }) => !deferred.has(id)), admissionNotice(outcome)] }
+      return { ...result, messages: [...result.messages.filter(({ id }) => !deferred.has(id)),
+        ...newInputs.map(() => admissionNotice({ state: 'queued' as const, message: '这条消息已排到当前会话的下一轮单独处理。' }))] }
     }
     const previous = turns.get(agent)
     if (previous?.number === turn) {
@@ -388,39 +396,55 @@ export function installNativeChat(host: Context, options: {
       turns.set(agent, state)
       return newInputs.length ? deferInputs(state) : result
     }
-    const state: Turn = { number: turn, signal, ...(admitted.length === 1 ? admitted[0] : undefined) }
+    // 同一批里可能有多条真人消息：本轮只消费第一条，其余原样放回宿主下一轮队列。
+    // 每条消息各自保留来源与幂等键，不把两条目标拼成一个。
+    const [primary, ...laterHumans] = newInputs
+    const state: Turn = { number: turn, signal, ...(primary ? { human: primary } : {}) }
+    if (laterHumans.length) for (const message of laterHumans) agent.followup(message)
     turns.set(agent, state)
+    const settle = (out: typeof result) => laterHumans.length ? {
+      ...out,
+      messages: [...out.messages.filter(({ id }) => !laterHumans.some((message) => message.id === id)),
+        ...laterHumans.map(() => admissionNotice({ state: 'queued' as const, message: '同一批还有一条消息，已排到当前会话的下一轮单独处理。' }))],
+    } : out
     if (!state.human) return result
     const text = state.human.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
     const slash = /^\/orchestra(?:\s+([\s\S]*))?$/u.exec(text.trim())
     if (!slash && /^(?:请\s*)?(?:审阅|分类)主脑专属便条(?:$|[：:，,\s])|^(?:please\s+)?(?:review|classify)\s+(?:the\s+)?private run notes\b/iu.test(text.trim())) {
       state.brainNotesOnly = true
-      return result
+      return settle(result)
     }
     if (!slash && /^(?:(?:请|能否|可否|帮我|麻烦你?)(?:帮我)?\s*)?(?:读(?:取|一下)?|查看|查询|列出).{0,120}(?:便条|运行注记)|^(?:please\s+)?(?:read|list|show|check)\s+.{0,120}\brun notes?\b/iu.test(text.trim())) {
       state.notesOnly = true
-      return result
+      return settle(result)
     }
     if (slash && !slash[1]?.trim()) {
       const outcome = { state: 'usage' as const, message: '使用 /orchestra 任务内容单次派单。' }
       state.managed = { outcome }
-      return { ...result, messages: [...result.messages, admissionNotice(outcome)] }
+      return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
     }
     if (!slash) {
       try {
         state.autoRoute ??= await options.autoRouteEnabled?.(binding, agent) !== false
-        if (!state.autoRoute) return result
+        if (!state.autoRoute) return settle(result)
       } catch (error) {
         signal.throwIfAborted()
         state.managed = { outcome: errorReceipt(error) }
-        return { ...result, messages: [...result.messages, noticeMessage(uuidv7() as Message['id'], {
+        return settle({ ...result, messages: [...result.messages, noticeMessage(uuidv7() as Message['id'], {
           heading: 'Orchestra 无法读取自动接管设置',
           body: '请检查 Orchestra 的会话设置，或用「/orchestra 任务内容」单次派单。',
-        })] }
+        })] })
       }
     }
+    // 只有附件、没有文字：先说明附件没有被读入，不要落进普通问答。
+    if (!slash && state.human.content.some((block) => block.type !== 'text') && !text.trim()) {
+      const managed: ManagedTask = { outcome: errorReceipt(new OrchError('PAYLOAD_SCHEMA_INVALID',
+        '这条消息只有附件，没有任务目标', { reason: 'only_attachments' })) }
+      state.managed = managed
+      return settle({ ...result, messages: [...result.messages, admissionNotice(managed.outcome!)] })
+    }
     const intent = slash ? 'task' : classifyChatTask(text)
-    if (intent === 'conversation') return result
+    if (intent === 'conversation') return settle(result)
     const managed: ManagedTask = {}
     state.managed = managed
     if (intent === 'clarify') {
@@ -440,7 +464,7 @@ export function installNativeChat(host: Context, options: {
         managed.outcome = errorReceipt(error)
       }
     }
-    return { ...result, messages: [...result.messages, admissionNotice(managed.outcome)] }
+    return settle({ ...result, messages: [...result.messages, admissionNotice(managed.outcome)] })
   })
   host.on('session/event', (session, event) => {
     if (event.type !== 'turn/end') return
@@ -479,7 +503,7 @@ export function installNativeChat(host: Context, options: {
     const nativeRequest = nativeOwnerRequest(human)
     if (!nativeRequest) throw new OrchError('FORBIDDEN', '后台进度和历史消息不能发起任务')
     if (explicitGoal !== undefined && human.content.some((block) => block.type !== 'text')) {
-      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '单次编排命令需要文字任务内容')
+      throw new OrchError('PAYLOAD_SCHEMA_INVALID', '单次编排命令需要文字任务内容', { reason: 'attachments_unsupported' })
     }
     const goal = explicitGoal === undefined ? taskText(human) : validatedTaskText(explicitGoal)
     const origin: ChatTaskOrigin = {
@@ -660,10 +684,8 @@ export function installNativeChat(host: Context, options: {
       turn.deniedNativeCalls = (turn.deniedNativeCalls ?? 0) + 1
       return '此回合已由 Orchestra 接管，请仅回报已登记状态。'
     }
-    if (turn.autoRoute && execution.name !== 'ask_user_question') {
-      turn.deniedNativeCalls = (turn.deniedNativeCalls ?? 0) + 1
-      return '任务默认交给 Orchestra。请直接回答普通问题；如需操作文件或运行命令，请先让用户明确目标，也可请用户使用 /orchestra 任务内容。'
-    }
+    // 普通对话（含自动接管开启后的问答、讨论与澄清）沿用宿主自己的工具授权，
+    // 不再按整轮 autoRoute 一律拒绝：读资料、检索和普通执行仍由 DSH 判定。
   })
   host.tools.register({
     name: TOOL_NAME,

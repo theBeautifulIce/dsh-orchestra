@@ -8,13 +8,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { sha256Hex } from '../core/canonical.ts'
-import { failEnvelope, okEnvelope, OrchError } from '../core/errors.ts'
+import { ERROR_STATUS, failEnvelope, okEnvelope, OrchError } from '../core/errors.ts'
 import { MEMORY_TOOL_PREFIX } from '../core/memory-graph.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type ToolDescriptor } from '../executor/tools.ts'
 import { createWindowsReadOnlyHost } from '../executor/windows-readonly-host.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
+import { RUN_TERMINAL } from './commands/run-close.ts'
 import { createNativeChatRoutingSettings, nativeChatRoutingUpdate } from './native-chat-routing-settings.ts'
 import { PROJECT_CONTEXT_FILE, type ProjectContextSource } from './project-shared-context.ts'
 import { requestControlPipe } from './windows-control-pipe.ts'
@@ -303,7 +304,18 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
   ctx.inject(dependencies, (ready) => {
     const host = ready as LocalHost
     const human = `local-dsh:${userInfo().username}`
-    const services = new Map<string, ReturnType<typeof openLocalService>>()
+    // 同时打开的编排服务上限。超过上限只在没有可回收会话时拒绝，并说明占用了多少。
+    const MAX_SERVICES = 8
+    type Lease = {
+      startup: ReturnType<typeof openLocalService>
+      sessionId: string
+      inflight: number
+      lastUsed: number
+      released: boolean
+      closed: boolean
+      service?: LocalService
+    }
+    const services = new Map<string, Lease>()
     const stop = new AbortController()
     let chatRouting: ReturnType<typeof createNativeChatRoutingSettings> | undefined
     const profileDir = (ctx.get('profileContext') as Profile | undefined)?.dir
@@ -318,21 +330,69 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       if (owners.length !== 1 || !workspace || !header.cwd || relative(workspace.path, header.cwd) !== '') return
       return { identity: identityFor(workspace, id), workspaceId: workspace.id, sessionId: id }
     }
+    // 未终态的运行仍需要这个服务继续收发；有它们时不回收。
+    const liveRuns = (service: LocalService) => {
+      const row = service.orchestra.db.raw.prepare(
+        `SELECT COUNT(*) AS n FROM runs WHERE status NOT IN (${RUN_TERMINAL.map((status) => `'${status}'`).join(',')})`).get() as { n?: number } | undefined
+      return Number(row?.n ?? 0)
+    }
+    const closeLease = async (identity: string, lease: Lease) => {
+      if (lease.closed) return
+      lease.closed = true
+      services.delete(identity)
+      try { (await lease.startup).service.close() } catch { /* 启动失败或已关闭 */ }
+    }
+    const maybeRelease = async (identity: string, lease: Lease) => {
+      if (!lease.released || lease.inflight > 0 || lease.closed) return
+      const settled = lease.service
+      if (!settled) return
+      try { if (liveRuns(settled) > 0) return } catch { return }
+      await closeLease(identity, lease)
+    }
     const serviceFor = (workspace: Workspace, sessionId: string) => {
       if (stop.signal.aborted) throw new OrchError('SERVICE_UNAVAILABLE', '编排服务正在停止')
       const identity = identityFor(workspace, sessionId)
-      let startup = services.get(identity)
-      if (!startup) {
-        if (services.size >= 8) throw new OrchError('SERVICE_UNAVAILABLE', '已打开过多编排会话')
-        startup = openLocalService(host, options, workspace, sessionId, identity, human, serve)
-        services.set(identity, startup)
-        void startup.catch(() => { if (services.get(identity) === startup) services.delete(identity) })
+      const existing = services.get(identity)
+      if (existing) {
+        existing.lastUsed = Date.now()
+        return existing
       }
-      return startup
+      if (services.size >= MAX_SERVICES) {
+        // 只回收已关闭会话且没有在途请求与运行的闲置服务；仍在使用中的不抢占。
+        const idle = [...services.entries()].filter(([, lease]) => lease.released && lease.inflight === 0 && !lease.closed
+          && lease.service && liveRuns(lease.service) === 0).sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0]
+        if (idle) void closeLease(idle[0], idle[1])
+        else throw new OrchError('SERVICE_UNAVAILABLE', `同时打开的编排会话已达上限 ${MAX_SERVICES} 个，且没有可回收的闲置会话`, {
+          capacity: MAX_SERVICES, reason: 'session_capacity',
+        })
+      }
+      const startup = openLocalService(host, options, workspace, sessionId, identity, human, serve)
+      const lease: Lease = { startup, sessionId, inflight: 0, lastUsed: Date.now(), released: false, closed: false }
+      services.set(identity, lease)
+      void startup.then(({ service }) => { lease.service = service },
+        () => { if (services.get(identity) === lease) services.delete(identity) })
+      return lease
     }
+    const releaseSession = (sessionId: string) => {
+      for (const [identity, lease] of [...services]) {
+        if (lease.sessionId !== sessionId) continue
+        lease.released = true
+        void maybeRelease(identity, lease)
+      }
+    }
+    host.on('agent/disposed', ({ agent }) => { releaseSession(agent.session.id) })
+    host.on('agent/created', ({ agent }) => {
+      // 同一会话重新打开时沿用原账本；此前回收过的服务按需重建。
+      for (const lease of services.values()) if (lease.sessionId === agent.session.id) lease.released = false
+      return undefined
+    })
     host.effect(() => async () => {
       stop.abort()
-      await Promise.allSettled([...services.values()].map(async (startup) => (await startup).service.close()))
+      await Promise.allSettled([...services.entries()].map(async ([identity, lease]) => {
+        lease.closed = true
+        services.delete(identity)
+        await (await lease.startup).service.close()
+      }))
     }, 'Orchestra personal services')
     if (nativeChat) host.inject(['systemPrompt', 'sessions', 'webServer'], (chatCtx) => {
       const settings = profileDir && isAbsolute(profileDir) ? createNativeChatRoutingSettings(profileDir) : undefined
@@ -352,7 +412,7 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           if (!workspace || identityFor(workspace, binding.sessionId) !== binding.identity) {
             throw new OrchError('FORBIDDEN', '工作区会话授权已失效')
           }
-          return (await serviceFor(workspace, binding.sessionId)).service
+          return (await serviceFor(workspace, binding.sessionId).startup).service
         },
       })
       chatCtx.effect(() => {
@@ -407,8 +467,13 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       if (request.method === 'POST' && target.pathname === '/v1/runs/start') {
         return failure(403, 'FORBIDDEN', '个人宿主请使用「用自然语言规划任务」，注明要使用的已发布流程及交付物，核对计划后再启动。')
       }
+      const identity = identityFor(workspace, sessionId)
+      let lease: Lease | undefined
       try {
-        const { service, secret, proof } = await serviceFor(workspace, sessionId)
+        lease = serviceFor(workspace, sessionId)
+        // 在途请求计入租约，回收判定不会打断正在执行的命令。
+        lease.inflight += 1
+        const { service, secret, proof } = await lease.startup
         const signal = AbortSignal.any([request.signal, stop.signal])
         signal.throwIfAborted()
         if (!selectedWorkspace(host, workspaceId, sessionId)) return failure(403, 'FORBIDDEN', '工作区会话授权已失效')
@@ -438,8 +503,18 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           return Response.json(health, { status: response.status, headers: forwarded })
         }
         return new Response(response.body, { status: response.status, headers: forwarded })
-      } catch {
+      } catch (error) {
+        // 容量与授权原因原样透出，不再统一提示用户去检查会话或默认模型。
+        if (error instanceof OrchError) {
+          return failure(ERROR_STATUS[error.code as keyof typeof ERROR_STATUS] ?? 503, error.code, error.message)
+        }
         return failure(503, 'SERVICE_UNAVAILABLE', '编排服务未就绪。请确认 DSH 会话和默认模型可用')
+      } finally {
+        if (lease) {
+          lease.inflight -= 1
+          lease.lastUsed = Date.now()
+          void maybeRelease(identity, lease)
+        }
       }
     } })
   })

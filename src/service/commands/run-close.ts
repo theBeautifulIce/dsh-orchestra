@@ -12,7 +12,7 @@ import { closeTerminalOrdinaryRecoveryCards, hasUnfinishedOrdinaryAbandon } from
 
 export type RunTerminal = 'succeeded' | 'succeeded_with_unverified' | 'failed' | 'failed_with_unverified' | 'orphaned' | 'cancelled'
 
-const RUN_TERMINAL: readonly RunTerminal[] = ['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled']
+export const RUN_TERMINAL: readonly RunTerminal[] = ['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled']
 
 export function isRunTerminal(status: string): status is RunTerminal {
   return RUN_TERMINAL.some(terminal => terminal === status)

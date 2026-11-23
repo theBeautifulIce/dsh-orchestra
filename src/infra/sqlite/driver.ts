@@ -169,7 +169,7 @@ function ledgerHead(raw: DatabaseSync): number {
   return Number(raw.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').get()?.seq)
 }
 
-export type SchemaStep = { version: number; name: string; checksum: string; statements: string[] }
+export type SchemaStep = { version: number; name: string; checksum: string; legacyChecksums?: string[]; statements: string[] }
 
 // 迁移执行器：已执行版本不重跑；内容改了必须新开编号（总纲 4.1.1）
 export function execSchema(db: Db, steps: SchemaStep[]): number[] {
@@ -178,7 +178,9 @@ export function execSchema(db: Db, steps: SchemaStep[]): number[] {
   for (const step of steps) {
     const row = db.raw.prepare('SELECT checksum FROM schema_migrations WHERE version = ?').get(step.version) as { checksum?: string } | undefined
     if (row) {
-      if (row.checksum !== step.checksum) {
+      // 已发行版本可能按原始行尾记账，只接受同一段 SQL 的 LF/CRLF 历史摘要；
+      // 文本真改了仍然拒绝。
+      if (row.checksum !== step.checksum && !(row.checksum && step.legacyChecksums?.includes(row.checksum))) {
         throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '已执行的迁移被改了，要新开编号', { version: step.version })
       }
       continue

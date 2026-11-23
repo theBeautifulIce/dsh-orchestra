@@ -317,8 +317,9 @@ it('binds ordinary native conversation, live owner input and one durable run per
       signal: new AbortController().signal })
     expect(eligible(human.agent)).toBe(true)
     expect(eligible(child.agent)).toBe(false)
+    // C01：普通问答不再被整轮自动接管锁住工具，读取与检索交给宿主自己的工具授权。
     await human.admit(user('你好'))
-    expect(human.checkTool('read')).toMatch(/任务默认交给 Orchestra/u)
+    expect(human.checkTool('read')).toBeUndefined()
     expect(human.checkTool('ask_user_question')).toBeUndefined()
     await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'CONFIRMATION_REQUIRED' })
     await human.admit(user('什么是并发调度？'))
@@ -381,6 +382,70 @@ it('binds ordinary native conversation, live owner input and one durable run per
     expect(count(service, 'runs')).toBe(1)
     expect(count(service, 'task_plans')).toBe(1)
     expect(count(service, 'chat_task_receipts')).toBe(1)
+  } finally { await test.close() }
+})
+
+it('names the real reason for an unusable dispatch instead of a character-count error', async () => {
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    const withImage = {
+      id: uuidv7(), role: 'user', source: { kind: 'user', rpcId: uuidv7() },
+      content: [{ type: 'text', text: '/orchestra 核对这张图' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }],
+    } as unknown as Message
+    const attached = await human.admit(withImage)
+    expect(attached).toMatchObject({ kind: 'enter' })
+    const attachedText = JSON.stringify(attached)
+    expect(attachedText).toContain('附件没有被读入本次任务')
+    expect(attachedText).not.toContain('1 至 2000 个字符')
+    await expect(human.call()).resolves.toMatchObject({ state: 'error', code: 'PAYLOAD_SCHEMA_INVALID', reason: 'attachments_unsupported' })
+
+    const onlyImage = {
+      id: uuidv7(), role: 'user', source: { kind: 'user', rpcId: uuidv7() },
+      content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }],
+    } as unknown as Message
+    await human.admit(onlyImage)
+    await expect(human.call()).resolves.toMatchObject({ state: 'error', reason: 'only_attachments' })
+
+    await human.admit(user('/orchestra ' + '目'.repeat(2001)))
+    await expect(human.call()).resolves.toMatchObject({ state: 'error', reason: 'goal_too_long' })
+
+    await human.admit(user('/orchestra 整理这份办公室事项并交付 markdown 报告'))
+    await expect(human.call()).resolves.toMatchObject({ state: 'started' })
+  } finally { await test.close() }
+})
+
+it('consumes each dispatch in one native batch as its own turn and run', async () => {
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    const firstGoal = '整理第一份办公室事项并交付 first.md'
+    const secondGoal = '整理第二份办公室事项并交付 second.md'
+    const first = user('/orchestra ' + firstGoal)
+    const second = user('/orchestra ' + secondGoal)
+    const admitted = await human.admitMany([first, second])
+    expect(admitted).toMatchObject({ kind: 'enter' })
+    if (admitted.kind !== 'enter') throw new Error('unreachable')
+    const texts = admitted.messages.flatMap((message) => message.content.flatMap((block) => block.type === 'text' ? [block.text] : []))
+    // 每条消息各得一条回执：第一条接单，第二条排队；两条目标不合并。
+    expect(texts.filter((text) => text.includes('Orchestra 已接单'))).toHaveLength(1)
+    expect(texts.filter((text) => text.includes('排到当前会话的下一轮单独处理'))).toHaveLength(1)
+    const startedRun = await human.call()
+    expect(startedRun).toMatchObject({ state: 'started' })
+
+    // 下一轮只带着第二条消息的来源与幂等键回来。
+    const deferred = human.nextTurn.filter((message) => message.id === second.id)
+    expect(deferred).toHaveLength(1)
+    const secondTurn = await human.admitMany([deferred[0]!], false)
+    expect(secondTurn).toMatchObject({ kind: 'enter' })
+    if (secondTurn.kind !== 'enter') throw new Error('unreachable')
+    const secondText = secondTurn.messages.flatMap((message) => message.content.flatMap((block) => block.type === 'text' ? [block.text] : []))
+      .join('\n')
+    expect(secondText).toContain('Orchestra 已接单')
+    const nextRun = await human.call()
+    expect(nextRun).toMatchObject({ state: 'started' })
+    expect(nextRun.run_id).not.toBe(startedRun.run_id)
+    expect(test.planner.mock.calls.map((call) => call[0].goal)).toEqual([firstGoal, secondGoal])
   } finally { await test.close() }
 })
 
@@ -583,7 +648,8 @@ it('takes a new preference snapshot for an owner steer in an ordinary open turn'
     const human = test.session('work', 'parent')
     const explanation = user('请解释这个项目的背景')
     await expect(human.admit(explanation)).resolves.toEqual({ kind: 'enter', messages: [explanation] })
-    expect(human.checkTool('write')).toMatch(/任务默认交给 Orchestra/u)
+    // 普通问答与讨论沿用宿主的工具授权（C01）；下面用同一回合的新偏好快照证明任务仍交给 Orchestra。
+    expect(human.checkTool('write')).toBeUndefined()
     routing.enabled = false
     const freshSteer = user('整理一份可交付的项目报告')
     await expect(human.admit(freshSteer, true, false)).resolves.toEqual({ kind: 'enter', messages: [freshSteer] })
