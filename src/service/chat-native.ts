@@ -539,7 +539,7 @@ export function installNativeChat(host: Context, options: {
           planSteps: view.proposal.steps.map((step) => step.description),
         })
         if (!await approveOnce(turn, view.plan_id, undefined, agent, reason, signal)) {
-          return { state: 'approval_pending' as const, plan_id: view.plan_id, title: view.proposal.title }
+          return { state: 'launch_declined' as const, plan_id: view.plan_id, title: view.proposal.title }
         }
         started = launch(true)
       }

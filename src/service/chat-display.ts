@@ -196,6 +196,7 @@ export type ChatOutcome =
   | { state: 'started'; title: string; run_id: string }
   | { state: 'quality_blocked'; issues: string[]; plan_id: string; title: string }
   | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
+  | { state: 'launch_declined'; plan_id: string; title: string }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
   | { state: 'clarification_required' | 'usage' | 'queued'; message: string }
   | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue; reason?: ChatErrorReason }
@@ -280,6 +281,9 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
       ].join('\n') }
     case 'approval_pending':
       return { heading: taskHeading(outcome.title, '等待人工批准'), body: '目前没有记录新的批准决定。要继续处理，可重新打开审批卡或在 Orchestra 面板查看待办。' }
+    case 'launch_declined':
+      // 启动被拒绝时既没有运行也没有待办，不能指向面板里的空入口（C06）。
+      return { heading: taskHeading(outcome.title, '未启动本次任务'), body: '这份计划没有启动，也没有创建运行或待办。需要时把目标重新发一次，就能重新核对计划；放弃的方案不会留在任务表里。' }
     case 'approved':
     case 'rejected':
       return { heading: taskHeading(outcome.title, outcome.state === 'approved' ? '已登记批准' : '已登记拒绝'),

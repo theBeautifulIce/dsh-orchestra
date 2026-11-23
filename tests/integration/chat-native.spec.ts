@@ -550,7 +550,7 @@ it.each([
   expect(classifyChatTask(text)).toBe(intent)
 })
 
-it.each(['approval', 'wait', 'no files'] as const)('enforces named approval and delivery constraints in chat planning (%s)', async (scenario) => {
+it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named approval and delivery constraints in chat planning (%s)', async (scenario) => {
   const test = await fixture({ routing: { enabled: true }, dispatchPlans: true })
   const gateType = scenario === 'wait' ? 'wait' : 'approval'
   const approvalName = '批准合成数据核对'
@@ -577,10 +577,20 @@ it.each(['approval', 'wait', 'no files'] as const)('enforces named approval and 
   })
   try {
     const human = test.session('work', 'parent')
+    // 启动审批发生在 pre-step 里，拒绝要在派单之前设好（C06）。
+    if (scenario === 'declined') test.deny(true)
     const delivery = scenario === 'no files' ? '在会话中给出结果。不要读写文件。' : '交付 report.md。'
     await human.admit(user('新建一次性测试任务「F8 演练」。为本次测试单独生成流程，设置人工审批步骤「批准合成数据核对」。在我批准前，计算步骤必须等待。批准后，使用模拟数据计算净额并' + delivery))
-    const receipt = await human.call()
     const service = test.services.get('parent')!
+    if (scenario === 'declined') {
+      // 拒绝启动：不创建运行，也不留下指向空审批中心的入口（C06）。
+      await expect(human.call()).resolves.toMatchObject({ state: 'launch_declined', title: 'F8 演练' })
+      expect(count(service, 'runs')).toBe(0)
+      expect(service.orchestra.db.raw.prepare('SELECT COUNT(*) AS n FROM decisions').get()).toMatchObject({ n: 0 })
+      expect(JSON.stringify(await human.render())).toContain('没有创建运行或待办')
+      return
+    }
+    const receipt = await human.call()
     if (scenario !== 'approval') {
       expect(receipt).toMatchObject({ state: 'quality_blocked', issues: [expect.stringContaining(scenario === 'wait' ? approvalName : '不写文件')] })
       expect(count(service, 'runs')).toBe(0)
