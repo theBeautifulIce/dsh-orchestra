@@ -123,11 +123,16 @@ function toNodeView(row: NodeRow, settling: boolean, decisionIds: string[], exec
     unverified: '已有工具执行记录，外部操作结果仍待核实。',
     settled: '账本已有结算记录。',
   }
+  // 流程生成器可能只给 node_id：主视图不裸露内部标识，退回可读的「步骤 N」（T12）。
+  const nodeId = String(row.node_id ?? '')
+  const docTitle = doc?.title && doc.title !== nodeId ? doc.title : undefined
+  const seqNumber = Number(row.seq ?? 0)
+  const fallbackTitle = seqNumber > 0 ? `步骤 ${seqNumber}` : undefined
   return {
     node_run_id: String(row.node_run_id),
     run_id: String(row.run_id),
-    node_id: String(row.node_id ?? ''),
-    ...(doc?.title ? { title: doc.title } : {}),
+    node_id: nodeId,
+    ...(docTitle ?? fallbackTitle ? { title: docTitle ?? fallbackTitle } : {}),
     node_type: String(row.node_type ?? ''),
     attempt: Number(row.attempt ?? 0),
     status: String(row.status),

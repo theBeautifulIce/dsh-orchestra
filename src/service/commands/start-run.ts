@@ -160,6 +160,8 @@ export type TrustedTaskLocalRunParams = {
    * 默认关闭，保持可信路径原来的 fail-closed 口径（重复启动一律被拒）。
    */
   allowReplay?: boolean
+  /** 与普通启动一致记录触发机制，避免同一操作因内部选路显示「来源未记录」（T13）。 */
+  triggerKind?: TaskOrigin
   now: string
 }
 
@@ -297,6 +299,7 @@ export function startTrustedTaskLocalRun(
     ownerTaskId: p.taskId,
     taskId: p.taskId,
     operationId: p.operationId,
+    ...(p.triggerKind === undefined ? {} : { triggerKind: p.triggerKind }),
     now: p.now,
   }, undefined, { ownerTaskId: p.taskId })
   return {

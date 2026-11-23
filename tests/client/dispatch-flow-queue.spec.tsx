@@ -124,7 +124,9 @@ it('keeps capacity, dependency waits, upstream failure and unknown queue reasons
     expect(attention.querySelectorAll('li[data-tone="blocked"]')).toHaveLength(2)
     expect(attention.textContent).toContain('复核同名步骤 2')
     expect(attention.textContent).toContain('审核合并稿上游失败，步骤受阻上游未成功：复核（同名步骤 2）')
-    expect(attention.textContent).toContain('单独归档库存排队原因未知')
+    // 排队原因未知属于正常等待，不进「暂停、重试与异常」（T09）。
+    expect(attention.textContent).not.toContain('单独归档库存排队原因未知')
+    expect(queue('等待条件')?.textContent).toContain('单独归档库存排队原因未知')
     expect(queue('已结束')?.textContent).toContain('重做库存汇总已取消')
     expect(queue('已结束')?.textContent).toContain('返工暂停步骤本次尝试已停止')
     expect(view.text()).not.toContain('旧的总额尝试')
