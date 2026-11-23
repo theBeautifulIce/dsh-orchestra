@@ -25,8 +25,10 @@ export function formatChatApproval(fields: ApprovalFields) {
     '确认后　' + singleLine(fields.consequence, 180),
   ]
   if (fields.planSteps?.length) {
-    const examples = fields.planSteps.slice(0, 3).map((step) => singleLine(step, 36))
-    lines.push('计划步骤　' + examples.join('、') + (fields.planSteps.length > 3 ? '等，可在任务计划中查看完整列表' : ''))
+    // 批准前至少能看清前 8 步并知道总数；更多的才提示去计划页看完整列表（C07）。
+    const examples = fields.planSteps.slice(0, 8).map((step) => singleLine(step, 36))
+    const total = `（共 ${fields.planSteps.length} 步${fields.planSteps.length > 8 ? '，可在任务计划中查看完整列表' : ''}）`
+    lines.push('计划步骤　' + examples.join('、') + total)
   }
   if (fields.confirmUntil) lines.push('有效至　' + fields.confirmUntil)
   return lines.join('\n')
