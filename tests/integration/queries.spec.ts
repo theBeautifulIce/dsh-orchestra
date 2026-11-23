@@ -349,3 +349,23 @@ it('T06 运行成果清单超过一页时用稳定游标翻到最早那份，并
   const named = listRunArtifacts(db, 'r1', Date.now(), { fileName: 'artifact-1.md' })
   expect(named.items.map((item) => item.artifact_id)).toEqual(['artifact-1'])
 })
+
+it('T05 节点清单用稳定游标翻到第 201 条尝试，队列不再丢失当前待办', () => {
+  const db = seeded()
+  withTx(db, (tx) => {
+    for (let i = 2; i <= 201; i += 1) {
+      tx.run(`INSERT INTO node_runs (node_run_id, run_id, node_id, seq, node_type, attempt, status, revision, created_at, updated_at)
+        VALUES (?, 'r1', ?, ?, 'agent', 1, ?, 1, ?, ?)`,
+      ['n' + String(i), 'step-' + String(i), i, i === 201 ? 'blocked_pre' : 'queued',
+        '2026-11-13T01:00:00.000Z', '2026-11-13T01:00:00.000Z'])
+    }
+  })
+  const first = listNodes(db, 'r1', 200)
+  expect(first.items).toHaveLength(200)
+  expect(first.has_more).toBe(true)
+  expect(first.items.some((node) => node.node_run_id === 'n201')).toBe(false)
+  const second = listNodes(db, 'r1', 200, undefined, first.next_cursor!)
+  expect(second.items.map((node) => node.node_run_id)).toContain('n201')
+  expect(second.items.find((node) => node.node_run_id === 'n201')?.status).toBe('blocked_pre')
+  expect(second.has_more).toBe(false)
+})
