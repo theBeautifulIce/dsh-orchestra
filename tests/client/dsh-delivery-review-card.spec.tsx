@@ -12,7 +12,7 @@ it.each(['accept', 'request_changes'] as const)('allows a human to inspect and %
     file_name: 'sample.md', created_at: '2026-11-21T01:00:00Z', retain_until: null, expired: false,
   }
   const scope: DshDeliveryReview = { sessionId, workspaceId, reviews: [{
-    title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact,
+    title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact, runId: 'run-fixture',
     nodeRunId: 'current-attempt', nodeRevision: 5, otherArtifacts: false, preview: '计算数据',
   }] }
   const sources = {
@@ -73,7 +73,7 @@ it('requires taking a readable version before accepting a result that has no in-
     file_name: 'big.md', created_at: '2026-11-21T01:00:00Z', retain_until: null, expired: false, size_bytes: 9000,
   }
   const scope: DshDeliveryReview = { sessionId, workspaceId, reviews: [{
-    title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact,
+    title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact, runId: 'run-fixture',
     nodeRunId: 'current-attempt', nodeRevision: 5, otherArtifacts: false,
   }] }
   const sources = {
@@ -90,5 +90,33 @@ it('requires taking a readable version before accepting a result that has no in-
     const confirm = view.findAll('input').find(input => (input as HTMLInputElement).type === 'checkbox') as HTMLInputElement
     await act(async () => { confirm.click() })
     expect((button('通过验收') as HTMLButtonElement).disabled).toBe(false)
+  } finally { view.unmount() }
+})
+
+it('offers withdraw, not acceptance, when a hold has no artifact yet', async () => {
+  const sessionId = 'source-session'
+  const workspaceId = 'workspace'
+  const scope: DshDeliveryReview = { sessionId, workspaceId, reviews: [{
+    title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact: null, runId: 'run-fixture',
+    nodeRunId: 'current-attempt', nodeRevision: 5, otherArtifacts: false,
+  }] }
+  const sources = {
+    sessions: { list: { getSnapshot: () => ({ byId: { [sessionId]: { id: sessionId, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } },
+    workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId, sessionIds: [sessionId] }], archivedSessionIds: [] }), subscribe: () => () => {} } },
+  }
+  const posts: Array<{ path: string; body: Record<string, unknown> }> = []
+  vi.stubGlobal('fetch', vi.fn(async (target: string, init: RequestInit) => {
+    const url = new URL(target, 'dsh-app://app')
+    const path = new URL(url.searchParams.get('path')!, 'http://fixture.test').pathname
+    if (init.method === 'POST') posts.push({ path, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+    return Response.json({ ok: true, schema_version: 1, as_of_seq: 1, data: { items: [] } })
+  }))
+  const view = await renderPanel(<DshDeliveryReviewCard scope={scope} sources={sources} />)
+  const button = (text: string) => view.findAll('button').find(element => element.textContent === text)
+  try {
+    expect(view.text()).toContain('还没有登记任何成果文件')
+    expect(button('通过验收')).toBeUndefined()
+    await view.click(button('撤销留验')!)
+    expect(posts[0]).toMatchObject({ path: '/v1/rework/hold', body: { run_id: 'run-fixture', action: 'withdraw' } })
   } finally { view.unmount() }
 })

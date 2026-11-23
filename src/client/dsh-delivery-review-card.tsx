@@ -15,7 +15,7 @@ export function DshDeliveryReviewCard({ scope, sources }: { scope: DshDeliveryRe
   const api = useMemo(() => createResourcesApi(client), [client])
   const commands = useMemo(() => createReworkApi(client), [client])
   return <section aria-label="待审成果">
-    {scope.reviews.map((review) => <Review key={review.artifact.artifact_id + ':' + (review.revised?.revision ?? review.nodeRevision)}
+    {scope.reviews.map((review) => <Review key={(review.artifact?.artifact_id ?? review.nodeRunId) + ':' + (review.revised?.revision ?? review.nodeRevision)}
       review={review} api={api} commands={commands} />)}
   </section>
 }
@@ -23,7 +23,7 @@ export function DshDeliveryReviewCard({ scope, sources }: { scope: DshDeliveryRe
 function Review({ review, api, commands }: {
   review: ChatDeliveryReview; api: ReturnType<typeof createResourcesApi>; commands: ReturnType<typeof createReworkApi>
 }) {
-  const { artifact, revised } = review
+  const { revised } = review
   const [editing, setEditing] = useState(false)
   const [reason, setReason] = useState('')
   const [expected, setExpected] = useState('')
@@ -34,11 +34,14 @@ function Review({ review, api, commands }: {
   // 没有会话内全文时，先取到这一版再确认；下载只代表取得文件，不宣称已读（D08）。
   const [opened, setOpened] = useState(false)
   const locked = useRef(false)
-  const retention = useArtifactRetention(artifact)
+  const retention = useArtifactRetention(review.artifact ?? undefined)
   const readInChat = review.preview !== undefined
   const enabled = retention === 'available' && !review.otherArtifacts && !busy && !notice && !unconfirmed
     && (readInChat || opened)
 
+  // 没有成果文件的留验只能补交或撤销，不给验收动作（D06）。
+  if (!review.artifact) return <PendingDelivery review={review} commands={commands} />
+  const artifact = review.artifact
   async function submit(action: 'accept' | 'request_changes') {
     if (!enabled || locked.current || action === 'request_changes' && (!reason.trim() || !revised && !expected.trim())) return
     locked.current = true
@@ -124,5 +127,35 @@ function Review({ review, api, commands }: {
     {notice && <p role="status">{notice}</p>}
     {error && !notice && <p role="alert">{error}</p>}
     {unconfirmed && !notice && <button type="button" onClick={() => void checkReceipt(unconfirmed)}>核对提交回执</button>}
+  </article>
+}
+
+
+/** 留验了但还没有成果文件：说明真实等待原因，并给撤销入口（D06）。 */
+function PendingDelivery({ review, commands }: {
+  review: ChatDeliveryReview; commands: ReturnType<typeof createReworkApi>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  async function withdraw() {
+    if (busy) return
+    setBusy(true); setError('')
+    try {
+      await commands.hold({ run_id: review.runId, node_run_id: review.nodeRunId, action: 'withdraw' })
+      setNotice('已撤销这次留验，运行会继续收尾。')
+    } catch (cause) {
+      setError(cause instanceof ApiError ? operatorReason(cause.message) : '撤销未完成，请稍后重试')
+    } finally { setBusy(false) }
+  }
+  return <article aria-label="待审成果">
+    <h3>{review.title} · {review.step}</h3>
+    <p>这一步已经留验，但还没有登记任何成果文件。补交成果后再验收，或者撤销留验让运行继续收尾。</p>
+    {review.criteria.length > 0 && <ul>{review.criteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>}
+    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+      <button type="button" disabled={busy || Boolean(notice)} onClick={() => void withdraw()}>撤销留验</button>
+    </div>
+    {notice && <p role="status">{notice}</p>}
+    {error && !notice && <p role="alert">{error}</p>}
   </article>
 }

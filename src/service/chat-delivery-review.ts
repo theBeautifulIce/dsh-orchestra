@@ -10,7 +10,9 @@ export type ChatDeliveryReview = {
   nodeRunId: string
   nodeRevision: number
   requestedAt?: string
-  artifact: RunArtifact
+  /** 留验可能还没有任何成果文件：这时只给"补交或撤销"，不能装作可验收（D06）。 */
+  artifact: RunArtifact | null
+  runId: string
   criteria: string[]
   otherArtifacts: boolean
   revised?: { requestId: string; revision: number; round: number }
@@ -21,8 +23,8 @@ export function listChatDeliveryReviews(db: Db, runId: string, actor: string, no
   const at = new Date(now).toISOString()
   return withReadTx(db, ({ tx }) => {
     const rows = tx.all<{
-      title: string; node_id: string; node_run_id: string; node_revision: number; artifact_id: string; file_name: string
-      sha256: string; retain_until: string | null; created_at: string; size_bytes: number; target_count: number
+      title: string; run_id: string; node_id: string; node_run_id: string; node_revision: number; artifact_id: string | null; file_name: string | null
+      sha256: string | null; retain_until: string | null; created_at: string | null; size_bytes: number | null; target_count: number
       request_id: string | null; request_revision: number | null; round_no: number | null; expected_result: string | null; requested_at: string
     }>(`WITH targets AS (
       SELECT h.run_id,n.node_id,n.node_run_id,n.revision AS node_revision,h.updated_at AS requested_at,
@@ -40,12 +42,12 @@ export function listChatDeliveryReviews(db: Db, runId: string, actor: string, no
       WHERE q.run_id=? AND q.owner_actor=? AND q.status='awaiting_review' AND q.expires_at>?
         AND w.status='awaiting_review' AND n.status='done' AND n.replacement_node_run_id IS NULL
     )
-    SELECT task.title,g.node_id,g.node_run_id,g.node_revision,g.requested_at,g.request_id,g.request_revision,g.round_no,g.expected_result,
+    SELECT task.title,g.run_id,g.node_id,g.node_run_id,g.node_revision,g.requested_at,g.request_id,g.request_revision,g.round_no,g.expected_result,
       a.artifact_id,c.file_name,a.sha256,a.retain_until,a.created_at,length(c.bytes) AS size_bytes,
       count(*) OVER (PARTITION BY g.node_run_id,g.request_id) AS target_count
     FROM targets g JOIN runs r ON r.run_id=g.run_id JOIN tasks task ON task.task_id=r.task_id
-    JOIN artifact_contents c ON c.node_run_id=g.node_run_id
-    JOIN artifacts a ON a.artifact_id=c.artifact_id AND a.run_id=r.run_id
+    LEFT JOIN artifact_contents c ON c.node_run_id=g.node_run_id
+    LEFT JOIN artifacts a ON a.artifact_id=c.artifact_id AND a.run_id=r.run_id
     WHERE r.status='running' AND r.cancel_requested_at IS NULL
       AND (g.request_id IS NULL OR (g.result_artifact=a.artifact_id AND g.result_hash=a.sha256))
     ORDER BY g.node_run_id,a.created_at,a.artifact_id LIMIT 8`, [runId, actor, runId, actor, at])
@@ -65,11 +67,14 @@ export function listChatDeliveryReviews(db: Db, runId: string, actor: string, no
         otherArtifacts: row.target_count > 1,
         ...(row.request_id && row.request_revision !== null && row.round_no !== null
           ? { revised: { requestId: row.request_id, revision: row.request_revision, round: row.round_no } } : {}),
-        artifact: {
-          run_id: runId, artifact_id: row.artifact_id, sha256: row.sha256, file_name: row.file_name,
-          source_node_run_id: row.node_run_id, size_bytes: row.size_bytes, created_at: row.created_at, retain_until: row.retain_until,
-          expired: row.retain_until !== null && !(Date.parse(row.retain_until) > now),
-        },
+        runId: row.run_id,
+        artifact: row.artifact_id && row.sha256 && row.created_at
+          ? {
+            run_id: runId, artifact_id: row.artifact_id, sha256: row.sha256, file_name: row.file_name ?? undefined,
+            source_node_run_id: row.node_run_id, size_bytes: row.size_bytes ?? undefined, created_at: row.created_at,
+            retain_until: row.retain_until, expired: row.retain_until !== null && !(Date.parse(row.retain_until) > now),
+          }
+          : null,
       }
     })
   })
@@ -78,7 +83,7 @@ export function listChatDeliveryReviews(db: Db, runId: string, actor: string, no
 export function attachChatDeliveryPreviews(db: Db, reviews: ChatDeliveryReview[]) {
   return reviews.map((review) => {
     const file = review.artifact
-    if (file.expired || (file.size_bytes ?? Infinity) > 4096) return review
+    if (!file || file.expired || (file.size_bytes ?? Infinity) > 4096) return review
     try {
       const { item } = getArtifactContent(db, file.run_id, file.artifact_id, 'preview', Date.now())
       if (item.kind === 'preview' && !item.truncated && item.sha256 === file.sha256) return { ...review, preview: item.text }
@@ -92,14 +97,15 @@ export function formatDeliveryReviewNotice(review: ChatDeliveryReview) {
     const text = value.replace(/\s+/gu, ' ').trim()
     return text.length > 200 ? text.slice(0, 199) + '…' : text
   }
-  const file = line(review.artifact.file_name ?? '未命名成果')
+  const file = review.artifact ? line(review.artifact.file_name ?? '未命名成果') : '还没有登记成果文件'
   return [
     '任务　' + line(review.title),
     '步骤　' + line(review.step),
     '待审成果　' + file + (review.revised ? `（第 ${review.revised.round} 轮修订）` : ''),
     '审核原因　' + (review.revised ? '修订已完成，请核对本轮成果是否达到要求。' : '该步骤已交付，当前运行等待人工验收。'),
     '审核标准　' + (review.criteria.length ? review.criteria.slice(0, 4).map(line).join('、') : '请对照原始任务要求核对成果。'),
-    '处理方式　' + (review.artifact.expired ? '成果已过期，请在 Orchestra 的任务结果中核对登记。'
+    '处理方式　' + (!review.artifact ? '先提交这一步的成果文件，或撤销这次留验让运行继续收尾。'
+      : review.artifact.expired ? '成果已过期，请在 Orchestra 的任务结果中核对登记。'
       : review.otherArtifacts ? '该步骤登记了多份成果，请在任务结果中核对完整交付后提交结论。'
         : '先查看成果，再选择「通过验收」或填写修改意见。'),
   ].join('\n')
