@@ -225,14 +225,17 @@ it('leases one service per session, reclaims a closed idle session and reports c
   ctx.provide('agents', { get: (id: string) => agents.get(id) })
   ctx.provide('llm', {})
   ctx.provide('tools', {})
-  const served: Awaited<ReturnType<typeof serveDshOrchestra>>[] = []
+  // 每个服务用一个没有运行中的账本替身：容量与回收判定只看租约和在跑运行。
+  const served: { close: ReturnType<typeof vi.fn> }[] = []
   const plugin = ctx.plugin((host) => { installLocalDshHost(host, localDshHostConfig.parse({ local: {
     enabled: true, dataDirectory: join(directory, 'db'),
-  } }).local, async (options) => {
-    const service = await serveDshOrchestra(options)
-    served.push(service)
-    return service
+  } }).local, async (_options) => {
+    const close = vi.fn(async () => {})
+    served.push({ close })
+    return { endpoint: 'http://127.0.0.1:1', close,
+      orchestra: { db: { raw: { prepare: () => ({ get: () => ({ n: 0 }) }) } } } } as unknown as Awaited<ReturnType<typeof serveDshOrchestra>>
   }) })
+  vi.stubGlobal('fetch', async () => new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }))
   const request = (target: string, sessionId: string) => {
     const query = new URLSearchParams({ workspaceId, sessionId, path: target })
     return handleRequest(new Request('http://dsh.internal/api/orchestra.request?' + query, {
@@ -252,10 +255,12 @@ it('leases one service per session, reclaims a closed idle session and reports c
     // 关闭一个没有在跑任务的会话后，服务被回收，第 9 个会话可以直接发单。
     const first = agents.get(sessionIds[0]!)!
     await agentEvents(ctx, first as never).emit('agent/disposed', { agent: first })
-    await expect.poll(async () => (await request('/health', sessionIds[8]!)).status, { timeout: 10_000 }).toBe(200)
-    expect(served.length).toBeGreaterThanOrEqual(9)
+    await expect.poll(async () => (await request('/health', sessionIds[8]!)).status, { timeout: 4_000 }).toBe(200)
+    expect(served).toHaveLength(9)
+    expect(served[0]!.close).toHaveBeenCalled()
   } finally {
     await plugin.dispose()
+    vi.unstubAllGlobals()
     await rm(directory, { recursive: true, force: true })
   }
-}, 30_000)
+})

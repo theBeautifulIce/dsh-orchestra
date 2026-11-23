@@ -20,10 +20,10 @@ DSH Orchestra 是 DeepSeek Harness（DSH）的工作流编排插件。你描述�
 
 ### 安装
 
-1. 准备一个与你的 DSH 版本兼容的 Orchestra 插件包（`.tgz`）。使用已取得的包，或按下方[源码构建](#开发与验收)生成。
-2. 在 DSH Desktop 的插件管理里安装该包，按宿主提示重新加载，确认侧栏出现 **Orchestra**。包通过 Cordis 注册服务端和 Web 客户端插件。
-3. 打开一个工作区及其中的普通会话。在 **Orchestra → 设置** 检查服务连接、模型和 **聊天任务自动接管**。个人 Desktop 适配器默认开启明确任务的自动接管。主脑默认跟随会话，也可指定已配置的供应商、模型及可用的思考强度。子智能体模型单独设置。
-4. 本仓包声明兼容 DSH `0.2.2` 系列，原生 Desktop 会话派单和审批的验收宿主为 `0.2.2-rc.5`。其他宿主的加载和能力以本机健康页与宿主装配为准。
+1. 下载 [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz)。[预发行页](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1)同时提供 `SHA256SUMS.txt`，可先核对再安装。本版面向 DSH `0.2.2` 系列，原生会话派单与审批在 **DSH Desktop `0.2.2-rc.5`** 验证。只有需要自己构建时才看[源码构建](#开发与验收)。
+2. 在 DSH Desktop 的插件管理里安装这个包，按宿主提示重新加载。侧栏出现 **Orchestra** 后，打开一个工作区及其中的普通会话。
+3. 在 **Orchestra → 设置** 检查服务连接、模型和 **聊天任务自动接管**。个人 Desktop 适配器默认开启明确任务的自动接管。主脑默认跟随会话，也可指定已配置的供应商、模型及可用的思考强度。子智能体模型单独设置。
+4. 其他 DSH 宿主的加载和能力以本机健康页与宿主装配为准。
 
 ### 在原会话发一条合成任务
 

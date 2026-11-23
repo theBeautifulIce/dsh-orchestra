@@ -67,11 +67,14 @@ function createLocalFetcher(
     }
     const body = isCommand ? await request.text() : undefined
     if (!isCurrent()) throw new DOMException('DSH workspace selection changed', 'AbortError')
+    // 直接把调用方的信号交给最终 fetch：Request 构造出来的 signal 在部分运行环境里
+    // 不再跟随父信号，切会话或强制回收时会漏掉取消（H04）。
+    const signal = init?.signal ?? request.signal
     return window.fetch(`${route}?${query}`, {
       method: request.method,
       body,
       headers,
-      signal: request.signal,
+      signal,
       credentials: 'same-origin',
       mode: 'same-origin',
       cache: 'no-store',

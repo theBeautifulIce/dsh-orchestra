@@ -264,6 +264,40 @@ it('目标遗漏、错误依赖、未知工具、不可核验文件和高风险�
   expect(db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toMatchObject({ n: 0 })
 })
 
+it('拒绝执行器永远交付不了的格式、字节和件数，并说明具体缺口', async () => {
+  const cases = [
+    { rule: { kind: 'artifact' as const, file_name: 'report.xlsx', minimum_bytes: 160 }, hint: /不是当前宿主能写出的文本格式/u },
+    { rule: { kind: 'artifact' as const, file_name: 'report.md', minimum_bytes: 65_537 }, hint: /单份文本最多 65536 字节/u },
+  ]
+  for (const item of cases) {
+    const { planCommands, db } = await boot(async () => {
+      const candidate = valid()
+      candidate.deliverables = [{ ...candidate.deliverables[0]!, acceptance: item.rule }]
+      return candidate
+    })
+    const plan = await planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])
+    expect(plan.quality.ready).toBe(false)
+    expect(plan.quality.checks.find((check) => check.check === 'deliverables')?.issues.join('\n')).toMatch(item.hint)
+    await expect(planCommands.confirmTaskPlan(plan.plan_id, plan.content_hash)).rejects.toMatchObject({ code: 'VERDICT_POLICY_UNMET' })
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toMatchObject({ n: 0 })
+    await closers.splice(0).reduce(async (all: Promise<void>, close) => { await all; await close() }, Promise.resolve())
+  }
+})
+
+it('同一节点超过 8 份文件时要求拆分到多个步骤', async () => {
+  const { planCommands } = await boot(async () => {
+    const candidate = valid()
+    candidate.deliverables = Array.from({ length: 9 }, (_, index) => ({
+      title: '报告 ' + String(index + 1), node_id: 'verify', goal_ids: ['goal'],
+      acceptance: { kind: 'artifact' as const, file_name: 'report-' + String(index + 1) + '.md', minimum_bytes: 16 },
+    }))
+    return candidate
+  })
+  const plan = await planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])
+  expect(plan.quality.ready).toBe(false)
+  expect(plan.quality.checks.find((check) => check.check === 'deliverables')?.issues.join('\n')).toMatch(/同一节点最多交付 8 份/u)
+})
+
 it('人工确认之前重新校验工具；已撤销工具能力的计划不能创建运行', async () => {
   const { planCommands, registry } = await boot(async () => valid())
   const plan = await planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])

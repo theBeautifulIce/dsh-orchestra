@@ -80,7 +80,10 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
             throw new OrchError('NOT_FOUND', '该步骤没有人工留验要求')
           }
           if (body.action === 'withdraw') {
-            tx.run('DELETE FROM delivery_review_holds WHERE run_id=? AND node_id=?', key)
+            // 撤销也服从同一代次：另一个页面已经提交的结论不能被悄悄撤掉。
+            if (tx.run("DELETE FROM delivery_review_holds WHERE run_id=? AND node_id=? AND status='held'", key).changes !== 1) {
+              throw new OrchError('STALE_GENERATION', '该留验已由其他页面处理，请刷新后再试')
+            }
           } else {
             if (tx.get(`SELECT 1 FROM rework_requests WHERE run_id=?
               AND (target_node_run_id=? OR new_node_run_id=?)
@@ -91,8 +94,11 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
               WHERE a.run_id=? AND c.node_run_id=? AND a.artifact_id=? AND a.sha256=? AND (a.retain_until IS NULL OR a.retain_until>?)`,
             [body.run_id, body.node_run_id, body.artifact_id, body.sha256, now])
             if (node.status !== 'done' || !artifact || sha256Hex(Buffer.from(artifact.bytes)) !== body.sha256) throw new OrchError('CONFIRMATION_MISMATCH', '成果版本与当前已完成步骤不符')
-            tx.run(`UPDATE delivery_review_holds SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,updated_at=? WHERE run_id=? AND node_id=?`,
+            // 比较并交换：只有仍处于 held 的代次才能写入验收结论，旧页面不能覆盖已提交的结果。
+            const accepted = tx.run(`UPDATE delivery_review_holds SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,updated_at=?
+              WHERE run_id=? AND node_id=? AND status='held'`,
             [body.node_run_id, body.artifact_id, body.sha256, now, ...key])
+            if (accepted.changes !== 1) throw new OrchError('STALE_GENERATION', '该留验已由其他页面提交，请刷新当前结论后再核对')
           }
         }
         appendEvent(tx, { type: 'rework.hold_' + body.action, runId: body.run_id, nodeRunId: body.node_run_id, payload: { ...body, actor } })
