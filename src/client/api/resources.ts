@@ -67,8 +67,9 @@ export function createResourcesApi(client: ApiClient) {
       client.get('/v1/artifacts/get', { artifact_id }),
     getArtifactContent: (run_id: string, artifact_id: string, mode: ArtifactContentMode): Promise<ApiResult<ArtifactContentView>> =>
       client.get('/v1/artifacts/content', { run_id, artifact_id, mode }),
-    listRunArtifacts: (run_id: string): Promise<ApiResult<{ items: RunArtifact[]; has_more: boolean }>> =>
-      client.get('/v1/artifacts', { run_id }),
+    listRunArtifacts: (run_id: string, options: { cursor?: string; file_name?: string } = {}):
+    Promise<ApiResult<{ items: RunArtifact[]; has_more: boolean; next_cursor: string | null }>> =>
+      client.get('/v1/artifacts', { run_id, cursor: options.cursor, file_name: options.file_name }),
     getAttestation: (attestation_id: string): Promise<ApiResult<AttestationView>> =>
       client.get('/v1/attestations/get', { attestation_id }),
     verifyLedger: (): Promise<ApiResult<LedgerVerify>> => client.get('/v1/ledger/verify'),

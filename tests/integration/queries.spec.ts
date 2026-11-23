@@ -15,6 +15,7 @@ import { getRun, listRuns } from '../../src/service/queries/runs.ts'
 import { setTaskArchive } from '../../src/service/commands/task-archive.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { getOperation } from '../../src/service/queries/get_operation.ts'
+import { registerRunArtifact } from '../../src/index.ts'
 import { listRunArtifacts } from '../../src/service/queries/artifacts.ts'
 import { verifyLedger } from '../../src/service/queries/verify_ledger.ts'
 import { listNodes } from '../../src/service/queries/nodes.ts'
@@ -330,4 +331,21 @@ it('T04 步骤进度按当前有效尝试去重，重试不把一次替换算成
   expect(run.counts).toEqual(expect.arrayContaining([{ status: 'done', count: 1 }, { status: 'superseded', count: 1 }]))
   // 人读进度只看到一项当前步骤，且已完成。
   expect(run.step_counts).toEqual([{ status: 'done', count: 1 }])
+})
+
+it('T06 运行成果清单超过一页时用稳定游标翻到最早那份，并能按文件名定位', () => {
+  const db = seeded()
+  for (let i = 1; i <= 51; i += 1) {
+    registerRunArtifact(db, { artifactId: 'artifact-' + String(i), runId: 'r1', nodeRunId: 'n1',
+      fileName: 'artifact-' + String(i) + '.md', bytes: Buffer.from('body') })
+  }
+  const first = listRunArtifacts(db, 'r1')
+  expect(first.items).toHaveLength(50)
+  expect(first.has_more).toBe(true)
+  expect(first.items.some((item) => item.artifact_id === 'artifact-1')).toBe(false)
+  const second = listRunArtifacts(db, 'r1', Date.now(), { cursor: first.next_cursor! })
+  expect(second.items.map((item) => item.artifact_id)).toContain('artifact-1')
+  expect(second.has_more).toBe(false)
+  const named = listRunArtifacts(db, 'r1', Date.now(), { fileName: 'artifact-1.md' })
+  expect(named.items.map((item) => item.artifact_id)).toEqual(['artifact-1'])
 })
