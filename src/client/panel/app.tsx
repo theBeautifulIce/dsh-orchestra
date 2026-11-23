@@ -48,6 +48,7 @@ export type PanelAppProps = {
   refreshServiceStatus?: () => Promise<boolean>
   collaborationEnabled?: boolean
   reworkEnabled?: boolean
+  taskTriggersEnabled?: boolean
   reworkPlannerEnabled?: boolean
   initialRoute?: PanelRoute
   workflowLaunchRequiresPlan?: boolean
@@ -208,9 +209,9 @@ export function PanelApp(props: PanelAppProps) {
   } else if (route === 'tasks') {
     screen = <div className="task-workspace">
       <TaskListScreen reworkEnabled={props.reworkEnabled} collaborationEnabled={props.collaborationEnabled}
-        workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan} api={api} commands={taskCommands} selectedTaskId={taskId} triggerManager={
-        <TaskTriggerManager api={api} commands={triggerCommands} onChanged={() => setReloadVersion((version) => version + 1)} />
-      } onSelectTask={(id, trigger, runId) => {
+        workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan} api={api} commands={taskCommands} selectedTaskId={taskId}
+        triggerManager={props.taskTriggersEnabled === false ? undefined :
+          <TaskTriggerManager api={api} commands={triggerCommands} onChanged={() => setReloadVersion((version) => version + 1)} />} onSelectTask={(id, trigger, runId) => {
         taskTrigger.current = trigger
         setTaskRunId(runId)
         setTaskId(id)

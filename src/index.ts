@@ -246,6 +246,8 @@ export type OrchestraOptions = {
   reworkPlanner?: ReworkPlanner
   release?: Omit<ReleaseWorkspace, 'runGroup'> & { checkDirectories: Record<ReleaseGroup, string> }
   collaboration?: boolean
+  /** 个人宿主没有触发器写通道：健康里报 false，面板据此撤下写入口（C11）。 */
+  taskTriggersWritable?: boolean
   log?: Logger
   // 生产执行器：装配了就开 /v1/node-runs/run，没装配时该路由明确报未配置（审计 F-01）
   // agents 省略时由 bridge.spawn 兜底，生产路径不靠外部顺手塞一个宿主工厂。
@@ -871,6 +873,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       workflowGenerator: opts.workflowGenerator,
       workflowGeneratorStreamProgress: opts.workflowGeneratorStreamProgress,
       taskTriggers,
+      taskTriggersWritable: opts.taskTriggersWritable,
       log,
     })
     memory?.resume()

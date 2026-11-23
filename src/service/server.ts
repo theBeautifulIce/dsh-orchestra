@@ -95,6 +95,7 @@ export type ServerDeps = {
   modelEscalation?: ReturnType<typeof createModelEscalationHost>
   modelSettings?: ModelRoutingSettingsHost
   taskTriggers?: TaskTriggerHost
+  taskTriggersWritable?: boolean
   workflowGenerator?: (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) => Promise<unknown>
   workflowGeneratorStreamProgress?: boolean
   planningSettings?: PlanningSettingsHost
@@ -371,6 +372,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
         rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
         model_escalation_enabled: Boolean(deps.modelEscalation),
+        task_triggers_enabled: Boolean(deps.taskTriggers) && deps.taskTriggersWritable !== false,
       }))
       return
     }
