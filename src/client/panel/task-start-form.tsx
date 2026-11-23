@@ -32,8 +32,9 @@ export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborati
   const [receipt, setReceipt] = useState<{ taskId: string; runId: string } | null>(null)
   useEffect(() => {
     let current = true
-    void api.listWorkflows({ status: 'active', limit: 100 }).then(({ data }) => {
-      if (current) setWorkflows(data.items.filter((item) => item.scope === 'reusable' && item.current_version !== null))
+    // 服务端按 reusable 过滤后再分页，第 100 条之后的可用流程也能选到（P03）。
+    void api.listWorkflows({ status: 'active', scope: 'reusable', limit: 100 }).then(({ data }) => {
+      if (current) setWorkflows(data.items.filter((item) => item.current_version !== null))
     }).catch(() => { if (current) setFailed(true) })
     return () => { current = false }
   }, [api])

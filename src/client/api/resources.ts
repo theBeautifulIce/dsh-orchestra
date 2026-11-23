@@ -14,7 +14,7 @@ export type ListTasksParams = {
   trigger_kind?: TaskOrigin | 'unknown'; archived?: '1'; updated_from?: string; updated_before?: string
 }
 export type ListDecisionsParams = { run_id?: string; status?: string; inbox?: 'human'; limit?: number; cursor?: string }
-export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; query?: string; owner_task_id?: string }
+export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; scope?: string; query?: string; owner_task_id?: string }
 export type ListEventsParams = { from_seq?: number; limit?: number; cursor?: string }
 export type ListMemoryBatchesParams = { task_id?: string; limit?: number; cursor?: string }
 export type ActivityItem = Pick<EventView, 'seq' | 'event_id' | 'type' | 'occurred_at' | 'run_id' | 'node_run_id' | 'decision_id'> & {

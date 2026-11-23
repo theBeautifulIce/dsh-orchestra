@@ -19,6 +19,7 @@ import { registerRunArtifact } from '../../src/index.ts'
 import { listRunArtifacts } from '../../src/service/queries/artifacts.ts'
 import { verifyLedger } from '../../src/service/queries/verify_ledger.ts'
 import { listNodes } from '../../src/service/queries/nodes.ts'
+import { listWorkflowSummaries } from '../../src/service/queries/workflows.ts'
 import { NODE_STATUS_LABELS } from '../fixtures/node-status-labels.ts'
 
 const SECRET = 'query-secret'
@@ -368,4 +369,21 @@ it('T05 节点清单用稳定游标翻到第 201 条尝试，队列不再丢失�
   expect(second.items.map((node) => node.node_run_id)).toContain('n201')
   expect(second.items.find((node) => node.node_run_id === 'n201')?.status).toBe('blocked_pre')
   expect(second.has_more).toBe(false)
+})
+
+it('P03 流程列表在服务端就能按使用范围过滤，第 100 条之后仍可选中', () => {
+  const db = seeded()
+  withTx(db, (tx) => {
+    for (let i = 1; i <= 120; i += 1) {
+      tx.run(`INSERT INTO workflows (workflow_id, name, status, scope, current_version, created_by, updated_by, created_at, updated_at)
+        VALUES (?, ?, 'active', ?, 1, 'human:a', 'human:a', ?, ?)`,
+      ['wf-' + String(i), '流程 ' + String(i), i === 1 ? 'reusable' : 'task_local',
+        '2026-11-13T00:00:00.000Z', new Date(Date.parse('2026-11-13T00:00:00.000Z') + i * 1000).toISOString()])
+    }
+  })
+  const reusable = listWorkflowSummaries(db, { status: 'active', scope: 'reusable', limit: 100 })
+  expect(reusable.items.map((item) => item.workflow_id)).toEqual(['wf-1'])
+  // 最早更新的那条已经掉出前 100：客户端截断后就选不到，服务端过滤才拿得到。
+  const unfiltered = listWorkflowSummaries(db, { status: 'active', limit: 100 })
+  expect(unfiltered.items.some((item) => item.workflow_id === 'wf-1')).toBe(false)
 })
