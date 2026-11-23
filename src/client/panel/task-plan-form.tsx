@@ -31,10 +31,17 @@ function Brief({ plan }: { plan: TaskPlanView }) {
     <div><strong>交付物与验收条件</strong>
       <ul style={listStyle}>
         {proposal.deliverables.map(({ title, node_id, goal_ids, acceptance }, index) => <li key={index}>
-          {title} · {goal_ids.join('、')} · 由 {node_id} 提交。
+          {title}。
           {acceptance.kind === 'artifact'
-            ? `验收文件「${acceptance.file_name}」至少 ${acceptance.minimum_bytes} 字节。`
-            : `验收需有 ${acceptance.tool} 退出码为 ${acceptance.exit_code} 的系统证据。`}
+            ? `交付文件「${acceptance.file_name}」，内容由你人工核对后再验收。`
+            : '以系统工具的执行为证，由你核对执行结果。'}
+          {/* 文件大小、退出码、目标编号和节点号留给核对用，不占人工阅读主线（P04）。 */}
+          <details style={detailStyle}><summary>技术依据</summary>
+            <p style={descriptionStyle}>节点 {node_id} · 目标 {goal_ids.join('、')}</p>
+            <p style={descriptionStyle}>{acceptance.kind === 'artifact'
+              ? `文件规则：至少 ${acceptance.minimum_bytes} 字节。`
+              : `工具规则：${acceptance.tool} 退出码为 ${acceptance.exit_code}。`}</p>
+          </details>
         </li>)}
       </ul>
     </div>
@@ -188,7 +195,10 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
         <details>
           <summary>步骤、模型建议与风险</summary>
           <ul style={listStyle}>{plan.proposal.steps.map((step, index) => <li key={index}>
-            <strong>{step.node_id}</strong> · {step.description} · {MODEL_LEVELS[step.complexity].label}。{step.model_reason}
+            {step.description} · {MODEL_LEVELS[step.complexity].label}。{step.model_reason}
+            <details style={detailStyle}><summary>技术依据</summary>
+              <p style={descriptionStyle}>步骤编号 {step.node_id} · 依赖 {step.depends_on.length > 0 ? step.depends_on.join('、') : '无'} · 工具 {step.tools.length > 0 ? step.tools.join('、') : '未指定'}</p>
+            </details>
             {step.preferred_model_ref && <span> · 建议模型 {step.preferred_model_ref}</span>}
             {step.depends_on.length > 0 && <p style={descriptionStyle}>依赖 {step.depends_on.join('、')}</p>}
             {step.tools.length > 0 && <p style={descriptionStyle}>工具 {step.tools.join('、')}</p>}
@@ -224,5 +234,6 @@ const panelStyle = { padding: 12, border: `1px solid ${COLOR.line}`, borderRadiu
 const contentStyle = { display: 'grid', gap: 8, marginTop: 5, fontSize: FONT_PX.body, minWidth: 0 }
 const headingStyle = { fontSize: FONT_PX.section, margin: '4px 0' }
 const descriptionStyle = { margin: '4px 0', color: COLOR.inkMuted, overflowWrap: 'anywhere' as const }
+const detailStyle = { marginTop: 4, fontSize: FONT_PX.menu, color: COLOR.inkMuted }
 const listStyle = { margin: '5px 0', paddingLeft: 22, overflowWrap: 'anywhere' as const }
 const editStyle = { justifySelf: 'start' as const, color: COLOR.ink, background: COLOR.surface, border: `1px solid ${COLOR.line}`, borderRadius: 5, minHeight: 36 }
