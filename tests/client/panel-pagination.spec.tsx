@@ -33,7 +33,7 @@ function loadMore(view: { findAll: (selector: string) => Element[] }): Element {
 }
 
 describe('收到 reload 之后重新从第一页取数', () => {
-  it('任务页在第二页收到 reload：旧行不残留、不重复，请求回到第一页', async () => {
+  it('任务页在第二页收到 reload：保留已加载窗口与位置，只重读当前页', async () => {
     const first = taskSummary({ task_id: 't1', title: '任务一' })
     const second = taskSummary({ task_id: 't2', title: '任务二' })
     const { api, service } = apiFrom((query) => {
@@ -54,13 +54,14 @@ describe('收到 reload 之后重新从第一页取数', () => {
     await view.rerender(<TaskListScreen api={api} onSelectTask={noop} reloadVersion={1} />)
     await view.flush()
 
-    expect(view.findAll('article').length).toBe(1)
+    // 实时刷新不再把用户踢回第一页：第二页的任务与选中位置都保留（T07）。
+    expect(view.findAll('article').length).toBe(2)
     expect(view.text()).toContain('任务一')
-    expect(view.text()).not.toContain('任务二')
+    expect(view.text()).toContain('任务二')
     const after = service.calls.slice(before)
     expect(after.length).toBeGreaterThan(0)
     for (const call of after) {
-      expect(call.params.get('cursor')).toBeNull()
+      expect(call.params.get('cursor')).toBe('cursor-2')
     }
     view.unmount()
   })
