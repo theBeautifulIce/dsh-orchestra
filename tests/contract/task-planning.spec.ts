@@ -554,3 +554,15 @@ it('S5 拒绝加载、发布和启动 wf_release_v1，普通流程仍可启动',
   })
 })
 
+
+it('P02 用户指定流程时只在该流程里规划，指错流程给出明确原因', async () => {
+  const { planCommands, db } = await boot(async () => valid())
+  const pinned = await planCommands.proposeTaskPlan('核对项目交付', [], undefined,
+    { workflow_id: 'review', workflow_version: '1' })
+  expect(pinned.proposal.workflow_id).toBe('review')
+  expect(pinned.proposal.workflow_version).toBe('1')
+  // 指到不存在的流程：明确报错，不能悄悄换一个流程继续。
+  await expect(planCommands.proposeTaskPlan('核对项目交付', [], undefined, { workflow_id: 'missing-flow' }))
+    .rejects.toMatchObject({ code: 'WORKFLOW_NOT_PUBLISHED' })
+  expect(db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toMatchObject({ n: 0 })
+})
