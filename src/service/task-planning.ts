@@ -274,6 +274,38 @@ function missingApprovalSteps(namedApprovals: string[], workflow: WorkflowCandid
     node.type === 'approval' && node.approvalPrompt === name && ancestors.has(node.id)))
 }
 
+// 个人宿主的原生生产器只写 UTF-8 文本，且同一节点最多 8 份、单份最多 64 KiB。
+// 计划阶段就按这套能力校验，避免批准一份执行器永远交付不了的计划（D01/D02）。
+export const NATIVE_PRODUCER = {
+  files_per_node: 8,
+  bytes_per_file: 64 * 1024,
+  binary_extension: /\.(?:xlsx?|xlsm|xlsb|docx?|docm|pptx?|pptm|pdf|zip|7z|rar|gz|tgz|tar|png|jpe?g|gif|bmp|webp|tiff?|ico|mp4|mov|avi|mkv|mp3|wav|flac|ogg|sqlite3?|db|exe|dll|bin)$/iu,
+} as const
+
+/** 交付能力核对：格式、单份字节与同一节点的件数都要是当前宿主真能产出的。 */
+export function deliveryCapabilityIssues(deliverables: readonly { node_id: string; acceptance: { kind: string; file_name?: string; minimum_bytes?: number } }[]): string[] {
+  const issues: string[] = []
+  const perNode = new Map<string, number>()
+  for (const item of deliverables) {
+    const rule = item.acceptance
+    if (rule.kind !== 'artifact' || !rule.file_name) continue
+    perNode.set(item.node_id, (perNode.get(item.node_id) ?? 0) + 1)
+    if (NATIVE_PRODUCER.binary_extension.test(rule.file_name)) {
+      issues.push(`「${rule.file_name}」不是当前宿主能写出的文本格式。请改成 .md、.txt、.csv 或 .json，或改用工具执行证据验收。`)
+    }
+    const minimum = rule.minimum_bytes ?? 0
+    if (minimum > NATIVE_PRODUCER.bytes_per_file) {
+      issues.push(`「${rule.file_name}」要求至少 ${minimum} 字节，当前宿主单份文本最多 ${NATIVE_PRODUCER.bytes_per_file} 字节。请拆成多份或降低字节要求。`)
+    }
+  }
+  for (const [nodeId, count] of perNode) {
+    if (count > NATIVE_PRODUCER.files_per_node) {
+      issues.push(`${nodeId} 安排了 ${count} 份文件，当前宿主同一节点最多交付 ${NATIVE_PRODUCER.files_per_node} 份。请拆到多个步骤。`)
+    }
+  }
+  return issues
+}
+
 function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: WorkflowCandidate | undefined): PlanQuality {
   const issues: Record<PlanCheck, string[]> = {
     workflow: [], coverage: [], deliverables: [], tools: [], dependencies: [], risks: [],
@@ -324,6 +356,7 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
       issues.deliverables.push(deliverable.title + ' 的验收文件名必须是普通文件名。')
     }
   }
+  issues.deliverables.push(...deliveryCapabilityIssues(proposal.deliverables))
   for (const goal of goals) {
     if (!proposal.steps.some((step) => step.goal_ids.includes(goal.id))
       || !proposal.deliverables.some((item) => item.goal_ids.includes(goal.id))) {

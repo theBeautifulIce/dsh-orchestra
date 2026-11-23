@@ -145,3 +145,37 @@ it('leaves service and historical starts unowned in S6 and preserves their S5 co
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+it('accepts one review generation only, so a second page cannot overwrite a submitted conclusion', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-review-cas-'))
+  let fixture: Awaited<ReturnType<typeof boot>> | undefined
+  try {
+    fixture = await boot(dir, 'S6')
+    await install(fixture)
+    const started = await fixture.post<{ run_id: string }>('/v1/runs/start', startInput(), primarySession)
+    const runId = started.data!.run_id
+    const nodeRunId = String(fixture.db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id='source'").get(runId)?.node_run_id)
+    expect(await fixture.post('/v1/rework/hold', hold(runId, nodeRunId), primarySession)).toMatchObject({ status: 200 })
+    const dispatch = await fixture.post('/v1/runs/dispatch', { runId, nodes: {
+      source: { tools: [{ command: tool, args: [], cwd: '.', timeoutMs: 5_000 }], input: {}, outputSchema: {} },
+    } })
+    expect(dispatch).toMatchObject({ status: 200, data: [expect.objectContaining({ status: 'done' })] })
+    const first = registerRunArtifact(fixture.db, { artifactId: 'review-a', runId, nodeRunId, fileName: 'review.md', bytes: Buffer.from('first version') })
+    const second = registerRunArtifact(fixture.db, { artifactId: 'review-b', runId, nodeRunId, fileName: 'review.md', bytes: Buffer.from('second version') })
+    const accept = (artifact: typeof first) => ({ operation_id: uuidv7(), run_id: runId, node_run_id: nodeRunId,
+      action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+    expect(await fixture.post('/v1/rework/hold', accept(first), primarySession)).toMatchObject({ status: 200 })
+    // 另一个页面拿着不同操作号提交第二个版本：代次已不是 held，必须拒绝而不是覆盖。
+    expect(await fixture.post('/v1/rework/hold', accept(second), primarySession)).toMatchObject({
+      status: 409, error: { code: 'STALE_GENERATION' },
+    })
+    expect(fixture.db.raw.prepare('SELECT status,artifact_id,sha256 FROM delivery_review_holds WHERE run_id=?').get(runId))
+      .toMatchObject({ status: 'accepted', artifact_id: 'review-a', sha256: first.sha256 })
+    // 已提交结论也不能被旧页面的撤销静默清掉。
+    expect(await fixture.post('/v1/rework/hold', { operation_id: uuidv7(), run_id: runId, node_run_id: nodeRunId, action: 'withdraw' },
+      primarySession)).toMatchObject({ status: 409, error: { code: 'STALE_GENERATION' } })
+  } finally {
+    await fixture?.service.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

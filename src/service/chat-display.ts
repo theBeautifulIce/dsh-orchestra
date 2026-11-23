@@ -164,6 +164,8 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
   }
   if (view.terminal || view.delivery_checks.length > 0) {
     lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
+    // 文件层结论与内容结论分开说：自动核对只看登记、大小与有效期（D01）。
+    if (view.acceptance === 'passed') lines.push('以上自动核对只覆盖文件是否登记、大小与有效期；内容是否达到要求仍需人工核对。')
     for (const check of view.delivery_checks.filter(({ outcome }) => outcome !== 'passed').slice(0, 5)) {
       const title = check.file_name || (check.kind === 'tool_evidence' ? '工具执行证据' : '交付文件')
       if (check.reason) lines.push(`「${title}」${check.outcome === 'failed' ? '未达到验收要求' : '验收结果待核实'}。${sentence(operatorReason(check.reason))}`)
