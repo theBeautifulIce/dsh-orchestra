@@ -46,6 +46,34 @@ export function requireReviewOperator(tx: ReadTx, secret: string, actor: string,
   return ownership
 }
 
+type ReviewItem = { artifact_id: string; sha256: string; file_name: string | null }
+type ReviewSet = ReviewItem[]
+
+/** 旧记录的清单列为空：按当时的单件语义解释，不补造历史。 */
+function readReviewSet(raw: unknown): ReviewSet | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null
+  try {
+    const value = JSON.parse(raw) as unknown
+    if (!Array.isArray(value)) return null
+    return value.flatMap((item) => typeof item === 'object' && item !== null
+      && typeof (item as ReviewItem).artifact_id === 'string' && typeof (item as ReviewItem).sha256 === 'string'
+      ? [{ artifact_id: (item as ReviewItem).artifact_id, sha256: (item as ReviewItem).sha256,
+        file_name: typeof (item as ReviewItem).file_name === 'string' ? (item as ReviewItem).file_name : null }]
+      : [])
+  } catch { return null }
+}
+
+function readAccepted(raw: unknown): Array<{ artifact_id: string; sha256: string }> {
+  if (typeof raw !== 'string' || raw.length === 0) return []
+  try {
+    const value = JSON.parse(raw) as unknown
+    return Array.isArray(value) ? value.flatMap((item) => typeof item === 'object' && item !== null
+      && typeof (item as { artifact_id?: unknown }).artifact_id === 'string'
+      && typeof (item as { sha256?: unknown }).sha256 === 'string'
+      ? [{ artifact_id: (item as { artifact_id: string }).artifact_id, sha256: (item as { sha256: string }).sha256 }] : []) : []
+  } catch { return [] }
+}
+
 export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = false) {
   return {
     list(actor: string, runId?: string) {
@@ -72,9 +100,16 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
         if (!node) throw new OrchError('STALE_GENERATION', '只能审核进行中运行的当前智能体步骤')
         const key = [body.run_id, node.node_id]
         if (body.action === 'hold') {
-          tx.run(`INSERT INTO delivery_review_holds(run_id,node_id,node_run_id,owner_actor,status,updated_at)
-            VALUES(?,?,?,?,'held',?) ON CONFLICT(run_id,node_id) DO UPDATE SET node_run_id=excluded.node_run_id,
-            status='held',artifact_id=NULL,sha256=NULL,updated_at=excluded.updated_at`, [...key, body.node_run_id, actor, now])
+          // 当轮应审清单在留验时固定：之后新增或替换的版本不会混进这一轮（D03）。
+          const reviewSet = tx.all<ReviewItem>(`SELECT a.artifact_id,a.sha256,c.file_name
+            FROM artifacts a JOIN artifact_contents c USING(artifact_id)
+            WHERE a.run_id=? AND c.node_run_id=? AND (a.retain_until IS NULL OR a.retain_until>?)
+            ORDER BY a.created_at, a.artifact_id`, [body.run_id, body.node_run_id, now])
+          tx.run(`INSERT INTO delivery_review_holds(run_id,node_id,node_run_id,owner_actor,status,updated_at,review_set_json,accepted_json,revision)
+            VALUES(?,?,?,?,'held',?,?, '[]', 1) ON CONFLICT(run_id,node_id) DO UPDATE SET node_run_id=excluded.node_run_id,
+            status='held',artifact_id=NULL,sha256=NULL,updated_at=excluded.updated_at,
+            review_set_json=excluded.review_set_json,accepted_json='[]',revision=delivery_review_holds.revision+1`,
+          [...key, body.node_run_id, actor, now, JSON.stringify(reviewSet)])
         } else {
           if (!tx.get('SELECT 1 FROM delivery_review_holds WHERE run_id=? AND node_id=? AND owner_actor=?', [...key, actor])) {
             throw new OrchError('NOT_FOUND', '该步骤没有人工留验要求')
@@ -94,16 +129,43 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
               WHERE a.run_id=? AND c.node_run_id=? AND a.artifact_id=? AND a.sha256=? AND (a.retain_until IS NULL OR a.retain_until>?)`,
             [body.run_id, body.node_run_id, body.artifact_id, body.sha256, now])
             if (node.status !== 'done' || !artifact || sha256Hex(Buffer.from(artifact.bytes)) !== body.sha256) throw new OrchError('CONFIRMATION_MISMATCH', '成果版本与当前已完成步骤不符')
-            // 比较并交换：只有仍处于 held 的代次才能写入验收结论，旧页面不能覆盖已提交的结果。
-            const accepted = tx.run(`UPDATE delivery_review_holds SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,updated_at=?
-              WHERE run_id=? AND node_id=? AND status='held'`,
-            [body.node_run_id, body.artifact_id, body.sha256, now, ...key])
+            const current = tx.get<{ status: string; review_set_json: string | null; accepted_json: string | null; revision: number }>(
+              'SELECT status,review_set_json,accepted_json,revision FROM delivery_review_holds WHERE run_id=? AND node_id=?', key)
+            if (!current || current.status !== 'held') {
+              throw new OrchError('STALE_GENERATION', '该留验已由其他页面提交，请刷新当前结论后再核对')
+            }
+            const reviewSet = readReviewSet(current.review_set_json)
+            const prior = readAccepted(current.accepted_json)
+            const confirmed = [...prior.filter((item) => item.artifact_id !== body.artifact_id),
+              { artifact_id: body.artifact_id, sha256: body.sha256 }]
+            if (reviewSet && reviewSet.length > 0
+              && !reviewSet.some((item) => item.artifact_id === body.artifact_id && item.sha256 === body.sha256)) {
+              throw new OrchError('CONFIRMATION_MISMATCH', '这份成果不在本次应审清单内，请刷新后核对当前版本')
+            }
+            const pending = (reviewSet ?? []).filter((item) =>
+              !confirmed.some((done) => done.artifact_id === item.artifact_id && done.sha256 === item.sha256))
+            // 清单没齐就继续等：整组只确认一份时，运行不能因此结束（D03）。
+            const complete = pending.length === 0
+            const accepted = complete
+              ? tx.run(`UPDATE delivery_review_holds SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,accepted_json=?,updated_at=?
+                WHERE run_id=? AND node_id=? AND status='held' AND revision=?`,
+              [body.node_run_id, body.artifact_id, body.sha256, JSON.stringify(confirmed), now, ...key, current.revision])
+              : tx.run(`UPDATE delivery_review_holds SET accepted_json=?,updated_at=?
+                WHERE run_id=? AND node_id=? AND status='held' AND revision=?`,
+              [JSON.stringify(confirmed), now, ...key, current.revision])
             if (accepted.changes !== 1) throw new OrchError('STALE_GENERATION', '该留验已由其他页面提交，请刷新当前结论后再核对')
+            if (!complete) {
+              appendEvent(tx, { type: 'rework.hold_' + body.action, runId: body.run_id, nodeRunId: body.node_run_id,
+                payload: { ...body, actor, pending: pending.length } })
+              return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action,
+                status: 'held' as const, pending: pending.map((item) => item.file_name ?? item.artifact_id) }
+            }
           }
         }
         appendEvent(tx, { type: 'rework.hold_' + body.action, runId: body.run_id, nodeRunId: body.node_run_id, payload: { ...body, actor } })
         if (body.action !== 'hold') closeRun(tx, secret, body.run_id, now)
-        return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action }
+        return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action,
+          status: body.action === 'hold' ? 'held' as const : 'accepted' as const }
       }).result)
     },
   }

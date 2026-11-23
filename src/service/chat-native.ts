@@ -217,8 +217,22 @@ function describeNodes(db: Service['orchestra']['db'], runId: string) {
   }))
 }
 
-function describeArtifacts(db: Service['orchestra']['db'], runId: string) {
-  return listRunArtifacts(db, runId).items.filter((artifact) => !artifact.expired && artifact.file_name).slice(0, 12).map((artifact) => ({
+/**
+ * 会话里展示的成果：验收证据绑定的那一版优先，其次才是最近登记的。
+ * 同名旧版或中间件很多时，正式交付件不会被挤出前 12 条（D09）。
+ */
+/** 验收证据里通过的文件版本：展示顺序以它们为准。 */
+function acceptedArtifactIds(checks: readonly { artifact_id?: string | null; kind?: string; outcome?: string }[] | undefined) {
+  return (checks ?? []).flatMap((check) => check.artifact_id && check.kind === 'artifact' && check.outcome === 'passed'
+    ? [check.artifact_id] : [])
+}
+
+function describeArtifacts(db: Service['orchestra']['db'], runId: string, acceptedIds: readonly string[] = []) {
+  const all = listRunArtifacts(db, runId).items.filter((artifact) => !artifact.expired && artifact.file_name)
+  const accepted = new Set(acceptedIds)
+  const ordered = [...all.filter((artifact) => accepted.has(artifact.artifact_id)),
+    ...all.filter((artifact) => !accepted.has(artifact.artifact_id))]
+  return ordered.slice(0, 12).map((artifact) => ({
     artifact_id: artifact.artifact_id, file_name: artifact.file_name, sha256: artifact.sha256, bytes: artifact.size_bytes,
   }))
 }
@@ -596,7 +610,8 @@ export function installNativeChat(host: Context, options: {
     if (input.action === 'status') {
       const run = describeRun(service, runId, options.operator)
       if (scopedRun && taskTitle && run.title !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
-      const result = { ...run, nodes: describeNodes(db, runId), artifacts: describeArtifacts(db, runId) }
+      const result = { ...run, nodes: describeNodes(db, runId),
+        artifacts: describeArtifacts(db, runId, acceptedArtifactIds(run.delivery_checks)) }
       turn.lastStatusRun = runId
       return result
     }
@@ -794,7 +809,7 @@ export function installNativeChat(host: Context, options: {
         try {
           const display = describeChatRun({
             ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
-            artifacts: describeArtifacts(service.orchestra.db, receipt.run_id),
+            artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
           }, true)
           agent.followup(noticeMessage(id, display))
         } finally { pending.delete(id) }
