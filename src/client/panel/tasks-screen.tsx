@@ -10,7 +10,7 @@ import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { UnknownState } from './shell.tsx'
 import { operatorReason } from '../../core/operator-language.ts'
-import { NARROW_TASK_CSS, TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
+import { NARROW_TASK_CSS, TASK_META_CSS, TASK_WORKSPACE_CSS } from './task-workspace-styles.ts'
 import { TaskStepOverview, useRunStepSnapshot } from './task-step-overview.tsx'
 import { readDisplayPreferences, TASK_VIEWS } from './display-preferences.ts'
 
@@ -207,7 +207,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   const grouped: Record<TaskLane, TaskSummary[]> = { upcoming: [], running: [], attention: [], finished: [] }
   for (const task of items) grouped[taskColumn(task)].push(task)
   return <section className="task-list" aria-labelledby="tasks-title">
-    <style>{TASK_WORKSPACE_CSS}{NARROW_TASK_CSS}</style>
+    <style>{TASK_WORKSPACE_CSS}{TASK_META_CSS}{NARROW_TASK_CSS}</style>
     <header className="task-page-header">
       <div>
       <h1 id="tasks-title" style={titleStyle}>{filter.archived ? '归档箱' : '任务'}</h1>
@@ -388,9 +388,18 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
       {hasUnverified && <span>{COPY.pendingIrreversible}</span>}
     </div>}
     <div className="task-card-meta">
-      <span>{task.run_count} 次运行</span>
-      <TaskRisk level={task.max_side_effect_level} />
-      <TaskWaitAndHeartbeat task={task} />
+      {/* 无待办、无异常时，运行次数、风险与心跳收进技术细节，首屏只留时间（T10）。 */}
+      {quiet
+        ? <details className="task-card-tech"><summary>技术细节</summary>
+            <span>{task.run_count} 次运行</span>
+            <TaskRisk level={task.max_side_effect_level} />
+            <TaskWaitAndHeartbeat task={task} />
+          </details>
+        : <>
+            <span>{task.run_count} 次运行</span>
+            <TaskRisk level={task.max_side_effect_level} />
+            <TaskWaitAndHeartbeat task={task} />
+          </>}
       <time dateTime={task.updated_at} title={formatDate(task.updated_at)}>{formatDate(task.updated_at)}</time>
     </div>
     {task.current_run_id && <div className="task-card-steps">

@@ -291,16 +291,22 @@ function evaluateDeliverable(
   }
   if (item.kind === 'artifact') return evaluateArtifact(tx, runId, now, item, deliverableKey, ruleVersion)
   if (item.kind === 'chat/text_result') {
-    // 会话文字结果还没有真实 UTF-8 文件可下载，先如实说不能自动核验（P05）。
+    // 会话结果已落成真实 UTF-8 文件（chat-result.md）时可自动核验，否则如实说不能（P05）。
+    const file = tx.get<{ artifact_id: string; sha256: string }>(
+      `SELECT a.artifact_id, a.sha256 FROM artifacts a JOIN artifact_contents c USING(artifact_id)
+        WHERE a.run_id = ? AND c.file_name = 'chat-result.md' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1`, [runId],
+    )
     return {
       deliverable_key: deliverableKey,
       title: item.title,
       node_id: item.node_id,
       kind: 'chat/text_result',
       rule_version: ruleVersion,
-      outcome: 'unverifiable',
-      reason: 'chat_text_result_not_exported',
-      evidence: { title: item.title, note: '会话结果尚未导出为可下载的 UTF-8 文件' },
+      outcome: file ? 'passed' : 'unverifiable',
+      reason: file ? null : 'chat_text_result_not_exported',
+      evidence: file
+        ? { artifact_id: file.artifact_id, sha256: file.sha256, note: '会话结果已导出为 chat-result.md' }
+        : { title: item.title, note: '会话结果尚未导出为可下载的 UTF-8 文件' },
     }
   }
   return evaluateToolEvidence(tx, runId, item, deliverableKey, ruleVersion)
