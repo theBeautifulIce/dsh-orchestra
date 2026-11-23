@@ -8,6 +8,7 @@ import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
+import { registerRunArtifact } from './artifact-store.ts'
 import { classifyChatTask } from './chat-task-intent.ts'
 import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatErrorReason, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
 import { readOutstandingFiles } from './chat-expected-files.ts'
@@ -276,6 +277,25 @@ function describeNodes(db: Service['orchestra']['db'], runId: string) {
 function acceptedArtifactIds(checks: readonly { artifact_id?: string | null; kind?: string; outcome?: string }[] | undefined) {
   return (checks ?? []).flatMap((check) => check.artifact_id && check.kind === 'artifact' && check.outcome === 'passed'
     ? [check.artifact_id] : [])
+}
+
+/**
+ * 会话交付的文字结果落成真实 UTF-8 文件，结果页可直接下载（P05）。
+ * 已经登记过就不再重复登记，保证同一运行只有一份结论文件。
+ */
+export function ensureChatResultArtifact(db: Service['orchestra']['db'], runId: string, text: string): void {
+  const existing = db.raw.prepare(
+    "SELECT a.artifact_id FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE a.run_id=? AND c.file_name='chat-result.md'",
+  ).get(runId)
+  if (existing) return
+  const node = db.raw.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? ORDER BY seq DESC, node_run_id DESC LIMIT 1').get(runId) as
+    { node_run_id?: string } | undefined
+  if (!node?.node_run_id) return
+  registerRunArtifact(db, {
+    // uuidv7 前 8 位是时间戳，同一毫秒的两次运行会撞主键：用完整 run id 才唯一。
+    artifactId: 'chat-result-' + runId, runId, nodeRunId: node.node_run_id,
+    fileName: 'chat-result.md', bytes: Buffer.from(text, 'utf8'),
+  })
 }
 
 function describeArtifacts(db: Service['orchestra']['db'], runId: string, acceptedIds: readonly string[] = []) {
@@ -885,6 +905,7 @@ export function installNativeChat(host: Context, options: {
             ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
             artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
           }, true)
+          if (view.terminal) ensureChatResultArtifact(service.orchestra.db, receipt.run_id, display.body)
           agent.followup(noticeMessage(id, display))
         } finally { pending.delete(id) }
       }

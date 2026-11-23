@@ -588,3 +588,37 @@ describe('交付验收阶段', () => {
     expect(rows[0]?.reason).toBe('artifact_retain_until_expired')
   })
 })
+
+describe('P05 会话文字结果的验收', () => {
+  it('有导出的 chat-result.md 就通过，没有就如实待核验', () => {
+    const { db } = freshLedger()
+    const catalog = catalogFor(db, 'wf-chat-text')
+    const created = createRun(db, catalog, {
+      taskTitle: '会话交付', workflowId: 'wf-chat-text', workflowVersion: '1', now: NOW,
+    })
+    seedPlan(db, {
+      planId: 'plan-chat-text',
+      taskId: created.task_id,
+      runId: created.run_id,
+      deliverables: [{ title: '会话结论', node_id: 'n1', goal_ids: ['g1'], acceptance: { kind: 'chat/text_result' } }],
+    })
+    expect(finishRun(db, created.run_id, 'done')).toBe('succeeded')
+    // 还没有导出文件：不能假装通过。
+    const before = acceptanceRows(db, created.run_id)
+    expect(before).toHaveLength(1)
+    expect(before[0]?.outcome).toBe('unverifiable')
+    expect(before[0]?.reason).toBe('chat_text_result_not_exported')
+    // 会话结果已落成真实 UTF-8 文件后，自动核验通过。
+    seedArtifact(db, {
+      artifactId: 'art-chat-text',
+      runId: created.run_id,
+      fileName: 'chat-result.md',
+      nodeRunId: nodeRunId(db, created.run_id, 'n1'),
+      bytes: 42,
+    })
+    withTx(db, (tx) => applyRunAcceptance(tx, created.run_id, LATER))
+    const after = acceptanceRows(db, created.run_id)
+    expect(after).toHaveLength(1)
+    expect(after[0]?.outcome).toBe('passed')
+  })
+})

@@ -542,6 +542,26 @@ function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtim
       if (node.node_id !== inferredTrigger && !incoming.has(node.node_id)) edges.push({ from: inferredTrigger, to: node.node_id })
     }
   }
+  // 「配置审批节点」是配置说明，不是一步工作：已有审批节点时把这类说明节点收掉，
+  // 否则会话里会多出两个并列步骤（C07）。
+  const approvalExists = nodes.some((node) => node.type === 'approval')
+  const metaApprovalNode = (node: WorkflowDoc['nodes'][number]) => node.type === 'agent'
+    && /^(?:配置|设置|添加|新增|安排|设立)(?:一个|一道)?(?:独立的?)?(?:人工)?审批节点?$/u.test(node.title)
+  if (approvalExists) {
+    const metaIds = new Set(nodes.filter(metaApprovalNode).map((node) => node.node_id))
+    for (const id of metaIds) {
+      const incoming = edges.filter((edge) => edge.to === id).map((edge) => edge.from)
+      const outgoing = edges.filter((edge) => edge.from === id).map((edge) => edge.to)
+      for (const from of incoming) for (const to of outgoing) if (from !== to && !edges.some((edge) => edge.from === from && edge.to === to)) edges.push({ from, to })
+    }
+    if (metaIds.size > 0) {
+      for (let index = nodes.length - 1; index >= 0; index -= 1) if (metaIds.has(nodes[index]!.node_id)) nodes.splice(index, 1)
+      for (let index = edges.length - 1; index >= 0; index -= 1) {
+        const edge = edges[index]!
+        if (metaIds.has(edge.from) || metaIds.has(edge.to)) edges.splice(index, 1)
+      }
+    }
+  }
   const doc: WorkflowDoc = { name: source.name, nodes, edges }
   const saved = validateSaveLayer(doc, { expectedName: source.name })
   if (saved.report.errors.length > 0) {

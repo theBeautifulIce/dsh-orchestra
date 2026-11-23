@@ -200,6 +200,11 @@ export const TASK_INSPECTOR_CSS = `
 `
 
 // 窄屏：看板单列、任务名可折两行、页头不挤压（T14）。
+export const TASK_META_CSS = `
+.task-card-tech summary { cursor: pointer; color: inherit; }
+.task-card-tech summary:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
+.task-card-tech span { margin-right: 8px; }
+`
 export const NARROW_TASK_CSS = `
 @container (max-width: 520px) {
   .task-board { grid-template-columns: minmax(0, 1fr); }
