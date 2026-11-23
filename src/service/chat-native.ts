@@ -62,6 +62,8 @@ const argsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('start') }),
   z.strictObject({ action: z.literal('status'), run_id: z.string().min(1).max(128).optional(),
     task_title: z.string().min(1).max(200).optional() }),
+  z.strictObject({ action: z.literal('stop'), run_id: z.string().min(1).max(128).optional(),
+    task_title: z.string().min(1).max(200).optional() }),
   z.strictObject({ action: z.literal('artifact'), run_id: z.string().min(1).max(128).optional(),
     artifact_id: z.string().min(1).max(128).optional(), file_name: z.string().min(1).max(500).optional() })
     .refine((input) => Boolean(input.artifact_id) !== Boolean(input.file_name)),
@@ -615,6 +617,17 @@ export function installNativeChat(host: Context, options: {
       turn.lastStatusRun = runId
       return result
     }
+    if (input.action === 'stop') {
+      // 会话内停止：绑定当前运行，交给既有的取消状态机，不把低层管理接口暴露给浏览器（C10）。
+      if (!service.orchestra.commands?.cancelRun) throw new OrchError('VERDICT_UNSUPPORTED', '当前宿主不提供会话内停止')
+      const out = service.orchestra.commands.cancelRun({
+        runId, cancelResult: 'interrupted', graceMs: 30_000, now: new Date().toISOString(),
+      })
+      turn.lastStatusRun = runId
+      return { state: 'stop_requested' as const, run_id: runId,
+        status: out.terminalStatus ?? out.runStatus, skipped_irreversible: out.skippedIrreversible.length,
+        pending_decisions: out.pendingHumanDecisions.length }
+    }
     if (input.action === 'review_delivery') {
       const reviews = service.rework ? listChatDeliveryReviews(db, runId, options.operator) : []
       return { deliveryReview: {
@@ -704,9 +717,9 @@ export function installNativeChat(host: Context, options: {
   })
   host.tools.register({
     name: TOOL_NAME,
-    description: 'Read an Orchestra receipt, status, evidence, or run notes, or open an approval card. Use exact task_title for a named task, or the verified source run in a notice. Use review_brain_notes only on an explicit operator request after status.',
+    description: 'Read an Orchestra receipt, status, evidence, or run notes, open an approval card, or stop the bound run when the operator asks to stop it. Use exact task_title for a named task, or the verified source run in a notice. Use review_brain_notes only on an explicit operator request after status.',
     parameters: { type: 'object', properties: {
-      action: { type: 'string', enum: ['start', 'status', 'artifact', 'review', 'notes', 'review_brain_notes', 'review_delivery'] },
+      action: { type: 'string', enum: ['start', 'status', 'stop', 'artifact', 'review', 'notes', 'review_brain_notes', 'review_delivery'] },
       run_id: { type: 'string' }, artifact_id: { type: 'string' }, decision_id: { type: 'string' },
       before_seq: { type: 'integer', minimum: 1 },
       task_title: { type: 'string' }, file_name: { type: 'string' }, decision_title: { type: 'string' },
@@ -715,7 +728,7 @@ export function installNativeChat(host: Context, options: {
     presentCall(args) {
       const input = argsSchema.safeParse(args)
       const title = input.success ? {
-        start: '查看任务回执', status: '查看任务状态', artifact: '查看交付文件', review: '打开人工待办', notes: '读取运行便条',
+        start: '查看任务回执', status: '查看任务状态', stop: '停止本次运行', artifact: '查看交付文件', review: '打开人工待办', notes: '读取运行便条',
         review_brain_notes: '审阅主脑专属便条',
         review_delivery: '查看待审成果',
       }[input.data.action] : '处理 Orchestra 任务'
