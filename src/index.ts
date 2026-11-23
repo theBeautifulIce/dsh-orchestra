@@ -836,7 +836,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         getWorkspaceOverview: () => getWorkspaceOverview(orchestra.db, Boolean(orchestra.release)),
         listRuns: (query) => listRuns(orchestra.db, query),
         getRun: (runId) => getRun(orchestra.db, runId),
-        listNodes: (runId, limit) => listNodes(orchestra.db, runId, limit, isWaitingForExecution),
+        listNodes: (runId, limit, cursor) => listNodes(orchestra.db, runId, limit, isWaitingForExecution, cursor),
         getNode: (nodeRunId) => getNodeSnapshot(orchestra.db, nodeRunId, isWaitingForExecution),
         getArtifact: (artifactId, now) => getArtifactSnapshot(orchestra.db, artifactId, now),
         getArtifactContent: (runId, artifactId, mode, now) => getArtifactContent(orchestra.db, runId, artifactId, mode, now),

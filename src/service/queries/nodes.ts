@@ -1,6 +1,7 @@
 import { OrchError } from '../../core/errors.ts'
 import { MODEL_COMPLEXITIES, readModelUse, validModelEffort, type ModelAssignment } from '../../executor/model-routing.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
+import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx, type ReadCtx, type ReadTx } from './read-tx.ts'
 import type { EffectVerdict } from '../../executor/tools.ts'
 import { dependencyReadiness, pinnedRunTopology, readRunBinding, runPredecessors } from '../run-readiness.ts'
@@ -248,21 +249,45 @@ function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: 
   }
 }
 
-export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeRunId: string) => boolean): { items: NodeRunView[]; as_of_seq: number; has_more: boolean } {
+/**
+ * 运行节点清单：稳定游标，第 201 条尝试也能翻到（T05）。
+ * 游标按 (seq, attempt, node_run_id) 升序推进，与展示顺序一致。
+ */
+export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeRunId: string) => boolean,
+  cursorInput?: string): { items: NodeRunView[]; as_of_seq: number; has_more: boolean; next_cursor: string | null } {
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
+  const filter = { run_id: runId }
+  const now = Date.now()
   return withReadTx(db, (ctx) => {
     const { settling, nodes } = readRunNodeDisplay(ctx.tx, runId)
     const executionState = readExecutionStates(ctx.tx, runId, isWaiting)
+    const where = ['n.run_id = ?']
+    const values: unknown[] = [runId]
+    if (cursorInput) {
+      const cursor = decodeCursor(cursorInput, 'nodes', filter, now)
+      const [seq, attempt] = cursor.last_key.split('\t').map(Number)
+      if (!Number.isInteger(seq) || !Number.isInteger(attempt)) {
+        throw new OrchError('CURSOR_EXPIRED', '游标里的节点位置不合法，请重新加载', { node_run_id: cursor.last_id })
+      }
+      where.push('(n.seq, n.attempt, n.node_run_id) > (?, ?, ?)')
+      values.push(seq, attempt, cursor.last_id)
+    }
     const rows = ctx.tx.all<NodeRow>(
-      NODE_VIEW_SELECT + ' WHERE n.run_id = ? ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?', [runId, limit + 1],
+      NODE_VIEW_SELECT + ' WHERE ' + where.join(' AND ') + ' ORDER BY n.seq, n.attempt, n.node_run_id LIMIT ?',
+      [...values, limit + 1],
     )
-    const items = rows.slice(0, limit).map((row) => ({
+    const page = rows.slice(0, limit)
+    const items = page.map((row) => ({
       ...toNodeView(row, settling, activeDecisions(ctx, row.node_run_id), nodeExecutionIds(ctx, row.node_run_id, Number(row.attempt ?? 0)),
         modelAssignment(ctx, row), nodes.get(String(row.node_id))),
       ...executionState(row),
     }))
-    return { items, as_of_seq: ctx.as_of_seq, has_more: rows.length > limit }
+    const last = page[page.length - 1]
+    const next_cursor = rows.length > limit && last
+      ? encodeCursor(makeCursor('nodes', filter, `${Number(last.seq ?? 0)}\t${Number(last.attempt ?? 0)}`, String(last.node_run_id), ctx.as_of_seq, now))
+      : null
+    return { items, as_of_seq: ctx.as_of_seq, has_more: rows.length > limit, next_cursor }
   })
 }
 
