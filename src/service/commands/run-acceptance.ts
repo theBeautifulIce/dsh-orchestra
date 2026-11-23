@@ -11,7 +11,7 @@ import type { Tx } from '../../infra/sqlite/driver.ts'
 
 export type AcceptanceOutcome = 'passed' | 'failed' | 'unverifiable'
 export type AcceptanceSummary = AcceptanceOutcome | 'not_applicable'
-export type AcceptanceKind = 'artifact' | 'tool_evidence'
+export type AcceptanceKind = 'artifact' | 'tool_evidence' | 'chat/text_result'
 
 /** 验收失败与验收待核验要分开说：前者是交付不达标，后者是证据不足。 */
 export const ACCEPTANCE_DISPLAY_STATUS = {
@@ -124,7 +124,7 @@ function parseDeliverable(entry: unknown): ParsedDeliverable {
   const rule = typeof raw.acceptance === 'object' && raw.acceptance !== null
     ? raw.acceptance as Record<string, unknown>
     : {}
-  const kind: AcceptanceKind | 'unknown' = rule.kind === 'artifact' || rule.kind === 'tool_evidence'
+  const kind: AcceptanceKind | 'unknown' = rule.kind === 'artifact' || rule.kind === 'tool_evidence' || rule.kind === 'chat/text_result'
     ? rule.kind
     : 'unknown'
   let parseError: string | null = null
@@ -290,6 +290,19 @@ function evaluateDeliverable(
     }
   }
   if (item.kind === 'artifact') return evaluateArtifact(tx, runId, now, item, deliverableKey, ruleVersion)
+  if (item.kind === 'chat/text_result') {
+    // 会话文字结果还没有真实 UTF-8 文件可下载，先如实说不能自动核验（P05）。
+    return {
+      deliverable_key: deliverableKey,
+      title: item.title,
+      node_id: item.node_id,
+      kind: 'chat/text_result',
+      rule_version: ruleVersion,
+      outcome: 'unverifiable',
+      reason: 'chat_text_result_not_exported',
+      evidence: { title: item.title, note: '会话结果尚未导出为可下载的 UTF-8 文件' },
+    }
+  }
   return evaluateToolEvidence(tx, runId, item, deliverableKey, ruleVersion)
 }
 

@@ -566,3 +566,18 @@ it('P02 用户指定流程时只在该流程里规划，指错流程给出明确
     .rejects.toMatchObject({ code: 'WORKFLOW_NOT_PUBLISHED' })
   expect(db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toMatchObject({ n: 0 })
 })
+
+it('P05 会话文字结果是一等交付类型，不再借用文件规则来验收', async () => {
+  const { planCommands, db } = await boot(async () => {
+    const candidate = valid()
+    candidate.deliverables = [{ title: '会话结论', node_id: 'verify', goal_ids: ['goal'],
+      acceptance: { kind: 'chat/text_result' } }, valid().deliverables[1]!]
+    return candidate
+  })
+  const plan = await planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])
+  expect(plan.quality.ready).toBe(true)
+  expect(plan.quality.checks.find((check) => check.check === 'deliverables')?.passed).toBe(true)
+  expect(plan.proposal.deliverables[0]?.acceptance).toMatchObject({ kind: 'chat/text_result' })
+  await expect(planCommands.confirmTaskPlan(plan.plan_id, plan.content_hash)).resolves.toMatchObject({ run_id: expect.any(String) })
+  expect(db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toMatchObject({ n: 1 })
+})
