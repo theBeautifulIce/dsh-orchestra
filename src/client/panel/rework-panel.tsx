@@ -30,15 +30,18 @@ export function ReworkPanel({ api, commands, runId, runStatus, reloadVersion = 0
       .catch(() => { if (current) setFailed(true) }).finally(() => { if (current) setLoading(false) })
     return () => { current = false }
   }, [api, runId, reloadVersion, retry, onSnapshot])
+  const runEnded = Boolean(runStatus && RUN_ENDED.has(runStatus))
+  // 已结束且没有返工记录时不再占首屏：空框对普通交付没有意义（T11）。
+  if (!compact && !loading && !failed && items.length === 0 && runEnded) return null
   return <section aria-label="成果审核与返工" style={box}>
     <h2 style={{ fontSize: FONT_PX.section, margin: '0 0 8px' }}>成果审核与返工</h2>
     {loading && <p role="status">正在读取返工记录…</p>}
     {failed && <p role="alert">返工记录读取失败。<button type="button" onClick={() => setRetry(n => n + 1)}>重试</button></p>}
-    {!loading && !failed && items.length === 0 && <p>暂无返工记录。</p>}
+    {!loading && !failed && items.length === 0 && <p>这次运行还没有返工记录。要改稿时可在下方提交具体意见。</p>}
     {items.filter(item => !runId || item.run_id === runId).map(item => compact ? <p key={item.request_id}>{labels[item.status] ?? operatorStatus(item.status)} · 第 {item.round_no} 轮 · {item.reason}</p>
       : <ReworkCard key={item.request_id + ':' + item.revision} api={api} item={item} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />)}
     {runId && commands && !compact && <ReworkRequestForm key={runId} api={api} runId={runId} commands={commands}
-      plannerEnabled={plannerEnabled} runEnded={Boolean(runStatus && RUN_ENDED.has(runStatus))}
+      plannerEnabled={plannerEnabled} runEnded={runEnded}
       onChanged={() => setRetry(n => n + 1)} />}
   </section>
 }

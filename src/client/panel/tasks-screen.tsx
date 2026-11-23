@@ -209,7 +209,8 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
     <header className="task-page-header">
       <div>
       <h1 id="tasks-title" style={titleStyle}>{filter.archived ? '归档箱' : '任务'}</h1>
-      <p style={mutedStyle}>{filter.archived ? '归档任务仍可查看运行记录、结果与证据，也可以取回。' : '在看板展开步骤看进度，打开任务查看结果和证据。'}</p>
+      <p style={mutedStyle}>{filter.archived ? '归档任务仍可查看运行记录、结果与证据，也可以取回。'
+        : '这里只显示当前会话的任务。展开看板看进度，打开任务查看结果和证据。'}</p>
       </div>
       {!filter.archived && <div className="task-page-actions">
         {commands && <button type="button" aria-expanded={startOpen} onClick={() => setStartOpen(!startOpen)} style={buttonStyle}>
@@ -275,7 +276,9 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
       <button type="button" onClick={refresh} style={quietButtonStyle}>{COPY.retry}</button>
     </div>}
     {loading && <p role="status" style={mutedStyle}>正在读取任务…</p>}
-    {!loading && !error && items.length === 0 && <div style={emptyStyle}>{filter.archived ? '归档箱没有符合条件的任务。' : Object.values(filter).some(Boolean) ? '没有符合筛选条件的任务。' : COPY.emptyTasks}</div>}
+    {!loading && !error && items.length === 0 && <div style={emptyStyle}>{filter.archived ? '归档箱没有符合条件的任务。'
+      : Object.values(filter).some(Boolean) ? '没有符合筛选条件的任务。'
+        : COPY.emptyTasks}</div>}
     {!filter.archived && view === 'board' && <TaskBoardScroll>{(!loading || items.length > 0) && <div className="task-board">
       {TASK_LANES.map(({ id, label }) => <section key={id} className="task-column" data-task-column={id} aria-labelledby={`tasks-${id}`}>
         <h2 id={`tasks-${id}`} className="task-column-title">{label}<span>{grouped[id].length}</span></h2>

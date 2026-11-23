@@ -1,5 +1,5 @@
 export const COPY = {
-  emptyTasks: '还没有任务，新建一个就能开始',
+  emptyTasks: '这个会话还没有任务。在原会话说清要交付什么，就会出现在这里；换会话后这里只显示该会话的任务。',
   emptyDecisions: '暂无待处理审批',
   emptyEffects: '没有待核实的操作',
   serviceDown: '服务未连接',
