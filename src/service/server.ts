@@ -106,7 +106,8 @@ export type ServerQueries = {
   listEvents: (fromSeq: number, limit: number) => { rows: unknown[]; as_of_seq: number }
   listEventHistory: (params: Parameters<typeof listEventHistory>[1]) => ReturnType<typeof listEventHistory>
   listExecutionHistory: (params: Parameters<typeof listExecutionHistory>[1]) => ReturnType<typeof listExecutionHistory>
-  listTaskSummaries: (params: ListTaskParams) => { items: TaskSummary[]; next_cursor: string | null; as_of_seq: number }
+  listTaskSummaries: (params: ListTaskParams) =>
+    { items: TaskSummary[]; next_cursor: string | null; lane_counts?: Partial<Record<string, number>>; as_of_seq: number }
   getTaskSummary: (taskId: string, now: number) => { item: TaskSummary; as_of_seq: number }
   getWorkspaceOverview: () => { item: WorkspaceOverview; as_of_seq: number }
   listRuns: (opts: { task_id?: string; workflow_id?: string; limit?: number; cursor?: string }) => {
@@ -647,7 +648,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
           archived: archive === '1', updated_from: from, updated_before: before,
           now: Date.parse(requestNow),
         })
-        sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, next_cursor: result.next_cursor }))
+        sendJson(res, 200, okEnvelope(result.as_of_seq, {
+          items: result.items, next_cursor: result.next_cursor, lane_counts: result.lane_counts ?? {},
+        }))
       } else {
         const limit = Math.min(intParam(url, 'limit', 50), 200)
         sendJson(res, 200, okEnvelope(deps.asOfSeq(), { items: deps.listTasks(limit) }))

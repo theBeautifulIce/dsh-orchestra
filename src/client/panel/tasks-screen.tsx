@@ -148,6 +148,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   const lastReloadVersion = useRef(reloadVersion)
   const expandedRunId = view === 'board' && !filter.archived
     ? items.find((task) => task.task_id === expandedTaskId)?.current_run_id ?? null : null
+  const [laneCounts, setLaneCounts] = useState<Partial<Record<TaskLane, number>>>({})
   const boardSteps = useRunStepSnapshot(api, expandedRunId, reload, true)
   const openBranches = useMemo(() => new Set<string>(), [api, expandedTaskId, expandedRunId])
 
@@ -167,6 +168,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
       if (!current) return
       setItems((previous) => mergeByTaskId(cursor ? previous : [], result.data.items))
       setNextCursor(result.data.next_cursor)
+      setLaneCounts((result.data as { lane_counts?: Partial<Record<TaskLane, number>> }).lane_counts ?? {})
       onSnapshot?.(result.as_of_seq)
     }).catch(() => {
       if (!current) return
@@ -279,10 +281,10 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
     {!loading && !error && items.length === 0 && <div style={emptyStyle}>{filter.archived ? '归档箱没有符合条件的任务。'
       : Object.values(filter).some(Boolean) ? '没有符合筛选条件的任务。'
         : COPY.emptyTasks}</div>}
-    {!filter.archived && view === 'board' && <TaskBoardScroll>{(!loading || items.length > 0) && <div className="task-board">
+    {!filter.archived && view === 'board' && !error && <TaskBoardScroll>{(!loading || items.length > 0) && <div className="task-board">
       {TASK_LANES.map(({ id, label }) => <section key={id} className="task-column" data-task-column={id} aria-labelledby={`tasks-${id}`}>
-        <h2 id={`tasks-${id}`} className="task-column-title">{label}<span>{grouped[id].length}</span></h2>
-        {grouped[id].length === 0 && <p className="task-column-empty">暂无任务</p>}
+        <h2 id={`tasks-${id}`} className="task-column-title">{label}<span>{laneCounts[id] ?? grouped[id].length}</span></h2>
+        {grouped[id].length === 0 && <p className="task-column-empty">{(laneCounts[id] ?? 0) > 0 ? '此页暂无，继续加载可看到' : '暂无任务'}</p>}
         {grouped[id].map((task) => <TaskCard key={task.task_id} task={task} selected={task.task_id === selectedTaskId} compact={Boolean(selectedTaskId)}
           expanded={expandedTaskId === task.task_id} onExpand={() => setExpandedTaskId((selected) => selected === task.task_id ? null : task.task_id)}
           steps={expandedTaskId === task.task_id && expandedRunId &&
