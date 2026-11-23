@@ -144,6 +144,8 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
   }
   const pending = ['proposed', 'needs_human_approval'].includes(item.status)
   const escalated = item.status === 'escalated'
+  // 普通授权只接受单份原件：多份时先把可用路径说清楚，别给必被拒的按钮（D05）。
+  const multiSource = (item.source_artifact_count ?? 0) > 1
   const mayDecline = (pending || escalated) && history?.attempts.length === 0
   return <article style={box} aria-label={`第 ${item.round_no} 轮返工`}>
     <h3>{labels[item.status] ?? operatorStatus(item.status)} · 第 {item.round_no} / {item.max_rounds} 轮</h3>
@@ -175,7 +177,8 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged }: {
     <details><summary>返工与验收历史</summary>{history ? <><ol>{history.attempts.map(a => <li key={a.attempt_id}>第 {a.round_no} 轮 · {labels[a.status] ?? a.status}<p>{a.feedback}</p><p>{a.source_artifact_id} → {a.result_artifact_id ?? '等待修订成果'}</p><p>{a.created_at}</p></li>)}</ol><ol>{history.reviews.map(r => <li key={r.review_id}>第 {r.round_no} 轮 · {r.reviewer_actor} · {r.action === 'accept' ? '验收通过' : r.action === 'request_changes' ? '要求修改' : r.action === 'authorize' ? '授权返工' : r.action === 'reject' ? '不批准' : '升级处理'}<p>{r.note}</p>{r.artifact_id && <p>验收版本 {r.artifact_id} · {r.artifact_hash}</p>}<p>{r.created_at}</p></li>)}</ol></> : <p>尚未读取历史。</p>}</details>
     {commands && (pending || review || escalated) && <fieldset disabled={!canWrite || interactionBusy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
       <label style={field}>具体修改意见或处理说明<textarea value={note} onChange={e => setNote(e.target.value)} rows={3} /></label>
-      <div style={actions}>{pending && <button type="button" disabled={!note.trim() || item.suggested_scope === 'replan_subgraph'} onClick={() => void act('authorize')}>授权返工</button>}
+      {pending && multiSource && <p role="status">这一步登记了 {item.source_artifact_count} 份成果，普通授权只能处理其中一份。请改用「提交局部重规划需求」，或先作废多余版本再授权。</p>}
+      <div style={actions}>{pending && <button type="button" disabled={!note.trim() || item.suggested_scope === 'replan_subgraph' || multiSource} onClick={() => void act('authorize')}>授权返工</button>}
         {review && <><button type="button" disabled={!revised || !note.trim()} onClick={() => void act('accept')}>通过验收</button><button type="button" disabled={!note.trim()} onClick={() => void act('request_changes')}>要求修改</button></>}
         {!escalated && <button type="button" disabled={!note.trim()} onClick={() => void act('escalate')}>升级处理</button>}{mayDecline && <button type="button" disabled={!note.trim()} onClick={() => void act('reject')}>不批准返工</button>}
         <button type="button" disabled={!note.trim()} onClick={()=>setTerminationConfirm(true)}>终止本次运行</button></div>

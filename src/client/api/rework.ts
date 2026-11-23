@@ -3,7 +3,7 @@ import { newOperationId } from './workflow-commands.ts'
 import type { OperationRow } from './types.ts'
 import type { ReworkRequest, ReworkAttempt, ReworkReview as ReviewRecord } from '../../service/rework-coordinator.ts'
 import type { InspectionInput, InspectionResult, ReworkInspection } from '../../service/rework-inspection.ts'
-export type ReworkItem = ReworkRequest
+export type ReworkItem = ReworkRequest & { source_artifact_count?: number }
 export type ReworkDetail = {
   request: ReworkRequest
   attempts: ReworkAttempt[]

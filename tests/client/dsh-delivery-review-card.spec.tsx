@@ -64,3 +64,31 @@ it.each(['accept', 'request_changes'] as const)('allows a human to inspect and %
     vi.unstubAllGlobals()
   }
 })
+
+it('requires taking a readable version before accepting a result that has no in-chat preview', async () => {
+  const sessionId = 'source-session'
+  const workspaceId = 'workspace'
+  const artifact = {
+    run_id: 'run-fixture', artifact_id: 'report-version', sha256: 'a'.repeat(64),
+    file_name: 'big.md', created_at: '2026-11-21T01:00:00Z', retain_until: null, expired: false, size_bytes: 9000,
+  }
+  const scope: DshDeliveryReview = { sessionId, workspaceId, reviews: [{
+    title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact,
+    nodeRunId: 'current-attempt', nodeRevision: 5, otherArtifacts: false,
+  }] }
+  const sources = {
+    sessions: { list: { getSnapshot: () => ({ byId: { [sessionId]: { id: sessionId, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } },
+    workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId, sessionIds: [sessionId] }], archivedSessionIds: [] }), subscribe: () => () => {} } },
+  }
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true, schema_version: 1, as_of_seq: 1,
+    data: { items: [{ node_run_id: 'current-attempt', status: 'held' }] } })))
+  const view = await renderPanel(<DshDeliveryReviewCard scope={scope} sources={sources} />)
+  const button = (text: string) => view.findAll('button').find(element => element.textContent === text)!
+  try {
+    // 没有会话内全文：先给出取得版本的入口，确认前不能通过。
+    expect((button('通过验收') as HTMLButtonElement).disabled).toBe(true)
+    const confirm = view.findAll('input').find(input => (input as HTMLInputElement).type === 'checkbox') as HTMLInputElement
+    await act(async () => { confirm.click() })
+    expect((button('通过验收') as HTMLButtonElement).disabled).toBe(false)
+  } finally { view.unmount() }
+})

@@ -31,9 +31,13 @@ function Review({ review, api, commands }: {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [unconfirmed, setUnconfirmed] = useState<string>()
+  // 没有会话内全文时，先取到这一版再确认；下载只代表取得文件，不宣称已读（D08）。
+  const [opened, setOpened] = useState(false)
   const locked = useRef(false)
   const retention = useArtifactRetention(artifact)
+  const readInChat = review.preview !== undefined
   const enabled = retention === 'available' && !review.otherArtifacts && !busy && !notice && !unconfirmed
+    && (readInChat || opened)
 
   async function submit(action: 'accept' | 'request_changes') {
     if (!enabled || locked.current || action === 'request_changes' && (!reason.trim() || !revised && !expected.trim())) return
@@ -105,8 +109,12 @@ function Review({ review, api, commands }: {
     <ArtifactContent api={api} artifact={artifact} />
     {review.otherArtifacts ? <p>这个步骤还有其他成果。请在 Orchestra 的任务结果中核对完整交付再提交结论。</p>
       : <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+        {!readInChat && retention === 'available' && <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" checked={opened} onChange={event => setOpened(event.currentTarget.checked)} />
+          我已打开或下载这一版成果
+        </label>}
         <button type="button" disabled={!enabled || editing} onClick={() => void submit('accept')}>通过验收</button>
-        <button type="button" disabled={!enabled} aria-expanded={editing} onClick={() => setEditing(!editing)}>要求修改</button>
+        <button type="button" disabled={!enabled || editing} aria-expanded={editing} onClick={() => setEditing(!editing)}>要求修改</button>
       </div>}
     {editing && !notice && <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
       <label>具体修改意见<textarea value={reason} maxLength={2500} rows={3} onChange={event => setReason(event.currentTarget.value)} style={{ display: 'block', width: '100%' }} /></label>

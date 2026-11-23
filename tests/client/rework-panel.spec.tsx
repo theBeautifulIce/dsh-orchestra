@@ -419,3 +419,17 @@ describe('成果审核与返工', () => {
     await expect(createReworkApi(client).review({ request_id: 'rw1', expected_revision: 3, action: 'accept', note: '符合要求' })).rejects.toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN', details: { operation_id: expect.any(String) } })
   })
 })
+
+  it('closes the ordinary authorize entry when the step has more than one source artifact', async () => {
+    const { client, posts } = clientFor({ ...request, status: 'needs_human_approval', source_artifact_count: 2 })
+    const view = await renderPanel(<ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)} runId="r1" />)
+    await view.flush()
+    const reason = view.findAll('textarea')[0]!
+    await fill(reason, '按新要求修改')
+    expect(view.text()).toContain('这一步登记了 2 份成果')
+    const button = view.findAll('button').find(b => b.textContent === '授权返工')!
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    await view.click(button)
+    expect(posts.some(post => post.path === '/v1/rework/review')).toBe(false)
+    view.unmount()
+  })

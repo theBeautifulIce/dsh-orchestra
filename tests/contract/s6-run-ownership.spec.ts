@@ -179,3 +179,39 @@ it('accepts one review generation only, so a second page cannot overwrite a subm
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+it('confirms a multi-file step against the review set captured at hold time', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-review-set-'))
+  let fixture: Awaited<ReturnType<typeof boot>> | undefined
+  try {
+    fixture = await boot(dir, 'S6')
+    await install(fixture)
+    const started = await fixture.post<{ run_id: string }>('/v1/runs/start', startInput(), primarySession)
+    const runId = started.data!.run_id
+    const nodeRunId = String(fixture.db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id='source'").get(runId)?.node_run_id)
+    const dispatch = await fixture.post('/v1/runs/dispatch', { runId, nodes: {
+      source: { tools: [{ command: tool, args: [], cwd: '.', timeoutMs: 5_000 }], input: {}, outputSchema: {} },
+    } })
+    expect(dispatch).toMatchObject({ status: 200 })
+    const report = registerRunArtifact(fixture.db, { artifactId: 'set-report', runId, nodeRunId, fileName: 'report.md', bytes: Buffer.from('report body') })
+    const detail = registerRunArtifact(fixture.db, { artifactId: 'set-detail', runId, nodeRunId, fileName: 'data.csv', bytes: Buffer.from('a,b') })
+    // 留验在成果登记之后：这一轮的应审清单就固定为这两份。
+    expect(await fixture.post('/v1/rework/hold', hold(runId, nodeRunId), primarySession)).toMatchObject({ status: 200 })
+    const accept = (artifact: { artifact_id: string; sha256: string }) => ({ operation_id: uuidv7(), run_id: runId,
+      node_run_id: nodeRunId, action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+    const first = await fixture.post<{ status: string; pending?: string[] }>('/v1/rework/hold', accept(report), primarySession)
+    expect(first).toMatchObject({ status: 200, data: { status: 'held', pending: ['data.csv'] } })
+    expect(fixture.db.raw.prepare('SELECT status FROM delivery_review_holds WHERE run_id=?').get(runId)).toMatchObject({ status: 'held' })
+    expect(fixture.db.raw.prepare("SELECT status FROM runs WHERE run_id=?").get(runId)).toMatchObject({ status: 'running' })
+    // 留验之后才登记的版本不在这一轮清单里，不能混进来。
+    const late = registerRunArtifact(fixture.db, { artifactId: 'set-late', runId, nodeRunId, fileName: 'late.md', bytes: Buffer.from('late') })
+    expect(await fixture.post('/v1/rework/hold', accept(late), primarySession))
+      .toMatchObject({ status: 409, error: { code: 'CONFIRMATION_MISMATCH' } })
+    expect(await fixture.post('/v1/rework/hold', accept(detail), primarySession))
+      .toMatchObject({ status: 200, data: { status: 'accepted' } })
+    expect(fixture.db.raw.prepare('SELECT status FROM delivery_review_holds WHERE run_id=?').get(runId)).toMatchObject({ status: 'accepted' })
+  } finally {
+    await fixture?.service.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

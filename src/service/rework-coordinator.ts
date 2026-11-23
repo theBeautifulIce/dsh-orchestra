@@ -374,10 +374,18 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
       return withReadTx(db, ({ tx, as_of_seq }) => {
         if (typeof actor === 'string') {
           if (options.humanOnly && runId) requireReviewOperator(tx, secret, actor, runId, true)
-          return { items: tx.all<ReworkRequest>('SELECT * FROM rework_requests WHERE owner_actor=? AND (? IS NULL OR run_id=?) ORDER BY created_at DESC,request_id DESC LIMIT 100', [actor, runId ?? null, runId ?? null]), as_of_seq }
+          return { items: tx.all<ReworkRequest & { source_artifact_count: number }>(`SELECT r.*,
+            (SELECT COUNT(*) FROM artifact_contents c WHERE c.node_run_id = r.target_node_run_id) AS source_artifact_count
+            FROM rework_requests r WHERE r.owner_actor=? AND (? IS NULL OR r.run_id=?)
+            ORDER BY r.created_at DESC,r.request_id DESC LIMIT 100`, [actor, runId ?? null, runId ?? null]), as_of_seq }
         }
         const node = bound(tx, actor)
-        return { items: tx.all<ReworkRequest>('SELECT r.* FROM rework_requests r LEFT JOIN node_runs q ON q.node_run_id=r.requester_node_run_id JOIN node_runs t ON t.node_run_id=r.target_node_run_id WHERE r.run_id=? AND (? IS NULL OR r.run_id=?) AND (q.node_id=? OR t.node_id=?) ORDER BY r.created_at DESC,r.request_id DESC LIMIT 100', [node.run_id, runId ?? null, runId ?? null, node.node_id, node.node_id]), as_of_seq }
+        return { items: tx.all<ReworkRequest & { source_artifact_count: number }>(`SELECT r.*,
+          (SELECT COUNT(*) FROM artifact_contents c WHERE c.node_run_id = r.target_node_run_id) AS source_artifact_count
+          FROM rework_requests r LEFT JOIN node_runs q ON q.node_run_id=r.requester_node_run_id
+          JOIN node_runs t ON t.node_run_id=r.target_node_run_id
+          WHERE r.run_id=? AND (? IS NULL OR r.run_id=?) AND (q.node_id=? OR t.node_id=?)
+          ORDER BY r.created_at DESC,r.request_id DESC LIMIT 100`, [node.run_id, runId ?? null, runId ?? null, node.node_id, node.node_id]), as_of_seq }
       })
     },
     get(requestId: string, actor: ReworkActor) {
