@@ -3,7 +3,8 @@ import { readReleaseGateCard, type ReleaseGateCardState } from '../release-workf
 import type { TaskLane, TaskOrigin } from '../../core/task-workspace.ts'
 import type { Autonomy } from '../runs.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
-import { UNVERIFIED_EFFECT, UNVERIFIED_EFFECT_OCCURRED } from '../../infra/db/unverified-effects.ts'
+import { UNVERIFIED_EFFECT_OCCURRED } from '../../infra/db/unverified-effects.ts'
+import { reviewFilesForDoneAttempt } from '../review-manifest.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { attentionWeight, deriveAttention, maxSideEffectLevel, DELIVERY_ACCEPTANCE, type Attention, type DeliveryAcceptance, type SideEffectLevel } from './attention.ts'
 import { withReadTx, type ReadTx } from './read-tx.ts'
@@ -57,6 +58,8 @@ function deliveryAcceptanceOf(value: unknown): DeliveryAcceptance {
 }
 
 export type ListTaskParams = {
+  /** 只由已认证的服务请求传入。 */
+  actor?: string
   status?: string
   attention?: Attention
   query?: string
@@ -152,15 +155,32 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
 // 当前根运行的整棵运行树：子流程的人工事项也要算在父任务上（T02）。
 const CURRENT_TREE = `(WITH RECURSIVE tree(run_id) AS (
     SELECT t.current_run_id WHERE t.current_run_id IS NOT NULL
-    UNION ALL SELECT c.run_id FROM runs c JOIN tree ON c.parent_run_id = tree.run_id
+    UNION SELECT c.run_id FROM runs c JOIN tree ON c.parent_run_id = tree.run_id AND c.task_id = t.task_id
   ) SELECT run_id FROM tree)`
-// 真的开始过执行的步骤才算“外部操作待核验”；排队中的可补偿步骤不算不可逆（T03）。
-const EXECUTED_NODE_STATUS = `n.status NOT IN ('queued','blocked_pre','dispatched','waiting')`
 const OPEN_DECISIONS = `FROM human_decision_inbox d WHERE d.run_id IN ${CURRENT_TREE}`
-const DELIVERY_REVIEWS = `FROM delivery_review_holds h
-  JOIN node_runs hn ON hn.run_id = h.run_id AND hn.node_id = h.node_id AND hn.replacement_node_run_id IS NULL
-  WHERE h.status = 'held' AND hn.status = 'done' AND h.run_id IN ${CURRENT_TREE}`
-const REWORK_ITEMS = `FROM rework_requests q WHERE q.status IN ('proposed','needs_human_approval','escalated')
+// 与实际办理入口一致：当前有效尝试和本轮返工成果都要进入待验收计数。
+const DELIVERY_REVIEWS = `FROM (
+  SELECT hn.node_run_id FROM delivery_review_holds h
+    JOIN runs hr ON hr.run_id=h.run_id AND hr.status='running' AND hr.cancel_requested_at IS NULL
+    JOIN node_runs hn ON hn.run_id=h.run_id AND hn.node_id=h.node_id
+      AND hn.replacement_node_run_id IS NULL AND hn.status='done'
+    WHERE (h.status='held' OR h.node_run_id<>hn.node_run_id) AND h.run_id IN ${CURRENT_TREE}
+      AND hn.attempt=(SELECT MAX(m.attempt) FROM node_runs m WHERE m.run_id=hn.run_id
+        AND m.node_id=hn.node_id AND m.replacement_node_run_id IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM rework_requests rq WHERE rq.run_id=h.run_id
+        AND (rq.target_node_run_id=hn.node_run_id OR rq.new_node_run_id=hn.node_run_id)
+        AND rq.status NOT IN ('closed','declined','cancelled'))
+  UNION
+  SELECT rn.node_run_id FROM rework_requests rq
+    JOIN runs rr ON rr.run_id=rq.run_id AND rr.status='running' AND rr.cancel_requested_at IS NULL
+    JOIN rework_attempts rw ON rw.request_id=rq.request_id AND rw.round_no=rq.round_no AND rw.status='awaiting_review'
+    JOIN node_runs rn ON rn.node_run_id=rq.new_node_run_id AND rn.node_run_id=rw.new_node_run_id
+      AND rn.run_id=rq.run_id AND rn.status='done' AND rn.replacement_node_run_id IS NULL
+    WHERE rq.status='awaiting_review' AND rq.run_id IN ${CURRENT_TREE}
+  )`
+const REWORK_ITEMS = `FROM rework_requests q
+  JOIN runs qr ON qr.run_id=q.run_id AND qr.status='running' AND qr.cancel_requested_at IS NULL
+  WHERE q.status IN ('proposed','needs_human_approval','escalated')
   AND q.run_id IN ${CURRENT_TREE}`
 const UNVERIFIED_NODES = `FROM node_runs n WHERE n.run_id IN ${CURRENT_TREE}
   AND ${UNVERIFIED_EFFECT_OCCURRED}`
@@ -232,7 +252,7 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}):
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > TASKS_LIMIT_MAX) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 ' + String(TASKS_LIMIT_MAX) + ' 条', { limit })
   const filter = {
-    status: params.status ?? null, attention: params.attention ?? null, query: params.query ?? null,
+    actor: params.actor ?? null, status: params.status ?? null, attention: params.attention ?? null, query: params.query ?? null,
     lane: params.lane ?? null, trigger_kind: params.trigger_kind ?? null, archived: params.archived === true,
     updated_from: params.updated_from ?? null, updated_before: params.updated_before ?? null,
   }
@@ -278,7 +298,7 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}):
     )) laneCounts[row.lane] = Number(row.count)
     const hasMore = rows.length > limit
     const page = hasMore ? rows.slice(0, limit) : rows
-    const items = attachNextActions(ctx.tx, page.map((row) => taskSummary(row, now)))
+    const items = attachNextActions(ctx.tx, page.map((row) => taskSummary(row, now)), params.actor, now)
     const last = page[page.length - 1]
     const nextCursor = hasMore && last
       ? encodeCursor(makeCursor('tasks', filter, `${last.sort_weight}\t${last.sort_at}`, last.task_id, ctx.as_of_seq, now))
@@ -298,61 +318,97 @@ export type TaskNextAction = {
   sha256?: string | null
   file_name?: string | null
   decision_id?: string | null
+  request_id?: string | null
 }
 
 /** 任务行只给一个最有用的动作；其余运行信息留在详情里（T01/T02/T10）。 */
-function attachNextActions(tx: ReadTx, items: TaskSummary[]): TaskSummary[] {
+function attachNextActions(tx: ReadTx, items: TaskSummary[], actor: string | undefined, now: number): TaskSummary[] {
   if (!items.length) return items
   const placeholders = items.map(() => '?').join(',')
   const ids = items.map((item) => item.task_id)
+  const at = new Date(now).toISOString()
   const tree = `(WITH RECURSIVE roots(task_id,run_id) AS (
       SELECT task_id,current_run_id FROM tasks WHERE task_id IN (${placeholders}) AND current_run_id IS NOT NULL
       UNION SELECT roots.task_id,c.run_id FROM roots JOIN runs c
         ON c.parent_run_id=roots.run_id AND c.task_id=roots.task_id
     ) SELECT task_id,run_id FROM roots)`
-  const holds = tx.all<{ task_id: string; run_id: string; node_id: string; node_run_id: string;
-    review_set_json: string | null; accepted_json: string | null; artifact_id: string | null; sha256: string | null;
-    file_name: string | null; updated_at: string }>(
-    `SELECT t.task_id,h.run_id,h.node_id,hn.node_run_id,h.review_set_json,h.accepted_json,h.updated_at,
-       a.artifact_id,a.sha256,c.file_name
-     FROM ${tree} t
-     JOIN delivery_review_holds h ON h.run_id=t.run_id AND h.status='held'
-     JOIN node_runs hn ON hn.run_id=h.run_id AND hn.node_id=h.node_id
-       AND hn.replacement_node_run_id IS NULL AND hn.status='done'
-     LEFT JOIN artifacts a ON a.run_id=h.run_id AND a.artifact_id=(
-       SELECT ra.artifact_id FROM artifacts ra JOIN artifact_contents rc USING(artifact_id)
-       WHERE ra.run_id=h.run_id AND rc.node_run_id=hn.node_run_id
-       ORDER BY ra.created_at DESC, ra.artifact_id DESC LIMIT 1)
-     LEFT JOIN artifact_contents c ON c.artifact_id=a.artifact_id
-     ORDER BY h.updated_at DESC`, ids)
+  type ReviewTarget = {
+    task_id: string; run_id: string; node_id: string; node_run_id: string;
+    request_id: string | null; review_set_json: string | null; accepted_json: string | null;
+    artifact_id: string | null; sha256: string | null; file_name: string | null;
+  }
+  const reviews = tx.all<ReviewTarget>(
+    `WITH current_tree AS ${tree}, targets AS (
+      SELECT t.task_id,h.run_id,hn.node_id,hn.node_run_id,NULL AS request_id,
+        CASE WHEN hn.node_run_id=h.node_run_id THEN h.review_set_json END AS review_set_json,
+        CASE WHEN hn.node_run_id=h.node_run_id THEN h.accepted_json END AS accepted_json,
+        NULL AS artifact_id,NULL AS sha256,NULL AS file_name,h.updated_at
+      FROM current_tree t JOIN delivery_review_holds h ON h.run_id=t.run_id
+      JOIN runs r ON r.run_id=h.run_id AND r.status='running' AND r.cancel_requested_at IS NULL
+      JOIN node_runs hn ON hn.run_id=h.run_id AND hn.node_id=h.node_id
+        AND hn.replacement_node_run_id IS NULL AND hn.status='done'
+      WHERE (h.status='held' OR h.node_run_id<>hn.node_run_id) AND (? IS NULL OR h.owner_actor=?)
+        AND hn.attempt=(SELECT MAX(n.attempt) FROM node_runs n
+          WHERE n.run_id=hn.run_id AND n.node_id=hn.node_id AND n.replacement_node_run_id IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM rework_requests q WHERE q.run_id=h.run_id
+          AND (q.target_node_run_id=hn.node_run_id OR q.new_node_run_id=hn.node_run_id)
+          AND q.status NOT IN ('closed','declined','cancelled'))
+      UNION ALL
+      SELECT t.task_id,q.run_id,n.node_id,n.node_run_id,q.request_id,
+        w.result_manifest_json,w.accepted_files_json,a.artifact_id,a.sha256,c.file_name,q.updated_at
+      FROM current_tree t JOIN rework_requests q ON q.run_id=t.run_id
+      JOIN runs r ON r.run_id=q.run_id AND r.status='running' AND r.cancel_requested_at IS NULL
+      JOIN rework_attempts w ON w.request_id=q.request_id AND w.round_no=q.round_no AND w.status='awaiting_review'
+      JOIN node_runs n ON n.node_run_id=q.new_node_run_id AND n.node_run_id=w.new_node_run_id
+        AND n.run_id=q.run_id AND n.status='done' AND n.replacement_node_run_id IS NULL
+      LEFT JOIN artifacts a ON a.artifact_id=w.result_artifact_id AND a.sha256=w.result_artifact_hash AND a.run_id=q.run_id
+      LEFT JOIN artifact_contents c ON c.artifact_id=a.artifact_id AND c.node_run_id=n.node_run_id
+      WHERE q.status='awaiting_review' AND q.expires_at>? AND (? IS NULL OR q.owner_actor=?)
+    ) SELECT * FROM targets ORDER BY updated_at DESC,task_id,node_run_id`,
+    [...ids,actor ?? null,actor ?? null,at,actor ?? null,actor ?? null])
+  const reviewByTask = new Map<string, TaskNextAction>()
+  for (const target of reviews) {
+    if (reviewByTask.has(target.task_id)) continue
+    let file = pendingFile(target.review_set_json, target.accepted_json)
+    if (!target.request_id && target.review_set_json === null) {
+      try {
+        const files = reviewFilesForDoneAttempt(tx, target.run_id, target.node_run_id, target.node_id, at, null)
+        file = pendingFile(JSON.stringify(files), target.accepted_json)
+      } catch (error) {
+        if (!(error instanceof OrchError)) throw error
+      }
+    }
+    if (target.request_id && target.review_set_json === null && target.artifact_id && target.sha256) {
+      file = { artifact_id: target.artifact_id, sha256: target.sha256, file_name: target.file_name }
+    }
+    reviewByTask.set(target.task_id, {
+      kind: 'review', label: file?.file_name ? `打开「${file.file_name}」验收` : '处理本轮留验',
+      run_id: target.run_id, node_id: target.node_id, node_run_id: target.node_run_id,
+      artifact_id: file?.artifact_id ?? null, sha256: file?.sha256 ?? null,
+      file_name: file?.file_name ?? null, request_id: target.request_id,
+    })
+  }
   const decisions = tx.all<{ task_id: string; run_id: string; decision_id: string }>(
     `SELECT t.task_id,d.run_id,d.decision_id FROM ${tree} t JOIN human_decision_inbox d ON d.run_id=t.run_id
      ORDER BY d.created_at,d.decision_id`, ids)
-  const reviewByTask = new Map<string, TaskNextAction>()
-  for (const hold of holds) {
-    if (reviewByTask.has(hold.task_id)) continue
-    const file = pendingFile(hold.review_set_json, hold.accepted_json)
-    reviewByTask.set(hold.task_id, {
-      kind: 'review', label: file?.file_name ? `打开「${file.file_name}」验收` : '打开成果验收',
-      run_id: hold.run_id, node_id: hold.node_id, node_run_id: hold.node_run_id,
-      artifact_id: file?.artifact_id ?? hold.artifact_id, sha256: file?.sha256 ?? hold.sha256,
-      file_name: file?.file_name ?? hold.file_name,
-    })
-  }
   const decisionByTask = new Map<string, TaskNextAction>()
   for (const decision of decisions) {
     if (decisionByTask.has(decision.task_id)) continue
     decisionByTask.set(decision.task_id, { kind: 'decision', label: '查看待批准事项', run_id: decision.run_id,
       decision_id: decision.decision_id })
   }
+  const reworks = tx.all<{ task_id: string; run_id: string; request_id: string }>(
+    `SELECT t.task_id,q.run_id,q.request_id FROM ${tree} t JOIN rework_requests q ON q.run_id=t.run_id
+     JOIN runs qr ON qr.run_id=q.run_id AND qr.status='running' AND qr.cancel_requested_at IS NULL
+     WHERE q.status IN ('proposed','needs_human_approval','escalated') AND (? IS NULL OR q.owner_actor=?)
+     ORDER BY q.created_at,q.request_id`, [...ids,actor ?? null,actor ?? null])
   return items.map((item) => {
     const review = reviewByTask.get(item.task_id)
     if (review) return { ...item, next_action: review }
     const decision = decisionByTask.get(item.task_id)
     if (decision) return { ...item, next_action: decision }
-    if ((item.rework_count ?? 0) > 0) {
-      return { ...item, next_action: { kind: 'rework', label: '处理返工待办', run_id: item.current_run_id } }
-    }
+    const rework = reworks.find(row => row.task_id === item.task_id)
+    if (rework) return { ...item, next_action: { kind: 'rework', label: '处理返工待办', run_id: rework.run_id, request_id: rework.request_id } }
     if ((item.open_decision_count > 0 || item.unverified_count > 0) && item.current_run_id) {
       return { ...item, next_action: { kind: 'progress', label: '查看进度', run_id: item.current_run_id } }
     }
@@ -360,14 +416,15 @@ function attachNextActions(tx: ReadTx, items: TaskSummary[]): TaskSummary[] {
   })
 }
 
-/** 留验清单里第一份还没确认的文件；还没封存时回落到最近登记件。 */
+/** 封存清单里第一份尚未确认的精确版本，不把旧封存改指向同名新版。 */
 function pendingFile(reviewSetJson: string | null, acceptedJson: string | null):
 { artifact_id: string; sha256: string; file_name: string | null } | null {
   const parse = (raw: string | null): Array<{ artifact_id?: unknown; sha256?: unknown; file_name?: unknown }> => {
     if (typeof raw !== 'string' || raw.length === 0) return []
     try {
       const value = JSON.parse(raw) as unknown
-      return Array.isArray(value) ? value as Array<{ artifact_id?: unknown; sha256?: unknown; file_name?: unknown }> : []
+      return Array.isArray(value) ? value.filter((item): item is { artifact_id?: unknown; sha256?: unknown; file_name?: unknown } =>
+        item !== null && typeof item === 'object' && !Array.isArray(item)) : []
     } catch { return [] }
   }
   const files = parse(reviewSetJson).flatMap((item) => typeof item.artifact_id === 'string' && typeof item.sha256 === 'string'
@@ -378,11 +435,11 @@ function pendingFile(reviewSetJson: string | null, acceptedJson: string | null):
   return pending ?? null
 }
 
-export function getTaskSummarySnapshot(db: Db, taskId: string, now = Date.now()): { item: TaskSummary; as_of_seq: number } {
+export function getTaskSummarySnapshot(db: Db, taskId: string, now = Date.now(), actor?: string): { item: TaskSummary; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const row = ctx.tx.get<TaskRow>(TASK_PAGE_START + 'task_id = ?) ' + TASK_SUMMARY_SELECT, [taskId])
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个任务', { task_id: taskId })
-    return { item: attachNextActions(ctx.tx, [taskSummary(row, now)])[0]!, as_of_seq: ctx.as_of_seq }
+    return { item: attachNextActions(ctx.tx, [taskSummary(row, now)], actor, now)[0]!, as_of_seq: ctx.as_of_seq }
   })
 }
 

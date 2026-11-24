@@ -13,7 +13,7 @@ it.each(['accept', 'request_changes'] as const)('allows a human to inspect and %
   }
   const scope: DshDeliveryReview = { sessionId, workspaceId, reviews: [{
     title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact, runId: 'run-fixture',
-    nodeRunId: 'current-attempt', nodeRevision: 5, otherArtifacts: false, preview: '计算数据',
+    nodeRunId: 'current-attempt', nodeRevision: 5, hold:{hold_id:'shown-hold',expected_revision:3}, otherArtifacts: false, preview: '计算数据',
   }] }
   const sources = {
     sessions: { list: { getSnapshot: () => ({ byId: { [sessionId]: { id: sessionId, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } },
@@ -53,12 +53,13 @@ it.each(['accept', 'request_changes'] as const)('allows a human to inspect and %
     await view.flush()
     const post = fetcher.mock.calls.find(([, init]) => init.method === 'POST')!
     expect(JSON.parse(String(post[1].body))).toMatchObject(action === 'accept' ? {
-      action, node_run_id: 'current-attempt', artifact_id: artifact.artifact_id, sha256: artifact.sha256,
+      action, hold_id:'shown-hold',expected_revision:3,node_run_id: 'current-attempt', artifact_id: artifact.artifact_id, sha256: artifact.sha256,
     } : {
       target_node_run_id: 'current-attempt', expected_revision: 5, source_artifact_id: artifact.artifact_id,
       source_artifact_hash: artifact.sha256, reason: '请更正退款', expected_result: '补充计算过程',
     })
     expect(view.text()).toContain(action === 'accept' ? '通过此版本' : '已登记修改意见')
+    expect(fetcher.mock.calls.every(([,init])=>init.method==='POST')).toBe(true)
   } finally {
     view.unmount()
     vi.unstubAllGlobals()
@@ -74,7 +75,7 @@ it('requires taking a readable version before accepting a result that has no in-
   }
   const scope: DshDeliveryReview = { sessionId, workspaceId, reviews: [{
     title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact, runId: 'run-fixture',
-    nodeRunId: 'current-attempt', nodeRevision: 5, otherArtifacts: false,
+    nodeRunId: 'current-attempt', nodeRevision: 5, hold:{hold_id:'shown-hold',expected_revision:3}, otherArtifacts: false,
   }] }
   const sources = {
     sessions: { list: { getSnapshot: () => ({ byId: { [sessionId]: { id: sessionId, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } },
@@ -109,7 +110,7 @@ it('offers withdraw, not acceptance, when a hold has no artifact yet', async () 
   const workspaceId = 'workspace'
   const scope: DshDeliveryReview = { sessionId, workspaceId, reviews: [{
     title: '报表复核', step: '计算净额', criteria: ['复核两位小数'], artifact: null, runId: 'run-fixture',
-    nodeRunId: 'current-attempt', nodeRevision: 5, otherArtifacts: false,
+    nodeRunId: 'current-attempt', nodeRevision: 5, hold:{hold_id:'shown-hold',expected_revision:3}, otherArtifacts: false,
   }] }
   const sources = {
     sessions: { list: { getSnapshot: () => ({ byId: { [sessionId]: { id: sessionId, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } },
@@ -128,6 +129,6 @@ it('offers withdraw, not acceptance, when a hold has no artifact yet', async () 
     expect(view.text()).toContain('还没有登记任何成果文件')
     expect(button('通过验收')).toBeUndefined()
     await view.click(button('撤销留验')!)
-    expect(posts[0]).toMatchObject({ path: '/v1/rework/hold', body: { run_id: 'run-fixture', action: 'withdraw' } })
+    expect(posts[0]).toMatchObject({ path: '/v1/rework/hold', body: { run_id: 'run-fixture', action: 'withdraw',hold_id:'shown-hold',expected_revision:3 } })
   } finally { view.unmount() }
 })

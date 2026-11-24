@@ -1,3 +1,5 @@
+import { PlanMaterialPanel, PlanMaterialList } from './plan-material-panel.tsx'
+import { PlanningProgressPanel } from './planning-progress.tsx'
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiError } from '../api/client.ts'
 import type { ResourcesApi } from '../api/resources.ts'
@@ -61,18 +63,30 @@ export function TaskPlanBrief({ api, taskId }: { api: ResourcesApi; taskId: stri
   }, [api, taskId])
   if (record?.taskId !== taskId) return null
   return <section aria-label="已确认任务简报" style={panelStyle}>
-    <strong>任务简报</strong><Brief plan={record.plan} />
+    <strong>任务简报</strong><Brief plan={record.plan} /><PlanMaterialList plan={record.plan} api={api}/>
   </section>
 }
 
 export type WorkflowPlanRequest = { id: string; version: string; goal: string }
+type PlanFormBusy = 'propose' | 'start' | 'discard' | 'materials' | null
 
-export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequest, onClearWorkflow }: {
+type TaskPlanFormProps = {
   api: ResourcesApi; commands: TaskCommands; onStarted?: (taskId: string) => void
   onOpenRun?: (taskId: string, trigger: HTMLButtonElement, runId: string) => void
   workflowRequest?: WorkflowPlanRequest
   onClearWorkflow?: () => void
-}) {
+}
+
+export function TaskPlanForm(props:TaskPlanFormProps) {
+  const [source,setSource]=useState({api:props.api,commands:props.commands,epoch:0})
+  if(source.api!==props.api || source.commands!==props.commands)
+    setSource({api:props.api,commands:props.commands,epoch:source.epoch+1})
+  return <TaskPlanFormBody key={source.epoch} {...props}/>
+}
+
+function TaskPlanFormBody({api,commands,onStarted,onOpenRun,workflowRequest,onClearWorkflow}:TaskPlanFormProps) {
+  const active=useRef(true)
+  useEffect(()=>{active.current=true;return()=>{active.current=false}},[])
   const [open, setOpen] = useState(Boolean(workflowRequest))
   const [capability, setCapability] = useState<'loading' | 'enabled' | 'unavailable' | 'error'>('loading')
   const [goal, setGoal] = useState(workflowRequest?.goal ?? '')
@@ -81,14 +95,31 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
   const [draftReadFailed, setDraftReadFailed] = useState(false)
   const [draftRetry, setDraftRetry] = useState(0)
   const [drafts, setDrafts] = useState<TaskPlanView[]>([])
+  const [draftPage, setDraftPage] = useState<string | undefined>(undefined)
+  const [draftNext, setDraftNext] = useState<string | null>(null)
+  const [draftLoading, setDraftLoading] = useState(false)
+  const [editingDraft, setEditingDraft] = useState<TaskPlanView | null>(null)
+  const scopeVersion = useRef(0)
   const [confirmed, setConfirmed] = useState(false)
-  const [busy, setBusy] = useState<'propose' | 'start' | null>(null)
+  const [busy, setBusyState] = useState<PlanFormBusy>(null)
+  const busyRef = useRef<PlanFormBusy>(null)
+  // Close the response race immediately, before React commits the disabled UI.
+  function setBusy(value: PlanFormBusy | ((previous: PlanFormBusy) => PlanFormBusy)) {
+    const next = typeof value === 'function' ? value(busyRef.current) : value
+    busyRef.current = next
+    setBusyState(next)
+  }
   const proposal = useRef<AbortController | null>(null)
   const [proposalCancelled, setProposalCancelled] = useState(false)
   const [failure, setFailure] = useState('')
   useLayoutEffect(() => {
+    scopeVersion.current += 1
+    setEditingDraft(null)
+    setDraftPage(undefined)
+    setDraftNext(null)
     setBusy((value) => value === 'propose' ? null : value)
     return () => {
+      scopeVersion.current += 1
       proposal.current?.abort()
       proposal.current = null
     }
@@ -108,14 +139,20 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
     if (!open || capability !== 'enabled') return
     let current = true
     setDraftReadFailed(false)
-    setDrafts([])
-    void api.listPlanDrafts().then(({ data }) => {
-      if (current) setDrafts(data.items)
+    setDraftLoading(true)
+    if (!draftPage) setDrafts([])
+    void api.listPlanDrafts(undefined, draftPage).then(({ data }) => {
+      if (!current) return
+      setDrafts(previous => draftPage ? [...new Map([...previous, ...data.items].map(item => [item.plan_id, item])).values()] : data.items)
+      setDraftNext(data.next_cursor ?? null)
     }).catch(() => { if (current) setDraftReadFailed(true) })
+      .finally(() => { if (current) setDraftLoading(false) })
     return () => { current = false }
-  }, [api, open, capability, draftRetry])
+  }, [api, open, capability, draftRetry, draftPage])
 
   function resume(draft: TaskPlanView) {
+    if (busyRef.current !== null) return
+    setEditingDraft(null)
     setGoal(draft.brief.goal)
     setCriteria(draft.brief.requirements.map((entry) => entry.text).join('\n'))
     setFailure('')
@@ -125,7 +162,7 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
 
   async function propose(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (busy || proposal.current || !goal.trim()) return
+    if (busyRef.current || proposal.current || !goal.trim()) return
     const requirements = criteria.split('\n').map((entry) => entry.trim()).filter(Boolean)
     if (requirements.length > 12 || requirements.some((entry) => entry.length > 300)) {
       setFailure('最多 12 项要求，每项不超过 300 字。')
@@ -140,8 +177,10 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
     try {
       const pin = workflowRequest
         ? { workflow_id: workflowRequest.id, workflow_version: workflowRequest.version }
-        : undefined
-      const proposed = await commands.proposeTaskPlan(goal.trim(), requirements, request.signal, pin)
+        : editingDraft?.brief.workflow_id ? { workflow_id: editingDraft.brief.workflow_id,
+          workflow_version: editingDraft.brief.workflow_version } : undefined
+      const revises = editingDraft ? { plan_id: editingDraft.plan_id, content_hash: editingDraft.content_hash } : undefined
+      const proposed = await commands.proposeTaskPlan(goal.trim(), requirements, request.signal, pin, revises)
       if (proposal.current !== request) return
       if (workflowRequest && (proposed.proposal.workflow_id !== workflowRequest.id
         || proposed.proposal.workflow_version !== workflowRequest.version)) {
@@ -149,6 +188,9 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
         return
       }
       setPlan(proposed)
+      setEditingDraft(null)
+      setDraftPage(undefined)
+      setDraftRetry(value => value + 1)
     } catch (error) {
       if (proposal.current === request) setFailure(proposalFailure(error))
     } finally {
@@ -160,18 +202,43 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
   }
 
   async function start() {
-    if (busy || !confirmed || !plan?.quality.ready || plan.launch) return
+    if (busyRef.current || !confirmed || !plan?.quality.ready || plan.launch) return
+    const version = scopeVersion.current
     setBusy('start')
     setFailure('')
     try {
       const launch = await commands.confirmTaskPlan(plan.plan_id, plan.content_hash)
+      if (!active.current || version !== scopeVersion.current) return
       setPlan({ ...plan, launch })
+      setDrafts(items => items.filter(item => item.plan_id !== plan.plan_id))
       onStarted?.(launch.task_id)
-    } catch (error) { setFailure(error instanceof Error ? error.message : '暂未获取启动回执。') }
-    finally { setBusy(null) }
+    } catch (error) {
+      if (version === scopeVersion.current) setFailure(error instanceof Error ? error.message : '暂未获取启动回执。')
+    } finally { if (version === scopeVersion.current) setBusy(null) }
   }
 
-  return <details style={panelStyle} open={open} onToggle={(event) => {
+  async function discard(draft: TaskPlanView) {
+    if (busyRef.current) return
+    const version = scopeVersion.current
+    setBusy('discard')
+    setFailure('')
+    try {
+      await commands.discardTaskPlan(draft.plan_id, draft.content_hash)
+      if (version !== scopeVersion.current) return
+      setDraftPage(undefined)
+      setDraftRetry(value => value + 1)
+      if (plan?.plan_id === draft.plan_id) setPlan(null)
+      if (editingDraft?.plan_id === draft.plan_id) setEditingDraft(null)
+      setConfirmed(false)
+    } catch (error) {
+      if (version === scopeVersion.current) setFailure(error instanceof Error ? error.message : '计划尚未放弃，请重试。')
+    } finally { if (version === scopeVersion.current) setBusy(null) }
+  }
+
+  return <><PlanningProgressPanel api={api} disabled={busy !== null} onResume={value=>{
+    if (busyRef.current !== null) return
+    setOpen(true);resume(value)
+  }}/><details style={panelStyle} open={open} onToggle={(event) => {
     if (event.target !== event.currentTarget) return
     const opened = event.currentTarget.open
     if (!opened && proposal.current) {
@@ -189,12 +256,16 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
       </button>}
       {draftReadFailed && <p aria-live="polite">未能读取未启动的计划。 <button type="button"
         onClick={() => setDraftRetry(n => n + 1)}>重新读取</button></p>}
+      {draftLoading && <p style={descriptionStyle} aria-live="polite">正在读取未启动的计划…</p>}
+      {draftNext && !draftReadFailed && <button type="button" disabled={draftLoading || busy !== null}
+        onClick={() => setDraftPage(draftNext)}>加载更早的计划</button>}
       {drafts.length > 0 && <details style={detailStyle} open={!plan && drafts.length > 0}>
         <summary>继续未启动的计划（{drafts.length}）</summary>
         <ul style={listStyle}>
           {drafts.map((draft) => <li key={draft.plan_id}>
             <button type="button" style={editStyle} disabled={busy !== null} onClick={() => resume(draft)}>{draft.proposal.title}</button>
             <span style={descriptionStyle}> · {draft.proposal.steps.length} 步 · {formatDraftTime(draft)}</span>
+            <PanelCommandButton disabled={busy !== null} onClick={() => { void discard(draft) }}>放弃计划</PanelCommandButton>
           </li>)}
         </ul>
         <p style={descriptionStyle}>取回后会重新显示计划内容，确认启动前仍可修改目标与要求。</p>
@@ -203,6 +274,7 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
       {capability === 'unavailable' && <p role="status" style={descriptionStyle}>当前宿主尚未启用主脑规划。</p>}
       {capability === 'error' && <p role="alert" style={descriptionStyle}>暂时无法获取主脑规划状态。</p>}
       {capability === 'enabled' && !plan && <div>
+        <p style={descriptionStyle}>需要本地材料时，请先在这里生成计划，再在「为本次任务补充材料」中选择文件和可读取步骤，最后确认启动。</p>
         <form onSubmit={(event) => { void propose(event) }} style={contentStyle} aria-busy={busy === 'propose'}>
           <label style={contentStyle}>要完成什么
             <textarea required rows={3} maxLength={2000} value={goal} disabled={busy !== null} autoFocus={Boolean(workflowRequest)}
@@ -221,6 +293,7 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
           {proposalCancelled && <p style={descriptionStyle}>已取消生成，输入已保留。可以重新生成计划。</p>}
         </div>
       </div>}
+      {editingDraft && <p style={descriptionStyle}>正在调整「{editingDraft.proposal.title}」。新计划保存成功后，原计划将被替代。</p>}
       {plan && <section style={contentStyle} aria-label="计划复核">
         <h2 style={headingStyle}>{plan.proposal.title}</h2>
         <details style={detailStyle}><summary>固定流程版本</summary>
@@ -251,6 +324,10 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
           </li>)}</ul>
 
         </details>
+        {!plan.launch && <PlanMaterialPanel key={plan.plan_id} plan={plan} api={api} commands={commands}
+          onPlan={next=>{setPlan(next);setConfirmed(false);setDraftPage(undefined);setDraftRetry(n=>n+1);setBusy(null)}}
+          onBusy={value=>setBusy(value?'materials':null)}/>}
+        {plan.launch && <PlanMaterialList plan={plan} api={api}/>}
         {!plan.launch && <div style={contentStyle}>
           {plan.quality.ready && <>
             <label><input type="checkbox" checked={confirmed} disabled={busy !== null}
@@ -260,7 +337,8 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
             </PanelCommandButton>
           </>}
           <button type="button" disabled={busy !== null} style={editStyle}
-            onClick={() => { setPlan(null); setConfirmed(false); setFailure('') }}>调整目标并重新规划</button>
+            onClick={() => { setEditingDraft(plan); setPlan(null); setConfirmed(false); setFailure('') }}>调整目标并重新规划</button>
+          <PanelCommandButton disabled={busy !== null} onClick={() => { void discard(plan) }}>放弃这份计划</PanelCommandButton>
         </div>}
         {plan.launch && <div>
           <p role="status" style={descriptionStyle}>已建立受监督的任务运行。</p>
@@ -271,7 +349,7 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
       </section>}
       {failure && <p role="alert" style={{ ...descriptionStyle, color: COLOR.danger }}>{failure}</p>}
     </div>
-  </details>
+  </details></>
 }
 
 const panelStyle = { padding: 12, border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.surface, color: COLOR.ink }

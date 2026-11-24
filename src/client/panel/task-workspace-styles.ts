@@ -2,7 +2,8 @@ import { COLOR, FONT_PX } from './tokens.ts'
 
 export const TASK_WORKSPACE_CSS = `
 .task-workspace { min-width: 0; }
-.task-list { display: grid; gap: 16px; min-width: 0; }
+.task-list { container-type: inline-size; container-name: task-list; display: grid; gap: 16px; min-width: 0; }
+.task-scope { margin: 0 0 5px; color: ${COLOR.inkMuted}; font-size: ${FONT_PX.menu}px; }
 .task-page-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; }
 .task-launch-form { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; border: 1px solid ${COLOR.line}; border-radius: 8px; padding: 10px; }
 .task-launch-form label { display: grid; gap: 3px; font-size: ${FONT_PX.menu}px; }
@@ -206,7 +207,16 @@ export const TASK_META_CSS = `
 .task-card-tech span { margin-right: 8px; }
 `
 export const NARROW_TASK_CSS = `
-@container (max-width: 520px) {
+@container task-list (max-width: 680px) {
+  .task-table-scroll { overflow: visible; }
+  .task-table { display: block; min-width: 0; width: 100%; }
+  .task-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .task-table tbody { display: grid; gap: 10px; }
+  .task-table tr { display: grid; min-width: 0; border: 1px solid ${COLOR.line}; border-radius: 8px; padding: 9px; }
+  .task-table td { min-width: 0; width: auto; border: 0; padding: 5px 0; white-space: normal; overflow-wrap: anywhere; }
+  .task-table td::before { content: attr(data-label); display: block; margin-bottom: 2px; color: ${COLOR.inkMuted}; font-size: ${FONT_PX.helper}px; }
+}
+@container task-list (max-width: 520px) {
   .task-board { grid-template-columns: minmax(0, 1fr); }
   .task-page-header { flex-direction: column; }
   .task-card-title button { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

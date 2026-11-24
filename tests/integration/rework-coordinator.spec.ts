@@ -190,14 +190,19 @@ it('verified findings are supplementary evidence and require confirmed adopted s
 it('multiple prior outputs require an explicit preservation plan, and candidate feedback cannot overlap an open review', () => {
   const {db,host}=setup()
   try {
-    putArtifact(db,'a1','appendix','unchanged appendix')
+    const appendixHash=putArtifact(db,'a1','appendix','unchanged appendix')
     const pending=host.request(input(),OWNER,NOW)
     expect(pending.status).toBe('needs_human_approval')
     expect(db.raw.prepare('SELECT COUNT(*) AS n FROM rework_attempts').get()).toMatchObject({n:0})
     host.review({operation_id:uuidv7(),request_id:pending.request_id,expected_revision:pending.revision,action:'reject',note:'Use full rerun with preservation instructions'},OWNER,NOW)
     const rerun=host.request(input('rerun_node'),OWNER,NOW)
-    const scheduled=host.review({operation_id:uuidv7(),request_id:rerun.request_id,expected_revision:rerun.revision,action:'authorize',note:'Full node rerun explicitly approved'},OWNER,NOW)
+    expect(()=>host.review({operation_id:uuidv7(),request_id:rerun.request_id,expected_revision:rerun.revision,action:'authorize',note:'Full node rerun explicitly approved'},OWNER,NOW)).toThrow(/逐份确认/)
+    const scheduled=host.review({operation_id:uuidv7(),request_id:rerun.request_id,expected_revision:rerun.revision,action:'authorize',note:'Full node rerun explicitly approved',file_manifest:{originals:[
+      {artifact_id:'v1',sha256:sha256Hex('old report'),file_name:'v1.txt',action:'revise'},
+      {artifact_id:'appendix',sha256:appendixHash,file_name:'appendix.txt',action:'keep'},
+    ],attachments:[]}},OWNER,NOW)
     const artifactHash=complete(db,scheduled)
+    withTx(db,tx=>tx.run("UPDATE artifact_contents SET file_name='v1.txt' WHERE artifact_id='v2'"))
     host.recover(LATER)
     const node=db.raw.prepare('SELECT revision FROM node_runs WHERE node_run_id=?').get(scheduled.new_node_run_id!) as {revision:number}
     expect(()=>host.request({...input(),target_node_run_id:scheduled.new_node_run_id!,source_artifact_id:'v2',source_artifact_hash:artifactHash,expected_revision:node.revision},OWNER,LATER)).toThrow(/未完成返工/)

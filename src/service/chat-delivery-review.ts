@@ -10,6 +10,7 @@ export type ChatDeliveryReview = {
   nodeRunId: string
   nodeRevision: number
   requestedAt?: string
+  hold?: { hold_id: string; expected_revision: number }
   /** 留验可能还没有任何成果文件：这时只给"补交或撤销"，不能装作可验收（D06）。 */
   artifact: RunArtifact | null
   runId: string
@@ -25,10 +26,11 @@ export function listChatDeliveryReviews(db: Db, runId: string, actor: string, no
     const rows = tx.all<{
       title: string; run_id: string; node_id: string; node_run_id: string; node_revision: number; artifact_id: string | null; file_name: string | null
       sha256: string | null; retain_until: string | null; created_at: string | null; size_bytes: number | null; target_count: number
-      request_id: string | null; request_revision: number | null; round_no: number | null; expected_result: string | null; requested_at: string
+      hold_id: string | null; hold_revision: number | null; request_id: string | null; request_revision: number | null; round_no: number | null; expected_result: string | null; requested_at: string
     }>(`WITH targets AS (
       SELECT h.run_id,n.node_id,n.node_run_id,n.revision AS node_revision,h.updated_at AS requested_at,
-        NULL AS request_id,NULL AS request_revision,NULL AS round_no,NULL AS expected_result,NULL AS result_artifact,NULL AS result_hash
+        h.hold_id,h.revision AS hold_revision,NULL AS request_id,NULL AS request_revision,NULL AS round_no,NULL AS expected_result,
+        h.review_set_json AS review_set,h.accepted_json AS accepted
       FROM delivery_review_holds h JOIN node_runs n ON n.run_id=h.run_id AND n.node_id=h.node_id
       WHERE h.run_id=? AND h.owner_actor=? AND (h.status='held' OR h.node_run_id<>n.node_run_id)
         AND n.replacement_node_run_id IS NULL AND n.status='done'
@@ -36,21 +38,29 @@ export function listChatDeliveryReviews(db: Db, runId: string, actor: string, no
           AND (q.target_node_run_id=n.node_run_id OR q.new_node_run_id=n.node_run_id)
           AND q.status NOT IN ('closed','declined','cancelled'))
       UNION ALL
-      SELECT q.run_id,n.node_id,n.node_run_id,n.revision,q.updated_at,q.request_id,q.revision,q.round_no,q.expected_result,w.result_artifact_id,w.result_artifact_hash
+      SELECT q.run_id,n.node_id,n.node_run_id,n.revision,q.updated_at,NULL,NULL,q.request_id,q.revision,q.round_no,q.expected_result,
+        COALESCE(w.result_manifest_json,json_array(json_object('artifact_id',w.result_artifact_id,'sha256',w.result_artifact_hash))),w.accepted_files_json
       FROM rework_requests q JOIN rework_attempts w ON w.request_id=q.request_id AND w.round_no=q.round_no
       JOIN node_runs n ON n.run_id=q.run_id AND n.node_run_id=q.new_node_run_id AND n.node_run_id=w.new_node_run_id
       WHERE q.run_id=? AND q.owner_actor=? AND q.status='awaiting_review' AND q.expires_at>?
         AND w.status='awaiting_review' AND n.status='done' AND n.replacement_node_run_id IS NULL
+    ), versions AS (
+      SELECT c.*,row_number() OVER(PARTITION BY c.node_run_id,c.file_name ORDER BY a.created_at DESC,a.artifact_id DESC) AS version_rank
+      FROM artifact_contents c JOIN artifacts a USING(artifact_id) WHERE a.run_id=?
     )
-    SELECT task.title,g.run_id,g.node_id,g.node_run_id,g.node_revision,g.requested_at,g.request_id,g.request_revision,g.round_no,g.expected_result,
+    SELECT task.title,g.run_id,g.node_id,g.node_run_id,g.node_revision,g.requested_at,g.hold_id,g.hold_revision,g.request_id,g.request_revision,g.round_no,g.expected_result,
       a.artifact_id,c.file_name,a.sha256,a.retain_until,a.created_at,length(c.bytes) AS size_bytes,
       count(*) OVER (PARTITION BY g.node_run_id,g.request_id) AS target_count
     FROM targets g JOIN runs r ON r.run_id=g.run_id JOIN tasks task ON task.task_id=r.task_id
-    LEFT JOIN artifact_contents c ON c.node_run_id=g.node_run_id
+    LEFT JOIN versions c ON c.node_run_id=g.node_run_id
     LEFT JOIN artifacts a ON a.artifact_id=c.artifact_id AND a.run_id=r.run_id
     WHERE r.status='running' AND r.cancel_requested_at IS NULL
-      AND (g.request_id IS NULL OR (g.result_artifact=a.artifact_id AND g.result_hash=a.sha256))
-    ORDER BY g.node_run_id,a.created_at,a.artifact_id LIMIT 8`, [runId, actor, runId, actor, at])
+      AND ((g.review_set IS NULL AND (c.version_rank=1 OR c.artifact_id IS NULL)) OR EXISTS (
+        SELECT 1 FROM json_each(g.review_set) f WHERE json_extract(f.value,'$.artifact_id')=a.artifact_id
+          AND json_extract(f.value,'$.sha256')=a.sha256))
+      AND NOT EXISTS (SELECT 1 FROM json_each(g.accepted) f
+        WHERE json_extract(f.value,'$.artifact_id')=a.artifact_id AND json_extract(f.value,'$.sha256')=a.sha256)
+    ORDER BY g.node_run_id,a.created_at,a.artifact_id LIMIT 8`, [runId, actor, runId, actor, at,runId])
     if (!rows.length) return []
     const { nodes } = readRunNodeDisplay(tx, runId)
     const plan = readApprovedTaskPlanForRun(tx, runId)
@@ -65,6 +75,7 @@ export function listChatDeliveryReviews(db: Db, runId: string, actor: string, no
         title: row.title, step: step && step !== row.node_id ? step : '步骤名称未记录',
         nodeRunId: row.node_run_id, nodeRevision: row.node_revision, requestedAt: row.requested_at, criteria,
         otherArtifacts: row.target_count > 1,
+        ...(row.hold_id && row.hold_revision ? {hold:{hold_id:row.hold_id,expected_revision:row.hold_revision}} : {}),
         ...(row.request_id && row.request_revision !== null && row.round_no !== null
           ? { revised: { requestId: row.request_id, revision: row.request_revision, round: row.round_no } } : {}),
         runId: row.run_id,

@@ -1,5 +1,7 @@
 import { z } from 'zod'
-import { sha256Hex } from '../core/canonical.ts'
+import { canonicalJson, sha256Hex } from '../core/canonical.ts'
+import { reworkFileManifestSchema, readFileManifest, readReworkFiles, validateFileManifest, resolveReworkResults, materializeReworkPreserved } from './rework-manifest.ts'
+import { advanceReview } from './review-manifest.ts'
 import { OrchError } from '../core/errors.ts'
 import { uuidv7 } from '../core/ids.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
@@ -29,10 +31,12 @@ export const reworkRequestSchema = z.strictObject({
   preserve_requirements: z.array(z.string().trim().min(1).max(1000)).max(20).default([]),
   suggested_scope: scope.default('targeted_revision'), evidence_ids: z.array(id).max(20).default([]),
   verification_request_id: id.optional(),
+  file_manifest: reworkFileManifestSchema.optional(),
 })
 export const reworkReviewSchema = z.strictObject({
   operation_id: z.string().regex(UUID_V7_RE), request_id: id, expected_revision: z.number().int().positive(),
-  action: z.enum(['authorize', 'reject', 'reject_final', 'accept', 'request_changes', 'escalate']),
+  file_manifest: reworkFileManifestSchema.optional(),
+  action: z.enum(['authorize', 'set_manifest', 'reject', 'reject_final', 'accept', 'request_changes', 'escalate']),
   note: z.string().trim().min(1).max(2500), artifact_id: id.optional(), artifact_hash: hash.optional(),
   evidence_ids: z.array(id).max(20).default([]),
 })
@@ -48,6 +52,7 @@ export type ReworkRequest = {
   source_artifact_hash: string
   reason: string
   expected_result: string
+  file_manifest_json?: string | null
   preserve_requirements_json: string
   suggested_scope: string
   approved_scope: string | null
@@ -71,6 +76,9 @@ export type ReworkAttempt = {
   new_node_run_id: string
   source_artifact_id: string
   source_artifact_hash: string
+  file_manifest_json?: string | null
+  result_manifest_json?: string | null
+  accepted_files_json?: string
   result_artifact_id: string | null
   result_artifact_hash: string | null
   status: string
@@ -166,13 +174,14 @@ function schedule(tx: Tx, secret: string, row: ReworkRequest, now: string, appro
     throw new OrchError('FORBIDDEN', '返工预算或轮数已耗尽，需人工处理')
   if (!Number.isSafeInteger(workUnits) || workUnits < 1 || workUnits > row.budget_remaining) throw new OrchError('FORBIDDEN','局部方案的执行工作量超过剩余返工预算')
   artifact(tx, row.run_id, row.target_node_run_id, row.source_artifact_id, row.source_artifact_hash, now)
-  if (row.suggested_scope === 'targeted_revision' && (tx.get<{
-    n: number
-  }>('SELECT COUNT(*) AS n FROM artifact_contents WHERE node_run_id=?', [row.target_node_run_id])?.n ?? 0) !== 1)
-    throw new OrchError('FORBIDDEN', '多个原始成果需要明确保留方案，不能自动用单一修订成果替换')
+  const manifest = readFileManifest(row.file_manifest_json)
+  if (manifest) validateFileManifest(tx, row.run_id, row.target_node_run_id, row.source_artifact_id, manifest, now)
+  else if ((tx.get<{ n: number }>('SELECT COUNT(DISTINCT file_name) AS n FROM artifact_contents WHERE node_run_id=?', [row.target_node_run_id])?.n ?? 0) !== 1)
+    throw new OrchError('FORBIDDEN', '请逐份确认原件的修改、保留与移除方式')
   tx.run("UPDATE rework_requests SET status='authorized' WHERE request_id=? AND revision=?", [row.request_id, row.revision])
   const next = authorizeReworkRuntime(tx, secret, { ...row, status: 'authorized' }, now)
   tx.run('INSERT INTO rework_attempts (attempt_id,request_id,round_no,old_node_run_id,new_node_run_id,source_artifact_id,source_artifact_hash,status,feedback,created_at) VALUES (?,?,?,?,?,?,?,\'scheduled\',?,?)', [uuidv7(), row.request_id, row.round_no, row.target_node_run_id, next, row.source_artifact_id, row.source_artifact_hash, row.reason, now])
+  tx.run('UPDATE rework_attempts SET file_manifest_json=? WHERE request_id=? AND round_no=?', [row.file_manifest_json ?? null, row.request_id, row.round_no])
   tx.run("UPDATE rework_requests SET status='scheduled',approved_scope=suggested_scope,new_node_run_id=?,budget_remaining=budget_remaining-?,revision=revision+1,updated_at=? WHERE request_id=? AND revision=?", [next, workUnits, now, row.request_id, row.revision])
   return loadReworkRequest(tx, row.request_id)
 }
@@ -253,9 +262,13 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
     tx.run('INSERT INTO rework_requests (request_id,run_id,requester_node_run_id,requester_actor,owner_actor,target_node_run_id,target_attempt,source_artifact_id,source_artifact_hash,reason,expected_result,preserve_requirements_json,suggested_scope,status,evidence_ids_json,expires_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [requestId, body.run_id, typeof actor === 'string' ? null : actor.node_run_id, planner ? 'planner:' + owner : actorKey(actor), owner, target.node_run_id, target.attempt, body.source_artifact_id, body.source_artifact_hash, body.reason, body.expected_result, JSON.stringify(body.preserve_requirements), body.suggested_scope, body.suggested_scope === 'replan_subgraph' ? 'needs_human_approval' : 'proposed', JSON.stringify(body.evidence_ids), new Date(Date.parse(now) + 86400000).toISOString(), now, now])
     if (body.verification_request_id)
       tx.run('UPDATE rework_requests SET verification_request_id=? WHERE request_id=?', [body.verification_request_id, requestId])
+    if (body.file_manifest) {
+      const manifest = validateFileManifest(tx, body.run_id, target.node_run_id, body.source_artifact_id, body.file_manifest, now)
+      tx.run('UPDATE rework_requests SET file_manifest_json=? WHERE request_id=?', [canonicalJson(manifest), requestId])
+    }
     let row = loadReworkRequest(tx, requestId)
     event(tx, row, 'proposed')
-    if (body.suggested_scope === 'targeted_revision') {
+    if (body.suggested_scope === 'targeted_revision' && !(body.file_manifest && typeof actor !== 'string')) {
       tx.exec('SAVEPOINT rework_auto_authorize')
       try {
         const impacts = previewReworkImpact(tx, row)
@@ -317,11 +330,23 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
           closeRun(tx,secret,row.run_id,now)
           row=loadReworkRequest(tx,row.request_id)
         }
+        else if (body.action === 'set_manifest') {
+          if (typeof actor !== 'string' || !body.file_manifest || !['proposed','needs_human_approval'].includes(row.status))
+            throw new OrchError('FORBIDDEN','只有负责人可在执行前确认文件方案')
+          const manifest = validateFileManifest(tx,row.run_id,row.target_node_run_id,row.source_artifact_id,body.file_manifest,now)
+          tx.run('UPDATE rework_requests SET file_manifest_json=?,revision=revision+1,updated_at=? WHERE request_id=?', [canonicalJson(manifest),now,row.request_id])
+          row = loadReworkRequest(tx,row.request_id)
+        }
         else if (body.action === 'authorize') {
           if (typeof actor !== 'string')
             throw new OrchError('FORBIDDEN', 'Agent 反馈不代表返工授权')
           if (!['proposed', 'needs_human_approval'].includes(row.status))
             throw new OrchError('STALE_GENERATION', '当前状态不能授权')
+          if (body.file_manifest) {
+            const manifest = validateFileManifest(tx, row.run_id, row.target_node_run_id, row.source_artifact_id, body.file_manifest, now)
+            tx.run('UPDATE rework_requests SET file_manifest_json=? WHERE request_id=?', [canonicalJson(manifest), row.request_id])
+            row = loadReworkRequest(tx, row.request_id)
+          }
           row = schedule(tx, secret, row, now)
         }
         else if (body.action === 'accept' || body.action === 'request_changes') {
@@ -333,19 +358,32 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
               throw new OrchError('FORBIDDEN', '只有原请求审核角色可验收')
           }
           const attempt = tx.get<ReworkAttempt>('SELECT * FROM rework_attempts WHERE request_id=? AND round_no=?', [row.request_id, row.round_no])!
-          if (!body.artifact_id || !body.artifact_hash || body.artifact_id !== attempt.result_artifact_id || body.artifact_hash !== attempt.result_artifact_hash)
+          const files = attempt.result_manifest_json ? readReworkFiles(attempt.result_manifest_json)
+            : attempt.result_artifact_id && attempt.result_artifact_hash
+              ? [{ artifact_id: attempt.result_artifact_id, sha256: attempt.result_artifact_hash,
+                file_name: tx.get<{file_name:string}>('SELECT file_name FROM artifact_contents WHERE artifact_id=?', [attempt.result_artifact_id])?.file_name ?? '' }] : []
+          if (!body.artifact_id || !body.artifact_hash || !files.some(file => file.artifact_id === body.artifact_id && file.sha256 === body.artifact_hash))
             throw new OrchError('STALE_GENERATION', '验收必须绑定本轮精确成果版本')
           artifact(tx, row.run_id, row.new_node_run_id, body.artifact_id, body.artifact_hash, now)
           evidence(tx, secret, actor, body.evidence_ids, row.updated_at)
-          tx.run('UPDATE rework_attempts SET status=?,reviewed_at=? WHERE attempt_id=?', [body.action === 'accept' ? 'accepted' : 'request_changes', now, attempt.attempt_id])
-          if (body.action === 'accept') {
+          const previous = readReworkFiles(attempt.accepted_files_json)
+          const accepted = body.action === 'accept' ? advanceReview(files, previous, {artifact_id:body.artifact_id,sha256:body.artifact_hash}) : null
+          const complete = accepted?.complete ?? false
+          const confirmedFiles = accepted ? files.filter(file => accepted.accepted.some(x => x.artifact_id===file.artifact_id && x.sha256===file.sha256)) : previous
+          tx.run('UPDATE rework_attempts SET status=?,reviewed_at=?,accepted_files_json=? WHERE attempt_id=?',
+            [body.action === 'accept' ? complete ? 'accepted' : 'awaiting_review' : 'request_changes', now, canonicalJson(confirmedFiles), attempt.attempt_id])
+          if (body.action === 'accept' && !complete) {
+            tx.run('UPDATE rework_requests SET revision=revision+1,updated_at=? WHERE request_id=?', [now,row.request_id])
+          }
+          else if (body.action === 'accept') {
+            for (const file of files) artifact(tx,row.run_id,row.new_node_run_id,file.artifact_id,file.sha256,now)
             acceptReworkRuntime(tx, secret, row, now)
             if (typeof actor === 'string' && actor === row.owner_actor) {
               const held = tx.run(`UPDATE delivery_review_holds
-                SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,updated_at=?
+                SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,updated_at=?,revision=revision+1,review_set_json=?,accepted_json=?
                 WHERE run_id=? AND node_id=(SELECT node_id FROM node_runs WHERE node_run_id=?)
                   AND owner_actor=? AND (status='held' OR node_run_id<>?)`,
-              [row.new_node_run_id, body.artifact_id, body.artifact_hash, now, row.run_id, row.new_node_run_id, actor, row.new_node_run_id])
+              [row.new_node_run_id, body.artifact_id, body.artifact_hash, now, canonicalJson(files), canonicalJson(files), row.run_id, row.new_node_run_id, actor, row.new_node_run_id])
               if (held.changes) appendEvent(tx, { type: 'rework.hold_accept', runId: row.run_id, nodeRunId: row.new_node_run_id,
                 payload: { artifact_id: body.artifact_id, sha256: body.artifact_hash, actor } })
             }
@@ -353,6 +391,9 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
             closeRun(tx, secret, row.run_id, now)
           }
           else {
+            const priorManifest = readFileManifest(attempt.file_manifest_json)
+            const manifest = priorManifest ? { originals: files.map(file => ({...file, action: file.artifact_id === body.artifact_id ? 'revise' as const : 'keep' as const})), attachments: [] } : null
+            tx.run('UPDATE rework_requests SET file_manifest_json=? WHERE request_id=?', [manifest ? canonicalJson(manifest) : null,row.request_id])
             const exhausted = row.round_no >= row.max_rounds || row.budget_remaining <= 0
             tx.run('UPDATE rework_requests SET status=?,target_node_run_id=?,target_attempt=?,source_artifact_id=?,source_artifact_hash=?,new_node_run_id=NULL,round_no=round_no+?,reason=?,revision=revision+1,updated_at=? WHERE request_id=?', [exhausted ? 'escalated' : 'proposed', row.new_node_run_id, loadNode(tx, row.new_node_run_id).attempt, body.artifact_id, body.artifact_hash, exhausted ? 0 : 1, body.note, now, row.request_id])
           }
@@ -375,13 +416,13 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
         if (typeof actor === 'string') {
           if (options.humanOnly && runId) requireReviewOperator(tx, secret, actor, runId, true)
           return { items: tx.all<ReworkRequest & { source_artifact_count: number }>(`SELECT r.*,
-            (SELECT COUNT(*) FROM artifact_contents c WHERE c.node_run_id = r.target_node_run_id) AS source_artifact_count
+            (SELECT COUNT(DISTINCT c.file_name) FROM artifact_contents c WHERE c.node_run_id = r.target_node_run_id) AS source_artifact_count
             FROM rework_requests r WHERE r.owner_actor=? AND (? IS NULL OR r.run_id=?)
             ORDER BY r.created_at DESC,r.request_id DESC LIMIT 100`, [actor, runId ?? null, runId ?? null]), as_of_seq }
         }
         const node = bound(tx, actor)
         return { items: tx.all<ReworkRequest & { source_artifact_count: number }>(`SELECT r.*,
-          (SELECT COUNT(*) FROM artifact_contents c WHERE c.node_run_id = r.target_node_run_id) AS source_artifact_count
+          (SELECT COUNT(DISTINCT c.file_name) FROM artifact_contents c WHERE c.node_run_id = r.target_node_run_id) AS source_artifact_count
           FROM rework_requests r LEFT JOIN node_runs q ON q.node_run_id=r.requester_node_run_id
           JOIN node_runs t ON t.node_run_id=r.target_node_run_id
           WHERE r.run_id=? AND (? IS NULL OR r.run_id=?) AND (q.node_id=? OR t.node_id=?)
@@ -423,14 +464,12 @@ export function createReworkHost(db: Db, secret: string, options: {clock?: Clock
               event(tx, loadReworkRequest(tx, row.request_id), 'expired')
             }
             else if (row.status === 'scheduled' && row.new_node_run_id && loadNode(tx, row.new_node_run_id).status === 'done') {
-              const results = tx.all<{
-                artifact_id: string
-                sha256: string
-              }>('SELECT a.artifact_id,a.sha256 FROM artifacts a JOIN artifact_contents c ON c.artifact_id=a.artifact_id WHERE c.node_run_id=? AND a.run_id=?', [row.new_node_run_id, row.run_id])
-              if (results.length === 1) {
+              materializeReworkPreserved(tx, loadNode(tx,row.new_node_run_id), now)
+              const attempt = tx.get<ReworkAttempt>('SELECT * FROM rework_attempts WHERE request_id=? AND round_no=?', [row.request_id,row.round_no])!
+              const results = resolveReworkResults(tx,row.run_id,row.new_node_run_id,readFileManifest(attempt.file_manifest_json),now)
+              if (results.length > 0) {
                 const result = results[0]!
-                artifact(tx, row.run_id, row.new_node_run_id, result.artifact_id, result.sha256, now)
-                tx.run("UPDATE rework_attempts SET status='awaiting_review',result_artifact_id=?,result_artifact_hash=? WHERE request_id=? AND round_no=?", [result.artifact_id, result.sha256, row.request_id, row.round_no])
+                tx.run("UPDATE rework_attempts SET status='awaiting_review',result_artifact_id=?,result_artifact_hash=?,result_manifest_json=?,accepted_files_json='[]' WHERE request_id=? AND round_no=?", [result.artifact_id, result.sha256, canonicalJson(results), row.request_id, row.round_no])
                 tx.run("UPDATE rework_requests SET status='awaiting_review',revision=revision+1,updated_at=? WHERE request_id=?", [now, row.request_id])
                 const updated = loadReworkRequest(tx, row.request_id)
                 prepareReworkReviewer(tx, secret, updated, now)

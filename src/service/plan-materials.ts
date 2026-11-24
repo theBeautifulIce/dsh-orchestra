@@ -2,17 +2,19 @@ import type { Tx } from '../infra/sqlite/driver.ts'
 import { sha256Hex } from '../core/canonical.ts'
 import { uuidv7 } from '../core/ids.ts'
 import { OrchError } from '../core/errors.ts'
-type Grant = { actor: string; scope: string; draft: string }
-type Pin = { id: string; digest: string }
-type Material = { name: string; body: string }
+export type Grant = { actor: string; scope: string; draft: string }
+export type Pin = { id: string; digest: string }
+export type Material = { name: string; body: string }
 
 // 调用者已获明确的按次同意。scope/actor 从服务认证上下文取；draft 是服务签发的草稿键。
 export function saveMaterials(tx: Tx, g: Grant, items: Material[], now: number): Pin[] {
+  tx.run("UPDATE plan_materials SET body='' WHERE expires_ms<=? AND body<>''", [now])
   if (!items.length || items.length > 8) throw new OrchError('PAYLOAD_SCHEMA_INVALID','每次可选 1–8 份文本')
   const pins = items.map(({ name, body }) => {
     if (!name || name.length > 120 || /[\/\\\x00-\x1f]/u.test(name) || !/\.(txt|md|csv)$/iu.test(name)
       || !body || body.includes('\0') || Buffer.byteLength(body, 'utf8') > 65536)
       throw new OrchError('PAYLOAD_SCHEMA_INVALID','仅支持 64 KiB 以内的 UTF-8 文本、Markdown 或 CSV')
+    if (Buffer.from(body, 'utf8').toString('utf8') !== body) throw new OrchError('PAYLOAD_SCHEMA_INVALID','材料需要完整 UTF-8 文本')
     const digest = sha256Hex(body)
     tx.run(`INSERT INTO plan_materials(id,scope,actor,draft,name,digest,body,expires_ms)
       VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(actor,scope,draft,name,digest) DO NOTHING`,
@@ -60,10 +62,18 @@ export function readMaterial(tx: Tx, g: Grant, runId: string, nodeId: string, pi
     AND n.run_id=plan_materials.run_id AND n.node_id=?)`,
     [pin.id,pin.digest,g.actor,g.scope,g.draft,runId,now,nodeId])
   if (!row) throw new OrchError('FORBIDDEN','本步骤没有有效的材料授权')
+  if (sha256Hex(row.body) !== pin.digest) throw new OrchError('CONFIRMATION_MISMATCH','材料内容与已授权版本不同')
   return row.body
 }
 
 export function revokeMaterial(tx: Tx, g: Grant, id: string) {
   return tx.run(`UPDATE plan_materials SET revoked=1, body=''
     WHERE actor=? AND scope=? AND draft=? AND id=? AND revoked=0`,[g.actor,g.scope,g.draft,id]).changes
+}
+
+export type PlanMaterial = Pin & { name: string; nodes: string[]; expires_ms: number; draft: string }
+export const materialGrant = (actor: string, draft: string): Grant => ({ actor, scope: 'plan:' + draft, draft })
+
+export function expireMaterials(tx: Tx, now: number): number {
+  return tx.run("UPDATE plan_materials SET body='' WHERE expires_ms<=? AND body<>''",[now]).changes
 }

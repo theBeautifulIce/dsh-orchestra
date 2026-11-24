@@ -66,9 +66,7 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
     writeFileSync(join(root, 'package/package.json'), JSON.stringify({
       ...manifest, dsh: { ...manifest.dsh, client: { ...manifest.dsh.client, inject } },
     }))
-    // Windows 上的 GNU tar 会把 `C:` 当成远端主机名，必须显式声明本地路径。
-    const local = process.platform === 'win32' ? ['--force-local'] : []
-    execFileSync('tar', [...local, '-czf', archive, '-C', root, ...Object.keys(files)])
+    writeFileSync(archive, execFileSync('tar', ['-czf', '-', '-C', root, ...Object.keys(files)]))
     return archive
   }
   try {
@@ -98,12 +96,12 @@ it.runIf(Boolean(tarball && sha))('验包拒绝缺少清单声明的任一发布
   const receipt = inspectPackage(tarball!, { expectedSha256: sha! })
   const root = mkdtempSync(join(tmpdir(), 'orch-package-guides-'))
   try {
-    execFileSync('tar', ['-xf', tarball!, '-C', root])
+    execFileSync('tar', ['-zxf', '-', '-C', root], { input: readFileSync(tarball!) })
     const manifest = JSON.parse(readFileSync(join(root, 'package/package.json'), 'utf8'))
     for (const guide of ['docs/runbook.md', 'docs/trial-circles.md']) {
       if (!manifest.files?.includes(guide)) continue
       const archive = join(root, 'missing-' + guide.slice('docs/'.length) + '.tgz')
-      execFileSync('tar', ['-czf', archive, '-C', root, ...receipt.entries.filter((name) => name !== 'package/' + guide)])
+      writeFileSync(archive, execFileSync('tar', ['-czf', '-', '-C', root, ...receipt.entries.filter((name) => name !== 'package/' + guide)], { maxBuffer: 64 * 1024 * 1024 }))
       expect(() => inspectPackage(archive)).toThrow('Missing declared package guide: ' + guide)
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
@@ -115,7 +113,7 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
   const installedPath = installed!
   for (const file of ['lib/index.js', 'lib/client.js']) {
     const installedBytes = readFileSync(join(installedPath, file))
-    const packedBytes = execFileSync('tar', ['-xOf', tarball!, 'package/' + file], {
+    const packedBytes = execFileSync('tar', ['-zxOf', '-', 'package/' + file], { input: readFileSync(tarball!),
       maxBuffer: Math.max(1024 * 1024, installedBytes.length + 1),
     })
     expect(installedBytes.equals(packedBytes)).toBe(true)

@@ -71,10 +71,10 @@ export function executionFeedbackContext(db: Db, catalog: WorkflowCatalog, nodeR
     const inputs = snapshotArtifactInputs(tx, nodeRunId, upstream.map(n => n.node_run_id), now)
       .map(input => ({ ...input, expected_revision: revisions.get(input.upstream_node_run_id) }))
     const revision = tx.get(`SELECT q.request_id,q.approved_scope,q.reason,q.expected_result,q.preserve_requirements_json,
-      q.source_artifact_id,q.source_artifact_hash,c.file_name,q.round_no,q.max_rounds,q.budget_remaining
+      q.source_artifact_id,q.source_artifact_hash,q.file_manifest_json,c.file_name,q.round_no,q.max_rounds,q.budget_remaining
       FROM rework_requests q JOIN artifact_contents c ON c.artifact_id=q.source_artifact_id
       WHERE q.new_node_run_id=? AND q.status='scheduled'`, [nodeRunId])
-    const review = tx.get(`SELECT q.request_id,q.revision,q.reason,q.expected_result,a.result_artifact_id,a.result_artifact_hash
+    const review = tx.get(`SELECT q.request_id,q.revision,q.reason,q.expected_result,a.result_artifact_id,a.result_artifact_hash,a.result_manifest_json,a.accepted_files_json
       FROM rework_requests q JOIN rework_impacts i USING(request_id)
       JOIN rework_attempts a ON a.request_id=q.request_id AND a.round_no=q.round_no
       WHERE i.replacement_node_run_id=? AND q.status='awaiting_review' AND i.released_at IS NULL`, [nodeRunId])

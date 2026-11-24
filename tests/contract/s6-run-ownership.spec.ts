@@ -62,6 +62,10 @@ function startInput(operationId = uuidv7()) {
 function hold(run: string, node: string) {
   return { operation_id: uuidv7(), action: 'hold', run_id: run, node_run_id: node }
 }
+function displayedHold(fixture: Awaited<ReturnType<typeof boot>>, runId: string) {
+  const row=fixture.db.raw.prepare('SELECT hold_id,revision FROM delivery_review_holds WHERE run_id=?').get(runId) as {hold_id:string;revision:number}
+  return {hold_id:row.hold_id,expected_revision:row.revision}
+}
 
 it('uses the host starter for direct S6 review and rework, survives reopening and keeps replay scoped', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-review-owner-'))
@@ -163,14 +167,15 @@ it('accepts one review generation only, so a second page cannot overwrite a subm
     const first = registerRunArtifact(fixture.db, { artifactId: 'review-a', runId, nodeRunId, fileName: 'review.md', bytes: Buffer.from('first version') })
     const second = registerRunArtifact(fixture.db, { artifactId: 'review-b', runId, nodeRunId, fileName: 'review.md', bytes: Buffer.from('second version') })
     const accept = (artifact: typeof first) => ({ operation_id: uuidv7(), run_id: runId, node_run_id: nodeRunId,
-      action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
-    expect(await fixture.post('/v1/rework/hold', accept(first), primarySession)).toMatchObject({ status: 200 })
+      action: 'accept' as const, ...displayedHold(fixture!,runId),artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+    expect(await fixture.post('/v1/rework/hold', accept(first), primarySession)).toMatchObject({status:409,error:{code:'CONFIRMATION_MISMATCH'}})
+    expect(await fixture.post('/v1/rework/hold', accept(second), primarySession)).toMatchObject({ status: 200 })
     // 另一个页面拿着不同操作号提交第二个版本：代次已不是 held，必须拒绝而不是覆盖。
-    expect(await fixture.post('/v1/rework/hold', accept(second), primarySession)).toMatchObject({
+    expect(await fixture.post('/v1/rework/hold', accept(first), primarySession)).toMatchObject({
       status: 409, error: { code: 'STALE_GENERATION' },
     })
     expect(fixture.db.raw.prepare('SELECT status,artifact_id,sha256 FROM delivery_review_holds WHERE run_id=?').get(runId))
-      .toMatchObject({ status: 'accepted', artifact_id: 'review-a', sha256: first.sha256 })
+      .toMatchObject({ status: 'accepted', artifact_id: 'review-b', sha256: second.sha256 })
     // 已提交结论也不能被旧页面的撤销静默清掉。
     expect(await fixture.post('/v1/rework/hold', { operation_id: uuidv7(), run_id: runId, node_run_id: nodeRunId, action: 'withdraw' },
       primarySession)).toMatchObject({ status: 409, error: { code: 'STALE_GENERATION' } })
@@ -198,7 +203,7 @@ it('confirms a multi-file step against the review set captured at hold time', as
     // 留验在成果登记之后：这一轮的应审清单就固定为这两份。
     expect(await fixture.post('/v1/rework/hold', hold(runId, nodeRunId), primarySession)).toMatchObject({ status: 200 })
     const accept = (artifact: { artifact_id: string; sha256: string }) => ({ operation_id: uuidv7(), run_id: runId,
-      node_run_id: nodeRunId, action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+      node_run_id: nodeRunId, action: 'accept' as const, ...displayedHold(fixture!,runId),artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
     const first = await fixture.post<{ status: string; pending?: string[] }>('/v1/rework/hold', accept(report), primarySession)
     expect(first).toMatchObject({ status: 200, data: { status: 'held', pending: ['data.csv'] } })
     expect(fixture.db.raw.prepare('SELECT status FROM delivery_review_holds WHERE run_id=?').get(runId)).toMatchObject({ status: 'held' })
@@ -235,7 +240,7 @@ it('waits for every file when the hold was taken before anything was delivered',
     const report = registerRunArtifact(fixture.db, { artifactId: 'early-report', runId, nodeRunId, fileName: 'report.md', bytes: Buffer.from('report body') })
     const detail = registerRunArtifact(fixture.db, { artifactId: 'early-detail', runId, nodeRunId, fileName: 'data.csv', bytes: Buffer.from('a,b') })
     const accept = (artifact: { artifact_id: string; sha256: string }) => ({ operation_id: uuidv7(), run_id: runId,
-      node_run_id: nodeRunId, action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+      node_run_id: nodeRunId, action: 'accept' as const, ...displayedHold(fixture!,runId),artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
     const first = await fixture.post<{ status: string; pending?: string[] }>('/v1/rework/hold', accept(report), primarySession)
     expect(first).toMatchObject({ status: 200, data: { status: 'held', pending: ['data.csv'] } })
     expect(fixture.db.raw.prepare('SELECT status FROM runs WHERE run_id=?').get(runId)).toMatchObject({ status: 'running' })
@@ -267,7 +272,7 @@ it('rejects a conclusion from an old page after the hold was withdrawn and taken
     expect(pageA).toMatchObject({ status: 200 })
     const seenA = { hold_id: pageA.data!.hold_id, expected_revision: pageA.data!.revision }
     const accept = (artifact: { artifact_id: string; sha256: string }) => ({ operation_id: uuidv7(), run_id: runId,
-      node_run_id: nodeRunId, action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+      node_run_id: nodeRunId, action: 'accept' as const, ...displayedHold(fixture!,runId),artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
     expect(await fixture.post('/v1/rework/hold', { ...accept(report), ...seenA }, primarySession))
       .toMatchObject({ status: 200, data: { status: 'held' } })
     // B 页撤销并以同一节点重建留验：新一轮有自己的身份，A 页手上的旧身份随即失效。
@@ -277,6 +282,10 @@ it('rejects a conclusion from an old page after the hold was withdrawn and taken
     const pageB = await fixture.post<{ hold_id: string; revision: number }>('/v1/rework/hold', hold(runId, nodeRunId), primarySession)
     expect(pageB).toMatchObject({ status: 200, data: { status: 'held' } })
     expect(pageB.data!.hold_id).not.toBe(seenA.hold_id)
+    expect(await fixture.post('/v1/rework/hold', {operation_id:uuidv7(),run_id:runId,node_run_id:nodeRunId,action:'withdraw'},primarySession))
+      .toMatchObject({error:{code:'CONFIRMATION_REQUIRED'}})
+    expect(await fixture.post('/v1/rework/hold', {operation_id:uuidv7(),run_id:runId,node_run_id:nodeRunId,action:'withdraw',...seenA},primarySession))
+      .toMatchObject({status:409,error:{code:'STALE_GENERATION'}})
     expect(await fixture.post('/v1/rework/hold', { ...accept(report), ...seenA }, primarySession))
       .toMatchObject({ status: 409, error: { code: 'STALE_GENERATION' } })
     expect(await fixture.post('/v1/rework/hold', { ...accept(detail), ...seenA }, primarySession))

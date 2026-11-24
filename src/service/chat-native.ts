@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { withTx } from '../infra/sqlite/driver.ts'
+import { beginPlanningProgress, advancePlanning } from './chat-planning-progress.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { sha256Hex } from '../core/canonical.ts'
@@ -8,7 +10,7 @@ import { OrchError } from '../core/errors.ts'
 import { receiptLocation } from '../core/receipt-location.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
-import { chatRun, chatRunByTitle, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
+import { chatRun, chatRunByTitle, findChatPlan, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
 import { readChatTextPreviews } from './chat-text-previews.ts'
 import { classifyChatTask, shouldDeferTask } from './chat-task-intent.ts'
 import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatErrorReason, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
@@ -47,8 +49,8 @@ const prompt = [
   'If Orchestra returned a planning or startup failure, relay its reason and next step. Do not direct the operator to a task or run that has no receipt, or suggest /orchestra as a remedy for those failures. If the notice says Orchestra could not read the automatic routing setting, relay its manual /orchestra option. If Orchestra returned no notice and the operator intended to dispatch a new task, suggest resending the complete request with /orchestra.',
   'Greetings, casual conversation, questions seeking an explanation, advice, brainstorming, or asking what you could do are ordinary conversation. Use no Orchestra task for them.',
   'If intent or the requested outcome is unclear, ask the human. For a request to wait for approval before running, ask for the complete executable instruction once the human is ready to start.',
-  'For questions about a named or earlier Orchestra task use action=status with its exact task_title. Use the latest task only if the operator asks for the latest task or refers to that task unambiguously. If the title is unclear, ask which task to open. For an Orchestra notice, omit task_title and run_id to use the verified source run. Use action=artifact with file_name from the status reply to retrieve the requested artifact. Summarize its contents as evidence, using the recorded acceptance facts.',
-  'When a terminal notice names accepted files, call action=status in that notice to find the exact file name, then call action=artifact and summarize the result in the original conversation. For a failure or pending verification, relay the recorded outcome and next step.',
+  'For questions about a named or earlier Orchestra task use action=status with its exact task_title. Use the latest task only if the operator asks for the latest task or refers to that task unambiguously. If the title is unclear, ask which task to open. For an Orchestra notice, omit task_title and run_id to use the verified source run. Use action=artifact with the exact artifact_id copied from status.artifacts to retrieve the requested version. Never invent an artifact_id. Use file_name only when the status reply contains exactly one matching version. Summarize its contents as evidence, using the recorded acceptance facts.',
+  'When a terminal notice names accepted files, call action=status in that notice to find its artifact_id in status.artifacts, then call action=artifact with that exact artifact_id and summarize the result in the original conversation. For a failure or pending verification, relay the recorded outcome and next step.',
   'When a pending approval notice directs the operator to the chat card, use action=status and call action=review with the exact decision_title that is ready to review. If required evidence is missing or a choice is unavailable, relay the recorded requirement and the way to open the pending item in Orchestra.',
   'When a notice includes the fields 待审成果 and 审核标准, call action=review_delivery for its verified source run. Use the supplied task, step, artifact, criteria, and next action. Never open an authorization popup or submit a review on the operator’s behalf. The operator can inspect the artifact and submit feedback in the review card.',
   'On an explicit request to show a task’s 待审成果, locate the exact task with action=status, then call action=review_delivery.',
@@ -105,13 +107,17 @@ function taskText(message: Message): string {
   return validatedTaskText(texts)
 }
 
-/**
- * 「用流程「X」第 2 牨」→ 结构化约束；识别不到就静默回落，不能因为解析失败挡住派单（P02）。
- */
+/** Recognize explicit flow references, then validate their published identity below. */
 export function workflowPinFromText(text: string): { name: string; version?: string } | undefined {
-  const match = /用(?:已发布的)?流程[「"']?([^，,。；\s「」"']{1,60})[」"']?(?:[，,]\s*第?\s*(\d+)\s*版)?/u.exec(text)
-  if (!match?.[1]) return undefined
-  return { name: match[1].trim(), ...(match[2] ? { version: match[2] } : {}) }
+  const reference = /(?:使用|用)(?:已发布的)?流程\s*(?:「([^」\n]{1,120})」|“([^”\n]{1,120})”|"([^"\n]{1,120})"|'([^'\n]{1,120})'|([^，,。；;\s「」“”"']{1,120}))/u.exec(text)
+  if (!reference) return undefined
+  const name = reference.slice(1).find(value => value !== undefined)!.trim()
+  const suffix = text.slice(reference.index + reference[0].length).replace(/^[，,]?\s*/u, '')
+  const version = /^(?:第\s*([1-9]\d{0,14})\s*版|[vV]([1-9]\d{0,14})(?=$|[^\d]))/u.exec(suffix)
+  if (/^(?:第|[vV]\d)/u.test(suffix) && !version) {
+    throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请使用有效的已发布版本，例如第 2 版')
+  }
+  return { name, ...(version ? { version: version[1] ?? version[2]! } : {}) }
 }
 
 function resolveWorkflowPin(db: Service['orchestra']['db'], text: string) {
@@ -384,9 +390,14 @@ export function installNativeChat(host: Context, options: {
   signal: AbortSignal
   bindingFor(agent: Agent): Binding | undefined
   serviceFor(binding: Binding): Promise<Service>
+  acquireService?(binding: Binding): Promise<{ service: Service; release(): void }>
   hasService(binding: Binding): boolean
   autoRouteEnabled?(binding: Binding, agent: Agent): boolean | Promise<boolean>
 }) {
+  // Retain the local service across planner, approval and session-flush awaits.
+  const acquire = async (binding: Binding) => options.acquireService
+    ? options.acquireService(binding)
+    : { service: await options.serviceFor(binding), release() {} }
   const inserted = new WeakMap<Agent, Map<Message['id'], string>>()
   const turns = new WeakMap<Agent, Turn>()
   const notices = new WeakMap<Agent, Map<Message['id'], { runId: string; digest: string }>>()
@@ -612,44 +623,70 @@ export function installNativeChat(host: Context, options: {
       signal, assertCurrent,
     }
     return once(origin.requestKey, async () => {
-      const service = await options.serviceFor(binding)
-      assertCurrent()
-      const { view } = await service.planning.proposeFromChat(
-        { goal, requirements: [], ...resolveWorkflowPin(service.orchestra.db, goal) },
-        options.operator, new Date().toISOString(), origin)
-      if (!view.quality.ready) return {
-        state: 'quality_blocked' as const, plan_id: view.plan_id, title: view.proposal.title,
-        issues: view.quality.checks.flatMap((check) => check.issues).slice(0, 12),
-      }
-      const launch = (approved: boolean) => service.planning.launchFromChat(
-        view.plan_id, view.content_hash, options.operator, new Date().toISOString(), origin, approved,
-      )
-      let started
-      try { started = launch(false) } catch (error) {
-        if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
-        const definition = service.orchestra.catalog.get(view.proposal.workflow_id, view.proposal.workflow_version)
-        const hasApprovalStep = definition.nodes.some((node) => node.type === 'approval')
-        const hasEffects = definition.nodes.some((node) => node.side_effect_policy === 'irreversible' || node.side_effect_policy === 'compensable')
-        const reason = formatChatApproval({
-          task: view.proposal.title, step: '启动前确认（整项任务）',
-          reason: hasEffects ? '计划包含可能影响外部环境的操作，启动前需要你确认。'
-            : hasApprovalStep ? '计划包含人工审批步骤，启动前需要你确认这份计划。'
-              : '计划包含需要确认的流程控制步骤。',
-          operation: `批准启动这份计划，共 ${view.proposal.steps.length} 个步骤。`,
-          consequence: hasApprovalStep ? '按计划启动，流程里的人工审批仍须单独处理。' : '按这份计划创建并开始本次运行。',
-          planSteps: view.proposal.steps.map((step) => step.description),
-          deliverables: view.proposal.deliverables.map(item => item.title),
-          planVersion: view.plan_id + ' / ' + view.content_hash,
+      const lease = await acquire(binding)
+      const { service } = lease
+      try {
+        assertCurrent()
+        const progress = { request:origin.requestKey, actor:options.operator, scope:binding.identity, hash:origin.inputHash }
+        withTx(service.orchestra.db,tx => {
+          beginPlanningProgress(tx,progress,Date.now())
+          tx.run("UPDATE chat_planning_progress SET stage='planning',updated_ms=? WHERE request_key=? AND plan_id IS NULL AND stage IN ('failed','cancelled')",
+            [Date.now(),origin.requestKey])
+          tx.run('UPDATE chat_planning_progress SET title=? WHERE request_key=? AND actor=?',
+            [goal.slice(0,200),origin.requestKey,options.operator])
         })
-        if (!await approveOnce(turn, view.plan_id, undefined, agent, reason, signal)) {
-          return { state: 'launch_declined' as const, plan_id: view.plan_id, title: view.proposal.title }
+        try {
+          const { view } = await service.planning.proposeFromChat(
+            { goal, requirements: [], ...resolveWorkflowPin(service.orchestra.db, goal) },
+            options.operator, new Date().toISOString(), origin)
+          if (!view.quality.ready) {
+            withTx(service.orchestra.db,tx => advancePlanning(tx,progress,'blocked',null,Date.now()))
+            return { state: 'quality_blocked' as const, plan_id: view.plan_id, title: view.proposal.title,
+              issues: view.quality.checks.flatMap((check) => check.issues).slice(0, 12) }
+          }
+          const launch = (approved: boolean) => {
+            if (findChatPlan(service.orchestra.db, origin) !== view.plan_id) {
+              throw new OrchError('CONFIRMATION_MISMATCH', '本次计划已更新，请重新核对', { reason: 'plan_updated' })
+            }
+            return service.planning.launchFromChat(
+              view.plan_id, view.content_hash, options.operator, new Date().toISOString(), origin, approved,
+            )
+          }
+          let started
+          try { started = launch(false) } catch (error) {
+            if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
+            const definition = service.orchestra.catalog.get(view.proposal.workflow_id, view.proposal.workflow_version)
+            const hasApprovalStep = definition.nodes.some((node) => node.type === 'approval')
+            const hasEffects = definition.nodes.some((node) => node.side_effect_policy === 'irreversible' || node.side_effect_policy === 'compensable')
+            const reason = formatChatApproval({
+              task: view.proposal.title, step: '启动前确认（整项任务）',
+              reason: hasEffects ? '计划包含可能影响外部环境的操作，启动前需要你确认。'
+                : hasApprovalStep ? '计划包含人工审批步骤，启动前需要你确认这份计划。'
+                  : '计划包含需要确认的流程控制步骤。',
+              operation: `批准启动这份计划，共 ${view.proposal.steps.length} 个步骤。`,
+              consequence: hasApprovalStep ? '按计划启动，流程里的人工审批仍须单独处理。' : '按这份计划创建并开始本次运行。',
+              planSteps: view.proposal.steps.map((step) => step.description),
+              deliverables: view.proposal.deliverables.map(item => item.title),
+              planVersion: view.plan_id + ' / ' + view.content_hash,
+            })
+            if (!await approveOnce(turn, view.plan_id, undefined, agent, reason, signal)) {
+              withTx(service.orchestra.db,tx => advancePlanning(tx,progress,'declined',null,Date.now()))
+              return { state: 'launch_declined' as const, plan_id: view.plan_id, title: view.proposal.title }
+            }
+            started = launch(true)
+          }
+          withTx(service.orchestra.db,tx => advancePlanning(tx,progress,'started',started.run_id,Date.now()))
+          sessions.set(agent, binding)
+          return { state: 'started' as const, ...started, title: view.proposal.title,
+            steps: view.proposal.steps.map((step) => ({ node_id: step.node_id, depends_on: step.depends_on, description: step.description })).slice(0, 12),
+            deliverables: view.proposal.deliverables.map((item) => item.title).slice(0, 12) }
+        } catch (error) {
+          const stage = error instanceof OrchError && error.details.reason === 'plan_updated'
+            ? 'approval' : signal.aborted ? 'cancelled' : 'failed'
+          withTx(service.orchestra.db,tx => advancePlanning(tx,progress,stage,null,Date.now()))
+          throw error
         }
-        started = launch(true)
-      }
-      sessions.set(agent, binding)
-      return { state: 'started' as const, ...started, title: view.proposal.title,
-        steps: view.proposal.steps.map((step) => ({ node_id: step.node_id, depends_on: step.depends_on, description: step.description })).slice(0, 12),
-        deliverables: view.proposal.deliverables.map((item) => item.title).slice(0, 12) }
+      } finally { lease.release() }
     })
   }
   const execute = async (raw: unknown, exec: ToolExecution) => {
@@ -672,8 +709,8 @@ export function installNativeChat(host: Context, options: {
     if (turn.brainNotesOnly && !['status', 'review_brain_notes'].includes(input.action)) {
       throw new OrchError('FORBIDDEN', '主脑便条审阅回合只可定位任务和审阅便条')
     }
-    if (input.action === 'status') {
-      turn.lastStatusRun = undefined
+    if (input.action === 'status' || input.action === 'stop') {
+      if (input.action === 'status') turn.lastStatusRun = undefined
       if (input.run_id && input.task_title) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请选择一种任务定位方式')
     }
     if (input.action === 'start') {
@@ -688,132 +725,137 @@ export function installNativeChat(host: Context, options: {
       throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
     }
     if (!options.hasService(binding)) throw new OrchError('NOT_FOUND', '当前会话还没有编排运行')
-    const service = await options.serviceFor(binding)
-    assertCurrent()
-    const { db, commands } = service.orchestra
-    const taskTitle = input.action === 'status' ? input.task_title : undefined
-    const selectedRun = scopedRun ?? requestedRun ?? (input.action === 'status' ? undefined : turn.lastStatusRun)
-    if (input.action !== 'status' && !selectedRun) throw new OrchError('NOT_FOUND', '请先查看对应任务的状态')
-    const runId = taskTitle && !scopedRun ? chatRunByTitle(db, options.operator, taskTitle) : chatRun(db, options.operator, selectedRun)
-    if (!runId) throw new OrchError('NOT_FOUND', '当前会话没有对应的编排运行')
-    if (input.action === 'status') {
-      const run = describeRun(service, runId, options.operator)
-      if (scopedRun && taskTitle && run.title !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
-      const result = { ...run, nodes: describeNodes(db, runId),
-        artifacts: describeArtifacts(db, runId, acceptedArtifactIds(run.delivery_checks)) }
-      turn.lastStatusRun = runId
-      return result
-    }
-    if (input.action === 'stop') {
-      if (!turn.human || turn.noticeRun || turn.reportOnly || !nativeOwnerRequest(turn.human))
-        throw new OrchError('FORBIDDEN', '停止操作需要当前会话中的真人确认')
-      const read = () => db.raw.prepare(
-        'SELECT status,cancel_requested_at FROM runs WHERE run_id=?'
-      ).get(runId) as { status: string; cancel_requested_at: string | null } | undefined
-      const initial = read()
-      if (!initial) throw new OrchError('NOT_FOUND','找不到这次运行')
-      const counts = { skipped_irreversible: 0, pending_decisions: 0 }
-      if (!isRunTerminal(initial.status) && !initial.cancel_requested_at) {
-        const reason = formatChatApproval({
-          task: describeRun(service,runId,options.operator).title,
-          step:'停止这次运行', reason:'你将暂停后续执行并请求结束在途操作。',
-          operation:'只停止当前选中的运行。', consequence:'正在执行的外部操作可能仍需核实。'
-        })
-        if (!await approveOnce(turn, 'stop:' + runId, exec, agent, reason, signal))
-          throw new OrchError('CONFIRMATION_REQUIRED','未确认停止，运行保持原状态')
-        assertCurrent()
-        const current = read()
-        if (current && !isRunTerminal(current.status) && !current.cancel_requested_at) {
-          // 当前同步命令会提交取消意图，并调用已注册的取消适配器。
-          const out = commands.cancelRun({runId,cancelResult:'unknown',graceMs:30_000,now:new Date().toISOString()})
-          counts.skipped_irreversible = out.skippedIrreversible.length
-          counts.pending_decisions = out.pendingHumanDecisions.length
-        }
-      }
-      turn.lastStatusRun = runId
-      const latest = read()
-      if (!latest) throw new OrchError('NOT_FOUND','运行已不再可读取')
-      return {state:'stop_requested' as const,run_id:runId,status:latest.status,...counts}
-    }
-    if (input.action === 'review_delivery') {
-      const reviews = service.rework ? listChatDeliveryReviews(db, runId, options.operator) : []
-      return { deliveryReview: {
-        workspaceId: binding.workspaceId, sessionId: binding.sessionId,
-        reviews: attachChatDeliveryPreviews(db, reviews),
-      } }
-    }
-    if (input.action === 'artifact') {
-      const artifactId = input.artifact_id ?? artifactFromName(db, runId, input.file_name!)
-      const item = getArtifactContent(db, runId, artifactId, 'preview', Date.now()).item
-      // 回执定位只用已经核验过的这一版，客户端据此重读而不是相信模型给的名字（T16）。
-      const run = getRun(db, runId)
-      return { ...item, location: { kind: 'artifact' as const, workspaceId: binding.workspaceId,
-        sessionId: binding.sessionId, taskId: run.task_id, runId, artifactId, sha256: item.sha256 } }
-    }
-    if (input.action === 'notes') {
-      if (!turn.human || turn.noticeRun || turn.managed || !turn.notesOnly) {
-        throw new OrchError('FORBIDDEN', '只有操作人明确查询时才可读取运行便条')
-      }
-      if (!service.runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '本宿主尚未提供运行便条')
-      const notes = service.runNotes.listChatShared(runId, options.operator, input.before_seq)
-      return { notes }
-    }
-    if (input.action === 'review_brain_notes') {
-      if (!turn.human || !turn.brainNotesOnly || turn.noticeRun || turn.managed || turn.brainReviewStarted) {
-        throw new OrchError('FORBIDDEN', '主脑便条需要来源会话中的明确审阅请求')
-      }
-      if (!service.reviewBrainNotes) throw new OrchError('SERVICE_UNAVAILABLE', '本宿主未提供主脑专属便条审阅')
-      turn.brainReviewStarted = true
-      return { brain_review: await service.reviewBrainNotes(agent, runId, options.operator, signal, assertCurrent) }
-    }
-    const decisionId = input.decision_id ?? decisionFromTitle(db, runId, input.decision_title!, input.resolution)
-    const { item: decision } = getDecisionSnapshot(db, decisionId)
-    if (decision.run_id !== runId || !decision.allowed_resolutions?.includes(input.resolution)
-      || (turn.noticeRun && input.resolution !== 'approved')) {
-      throw new OrchError('FORBIDDEN', '该裁决不属于当前会话的待确认运行，或需要原有核验证据')
-    }
-    if (decision.kind === 'audit_result') throw new OrchError('RESOLUTION_NOT_AVAILABLE', '请先查看成果，再在对应审核入口提交结论')
-    return once(decision.decision_id, async () => {
-      const title = chatDecisionTitle(decision.target_summary, decision.kind)
-      const fields = chatReviewFields(service, runId, decision, title, input.resolution)
-      const firstReason = formatChatApproval(decision.confirm_required
-        ? { ...fields, consequence: '还需在下一张卡片完成二次确认。' }
-        : fields)
-      if (!await approveOnce(turn, decision.decision_id, exec, agent, firstReason, signal)) {
-        return { state: 'approval_pending' as const, run_id: runId, title }
-      }
+    const lease = await acquire(binding)
+    const { service } = lease
+    try {
       assertCurrent()
-      const request = {
-        decisionId: decision.decision_id, revision: decision.current_revision, resolution: input.resolution,
-        actor: { kind: 'human' as const, id: options.operator }, operationId: uuidv7(), bindActor: true,
-        now: new Date().toISOString(), ...(decision.content_hash ? { contentHash: decision.content_hash } : {}),
+      const { db, commands } = service.orchestra
+      const taskTitle = input.action === 'status' || input.action === 'stop' ? input.task_title : undefined
+      const selectedRun = scopedRun ?? requestedRun ?? (input.action === 'status' ? undefined : turn.lastStatusRun)
+      if (input.action !== 'status' && !selectedRun && !taskTitle) throw new OrchError('NOT_FOUND', '请先查看对应任务的状态')
+      const runId = taskTitle && !scopedRun ? chatRunByTitle(db, options.operator, taskTitle) : chatRun(db, options.operator, selectedRun)
+      if (!runId) throw new OrchError('NOT_FOUND', '当前会话没有对应的编排运行')
+      if (input.action === 'status') {
+        const run = describeRun(service, runId, options.operator)
+        if (scopedRun && taskTitle && run.title !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
+        const result = { ...run, nodes: describeNodes(db, runId),
+          artifacts: describeArtifacts(db, runId, acceptedArtifactIds(run.delivery_checks)) }
+        turn.lastStatusRun = runId
+        return result
       }
-      try { commands.resolveDecision(request) } catch (error) {
-        if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
-        const { confirm_challenge: challenge, expires_at: deadline } = error.details
-        if (typeof challenge !== 'string' || typeof deadline !== 'string') throw error
-        const expiresAt = Date.parse(deadline)
-        const remaining = expiresAt - Date.now()
-        const expired = () => new OrchError('CONFIRMATION_EXPIRED', '这次裁决的二次确认已过期，请重新选择')
-        if (!Number.isFinite(remaining) || remaining <= 0) throw expired()
-        // This is a fresh native interaction. DSH records a separate approval
-        // ID and the browser creates a new, single-use card for each request.
-        const followupSignal = AbortSignal.any([signal, AbortSignal.timeout(remaining)])
-        const until = new Intl.DateTimeFormat('zh-CN', {
-          timeZone: 'UTC', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-        }).format(expiresAt)
-        const secondReason = formatChatApproval({ ...fields, confirmUntil: until + '（UTC）' })
-        const confirmed = await approveOnce(turn, decision.decision_id, exec, agent, secondReason, followupSignal)
+      if (input.action === 'stop') {
+        if (scopedRun && taskTitle && getRun(db, runId).task_title !== taskTitle)
+          throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
+        if (!turn.human || turn.noticeRun || turn.reportOnly || !nativeOwnerRequest(turn.human))
+          throw new OrchError('FORBIDDEN', '停止操作需要当前会话中的真人确认')
+        const read = () => db.raw.prepare(
+          'SELECT status,cancel_requested_at FROM runs WHERE run_id=?'
+        ).get(runId) as { status: string; cancel_requested_at: string | null } | undefined
+        const initial = read()
+        if (!initial) throw new OrchError('NOT_FOUND','找不到这次运行')
+        const counts = { skipped_irreversible: 0, pending_decisions: 0 }
+        if (!isRunTerminal(initial.status) && !initial.cancel_requested_at) {
+          const reason = formatChatApproval({
+            task: describeRun(service,runId,options.operator).title,
+            step:'停止这次运行', reason:'你将暂停后续执行并请求结束在途操作。',
+            operation:'只停止当前选中的运行。', consequence:'正在执行的外部操作可能仍需核实。'
+          })
+          if (!await approveOnce(turn, 'stop:' + runId, exec, agent, reason, signal))
+            throw new OrchError('CONFIRMATION_REQUIRED','未确认停止，运行保持原状态')
+          assertCurrent()
+          const current = read()
+          if (current && !isRunTerminal(current.status) && !current.cancel_requested_at) {
+            // 当前同步命令会提交取消意图，并调用已注册的取消适配器。
+            const out = commands.cancelRun({runId,cancelResult:'unknown',graceMs:30_000,now:new Date().toISOString()})
+            counts.skipped_irreversible = out.skippedIrreversible.length
+            counts.pending_decisions = out.pendingHumanDecisions.length
+          }
+        }
+        turn.lastStatusRun = runId
+        const latest = read()
+        if (!latest) throw new OrchError('NOT_FOUND','运行已不再可读取')
+        return {state:'stop_requested' as const,run_id:runId,status:latest.status,...counts}
+      }
+      if (input.action === 'review_delivery') {
+        const reviews = service.rework ? listChatDeliveryReviews(db, runId, options.operator) : []
+        return { deliveryReview: {
+          workspaceId: binding.workspaceId, sessionId: binding.sessionId,
+          reviews: attachChatDeliveryPreviews(db, reviews),
+        } }
+      }
+      if (input.action === 'artifact') {
+        const artifactId = input.artifact_id ?? artifactFromName(db, runId, input.file_name!)
+        const item = getArtifactContent(db, runId, artifactId, 'preview', Date.now()).item
+        // 回执定位只用已经核验过的这一版，客户端据此重读而不是相信模型给的名字（T16）。
+        const run = getRun(db, runId)
+        return { ...item, location: { kind: 'artifact' as const, workspaceId: binding.workspaceId,
+          sessionId: binding.sessionId, taskId: run.task_id, runId, artifactId, sha256: item.sha256 } }
+      }
+      if (input.action === 'notes') {
+        if (!turn.human || turn.noticeRun || turn.managed || !turn.notesOnly) {
+          throw new OrchError('FORBIDDEN', '只有操作人明确查询时才可读取运行便条')
+        }
+        if (!service.runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '本宿主尚未提供运行便条')
+        const notes = service.runNotes.listChatShared(runId, options.operator, input.before_seq)
+        return { notes }
+      }
+      if (input.action === 'review_brain_notes') {
+        if (!turn.human || !turn.brainNotesOnly || turn.noticeRun || turn.managed || turn.brainReviewStarted) {
+          throw new OrchError('FORBIDDEN', '主脑便条需要来源会话中的明确审阅请求')
+        }
+        if (!service.reviewBrainNotes) throw new OrchError('SERVICE_UNAVAILABLE', '本宿主未提供主脑专属便条审阅')
+        turn.brainReviewStarted = true
+        return { brain_review: await service.reviewBrainNotes(agent, runId, options.operator, signal, assertCurrent) }
+      }
+      const decisionId = input.decision_id ?? decisionFromTitle(db, runId, input.decision_title!, input.resolution)
+      const { item: decision } = getDecisionSnapshot(db, decisionId)
+      if (decision.run_id !== runId || !decision.allowed_resolutions?.includes(input.resolution)
+        || (turn.noticeRun && input.resolution !== 'approved')) {
+        throw new OrchError('FORBIDDEN', '该裁决不属于当前会话的待确认运行，或需要原有核验证据')
+      }
+      if (decision.kind === 'audit_result') throw new OrchError('RESOLUTION_NOT_AVAILABLE', '请先查看成果，再在对应审核入口提交结论')
+      return await once(decision.decision_id, async () => {
+        const title = chatDecisionTitle(decision.target_summary, decision.kind)
+        const fields = chatReviewFields(service, runId, decision, title, input.resolution)
+        const firstReason = formatChatApproval(decision.confirm_required
+          ? { ...fields, consequence: '还需在下一张卡片完成二次确认。' }
+          : fields)
+        if (!await approveOnce(turn, decision.decision_id, exec, agent, firstReason, signal)) {
+          return { state: 'approval_pending' as const, run_id: runId, title }
+        }
         assertCurrent()
-        if (followupSignal.aborted || Date.now() >= expiresAt) throw expired()
-        if (!confirmed) return { state: 'approval_pending' as const, run_id: runId, title }
-        const { item: current } = getDecisionSnapshot(db, decision.decision_id)
-        if (current.current_revision !== request.revision) throw new OrchError('DECISION_REVISION_CONFLICT', '裁决修订已改变，请重新选择')
-        if (current.content_hash !== decision.content_hash) throw new OrchError('CONFIRMATION_MISMATCH', '裁决内容已改变，请重新选择')
-        commands.resolveDecision({ ...request, now: new Date().toISOString(), confirmChallenge: challenge })
-      }
-      return { state: input.resolution, run_id: runId, decision_id: decision.decision_id, title }
-    })
+        const request = {
+          decisionId: decision.decision_id, revision: decision.current_revision, resolution: input.resolution,
+          actor: { kind: 'human' as const, id: options.operator }, operationId: uuidv7(), bindActor: true,
+          now: new Date().toISOString(), ...(decision.content_hash ? { contentHash: decision.content_hash } : {}),
+        }
+        try { commands.resolveDecision(request) } catch (error) {
+          if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
+          const { confirm_challenge: challenge, expires_at: deadline } = error.details
+          if (typeof challenge !== 'string' || typeof deadline !== 'string') throw error
+          const expiresAt = Date.parse(deadline)
+          const remaining = expiresAt - Date.now()
+          const expired = () => new OrchError('CONFIRMATION_EXPIRED', '这次裁决的二次确认已过期，请重新选择')
+          if (!Number.isFinite(remaining) || remaining <= 0) throw expired()
+          // This is a fresh native interaction. DSH records a separate approval
+          // ID and the browser creates a new, single-use card for each request.
+          const followupSignal = AbortSignal.any([signal, AbortSignal.timeout(remaining)])
+          const until = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'UTC', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+          }).format(expiresAt)
+          const secondReason = formatChatApproval({ ...fields, confirmUntil: until + '（UTC）' })
+          const confirmed = await approveOnce(turn, decision.decision_id, exec, agent, secondReason, followupSignal)
+          assertCurrent()
+          if (followupSignal.aborted || Date.now() >= expiresAt) throw expired()
+          if (!confirmed) return { state: 'approval_pending' as const, run_id: runId, title }
+          const { item: current } = getDecisionSnapshot(db, decision.decision_id)
+          if (current.current_revision !== request.revision) throw new OrchError('DECISION_REVISION_CONFLICT', '裁决修订已改变，请重新选择')
+          if (current.content_hash !== decision.content_hash) throw new OrchError('CONFIRMATION_MISMATCH', '裁决内容已改变，请重新选择')
+          commands.resolveDecision({ ...request, now: new Date().toISOString(), confirmChallenge: challenge })
+        }
+        return { state: input.resolution, run_id: runId, decision_id: decision.decision_id, title }
+      })
+    } finally { lease.release() }
   }
   host.tools.guard((execution) => {
     const turn = execution.agent && turns.get(execution.agent)
@@ -906,46 +948,49 @@ export function installNativeChat(host: Context, options: {
 
   const publish = async (agent: Agent, binding: Binding) => {
     if (!sameBinding(agent, binding)) { sessions.delete(agent); return }
-    const service = await options.serviceFor(binding)
-    if (options.signal.aborted || !sameBinding(agent, binding)) return
-    const receipts = pendingChatReports(service.orchestra.db, options.operator, cursors.get(agent) ?? 0, 16)
-    cursors.set(agent, receipts.length === 16 ? receipts.at(-1)!.cursor : 0)
-    const checked = checkedModelRecovery.get(agent) ?? new Map()
-    checkedModelRecovery.set(agent, checked)
-    for (const receipt of receipts) {
-      const isCurrent = () => sameBinding(agent, binding)
-      const retrying = await service.recoverChatModelAssignment?.({ actor: options.operator, runId: receipt.run_id, signal: options.signal,
-        checked, isCurrent }).catch(() => undefined)
-      if (options.signal.aborted || !isCurrent()) return
-      const facts = describeRun(service, receipt.run_id, options.operator)
-      const view = retrying?.length ? { ...facts,
-        blocking: facts.blocking.filter(({ node_run_id }) => !retrying.includes(node_run_id)) } : facts
-      const report = nextReport(view, receipt.reported_key)
-      if (!report || receipt.reported_key === report.key || options.signal.aborted || !sameBinding(agent, binding)) continue
-      const { key, notify } = report
-      if (!notify) {
+    const lease = await acquire(binding)
+    const { service } = lease
+    try {
+      if (options.signal.aborted || !sameBinding(agent, binding)) return
+      const receipts = pendingChatReports(service.orchestra.db, options.operator, cursors.get(agent) ?? 0, 16)
+      cursors.set(agent, receipts.length === 16 ? receipts.at(-1)!.cursor : 0)
+      const checked = checkedModelRecovery.get(agent) ?? new Map()
+      checkedModelRecovery.set(agent, checked)
+      for (const receipt of receipts) {
+        const isCurrent = () => sameBinding(agent, binding)
+        const retrying = await service.recoverChatModelAssignment?.({ actor: options.operator, runId: receipt.run_id, signal: options.signal,
+          checked, isCurrent }).catch(() => undefined)
+        if (options.signal.aborted || !isCurrent()) return
+        const facts = describeRun(service, receipt.run_id, options.operator)
+        const view = retrying?.length ? { ...facts,
+          blocking: facts.blocking.filter(({ node_run_id }) => !retrying.includes(node_run_id)) } : facts
+        const report = nextReport(view, receipt.reported_key)
+        if (!report || receipt.reported_key === report.key || options.signal.aborted || !sameBinding(agent, binding)) continue
+        const { key, notify } = report
+        if (!notify) {
+          reportChatRun(service.orchestra.db, receipt.run_id, key)
+          continue
+        }
+        const digest = sha256Hex(JSON.stringify([binding.identity, receipt.run_id, key]))
+        const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}` as Message['id']
+        const alreadyDelivered = agent.session.snapshotEvents().some((event) => event.type === 'user/message'
+          ? event.data.id === id : event.type === 'agent/inbox/spliced' && event.data.inserted.some((message) => message.id === id))
+        if (!alreadyDelivered) {
+          const pending = issued.get(agent) ?? new Map()
+          issued.set(agent, pending)
+          pending.set(id, receipt.run_id)
+          try {
+            const display = describeChatRun({
+              ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
+              artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
+            }, true)
+            agent.followup(noticeMessage(id, display))
+          } finally { pending.delete(id) }
+        }
+        if (!await host.sessions.flush(agent.session) || options.signal.aborted) return
         reportChatRun(service.orchestra.db, receipt.run_id, key)
-        continue
       }
-      const digest = sha256Hex(JSON.stringify([binding.identity, receipt.run_id, key]))
-      const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}` as Message['id']
-      const alreadyDelivered = agent.session.snapshotEvents().some((event) => event.type === 'user/message'
-        ? event.data.id === id : event.type === 'agent/inbox/spliced' && event.data.inserted.some((message) => message.id === id))
-      if (!alreadyDelivered) {
-        const pending = issued.get(agent) ?? new Map()
-        issued.set(agent, pending)
-        pending.set(id, receipt.run_id)
-        try {
-          const display = describeChatRun({
-            ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
-            artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
-          }, true)
-          agent.followup(noticeMessage(id, display))
-        } finally { pending.delete(id) }
-      }
-      if (!await host.sessions.flush(agent.session) || options.signal.aborted) return
-      reportChatRun(service.orchestra.db, receipt.run_id, key)
-    }
+    } finally { lease.release() }
   }
   const interval = setInterval(() => {
     if (!polling && !options.signal.aborted) {

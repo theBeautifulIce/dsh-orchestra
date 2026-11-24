@@ -1,3 +1,4 @@
+import { draftReferenceSchema } from './task-plan-drafts.ts'
 // HTTP 入口：只监听 127.0.0.1；/health 免认证，其余路径都要 x-orchestra-secret（规格 12.5 行 1091）
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
@@ -49,7 +50,7 @@ import type { acknowledgeDecision, Resolution } from './commands/decisions.ts'
 import type { inspectEffectEvidence, EffectResolutionResult, EvidenceSource, ResolutionBasis } from './commands/effects.ts'
 import type { Actor } from './decision/approver.ts'
 import type { MemoryHost } from './memory-host.ts'
-import { planConfirmSchema, planInputSchema, type TaskPlanningHost } from './task-planning.ts'
+import { materialGrantSchema, materialRevokeSchema, planConfirmSchema, planInputSchema, type TaskPlanningHost } from './task-planning.ts'
 import { collaborationReassignSchema, collaborationReviewSchema, collaborationScopeSchema, type CollaborationHost } from './collaboration.ts'
 import { reworkRequestSchema, reworkReviewSchema, type ReworkHost } from './rework-coordinator.ts'
 import { deliveryHoldSchema, type createDeliveryReviewHost } from './delivery-review.ts'
@@ -109,7 +110,7 @@ export type ServerQueries = {
   listExecutionHistory: (params: Parameters<typeof listExecutionHistory>[1]) => ReturnType<typeof listExecutionHistory>
   listTaskSummaries: (params: ListTaskParams) =>
     { items: TaskSummary[]; next_cursor: string | null; lane_counts?: Partial<Record<string, number>>; as_of_seq: number }
-  getTaskSummary: (taskId: string, now: number) => { item: TaskSummary; as_of_seq: number }
+  getTaskSummary: (taskId: string, now: number, actor?: string) => { item: TaskSummary; as_of_seq: number }
   getWorkspaceOverview: () => { item: WorkspaceOverview; as_of_seq: number }
   listRuns: (opts: { task_id?: string; workflow_id?: string; limit?: number; cursor?: string }) => {
     items: RunSummary[]; next_cursor?: string | null; as_of_seq: number
@@ -568,6 +569,23 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
+    if (req.method === 'GET' && url.pathname === '/v1/task-plans/progress' && deps.planning) {
+      const { items, as_of_seq } = deps.planning.progress(actor, Date.parse(requestNow)-24*60*60_000)
+      sendJson(res,200,okEnvelope(as_of_seq,{items}))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-plans/materials' && deps.planning) {
+      const input=parseBody(materialGrantSchema,await readJsonBody(req),'为这份计划授权材料')
+      const result=await queue.run(()=>deps.planning!.grantMaterials(input,actor,requestNow))
+      sendJson(res,200,okEnvelope(deps.asOfSeq(),result))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-plans/materials/revoke' && deps.planning) {
+      const input=parseBody(materialRevokeSchema,await readJsonBody(req),'撤回材料授权')
+      const result=await queue.run(()=>deps.planning!.revokeMaterial(input,actor))
+      sendJson(res,200,okEnvelope(deps.asOfSeq(),result))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/v1/task-plans/capability') {
       sendJson(res, 200, okEnvelope(deps.asOfSeq(), { enabled: deps.planning?.enabled === true }))
       return
@@ -578,8 +596,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/task-plans/drafts' && deps.planning) {
-      const { items, as_of_seq } = deps.planning.listDrafts(actor, stringParam(url, 'task_id', 256) ?? undefined)
-      sendJson(res, 200, okEnvelope(as_of_seq, { items }))
+      const { items, next_cursor, as_of_seq } = deps.planning.listDrafts(actor, stringParam(url, 'task_id', 256) ?? undefined,
+        { cursor: stringParam(url, 'cursor', 4096), limit: Math.min(intParam(url, 'limit', 20), 100) })
+      sendJson(res, 200, okEnvelope(as_of_seq, { items, next_cursor }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/task-plans/by-task' && deps.planning) {
@@ -592,6 +611,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
       const planning = deps.planning
       const { view, as_of_seq } = await withPlanningResponse(res, (signal) => planning.propose(input, actor, requestNow, signal))
       sendJson(res, 200, okEnvelope(as_of_seq, view))
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/task-plans/discard' && deps.planning) {
+      const input = parseBody(draftReferenceSchema, await readJsonBody(req), '放弃未启动计划')
+      const result = await queue.run(() => deps.planning!.discard(input, actor, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
       return
     }
     if (req.method === 'POST' && url.pathname === '/v1/task-plans/confirm' && deps.planning) {
@@ -646,6 +671,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
           throw new OrchError('PAYLOAD_SCHEMA_INVALID', '任务筛选值无效')
         }
         const result = deps.queries.listTaskSummaries({
+          actor,
           limit: Math.min(intParam(url, 'limit', 50), 100),
           cursor: stringParam(url, 'cursor', 4096),
           status: stringParam(url, 'status', 64),
@@ -672,7 +698,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     if (req.method === 'GET' && url.pathname === '/v1/tasks/get' && deps.queries) {
       const taskId = stringParam(url, 'task_id', 256) ?? ''
-      const result = deps.queries.getTaskSummary(taskId, Date.parse(requestNow))
+      const result = deps.queries.getTaskSummary(taskId, Date.parse(requestNow), actor)
       sendJson(res, 200, okEnvelope(result.as_of_seq, result.item))
       return
     }

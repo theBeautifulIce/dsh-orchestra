@@ -159,8 +159,8 @@ describe('version-bound rework runtime',() => {
   expect(()=>withTx(db,tx=>authorizeReworkRuntime(tx,secret,req,now))).toThrow(/persisted topology/)
   expect(db.raw.prepare("SELECT count(*) n FROM node_runs WHERE node_id='a'").get()?.n).toBe(1)
   const second=setup(); const secondReq=request(second)
-  withTx(second,tx=>artifact(tx,'a','sibling-v1'))
-  expect(()=>withTx(second,tx=>authorizeReworkRuntime(tx,secret,secondReq,now))).toThrow(/preservation/)
+  withTx(second,tx=>{artifact(tx,'a','sibling-v1');tx.run("UPDATE artifact_contents SET file_name='appendix.txt' WHERE artifact_id='sibling-v1'")})
+  expect(()=>withTx(second,tx=>authorizeReworkRuntime(tx,secret,secondReq,now))).toThrow(/逐份批准/)
   expect(second.raw.prepare('SELECT count(*) n FROM artifact_contents WHERE node_run_id=?').get('a')?.n).toBe(2)
  })
  it('never releases authorized collateral merely because the request is declined',()=>{

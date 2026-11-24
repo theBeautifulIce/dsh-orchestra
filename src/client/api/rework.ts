@@ -2,6 +2,7 @@ import { ApiError, type ApiClient } from './client.ts'
 import { newOperationId } from './workflow-commands.ts'
 import type { OperationRow } from './types.ts'
 import type { ReworkRequest, ReworkAttempt, ReworkReview as ReviewRecord } from '../../service/rework-coordinator.ts'
+import type { ReworkFileManifest } from '../../service/rework-manifest.ts'
 import type { InspectionInput, InspectionResult, ReworkInspection } from '../../service/rework-inspection.ts'
 export type ReworkItem = ReworkRequest & { source_artifact_count?: number }
 export type ReworkDetail = {
@@ -28,8 +29,8 @@ export type ReviewHold = { run_id: string; node_id: string; node_run_id: string;
   revision: number
   reviewed_files?: Array<{ artifact_id: string; sha256: string; file_name: string | null }>
   pending?: string[] }
-export type ReworkRequestInput = { run_id: string; target_node_run_id: string; source_artifact_id: string; source_artifact_hash: string; reason: string; expected_result: string; preserve_requirements: string[]; suggested_scope: ReworkScope; evidence_ids: string[]; expected_revision: number }
-export type ReworkReviewInput = { request_id: string; expected_revision: number; action: 'authorize' | 'reject' | 'reject_final' | 'accept' | 'request_changes' | 'escalate'; note: string; artifact_id?: string; artifact_hash?: string }
+export type ReworkRequestInput = { run_id: string; target_node_run_id: string; source_artifact_id: string; source_artifact_hash: string; reason: string; expected_result: string; preserve_requirements: string[]; suggested_scope: ReworkScope; evidence_ids: string[]; expected_revision: number; file_manifest?: ReworkFileManifest }
+export type ReworkReviewInput = { request_id: string; expected_revision: number; action: 'authorize' | 'set_manifest' | 'reject' | 'reject_final' | 'accept' | 'request_changes' | 'escalate'; note: string; artifact_id?: string; artifact_hash?: string; file_manifest?: ReworkFileManifest }
 
 /** Ambiguous writes recover the original receipt; they never resend the command. */
 export function createReworkApi(client: ApiClient) {

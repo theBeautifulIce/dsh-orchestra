@@ -2,7 +2,7 @@
 import { act } from 'react'
 import { expect, it, vi } from 'vitest'
 import { MaterialPicker } from '../../src/client/panel/material-picker.tsx'
-import { renderPanel } from './harness.ts'
+import { deferred, renderPanel } from './harness.ts'
 
 it('keeps pasted material local until consent and preserves it after an unsuccessful grant', async () => {
   const grant = vi.fn().mockRejectedValueOnce(new Error('授权服务暂不可用')).mockResolvedValueOnce(undefined)
@@ -45,4 +45,21 @@ it('lists selected files before consent and reads the selected bytes only on sub
     expect(grant).toHaveBeenCalledWith([{name:'income.csv',body:'value\n10'}])
     expect(read).toHaveBeenCalledTimes(1)
   } finally { view.unmount() }
+})
+
+it('does not upload a locally selected file if its read completes after the material form leaves the session', async () => {
+  const contents = deferred<ArrayBuffer>()
+  const grant = vi.fn()
+  const file = new File(['private'], '私有材料.txt', { type: 'text/plain' })
+  Object.defineProperty(file, 'arrayBuffer', { value: () => contents.promise })
+  const view = await renderPanel(<MaterialPicker recipients={['核对材料']} onGrant={grant} />)
+  const input = view.container.querySelector('input')!
+  await act(async () => {
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await view.click(view.container.querySelector('button')!)
+  view.unmount()
+  await act(async () => { contents.resolve(new TextEncoder().encode('private').buffer) })
+  expect(grant).not.toHaveBeenCalled()
 })

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { gunzipSync } from 'node:zlib'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { sha256Hex } from '../src/core/canonical.ts'
@@ -32,22 +33,23 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
   const bytes = readFileSync(archive)
   const sha256 = sha256Hex(bytes)
   if (options.expectedSha256 && options.expectedSha256 !== sha256) throw new Error('Archive SHA256 mismatch')
-  // Windows 的 GNU tar 会把 `C:` 当成远端主机名，先声明这是本地归档。
-  const tarLocal = process.platform === 'win32' ? ['--force-local'] : []
-  const entries = execFileSync('tar', [...tarLocal, '-tf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/).sort()
+  const unpackLimit = 64 * 1024 * 1024
+  const tarBytes = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes, { maxOutputLength: unpackLimit }) : bytes
+  if (tarBytes.length > unpackLimit) throw new Error('Package exceeds the 64 MiB inspection limit')
+  const entries = execFileSync('tar', ['-tf', '-'], { input: tarBytes, encoding: 'utf8' }).trim().split(/\r?\n/).sort()
   if (new Set(entries).size !== entries.length
     || entries.some((name) => !baseFiles.has(name) && !publicDocs.has(name) && name !== 'package/README.md' &&
       !guideFiles.some((file) => name === 'package/' + file) && !migrationPath.test(name))) {
     throw new Error('Package has duplicate or undeclared paths')
   }
-  const metadata = execFileSync('tar', [...tarLocal, '-tvf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/)
+  const metadata = execFileSync('tar', ['-tvf', '-'], { input: tarBytes, encoding: 'utf8' }).trim().split(/\r?\n/)
   if (metadata.length !== entries.length || metadata.some((line) => !line.startsWith('-'))) {
     throw new Error('Package must contain ordinary files only')
   }
   for (const required of baseFiles) if (!entries.includes(required)) throw new Error('Missing package file: ' + required)
   if (!options.previous && !entries.includes('package/README.md')) throw new Error('Candidate package has no installation README')
 
-  const read = (name: string) => execFileSync('tar', [...tarLocal, '-xOf', archive, 'package/' + name], { maxBuffer: 10 * 1024 * 1024 })
+  const read = (name: string) => execFileSync('tar', ['-xOf', '-', 'package/' + name], { input: tarBytes, maxBuffer: 10 * 1024 * 1024 })
   const manifest = JSON.parse(read('package.json').toString('utf8'))
   if (!options.previous && Array.isArray(manifest.files)) {
     for (const file of guideFiles) {

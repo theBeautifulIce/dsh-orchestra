@@ -3,6 +3,7 @@ import { appendNodeRunEvent, assertChainIntact, readChain } from '../infra/db/le
 import type { Tx } from '../infra/sqlite/driver.ts'
 import type { NodeRunRow } from './commands/lease.ts'
 import type { ReworkBinding } from './rework-coordinator.ts'
+import { materializeReworkPreserved } from './rework-manifest.ts'
 import { textTarget } from './text-result.ts'
 import { approvedArtifactRequirements } from './task-planning.ts'
 
@@ -41,6 +42,7 @@ export function recordArtifactPublication(tx: Tx, secret: string, binding: Rewor
 export function verifyArtifactCompletion(tx: Tx, secret: string, row: NodeRunRow, now: string) {
   if (row.status !== 'verifying' || row.node_type !== 'agent' || row.side_effect_policy !== 'pure'
     || tx.get('SELECT 1 FROM tool_executions WHERE node_run_id=? AND attempt=? LIMIT 1', [row.node_run_id, row.attempt])) return null
+  materializeReworkPreserved(tx, row, now, (name, receipt) => recordArtifactPublication(tx,secret,row,row,name,receipt))
   const approved = approvedArtifactRequirements(tx, row.run_id, row.node_id)
   if (!approved) return null
   assertChainIntact(tx, secret, row.node_run_id)

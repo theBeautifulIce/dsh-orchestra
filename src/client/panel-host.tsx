@@ -20,6 +20,7 @@ export type PanelHostProps = {
   initialRoute?: PanelRoute
   /** 宿主要求从已发布流程启动前先确认任务计划。 */
   workflowLaunchRequiresPlan?: boolean
+  scopeLabel?: string
 }
 
 export type PanelHostStatus = {
@@ -131,6 +132,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     protocolMismatch={status.protocolMismatch ?? false}
     initialRoute={props.initialRoute}
     workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan}
+    scopeLabel={props.scopeLabel}
     runNotesEnabled={status.runNotesEnabled}
     memoryEnabled={status.serviceConnected ? status.memoryEnabled : false}
     memoryProposalOnly={status.serviceConnected && status.memoryProposalOnly}

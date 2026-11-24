@@ -1,7 +1,7 @@
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { OrchError } from '../core/errors.ts'
 export type Phase = 'planning' | 'approval' | 'started' | 'failed' | 'declined' | 'cancelled' | 'blocked'
-type ProgressKey = { request: string; actor: string; scope: string; hash: string }
+export type ProgressKey = { request: string; actor: string; scope: string; hash: string }
 
 export function beginPlanningProgress(tx: Tx, k: ProgressKey, now: number) {
   tx.run(`INSERT INTO chat_planning_progress
@@ -29,4 +29,20 @@ export function listPlanning(tx: Tx, actor: string, scope: string, since: number
   return tx.all(`SELECT stage,run_id,updated_ms FROM chat_planning_progress
     WHERE actor=? AND scope=? AND updated_ms>=? ORDER BY updated_ms DESC,request_key DESC LIMIT 20`,
     [actor,scope,since])
+}
+
+export type PlanningProgress = { request_key: string; stage: Phase; run_id: string | null;
+  plan_id: string | null; title: string; updated_ms: number }
+export function readPlanningProgress(tx: Pick<Tx, 'all'>, actor: string, since: number): PlanningProgress[] {
+  return tx.all<PlanningProgress>(`SELECT c.request_key,CASE WHEN o.run_id IS NOT NULL THEN 'started' ELSE c.stage END AS stage,
+      COALESCE(o.run_id,c.run_id) AS run_id,c.plan_id,c.title,c.updated_ms
+    FROM chat_planning_progress c LEFT JOIN task_plans p ON p.plan_id=c.plan_id
+    LEFT JOIN start_run_operations o ON o.operation_id=p.launch_operation_id
+    WHERE c.actor=? AND c.updated_ms>=?
+    ORDER BY CASE WHEN o.run_id IS NULL AND c.stage IN ('planning','approval','blocked') THEN 0 ELSE 1 END,
+      c.updated_ms DESC,c.request_key DESC LIMIT 20`, [actor,since])
+}
+export function bindPlanningProgress(tx: Tx, request: string, planId: string, title: string, now: number) {
+  tx.run(`UPDATE chat_planning_progress SET plan_id=?,title=?,stage='approval',updated_ms=?
+    WHERE request_key=? AND stage='planning'`, [planId,title.slice(0,200),now,request])
 }

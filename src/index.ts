@@ -1,3 +1,4 @@
+import { expireMaterials } from './service/plan-materials.ts'
 import { rememberManualDispatchSpecs, resolveManualReworkSpecs } from './service/rework-dispatch-specs.ts'
 import { configureReceiptRetention } from './service/receipt-retention.ts'
 import { installConfiguredLocalDshHost, localDshHostConfig } from './service/local-dsh-host.ts'
@@ -5,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // src/index.ts —— DSH 插件入口 + 生产装配（规格 12.5 行 1088-1092）
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { OrchError } from './core/errors.ts'
-import { openDb, type Db } from './infra/sqlite/driver.ts'
+import { openDb, withTx, type Db } from './infra/sqlite/driver.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from './infra/db/migrate.ts'
 import { bumpEpoch, openServiceDb } from './infra/db/open.ts'
 import { acquireDbLock } from './infra/lock.ts'
@@ -778,6 +779,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   // 维护扫描：租约过期、围栏宽限到点，2 秒一轮；失败只记日志，下一轮继续
   const sweepTimer = setInterval(() => {
     try {
+      withTx(orchestra.db,tx=>expireMaterials(tx,Date.now()))
       sweepNow(orchestra.runtime, new Date().toISOString())
       if (opts.phase === 'S6') sweepIntake(orchestra.db, new Date().toISOString())
       memory?.resume()
@@ -834,7 +836,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
         listEventHistory: (params) => listEventHistory(orchestra.db, params),
         listExecutionHistory: (params) => listExecutionHistory(orchestra.db, params),
         listTaskSummaries: (params) => listTaskSummaries(orchestra.db, params),
-        getTaskSummary: (taskId, now) => getTaskSummarySnapshot(orchestra.db, taskId, now),
+        getTaskSummary: (taskId, now, actor) => getTaskSummarySnapshot(orchestra.db, taskId, now, actor),
         getWorkspaceOverview: () => getWorkspaceOverview(orchestra.db, Boolean(orchestra.release)),
         listRuns: (query) => listRuns(orchestra.db, query),
         getRun: (runId) => getRun(orchestra.db, runId),

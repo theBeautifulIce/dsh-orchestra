@@ -296,9 +296,16 @@ it('cancels native admission during planning without creating records or launchi
     })
     const admission = human.admit(user('整理一份待取消的办公报告'))
     await planned.promise
+    const progressService=test.services.get('parent')!
+    const inProgress=progressService.orchestra.db.raw.prepare('SELECT actor,stage,title FROM chat_planning_progress').get()!
+    expect(inProgress.stage).toBe('planning')
+    expect(inProgress.title).toContain('待取消')
+    expect(progressService.planning.progress(String(inProgress.actor)).items).toHaveLength(1)
+    expect(progressService.planning.progress('another-operator').items).toEqual([])
     human.signal.abort(new DOMException('operator cancelled', 'AbortError'))
     await expect(admission).rejects.toMatchObject({ name: 'AbortError' })
     const service = test.services.get('parent')!
+    expect(service.orchestra.db.raw.prepare('SELECT stage FROM chat_planning_progress').get()?.stage).toBe('cancelled')
     for (const table of ['tasks', 'workflows', 'task_plans', 'runs', 'chat_task_receipts'] as const) {
       expect(count(service, table)).toBe(0)
     }
@@ -977,8 +984,9 @@ it('notifies the source conversation with a fixed delivery review and leaves the
     expect(JSON.stringify(nextMeta)).not.toContain('"preview"')
     expect(test.approval).not.toHaveBeenCalled()
     const awaiting = service.rework!.list(actor, first.run_id).items[0]!
+    const displayed=reviewHost.list(actor,first.run_id).items[0]!
     expect(() => reviewHost.change({ action: 'accept', operation_id: uuidv7(), run_id: first.run_id, node_run_id: revisedId,
-      artifact_id: revised.artifact_id, sha256: revised.sha256 }, actor, now)).toThrow(/正在返工/u)
+      hold_id:displayed.hold_id!,expected_revision:displayed.revision,artifact_id: revised.artifact_id, sha256: revised.sha256 }, actor, now)).toThrow(/正在返工/u)
     service.rework!.review({ operation_id: uuidv7(), request_id: awaiting.request_id, expected_revision: awaiting.revision,
       action: 'accept', note: '修订符合预期', artifact_id: revised.artifact_id, artifact_hash: revised.sha256 }, actor, now)
     expect(reviewHost.list(actor, first.run_id).items[0]).toMatchObject({ status: 'accepted', node_run_id: revisedId, artifact_id: revised.artifact_id })
@@ -1446,4 +1454,61 @@ const text = formatChatApproval({step:'启动', reason:'核对范围', operation
 planSteps:[...Array.from({length:8}, (_, i) => '阶段' + (i + 1)), final],
 deliverables:['核对清单'], planVersion:'plan-9 / hash-9'})
 expect(text).toContain('9. ' + final);expect(text).toContain('核对清单');expect(text).toContain('plan-9 / hash-9')
+})
+
+it('C10 stops the task explicitly named by the human instead of the last status target', async () => {
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'named-stop')
+    await human.admit(user('/orchestra 整理第一批合同'))
+    const first = await human.call()
+    await human.admit(user('/orchestra 整理第二批合同'))
+    const second = await human.call()
+    await human.admit(user('查看第一批合同，然后停止第二批合同'))
+    await expect(human.call({ action: 'status', task_title: first.title })).resolves.toMatchObject({ run_id: first.run_id })
+    await expect(human.call({ action: 'stop', task_title: second.title, run_id: first.run_id }))
+      .resolves.toMatchObject({ state: 'error', code: 'PAYLOAD_SCHEMA_INVALID' })
+    await expect(human.call({ action: 'stop', task_title: second.title }))
+      .resolves.toMatchObject({ state: 'stop_requested', run_id: second.run_id })
+    const { db } = test.services.get('named-stop')!.orchestra
+    expect(db.raw.prepare('SELECT cancel_requested_at FROM runs WHERE run_id=?').get(first.run_id)?.cancel_requested_at).toBeNull()
+    expect(db.raw.prepare('SELECT cancel_requested_at FROM runs WHERE run_id=?').get(second.run_id)?.cancel_requested_at).not.toBeNull()
+    expect(test.approval).toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringContaining(second.title) }))
+  } finally { await test.close() }
+})
+
+it('keeps a new material revision unstarted when an older native approval completes', async () => {
+  const test = await fixture({ routing: { enabled: true } })
+  const approvalEntered = Promise.withResolvers<void>()
+  const approvalResult = Promise.withResolvers<'rejected' | 'allowed-once'>()
+  test.approval.mockImplementationOnce(async () => { approvalEntered.resolve(); return approvalResult.promise })
+  const definition = {
+    name: '材料复核', nodes: [{ node_id: 'start', type: 'trigger' },
+      { node_id: 'gate', type: 'approval', title: '确认材料范围', config: { prompt: '确认材料范围', on_timeout: 'fail' } },
+      { node_id: 'draft', type: 'agent' }],
+    edges: [{ from: 'start', to: 'gate' }, { from: 'gate', to: 'draft' }],
+  }
+  test.workflowGenerator.mockResolvedValue(definition)
+  const original = test.planner.getMockImplementation()!
+  test.planner.mockImplementation(async input => {
+    const result = await original(input)
+    const step = result.steps[0]!
+    return { ...result, steps: [{ ...step, node_id: 'gate', description: '确认材料范围' }, { ...step, depends_on: ['gate'] }] }
+  })
+  try {
+    const human = test.session('work', 'revision-approval')
+    const pending = human.admit(user('/orchestra 整理材料并交付复核报告'))
+    await approvalEntered.promise
+    const service = test.services.get('revision-approval')!
+    const old = service.planning.listDrafts('local-dsh:fixture').items[0]!
+    const updated = service.planning.grantMaterials({ operation_id: uuidv7(), plan_id: old.plan_id,
+      content_hash: old.content_hash, nodes: ['draft'], items: [{ name: '材料.txt', body: '只授权整理步骤读取' }] },
+      'local-dsh:fixture', new Date().toISOString())
+    approvalResult.resolve('allowed-once')
+    await pending
+    expect(await human.call()).toMatchObject({ state: 'error', code: 'CONFIRMATION_MISMATCH', reason: 'plan_updated' })
+    expect(JSON.stringify(await human.render())).toContain('取回最新计划')
+    expect(count(service, 'runs')).toBe(0)
+    expect(service.planning.progress('local-dsh:fixture').items).toMatchObject([{ plan_id: updated.plan_id, stage: 'approval' }])
+  } finally { approvalResult.resolve('rejected'); await test.close() }
 })
