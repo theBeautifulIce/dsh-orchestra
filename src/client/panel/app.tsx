@@ -262,7 +262,7 @@ export function PanelApp(props: PanelAppProps) {
     screen = <>
       <div hidden={workflowId !== null}><WorkflowListScreen api={api} onSelectWorkflow={setWorkflowId} reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} /></div>
       {workflowId && <WorkflowCanvas key={workflowId} api={api} workflowId={workflowId} onBack={() => setWorkflowId(null)}
-          onOpenRun={(task, run) => { taskTrigger.current = null; setTaskId(task); setTaskRunId(run) }}
+          onOpenRun={(task, run) => { taskTrigger.current = null; setTaskAction(undefined); setTaskId(task); setTaskRunId(run) }}
           reloadVersion={reloadVersion} onSnapshot={onSnapshot} commands={commands} />}
     </>
   } else {
