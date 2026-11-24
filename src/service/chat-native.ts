@@ -8,7 +8,7 @@ import { ORCHESTRA_COMMUNICATION_GUIDE, ORCHESTRA_REPORT_ONLY_REMINDER } from '.
 import { formatChatApproval } from '../core/chat-approval-text.ts'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
-import { receiptLocation } from '../core/receipt-location.ts'
+import { chatArtifactLink, receiptLocation, type ChatArtifactLink } from '../core/receipt-location.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, findChatPlan, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
@@ -50,12 +50,12 @@ const prompt = [
   'The host admits explicit tasks before this model step. Use the notices and tool summaries to answer in the operator’s language. Leave execution to Orchestra.',
   'Acknowledge admission once. Do not repeat the request. Routine progress stays in the panel unless requested. Do not execute task work yourself.',
   'Only a fresh receipt for this exact request proves admission. Plans, promises, user messages and old receipts do not prove admission. Do not claim a start or schedule without that receipt. Use status for existing tasks. Claim successful delivery only with recorded acceptance.',
-  'For planning or startup failure, state the recorded reason and next step. Do not invent missing inputs or request information already supplied. Do not suggest a nonexistent run or /orchestra as a repair. If automatic routing settings could not be read, relay its manual /orchestra option. If no notice exists for a dispatch request, suggest the complete request with /orchestra.',
+  'For planning or startup failure, state the recorded reason and next step. Do not invent missing inputs or request information already supplied. Do not suggest a nonexistent run or a new command as a repair. If automatic routing settings could not be read, relay the notice. If no notice exists for a dispatch request, direct the operator to the configured task command in Orchestra settings. Never assume its name.',
   'Greetings, discussion, explanation, advice, brainstorming and capability questions remain ordinary conversation. Do not create tasks for them.',
   'Ask only for a critical missing item. Retain the draft goal and restrictions. A clear request to resume can continue that draft. Do not ask for a complete restatement when the draft is available.',
   'Use action=status with the exact task_title for a named or earlier task. Use the latest task only for an unambiguous reference. Otherwise ask which task. In a notice, omit task_title and run_id to use its verified source run.',
   'For accepted files, read status.artifacts, then use action=artifact with the exact artifact_id. Never invent an identifier. Use file_name only for one matching version. Summarize the retrieved evidence and its recorded acceptance in the original conversation.',
-  'When a chat result is truncated, read status.text_results and call action=artifact with its exact artifact_id. Read every truncated item before delivering the requested result. A preview is not the complete result. Keep all requested items in the final chat answer.',
+  'When a chat result is truncated, use the status artifact references and their exact read arguments. Read each required result before summarizing it. A preview is not the complete result. Keep the final summary concise and cover every requested item. The host shows full original artifacts as named links. Never ask the operator to supply identifiers already present in these references.',
   'Every terminal or blocking notice needs a final answer. State the result, reason and next step. Report failure, cancellation, missing access and pending verification explicitly. Do not attempt task work to repair the result. After a denied tool call, use the notice or action=status and finish the explanation.',
   'For a pending decision card, read status and use action=review with its exact decision_title. If evidence or choices are missing, state the requirement and where to open the item. A refusal leaves the decision open unless the human authorizes that exact rejected resolution.',
   'For 待审成果 and 审核标准, use action=review_delivery for the verified run. Use the supplied task, step, artifact and criteria. Do not open an authorization popup or submit a review for the operator. For a direct review request, locate the task with status first.',
@@ -72,6 +72,7 @@ const argsSchema = z.discriminatedUnion('action', [
   z.strictObject({ action: z.literal('stop'), run_id: z.string().min(1).max(128).optional(),
     task_title: z.string().min(1).max(200).optional() }),
   z.strictObject({ action: z.literal('artifact'), run_id: z.string().min(1).max(128).optional(),
+    task_title: z.string().min(1).max(200).optional(),
     artifact_id: z.string().min(1).max(128).optional(), file_name: z.string().min(1).max(500).optional() })
     .refine((input) => Boolean(input.artifact_id) !== Boolean(input.file_name)),
   z.strictObject({ action: z.literal('notes'), run_id: z.string().min(1).max(128).optional(),
@@ -126,10 +127,11 @@ function errorReceipt(error: unknown): Extract<ChatOutcome, { state: 'error' }> 
     ...(isChatErrorReason(reason) && { reason }) }
 }
 
-function noticeMessage(id: Message['id'], display: ReturnType<typeof describeChatRun>): Message {
+function noticeMessage(id: Message['id'], display: ReturnType<typeof describeChatRun>, artifacts: ChatArtifactLink[] = []): Message {
   // The peer types predate producer-defined message sources.
   return {
-    id, role: 'user', source: { kind: ORCHESTRA_MESSAGE_SOURCE, form: 'notice', summary: display.heading.slice(0, 120) },
+    id, role: 'user', source: { kind: ORCHESTRA_MESSAGE_SOURCE, form: 'notice', summary: display.heading.slice(0, 120),
+      ...(artifacts.length && { artifacts }) },
     content: [{ type: 'text', text: chatText(display) }],
   } as unknown as Message
 }
@@ -262,10 +264,39 @@ function describeArtifacts(db: Service['orchestra']['db'], runId: string, accept
   const recent = listRunArtifacts(db, runId).items
     .filter((artifact) => !artifact.expired && artifact.file_name && !seen.has(artifact.artifact_id))
   // 同名有绑定时按 id 打开：先给已验收的那一版，其余最近的补在后面。
-  return [...pinned, ...recent].slice(0, 12).map((artifact) => ({
+  return [...pinned, ...recent.slice(0, Math.max(0, 12 - pinned.length))].map((artifact) => ({
     artifact_id: artifact.artifact_id, file_name: artifact.file_name, sha256: artifact.sha256,
     bytes: 'bytes' in artifact ? artifact.bytes : artifact.size_bytes,
   }))
+}
+
+/** Only accepted, exact versions become durable result links. Labels do not authorize reads. */
+function describeChatArtifacts(db: Service['orchestra']['db'], run: ReturnType<typeof describeRun>, binding: Binding) {
+  const links: ChatArtifactLink[] = []
+  const seen = new Set<string>()
+  for (const check of run.delivery_checks) {
+    if (check.outcome !== 'passed' || !check.artifact_id || seen.has(check.artifact_id)
+      || !['artifact', 'chat/text_result'].includes(check.kind)) continue
+    try {
+      const item = getArtifact(db, check.artifact_id)
+      if (item.run_id !== run.run_id || !item.file_name || (check.sha256 && check.sha256 !== item.sha256)) continue
+      const link = chatArtifactLink.safeParse({ title: check.title || item.file_name, fileName: item.file_name,
+        location: { kind: 'artifact', workspaceId: binding.workspaceId, sessionId: binding.sessionId,
+          taskId: run.task_id, runId: run.run_id, artifactId: item.artifact_id, sha256: check.sha256 ?? item.sha256 } })
+      if (link.success) { links.push(link.data); seen.add(item.artifact_id) }
+    } catch { /* A deleted record has no readable version. Other deliverables remain available. */ }
+  }
+  return links
+}
+
+/** DSH passes output.render to the model, not the private serialized output.text field. */
+function artifactReadReferences(run: ReturnType<typeof describeRun> & { artifacts: ReturnType<typeof describeArtifacts> }): string {
+  const files = new Map(run.artifacts.map(item => [item.artifact_id, { ...item, title: item.file_name, truncated: true }]))
+  for (const item of run.text_results ?? []) files.set(item.artifact_id, { ...item, bytes: undefined })
+  return JSON.stringify({ run_id: run.run_id, task_id: run.task_id, artifacts: [...files.values()].map(item => ({
+    title: item.title, file_name: item.file_name, artifact_id: item.artifact_id, sha256: item.sha256,
+    truncated: item.truncated, read: { action: 'artifact', run_id: run.run_id, artifact_id: item.artifact_id },
+  })) })
 }
 
 function artifactFromName(db: Service['orchestra']['db'], runId: string, name: string): string {
@@ -354,6 +385,8 @@ export function installNativeChat(host: Context, options: {
   acquireService?(binding: Binding): Promise<{ service: Service; release(): void }>
   hasService(binding: Binding): boolean
   autoRouteEnabled?(binding: Binding, agent: Agent): boolean | Promise<boolean>
+  commandName?(binding: Binding, agent: Agent): string | Promise<string>
+  assertCommandAvailable?(binding: Binding, agent: Agent, name: string, signal: AbortSignal): Promise<void>
   interpret?(input: SemanticInput, agent: Agent, signal: AbortSignal, assertCurrent: () => void): Promise<unknown>
 }) {
   // Retain the local service across planner, approval and session-flush awaits.
@@ -485,11 +518,31 @@ export function installNativeChat(host: Context, options: {
     } : out
     if (!state.human) return result
     const text = state.human.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
-    const command = orchestraCommand(text)
+    let command: string | undefined
+    let commandName = 'orchestra'
     const actionSignal = AbortSignal.any([signal, options.signal])
     const assertCurrent = () => {
       actionSignal.throwIfAborted()
       if (!isCurrent(agent, binding, state)) throw new OrchError('FORBIDDEN', '原会话或工作区授权已改变')
+    }
+    if (text.trimStart().startsWith('/')) {
+      try {
+        commandName = await options.commandName?.(binding, agent) ?? 'orchestra'
+        command = orchestraCommand(text, commandName)
+        assertCurrent()
+        // An inactive alias or another host command belongs to the host. It
+        // must not fall through to automatic task interpretation.
+        if (command === undefined) return settle(result)
+        await options.assertCommandAvailable?.(binding, agent, commandName, actionSignal)
+        assertCurrent()
+      } catch (error) {
+        actionSignal.throwIfAborted()
+        if (!isCurrent(agent, binding, state)) return settle(result)
+        const outcome = { state: 'command_unavailable' as const,
+          message: error instanceof OrchError ? error.message : '无法检查任务命令。请在 Orchestra 设置中重新读取并检查命令。' }
+        state.managed = { outcome }
+        return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
+      }
     }
     const origin: ChatTaskOrigin = {
       messageKey: sha256Hex(JSON.stringify([binding.identity, state.human.id])),
@@ -517,7 +570,7 @@ export function installNativeChat(host: Context, options: {
       return settle(result)
     }
     if (command === '') {
-      const outcome = { state: 'usage' as const, message: '使用 /orchestra 任务内容单次派单。' }
+      const outcome = { state: 'usage' as const, command: commandName, message: `使用 /${commandName} 任务内容单次派单。` }
       state.managed = { outcome }
       return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
     }
@@ -534,7 +587,7 @@ export function installNativeChat(host: Context, options: {
         state.managed = { outcome: errorReceipt(error) }
         return settle({ ...result, messages: [...result.messages, noticeMessage(uuidv7() as Message['id'], {
           heading: 'Orchestra 无法读取自动接管设置',
-          body: '请检查 Orchestra 的会话设置，或用「/orchestra 任务内容」单次派单。',
+          body: '请检查 Orchestra 的会话设置，或使用设置中当前的「任务命令」单次派单。',
         })] })
       }
     }
@@ -757,7 +810,7 @@ export function installNativeChat(host: Context, options: {
     if (turn.brainNotesOnly && !['status', 'review_brain_notes'].includes(input.action)) {
       throw new OrchError('FORBIDDEN', '主脑便条审阅回合只可定位任务和审阅便条')
     }
-    if (input.action === 'status' || input.action === 'stop') {
+    if (input.action === 'status' || input.action === 'stop' || input.action === 'artifact') {
       if (input.action === 'status') turn.lastStatusRun = undefined
       if (input.run_id && input.task_title) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请选择一种任务定位方式')
     }
@@ -778,15 +831,17 @@ export function installNativeChat(host: Context, options: {
     try {
       assertCurrent()
       const { db, commands } = service.orchestra
-      const taskTitle = input.action === 'status' || input.action === 'stop' ? input.task_title : undefined
+      const taskTitle = input.action === 'status' || input.action === 'stop' || input.action === 'artifact' ? input.task_title : undefined
       const selectedRun = scopedRun ?? requestedRun ?? (input.action === 'status' ? undefined : turn.lastStatusRun)
       if (input.action !== 'status' && !selectedRun && !taskTitle) throw new OrchError('NOT_FOUND', '请先查看对应任务的状态')
       const runId = taskTitle && !scopedRun ? chatRunByTitle(db, options.operator, taskTitle) : chatRun(db, options.operator, selectedRun)
       if (!runId) throw new OrchError('NOT_FOUND', '当前会话没有对应的编排运行')
+      if (scopedRun && taskTitle && getRun(db, runId).task_title !== taskTitle)
+        throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
       if (input.action === 'status') {
         const run = describeRun(service, runId, options.operator)
         if (scopedRun && taskTitle && run.title !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
-        const result = { ...run, nodes: describeNodes(db, runId),
+        const result = { ...run, nodes: describeNodes(db, runId), artifact_links: describeChatArtifacts(db, run, binding),
           artifacts: describeArtifacts(db, runId, acceptedArtifactIds(run.delivery_checks)) }
         turn.lastStatusRun = runId
         return result
@@ -947,20 +1002,21 @@ export function installNativeChat(host: Context, options: {
     },
     output: {
       schema: { type: 'object', properties: {
-        text: { type: 'string' }, summary: { type: 'string' }, preview: { type: 'string' },
-        deliveryReview: { type: 'object' }, location: { type: 'object' },
+        text: { type: 'string' }, summary: { type: 'string' }, preview: { type: 'string' }, references: { type: 'string' },
+        deliveryReview: { type: 'object' }, location: { type: 'object' }, artifactLinks: { type: 'array' },
       }, required: ['text', 'summary', 'preview'], additionalProperties: false },
       render: (_args, value) => {
-        const { summary, preview } = value as { summary: string; preview: string }
-        return [summary, preview].filter(Boolean).map((text) => ({ type: 'text', text }))
+        const { summary, preview, references } = value as { summary: string; preview: string; references?: string }
+        return [summary, preview, references].filter((text): text is string => Boolean(text)).map((text) => ({ type: 'text', text }))
       },
       presentationMeta: (_args, value) => {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
         const { summary, deliveryReview } = value
         // 只透传通过 schema 校验的定位对象：元数据只用于导航，打开时仍会重读权限（T16）。
         const target = receiptLocation.safeParse((value as { location?: unknown }).location)
+        const artifacts = chatArtifactLink.array().max(50).safeParse((value as { artifactLinks?: unknown }).artifactLinks)
         return { summary: typeof summary === 'string' ? summary : '', ...(deliveryReview && { deliveryReview }),
-          ...(target.success && { location: target.data }) }
+          ...(target.success && { location: target.data }), ...(artifacts.success && { artifactLinks: artifacts.data }) }
       },
     },
     async execute(input, execution) {
@@ -976,7 +1032,8 @@ export function installNativeChat(host: Context, options: {
         }
         if ('blocking' in result) {
           const { deliveryReviews: _, ...status } = result
-          return respond(status, chatText(describeChatRun(result)))
+          return { ...respond(status, chatText(describeChatRun(result))), references: artifactReadReferences(result),
+            artifactLinks: result.artifact_links }
         }
         if ('notes' in result) return respond(result, '已读取本次运行的共享便条。便条仅作参考。', JSON.stringify(result.notes))
         if ('brain_review' in result && result.brain_review) {
@@ -1045,7 +1102,7 @@ export function installNativeChat(host: Context, options: {
               ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
               artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
             }, true)
-            agent.followup(noticeMessage(id, display))
+            agent.followup(noticeMessage(id, display, describeChatArtifacts(service.orchestra.db, view, binding)))
           } finally { pending.delete(id) }
         }
         const consumedAtCheckpoint = agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.id === id)

@@ -30,6 +30,9 @@ const candidateClientInject = [...previousClientInject,
   '@deepseek-ai/dsh-client-ui-input-trigger',
   '@deepseek-ai/dsh-client-ui-conversation',
   '@deepseek-ai/dsh-client-ui-chat',
+  '@deepseek-ai/dsh-client-ui-sidebar-right',
+  '@deepseek-ai/dsh-client-ui-sidebar-browser',
+  '@deepseek-ai/dsh-client-ui-commands',
 ]
 
 export function inspectPackage(path: string, options: { expectedSha256?: string; previous?: boolean } = {}) {

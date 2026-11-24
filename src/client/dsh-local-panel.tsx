@@ -1,6 +1,7 @@
 import { useMemo, useSyncExternalStore } from 'react'
 import type { FetchLike } from './api/client.ts'
 import { PanelHost } from './panel-host.tsx'
+import type { ClientCommandReservations } from './dsh-command-reservations.ts'
 
 const route = '/api/orchestra.request'
 // PanelHost resolves paths as URLs. This routing base never leaves the renderer.
@@ -89,7 +90,7 @@ export function createLocalSessionFetcher(sources: DshLocalPanelSources, workspa
     && workspaceForSession(sessionId, sources.workspaces.list.getSnapshot()) === workspaceId)
 }
 
-export function DshLocalPanel({ sessions, workspaces }: DshLocalPanelSources) {
+export function DshLocalPanel({ sessions, workspaces, clientCommands }: DshLocalPanelSources & { clientCommands?: ClientCommandReservations }) {
   const sessionList = useSyncExternalStore(
     listener => sessions.list.subscribe(listener), () => sessions.list.getSnapshot(),
   )
@@ -107,5 +108,5 @@ export function DshLocalPanel({ sessions, workspaces }: DshLocalPanelSources) {
     <h1>Orchestra</h1>
     <p role="status">请在 DSH 的工作区中打开一个会话，再返回 Orchestra。</p>
   </main>
-  return <PanelHost key={JSON.stringify([workspaceId, sessionId])} baseUrl={localPanelBase} fetcher={fetcher} workflowLaunchRequiresPlan scopeLabel="当前会话" />
+  return <PanelHost key={JSON.stringify([workspaceId, sessionId])} baseUrl={localPanelBase} fetcher={fetcher} workflowLaunchRequiresPlan scopeLabel="当前会话" clientCommands={clientCommands} />
 }

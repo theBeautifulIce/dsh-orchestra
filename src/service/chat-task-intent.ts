@@ -4,10 +4,13 @@ export function isOrdinaryChat(text: string): boolean {
   return ordinary.has(text.trim().normalize('NFKC').toLowerCase().replace(/[.!。！]+$/u, ''))
 }
 
-/** A public command has a fixed grammar. Its body still receives semantic interpretation. */
-export function orchestraCommand(text: string): string | undefined {
-  return /^\/orchestra(?:\s+([\s\S]*))?$/u.exec(text.trim())?.[1]?.trim()
-    ?? (text.trim() === '/orchestra' ? '' : undefined)
+/** Parse only the configured lexical prefix. Its body still receives typed admission. */
+export function orchestraCommand(text: string, name = 'orchestra'): string | undefined {
+  const line = text.trim()
+  const token = '/' + name
+  if (line === token) return ''
+  if (line.startsWith(token) && /^\s/u.test(line.slice(token.length))) return line.slice(token.length).trim()
+  return undefined
 }
 
 /** Existing narrow operator phrases authorize the two read-only note capabilities. */

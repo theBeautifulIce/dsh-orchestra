@@ -47,7 +47,8 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
   const candidate = manifest.dsh.client.inject as string[]
   const addedClients = ['@deepseek-ai/dsh-client-ui-input-trigger',
-    '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-chat']
+    '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-chat',
+    '@deepseek-ai/dsh-client-ui-sidebar-right', '@deepseek-ai/dsh-client-ui-sidebar-browser', '@deepseek-ai/dsh-client-ui-commands']
   const previous = candidate.filter((dependency) => !addedClients.includes(dependency))
   const files: Record<string, string> = {
     'package/package.json': '',
@@ -77,8 +78,8 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
       writeFileSync(join(root, file), content)
     }
     const valid = pack('candidate', [...candidate].reverse())
-    expect(candidate).toHaveLength(9)
-    expect(new Set(candidate).size).toBe(9)
+    expect(candidate).toHaveLength(12)
+    expect(new Set(candidate).size).toBe(12)
     expect(inspectPackage(valid).migrations).toHaveLength(57)
     expect(() => inspectPackage(valid, { previous: true })).toThrow('DSH client inject must contain exactly')
     files['package/docs/assets/readme/extra.txt'] = 'extra'

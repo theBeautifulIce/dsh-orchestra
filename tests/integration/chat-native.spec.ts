@@ -17,6 +17,8 @@ import { transitionNode } from '../../src/service/commands/node-state.ts'
 import { installConfiguredLocalDshHost, localDshHostConfig } from '../../src/service/local-dsh-host.ts'
 import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
 import { registerRunArtifact } from '../../src/service/artifact-store.ts'
+import { textTarget } from '../../src/service/text-result.ts'
+import type { ChatArtifactLink } from '../../src/core/receipt-location.ts'
 import { createDeliveryReviewHost } from '../../src/service/delivery-review.ts'
 import { recordArtifactPublication } from '../../src/service/artifact-completion.ts'
 import { applyRunAcceptance } from '../../src/service/commands/run-acceptance.ts'
@@ -25,6 +27,7 @@ import { chatSemanticFixture } from '../fixtures/chat-semantic-model.ts'
 import type { SemanticInput } from '../../src/service/semantic-admission.ts'
 import { reportChatRun } from '../../src/service/chat-task-receipts.ts'
 import { installNativeChat } from '../../src/service/chat-native.ts'
+import { createNativeCommandSettings } from '../../src/service/native-command-settings.ts'
 
 type Message = Parameters<Agent['followup']>[0]
 type Definition = Parameters<Context['tools']['register']>[0]
@@ -37,6 +40,9 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError; dispatchPlans?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'orchestra-native-chat-'))
   const ctx = new Context()
+  const commandNames: string[] = []
+  ctx.provide('commands', { list: () => commandNames.map(name => ({ name, description: '已有命令' })) })
+  ctx.provide('skills', { list: async () => [] })
   const agents = new Map<string, Agent>()
   const conversations = new Map<string, string[]>()
   const routes: string[] = []
@@ -214,7 +220,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     const checkTool = (name: string, parent?: symbol) => guard?.({ agent, name, signal: signal.signal, parent } as Parameters<Guard>[0])
     return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn, events, dispatch: agentEvents(ctx, agent) }
   }
-  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn, interpret, flush,
+  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn, interpret, flush, directory, commandNames,
     registered: () => ({ activation: activation!, prompt: prompt!, tool: tool! }),
     deny: (value: boolean) => { deny = value }, badPlan: (value: boolean) => { badPlan = value },
     plannerUnavailable: (value: boolean) => { plannerUnavailable = value },
@@ -671,13 +677,13 @@ it('offers manual dispatch when the automatic routing setting cannot be read', a
     const assigned = user(goal)
     await expect(human.admit(assigned)).resolves.toMatchObject({ kind: 'enter', messages: [assigned, {
       source: { kind: 'plugin:dsh-orchestra', form: 'notice', summary: 'Orchestra 无法读取自动接管设置' },
-      content: [{ type: 'text', text: expect.stringContaining('/orchestra 任务内容') }],
+      content: [{ type: 'text', text: expect.stringContaining('当前的「任务命令」') }],
     }] })
     expect(test.services.size).toBe(0)
     await human.admit(user(`/orchestra ${goal}`))
     await expect(human.call()).resolves.toMatchObject({ state: 'started' })
     expect(readRouting).toHaveBeenCalledOnce()
-    expect(test.registered().prompt({ agent: human.agent })).toContain('relay its manual /orchestra option')
+    expect(test.registered().prompt({ agent: human.agent })).toContain('Never assume its name')
   } finally { await test.close() }
 })
 
@@ -1014,7 +1020,9 @@ it('reports the blocked step and missing planned file separately from its three 
     expect(blockedText).not.toContain(runId)
     expect(blockedText).not.toContain(published!.sha256)
     await human.admit(notice, false)
-    await expect(human.render({ action: 'status' })).resolves.toEqual([{ type: 'text', text: blockedText }])
+    await expect(human.render({ action: 'status' })).resolves.toEqual([
+      { type: 'text', text: blockedText }, { type: 'text', text: expect.stringContaining(published!.artifact_id) },
+    ])
     const { tool } = test.registered()
     const statusArgs = { action: 'status', run_id: runId }
     const storedContent = [{ type: 'text' as const, text: JSON.stringify({ run_id: runId, status: 'blocked_post' }) }]
@@ -1736,4 +1744,88 @@ it('flush期间才消费的通知留到下一次耐久检查再确认', async ()
     expect(readKey()).toBe('delivered:terminal:cancelled')
     expect(test.notices).toHaveLength(1)
   } finally { await test.close(); vi.useRealTimers() }
+})
+
+it('exposes exact artifact read arguments to the model and persists every original result link beside its summary', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  const original = test.planner.getMockImplementation()!
+  const names = ['AIHOT 原始事实表', 'B站 原始事实表', '最终完整简报']
+  const bodies = names.map((name, index) => '# ' + name + '\n\n' + ('逐条核验资料' + index + '。\n').repeat(1500) + '\n原始成果末尾-' + index)
+  test.planner.mockImplementation(async input => ({ ...await original(input), deliverables: names.map(title => ({
+    title, node_id: 'draft', goal_ids: ['goal'], acceptance: { kind: 'chat/text_result' as const },
+  })) }))
+  try {
+    const human = test.session('work', 'results-parent')
+    await human.admit(user('/orchestra 汇总最近24小时新闻并输出简报'))
+    const { run_id: runId } = await human.call()
+    const { db } = test.services.get('results-parent')!.orchestra
+    const node = db.raw.prepare("SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_id='draft'")
+      .get(runId) as { node_run_id: string; attempt: number; action_generation: number }
+    const plan = db.raw.prepare('SELECT plan_id,content_hash FROM task_plans LIMIT 1').get() as { plan_id: string; content_hash: string }
+    const published = bodies.map((body, index) => registerRunArtifact(db, {
+      ...textTarget(plan.plan_id, plan.content_hash, index, node), runId, nodeRunId: node.node_run_id, bytes: Buffer.from(body),
+    }))
+    const now = new Date().toISOString()
+    withTx(db, tx => {
+      tx.run("UPDATE node_runs SET status='done' WHERE run_id=?", [runId])
+      tx.run("UPDATE runs SET status='succeeded',ended_at=? WHERE run_id=?", [now, runId])
+      applyRunAcceptance(tx, runId, now)
+    })
+    await vi.advanceTimersByTimeAsync(4000)
+    const notice = test.notices[0]!.message
+    const links = (notice.source as unknown as { artifacts: ChatArtifactLink[] }).artifacts
+    expect(links.map(item => item.title)).toEqual(names)
+    expect(links.map(item => item.fileName)).toEqual(['会话正文-1.md', '会话正文-2.md', '会话正文-3.md'])
+    expect(links.every(item => item.location.sessionId === 'results-parent' && item.location.runId === runId)).toBe(true)
+    expect(JSON.stringify(links)).not.toMatch(/http:|token|secret/u)
+    expect(JSON.stringify(notice.content)).not.toContain('原始成果末尾-2')
+    await human.admit(notice, false)
+    const modelContent = await human.render({ action: 'status' })
+    const reference = JSON.parse((modelContent.at(-1) as { text: string }).text) as { run_id: string; artifacts: Array<{
+      artifact_id: string; truncated: boolean; read: { action: string; run_id: string; artifact_id: string }
+    }> }
+    expect(reference.run_id).toBe(runId)
+    for (const [index, item] of published.entries()) {
+      const exact = reference.artifacts.find(file => file.artifact_id === item.artifact_id)!
+      expect(exact.read).toEqual({ action: 'artifact', run_id: runId, artifact_id: item.artifact_id })
+      expect(exact.truncated).toBe(true)
+      const full = await human.render(exact.read)
+      expect((full[1] as { text: string }).text).toBe(bodies[index])
+      expect((full[1] as { text: string }).text.endsWith('原始成果末尾-' + index)).toBe(true)
+    }
+    const status = await human.call({ action: 'status' })
+    expect(status.artifact_links).toEqual(links)
+    await expect(human.call({ action: 'artifact', task_title: '另一个任务', file_name: '会话正文-1.md' }))
+      .resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    await expect(human.call({ action: 'artifact', task_title: status.title, file_name: '会话正文-1.md' }))
+      .resolves.toMatchObject({ text: bodies[0], truncated: false })
+    await expect(human.call({ action: 'artifact', run_id: runId, task_title: status.title, artifact_id: published[0]!.artifact_id }))
+      .resolves.toMatchObject({ state: 'error', code: 'PAYLOAD_SCHEMA_INVALID' })
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
+
+it('uses the configured command only, preserves typed admission and blocks a late host command collision', async () => {
+  const test = await fixture()
+  try {
+    const settings = createNativeCommandSettings(test.directory)
+    settings.save({ name: 'go', expected_revision: 0 })
+    const human = test.session('work', 'custom-command')
+    const old = user('/orchestra 整理报告')
+    expect(await human.admit(old)).toEqual({ kind: 'enter', messages: [old] })
+    expect(test.interpret).not.toHaveBeenCalled()
+    expect(test.services.size).toBe(0)
+    const usage = await human.admit(user('/go'))
+    expect(JSON.stringify(usage)).toContain('/go 任务内容')
+    expect(JSON.stringify(usage)).not.toContain('/orchestra 任务内容')
+    test.commandNames.push('go')
+    const blocked = await human.admit(user('/go 整理会议事项并交付清单'))
+    expect(JSON.stringify(blocked)).toContain('与已有命令或技能冲突')
+    expect(test.services.size).toBe(0)
+    test.commandNames.length = 0
+    await human.admit(user('/go 整理会议事项并交付清单'))
+    expect(test.interpret).toHaveBeenCalledWith(expect.objectContaining({ explicit: true, current: expect.objectContaining({ text: '整理会议事项并交付清单' }) }))
+    expect(await human.call()).toMatchObject({ state: 'started' })
+  } finally { await test.close() }
 })

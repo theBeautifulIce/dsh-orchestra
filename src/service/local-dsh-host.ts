@@ -10,6 +10,7 @@ import { z } from 'zod'
 import { sha256Hex } from '../core/canonical.ts'
 import { ERROR_STATUS, failEnvelope, okEnvelope, OrchError } from '../core/errors.ts'
 import { MEMORY_TOOL_PREFIX } from '../core/memory-graph.ts'
+import { artifactReceiptLocation, type ArtifactReceiptLocation } from '../core/receipt-location.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type ToolDescriptor } from '../executor/tools.ts'
 import { createDshJsonCompletion } from '../executor/dsh-json.ts'
@@ -17,8 +18,13 @@ import { SEMANTIC_INSTRUCTIONS } from './semantic-admission.ts'
 import { createWindowsReadOnlyHost } from '../executor/windows-readonly-host.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
+import { artifactBrowserPath, artifactDownloadPath, createArtifactBrowserReader } from './artifact-browser.ts'
+import { getArtifactContent } from './queries/artifacts.ts'
+import { getRun } from './queries/runs.ts'
 import { RUN_TERMINAL } from './commands/run-close.ts'
 import { createNativeChatRoutingSettings, nativeChatRoutingUpdate } from './native-chat-routing-settings.ts'
+import { checkNativeTaskCommand, createNativeCommandSettings, nativeCommandCheck, nativeCommandUpdate } from './native-command-settings.ts'
+import { DEFAULT_TASK_COMMAND } from '../core/task-command.ts'
 import { createExecutionPermissionSettings, executionPermissionUpdate } from './execution-permission-settings.ts'
 import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
 import { PROJECT_CONTEXT_FILE, type ProjectContextSource } from './project-shared-context.ts'
@@ -72,12 +78,15 @@ type LocalHost = Context & {
 
 const routePath = '/api/orchestra.request'
 const chatRoutingPath = '/v1/settings/chat-routing'
+const taskCommandPath = '/v1/settings/task-command'
+const taskCommandCheckPath = '/v1/settings/task-command/check'
 const executionPermissionsPath = '/v1/settings/execution-permissions'
 const responseHeaders = ['content-type', 'content-disposition', 'cache-control', 'x-content-type-options']
 const catalog = {
   GET: new Set([
     '/v1/run-notes',
     chatRoutingPath,
+    taskCommandPath,
     executionPermissionsPath,
     '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/health', '/v1/activity', '/v1/artifacts', '/v1/artifacts/content', '/v1/artifacts/get', '/v1/attestations/get',
@@ -89,8 +98,11 @@ const catalog = {
     '/v1/workflows', '/v1/workflows/generate/capability', '/v1/workflows/get', '/v1/workflows/versions/get', '/v1/workspace/overview',
   ]),
   POST: new Set([
+    artifactBrowserPath,
+    artifactDownloadPath,
     '/v1/run-notes',
     chatRoutingPath,
+    taskCommandPath, taskCommandCheckPath,
     executionPermissionsPath,
     '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/v1/collaboration/reassign', '/v1/collaboration/review', '/v1/collaboration/scopes', '/v1/decisions/acknowledge',
@@ -326,6 +338,10 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     const stop = new AbortController()
     let chatRouting: ReturnType<typeof createNativeChatRoutingSettings> | undefined
     const profileDir = (ctx.get('profileContext') as Profile | undefined)?.dir
+    const commandSettings = nativeChat && profileDir && isAbsolute(profileDir) ? createNativeCommandSettings(profileDir) : undefined
+    const checkCommand = (agent: Agent, name: string, signal: AbortSignal) => checkNativeTaskCommand(name, agent, agent.session.header.cwd, signal, {
+      commands: host.get('commands'), skills: host.get('skills'),
+    })
     const executionPermissions = profileDir && isAbsolute(profileDir) ? createExecutionPermissionSettings(profileDir) : undefined
     const executionPermissionMode = (): ExecutionPermissionMode => {
       if (!executionPermissions) throw new OrchError('SERVICE_UNAVAILABLE', '此宿主没有可用的执行权限设置')
@@ -385,6 +401,35 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
         () => { if (services.get(identity) === lease) services.delete(identity) })
       return lease
     }
+    const readChatArtifact = async (location: ArtifactReceiptLocation, identity: string) => {
+      const authorized = () => {
+        const workspace = selectedWorkspace(host, location.workspaceId, location.sessionId)
+        const agent = host.agents.get(location.sessionId as Agent['session']['id'])
+        const binding = agent && bindingFor(agent)
+        if (!workspace || identityFor(workspace, location.sessionId) !== identity || binding?.identity !== identity
+          || binding.workspaceId !== location.workspaceId || binding.sessionId !== location.sessionId)
+          throw new OrchError('FORBIDDEN', '原会话或工作区授权已改变。请回到原会话重新打开成果。')
+        return workspace
+      }
+      const workspace = authorized()
+      const lease = serviceFor(workspace, location.sessionId)
+      lease.inflight += 1
+      try {
+        const { service } = await lease.startup
+        authorized()
+        const run = getRun(service.orchestra.db, location.runId)
+        if (run.task_id !== location.taskId) throw new OrchError('FORBIDDEN', '成果不属于此任务。请从原会话打开。')
+        const item = getArtifactContent(service.orchestra.db, location.runId, location.artifactId, 'download', Date.now()).item
+        if (item.kind !== 'download' || item.sha256 !== location.sha256)
+          throw new OrchError('CONFIRMATION_MISMATCH', '成果版本已改变。请从原会话重新核对成果。')
+        return { fileName: item.file_name, bytes: Buffer.from(item.base64, 'base64'), sha256: item.sha256 }
+      } finally {
+        lease.inflight -= 1
+        lease.lastUsed = Date.now()
+        void maybeRelease(identity, lease)
+      }
+    }
+    const artifactBrowser = createArtifactBrowserReader({ read: readChatArtifact })
     const releaseSession = (sessionId: string) => {
       for (const [identity, lease] of [...services]) {
         if (lease.sessionId !== sessionId) continue
@@ -400,6 +445,7 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     })
     host.effect(() => async () => {
       stop.abort()
+      await artifactBrowser.close()
       await Promise.allSettled([...services.entries()].map(async ([identity, lease]) => {
         lease.closed = true
         services.delete(identity)
@@ -421,6 +467,13 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
         autoRouteEnabled() {
           if (!settings) throw new OrchError('SERVICE_UNAVAILABLE', '无法读取此 Desktop 用户的自动接管设置')
           return settings.read().enabled
+        },
+        commandName() { return commandSettings?.read().name ?? DEFAULT_TASK_COMMAND },
+        async assertCommandAvailable(_binding, agent, name, signal) {
+          if (!commandSettings) return
+          const check = await checkCommand(agent, name, AbortSignal.any([signal, AbortSignal.timeout(5_000)]))
+          if (commandSettings.read().name !== name) throw new OrchError('STALE_GENERATION', '任务命令已变更，请使用设置中的当前命令重试')
+          if (!check.available) throw new OrchError('COMMAND_BUSY', `/${name} 与已有命令或技能冲突，请在 Orchestra 设置中更换任务命令`)
         },
         bindingFor,
         hasService(binding) {
@@ -476,6 +529,31 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       const sessionId = query.get('sessionId') ?? ''
       const workspace = selectedWorkspace(host, workspaceId, sessionId)
       if (!workspace) return failure(403, 'FORBIDDEN', '请选择该工作区中未归档的 DSH 会话')
+      if (target.pathname === artifactBrowserPath || target.pathname === artifactDownloadPath) {
+        let input: unknown
+        try { input = await request.json() } catch { return failure(400, 'PAYLOAD_SCHEMA_INVALID', '成果定位格式无效') }
+        const location = artifactReceiptLocation.safeParse(input)
+        if (!location.success) return failure(400, 'PAYLOAD_SCHEMA_INVALID', '成果定位格式无效')
+        if (location.data.workspaceId !== workspaceId || location.data.sessionId !== sessionId)
+          return failure(403, 'FORBIDDEN', '请从成果所属的原会话打开。')
+        const resolved = await host.sessionController.resolveAgent(sessionId).catch(() => undefined)
+        if (stop.signal.aborted || request.signal.aborted) return failure(503, 'SERVICE_UNAVAILABLE', '成果打开请求已取消')
+        const binding = resolved && 'agent' in resolved && resolved.agent ? bindingFor(resolved.agent) : undefined
+        if (binding?.workspaceId !== workspaceId || binding.sessionId !== sessionId
+          || binding.identity !== identityFor(workspace, sessionId))
+          return failure(403, 'FORBIDDEN', '成果需要此工作区的本机用户会话授权。')
+        try {
+          const content = target.pathname === artifactDownloadPath ? await readChatArtifact(location.data, binding.identity) : undefined
+          const result = content ? { kind: 'download', file_name: content.fileName, sha256: content.sha256,
+            size_bytes: content.bytes.byteLength, base64: Buffer.from(content.bytes).toString('base64') }
+            : await artifactBrowser.open(location.data, binding.identity)
+          if (stop.signal.aborted || request.signal.aborted) return failure(503, 'SERVICE_UNAVAILABLE', '成果打开请求已取消')
+          return Response.json(okEnvelope(0, result), { headers: { 'cache-control': 'no-store' } })
+        } catch (error) {
+          if (error instanceof OrchError) return failure(error.httpStatus, error.code, error.message)
+          return failure(503, 'SERVICE_UNAVAILABLE', '暂时无法打开成果。请稍后在原会话重试。')
+        }
+      }
       if (target.pathname === executionPermissionsPath) {
         const settings = executionPermissions
         if (!settings) return failure(404, 'NOT_FOUND', '此宿主未提供执行权限设置')
@@ -500,6 +578,38 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
         } catch (error) {
           if (error instanceof OrchError && error.code === 'STALE_GENERATION') return failure(409, error.code, error.message)
           return failure(503, 'SERVICE_UNAVAILABLE', '暂时无法确认执行权限设置')
+        }
+      }
+      if (target.pathname === taskCommandPath || target.pathname === taskCommandCheckPath) {
+        if (!commandSettings || !chatRouting) return failure(404, 'NOT_FOUND', '此宿主未启用任务命令设置')
+        try {
+          const input: unknown = request.method === 'POST' ? await request.json() : undefined
+          const parsed = request.method === 'POST'
+            ? (target.pathname === taskCommandCheckPath ? nativeCommandCheck : nativeCommandUpdate).safeParse(input) : undefined
+          if (parsed && !parsed.success) return failure(400, 'PAYLOAD_SCHEMA_INVALID', '命令需为 1–32 位小写字母、数字、连字符或下划线，并以字母开头')
+          const resolved = await host.sessionController.resolveAgent(sessionId)
+          if (!('agent' in resolved) || !resolved.agent) return failure(403, 'FORBIDDEN', '任务命令设置需要此工作区的本机用户会话')
+          const agent = resolved.agent
+          const assertCurrent = () => {
+            stop.signal.throwIfAborted(); request.signal.throwIfAborted()
+            const binding = bindingFor(agent)
+            if (!chatRouting || binding?.workspaceId !== workspaceId || binding.sessionId !== sessionId
+              || binding.identity !== identityFor(workspace, sessionId)) throw new OrchError('FORBIDDEN', '工作区会话授权已失效')
+          }
+          assertCurrent()
+          const before = commandSettings.read()
+          const name = parsed?.success ? parsed.data.name : before.name
+          const check = await checkCommand(agent, name, AbortSignal.any([stop.signal, request.signal, AbortSignal.timeout(5_000)]))
+          assertCurrent()
+          if (target.pathname === taskCommandCheckPath) return Response.json(okEnvelope(0, check), { headers: { 'cache-control': 'no-store' } })
+          if (parsed?.success && !check.available) return failure(409, 'COMMAND_BUSY', `/${name} 已被命令或技能占用，请更换名称`)
+          const view = parsed?.success ? commandSettings.save(nativeCommandUpdate.parse(parsed.data)) : commandSettings.read()
+          if (view.name !== name) return failure(409, 'STALE_GENERATION', '任务命令已更新，请重新读取')
+          return Response.json(okEnvelope(0, { ...view, check }), { headers: { 'cache-control': 'no-store' } })
+        } catch (error) {
+          if (error instanceof OrchError) return failure(ERROR_STATUS[error.code as keyof typeof ERROR_STATUS] ?? 503, error.code, error.message)
+          if (error instanceof SyntaxError) return failure(400, 'PAYLOAD_SCHEMA_INVALID', '任务命令设置格式无效')
+          return failure(503, 'SERVICE_UNAVAILABLE', '暂时无法检查或保存任务命令，请重新读取')
         }
       }
       if (target.pathname === chatRoutingPath) {
@@ -567,6 +677,7 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           const health = await response.json() as { ok?: boolean; data?: Record<string, unknown> }
           if (health.ok && health.data) {
             if (chatRouting) health.data.native_chat_routing_enabled = true
+            if (chatRouting && commandSettings) health.data.native_command_settings_enabled = true
             if (executionPermissions) health.data.native_execution_permissions_enabled = true
           }
           return Response.json(health, { status: response.status, headers: forwarded })

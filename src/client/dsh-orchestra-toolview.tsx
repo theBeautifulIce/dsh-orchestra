@@ -2,7 +2,8 @@ import type { ReactElement } from 'react'
 import { DshDeliveryReviewCard, type DshDeliveryReview } from './dsh-delivery-review-card.tsx'
 import { isDshLocalShell, type DshLocalPanelSources } from './dsh-local-panel.tsx'
 import { ReceiptAction } from './receipt-action.tsx'
-import { receiptLocation } from '../core/receipt-location.ts'
+import { chatArtifactLink, receiptLocation } from '../core/receipt-location.ts'
+import { ArtifactLinks, type OpenChatArtifact } from './dsh-artifact-links.tsx'
 
 const slotName = 'tool.call.toolview'
 const toolName = 'orchestra_task'
@@ -27,7 +28,7 @@ function summaryOf(meta: unknown): string | undefined {
   return typeof summary === 'string' && summary.trim() ? summary.trim() : undefined
 }
 
-function OrchestraToolRow(owner: ToolOwner, sources?: DshLocalPanelSources) {
+function OrchestraToolRow(owner: ToolOwner, sources?: DshLocalPanelSources, openArtifact?: OpenChatArtifact, downloadArtifact?: OpenChatArtifact) {
   const result = owner.phase === 'result' ? owner.block : undefined
   const isError = result?.isError === true
   const review = result?.meta && typeof result.meta === 'object'
@@ -44,15 +45,19 @@ function OrchestraToolRow(owner: ToolOwner, sources?: DshLocalPanelSources) {
   const target = result?.meta && typeof result.meta === 'object' && 'location' in result.meta
     ? receiptLocation.safeParse((result.meta as { location?: unknown }).location) : undefined
   const linkable = !isError && target?.success && sources && typeof window !== 'undefined' && isDshLocalShell(window.location.href)
+  const artifacts = chatArtifactLink.array().max(50).safeParse(result?.meta && typeof result.meta === 'object'
+    ? (result.meta as { artifactLinks?: unknown }).artifactLinks : undefined)
   return <>
     <p role={isError ? 'alert' : 'status'} style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</p>
     {linkable && <ReceiptAction location={target.data} sources={sources} />}
+    {!isError && artifacts.success && <ArtifactLinks artifacts={artifacts.data} openArtifact={openArtifact} downloadArtifact={downloadArtifact} />}
   </>
 }
 
-export function registerNativeOrchestraToolView(ctx: NativeOrchestraToolViewContext, reviewSources?: () => DshLocalPanelSources | undefined) {
+export function registerNativeOrchestraToolView(ctx: NativeOrchestraToolViewContext,
+  reviewSources?: () => DshLocalPanelSources | undefined, openArtifact?: OpenChatArtifact, downloadArtifact?: OpenChatArtifact) {
   return ctx.effect(function* () {
     yield ctx.slots.inject(slotName, () => ctx.slots.register({ name: slotName, key: toolName }, (owner) =>
-      OrchestraToolRow(owner, reviewSources?.())))
+      OrchestraToolRow(owner, reviewSources?.(), openArtifact, downloadArtifact)))
   }, 'orchestra: native chat tool row')
 }

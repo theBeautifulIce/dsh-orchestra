@@ -43,18 +43,26 @@ export function ExecutionPermissionSettings({ client, reloadVersion, writable }:
   }
   return <section className="ops-surface" aria-labelledby="execution-permissions-title">
     <header className="ops-surface-head"><h2 id="execution-permissions-title" className="ops-settings-anchor" tabIndex={-1}>执行权限</h2></header>
-    <div className="ops-inset ops-stack">
-      <p id="execution-permissions-scope">适用于此 Desktop 用户的新执行尝试。以宿主和任务约束为上限；设置不会修改在途尝试。</p>
-      <p>当前普通节点只执行已确认的只读原生工具。未知或有副作用的工具会说明缺口；全权限设置不会绕过节点限制。</p>
-      {busy ? <p role="status">正在确认执行权限设置是否已保存…</p> : error ? <>
-        <p role="alert">{error}</p><button className="ops-button" type="button" onClick={() => setReload(value => value + 1)}>重新读取执行权限设置</button>
-      </> : view ? <>
-        <label>执行权限模式 <select aria-label="执行权限模式" aria-describedby="execution-permissions-scope" value={view.mode}
-          disabled={!writable} onChange={event => { void change(event.currentTarget.value as ExecutionPermissionMode) }}>
-          {choices.map(choice => <option key={choice.mode} value={choice.mode}>{choice.label}</option>)}
-        </select></label>
-        <p role="status">{choices.find(choice => choice.mode === view.mode)?.description}</p>
-      </> : <p role="status">正在读取执行权限设置…</p>}
+    <div className="ops-inset ops-setting-body">
+      <p id="execution-permissions-scope" className="ops-setting-help">对本机 DSH 用户的新执行尝试生效。正在执行的任务保持原设置。</p>
+      <div className="ops-setting-row">
+        <div className="ops-setting-copy">
+          <label className="ops-setting-label" htmlFor="execution-permission-mode">执行权限模式</label>
+          <p id="execution-permissions-description" className="ops-setting-help" role="status">{view
+            ? choices.find(choice => choice.mode === view.mode)?.description : '选择执行工具时使用的权限与审批方式。'}</p>
+        </div>
+        <div className="ops-setting-control">
+          {busy ? <p className="ops-setting-feedback" role="status">正在确认执行权限设置是否已保存…</p> : error ? <>
+            <p className="ops-setting-feedback" role="alert">{error}</p>
+            <button className="ops-button" type="button" onClick={() => setReload(value => value + 1)}>重新读取执行权限设置</button>
+          </> : view ? <select id="execution-permission-mode" className="ops-field" aria-label="执行权限模式"
+            aria-describedby="execution-permissions-scope execution-permissions-description execution-permissions-boundary" value={view.mode}
+            disabled={!writable} onChange={event => { void change(event.currentTarget.value as ExecutionPermissionMode) }}>
+            {choices.map(choice => <option key={choice.mode} value={choice.mode}>{choice.label}</option>)}
+          </select> : <p className="ops-setting-feedback" role="status">正在读取执行权限设置…</p>}
+        </div>
+      </div>
+      <p id="execution-permissions-boundary" className="ops-setting-note">全权限设置不会绕过节点限制。普通节点仅执行已确认的只读工具，其他能力会提示缺口。</p>
     </div>
   </section>
 }

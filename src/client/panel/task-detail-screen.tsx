@@ -172,14 +172,14 @@ export function TaskDetailScreen({
       {showRun && !failed && detailFailed && <ReadError onRetry={() => setReload((n) => n + 1)} />}
       {showRun && task && run && <>
         {runTab === '便条' && notesClient
-          ? <RunNotes key={run.run_id} client={notesClient} runId={run.run_id} reloadVersion={reloadVersion} />
-          : <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab === '便条' ? '步骤' : runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation}
+          ? <RunNotes key={`notes:${run.run_id}`} client={notesClient} runId={run.run_id} reloadVersion={reloadVersion} />
+          : <RunDetails key={`details:${run.run_id}`} run={run} task={task} api={api} tab={runTab === '便条' ? '步骤' : runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation}
           reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision}
           onOpenResult={() => { setReviewRunId(run.run_id); setRunTab('结果'); resetScroll() }} />}
         {rework && reviewRunId === run.run_id && <div hidden={runTab !== '结果'}><ReworkPanel key={run.run_id} api={api} commands={rework} runId={run.run_id} runStatus={run.status} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot}
           initialTarget={actionIsReview && actionRunId === run.run_id ? initialAction : undefined} /></div>}
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
-          && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
+          && <StartMemory key={`memory:${run.run_id}`} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
       </>}
       {!showRun && data && <>
         {taskTab === '概览' && latest && <ResultLanding api={api} run={latest}

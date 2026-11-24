@@ -9,7 +9,7 @@ type ReadableArtifact = Omit<RunArtifact, 'created_at'>
 type Preview = Extract<ArtifactContentView, { kind: 'preview' }>
 type Download = Extract<ArtifactContentView, { kind: 'download' }>
 
-function saveArtifact(artifact: Download): void {
+export function saveArtifact(artifact: Download): void {
   const binary = atob(artifact.base64)
   const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
   if (bytes.byteLength !== artifact.size_bytes) throw new Error('下载内容大小与登记不一致')

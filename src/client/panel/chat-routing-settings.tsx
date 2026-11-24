@@ -41,7 +41,7 @@ export function ChatRoutingSettings({ client, reloadVersion, writable }: {
   return <section className="ops-surface" aria-labelledby="chat-routing-title">
     <header className="ops-surface-head"><h2 id="chat-routing-title" className="ops-settings-anchor" tabIndex={-1}>聊天任务自动接管</h2></header>
     <div className="ops-inset ops-stack">
-      <p id="chat-routing-scope">适用于此 Desktop 用户的会话，从下一条消息生效。关闭后仍可用 <code>/orchestra 任务内容</code> 交给 Orchestra。</p>
+      <p id="chat-routing-scope">适用于此 Desktop 用户的会话，从下一条消息生效。关闭后仍可使用设置中的任务命令；默认为 <code>/orchestra 任务内容</code>。</p>
       {busy ? <p role="status">正在确认设置是否已保存…</p> : error ? <>
         <p role="alert">{error}</p>
         <button className="ops-button" type="button" onClick={() => setReload((value) => value + 1)}>重新读取自动接管设置</button>
