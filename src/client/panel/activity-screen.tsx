@@ -36,7 +36,9 @@ export function activityTitle(type: string) {
 
 export function ActivityScreen({ api, reloadVersion, onSnapshot }: { api: ResourcesApi; reloadVersion: number; onSnapshot: (seq: number) => void }) {
   return <section aria-labelledby="activity-title" className="ops-page">
-    <header className="ops-page-header"><h1 id="activity-title">事件日志</h1></header>
+    <header className="ops-page-header"><div><h1 id="activity-title">事件日志</h1>
+      <p className="ops-meta">按时间查看任务、审批与配置的变化，展开记录追溯来源。</p>
+    </div></header>
     <ActivityList api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   </section>
 }
@@ -65,7 +67,7 @@ export function ActivityList({ api, runId, taskId, reloadVersion, onSnapshot, co
   }, [api, before, runId, taskId, retry, reloadVersion, onSnapshot, compact])
   return <section aria-label="账本活动" style={{ display: 'grid', gap: 9 }}>
     {loading && <p role="status" style={muted}>正在读取活动…</p>}
-    {failed && <p role="alert">活动记录读取失败。 <button type="button" onClick={() => { setBefore(undefined); setRetry((value) => value + 1) }}>重试</button></p>}
+    {failed && <p role="alert">活动记录读取失败。 <button type="button" className="ops-button" onClick={() => { setBefore(undefined); setRetry((value) => value + 1) }}>重试</button></p>}
     {!loading && !failed && items.length === 0 && <p style={muted}>当前没有活动记录。</p>}
     {items.length > 0 && <ol style={timeline}>{items.map((event) => <li key={event.seq} style={row}>
       <div><strong>{activityTitle(event.type)}</strong>
@@ -76,10 +78,10 @@ export function ActivityList({ api, runId, taskId, reloadVersion, onSnapshot, co
         ]} />}</div>
       <time dateTime={event.occurred_at} style={muted}>{new Date(event.occurred_at).toLocaleString()}</time>
     </li>)}</ol>}
-    {!compact && next !== null && !failed && <button type="button" disabled={loading} onClick={() => setBefore(next)} style={{ justifySelf: 'start' }}>加载更早活动</button>}
+    {!compact && next !== null && !failed && <button type="button" className="ops-button" disabled={loading} onClick={() => setBefore(next)} style={{ justifySelf: 'start' }}>加载更早活动</button>}
   </section>
 }
 
 const muted = { color: COLOR.inkMuted, fontSize: FONT_PX.helper, margin: '4px 0' }
-const timeline = { display: 'grid', gap: 0, padding: 0, margin: 0, listStyle: 'none', border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.surface } as const
-const row = { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6, padding: '7px 11px', borderBottom: `1px solid ${COLOR.line}`, overflowWrap: 'anywhere', minWidth: 0 } as const
+const timeline = { display: 'grid', gap: 0, padding: 0, margin: 0, listStyle: 'none', border: `1px solid ${COLOR.line}`, borderRadius: 12, background: COLOR.surface, overflow: 'hidden' } as const
+const row = { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '16px 20px', borderBottom: `1px solid ${COLOR.line}`, overflowWrap: 'anywhere', minWidth: 0 } as const

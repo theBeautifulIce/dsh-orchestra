@@ -102,6 +102,7 @@ export function WorkflowListScreen({ api, onSelectWorkflow, reloadVersion = 0, o
     <header className="ops-page-header">
       <div>
         <h1 id="workflow-list-title">Workflow 管理</h1>
+        <p className="ops-meta">维护可复用的流程；校验草稿、演练后再发布新版本。</p>
         {!commands && <p className="ops-meta">只读访问</p>}
       </div>
       {commands && <div className="ops-actions">

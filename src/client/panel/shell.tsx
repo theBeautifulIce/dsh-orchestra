@@ -3,6 +3,7 @@ import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import type { StreamStatus } from '../api/sse.ts'
 import { PANEL_LAYOUT_CSS } from './panel-layout.ts'
+import { RouteIcon } from './route-icons.tsx'
 
 export const PANEL_ROUTES = [
   { id: 'overview', label: '总览' },
@@ -17,6 +18,12 @@ export const PANEL_ROUTES = [
 ] as const
 
 export type PanelRoute = (typeof PANEL_ROUTES)[number]['id']
+const NAV_GROUPS: readonly { label: string; routes: readonly PanelRoute[] }[] = [
+  { label: '工作空间', routes: ['overview', 'tasks'] },
+  { label: '处理与核验', routes: ['decisions', 'effects'] },
+  { label: '资源与记录', routes: ['workflows', 'activity', 'collaboration', 'memory'] },
+  { label: '偏好与服务', routes: ['settings'] },
+]
 type SettingsSection = { id: string; label: string }
 export type PanelShellProps = {
   activeRoute: PanelRoute
@@ -94,28 +101,36 @@ export function PanelShell(props: PanelShellProps) {
     </div>
   }
 
+  const isStale = props.snapshotStale || props.streamStatus === 'stale'
   const stateLabel = !props.serviceConnected
     ? COPY.serviceDown
-    : props.streamStatus === 'polling' ? '轮询更新' : props.streamStatus === 'stale' ? '数据可能已过期' : props.streamStatus === 'live' ? '实时更新' : '服务已连接'
-  const isStale = props.snapshotStale || props.streamStatus === 'stale'
+    : isStale ? '数据可能已过期' : props.streamStatus === 'polling' ? '轮询更新' : props.streamStatus === 'live' ? '实时更新' : '服务已连接'
   const commandsEnabled = props.serviceConnected && !isStale
   const commandsUnavailableReason = !props.serviceConnected ? COPY.serviceDown : COPY.staleNotice
   return <CommandsEnabledContext.Provider value={{ enabled: commandsEnabled, reason: commandsUnavailableReason }}>
     <div className="ops-panel-viewport" style={appStyle}>
       <style>{PANEL_LAYOUT_CSS}</style>
+      <button type="button" className="ops-skip-link" aria-controls="panel-content"
+        onClick={() => content.current?.focus({ preventScroll: true })}>跳到主要内容</button>
       <div className="ops-shell" data-panel-route={props.activeRoute}>
-        <aside aria-label="主导航" className="ops-shell-sidebar" style={sidebarStyle}>
-          <div className="ops-shell-brand" style={brandStyle}>Orchestra</div>
+        <aside aria-label="主导航" className="ops-shell-sidebar">
+          <div className="ops-shell-identity">
+            <div className="ops-shell-brand">Orchestra<span aria-hidden="true" /></div>
+            <p className="ops-shell-caption">任务与协作工作台</p>
+          </div>
           <nav aria-label="主菜单" className="ops-main-menu">
-            {PANEL_ROUTES.filter((route) => route.id !== 'collaboration' || props.collaborationEnabled).map((route) => <button
-              key={route.id}
-              type="button"
-              aria-current={props.activeRoute === route.id ? 'page' : undefined}
-              aria-expanded={route.id === 'settings' && props.settingsSections?.length ? settingsOpen : undefined}
-              aria-controls={route.id === 'settings' && settingsOpen ? settingsMenuId : undefined}
-              onClick={() => props.onNavigate(route.id)}
-              style={{ ...navButtonStyle, ...(props.activeRoute === route.id ? activeNavStyle : {}) }}
-            >{route.label}</button>)}
+            {NAV_GROUPS.map((group) => <div key={group.label} className="ops-nav-group" role="group" aria-label={group.label}>
+              <div className="ops-nav-group-label" aria-hidden="true">{group.label}</div>
+              {PANEL_ROUTES.filter((route) => group.routes.includes(route.id) && (route.id !== 'collaboration' || props.collaborationEnabled)).map((route) => <button
+                key={route.id}
+                type="button"
+                className="ops-nav-button"
+                aria-current={props.activeRoute === route.id ? 'page' : undefined}
+                aria-expanded={route.id === 'settings' && props.settingsSections?.length ? settingsOpen : undefined}
+                aria-controls={route.id === 'settings' && settingsOpen ? settingsMenuId : undefined}
+                onClick={() => props.onNavigate(route.id)}
+              ><RouteIcon route={route.id} /><span>{route.label}</span></button>)}
+            </div>)}
           </nav>
           {settingsOpen && <nav id={settingsMenuId} aria-label="设置子菜单" className="ops-settings-menu">
             {props.settingsSections?.map(({ id, label }) => <button key={id} type="button"
@@ -126,13 +141,17 @@ export function PanelShell(props: PanelShellProps) {
           </nav>}
         </aside>
         <div className="ops-shell-main" data-panel-route={props.activeRoute}>
-          <header style={props.activeRoute === 'tasks' ? headerStyle : { ...headerStyle, height: 44, paddingInline: 22 }}>
-            <strong>{PANEL_ROUTES.find((route) => route.id === props.activeRoute)?.label}</strong>
-            <span role="status" style={{ color: props.serviceConnected ? COLOR.success : COLOR.warning }}>
-              {stateLabel}
+          <header className="ops-shell-header">
+            <div className="ops-breadcrumb" aria-label="当前位置">
+              <span>工作空间</span><span aria-hidden="true">/</span>
+              <strong>{PANEL_ROUTES.find((route) => route.id === props.activeRoute)?.label}</strong>
+            </div>
+            <span role="status" className="ops-connection-state"
+              data-tone={!props.serviceConnected || isStale ? 'warning' : props.streamStatus === 'polling' ? 'info' : 'success'}>
+              <span className="ops-state-dot" aria-hidden="true" />{stateLabel}
             </span>
           </header>
-          {(!props.serviceConnected || isStale) && <div role="status" style={noticeStyle}>
+          {(!props.serviceConnected || isStale) && <div role="status" className="ops-connection-notice">
             {COPY.staleNotice}。刷新成功后可继续写入。
           </div>}
           <main id="panel-content" ref={content} tabIndex={0}>
@@ -144,10 +163,5 @@ export function PanelShell(props: PanelShellProps) {
   </CommandsEnabledContext.Provider>
 }
 
-const appStyle = { background: COLOR.canvas, color: COLOR.ink, fontSize: FONT_PX.body, lineHeight: 1.55 } as const
-const sidebarStyle = { background: COLOR.sidebar }
-const brandStyle = { fontSize: 16, fontWeight: 700 } as const
-const navButtonStyle = { minHeight: 40, padding: '0 12px', border: 0, borderRadius: 7, textAlign: 'left' as const, background: 'transparent', color: COLOR.ink, fontFamily: 'system-ui, sans-serif', fontSize: FONT_PX.menu, fontWeight: 500, cursor: 'pointer' }
-const activeNavStyle = { background: '#e9edf2', fontWeight: 700 } as const
-const headerStyle = { height: 58, padding: '0 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.menu } as const
-const noticeStyle = { padding: '10px 28px', background: '#fff8e9', color: COLOR.warning, borderBottom: `1px solid ${COLOR.line}`, fontSize: FONT_PX.helper } as const
+const appStyle = { background: COLOR.canvas, color: COLOR.ink, fontSize: FONT_PX.body, lineHeight: 1.6,
+  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif' } as const
