@@ -25,13 +25,16 @@ it('T05 继续读取后仍保留尚在后页的受阻项，并在读完时去重
   expect(service.calls.filter(call=>call.params.get('only')==='attention')).toHaveLength(2)
 })
 
-it('T01 卡片主动作把子运行和文件版本带进结果页，并预选实际审核表单', async () => {
+it.each(['tasks', 'overview'] as const)('T01 卡片主动作把子运行和文件版本带进结果页，并预选实际审核表单（入口：%s）', async (initialRoute) => {
   const sha='a'.repeat(64)
   const action={kind:'review' as const,label:'打开「本次报告.md」验收',run_id:'child',node_run_id:'child-report',artifact_id:'version-new',sha256:sha,file_name:'本次报告.md'}
   const task=taskSummary({title:'人读交付',lane:'attention',next_action:action,delivery_review_count:1})
   const artifact={artifact_id:'version-new',run_id:'child',source_node_run_id:'child-report',sha256:sha,file_name:'本次报告.md',retain_until:null,created_at:task.updated_at}
   const service=createFakeService(({path,params})=> {
-    if(path==='/v1/tasks')return {ok:true,data:{items:[task],next_cursor:null}}
+    if(path==='/v1/workspace/overview')return {ok:true,data:{lanes:{upcoming:0,running:0,attention:1,finished:0},open_decisions:0,unverified_effects:0}}
+    if(path==='/v1/workflows')return {ok:true,data:{items:[],next_cursor:null}}
+    if(path==='/v1/activity')return {ok:true,data:{items:[],next_before_seq:null}}
+    if(path==='/v1/tasks')return {ok:true,data:{items:!params.get('lane') || params.get('lane')==='attention' ? [task] : [],next_cursor:null}}
     if(path==='/v1/tasks/get')return {ok:true,data:task}
     if(path==='/v1/runs')return {ok:true,data:{items:[runSummary()]}}
     if(path==='/v1/runs/get')return {ok:true,data:runSummary({run_id:params.get('run_id')!})}
@@ -42,11 +45,13 @@ it('T01 卡片主动作把子运行和文件版本带进结果页，并预选实
     if(path==='/v1/rework/holds')return {ok:true,data:{items:[{run_id:'child',node_id:'report',node_run_id:'child-report',status:'held',hold_id:'hold-1',revision:1}]}}
     return {ok:false,error:{code:'NOT_FOUND',message:'fixture',retryable:false}}
   })
-  const view=await renderPanel(<PanelApp client={createApiClient('http://panel.test',service.fetcher)} serviceConnected reworkEnabled scopeLabel="当前会话" />)
+  const view=await renderPanel(<PanelApp client={createApiClient('http://panel.test',service.fetcher)} serviceConnected reworkEnabled scopeLabel="当前会话" initialRoute={initialRoute} />)
   try {
     await view.flush()
-    expect(view.text()).toContain('当前会话中的任务')
-    await view.click(view.findAll('button').find(button=>button.textContent===action.label)!)
+    if(initialRoute==='tasks')expect(view.text()).toContain('当前会话中的任务')
+    const trigger=view.findAll('button').find(button=>button.textContent?.startsWith(action.label))!
+    expect(trigger).toBeDefined()
+    await view.click(trigger)
     await view.flush()
     const inspector=view.container.querySelector('#task-inspector')!
     expect(inspector.querySelector('[aria-pressed="true"]')?.textContent).toBe('结果')
@@ -56,6 +61,9 @@ it('T01 卡片主动作把子运行和文件版本带进结果页，并预选实
     expect(inspector.textContent).toContain('本次交付正文')
     expect(service.calls.some(call=>call.path==='/v1/runs/get' && call.params.get('run_id')==='child')).toBe(true)
     expect(inspector.querySelector('details[open]')?.textContent).toContain('审核成果或提出修改')
+    await view.click(view.findAll('button').find(button=>button.textContent==='关闭')!)
+    expect(view.container.querySelector('#task-inspector')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
   } finally {view.unmount()}
 })
 

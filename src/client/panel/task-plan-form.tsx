@@ -352,11 +352,11 @@ function TaskPlanFormBody({api,commands,onStarted,onOpenRun,workflowRequest,onCl
   </details></>
 }
 
-const panelStyle = { padding: 12, border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.surface, color: COLOR.ink }
+const panelStyle = { padding: 20, border: `1px solid ${COLOR.line}`, borderRadius: 12, background: COLOR.surface, color: COLOR.ink }
 const contentStyle = { display: 'grid', gap: 8, marginTop: 5, fontSize: FONT_PX.body, minWidth: 0 }
 const headingStyle = { fontSize: FONT_PX.section, margin: '4px 0' }
 const descriptionStyle = { margin: '4px 0', color: COLOR.inkMuted, overflowWrap: 'anywhere' as const }
 const detailStyle = { marginTop: 4, fontSize: FONT_PX.menu, color: COLOR.inkMuted }
 const formatDraftTime = (draft: TaskPlanView) => draft.created_at ? draft.created_at.slice(0, 16).replace('T', ' ') : '时间未记录'
 const listStyle = { margin: '5px 0', paddingLeft: 22, overflowWrap: 'anywhere' as const }
-const editStyle = { justifySelf: 'start' as const, color: COLOR.ink, background: COLOR.surface, border: `1px solid ${COLOR.line}`, borderRadius: 5, minHeight: 36 }
+const editStyle = { justifySelf: 'start' as const, color: COLOR.ink, background: COLOR.surface, border: `1px solid ${COLOR.line}`, borderRadius: 8, minHeight: 44, padding: '0 14px' }

@@ -156,11 +156,11 @@ function formatDate(value: string): string {
   return Number.isNaN(date.valueOf()) ? '时间未知' : date.toLocaleString()
 }
 
-const cardTitleStyle = { margin: 0, fontSize: 16 }
+const cardTitleStyle = { margin: 0, fontSize: FONT_PX.section }
 const mutedStyle = { margin: '6px 0 0', color: COLOR.inkMuted, fontSize: FONT_PX.body }
-const cardStyle = { minWidth: 0, padding: '11px 13px', border: '1px solid #dde4ed', borderRadius: 9, background: COLOR.surface }
+const cardStyle = { minWidth: 0, padding: '20px', border: `1px solid ${COLOR.line}`, borderRadius: 12, background: COLOR.surface }
 const detailGridStyle = { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', gap: '4px 10px', margin: '8px 0 0', fontSize: FONT_PX.body } as const
-const buttonStyle = { minHeight: 36, justifySelf: 'start' as const, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' }
+const buttonStyle = { minHeight: 44, justifySelf: 'start' as const, padding: '0 14px', border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.body, cursor: 'pointer' }
 const errorStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 14, color: COLOR.danger, background: '#fff1f0', borderRadius: 8 }
 const toggleStyle = { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: FONT_PX.body } as const
 const tableStyle = { width: '100%', margin: '16px 0 0', borderCollapse: 'collapse', fontSize: FONT_PX.helper, textAlign: 'left' as const } as const
