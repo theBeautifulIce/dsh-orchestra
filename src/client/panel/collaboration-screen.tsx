@@ -89,14 +89,14 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
         void command('/v1/collaboration/scopes', 'collaboration.scope_create',
           { title: title.trim(), node_run_ids: memberIds, ttl_minutes: minutes }, () => { setTitle(''); setMembers([]); setSelected(''); setCreating(false) })
       }}>
-        <label>本次核验名称 <input required maxLength={200} placeholder="例如：复核月报汇总金额" value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+        <label>本次核验名称 <input className="ops-field" required maxLength={200} placeholder="例如：复核月报汇总金额" value={title} onChange={(event) => setTitle(event.target.value)} /></label>
         {creating && <CollaborationMembers client={client} selected={members} onChange={setMembers} disabled={busy} />}
-        <label>允许提出核验的时长（分钟） <input type="number" required min={1} max={10_080} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} /></label>
+        <label>允许提出核验的时长（分钟） <input className="ops-field" type="number" required min={1} max={10_080} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} /></label>
         <p className="ops-meta">保存后，选中的步骤可在范围内提出带证据的请求。出现请求时，在这里选择「授权核验」。</p>
-        <PanelCommandButton type="submit" disabled={busy || !title.trim() || memberIds.length < 2 || memberIds.length > 16}>保存范围</PanelCommandButton>
+        <PanelCommandButton className="ops-button ops-button--primary" type="submit" disabled={busy || !title.trim() || memberIds.length < 2 || memberIds.length > 16}>保存范围</PanelCommandButton>
       </form>
     </details>
-    {notice && <p role={failed ? 'alert' : 'status'}>{notice} {failed && <button type="button" onClick={() => refresh((value) => value + 1)}>刷新</button>}</p>}
+    {notice && <p role={failed ? 'alert' : 'status'}>{notice} {failed && <button className="ops-button" type="button" onClick={() => refresh((value) => value + 1)}>刷新</button>}</p>}
     {!scopes && !failed && <p role="status">正在读取协作范围…</p>}
     {scopes?.length === 0 && <p className="ops-surface ops-empty">还没有协作范围。</p>}
     {shown && <>
@@ -130,9 +130,9 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
               {request.target_generation !== null && <p>派发代次 {request.target_generation}</p>}
               {request.evidence_id && <p>证据编号 <code>{request.evidence_id}</code></p>}
             </details>
-            {actions.map((action) => <PanelCommandButton key={action} disabled={busy} onClick={() => {
+            <div className="ops-actions">{actions.map((action) => <PanelCommandButton className="ops-button" key={action} disabled={busy} onClick={() => {
               setReview({ id: request.request_id, revision: request.revision, action }); setNote(''); setReplacement('')
-            }}>{ACTIONS[action]}</PanelCommandButton>)}
+            }}>{ACTIONS[action]}</PanelCommandButton>)}</div>
             {review?.id === request.request_id && review.revision === request.revision && actions.includes(review.action) && <form style={form} onSubmit={(event) => {
               event.preventDefault()
               const base = { request_id: review.id, expected_revision: review.revision, note: note.trim() }
@@ -142,12 +142,12 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
                 void command('/v1/collaboration/review', 'collaboration.review', { ...base, action: review.action }, () => setReview(undefined))
               }
             }}>
-              {review.action === 'reassign' && <label>新接收步骤 <select required value={replacement} onChange={(event) => setReplacement(event.target.value)}>
+              {review.action === 'reassign' && <label>新接收步骤 <select className="ops-field" required value={replacement} onChange={(event) => setReplacement(event.target.value)}>
                 <option value="">选择接收步骤</option>
                 {candidates?.map((id) => <option key={id} value={id}>{participantNames.get(id) ?? id}</option>)}
               </select></label>}
-              <label>处理理由 <textarea required maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label>
-              <PanelCommandButton type="submit" disabled={busy || !note.trim()
+              <label>处理理由 <textarea className="ops-field" required maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label>
+              <PanelCommandButton className="ops-button ops-button--primary" type="submit" disabled={busy || !note.trim()
                 || (review.action === 'reassign' && !candidates?.includes(replacement))}>确认{ACTIONS[review.action]}</PanelCommandButton>
             </form>}
           </section>
@@ -158,5 +158,5 @@ export function CollaborationScreen({ client, reloadVersion, onSnapshot, onOpenR
   </section>
 }
 
-const card = { border: '1px solid #dde4ed', background: COLOR.surface, borderRadius: 8, padding: '9px 12px', overflowWrap: 'anywhere' as const }
-const form = { display: 'grid', gap: 7, marginTop: 8, maxWidth: 540 }
+const card = { border: `1px solid ${COLOR.line}`, background: COLOR.surface, borderRadius: 12, padding: '20px', overflowWrap: 'anywhere' as const }
+const form = { display: 'grid', gap: 14, marginTop: 16, maxWidth: 640 }

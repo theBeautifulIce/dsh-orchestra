@@ -98,10 +98,6 @@ describe('S5-J 视觉硬门槛', () => {
   it('门槛① 面板源码的字号字面量只剩棘轮清单里的历史项，新代码必须走 tokens.ts', () => {
     // 历史存量（迁移到 tokens.ts 之前不许新增；迁移后要同步改这份清单）：
     const legacyFontLiterals: Record<string, number[]> = {
-      'decision-inbox.tsx': [16],
-      'memory-panel.tsx': [16],
-      'shell.tsx': [16],
-      'unverified-effects.tsx': [16],
       'workflow-canvas-view.tsx': [14],
       'workflow-canvas.tsx': [16],
       'workflow-editor.tsx': [14, 16],
@@ -115,7 +111,7 @@ describe('S5-J 视觉硬门槛', () => {
     }
     for (const values of Object.values(actual)) values.sort((a, b) => a - b)
     // 扫描器确实在工作（不是空壳断言）
-    expect(found.length).toBeGreaterThanOrEqual(8)
+    expect(found.length).toBeGreaterThanOrEqual(4)
     // 新增一个字面量就红：清单必须与源码逐项对上
     expect(actual).toEqual(legacyFontLiterals)
     // 本次新增的设置屏不得带字号字面量
@@ -161,7 +157,7 @@ describe('S5-J 视觉硬门槛', () => {
     const widths = scanWidthLiterals()
     // 扫描器确实在工作（不是空壳断言）
     expect(widths.length).toBeGreaterThanOrEqual(10)
-    expect(widths.some((item) => item.key === 'width' && item.value === 236)).toBe(true)
+    expect(widths.some((item) => item.key === 'width' && item.value === 214)).toBe(true)
     const tooWide = widths.filter((item) => item.value > 1366)
     expect(tooWide).toEqual([])
   })
