@@ -11,7 +11,9 @@ it('supplies only data and no tools or session identity to a pinned, prepared JS
       expect(options.tools).toEqual([])
       expect(options.sessionId).toBeUndefined()
       expect(options.messages).toHaveLength(1)
-      expect(options.system).toBe('interpret')
+      expect(options.system).toContain('ORCHESTRA_COMMUNICATION_STE80')
+      expect(options.system.endsWith('\ninterpret')).toBe(true)
+      expect(options.system).not.toContain('hello')
       yield { type: 'block-end', block: { type: 'text', text: '{"kind":"conversation"}' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     } }

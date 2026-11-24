@@ -103,9 +103,8 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
   const taskStatus = String(row.status ?? '')
   const deliveryAcceptance = deliveryAcceptanceOf(row.delivery_acceptance)
   // 有已确认计划时，目标达成看验收汇总（必需交付项必须全部 passed），不能只看 run 终态
-  const goalMet = deliveryAcceptance === 'not_applicable'
-    ? taskStatus === 'succeeded' || taskStatus === 'succeeded_with_unverified'
-    : deliveryAcceptance === 'passed'
+  const executionSucceeded = taskStatus === 'succeeded' || taskStatus === 'succeeded_with_unverified'
+  const goalMet = executionSucceeded && (deliveryAcceptance === 'not_applicable' || deliveryAcceptance === 'passed')
   const attention = deriveAttention({
     openDecisionCount,
     oldestOpenDecisionAgeSeconds: oldestDecisionAge,

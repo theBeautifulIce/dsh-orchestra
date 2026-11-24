@@ -51,7 +51,7 @@ export function pendingChatReports(db: Db, actor: string, after: number, limit: 
   return db.raw.prepare(
     'SELECT o.run_id, c.reported_key, o.rowid AS cursor FROM chat_task_receipts c JOIN task_plans p USING (plan_id)'
     + ' JOIN start_run_operations o ON p.launch_operation_id = o.operation_id'
-    + " WHERE p.created_by = ? AND o.rowid > ? AND COALESCE(c.reported_key, '') NOT LIKE 'terminal:%'"
+    + " WHERE p.created_by = ? AND o.rowid > ? AND COALESCE(c.reported_key, '') NOT LIKE 'delivered:terminal:%'"
     + ' ORDER BY o.rowid LIMIT ?',
   ).all(actor, after, limit) as ChatRunReceipt[]
 }

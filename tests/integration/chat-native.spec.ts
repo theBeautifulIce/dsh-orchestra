@@ -92,7 +92,8 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     guard(check: Guard) { guard = check },
   })
   ctx.provide('systemPrompt', { section(section: { text: typeof prompt }) { prompt = section.text } })
-  ctx.provide('sessions', { flush: async () => true })
+  const flush = vi.fn(async () => true)
+  ctx.provide('sessions', { flush })
   ctx.provide('approval', { request: approval })
   ctx.provide('connection', { fetch: { register({ path }: { path: string }) { routes.push(path) } } })
   ctx.provide('credentials', { modifyRecord: async () => ({ kind: 'grant', payload: 'a'.repeat(64) }) })
@@ -106,7 +107,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     modelCatalog: async () => ({ default: { provider: 'fixture', model: 'model' }, groups: [{ id: 'fixture', models: [{ id: 'model' }] }] }),
   })
   const openService = async (sessionId: string, dbFile: string) => {
-    const service = await serveOrchestra({
+    const core = await serveOrchestra({
       dbFile, secret, phase: 'S6', asOfSeq: () => 0, listEvents: () => [], listTasks: () => [],
       appendLedgerEvent: () => { throw new Error('Unexpected raw ledger write') },
       planning: { propose: planner, workflowGenerator },
@@ -124,6 +125,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
         }),
       } }),
     })
+    const service: Service = { ...core, pendingNativeApprovals: () => [] }
     services.set(sessionId, service)
     return service
   }
@@ -188,6 +190,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
           const queued = nextTurn.findIndex(({ id }) => id === message.id)
           if (queued !== -1) nextTurn.splice(queued, 1)
         }
+        dispatch.emit('agent/inbox/claimed', { message, turn: advance ? turn + 1 : turn })
       }
       if (advance) turn++
       const claimed = structuredClone(messages)
@@ -209,9 +212,9 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
       return tool!.output.render(input, await invoke(input))
     }
     const checkTool = (name: string, parent?: symbol) => guard?.({ agent, name, signal: signal.signal, parent } as Parameters<Guard>[0])
-    return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn }
+    return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn, events, dispatch: agentEvents(ctx, agent) }
   }
-  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn, interpret,
+  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn, interpret, flush,
     registered: () => ({ activation: activation!, prompt: prompt!, tool: tool! }),
     deny: (value: boolean) => { deny = value }, badPlan: (value: boolean) => { badPlan = value },
     plannerUnavailable: (value: boolean) => { plannerUnavailable = value },
@@ -227,6 +230,38 @@ function user(text: string, options: { id?: string; source?: object } = {}): Mes
 function count(service: Service, table: 'tasks' | 'workflows' | 'task_plans' | 'runs' | 'chat_task_receipts') {
   return service.orchestra.db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n
 }
+
+it.each(['quality', 'provider'] as const)('启动前失败后，补充条件沿用原任务，不要求用户重述或重复确认（%s）', async failure => {
+  const test = await fixture({ interpret: input => ({
+    kind: 'task', relation: input.draft ? 'continue' : 'new', timing: 'immediate', quote: input.current.text,
+    ...(input.draft ? { draft_revision: input.draft.revision, continuation: 'supply' } : {}),
+    constraints: input.draft ? [] : [{ id: 'chat', kind: 'chat_only', source_message_id: input.current.message_id,
+      quote: '输出到聊天里' }], missing: [],
+  }) })
+  const plan = test.planner.getMockImplementation()!
+  test.planner.mockImplementation(async input => ({ ...await plan(input), deliverables: [
+    { title: 'AI 热点清单', node_id: 'draft', goal_ids: ['goal'], acceptance: { kind: 'chat/text_result' } },
+  ] }))
+  try {
+    const human = test.session('work', 'continuous-admission')
+    const original = '帮我查找今天AI热点新闻，来源AIHOT和B站，15条内，输出到聊天里'
+    if (failure === 'quality') test.badPlan(true)
+    else test.plannerUnavailable(true)
+    await human.admit(user(original))
+    expect(await human.call()).toMatchObject({ state: failure === 'quality' ? 'quality_blocked' : 'error' })
+    expect(count(test.services.get('continuous-admission')!, 'runs')).toBe(0)
+    test.badPlan(false)
+    test.plannerUnavailable(false)
+    const supplement = '合计，重复信息合并，时间最近24小时'
+    await human.admit(user(supplement))
+    expect(await human.call()).toMatchObject({ state: 'started' })
+    expect(test.planner.mock.calls.at(-1)?.[0]).toMatchObject({ goal: original + '\n' + supplement,
+      requirements_contract: { start_policy: 'immediate', constraints: [{ kind: 'chat_only' }],
+        sources: [{ text: original }, { text: supplement }] } })
+    expect(count(test.services.get('continuous-admission')!, 'runs')).toBe(1)
+    expect(test.approval).not.toHaveBeenCalled()
+  } finally { await test.close() }
+})
 
 it('applies a captured budget to native chat, including the aggregate deadline, without orphaning work', async () => {
   const test = await fixture()
@@ -789,7 +824,7 @@ it('acknowledges once, keeps recoverable progress quiet, and reports a late bloc
     expect(otherRun).not.toBe(runId)
     const unrelated = registerRunArtifact(db, { artifactId: uuidv7(), runId: otherRun, fileName: 'other-run.md', bytes: Buffer.from('other run only') })
     withTx(db, (tx) => tx.run("UPDATE runs SET status = 'cancelled', ended_at = ? WHERE run_id = ?", [now, otherRun]))
-    reportChatRun(db, otherRun, 'terminal:cancelled')
+    reportChatRun(db, otherRun, 'delivered:terminal:cancelled')
     await runScan()
     expect(test.notices).toHaveLength(0)
     await human.admit(user('这个运行已经有哪些产物？'))
@@ -846,8 +881,10 @@ it('acknowledges once, keeps recoverable progress quiet, and reports a late bloc
     await runScan()
     expect(test.notices).toHaveLength(3)
     expect(test.notices[2]?.message.source).toMatchObject({ summary: expect.stringContaining('运行失败') })
+    await human.admit(test.notices[2]!.message, false)
+    await runScan()
     expect(db.raw.prepare('SELECT reported_key FROM chat_task_receipts').all()).toEqual(expect.arrayContaining([
-      { reported_key: 'terminal:failed' }, { reported_key: 'terminal:cancelled' },
+      { reported_key: 'delivered:terminal:failed' }, { reported_key: 'delivered:terminal:cancelled' },
     ]))
   } finally {
     await test.close()
@@ -1107,7 +1144,8 @@ it('keeps approval, planning failure and terminal results in the originating DSH
     test.plannerUnavailable(false)
     test.badPlan(true)
     await human.admit(user('请发送涉及风险的报告'))
-    await expect(human.call()).resolves.toMatchObject({ state: 'quality_blocked', issues: [expect.stringContaining('高风险')] })
+    await expect(human.call()).resolves.toMatchObject({ state: 'quality_blocked',
+      issues: [expect.stringMatching(/涉及影响.*需要调整/u)] })
     const service = test.services.get('parent')!
     expect(count(service, 'runs')).toBe(0)
     expect(test.approval).not.toHaveBeenCalled()
@@ -1560,4 +1598,142 @@ it('discards a semantic result after automatic routing is disabled while the mod
     expect(test.planner).not.toHaveBeenCalled()
     expect(human.checkTool('read')).toBeUndefined()
   } finally { await test.close() }
+})
+
+it('两次原生工具拒绝后仍进入最终说明步骤，并且提示只注入一次', async () => {
+  const test = await fixture()
+  try {
+    const human = test.session('workspace', 'report-after-denial')
+    await human.admit(user('整理办公室事项，交付一份报告'))
+    expect(human.checkTool('skill')).toContain('Orchestra 接管')
+    expect(human.checkTool('bili_hot')).toContain('Orchestra 接管')
+    const recovery = await human.admitMany([], false, false)
+    expect(recovery).toMatchObject({ kind: 'enter', messages: [expect.objectContaining({
+      content: [expect.objectContaining({ text: expect.stringContaining('现在用已有通知给出最终回复') })],
+    })] })
+    expect(human.checkTool('orchestra_task')).toBeUndefined()
+    const next = await human.admitMany([], false, false)
+    expect(next).toEqual({ kind: 'enter', messages: [] })
+    await expect(human.call({ action: 'status' })).resolves.toHaveProperty('run_id')
+    expect(count(test.services.get('report-after-denial')!, 'runs')).toBe(1)
+  } finally { await test.close() }
+})
+
+it.each(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'cancelled', 'orphaned'])
+('重新检查旧版 %s 入队回执，丢弃后重投同一通知，只在来源会话落盘后确认', async status => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理办公材料并交付审核报告'))
+    const { run_id: runId } = await human.call()
+    const { db } = test.services.get('parent')!.orchestra
+    withTx(db, tx => tx.run('UPDATE runs SET status=?,ended_at=? WHERE run_id=?', [status, new Date().toISOString(), runId]))
+    // The old version acknowledged durable insertion before any visible user/message.
+    reportChatRun(db, runId, 'terminal:' + status)
+    const readKey = () => db.raw.prepare('SELECT reported_key FROM chat_task_receipts').get()?.reported_key
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(1)
+    const first = test.notices[0]!.message
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(test.notices).toHaveLength(1)
+    expect(readKey()).toBe('terminal:' + status)
+    human.nextTurn.splice(human.nextTurn.findIndex(message => message.id === first.id), 1)
+    human.events.push({ type: 'agent/inbox/spliced', data: { target: 'nextTurn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' } })
+    human.dispatch.emit('agent/inbox/discarded', { message: first })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(2)
+    expect(test.notices[1]!.message.id).toBe(first.id)
+    await human.admit(test.notices[1]!.message, false)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(readKey()).toBe('delivered:terminal:' + status)
+    expect(test.notices).toHaveLength(2)
+    expect(count(test.services.get('parent')!, 'runs')).toBe(1)
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
+it('claimed 后的 pre-step 拒绝会恢复通知，在途 claim 与失败 flush 都不会假确认或重复入队', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理办公材料并交付审核报告'))
+    const { run_id: runId } = await human.call()
+    const { db } = test.services.get('parent')!.orchestra
+    withTx(db, tx => tx.run("UPDATE runs SET status='failed',ended_at=? WHERE run_id=?", [new Date().toISOString(), runId]))
+    const readKey = () => db.raw.prepare('SELECT reported_key FROM chat_task_receipts').get()?.reported_key
+    test.flush.mockResolvedValueOnce(false)
+    await vi.advanceTimersByTimeAsync(2000)
+    const first = test.notices[0]!.message
+    expect(readKey()).toBeNull()
+    human.nextTurn.splice(human.nextTurn.findIndex(message => message.id === first.id), 1)
+    human.dispatch.emit('agent/inbox/claimed', { message: first, turn: 50 })
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(test.notices).toHaveLength(1)
+    human.events.push({ type: 'turn/end', data: { turn: 50, reason: { kind: 'blocked' } } })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(2)
+    expect(test.notices[1]!.message.id).toBe(first.id)
+    await human.admit(test.notices[1]!.message, false)
+    test.flush.mockResolvedValueOnce(false)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(readKey()).toBeNull()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(readKey()).toBe('delivered:terminal:failed')
+    expect(test.notices).toHaveLength(2)
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
+it('原生工具审批在来源会话通知，持续等待不重复，新审批会再次通知', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理办公材料并交付审核报告'))
+    const { run_id: runId } = await human.call()
+    const service = test.services.get('parent')!
+    let pending: ReturnType<NonNullable<Service['pendingNativeApprovals']>> = [{ requestId: 'approval-1', nodeRunId: 'step-1',
+      executorSessionId: 'execution-session', tool: 'bili_hot', mode: 'user' }]
+    service.pendingNativeApprovals = id => id === runId ? pending : []
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(1)
+    expect(test.notices[0]).toMatchObject({ sessionId: 'parent', message: {
+      source: { summary: expect.stringContaining('等待工具授权') },
+      content: [{ type: 'text', text: expect.stringContaining('bili_hot') }],
+    } })
+    expect(test.notices[0]!.message.content[0]).toMatchObject({ text: expect.stringContaining('执行会话：execution-session') })
+    await human.admit(test.notices[0]!.message, false)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(test.notices).toHaveLength(1)
+    pending = []
+    await vi.advanceTimersByTimeAsync(2000)
+    pending = [{ requestId: 'approval-2', nodeRunId: 'step-1', executorSessionId: 'execution-session', tool: 'read', mode: 'brain' }]
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(2)
+    expect(test.notices[1]!.message.content[0]).toMatchObject({ text: expect.stringContaining('主脑判断或你的授权') })
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
+it('flush期间才消费的通知留到下一次耐久检查再确认', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理办公材料并交付审核报告'))
+    const { run_id: runId } = await human.call()
+    const { db } = test.services.get('parent')!.orchestra
+    withTx(db, tx => tx.run("UPDATE runs SET status='cancelled',ended_at=? WHERE run_id=?", [new Date().toISOString(), runId]))
+    const readKey = () => db.raw.prepare('SELECT reported_key FROM chat_task_receipts').get()?.reported_key
+    test.flush.mockImplementationOnce(async () => {
+      // This event lands after the flush checkpoint; it was not covered by that flush.
+      await human.admit(test.notices[0]!.message, false)
+      return true
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(1)
+    expect(readKey()).toBeNull()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(readKey()).toBe('delivered:terminal:cancelled')
+    expect(test.notices).toHaveLength(1)
+  } finally { await test.close(); vi.useRealTimers() }
 })

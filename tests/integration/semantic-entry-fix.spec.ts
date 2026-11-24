@@ -180,3 +180,85 @@ it('ignores a late provider failure after the session has moved to another works
   })
   expect(resumed.kind).toBe('ready')
 })
+
+it.each([false, true])('keeps a complete unstarted request so a short supplement preserves its goal, timing and restrictions (answer=%s)', async hasAnswer => {
+  const session = createSemanticSession()
+  const request = (text: string, id: string) => ({ identity: 'workspace/session', requestId: id, hash: id,
+    input: input(text, id), signal: new AbortController().signal, assertCurrent() {} })
+  const original = '请查找今天 AIHOT 和 B站的 AI 热点，15条内，输出到聊天里'
+  expect(await session.admit(request(original, 'u1'), async i => task(i, { constraints: [
+    { id: 'c', kind: 'chat_only', source_message_id: 'u1', quote: '输出到聊天里' },
+  ] }))).toMatchObject({ kind: 'ready' })
+  session.retainUnstarted('u1', 'u1')
+  const supplement = '合计，重复信息合并，时间最近24小时'
+  const out = await session.admit(request(supplement, 'u2'), async i => {
+    expect(i.draft?.sources).toEqual([{ message_id: 'u1', text: original }])
+    return task(i, { relation: 'continue', draft_revision: i.draft!.revision, continuation: 'supply',
+      ...(hasAnswer ? { answer: { slot: 'result', quote: supplement, value: '重复信息合并' } } : {}) })
+  })
+  expect(out).toMatchObject({ kind: 'ready', request: { goal: original + '\n' + supplement,
+    requirements_contract: { start_policy: 'immediate', timing: { source_message_id: 'u1' },
+      constraints: [{ kind: 'chat_only', source_message_id: 'u1' }] } } })
+})
+
+it('retains plan-only timing on added details and requires a new explicit resume to execute', async () => {
+  const first = input('先给我整理方案，暂不执行')
+  const held = draftOf(interpretSemanticAdmission(first, task(first, { timing: 'held' })))
+  const next = { ...input('输出五条建议', 'u2'), draft: held }
+  const raw = task(next, { relation: 'continue', draft_revision: held.revision, continuation: 'supply' })
+  expect(interpretSemanticAdmission(next, raw)).toMatchObject({ kind: 'held' })
+  const plan = { ...held, timing: 'plan_only' as const }
+  expect(interpretSemanticAdmission({ ...next, draft: plan }, raw)).toMatchObject({ kind: 'ready',
+    request: { requirements_contract: { start_policy: 'plan_only', timing: { source_message_id: 'u1' } } } })
+})
+
+it('cannot restore an older failed request over a newer draft or another workspace', async () => {
+  const session = createSemanticSession()
+  const request = (text: string, id: string, identity = 'one') => ({ identity, requestId: id, hash: id,
+    input: input(text, id), signal: new AbortController().signal, assertCurrent() {} })
+  await session.admit(request('整理月报', 'u1'), async i => task(i))
+  session.retainUnstarted('u1', 'wrong-hash')
+  await session.admit(request('先别执行旅行计划', 'u2'), async i => {
+    expect(i.draft).toBeUndefined()
+    return task(i, { timing: 'held' })
+  })
+  session.retainUnstarted('u1', 'u1')
+  await session.admit(request('继续旅行计划', 'u3'), async i => {
+    expect(i.draft?.sources.map(source => source.message_id)).toEqual(['u2'])
+    return task(i, { relation: 'continue', draft_revision: i.draft!.revision, continuation: 'resume' })
+  })
+  await session.admit(request('你好', 'u4', 'two'), async () => ({ kind: 'conversation' }))
+  session.retainUnstarted('u3', 'u3')
+  await session.admit(request('整理日报', 'u5', 'two'), async i => {
+    expect(i.draft).toBeUndefined()
+    return task(i)
+  })
+})
+
+it('does not retain a successfully admitted request unless the caller reports it unstarted', async () => {
+  const session = createSemanticSession()
+  const request = (text: string, id: string) => ({ identity: 'one', requestId: id, hash: id,
+    input: input(text, id), signal: new AbortController().signal, assertCurrent() {} })
+  await session.admit(request('生成周报', 'u1'), async i => task(i))
+  await session.admit(request('生成日报', 'u2'), async i => {
+    expect(i.draft).toBeUndefined()
+    return task(i)
+  })
+})
+
+it.each(['held', 'plan_only', 'unclear'] as const)('an explicit %s supplement overrides an unstarted immediate request', async timing => {
+  const session = createSemanticSession()
+  const request = (text: string, id: string) => ({ identity: 'one', requestId: id, hash: id,
+    input: input(text, id), signal: new AbortController().signal, assertCurrent() {} })
+  await session.admit(request('查找今天 AI 热点，直接执行', 'u1'), async current => task(current))
+  session.retainUnstarted('u1', 'u1')
+  const outcome = await session.admit(request('先不要执行，只补充来源为AIHOT', 'u2'), async current => task(current, {
+    relation: 'continue', draft_revision: current.draft!.revision, continuation: 'supply', timing,
+  }))
+  if (timing === 'plan_only') {
+    expect(outcome).toMatchObject({ kind: 'ready', request: { requirements_contract: {
+      start_policy: 'plan_only', timing: { source_message_id: 'u2' },
+    } } })
+  } else expect(outcome).toMatchObject({ kind: timing === 'held' ? 'held' : 'clarify',
+    draft: { timing, timing_source: { source_message_id: 'u2' } } })
+})

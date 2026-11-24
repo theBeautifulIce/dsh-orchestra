@@ -61,6 +61,7 @@ const REASON: Readonly<Record<Lowercase<AnyOrchErrorCode>, string> & Record<stri
   verdict_policy_unmet: '当前计划或结果未通过要求的检查。',
   verdict_unsupported: '当前环境暂无法按所需条件进行判断。',
   chat_text_result_not_exported: '未找到此交付项由负责步骤提交的有效正文。',
+  chat_text_producer_not_completed: '负责步骤尚未完成，已提交的说明不能作为最终交付。',
   artifact_not_registered: '没有找到验收要求的成果。',
   artifact_source_node_unbound: '成果缺少可核验的步骤来源。',
   artifact_source_node_mismatch: '成果来源与验收规则指定的步骤不符。',

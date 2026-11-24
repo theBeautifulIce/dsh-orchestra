@@ -83,6 +83,7 @@ import { bridgeHostAgentFactory } from './executor/bridge.ts'
 import { createDshExecutor, createDshPlanningCallback } from './executor/dsh-host.ts'
 import { createDshPrivateNotes } from './executor/dsh-private-notes.ts'
 import { createDshTaskRequirements } from './executor/dsh-task-requirements.ts'
+import { readNativeExecutionPolicy } from './service/native-execution-policy.ts'
 import { resolveSemanticWorkflow } from './service/semantic-workflow.ts'
 import { createCollaborationHost, type CollaborationHost } from './service/collaboration.ts'
 import { createRunNotes, type RunNotes } from './service/run-notes.ts'
@@ -124,8 +125,25 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   let collaboration: CollaborationHost | undefined
   let runNotes: RunNotes | undefined
   let installed: { db: Db; feedback: ReworkHost } | undefined
+  type NativeApproval = { requestId: string; nodeRunId: string; executorSessionId: string; tool: string; mode: 'brain' | 'user' }
+  const nativeApprovals = new Map<string, NativeApproval>()
   const privateNotes = serviceOptions.phase === 'S6' && dshPlanner ? createDshPrivateNotes(dsh.context.llm) : undefined
   const host = createDshExecutor({ ...dsh,
+    nativeToolPolicyForNode(nodeRunId) {
+      if (!plannerDb) throw new OrchError('SERVICE_UNAVAILABLE', '执行权限账本尚未就绪')
+      return readNativeExecutionPolicy(plannerDb, nodeRunId)
+    },
+    onNativeApprovalPending(input) {
+      const release = dsh.onNativeApprovalPending?.(input)
+      const requestId = input.executorSessionId + ':' + input.callId
+      const pending: NativeApproval = { requestId, nodeRunId: input.nodeRunId,
+        executorSessionId: input.executorSessionId, tool: input.tool, mode: input.mode }
+      nativeApprovals.set(requestId, pending)
+      return () => {
+        if (nativeApprovals.get(requestId) === pending) nativeApprovals.delete(requestId)
+        release?.()
+      }
+    },
     ...(serviceOptions.phase === 'S6' ? { runNote(binding, input, requestId, now) {
       if (!runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '运行便条服务尚未就绪')
       return runNotes.callNode(binding, input, requestId, now)
@@ -153,7 +171,8 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     },
   } : {}) })
   try {
-    const planner = dshPlanner && { context: dsh.context, parent: dshPlanner.parent, model: dshPlanner.model }
+    const planner = dshPlanner && { context: dsh.context, parent: dshPlanner.parent, model: dshPlanner.model,
+      executionPermissionMode: dshPlanner.executionPermissionMode ?? dsh.executionPermissionMode }
     if (planner && dshPlanner.useModelRoutingSettings) {
       const fallback = planner.model
       planner.model = (parent, signal) => {
@@ -208,9 +227,23 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
         (lifetime) => typeof planner.model === 'function' ? planner.model(agent, lifetime) : planner.model,
         bodies, signal, assertSnapshot))
     } : undefined
-    return { ...service, ...(reviewBrainNotes ? { reviewBrainNotes } : {}), close: async () => {
+    const pendingNativeApprovals = (runId: string): NativeApproval[] => {
+      if (!nativeApprovals.size) return []
+      const nodes = withReadTx(service.orchestra.db, ({ tx }) => new Set(tx.all<{ node_run_id: string }>(
+        `WITH RECURSIVE tree(run_id,task_id) AS (
+          SELECT run_id,task_id FROM runs WHERE run_id=?
+          UNION SELECT child.run_id,child.task_id FROM runs child JOIN tree parent
+            ON child.parent_run_id=parent.run_id AND child.task_id=parent.task_id
+        ) SELECT n.node_run_id FROM node_runs n JOIN tree USING(run_id)`, [runId]).map(node => node.node_run_id)))
+      return [...nativeApprovals.values()].filter(pending => nodes.has(pending.nodeRunId)).map(pending => ({ ...pending }))
+    }
+    // Common service consumers can also run against hosts without native approval cards.
+    const nativeApprovalQueries: { pendingNativeApprovals?: typeof pendingNativeApprovals } = { pendingNativeApprovals }
+    return { ...service, ...nativeApprovalQueries, ...(reviewBrainNotes ? { reviewBrainNotes } : {}), close: async () => {
       host.stopModelRefresh()
-      try { await service.close() } finally { await host.close() }
+      try { await service.close() } finally {
+        try { await host.close() } finally { nativeApprovals.clear() }
+      }
     } }
   } catch (error) {
     await host.close()

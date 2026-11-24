@@ -478,7 +478,7 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
     }
   }
   for (const risk of proposal.risks) {
-    if (risk.severity === 'high') issues.risks.push('存在高风险事项，需调整计划后重新评估。')
+    if (risk.severity === 'high') issues.risks.push(`执行条件未满足：${risk.description}；处理方式：${risk.mitigation}`)
     if (risk.node_id !== undefined && !steps.has(risk.node_id)) issues.risks.push('风险引用了不存在的计划步骤。')
   }
   const results = checks.map((check) => ({ check, passed: issues[check].length === 0, issues: [...new Set(issues[check])] }))

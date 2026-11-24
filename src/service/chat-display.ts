@@ -12,11 +12,13 @@ type RunDisplay = {
   status: string
   terminal: boolean
   acceptance?: string
+  goal_met?: boolean
   settling: boolean
   counts: Array<{ status: string; count: number }>
   blocking: BlockingStep[]
   decisions: Decision[]
   deliveryReviews?: ChatDeliveryReview[]
+  nativeApprovals?: Array<{ requestId: string; executorSessionId: string; tool: string; mode: 'brain' | 'user'; title?: string }>
   rework?: Array<{ run_id?: string; request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string; revision?: number }>
   delivery_checks: RunDeliveryCheck[]
   text_results?: ChatTextPreview[]
@@ -131,16 +133,25 @@ function blockingDescription(step: BlockingStep): string {
 export function describeChatRun(view: RunDisplay, proactive = false): { heading: string; body: string } {
   const actions = view.blocking.filter((step) => !proactive || step.action_required)
   const humanActions = actions.some((step) => step.action_required)
-  const state = view.deliveryReviews?.length ? '成果待审核'
+  const state = view.nativeApprovals?.length ? '等待工具授权'
+    : view.deliveryReviews?.length ? '成果待审核'
     : view.rework?.length ? '返工待处理'
       : view.decisions.length ? '等待人工处理' : humanActions ? '执行受阻'
-    : view.settling && !view.terminal ? '正在确认执行结果' : RUN_LABEL.get(view.status) ?? operatorStatus(view.status)
+    : view.settling && !view.terminal ? '正在确认执行结果'
+      : view.terminal && view.status === 'succeeded' && view.acceptance === 'failed' ? '执行已结束，交付未通过'
+        : view.terminal && view.status === 'succeeded' && view.acceptance === 'unverifiable' ? '执行已结束，交付待核验'
+          : RUN_LABEL.get(view.status) ?? operatorStatus(view.status)
   const heading = taskHeading(view.title, state)
   const lines: string[] = []
+  if (view.terminal) lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
+  for (const approval of view.nativeApprovals ?? []) {
+    lines.push(`${approval.title ? `步骤「${approval.title}」的` : ''}工具「${approval.tool}」正在等待${approval.mode === 'brain' ? '主脑判断或你的授权' : '你的授权'}。`,
+      `执行会话：${approval.executorSessionId}。请打开该会话，处理此工具的宿主审批卡。审批前，此操作保持暂停。`)
+  }
   for (const item of view.text_results ?? []) {
     lines.push(item.title)
     if (item.text) lines.push(item.text)
-    if (item.truncated) lines.push('完整正文见本次任务「结果」中的「' + item.file_name + '」。')
+    if (item.truncated) lines.push('这里只显示部分正文。请继续读取「' + item.file_name + '」的完整正文，再完成会话交付。')
     lines.push('')
   }
   for (const review of view.deliveryReviews ?? []) lines.push(formatDeliveryReviewNotice(review), '')
@@ -166,7 +177,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
     const finished = view.counts.find(({ status }) => status === 'done')?.count
     if (finished) lines.push(`已有 ${finished} 个步骤完成执行。`)
   }
-  if (!view.terminal && !view.decisions.length && !view.deliveryReviews?.length && !actions.length && !proactive && view.counts.length) {
+  if (!view.terminal && !view.decisions.length && !view.deliveryReviews?.length && !view.nativeApprovals?.length && !actions.length && !proactive && view.counts.length) {
     const counts = view.counts.map(({ status, count }) => `${operatorStatus(status)} ${count} 项`)
     lines.push(`步骤情况：${counts.join('，')}。`)
   }
@@ -182,7 +193,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
     lines.push(`${stepTitle(node)}${operatorStatus(node.status)}${dependencies.length ? `，还在等待${dependencies.join('、')}` : ''}。`)
   }
   if (view.terminal || view.delivery_checks.length > 0) {
-    lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
+    if (!view.terminal) lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
     // 文件层结论与内容结论分开说：自动核对只看登记、大小与有效期（D01）。
     if (view.acceptance === 'passed' && view.delivery_checks.some((item) => item.kind === 'artifact')) lines.push('以上自动核对只覆盖文件是否登记、大小与有效期；内容是否达到要求仍需人工核对。')
     for (const check of view.delivery_checks.filter(({ outcome }) => outcome !== 'passed').slice(0, 5)) {
@@ -305,7 +316,7 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
     case 'quality_blocked':
       return { heading: taskHeading(outcome.title, '未启动本次任务'), body: [
         ...new Set(outcome.issues.slice(0, 5).map((issue) => sentence(operatorReason(issue)))),
-        '请根据提示补充交付目标、材料或必要的执行条件，再提交任务。',
+        '任务目标已保留。请处理以上具体条件，再继续本次任务。',
       ].join('\n') }
     case 'approval_pending':
       return { heading: taskHeading(outcome.title, '等待人工批准'), body: '目前没有记录新的批准决定。要继续处理，可重新打开审批卡或在 Orchestra 面板查看待办。' }

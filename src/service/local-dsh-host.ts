@@ -19,6 +19,8 @@ import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
 import { RUN_TERMINAL } from './commands/run-close.ts'
 import { createNativeChatRoutingSettings, nativeChatRoutingUpdate } from './native-chat-routing-settings.ts'
+import { createExecutionPermissionSettings, executionPermissionUpdate } from './execution-permission-settings.ts'
+import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
 import { PROJECT_CONTEXT_FILE, type ProjectContextSource } from './project-shared-context.ts'
 import { requestControlPipe } from './windows-control-pipe.ts'
 
@@ -70,11 +72,13 @@ type LocalHost = Context & {
 
 const routePath = '/api/orchestra.request'
 const chatRoutingPath = '/v1/settings/chat-routing'
+const executionPermissionsPath = '/v1/settings/execution-permissions'
 const responseHeaders = ['content-type', 'content-disposition', 'cache-control', 'x-content-type-options']
 const catalog = {
   GET: new Set([
     '/v1/run-notes',
     chatRoutingPath,
+    executionPermissionsPath,
     '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/health', '/v1/activity', '/v1/artifacts', '/v1/artifacts/content', '/v1/artifacts/get', '/v1/attestations/get',
     '/v1/collaboration/scopes', '/v1/collaboration/scopes/get', '/v1/decisions', '/v1/decisions/get', '/v1/effects/review',
@@ -87,6 +91,7 @@ const catalog = {
   POST: new Set([
     '/v1/run-notes',
     chatRoutingPath,
+    executionPermissionsPath,
     '/v1/settings/execution-capacity', '/v1/settings/workflow-concurrency',
     '/v1/collaboration/reassign', '/v1/collaboration/review', '/v1/collaboration/scopes', '/v1/decisions/acknowledge',
     '/v1/decisions/resolve', '/v1/effects/resolve', '/v1/model-escalation', '/v1/rework/hold', '/v1/rework/inspect',
@@ -158,7 +163,7 @@ async function ledgerSecret(host: LocalHost, identity: string, dbFile: string) {
 }
 
 async function openLocalService(host: LocalHost, options: LocalOptions, workspace: Workspace, sessionId: string,
-  identity: string, human: string, serve: Serve) {
+  identity: string, human: string, serve: Serve, executionPermissionMode: () => ExecutionPermissionMode) {
   const resolved = await host.sessionController.resolveAgent(sessionId)
   if (!('agent' in resolved) || resolved.agent.session.header.origin === 'subagent'
     || !selectedWorkspace(host, workspace.id, sessionId)) throw new Error('Workspace session could not be activated')
@@ -270,7 +275,7 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
     dbFile, secret, phase: 'S6', tools: { registry, runner }, preferNamedPipe: true, taskTriggersWritable: false,
     projectContext,
     resolveHttpHuman: (req) => req.headers['x-orchestra-local-proof'] === proof ? { id: human } : null,
-    dsh: { context: host, parentForNode: parent, models: [],
+    dsh: { context: host, parentForNode: () => projectAuthorized() ? parent() : undefined, models: [], executionPermissionMode,
       sessionExecutionModelRef: () => {
         const agent = parent()
         const selection = agent && projectAuthorized() ? currentModel(agent) : undefined
@@ -283,7 +288,7 @@ async function openLocalService(host: LocalHost, options: LocalOptions, workspac
           unavailable_providers: catalog.failures?.map(({ id, name }) => name || id) ?? [] }
       },
       recommend: () => ({ complexity: 'routine', reason: '使用此宿主已批准的 DSH 默认执行模型。' }) },
-    dshPlanner: { parent, model: currentModel, useModelRoutingSettings: true },
+    dshPlanner: { parent, model: currentModel, useModelRoutingSettings: true, executionPermissionMode },
     asOfSeq: () => Number(service?.orchestra.db.raw.prepare('SELECT COALESCE(MAX(seq), 0) AS n FROM events').get()?.n ?? 0),
     listTasks: () => [], listEvents: () => [],
     appendLedgerEvent: () => { throw new OrchError('FORBIDDEN', '个人面板不提供原始账本写入') },
@@ -321,6 +326,11 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     const stop = new AbortController()
     let chatRouting: ReturnType<typeof createNativeChatRoutingSettings> | undefined
     const profileDir = (ctx.get('profileContext') as Profile | undefined)?.dir
+    const executionPermissions = profileDir && isAbsolute(profileDir) ? createExecutionPermissionSettings(profileDir) : undefined
+    const executionPermissionMode = (): ExecutionPermissionMode => {
+      if (!executionPermissions) throw new OrchError('SERVICE_UNAVAILABLE', '此宿主没有可用的执行权限设置')
+      return executionPermissions.read().mode
+    }
     const identityFor = (workspace: Workspace, sessionId: string) => sha256Hex(JSON.stringify([workspace.id, workspace.path, sessionId, human]))
     const bindingFor = (agent: Agent) => {
       const { id, header } = agent.session
@@ -368,7 +378,7 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           capacity: MAX_SERVICES, reason: 'session_capacity',
         })
       }
-      const startup = openLocalService(host, options, workspace, sessionId, identity, human, serve)
+      const startup = openLocalService(host, options, workspace, sessionId, identity, human, serve, executionPermissionMode)
       const lease: Lease = { startup, sessionId, inflight: 0, lastUsed: Date.now(), released: false, closed: false }
       services.set(identity, lease)
       void startup.then(({ service }) => { lease.service = service },
@@ -466,6 +476,32 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       const sessionId = query.get('sessionId') ?? ''
       const workspace = selectedWorkspace(host, workspaceId, sessionId)
       if (!workspace) return failure(403, 'FORBIDDEN', '请选择该工作区中未归档的 DSH 会话')
+      if (target.pathname === executionPermissionsPath) {
+        const settings = executionPermissions
+        if (!settings) return failure(404, 'NOT_FOUND', '此宿主未提供执行权限设置')
+        let input: unknown
+        if (request.method === 'POST') {
+          try { input = await request.json() } catch {
+            return failure(400, 'PAYLOAD_SCHEMA_INVALID', '执行权限设置格式无效')
+          }
+        }
+        const resolved = await host.sessionController.resolveAgent(sessionId).catch(() => undefined)
+        if (stop.signal.aborted || request.signal.aborted) return failure(503, 'SERVICE_UNAVAILABLE', '执行权限设置请求已取消')
+        const binding = resolved && 'agent' in resolved && resolved.agent ? bindingFor(resolved.agent) : undefined
+        if (binding?.workspaceId !== workspaceId || binding.sessionId !== sessionId
+          || binding.identity !== identityFor(workspace, sessionId)) {
+          return failure(403, 'FORBIDDEN', '执行权限设置需要此工作区的本机用户会话')
+        }
+        try {
+          const update = request.method === 'POST' ? executionPermissionUpdate.safeParse(input) : undefined
+          if (update && !update.success) return failure(400, 'PAYLOAD_SCHEMA_INVALID', '执行权限设置格式无效')
+          const view = update ? settings.save(update.data) : settings.read()
+          return Response.json(okEnvelope(0, view), { headers: { 'cache-control': 'no-store' } })
+        } catch (error) {
+          if (error instanceof OrchError && error.code === 'STALE_GENERATION') return failure(409, error.code, error.message)
+          return failure(503, 'SERVICE_UNAVAILABLE', '暂时无法确认执行权限设置')
+        }
+      }
       if (target.pathname === chatRoutingPath) {
         const settings = chatRouting
         if (!settings) return failure(404, 'NOT_FOUND', '此宿主未启用原生聊天接管设置')
@@ -527,9 +563,12 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           const value = response.headers.get(name)
           if (value) forwarded.set(name, value)
         }
-        if (request.method === 'GET' && target.pathname === '/health' && response.ok && chatRouting) {
+        if (request.method === 'GET' && target.pathname === '/health' && response.ok && (chatRouting || executionPermissions)) {
           const health = await response.json() as { ok?: boolean; data?: Record<string, unknown> }
-          if (health.ok && health.data) health.data.native_chat_routing_enabled = true
+          if (health.ok && health.data) {
+            if (chatRouting) health.data.native_chat_routing_enabled = true
+            if (executionPermissions) health.data.native_execution_permissions_enabled = true
+          }
           return Response.json(health, { status: response.status, headers: forwarded })
         }
         return new Response(response.body, { status: response.status, headers: forwarded })

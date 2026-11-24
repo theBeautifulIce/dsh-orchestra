@@ -15,6 +15,7 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
   let route: ((request: Request) => Promise<Response>) | undefined
   const workspaceId = 'work-id'
   const sessionId = 'session-id'
+  let workspacePath = dir
   const archivedSessionIds: string[] = []
   const agent = { session: { id: sessionId, header: { cwd: dir } }, model: { current: () => ({ provider: 'trusted', model: 'selected' }) } }
   let groups = [{ id: 'trusted', models: [{ id: 'default' }, { id: 'selected' }] }]
@@ -23,7 +24,7 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
   ctx.provide('connection', { fetch: { register(options: { fetch: NonNullable<typeof route> }) { route = options.fetch } } })
   ctx.provide('workspaceRegistry', {
     archivedSessionIds,
-    get: (id: string) => id === workspaceId ? { id, path: dir, sessionIds: [sessionId] } : undefined,
+    get: (id: string) => id === workspaceId ? { id, path: workspacePath, sessionIds: [sessionId] } : undefined,
   })
   ctx.provide('sessionController', {
     resolveAgent: async () => ({ agent }),
@@ -96,6 +97,13 @@ it('binds the native DSH route to one local workspace session and keeps the ledg
     expect(result.stdout).toBe('sample-row,12')
     expect(result.evidence.boundary).toBe('dsh_workspace_rpc')
     expect(read).toHaveBeenCalledWith({ sessionId, workspaceRoot: dir }, 'approved.txt', { offset: 1, limit: 200 }, expect.any(AbortSignal))
+    workspacePath = join(dir, 'moved-workspace')
+    expect(serve.mock.calls[0]?.[0].dsh.parentForNode('node')).toBeUndefined()
+    workspacePath = dir
+    agent.session.header.cwd = join(dir, 'different-source-cwd')
+    expect(serve.mock.calls[0]?.[0].dsh.parentForNode('node')).toBeUndefined()
+    agent.session.header.cwd = dir
+    expect(serve.mock.calls[0]?.[0].dsh.parentForNode('node')).toBe(agent)
     archivedSessionIds.push(sessionId)
     expect((await request('/health')).status).toBe(403)
     expect(serve.mock.calls[0]?.[0].dsh.parentForNode('node')).toBeUndefined()

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { OrchError } from '../core/errors.ts'
+import { ORCHESTRA_COMMUNICATION_GUIDE } from '../core/communication.ts'
 
 type Llm = Context['llm']
 type StreamOptions = Parameters<Llm['stream']>[0]
@@ -35,7 +36,7 @@ export function createDshJsonCompletion(llm: Llm | undefined) {
         || (reasoningEffort != null && prepared.config.reasoningEffort !== reasoningEffort)) throw unavailable()
       const messages: StreamOptions['messages'] = [{ id: randomUUID() as NonNullable<StreamOptions['messages'][number]['id']>,
         role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: body }] }]
-      const stream = prepared.stream({ provider, model, maxTokens, system: instructions, messages, tools: [], signal: lifetime,
+      const stream = prepared.stream({ provider, model, maxTokens, system: `${ORCHESTRA_COMMUNICATION_GUIDE}\n${instructions}`, messages, tools: [], signal: lifetime,
         ...(prepared.config.reasoningEffort === undefined ? {} : { reasoningEffort: prepared.config.reasoningEffort }) })
       let output = ''
       let length = 0
