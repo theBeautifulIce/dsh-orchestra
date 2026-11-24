@@ -215,12 +215,13 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
 
 export type ChatOutcome =
   | { state: 'started'; title: string; run_id: string; task_id?: string }
+  | { state: 'plan_ready'; plan_id: string; title: string }
   | { state: 'quality_blocked'; issues: string[]; plan_id: string; title: string }
   | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
   | { state: 'launch_declined'; plan_id: string; title: string }
   | { state: 'stop_requested'; run_id: string; status: string; skipped_irreversible: number; pending_decisions: number }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
-  | { state: 'clarification_required' | 'usage' | 'queued' | 'draft_discarded'; message: string }
+  | { state: 'clarification_required' | 'task_held' | 'usage' | 'queued' | 'draft_discarded'; message: string }
   | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue; reason?: ChatErrorReason }
 
 function startErrorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>): readonly [string, string] {
@@ -298,6 +299,9 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
       return { heading: taskHeading(outcome.title, '已接单'), body: '已接收任务，执行进度可在 Orchestra 面板查看。'
         // 纯文字回执给出可直接搜索的完整任务编号，不假定宿主有可点工具卡（T16）。
         + (outcome.task_id ? '\n在 Orchestra 的「任务」中搜索任务编号：' + outcome.task_id : '') }
+    case 'plan_ready':
+      return { heading: taskHeading(outcome.title, '计划已准备'),
+        body: '已按本次要求保存计划草稿。打开本会话的 Orchestra → 任务 → 继续未启动的计划，可核对目标和限制条件，再决定是否启动。' }
     case 'quality_blocked':
       return { heading: taskHeading(outcome.title, '未启动本次任务'), body: [
         ...new Set(outcome.issues.slice(0, 5).map((issue) => sentence(operatorReason(issue)))),
@@ -327,6 +331,8 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
         body: '后续执行状态可在 Orchestra 面板查看。' }
     case 'clarification_required':
       return { heading: 'Orchestra 需要明确的交付目标', body: outcome.message }
+    case 'task_held':
+      return { heading: 'Orchestra 已暂缓任务', body: outcome.message }
     case 'draft_discarded': return { heading: 'Orchestra 已放弃草稿', body: outcome.message }
     case 'usage':
       return { heading: 'Orchestra 用法 · /orchestra 任务内容', body: outcome.message }

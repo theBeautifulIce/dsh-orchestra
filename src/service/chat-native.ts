@@ -12,7 +12,9 @@ import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, findChatPlan, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
 import { readChatTextPreviews } from './chat-text-previews.ts'
-import { classifyChatTask, shouldDeferTask } from './chat-task-intent.ts'
+import { orchestraCommand, explicitNotesRequest } from './chat-task-intent.ts'
+import { createSemanticSession, type SemanticInput, type SemanticRequest } from './semantic-admission.ts'
+import { resolveSemanticWorkflow } from './semantic-workflow.ts'
 import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatErrorReason, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
 import { readOutstandingFiles } from './chat-expected-files.ts'
 import { attachChatDeliveryPreviews, listChatDeliveryReviews } from './chat-delivery-review.ts'
@@ -48,7 +50,7 @@ const prompt = [
   'Only a fresh Orchestra admission receipt for this exact request confirms that a new task was accepted. A proposed plan, the operator’s message, an earlier receipt, or an assistant promise does not establish admission. Without a matching receipt, never say this request was handed off, queued, started, or scheduled. For existing tasks, report only the state returned by the status tool.',
   'If Orchestra returned a planning or startup failure, relay its reason and next step. Do not direct the operator to a task or run that has no receipt, or suggest /orchestra as a remedy for those failures. If the notice says Orchestra could not read the automatic routing setting, relay its manual /orchestra option. If Orchestra returned no notice and the operator intended to dispatch a new task, suggest resending the complete request with /orchestra.',
   'Greetings, casual conversation, questions seeking an explanation, advice, brainstorming, or asking what you could do are ordinary conversation. Use no Orchestra task for them.',
-  'If intent or the requested outcome is unclear, ask the human. For a request to wait for approval before running, ask for the complete executable instruction once the human is ready to start.',
+  'If intent or the requested outcome is unclear, ask the human for the specific missing item. A held task retains its goal and restrictions. A clear request to resume that task can continue the current draft.',
   'For questions about a named or earlier Orchestra task use action=status with its exact task_title. Use the latest task only if the operator asks for the latest task or refers to that task unambiguously. If the title is unclear, ask which task to open. For an Orchestra notice, omit task_title and run_id to use the verified source run. Use action=artifact with the exact artifact_id copied from status.artifacts to retrieve the requested version. Never invent an artifact_id. Use file_name only when the status reply contains exactly one matching version. Summarize its contents as evidence, using the recorded acceptance facts.',
   'When a terminal notice names accepted files, call action=status in that notice to find its artifact_id in status.artifacts, then call action=artifact with that exact artifact_id and summarize the result in the original conversation. For a failure or pending verification, relay the recorded outcome and next step.',
   'When a pending approval notice directs the operator to the chat card, use action=status and call action=review with the exact decision_title that is ready to review. If required evidence is missing or a choice is unavailable, relay the recorded requirement and the way to open the pending item in Orchestra.',
@@ -105,55 +107,6 @@ function taskText(message: Message): string {
       : new OrchError('PAYLOAD_SCHEMA_INVALID', '这条消息只有附件，没有任务目标', { reason: 'only_attachments' })
   }
   return validatedTaskText(texts)
-}
-
-/** Recognize explicit flow references, then validate their published identity below. */
-export function workflowPinFromText(text: string): { name: string; version?: string } | undefined {
-  const reference = /(?:使用|用)(?:已发布的)?流程\s*(?:「([^」\n]{1,120})」|“([^”\n]{1,120})”|"([^"\n]{1,120})"|'([^'\n]{1,120})'|([^，,。；;\s「」“”"']{1,120}))/u.exec(text)
-  if (!reference) return undefined
-  const name = reference.slice(1).find(value => value !== undefined)!.trim()
-  const suffix = text.slice(reference.index + reference[0].length).replace(/^[，,]?\s*/u, '')
-  const version = /^(?:第\s*([1-9]\d{0,14})\s*版|[vV]([1-9]\d{0,14})(?=$|[^\d]))/u.exec(suffix)
-  if (/^(?:第|[vV]\d)/u.test(suffix) && !version) {
-    throw new OrchError('PAYLOAD_SCHEMA_INVALID', '请使用有效的已发布版本，例如第 2 版')
-  }
-  return { name, ...(version ? { version: version[1] ?? version[2]! } : {}) }
-}
-
-function resolveWorkflowPin(db: Service['orchestra']['db'], text: string) {
-  const pin = workflowPinFromText(text)
-  if (!pin) return undefined
-  const rows = db.raw.prepare(`SELECT workflow_id, name, current_version FROM workflows
-    WHERE status='active' AND scope='reusable' AND (name = ? OR workflow_id = ?) LIMIT 2`).all(pin.name, pin.name) as Array<{
-      workflow_id: string; current_version: number | null }>
-  if (!rows.length) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '未找到指定的已发布流程，请核对流程名称或编号')
-  if (rows.length > 1) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '有多个同名流程，请在插件面板选择具体流程')
-  const row = rows[0]!
-  return {
-    workflow_id: row.workflow_id,
-    ...(pin.version ? { workflow_version: pin.version }
-      : row.current_version === null ? {} : { workflow_version: String(row.current_version) }),
-  }
-}
-
-/**
- * 澄清后的补充答复：保留上一条的目标，只把答复并进去（C03）。
- * 新工作、提问或纯应答不算补充，仍走完整分类。
- */
-/**
- * 只有“补充材料/口径/限制”才续接草稿；自己要一份新交付物就是换一项工作，走完整重分类（C03）。
- */
-export function isClarificationAnswer(text: string): boolean {
-  const trimmed = text.trim()
-  if (trimmed.length < 4 || trimmed.length > 400) return false
-  if (/[？?]\s*$/u.test(trimmed)) return false
-  if (/^(?:好的|收到|可以|谢谢|嗯|行|ok|okay)[。！!,.]?$/iu.test(trimmed)) return false
-  if (/^(?:新建|创建|执行|开展|停一下).{0,12}(?:任务|工作)/u.test(trimmed) || /执行任务「/u.test(trimmed)) return false
-  // 补充材料、口径与限制：这类答复保留原目标，只把补充并进去。
-  const supplements = /(?:材料|资料|数据|文件|用\s*\S{1,80}\.(?:csv|xlsx|md|txt|json)|只读|不修改|不要修改|按天|按周|按月|分组|口径|范围|排除|只看|仅看|截止|时间范围)/u
-  if (!supplements.test(trimmed)) return false
-  // 自己要一份新交付物的答复，不属于补充。
-  return !/(?:交付|输出|生成|写一份|做一份|作一份|出一份|给出一份)\s*[^，。；]{0,30}(?:报告|清单|汇总|总结|纪要|摘要|表格)/u.test(trimmed)
 }
 
 function validatedTaskText(text: string): string {
@@ -393,6 +346,7 @@ export function installNativeChat(host: Context, options: {
   acquireService?(binding: Binding): Promise<{ service: Service; release(): void }>
   hasService(binding: Binding): boolean
   autoRouteEnabled?(binding: Binding, agent: Agent): boolean | Promise<boolean>
+  interpret?(input: SemanticInput, agent: Agent, signal: AbortSignal, assertCurrent: () => void): Promise<unknown>
 }) {
   // Retain the local service across planner, approval and session-flush awaits.
   const acquire = async (binding: Binding) => options.acquireService
@@ -404,8 +358,7 @@ export function installNativeChat(host: Context, options: {
   const issued = new WeakMap<Agent, Map<string, string>>()
   const sessions = new Map<Agent, Binding>()
   const cursors = new WeakMap<Agent, number>()
-  // 澄清草稿跨轮续接：只在这条澄清后的下一条消息里续接（C03）。
-  const clarifications = new WeakMap<Agent, { goal: string; at: number; identity: string }>()
+  const semanticSessions = new WeakMap<Agent, ReturnType<typeof createSemanticSession>>()
   const checkedModelRecovery = new WeakMap<Agent, ChatModelRecoveryChecks>()
   const operations = new Map<string, Promise<unknown>>()
   let polling: Promise<void> | undefined
@@ -502,35 +455,51 @@ export function installNativeChat(host: Context, options: {
         ...laterHumans.map(() => admissionNotice({ state: 'queued' as const, message: '同一批还有一条消息，已排到当前会话的下一轮单独处理。' }))],
     } : out
     if (!state.human) return result
-    // 每个新的人类回合最多消费一次待澄清上下文。
-    const draft = clarifications.get(agent)
-    clarifications.delete(agent)
-    const pendingClarify = draft?.identity === binding.identity
-      && Date.now() - draft.at < 30 * 60_000 ? draft : undefined
     const text = state.human.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
-    const slash = /^\/orchestra(?:\s+([\s\S]*))?$/u.exec(text.trim())
-    if (!slash && /^(?:请\s*)?(?:审阅|分类)主脑专属便条(?:$|[：:，,\s])|^(?:please\s+)?(?:review|classify)\s+(?:the\s+)?private run notes\b/iu.test(text.trim())) {
-      state.brainNotesOnly = true
+    const command = orchestraCommand(text)
+    const actionSignal = AbortSignal.any([signal, options.signal])
+    const assertCurrent = () => {
+      actionSignal.throwIfAborted()
+      if (!isCurrent(agent, binding, state)) throw new OrchError('FORBIDDEN', '原会话或工作区授权已改变')
+    }
+    const origin: ChatTaskOrigin = {
+      messageKey: sha256Hex(JSON.stringify([binding.identity, state.human.id])),
+      requestKey: sha256Hex(JSON.stringify([binding.identity, nativeOwnerRequest(state.human)])),
+      inputHash: sha256Hex(JSON.stringify(state.human.content)), signal: actionSignal, assertCurrent,
+    }
+    try {
+      const replay = await replayTask(binding, origin, command)
+      assertCurrent()
+      if (replay) {
+        state.managed = { outcome: replay, ...(replay.state === 'started' ? { runId: replay.run_id } : {}) }
+        sessions.set(agent, binding)
+        return settle({ ...result, messages: [...result.messages, admissionNotice(replay)] })
+      }
+    } catch (error) {
+      actionSignal.throwIfAborted()
+      if (!isCurrent(agent, binding, state)) return settle(result)
+      state.managed = { outcome: errorReceipt(error) }
+      return settle({ ...result, messages: [...result.messages, admissionNotice(state.managed.outcome!)] })
+    }
+    const notesRequest = command === undefined ? explicitNotesRequest(text) : undefined
+    if (notesRequest) {
+      if (notesRequest === 'notes') state.notesOnly = true
+      else state.brainNotesOnly = true
       return settle(result)
     }
-    if (!slash && /^(?:(?:请|能否|可否|帮我|麻烦你?)(?:帮我)?\s*)?(?:读(?:取|一下)?|查看|查询|列出).{0,120}(?:便条|运行注记)|^(?:please\s+)?(?:read|list|show|check)\s+.{0,120}\brun notes?\b/iu.test(text.trim())) {
-      state.notesOnly = true
-      return settle(result)
-    }
-    if (slash?.[1] && shouldDeferTask(slash[1])) {
-      const outcome = { state: 'clarification_required' as const, message: '已记录暂缓要求。准备开始时请重新提交本次目标。' }
-      state.managed = { outcome }
-      return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
-    }
-    if (slash && !slash[1]?.trim()) {
+    if (command === '') {
       const outcome = { state: 'usage' as const, message: '使用 /orchestra 任务内容单次派单。' }
       state.managed = { outcome }
       return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
     }
-    if (!slash) {
+    const readRouting = async () => await options.autoRouteEnabled?.(binding, agent) !== false
+    if (command === undefined) {
       try {
-        state.autoRoute ??= await options.autoRouteEnabled?.(binding, agent) !== false
-        if (!state.autoRoute) return settle(result)
+        state.autoRoute = await readRouting()
+        if (!state.autoRoute) {
+          semanticSessions.get(agent)?.clear()
+          return settle(result)
+        }
       } catch (error) {
         signal.throwIfAborted()
         state.managed = { outcome: errorReceipt(error) }
@@ -540,40 +509,51 @@ export function installNativeChat(host: Context, options: {
         })] })
       }
     }
-    if (!slash && !text.trim() && state.human.content.some(block => block.type !== 'text')) {
-      return settle(result)
-    }
-    // 澄清答复跨轮续接：保留上一条目标，把补充并进来（C03）。
-    const answer = text.trim().normalize('NFKC').toLowerCase().replace(/[.!?。]+$/u, '')
-    if (pendingClarify && !slash && ['算了', '取消', '放弃', '取消草稿', 'cancel', 'never mind'].includes(answer)) {
-      const outcome = { state: 'draft_discarded' as const, message: '已放弃这项草稿，没有启动任务。' }
-      state.managed = { outcome }
-      return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
-    }
-    const continued = !slash && !!pendingClarify && isClarificationAnswer(text)
-    const intent = continued ? 'task' : slash ? 'task' : classifyChatTask(text)
-    if (intent === 'conversation') return settle(result)
+    // The host retains ordinary attachment and long-form conversations. These inputs are
+    // outside the text-only dispatch contract and must not lose their existing host tools.
+    if (command === undefined && (text.trim().length > 2000 || state.human.content.some(block => block.type !== 'text'))) return settle(result)
     const managed: ManagedTask = {}
-    state.managed = managed
-    if (intent === 'clarify') {
-      clarifications.set(agent, { goal: text.trim(), at: Date.now(), identity: binding.identity })
-      managed.outcome = { state: 'clarification_required', message: '请说明希望拿到什么结果，以及本次可以使用哪些已授权的材料。' }
-    } else {
-      const actionSignal = AbortSignal.any([signal, options.signal])
-      const assertCurrent = () => {
-        actionSignal.throwIfAborted()
-        if (!isCurrent(agent, binding, state)) throw new OrchError('FORBIDDEN', '原会话或工作区授权已改变')
+    try {
+      const goal = command === undefined ? taskText(state.human) : validatedTaskText(command)
+      if (state.human.content.some(block => block.type !== 'text')) {
+        throw new OrchError('PAYLOAD_SCHEMA_INVALID', '附件没有纳入本次任务', { reason: 'attachments_unsupported' })
       }
-      try {
-        const outcome = await startTask(agent, binding, state, state.human, actionSignal, assertCurrent,
-          continued && pendingClarify ? pendingClarify.goal + '。' + text.trim() : slash?.[1])
+      const session = semanticSessions.get(agent) ?? createSemanticSession()
+      semanticSessions.set(agent, session)
+      const admission = await session.admit({ identity: binding.identity, requestId: nativeOwnerRequest(state.human)!,
+        hash: fingerprint(state.human), input: { current: { message_id: state.human.id, text: goal }, explicit: command !== undefined },
+        signal: actionSignal, assertCurrent }, async (input, lifetime, current) => {
+        if (!options.interpret) throw new OrchError('SERVICE_UNAVAILABLE', '此会话暂时无法解释任务，请检查当前模型后重试')
+        return options.interpret(input, agent, lifetime, current)
+      })
+      assertCurrent()
+      if (command === undefined && !await readRouting()) {
+        session.clear()
+        return settle(result)
+      }
+      assertCurrent()
+      if (admission.kind === 'conversation') return settle(result)
+      if (admission.kind === 'notes' || admission.kind === 'brain_notes') {
+        if (admission.kind === 'notes') state.notesOnly = true
+        else state.brainNotesOnly = true
+        return settle(result)
+      }
+      state.managed = managed
+      if (admission.kind === 'held') managed.outcome = { state: 'task_held', message: admission.message }
+      else if (admission.kind === 'clarify') managed.outcome = { state: 'clarification_required', message: admission.message }
+      else if (admission.kind === 'discarded') managed.outcome = { state: 'draft_discarded', message: '已放弃这项草稿。' }
+      else if (admission.kind === 'ready') {
+        const outcome = await startTask(agent, binding, state, state.human, origin, admission.request)
         managed.outcome = outcome
         if (outcome.state === 'started') managed.runId = outcome.run_id
-      } catch (error) {
-        actionSignal.throwIfAborted()
-        managed.outcome = errorReceipt(error)
       }
+    } catch (error) {
+      actionSignal.throwIfAborted()
+      if (!isCurrent(agent, binding, state)) return settle(result)
+      state.managed = managed
+      managed.outcome = errorReceipt(error)
     }
+    if (!managed.outcome) return settle(result)
     return settle({ ...result, messages: [...result.messages, admissionNotice(managed.outcome)] })
   })
   host.on('session/event', (session, event) => {
@@ -581,7 +561,7 @@ export function installNativeChat(host: Context, options: {
     const agent = host.agents.get(session.id)
     if (agent && turns.get(agent)?.number === event.data.turn) turns.delete(agent)
   })
-  host.on('agent/disposed', ({ agent }) => { turns.delete(agent); sessions.delete(agent) })
+  host.on('agent/disposed', ({ agent }) => { turns.delete(agent); sessions.delete(agent); semanticSessions.get(agent)?.clear() })
   host.on('agent/created', ({ agent }) => { track(agent); return undefined })
   for (const agent of host.agents.list()) track(agent)
   host.systemPrompt.section({
@@ -608,20 +588,48 @@ export function installNativeChat(host: Context, options: {
     operations.set(key, running)
     try { return await running } finally { operations.delete(key) }
   }
-  const startTask = (agent: Agent, binding: Binding, turn: Turn, human: Message, signal: AbortSignal,
-    assertCurrent: () => void, explicitGoal?: string) => {
-    const nativeRequest = nativeOwnerRequest(human)
-    if (!nativeRequest) throw new OrchError('FORBIDDEN', '后台进度和历史消息不能发起任务')
-    if (explicitGoal !== undefined && human.content.some((block) => block.type !== 'text')) {
+  const replayTask = async (binding: Binding, origin: ChatTaskOrigin, command: string | undefined): Promise<ChatOutcome | undefined> => {
+    if (!options.hasService(binding)) return
+    const lease = await acquire(binding)
+    try {
+      origin.assertCurrent()
+      const { service } = lease
+      const db = service.orchestra.db
+      const receipt = db.raw.prepare('SELECT input_hash FROM chat_task_receipts WHERE message_key=? OR request_key=?')
+        .get(origin.messageKey, origin.requestKey)
+      const progress = db.raw.prepare('SELECT actor,scope,input_hash,stage FROM chat_planning_progress WHERE request_key=?').get(origin.requestKey)
+      // Older explicit commands hashed their body. Accept that exact legacy input for replay only.
+      const storedHash = receipt?.input_hash ?? progress?.input_hash
+      if (command !== undefined && storedHash === sha256Hex(command)) origin.inputHash = String(storedHash)
+      if (progress && (progress.actor !== options.operator || progress.scope !== binding.identity || progress.input_hash !== origin.inputHash)) {
+        throw new OrchError('OPERATION_ID_CONFLICT', '这条请求已经绑定了不同的规划内容')
+      }
+      const planId = findChatPlan(db, origin)
+      if (!planId) return
+      const { view } = service.planning.get(planId, options.operator)
+      if (view.launch) {
+        const replay = { state: 'started' as const, title: view.proposal.title, ...view.launch, replayed: true,
+          steps: view.proposal.steps.map(step => ({ node_id: step.node_id, depends_on: step.depends_on, description: step.description })).slice(0, 12),
+          deliverables: view.proposal.deliverables.map(item => item.title).slice(0, 12) }
+        return replay
+      }
+      if (db.raw.prepare('SELECT 1 FROM task_plan_draft_end WHERE plan_id=? AND successor_id IS NULL').get(view.plan_id)) {
+        return { state: 'draft_discarded', message: '这份草稿已放弃。可用一条新消息提出新的任务。' }
+      }
+      if (!view.quality.ready) return { state: 'quality_blocked', plan_id: view.plan_id, title: view.proposal.title,
+        issues: view.quality.checks.flatMap(check => check.issues).slice(0, 12) }
+      if (progress?.stage === 'declined') return { state: 'launch_declined', plan_id: view.plan_id, title: view.proposal.title }
+      return { state: 'plan_ready', plan_id: view.plan_id, title: view.proposal.title }
+    } finally { lease.release() }
+  }
+  const startTask = (agent: Agent, binding: Binding, turn: Turn, human: Message, origin: ChatTaskOrigin,
+    request: SemanticRequest) => {
+    if (!nativeOwnerRequest(human)) throw new OrchError('FORBIDDEN', '后台进度和历史消息不能发起任务')
+    if (human.content.some(block => block.type !== 'text')) {
       throw new OrchError('PAYLOAD_SCHEMA_INVALID', '单次编排命令需要文字任务内容', { reason: 'attachments_unsupported' })
     }
-    const goal = explicitGoal === undefined ? taskText(human) : validatedTaskText(explicitGoal)
-    const origin: ChatTaskOrigin = {
-      messageKey: sha256Hex(JSON.stringify([binding.identity, human.id])),
-      requestKey: sha256Hex(JSON.stringify([binding.identity, nativeRequest])),
-      inputHash: sha256Hex(explicitGoal === undefined ? JSON.stringify(human.content) : goal),
-      signal, assertCurrent,
-    }
+    const goal = validatedTaskText(request.goal)
+    const { signal, assertCurrent } = origin
     return once(origin.requestKey, async () => {
       const lease = await acquire(binding)
       const { service } = lease
@@ -637,12 +645,17 @@ export function installNativeChat(host: Context, options: {
         })
         try {
           const { view } = await service.planning.proposeFromChat(
-            { goal, requirements: [], ...resolveWorkflowPin(service.orchestra.db, goal) },
+            { goal, requirements: request.requirements, requirements_contract: request.requirements_contract,
+              ...resolveSemanticWorkflow(service.orchestra.db, request.workflow) },
             options.operator, new Date().toISOString(), origin)
           if (!view.quality.ready) {
             withTx(service.orchestra.db,tx => advancePlanning(tx,progress,'blocked',null,Date.now()))
             return { state: 'quality_blocked' as const, plan_id: view.plan_id, title: view.proposal.title,
               issues: view.quality.checks.flatMap((check) => check.issues).slice(0, 12) }
+          }
+          if (request.requirements_contract.start_policy === 'plan_only') {
+            withTx(service.orchestra.db, tx => advancePlanning(tx, progress, 'approval', null, Date.now()))
+            return { state: 'plan_ready' as const, plan_id: view.plan_id, title: view.proposal.title }
           }
           const launch = (approved: boolean) => {
             if (findChatPlan(service.orchestra.db, origin) !== view.plan_id) {

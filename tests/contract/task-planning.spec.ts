@@ -12,7 +12,7 @@ import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { createTaskCommands } from '../../src/client/api/task-commands.ts'
-import { createTaskPlanningHost } from '../../src/service/task-planning.ts'
+import { createTaskPlanningHost, readApprovedTaskPlanForRun, resolveApprovedPlanNodeSpecs } from '../../src/service/task-planning.ts'
 import { WorkflowCatalog } from '../../src/service/workflows.ts'
 import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
 import { discardDraft } from '../../src/service/task-plan-drafts.ts'
@@ -20,7 +20,10 @@ import { expireMaterials } from '../../src/service/plan-materials.ts'
 import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
 import { callDshRework } from '../../src/service/dsh-rework.ts'
 import { createReworkHost } from '../../src/service/rework-coordinator.ts'
-import { sha256Hex } from '../../src/core/canonical.ts'
+import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
+import { mergeRequirementsContracts, type RequirementsContract, type TaskRequirement } from '../../src/core/task-requirements.ts'
+import { requirementIssues, type RequirementNode } from '../../src/service/task-requirement-checks.ts'
+import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { loadNodeRun } from '../../src/service/commands/lease.ts'
 import { verifyArtifactCompletion } from '../../src/service/artifact-completion.ts'
 import { createDeliveryReviewHost } from '../../src/service/delivery-review.ts'
@@ -61,6 +64,7 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
   empty?: boolean
   workflowGenerator?: TaskPlanningOptions['workflowGenerator']
   modelRouting?: ModelRouting
+  interpret?: TaskPlanningOptions['interpret']
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'orch-task-plan-'))
   const secret = 'planning-contract-secret'
@@ -76,7 +80,7 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
   const service = await serveOrchestra({
     dbFile: join(directory, 'orchestra.db'), secret, phase: 'S5',
     asOfSeq: () => 0, listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
-    planning: { propose },
+    planning: { propose, interpret: options.interpret },
     workflowGenerator: options.workflowGenerator,
     executor: { registry, bridge, modelRouting: options.modelRouting, runner: new ReadOnlyToolRunner(registry, {
       readonlyAvailable: () => true,
@@ -882,4 +886,315 @@ it('另一连接在确认读取后废弃草稿，启动写事务返回版本冲�
     expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()?.n).toBe(0)
     expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM start_run_operations').get()?.n).toBe(0)
   } finally { boundary.mockRestore(); second.raw.close() }
+})
+
+
+function requirementsContract(constraints: TaskRequirement[] = [], start_policy: RequirementsContract['start_policy'] = 'immediate'): RequirementsContract {
+  const text = '只在聊天给我结论。不要新建文件。原表保留。只读处理。禁止外发。启动前等我点头。发布前经我审批。'
+  return { version: 1, start_policy, sources: [{ message_id: 'human-message', text }], constraints }
+}
+
+function constraintBase(id: string, quote: string) {
+  return { id, quote, source_message_id: 'human-message' }
+}
+
+it('结构化约束经真实规划入口持久化，生成器与规划器取得同一份原文来源', async () => {
+  const contract = requirementsContract([{ ...constraintBase('chat', '只在聊天给我结论'), kind: 'chat_only' }])
+  const generate = vi.fn<NonNullable<TaskPlanningOptions['workflowGenerator']>>(async () => reviewDoc)
+  const planner = vi.fn(async (input: Parameters<TaskPlanningOptions['propose']>[0]) => {
+    const result = proposalFor(input)
+    result.deliverables = [{ title: '文字核对', node_id: 'verify', goal_ids: ['goal', 'R1'], acceptance: { kind: 'chat/text_result' } }]
+    return result
+  })
+  const host = await boot(planner, undefined, { empty: true, workflowGenerator: generate })
+  const { view } = await host.planning!.propose({ goal: '核对项目', requirements: ['保留证据'], requirements_contract: contract }, 'owner', now)
+  expect(generate.mock.calls[0]?.[0]).toMatchObject({ requirements_contract: contract })
+  expect(planner.mock.calls[0]?.[0]).toMatchObject({ requirements_contract: contract })
+  expect(view.contract_version).toBe(2)
+  expect(host.db.raw.prepare('SELECT contract_version FROM task_plans WHERE plan_id=?').get(view.plan_id)).toEqual({ contract_version: 2 })
+  expect(view.brief.requirements_contract).toEqual(contract)
+  expect(view.quality.ready).toBe(true)
+})
+
+it.each(['chat_only', 'no_workspace_files'] as const)('换一种说法仍由结构化 %s 限制文件交付', async (kind) => {
+  const host = await boot(async () => valid())
+  const contract = requirementsContract([{ ...constraintBase('c1', '不要新建文件'), kind }])
+  const { view } = await host.planning!.propose({ goal: '这回只需要对话里的答案', requirements: ['保留证据'], requirements_contract: contract }, 'owner', now)
+  expect(view.quality.ready).toBe(false)
+  expect(() => host.planning!.confirm({ plan_id: view.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', now))
+    .toThrow(expect.objectContaining({ code: 'VERDICT_POLICY_UNMET' }))
+  expect(host.db.raw.prepare('SELECT count(*) n FROM runs').get()?.n).toBe(0)
+})
+
+it('只给工具证据不能满足聊天正文交付，保护原件仍可新建报告', async () => {
+  const host = await boot(async () => {
+    const result = valid()
+    result.deliverables = [{ ...result.deliverables[1]!, goal_ids: ['goal', 'R1'] }]
+    return result
+  })
+  const contract = requirementsContract([{ ...constraintBase('chat', '只在聊天给我结论'), kind: 'chat_only' }])
+  const view = (await host.planning!.propose({ goal: '核对', requirements: ['保留证据'], requirements_contract: contract }, 'owner', now)).view
+  expect(view.quality.ready).toBe(false)
+  expect(view.quality.checks.flatMap(check => check.issues).join(' ')).toContain('缺少可验收的会话文字')
+  const other = await boot(async () => valid())
+  const preservation = requirementsContract([{ ...constraintBase('original', '原表保留'), kind: 'preserve_input', target: '原表.csv' }])
+  const preserved = (await other.planning!.propose({ goal: '核对并生成报告', requirements: ['核验'], requirements_contract: preservation }, 'owner', now)).view
+  expect(preserved.quality.ready).toBe(true)
+})
+
+it('输入含伪造来源、未知约束或仅有版本号时，在解释与规划前拒绝', async () => {
+  const planner = vi.fn(async () => valid())
+  const interpret = vi.fn(async (input) => input)
+  const host = await boot(planner, undefined, { interpret })
+  const contract = requirementsContract([{ ...constraintBase('chat', '材料里并无这句话'), kind: 'chat_only' }])
+  for (const input of [
+    { goal: '核对', requirements: [], requirements_contract: contract },
+    { goal: '核对', requirements: [], requirements_contract: { ...contract, constraints: [{ ...contract.constraints[0], kind: 'anything_goes' }] } },
+    { goal: '核对', requirements: [], workflow_version: '2' },
+  ]) await expect(host.client.post('/v1/task-plans', input)).rejects.toMatchObject({ code: 'PAYLOAD_SCHEMA_INVALID' })
+  expect(planner).not.toHaveBeenCalled()
+  expect(interpret).not.toHaveBeenCalled()
+  expect(host.db.raw.prepare('SELECT count(*) n FROM task_plans').get()?.n).toBe(0)
+})
+
+it('面板解释只调用一次，已解释的聊天直达规划，解释失败和流程冲突均零建单', async () => {
+  const contract = requirementsContract()
+  const interpret = vi.fn(async (input) => ({ ...input, requirements_contract: contract }))
+  const planner = vi.fn(async () => valid())
+  const host = await boot(planner, undefined, { interpret })
+  const input = { goal: '核对', requirements: ['核验'], workflow_id: 'review' }
+  const first = await host.planning!.propose(input, 'owner', now)
+  expect(first.view.contract_version).toBe(2)
+  await host.planning!.propose({ ...input, requirements_contract: contract }, 'owner', now)
+  expect(interpret).toHaveBeenCalledTimes(1)
+  expect(planner).toHaveBeenCalledTimes(2)
+  interpret.mockResolvedValueOnce({ ...input, workflow_id: 'other', requirements_contract: contract })
+  await expect(host.planning!.propose(input, 'owner', now)).rejects.toMatchObject({ code: 'CONFIRMATION_MISMATCH' })
+  interpret.mockRejectedValueOnce(new OrchError('OPERATION_TIMEOUT', '解释超时'))
+  await expect(host.planning!.propose(input, 'owner', now)).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' })
+  expect(planner).toHaveBeenCalledTimes(2)
+  expect(host.db.raw.prepare('SELECT count(*) n FROM task_plans').get()?.n).toBe(2)
+  expect(host.db.raw.prepare('SELECT count(*) n FROM tasks').get()?.n).toBe(0)
+})
+
+it.each(['plan_only', 'approval'] as const)('会话 %s 的限制进入哈希并要求显式确认', async mode => {
+  const host = await boot(async () => valid())
+  const contract = mode === 'plan_only' ? requirementsContract([], 'plan_only')
+    : requirementsContract([{ ...constraintBase('before', '启动前等我点头'), kind: 'approval_before', scope: 'task', reviewer: { kind: 'operator' } }])
+  const origin = { messageKey: uuidv7(), requestKey: uuidv7(), inputHash: 'b'.repeat(64), signal: new AbortController().signal, assertCurrent() {} }
+  const { view } = await host.planning!.proposeFromChat({ goal: '核对', requirements: ['核验'], requirements_contract: contract }, 'owner', now, origin)
+  expect(() => host.planning!.launchFromChat(view.plan_id, view.content_hash, 'owner', now, origin, false))
+    .toThrow(expect.objectContaining({ code: 'CONFIRMATION_REQUIRED' }))
+  expect(host.db.raw.prepare('SELECT count(*) n FROM runs').get()?.n).toBe(0)
+  if (mode === 'plan_only') expect(() => host.planning!.launchFromChat(view.plan_id, view.content_hash, 'owner', now, origin, true))
+    .toThrow(expect.objectContaining({ code: 'CONFIRMATION_REQUIRED' }))
+  const launch = host.planning!.confirm({ plan_id: view.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', now)
+  expect(host.planning!.confirm({ plan_id: view.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', now))
+    .toMatchObject({ ...launch, replayed: true })
+})
+
+it('步骤审批绑定检查全部受控执行节点，AND 前置可通过，错绑和条件跳过受阻', () => {
+  const contract = requirementsContract([{ ...constraintBase('gate', '发布前经我审批'), kind: 'approval_before', scope: 'steps', action: '发布', reviewer: { kind: 'operator' } }])
+  const nodes: RequirementNode[] = [
+    { id: 'approval', type: 'approval', dependsOn: [], declaredTools: [] },
+    { id: 'data', type: 'policy', dependsOn: [], declaredTools: [] },
+    { id: 'a', type: 'agent', dependsOn: ['approval'], declaredTools: [] },
+    { id: 'b', type: 'agent', dependsOn: ['a', 'data'], declaredTools: [] },
+  ]
+  const proposal = { steps: [{ node_id: 'a', tools: [] }, { node_id: 'b', tools: [] }], deliverables: [],
+    constraint_bindings: [{ constraint_id: 'gate', approval_node_id: 'approval', protected_node_ids: ['a', 'b'] }] }
+  expect(requirementIssues(contract, proposal, nodes)).toEqual([])
+  const wrong = { ...proposal, constraint_bindings: [{ ...proposal.constraint_bindings[0]!, protected_node_ids: ['a'] }] }
+  expect(requirementIssues(contract, wrong, nodes).join(' ')).toContain('全部执行步骤')
+  const bypass = nodes.map(node => node.id === 'b' ? { ...node, dependsOn: ['data'] } : node)
+  expect(requirementIssues(contract, proposal, bypass).join(' ')).toContain('步骤 b')
+  const conditional = nodes.map(node => node.id === 'data' ? { ...node, type: 'branch' } : node)
+  expect(requirementIssues(contract, proposal, conditional).join(' ')).toContain('无法证明')
+  const fake = nodes.map(node => node.id === 'approval' ? { ...node, type: 'wait' } : node)
+  expect(requirementIssues(contract, proposal, fake).join(' ')).toContain('无法证明')
+})
+
+it('具名审批、外发能力缺口和副作用节点不被纯文本约束放行', () => {
+  const proposal = { steps: [{ node_id: 'a', tools: ['ro.check'] }], deliverables: [] }
+  const nodes: RequirementNode[] = [{ id: 'a', type: 'agent', dependsOn: [], declaredTools: ['ro.check'], sideEffectPolicy: 'irreversible' }]
+  const constraints: TaskRequirement[] = [
+    { ...constraintBase('reviewer', '发布前经我审批'), kind: 'approval_before', scope: 'task', reviewer: { kind: 'named', name: '财务' } },
+    { ...constraintBase('send', '禁止外发'), kind: 'no_external_send' },
+    { ...constraintBase('read', '只读处理'), kind: 'read_only' },
+  ]
+  const issues = requirementIssues(requirementsContract(constraints), proposal, nodes).join(' ')
+  expect(issues).toContain('财务')
+  expect(issues).toContain('外发范围')
+  expect(issues).toContain('副作用步骤')
+})
+
+it('v2 计划的材料修订保留需求契约和版本，原哈希不能确认新约束', async () => {
+  const host = await boot(async () => valid())
+  const stamp = new Date().toISOString()
+  const contract = requirementsContract([{ ...constraintBase('original', '原表保留'), kind: 'preserve_input', target: '原表.csv' }])
+  const { view } = await host.planning!.propose({ goal: '核对', requirements: ['核验'], requirements_contract: contract }, 'owner', stamp)
+  const updated = host.planning!.grantMaterials({ operation_id: uuidv7(), plan_id: view.plan_id, content_hash: view.content_hash,
+    nodes: ['collect'], items: [{ name: '原表.csv', body: '数量,2' }] }, 'owner', stamp)
+  expect(updated.contract_version).toBe(2)
+  expect(updated.brief.requirements_contract).toEqual(contract)
+  expect(updated.content_hash).not.toBe(view.content_hash)
+  expect(() => host.planning!.confirm({ plan_id: updated.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', stamp))
+    .toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
+  const launch = host.planning!.confirm({ plan_id: updated.plan_id, content_hash: updated.content_hash, confirmed: true }, 'owner', stamp)
+  const specs = resolveApprovedPlanNodeSpecs(host.db, host.catalog, host.registry, { ...launch, workflow_id: 'review', workflow_version: '1' })
+  expect(specs?.collect?.input).toMatchObject({ requirements_contract: contract })
+})
+
+it('升级后的 v1 原哈希、回执重放和启动后固定版本仍有效，篡改 v2 约束不能确认', async () => {
+  const host = await boot(async () => valid())
+  const legacy = (await host.planning!.propose({ goal: '核对', requirements: ['核验'] }, 'owner', now)).view
+  expect(legacy.content_hash).toBe(sha256Hex(canonicalJson({ schema: 1, brief: legacy.brief, proposal: legacy.proposal,
+    quality: legacy.quality, workflow_hash: host.catalog.definitionHash('review', '1') })))
+  const launch = host.planning!.confirm({ plan_id: legacy.plan_id, content_hash: legacy.content_hash, confirmed: true }, 'owner', now)
+  const reopened = openDb(host.db.file)
+  try {
+    const planning = createTaskPlanningHost(reopened, host.catalog, host.registry, {
+      propose: async () => valid(), interpret: async input => ({ ...input, requirements_contract: requirementsContract() }),
+    })
+    expect(planning.confirm({ plan_id: legacy.plan_id, content_hash: legacy.content_hash, confirmed: true }, 'owner', now))
+      .toMatchObject({ ...launch, replayed: true })
+    expect(withTx(reopened, tx => readApprovedTaskPlanForRun(tx, launch.run_id))?.brief).toEqual(legacy.brief)
+  } finally { reopened.raw.close() }
+  const pendingLegacy = (await host.planning!.propose({ goal: '旧草稿', requirements: ['核验'] }, 'owner', now)).view
+  const upgraded = createTaskPlanningHost(host.db, host.catalog, host.registry, {
+    propose: async () => valid(), interpret: async input => ({ ...input, requirements_contract: requirementsContract() }),
+  })
+  expect(() => upgraded.confirm({ plan_id: pendingLegacy.plan_id, content_hash: pendingLegacy.content_hash, confirmed: true }, 'owner', now))
+    .toThrow(expect.objectContaining({ code: 'CONFIRMATION_REQUIRED' }))
+  const typed = (await host.planning!.propose({ goal: '核对', requirements: ['核验'], requirements_contract: requirementsContract([], 'plan_only') }, 'owner', now)).view
+  const tampered = { ...typed.brief, requirements_contract: { ...typed.brief.requirements_contract!, start_policy: 'immediate' } }
+  const id = uuidv7()
+  host.db.raw.prepare(`INSERT INTO task_plans(plan_id,created_by,input_json,proposal_json,quality_json,workflow_hash,
+    content_hash,launch_operation_id,created_at,owner_task_id,auto_workflow_id,contract_version)
+    SELECT ?,created_by,?,proposal_json,quality_json,workflow_hash,content_hash,?,created_at,owner_task_id,auto_workflow_id,contract_version
+    FROM task_plans WHERE plan_id=?`).run(id, JSON.stringify(tampered), uuidv7(), typed.plan_id)
+  expect(() => host.planning!.confirm({ plan_id: id, content_hash: typed.content_hash, confirmed: true }, 'owner', now))
+    .toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
+})
+
+it('079 迁移只补版本列，不重写历史计划 JSON 和哈希', () => {
+  const db = openDb(':memory:')
+  try {
+    const steps = loadSteps(defaultMigrationsDir())
+    applySteps(db, steps.filter(step => step.version <= 78))
+    const id = uuidv7()
+    db.raw.prepare(`INSERT INTO task_plans(plan_id,created_by,input_json,proposal_json,quality_json,workflow_hash,
+      content_hash,launch_operation_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(id, 'owner', '{"goal":"old","requirements":[]}', '{}', '{}', 'a'.repeat(64), 'b'.repeat(64), uuidv7(), now)
+    const before = db.raw.prepare('SELECT input_json,proposal_json,quality_json,content_hash FROM task_plans').get()
+    expect(applySteps(db, steps.filter(step => step.version === 79))).toEqual([79])
+    expect(db.raw.prepare('SELECT input_json,proposal_json,quality_json,content_hash FROM task_plans').get()).toEqual(before)
+    expect(db.raw.prepare('SELECT contract_version FROM task_plans').get()).toEqual({ contract_version: 1 })
+  } finally { db.raw.close() }
+})
+
+
+it('真实规划与确认按结构化审批绑定校验，错绑不创建运行', async () => {
+  const doc = { ...reviewDoc, nodes: [reviewDoc.nodes[0]!,
+    { node_id: 'gate', type: 'approval', title: '操作确认', position: { x: 50, y: 0 }, config: { prompt: '允许执行', on_timeout: 'fail' } },
+    ...reviewDoc.nodes.slice(1)], edges: [{ from: 'start', to: 'gate' }, { from: 'gate', to: 'collect' }, { from: 'collect', to: 'verify' }] }
+  let protectedNodes = ['verify']
+  const host = await boot(async input => {
+    const proposal = proposalFor(input)
+    proposal.steps = input.workflows[0]!.nodes.map(node => ({ node_id: node.id, description: node.id,
+      goal_ids: ['goal', 'R1'], depends_on: node.dependsOn, tools: node.toolAllow, complexity: 'routine', model_reason: '核验' }))
+    proposal.constraint_bindings = [{ constraint_id: 'gate-before', approval_node_id: 'gate', protected_node_ids: protectedNodes }]
+    return proposal
+  }, undefined, { empty: true })
+  host.publish('review', doc)
+  const requirements_contract = requirementsContract([{ ...constraintBase('gate-before', '发布前经我审批'),
+    kind: 'approval_before', scope: 'steps', action: '核对并发布', reviewer: { kind: 'operator' } }])
+  const first = (await host.planning!.propose({ goal: '核对', requirements: ['核验'], requirements_contract }, 'owner', now)).view
+  expect(first.quality.ready).toBe(false)
+  expect(() => host.planning!.confirm({ plan_id: first.plan_id, content_hash: first.content_hash, confirmed: true }, 'owner', now))
+    .toThrow(expect.objectContaining({ code: 'VERDICT_POLICY_UNMET' }))
+  protectedNodes = ['collect', 'verify']
+  const second = (await host.planning!.propose({ goal: '核对', requirements: ['核验'], requirements_contract }, 'owner', now)).view
+  expect(second.quality.ready).toBe(true)
+  expect(host.planning!.confirm({ plan_id: second.plan_id, content_hash: second.content_hash, confirmed: true }, 'owner', now))
+    .toMatchObject({ run_id: expect.any(String) })
+  expect(host.db.raw.prepare('SELECT count(*) n FROM runs').get()?.n).toBe(1)
+})
+
+it('固定历史版本能够确认，新版本与错误提案不会改变绑定或生成专属流程', async () => {
+  const generator = vi.fn(async () => reviewDoc)
+  const planner = vi.fn<TaskPlanningOptions['propose']>(async input => proposalFor(input))
+  const host = await boot(planner, undefined, { workflowGenerator: generator })
+  const draft = host.commands.openWorkflowDraft({ workflowId: 'review', baseVersion: 1, actor: 'host', now, operationId: uuidv7() }) as { revision: number }
+  const update = host.commands.updateWorkflowDraft({ workflowId: 'review', revision: draft.revision,
+    definition: { ...reviewDoc, nodes: reviewDoc.nodes.map(node => node.node_id === 'verify'
+      ? { ...node, config: { tools: { allow: [] } } } : node) }, actor: 'host', now, operationId: uuidv7() }) as { revision: number }
+  expect(host.commands.testWorkflowDraft({ workflowId: 'review', revision: update.revision, now }).passed).toBe(true)
+  host.commands.publishWorkflow({ workflowId: 'review', revision: update.revision, baseVersion: 1, note: '新版', actor: 'host', now, operationId: uuidv7() })
+  const input = { goal: '核对', requirements: ['核验'], workflow_id: 'review', workflow_version: '1', requirements_contract: requirementsContract() }
+  const { view } = await host.planning!.propose(input, 'owner', now)
+  const launch = host.planning!.confirm({ plan_id: view.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', now)
+  expect(host.db.raw.prepare('SELECT CAST(workflow_version AS TEXT) version,workflow_definition_hash hash FROM runs WHERE run_id=?').get(launch.run_id))
+    .toEqual({ version: '1', hash: host.catalog.definitionHash('review', '1') })
+  planner.mockResolvedValueOnce({ kind: 'no_candidate', reason: '不适用' })
+  await expect(host.planning!.propose(input, 'owner', now)).rejects.toMatchObject({ code: 'VERDICT_POLICY_UNMET' })
+  planner.mockResolvedValueOnce({ ...valid(), workflow_version: '2' })
+  await expect(host.planning!.propose(input, 'owner', now)).rejects.toMatchObject({ code: 'WORKFLOW_DEFINITION_INVALID' })
+  expect(generator).not.toHaveBeenCalled()
+  expect(host.db.raw.prepare("SELECT count(*) n FROM workflows WHERE scope='task_local'").get()?.n).toBe(0)
+  expect(host.db.raw.prepare('SELECT count(*) n FROM task_plans').get()?.n).toBe(1)
+})
+
+
+it('调整 v2 草稿把旧约束交给解释器，重试回原后继且自定义宿主无法静默降级', async () => {
+  const contract = requirementsContract([{ ...constraintBase('original', '原表保留'), kind: 'preserve_input', target: '原表.csv' }])
+  const interpret = vi.fn<NonNullable<TaskPlanningOptions['interpret']>>(async (input, _signal, previous) =>
+    ({ ...input, requirements_contract: previous?.requirements_contract ?? contract }))
+  const host = await boot(async () => valid(), undefined, { interpret })
+  const original = (await host.planning!.propose({ goal: '核对', requirements: ['核验'], workflow_id: 'review', workflow_version: '1', requirements_contract: contract }, 'owner', now)).view
+  const input = { goal: '核对下周项目', requirements: ['核验'], revises: { plan_id: original.plan_id, content_hash: original.content_hash } }
+  const changed = (await host.planning!.propose(input, 'owner', now)).view
+  expect(interpret.mock.calls[0]?.[2]).toMatchObject({ goal: original.brief.goal, requirements_contract: contract, workflow_id: 'review', workflow_version: '1' })
+  expect(changed.brief).toMatchObject({ workflow_id: 'review', workflow_version: '1' })
+  expect(changed.brief.requirements_contract?.constraints).toEqual([{ ...contract.constraints[0], id: 'c1' }])
+  expect((await host.planning!.propose(input, 'owner', now)).view.plan_id).toBe(changed.plan_id)
+  expect(interpret).toHaveBeenCalledTimes(1)
+  const custom = createTaskPlanningHost(host.db, host.catalog, host.registry, { propose: async () => valid() })
+  await expect(custom.propose({ ...input, revises: { plan_id: changed.plan_id, content_hash: changed.content_hash } }, 'owner', now))
+    .rejects.toMatchObject({ code: 'PAYLOAD_SCHEMA_INVALID' })
+})
+
+
+it('调用方直接提交新契约也不能在修订中移除旧约束、立即启动或替换固定版本', async () => {
+  const host = await boot(async () => valid())
+  const contract = requirementsContract([{ ...constraintBase('original', '原表保留'), kind: 'preserve_input', target: '原表.csv' }], 'plan_only')
+  const first = (await host.planning!.propose({ goal: '核对', requirements: ['核验'], workflow_id: 'review', workflow_version: '1', requirements_contract: contract }, 'owner', now)).view
+  const next = { goal: '继续核对', requirements: ['核验'], revises: { plan_id: first.plan_id, content_hash: first.content_hash },
+    requirements_contract: requirementsContract() }
+  await expect(host.planning!.propose({ ...next, workflow_id: 'another', workflow_version: '2' }, 'owner', now))
+    .rejects.toMatchObject({ code: 'CONFIRMATION_MISMATCH' })
+  const result = (await host.planning!.propose(next, 'owner', now)).view
+  expect(result.brief).toMatchObject({ workflow_id: 'review', workflow_version: '1', requirements_contract: {
+    start_policy: 'plan_only', constraints: [{ ...contract.constraints[0], id: 'c1' }],
+  } })
+  expect(result.content_hash).not.toBe(first.content_hash)
+  expect(() => host.planning!.confirm({ plan_id: first.plan_id, content_hash: first.content_hash, confirmed: true }, 'owner', now))
+    .toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
+})
+
+
+it('修订合并对同义结构约束去重并稳定编号，不接受同一来源号对应不同正文', () => {
+  const prior = requirementsContract([{ ...constraintBase('old-name', '原表保留'), kind: 'preserve_input', target: '原表.csv' }], 'plan_only')
+  const next: RequirementsContract = { version: 1, start_policy: 'immediate',
+    sources: [{ message_id: 'next', text: '原表保留，禁止外发。' }], constraints: [
+      { id: 'c1', kind: 'preserve_input', target: '原表.csv', source_message_id: 'next', quote: '原表保留' },
+      { id: 'c2', kind: 'no_external_send', source_message_id: 'next', quote: '禁止外发' },
+    ] }
+  const merged = mergeRequirementsContracts(prior, next)
+  expect(merged.constraints.map(item => [item.id, item.kind, item.source_message_id])).toEqual([
+    ['c1', 'preserve_input', 'human-message'], ['c2', 'no_external_send', 'next'],
+  ])
+  expect(merged.start_policy).toBe('plan_only')
+  expect(mergeRequirementsContracts(merged, next)).toEqual(merged)
+  expect(() => mergeRequirementsContracts(prior, { ...next, sources: [{ message_id: 'human-message', text: '不同正文' }] })).toThrow()
 })

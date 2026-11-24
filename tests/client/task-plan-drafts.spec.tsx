@@ -68,3 +68,38 @@ it('loads older drafts, revises the selected version and persists discard throug
     expect(button('最近的计划')).toBeDefined()
   } finally { view.unmount() }
 })
+
+it('shows persisted execution constraints and original wording before a saved draft can be started', async () => {
+  const saved = {
+    ...draft('constrained', '只规划复核任务'), contract_version: 2,
+    brief: { goal: '只规划复核任务', requirements: [], requirements_contract: {
+      version: 1, start_policy: 'plan_only', sources: [{ message_id: 'source', text: '只给计划；不修改原表；结果发在聊天里。' }],
+      constraints: [
+        { id: 'input', kind: 'preserve_input', source_message_id: 'source', quote: '不修改原表', target: '原表' },
+        { id: 'chat', kind: 'chat_only', source_message_id: 'source', quote: '结果发在聊天里' },
+      ],
+    } },
+  }
+  const service = createFakeService(({ path }) => {
+    if (path === '/v1/task-plans/capability') return { ok: true, data: { enabled: true } }
+    if (path === '/v1/task-plans/drafts') return { ok: true, data: page([saved]) }
+    throw new Error(path)
+  })
+  const client = createApiClient('http://panel.test', service.fetcher)
+  const view = await renderPanel(<PanelShell activeRoute="tasks" serviceConnected onNavigate={() => {}}>
+    <TaskPlanForm api={createResourcesApi(client)} commands={createTaskCommands(client)} />
+  </PanelShell>)
+  try {
+    await view.click(view.container.querySelector('summary')!)
+    await view.flush()
+    await view.click(view.findAll('button').find(button => button.textContent === '只规划复核任务')!)
+    const constraints = view.container.querySelector('[aria-label="执行约束"]')!
+    expect(constraints.textContent).toContain('本次只生成计划，后续执行需另行确认。')
+    expect(constraints.textContent).toContain('保持输入材料不变：原表')
+    expect(constraints.textContent).toContain('原始要求：不修改原表')
+    expect(constraints.textContent).toContain('在本次聊天中交付正文')
+    const start = view.findAll('button').find(button => button.textContent === '确认后启动任务')!
+    expect(start).toHaveProperty('disabled', true)
+    expect(view.text()).toContain('我已核对目标、执行约束、交付物、风险和固定流程版本。')
+  } finally { view.unmount() }
+})
