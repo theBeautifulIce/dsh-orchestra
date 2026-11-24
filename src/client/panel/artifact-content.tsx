@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { ArtifactContentMode, ArtifactContentView, RunArtifact } from '../api/types.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
+import { MarkdownReading } from './markdown-reading.tsx'
 
 type Preview = Extract<ArtifactContentView, { kind: 'preview' }>
 type Download = Extract<ArtifactContentView, { kind: 'download' }>
@@ -30,7 +31,9 @@ export function matchesArtifactContent(content: ArtifactContentView, artifact: R
   return content.sha256 === artifact.sha256 && content.file_name === artifact.file_name
 }
 
-type ArtifactContentProps = { api: ResourcesApi; artifact: RunArtifact }
+type ArtifactContentProps = { api: ResourcesApi; artifact: RunArtifact
+  /** 取得并核验了哪一版：审核入口据此决定能不能提交结论（D08）。 */
+  onAcquired?: (acquired: { key: string; mode: ArtifactContentMode }) => void }
 
 export function useArtifactRetention(artifact?: RunArtifact): 'available' | 'expired' | 'invalid' {
   const [, refresh] = useState(0)
@@ -51,15 +54,20 @@ export function useArtifactRetention(artifact?: RunArtifact): 'available' | 'exp
   return Number.isNaN(deadline) ? 'invalid' : 'available'
 }
 
-export function ArtifactContent({ api, artifact }: ArtifactContentProps) {
+export function ArtifactContent({ api, artifact, onAcquired }: ArtifactContentProps) {
   const retention = useArtifactRetention(artifact)
   if (retention === 'expired') return <p style={noteStyle}>已超过保留期限。仍可查看登记记录。</p>
   if (retention === 'invalid') return <p style={noteStyle}>产物保留期限未通过校验。仍可查看登记记录。</p>
   if (!artifact.file_name) return <p style={noteStyle}>这份产物仅有登记记录，内容尚未入库。</p>
-  return <ArtifactContentReader key={artifactContentKey(artifact)} api={api} artifact={artifact} />
+  return <ArtifactContentReader key={artifactContentKey(artifact)} api={api} artifact={artifact} onAcquired={onAcquired} />
 }
 
-function ArtifactContentReader({ api, artifact }: ArtifactContentProps) {
+/** 只有登记过的 Markdown 才给阅读视图：其它文本仍按原文呈现（D11）。 */
+function isMarkdown(artifact: RunArtifact): boolean {
+  return /\.(?:md|markdown)$/iu.test(artifact.file_name ?? '')
+}
+
+function ArtifactContentReader({ api, artifact, onAcquired }: ArtifactContentProps) {
   const [pending, setPending] = useState<ArtifactContentMode | null>(null)
   const [preview, setPreview] = useState<Preview | null>(null)
   const [notice, setNotice] = useState('')
@@ -81,6 +89,10 @@ function ArtifactContentReader({ api, artifact }: ArtifactContentProps) {
       }
       if (data.kind === 'preview') setPreview(data)
       else saveArtifact(data)
+      // 只有真正取得并核对过这一版（且预览未被截断、下载成功）才算取得版本（D08）。
+      if (data.kind === 'download' || !data.truncated) {
+        onAcquired?.({ key: artifactContentKey(artifact), mode: data.kind })
+      }
     } catch (error) {
       if (active.current) setNotice(error instanceof Error ? error.message : '未能读取产物。')
     } finally {
@@ -98,7 +110,9 @@ function ArtifactContentReader({ api, artifact }: ArtifactContentProps) {
     {notice && <p role="alert" style={noteStyle}>{notice}</p>}
     {preview && <>
       {preview.truncated && <p style={noteStyle}>预览仅显示前 32 KiB，可下载完整产物。</p>}
-      <pre style={previewStyle}>{preview.text}</pre>
+      {isMarkdown(artifact) && !preview.truncated
+        ? <MarkdownReading text={preview.text} />
+        : <pre style={previewStyle}>{preview.text}</pre>}
     </>}
   </section>
 }

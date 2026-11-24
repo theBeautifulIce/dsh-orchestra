@@ -152,3 +152,30 @@ it('以纯文本显示主动内容，下载生成带正确文件名的二进制�
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:artifact')
   } finally { view.unmount() }
 })
+
+it('reads Markdown as approved elements and keeps raw HTML and links as text', async () => {
+  const markdown = { ...artifact, artifact_id: 'markdown-1', file_name: '核对报告.md', sha256: 'markdown-sha' }
+  const text = ['# 退款核对', '', '| 项目 | 金额 |', '| --- | --- |', '| 净额 | 109.50 |', '',
+    '原始 HTML：<script>alert(1)</script>', '', '图片 ![截图](https://example.test/x.png) 与 [外链](https://example.test/y)', '',
+    '```', 'net = 109.50', '```'].join('\n')
+  const service = createFakeService(vi.fn().mockReturnValue(preview(text, markdown)))
+  const api = createResourcesApi(createApiClient('http://artifact.test', service.fetcher))
+  const view = await renderPanel(<ArtifactContent api={api} artifact={markdown} />)
+  try {
+    await view.click(view.findAll('button')[0]!)
+    expect(view.findAll('button').map((button) => button.textContent)).toContain('显示原文')
+    expect(view.findAll('h1')[0]?.textContent).toBe('退款核对')
+    expect(view.findAll('table')).toHaveLength(1)
+    expect(view.findAll('td').map((cell) => cell.textContent)).toEqual(['净额', '109.50'])
+    // 原始 HTML、外链与图片都只作为文字出现，不会自动联网或执行脚本。
+    expect(view.findAll('script')).toHaveLength(0)
+    expect(view.findAll('a')).toHaveLength(0)
+    expect(view.findAll('img')).toHaveLength(0)
+    expect(view.text()).toContain('<script>alert(1)</script>')
+    expect(view.text()).toContain('外链')
+    expect(view.findAll('pre').some((block) => block.textContent?.includes('net = 109.50'))).toBe(true)
+    await view.click(view.findAll('button').find((button) => button.textContent === '显示原文')!)
+    expect(view.findAll('pre')[0]?.textContent).toContain('| 项目 | 金额 |')
+    expect(service.calls).toHaveLength(1)
+  } finally { view.unmount() }
+})

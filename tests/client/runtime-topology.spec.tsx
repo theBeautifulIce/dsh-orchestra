@@ -68,7 +68,7 @@ describe('运行级局部拓扑', () => {
     expect(view.findAll('[data-node-id="rw_prepare"]')[0]?.textContent).toContain('来源角色：报告作者')
     expect(view.text()).not.toContain('旧成果已交付')
     expect(view.findAll('.task-flow-step').map(e => e.textContent)).toEqual([
-      expect.stringContaining('采集数据'), expect.stringContaining('rw_prepare'), expect.stringContaining('报告作者'),
+      expect.stringContaining('采集数据'), expect.stringContaining('新增步骤 1'), expect.stringContaining('报告作者'),
     ])
     await view.click(view.findAll('[data-node-id="rw_prepare"] button')[0]!)
     expect(view.findAll('aside[aria-label="节点详情"]')[0]?.textContent).toContain('先补齐真实测试数据对照表')

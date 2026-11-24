@@ -5,17 +5,19 @@ import { sha256Hex } from '../core/canonical.ts'
 import { formatChatApproval } from '../core/chat-approval-text.ts'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
+import { receiptLocation } from '../core/receipt-location.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
-import { registerRunArtifact } from './artifact-store.ts'
-import { classifyChatTask } from './chat-task-intent.ts'
+import { readChatTextPreviews } from './chat-text-previews.ts'
+import { classifyChatTask, shouldDeferTask } from './chat-task-intent.ts'
 import { chatDecisionTitle, chatText, describeChatOutcome, describeChatRun, isChatErrorReason, isChatPlanningIssue, type ChatOutcome } from './chat-display.ts'
 import { readOutstandingFiles } from './chat-expected-files.ts'
 import { attachChatDeliveryPreviews, listChatDeliveryReviews } from './chat-delivery-review.ts'
+import { pendingReworkTree } from './rework-inbox-tree.ts'
 import type { ChatModelRecoveryChecks } from './chat-model-recovery.ts'
 import { isRunTerminal } from './commands/run-close.ts'
-import { findRunArtifactIdsByName, getArtifactContent, listRunArtifacts } from './queries/artifacts.ts'
+import { findRunArtifactIdsByName, getArtifact, getArtifactContent, listRunArtifacts } from './queries/artifacts.ts'
 import { getDecisionSnapshot, listDecisions } from './queries/decisions.ts'
 import { listNodes, readRunNodeDisplay } from './queries/nodes.ts'
 import { withReadTx } from './queries/read-tx.ts'
@@ -118,7 +120,8 @@ function resolveWorkflowPin(db: Service['orchestra']['db'], text: string) {
   const rows = db.raw.prepare(`SELECT workflow_id, name, current_version FROM workflows
     WHERE status='active' AND scope='reusable' AND (name = ? OR workflow_id = ?) LIMIT 2`).all(pin.name, pin.name) as Array<{
       workflow_id: string; current_version: number | null }>
-  if (rows.length !== 1) return undefined
+  if (!rows.length) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '未找到指定的已发布流程，请核对流程名称或编号')
+  if (rows.length > 1) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '有多个同名流程，请在插件面板选择具体流程')
   const row = rows[0]!
   return {
     workflow_id: row.workflow_id,
@@ -252,13 +255,11 @@ function describeRun(service: Service, runId: string, operator: string) {
     run_id: runId, task_id: run.task_id, title: run.task_title, status: run.status, terminal,
     counts: run.counts, settling: run.settling, delivery_checks: run.delivery_checks?.items ?? [],
     ...(task?.current_run_id === runId ? { acceptance: task.delivery_acceptance, goal_met: task.goal_met } : {}),
+    ...(terminal && { text_results: readChatTextPreviews(db, runId, run.delivery_checks?.items ?? []) }),
     decisions, blocking,
     deliveryReviews: !terminal && service.rework ? listChatDeliveryReviews(db, runId, operator) : [],
     // 返工待授权/已升级也算“等你处理”，否则会话只报执行中（D07）。
-    rework: terminal ? [] : db.raw.prepare(`SELECT request_id, target_node_run_id, status, round_no, reason
-      FROM rework_requests WHERE run_id=? AND owner_actor=? AND status IN ('proposed','needs_human_approval','escalated')
-      ORDER BY created_at DESC LIMIT 5`).all(runId, operator) as Array<{
-        request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string }>,
+    rework: terminal ? [] : pendingReworkTree(db, runId, operator).items,
   }
 }
 
@@ -279,32 +280,26 @@ function acceptedArtifactIds(checks: readonly { artifact_id?: string | null; kin
     ? [check.artifact_id] : [])
 }
 
-/**
- * 会话交付的文字结果落成真实 UTF-8 文件，结果页可直接下载（P05）。
- * 已经登记过就不再重复登记，保证同一运行只有一份结论文件。
- */
-export function ensureChatResultArtifact(db: Service['orchestra']['db'], runId: string, text: string): void {
-  const existing = db.raw.prepare(
-    "SELECT a.artifact_id FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE a.run_id=? AND c.file_name='chat-result.md'",
-  ).get(runId)
-  if (existing) return
-  const node = db.raw.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? ORDER BY seq DESC, node_run_id DESC LIMIT 1').get(runId) as
-    { node_run_id?: string } | undefined
-  if (!node?.node_run_id) return
-  registerRunArtifact(db, {
-    // uuidv7 前 8 位是时间戳，同一毫秒的两次运行会撞主键：用完整 run id 才唯一。
-    artifactId: 'chat-result-' + runId, runId, nodeRunId: node.node_run_id,
-    fileName: 'chat-result.md', bytes: Buffer.from(text, 'utf8'),
-  })
-}
-
 function describeArtifacts(db: Service['orchestra']['db'], runId: string, acceptedIds: readonly string[] = []) {
-  const all = listRunArtifacts(db, runId).items.filter((artifact) => !artifact.expired && artifact.file_name)
+  const now = Date.now()
   const accepted = new Set(acceptedIds)
-  const ordered = [...all.filter((artifact) => accepted.has(artifact.artifact_id)),
-    ...all.filter((artifact) => !accepted.has(artifact.artifact_id))]
-  return ordered.slice(0, 12).map((artifact) => ({
-    artifact_id: artifact.artifact_id, file_name: artifact.file_name, sha256: artifact.sha256, bytes: artifact.size_bytes,
+  type Shown = { artifact_id: string; file_name: string; sha256: string; bytes: number | undefined }
+  // 先按验收记录逐份精确取：正式交付件在 52 个附件之后也不能被分页挤掉（D09）。
+  const pinned: Shown[] = []
+  for (const artifactId of accepted) {
+    try {
+      const item = getArtifact(db, artifactId, now)
+      if (item.run_id !== runId || item.expired || !item.file_name) continue
+      pinned.push({ artifact_id: item.artifact_id, file_name: item.file_name, sha256: item.sha256, bytes: item.size_bytes })
+    } catch { /* 已过期或被清理的验收记录不再展示，但也不挡住其它文件。 */ }
+  }
+  const seen = new Set(pinned.map((item) => item.artifact_id))
+  const recent = listRunArtifacts(db, runId).items
+    .filter((artifact) => !artifact.expired && artifact.file_name && !seen.has(artifact.artifact_id))
+  // 同名有绑定时按 id 打开：先给已验收的那一版，其余最近的补在后面。
+  return [...pinned, ...recent].slice(0, 12).map((artifact) => ({
+    artifact_id: artifact.artifact_id, file_name: artifact.file_name, sha256: artifact.sha256,
+    bytes: 'bytes' in artifact ? artifact.bytes : artifact.size_bytes,
   }))
 }
 
@@ -399,7 +394,7 @@ export function installNativeChat(host: Context, options: {
   const sessions = new Map<Agent, Binding>()
   const cursors = new WeakMap<Agent, number>()
   // 澄清草稿跨轮续接：只在这条澄清后的下一条消息里续接（C03）。
-  const clarifications = new WeakMap<Agent, { goal: string; at: number }>()
+  const clarifications = new WeakMap<Agent, { goal: string; at: number; identity: string }>()
   const checkedModelRecovery = new WeakMap<Agent, ChatModelRecoveryChecks>()
   const operations = new Map<string, Promise<unknown>>()
   let polling: Promise<void> | undefined
@@ -496,6 +491,11 @@ export function installNativeChat(host: Context, options: {
         ...laterHumans.map(() => admissionNotice({ state: 'queued' as const, message: '同一批还有一条消息，已排到当前会话的下一轮单独处理。' }))],
     } : out
     if (!state.human) return result
+    // 每个新的人类回合最多消费一次待澄清上下文。
+    const draft = clarifications.get(agent)
+    clarifications.delete(agent)
+    const pendingClarify = draft?.identity === binding.identity
+      && Date.now() - draft.at < 30 * 60_000 ? draft : undefined
     const text = state.human.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('\n')
     const slash = /^\/orchestra(?:\s+([\s\S]*))?$/u.exec(text.trim())
     if (!slash && /^(?:请\s*)?(?:审阅|分类)主脑专属便条(?:$|[：:，,\s])|^(?:please\s+)?(?:review|classify)\s+(?:the\s+)?private run notes\b/iu.test(text.trim())) {
@@ -505,6 +505,11 @@ export function installNativeChat(host: Context, options: {
     if (!slash && /^(?:(?:请|能否|可否|帮我|麻烦你?)(?:帮我)?\s*)?(?:读(?:取|一下)?|查看|查询|列出).{0,120}(?:便条|运行注记)|^(?:please\s+)?(?:read|list|show|check)\s+.{0,120}\brun notes?\b/iu.test(text.trim())) {
       state.notesOnly = true
       return settle(result)
+    }
+    if (slash?.[1] && shouldDeferTask(slash[1])) {
+      const outcome = { state: 'clarification_required' as const, message: '已记录暂缓要求。准备开始时请重新提交本次目标。' }
+      state.managed = { outcome }
+      return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
     }
     if (slash && !slash[1]?.trim()) {
       const outcome = { state: 'usage' as const, message: '使用 /orchestra 任务内容单次派单。' }
@@ -524,24 +529,23 @@ export function installNativeChat(host: Context, options: {
         })] })
       }
     }
-    // 只有附件、没有文字：先说明附件没有被读入，不要落进普通问答。
-    if (!slash && state.human.content.some((block) => block.type !== 'text') && !text.trim()) {
-      const managed: ManagedTask = { outcome: errorReceipt(new OrchError('PAYLOAD_SCHEMA_INVALID',
-        '这条消息只有附件，没有任务目标', { reason: 'only_attachments' })) }
-      state.managed = managed
-      return settle({ ...result, messages: [...result.messages, admissionNotice(managed.outcome!)] })
+    if (!slash && !text.trim() && state.human.content.some(block => block.type !== 'text')) {
+      return settle(result)
     }
     // 澄清答复跨轮续接：保留上一条目标，把补充并进来（C03）。
-    const pendingClarify = clarifications.get(agent)
-    const continued = !slash && Boolean(pendingClarify) && Date.now() - pendingClarify!.at < 30 * 60_000
-      && isClarificationAnswer(text)
-    if (continued) clarifications.delete(agent)
+    const answer = text.trim().normalize('NFKC').toLowerCase().replace(/[.!?。]+$/u, '')
+    if (pendingClarify && !slash && ['算了', '取消', '放弃', '取消草稿', 'cancel', 'never mind'].includes(answer)) {
+      const outcome = { state: 'draft_discarded' as const, message: '已放弃这项草稿，没有启动任务。' }
+      state.managed = { outcome }
+      return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
+    }
+    const continued = !slash && !!pendingClarify && isClarificationAnswer(text)
     const intent = continued ? 'task' : slash ? 'task' : classifyChatTask(text)
     if (intent === 'conversation') return settle(result)
     const managed: ManagedTask = {}
     state.managed = managed
     if (intent === 'clarify') {
-      clarifications.set(agent, { goal: text.trim(), at: Date.now() })
+      clarifications.set(agent, { goal: text.trim(), at: Date.now(), identity: binding.identity })
       managed.outcome = { state: 'clarification_required', message: '请说明希望拿到什么结果，以及本次可以使用哪些已授权的材料。' }
     } else {
       const actionSignal = AbortSignal.any([signal, options.signal])
@@ -634,6 +638,8 @@ export function installNativeChat(host: Context, options: {
           operation: `批准启动这份计划，共 ${view.proposal.steps.length} 个步骤。`,
           consequence: hasApprovalStep ? '按计划启动，流程里的人工审批仍须单独处理。' : '按这份计划创建并开始本次运行。',
           planSteps: view.proposal.steps.map((step) => step.description),
+          deliverables: view.proposal.deliverables.map(item => item.title),
+          planVersion: view.plan_id + ' / ' + view.content_hash,
         })
         if (!await approveOnce(turn, view.plan_id, undefined, agent, reason, signal)) {
           return { state: 'launch_declined' as const, plan_id: view.plan_id, title: view.proposal.title }
@@ -699,15 +705,35 @@ export function installNativeChat(host: Context, options: {
       return result
     }
     if (input.action === 'stop') {
-      // 会话内停止：绑定当前运行，交给既有的取消状态机，不把低层管理接口暴露给浏览器（C10）。
-      if (!service.orchestra.commands?.cancelRun) throw new OrchError('VERDICT_UNSUPPORTED', '当前宿主不提供会话内停止')
-      const out = service.orchestra.commands.cancelRun({
-        runId, cancelResult: 'interrupted', graceMs: 30_000, now: new Date().toISOString(),
-      })
+      if (!turn.human || turn.noticeRun || turn.reportOnly || !nativeOwnerRequest(turn.human))
+        throw new OrchError('FORBIDDEN', '停止操作需要当前会话中的真人确认')
+      const read = () => db.raw.prepare(
+        'SELECT status,cancel_requested_at FROM runs WHERE run_id=?'
+      ).get(runId) as { status: string; cancel_requested_at: string | null } | undefined
+      const initial = read()
+      if (!initial) throw new OrchError('NOT_FOUND','找不到这次运行')
+      const counts = { skipped_irreversible: 0, pending_decisions: 0 }
+      if (!isRunTerminal(initial.status) && !initial.cancel_requested_at) {
+        const reason = formatChatApproval({
+          task: describeRun(service,runId,options.operator).title,
+          step:'停止这次运行', reason:'你将暂停后续执行并请求结束在途操作。',
+          operation:'只停止当前选中的运行。', consequence:'正在执行的外部操作可能仍需核实。'
+        })
+        if (!await approveOnce(turn, 'stop:' + runId, exec, agent, reason, signal))
+          throw new OrchError('CONFIRMATION_REQUIRED','未确认停止，运行保持原状态')
+        assertCurrent()
+        const current = read()
+        if (current && !isRunTerminal(current.status) && !current.cancel_requested_at) {
+          // 当前同步命令会提交取消意图，并调用已注册的取消适配器。
+          const out = commands.cancelRun({runId,cancelResult:'unknown',graceMs:30_000,now:new Date().toISOString()})
+          counts.skipped_irreversible = out.skippedIrreversible.length
+          counts.pending_decisions = out.pendingHumanDecisions.length
+        }
+      }
       turn.lastStatusRun = runId
-      return { state: 'stop_requested' as const, run_id: runId,
-        status: out.terminalStatus ?? out.runStatus, skipped_irreversible: out.skippedIrreversible.length,
-        pending_decisions: out.pendingHumanDecisions.length }
+      const latest = read()
+      if (!latest) throw new OrchError('NOT_FOUND','运行已不再可读取')
+      return {state:'stop_requested' as const,run_id:runId,status:latest.status,...counts}
     }
     if (input.action === 'review_delivery') {
       const reviews = service.rework ? listChatDeliveryReviews(db, runId, options.operator) : []
@@ -718,7 +744,11 @@ export function installNativeChat(host: Context, options: {
     }
     if (input.action === 'artifact') {
       const artifactId = input.artifact_id ?? artifactFromName(db, runId, input.file_name!)
-      return getArtifactContent(db, runId, artifactId, 'preview', Date.now()).item
+      const item = getArtifactContent(db, runId, artifactId, 'preview', Date.now()).item
+      // 回执定位只用已经核验过的这一版，客户端据此重读而不是相信模型给的名字（T16）。
+      const run = getRun(db, runId)
+      return { ...item, location: { kind: 'artifact' as const, workspaceId: binding.workspaceId,
+        sessionId: binding.sessionId, taskId: run.task_id, runId, artifactId, sha256: item.sha256 } }
     }
     if (input.action === 'notes') {
       if (!turn.human || turn.noticeRun || turn.managed || !turn.notesOnly) {
@@ -828,7 +858,7 @@ export function installNativeChat(host: Context, options: {
     output: {
       schema: { type: 'object', properties: {
         text: { type: 'string' }, summary: { type: 'string' }, preview: { type: 'string' },
-        deliveryReview: { type: 'object' },
+        deliveryReview: { type: 'object' }, location: { type: 'object' },
       }, required: ['text', 'summary', 'preview'], additionalProperties: false },
       render: (_args, value) => {
         const { summary, preview } = value as { summary: string; preview: string }
@@ -837,7 +867,10 @@ export function installNativeChat(host: Context, options: {
       presentationMeta: (_args, value) => {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
         const { summary, deliveryReview } = value
-        return { summary: typeof summary === 'string' ? summary : '', ...(deliveryReview && { deliveryReview }) }
+        // 只透传通过 schema 校验的定位对象：元数据只用于导航，打开时仍会重读权限（T16）。
+        const target = receiptLocation.safeParse((value as { location?: unknown }).location)
+        return { summary: typeof summary === 'string' ? summary : '', ...(deliveryReview && { deliveryReview }),
+          ...(target.success && { location: target.data }) }
       },
     },
     async execute(input, execution) {
@@ -856,12 +889,14 @@ export function installNativeChat(host: Context, options: {
           return respond(status, chatText(describeChatRun(result)))
         }
         if ('notes' in result) return respond(result, '已读取本次运行的共享便条。便条仅作参考。', JSON.stringify(result.notes))
-        if ('brain_review' in result) {
+        if ('brain_review' in result && result.brain_review) {
           const summary = { follow_up: '专属便条建议人工关注。', informational: '专属便条仅供参考。', insufficient: '目前没有可分类的专属便条。' }
           return respond(result, summary[result.brain_review.classification])
         }
         const summary = `「${result.file_name}」的内容预览${result.kind === 'preview' && result.truncated ? '（部分）' : ''}。请结合任务的交付验收情况使用这份文件。`
-        return respond(result, summary, result.kind === 'preview' ? result.text : '')
+        const output = respond(result, summary, result.kind === 'preview' ? result.text : '')
+        const parsed = receiptLocation.safeParse('location' in result ? result.location : undefined)
+        return parsed.success ? { ...output, location: parsed.data } : output
       } catch (error) {
         if (execution.signal.aborted) execution.signal.throwIfAborted()
         return respondOutcome(errorReceipt(error), action)
@@ -905,7 +940,6 @@ export function installNativeChat(host: Context, options: {
             ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
             artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
           }, true)
-          if (view.terminal) ensureChatResultArtifact(service.orchestra.db, receipt.run_id, display.body)
           agent.followup(noticeMessage(id, display))
         } finally { pending.delete(id) }
       }

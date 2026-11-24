@@ -38,7 +38,7 @@ export function workspaceForSession(sessionId: string | undefined, workspaces: W
   return matches.length === 1 ? matches[0]?.workspaceId : undefined
 }
 
-function selectedSession(sessions: SessionList): string | undefined {
+export function selectedSession(sessions: SessionList): string | undefined {
   const selected = Object.values(sessions.byId).filter(row => (row.retainedBy?.mainView ?? 0) > 0)
   return selected.length === 1 ? selected[0]?.id : undefined
 }

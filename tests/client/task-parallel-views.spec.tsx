@@ -115,7 +115,7 @@ it('shows the real ten-way fan-out, join, and live queue with one selected run r
     expect(queue('等待上游完成').textContent).toContain('等待：' + names.join('、'))
     expect(queue('就绪待派发').textContent).toContain('准备就绪')
     expect(queue('暂停、重试与异常').textContent).toContain('第 2 次尝试')
-    expect(queue('暂停、重试与异常').textContent).toContain('排队原因未记录')
+    expect(queue('等待条件').textContent).toContain('排队原因未记录')
     expect(view.text()).not.toContain('笼统排队标签')
     expect(service.calls.filter(({ path }) => path === '/v1/node-runs').map(({ params }) => params.get('run_id'))).toEqual(['main-run', 'main-run'])
     expect(service.calls.filter(({ path }) => path === '/v1/runs/get')).toHaveLength(1)

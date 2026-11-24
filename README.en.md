@@ -20,7 +20,7 @@ DSH Orchestra is a workflow orchestration plugin for DeepSeek Harness (DSH). Des
 
 ### Install
 
-1. Obtain an Orchestra plugin archive (`.tgz`) compatible with your DSH version, or [build it from source](#development-and-validation).
+1. Download [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz). The [prerelease page](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1) includes `SHA256SUMS.txt`. This release targets DSH 0.2.2. Native chat dispatch and approval were verified on DSH Desktop 0.2.2-rc.5. For a local build, see [development and validation](#development-and-validation).
 2. Install it using the DSH Desktop plugin manager. Reload as requested by DSH and check that **Orchestra** appears in the sidebar. The package registers its server and web client through Cordis.
 3. Open a workspace and a normal conversation within it. Under **Orchestra → Settings**, check the service connection, model configuration, and automatic task routing. The personal Desktop adapter enables automatic routing for explicit work requests by default. The planner follows the conversation model by default. You can pin a configured provider, model, and supported reasoning effort. Worker models are configured separately.
 4. The package targets the DSH `0.2.2` series. Native Desktop chat routing and approval acceptance runs used `0.2.2-rc.5`. Check the health panel and host integration for other environments.

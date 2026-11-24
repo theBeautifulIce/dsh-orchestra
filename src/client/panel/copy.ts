@@ -14,6 +14,8 @@ export const COPY = {
   awaitingDecision: '待审批',
   // 仍有未结算不可逆动作：settling 里还挂着没结算的不可逆动作。
   pendingIrreversible: '仍有未结算不可逆动作',
+  // 只是发生过对外动作、结果未明：没有不可逆策略时不能这么说（T03）。
+  pendingExternalEffect: '有对外操作待核实',
   // 心跳已停：心跳超过阈值，只影响显示，不改节点状态。
   heartbeatStopped: '心跳已停',
   // 未验证终态的独立文案：不折叠进「已完成」或「未成功」。

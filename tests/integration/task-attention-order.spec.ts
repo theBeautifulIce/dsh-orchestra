@@ -188,23 +188,47 @@ it('把子流程决定、成果留验与未派发的可补偿步骤分别投影�
       addTask(tx, 'r', 'r-run', 'running')
       tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at)
         VALUES('r-step','r-run','pay',1,'agent','queued','compensable',?,?)`, [started, started])
+
+      // s：只领到租约、既没开始执行也没有工具记录，同样不能报成对外动作待核实（T03）。
+      addTask(tx, 's', 's-run', 'running')
+      tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at)
+        VALUES('s-step','s-run','pay',1,'agent','leased','compensable',?,?)`, [started, started])
+
+      // t：真的开始执行过、结果未明，两个入口都要计 1（T03 正例）。
+      addTask(tx, 't', 't-run', 'running')
+      tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,started_at,created_at,updated_at)
+        VALUES('t-step','t-run','pay',1,'agent','started','compensable',?,?,?)`, [started, started, started])
     })
     const person = getTaskSummarySnapshot(db, 'p', now).item
     expect(person.run_count).toBe(1)
     expect(person.open_decision_count).toBe(1)
     expect(person.attention).toBe('decision')
     expect(person.lane).toBe('attention')
+    // 子流程上的决定给出精确目标：任务行不用知道步骤号也能直接打开（T02）。
+    expect(person.next_action).toMatchObject({ kind: 'decision', decision_id: 'p-decision', run_id: 'p-child' })
 
     const review = getTaskSummarySnapshot(db, 'q', now).item
     expect(review.delivery_review_count).toBe(1)
     expect(review.attention).toBe('decision')
     expect(review.attention_reason).toContain('成果待验收')
+    // 留验还没交文件：动作是打开验收区，而不是假装有一份文件可点（T01/D06）。
+    expect(review.next_action).toMatchObject({ kind: 'review', node_run_id: 'q-step', run_id: 'q-run' })
     expect(storedRank(db, 'q')).toBe(attentionWeight('decision'))
 
     const queued = getTaskSummarySnapshot(db, 'r', now).item
     expect(queued.unverified_count).toBe(0)
     expect(queued.attention).not.toBe('unverified')
     expect(queued.attention_reason ?? '').not.toContain('不可逆')
+    expect(queued.next_action).toBeUndefined()
+
+    const leased = getTaskSummarySnapshot(db, 's', now).item
+    expect(leased.unverified_count).toBe(0)
+    expect(leased.attention).not.toBe('unverified')
+    expect(storedRank(db, 's')).toBe(attentionWeight('running'))
+
+    const startedEffect = getTaskSummarySnapshot(db, 't', now).item
+    expect(startedEffect.unverified_count).toBe(1)
+    expect(startedEffect.attention).toBe('unverified')
   } finally { db.raw.close() }
 })
 

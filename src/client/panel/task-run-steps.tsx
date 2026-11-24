@@ -9,6 +9,16 @@ import { operatorReason } from '../../core/operator-language.ts'
 import { nodeExecutionLabel, nodeExecutionPhase, waitingFor } from './task-node-status.ts'
 import { TASK_RUN_STEPS_CSS } from './task-workspace-styles.ts'
 
+export function humanStepTitle(id:string, index:number,
+  ...candidates:(string|null|undefined)[]):string {
+  for (const candidate of candidates) {
+    const text = candidate?.trim()
+    if (text && text!==id) return text
+  }
+  return `步骤 ${index+1}`
+}
+
+
 type Step = { id: string; nodeId: string; title: string; type: string; attempt: NodeRunView | null; definition?: CanvasNode }
 
 function stepsFor(nodes: readonly NodeRunView[], doc?: CanvasDoc | null): Step[] {
@@ -19,13 +29,14 @@ function stepsFor(nodes: readonly NodeRunView[], doc?: CanvasDoc | null): Step[]
     const rank = new Map(order?.ok ? order.order.map((id, index) => [id, index]) : [])
     const ordered = Array.from(actual.values()).sort((a, b) => (rank.get(a.node_id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.node_id) ?? Number.MAX_SAFE_INTEGER))
     return ordered.map((node, index) => ({
-      id: node.node_run_id, nodeId: node.node_id, title: node.title || documented.get(node.node_id)?.title || `未命名步骤 ${index + 1}`,
+      id: node.node_run_id, nodeId: node.node_id, title: humanStepTitle(node.node_id, index, node.title, documented.get(node.node_id)?.title),
       type: node.node_type, attempt: node, definition: documented.get(node.node_id),
     }))
   }
-  return (doc?.nodes ?? []).filter((node) => node.type !== 'trigger').map((node) => ({
-    id: node.node_id, nodeId: node.node_id, title: node.title, type: node.type, attempt: null, definition: node,
-  }))
+return (doc?.nodes??[]).filter(node=>node.type!=='trigger').map((node,index)=>({
+  id:node.node_id, nodeId:node.node_id, title:humanStepTitle(node.node_id,index,node.title),
+  type:node.type, attempt:null, definition:node,
+}))
 }
 
 export function usePinnedWorkflow(api: ResourcesApi, workflowId: string | null | undefined, version: number | null | undefined) {

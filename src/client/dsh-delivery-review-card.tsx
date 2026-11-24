@@ -4,6 +4,7 @@ import { createResourcesApi } from './api/resources.ts'
 import { createReworkApi } from './api/rework.ts'
 import { createLocalSessionFetcher, localPanelBase, type DshLocalPanelSources } from './dsh-local-panel.tsx'
 import { ArtifactContent, useArtifactRetention } from './panel/artifact-content.tsx'
+import { mayReview, type AcquiredVersion } from './panel/acquired-version.ts'
 import { operatorReason } from '../core/operator-language.ts'
 import type { ChatDeliveryReview } from '../service/chat-delivery-review.ts'
 
@@ -31,13 +32,15 @@ function Review({ review, api, commands }: {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [unconfirmed, setUnconfirmed] = useState<string>()
-  // 没有会话内全文时，先取到这一版再确认；下载只代表取得文件，不宣称已读（D08）。
-  const [opened, setOpened] = useState(false)
+  // 没有会话内全文时，先真正取得并核验这一版；只勾选「已打开」不构成已读（D08）。
+  const [acquired, setAcquired] = useState<AcquiredVersion | null>(null)
+  const [acknowledged, setAcknowledged] = useState(false)
   const locked = useRef(false)
   const retention = useArtifactRetention(review.artifact ?? undefined)
   const readInChat = review.preview !== undefined
-  const enabled = retention === 'available' && !review.otherArtifacts && !busy && !notice && !unconfirmed
-    && (readInChat || opened)
+  const artifactFile = review.artifact
+  const readable = artifactFile ? mayReview(artifactFile, acquired, readInChat, acknowledged) : false
+  const enabled = retention === 'available' && !review.otherArtifacts && !busy && !notice && !unconfirmed && readable
 
   // 没有成果文件的留验只能补交或撤销，不给验收动作（D06）。
   if (!review.artifact) return <PendingDelivery review={review} commands={commands} />
@@ -57,12 +60,15 @@ function Review({ review, api, commands }: {
         }
       } else {
         const { data } = await commands.listHolds(artifact.run_id)
-        if (!data.items.some((item) => item.status === 'held' && item.node_run_id === review.nodeRunId)) {
+        const hold = data.items.find((item) => item.status === 'held' && item.node_run_id === review.nodeRunId)
+        if (!hold) {
           setNotice('这条待办已处理或成果版本已更新。请刷新任务结果。')
           return
         }
+        // 把读到的留验身份带回去：另一个页签已经换代时，这次结论必须失败（D04）。
+        const seen = hold.hold_id ? { hold_id: hold.hold_id, expected_revision: hold.revision } : {}
         if (action === 'accept') await commands.hold({ run_id: artifact.run_id, node_run_id: review.nodeRunId, action: 'accept',
-          artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+          ...seen, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
         else {
           const result = await commands.request({ run_id: artifact.run_id, target_node_run_id: review.nodeRunId,
             source_artifact_id: artifact.artifact_id, source_artifact_hash: artifact.sha256, expected_revision: review.nodeRevision,
@@ -109,12 +115,12 @@ function Review({ review, api, commands }: {
     {review.preview !== undefined && retention === 'available' && <pre aria-label="待审成果全文" style={{
       whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 250, overflow: 'auto', padding: 10, border: '1px solid #d5dee8',
     }}>{review.preview}</pre>}
-    <ArtifactContent api={api} artifact={artifact} />
+    <ArtifactContent api={api} artifact={artifact} onAcquired={setAcquired} />
     {review.otherArtifacts ? <p>这个步骤还有其他成果。请在 Orchestra 的任务结果中核对完整交付再提交结论。</p>
       : <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
         {!readInChat && retention === 'available' && <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input type="checkbox" checked={opened} onChange={event => setOpened(event.currentTarget.checked)} />
-          我已打开或下载这一版成果
+          <input type="checkbox" checked={acknowledged} disabled={acquired === null} onChange={event => setAcknowledged(event.currentTarget.checked)} />
+          我已打开这一版成果
         </label>}
         <button type="button" disabled={!enabled || editing} onClick={() => void submit('accept')}>通过验收</button>
         <button type="button" disabled={!enabled || editing} aria-expanded={editing} onClick={() => setEditing(!editing)}>要求修改</button>

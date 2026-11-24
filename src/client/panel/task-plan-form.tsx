@@ -27,14 +27,14 @@ function Brief({ plan }: { plan: TaskPlanView }) {
   return <div style={contentStyle}>
     <div><strong>目标</strong><p style={descriptionStyle}>{brief.goal}</p></div>
     {brief.requirements.length > 0 && <div><strong>必须满足</strong>
-      <ul style={listStyle}>{brief.requirements.map(({ id, text }) => <li key={id}>{id} · {text}</li>)}</ul></div>}
+      <ul style={listStyle}>{brief.requirements.map(({ id, text }) => <li key={id}>{text}</li>)}</ul></div>}
     <div><strong>交付物与验收条件</strong>
       <ul style={listStyle}>
         {proposal.deliverables.map(({ title, node_id, goal_ids, acceptance }, index) => <li key={index}>
           {title}。
           {acceptance.kind === 'artifact'
-            ? `交付文件「${acceptance.file_name}」，内容由你人工核对后再验收。`
-            : '以系统工具的执行为证，由你核对执行结果。'}
+            ? `交付文件「${acceptance.file_name}」，内容由你核对。`
+            : acceptance.kind === 'chat/text_result' ? '完成后在本次会话直接查看正文。' : '使用系统工具记录核对执行结果。'}
           {/* 文件大小、退出码、目标编号和节点号留给核对用，不占人工阅读主线（P04）。 */}
           <details style={detailStyle}><summary>技术依据</summary>
             <p style={descriptionStyle}>节点 {node_id} · 目标 {goal_ids.join('、')}</p>
@@ -42,7 +42,7 @@ function Brief({ plan }: { plan: TaskPlanView }) {
               ? `文件规则：至少 ${acceptance.minimum_bytes} 字节。`
               : acceptance.kind === 'tool_evidence'
                 ? `工具规则：${acceptance.tool} 退出码为 ${acceptance.exit_code}。`
-                : '会话结果：由操作者人工核对，自动核验待导出文件能力。'}</p>
+                : '核对负责步骤提交的正文版本，内容由你审核。'}</p>
           </details>
         </li>)}
       </ul>
@@ -78,6 +78,8 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
   const [goal, setGoal] = useState(workflowRequest?.goal ?? '')
   const [criteria, setCriteria] = useState('')
   const [plan, setPlan] = useState<TaskPlanView | null>(null)
+  const [draftReadFailed, setDraftReadFailed] = useState(false)
+  const [draftRetry, setDraftRetry] = useState(0)
   const [drafts, setDrafts] = useState<TaskPlanView[]>([])
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState<'propose' | 'start' | null>(null)
@@ -105,11 +107,13 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
   useEffect(() => {
     if (!open || capability !== 'enabled') return
     let current = true
+    setDraftReadFailed(false)
+    setDrafts([])
     void api.listPlanDrafts().then(({ data }) => {
-      if (current) setDrafts(data?.items ?? [])
-    }).catch(() => { if (current) setDrafts([]) })
+      if (current) setDrafts(data.items)
+    }).catch(() => { if (current) setDraftReadFailed(true) })
     return () => { current = false }
-  }, [api, open, capability])
+  }, [api, open, capability, draftRetry])
 
   function resume(draft: TaskPlanView) {
     setGoal(draft.brief.goal)
@@ -134,7 +138,10 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
     setFailure('')
     setConfirmed(false)
     try {
-      const proposed = await commands.proposeTaskPlan(goal.trim(), requirements, request.signal)
+      const pin = workflowRequest
+        ? { workflow_id: workflowRequest.id, workflow_version: workflowRequest.version }
+        : undefined
+      const proposed = await commands.proposeTaskPlan(goal.trim(), requirements, request.signal, pin)
       if (proposal.current !== request) return
       if (workflowRequest && (proposed.proposal.workflow_id !== workflowRequest.id
         || proposed.proposal.workflow_version !== workflowRequest.version)) {
@@ -180,6 +187,8 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
       {workflowRequest && <button type="button" disabled={busy === 'start'} style={editStyle} onClick={onClearWorkflow}>
         不指定流程，从目标开始
       </button>}
+      {draftReadFailed && <p aria-live="polite">未能读取未启动的计划。 <button type="button"
+        onClick={() => setDraftRetry(n => n + 1)}>重新读取</button></p>}
       {drafts.length > 0 && <details style={detailStyle} open={!plan && drafts.length > 0}>
         <summary>继续未启动的计划（{drafts.length}）</summary>
         <ul style={listStyle}>
@@ -214,29 +223,33 @@ export function TaskPlanForm({ api, commands, onStarted, onOpenRun, workflowRequ
       </div>}
       {plan && <section style={contentStyle} aria-label="计划复核">
         <h2 style={headingStyle}>{plan.proposal.title}</h2>
-        <p style={descriptionStyle}>{plan.proposal.workflow_id} · 固定 v{plan.proposal.workflow_version}</p>
+        <details style={detailStyle}><summary>固定流程版本</summary>
+          <p>{plan.proposal.workflow_id} · v{plan.proposal.workflow_version}</p>
+        </details>
         <Brief plan={plan} />
         <div>
           <strong>{plan.quality.ready ? '质量检查通过，待你确认' : '质量检查发现阻断项'}</strong>
-          <ul style={listStyle}>{plan.quality.checks.map((check) => <li key={check.check}>
-            {checkLabels[check.check]} · {check.passed ? '通过' : '需要调整'}
-            {!check.passed && <ul style={listStyle}>{check.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}
-          </li>)}</ul>
+          {plan.quality.checks.filter(check => !check.passed).map(check => <div key={check.check}>
+            {checkLabels[check.check]}需要调整
+            <ul style={listStyle}>{check.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>
+          </div>)}
         </div>
+        {plan.proposal.risks.length > 0 && <section aria-label="确认前要了解的风险">
+          <strong>确认前要了解的风险</strong>
+          {plan.proposal.risks.map((risk, index) => <p key={index} style={descriptionStyle}>
+            {severityLabels[risk.severity]} · {risk.description}。{risk.mitigation}
+          </p>)}
+        </section>}
         <details>
-          <summary>步骤、模型建议与风险</summary>
+          <summary>步骤与模型建议</summary>
           <ul style={listStyle}>{plan.proposal.steps.map((step, index) => <li key={index}>
             {step.description} · {MODEL_LEVELS[step.complexity].label}。{step.model_reason}
             <details style={detailStyle}><summary>技术依据</summary>
               <p style={descriptionStyle}>步骤编号 {step.node_id} · 依赖 {step.depends_on.length > 0 ? step.depends_on.join('、') : '无'} · 工具 {step.tools.length > 0 ? step.tools.join('、') : '未指定'}</p>
             </details>
             {step.preferred_model_ref && <span> · 建议模型 {step.preferred_model_ref}</span>}
-            {step.depends_on.length > 0 && <p style={descriptionStyle}>依赖 {step.depends_on.join('、')}</p>}
-            {step.tools.length > 0 && <p style={descriptionStyle}>工具 {step.tools.join('、')}</p>}
           </li>)}</ul>
-          {plan.proposal.risks.map((risk, index) => <p key={index} style={descriptionStyle}>
-            {severityLabels[risk.severity]} · {risk.description}。应对措施为{risk.mitigation}。
-          </p>)}
+
         </details>
         {!plan.launch && <div style={contentStyle}>
           {plan.quality.ready && <>

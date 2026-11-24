@@ -5,6 +5,8 @@
 // - 只写 run_acceptance_results 与 tasks.display_status；
 // - 绝不改写 runs.status / node_runs.status / events / artifacts / tool_executions；
 // - 没有已确认计划的任务（通用 Workflow Run）判 not_applicable，不写任何验收行。
+import { readBoundText } from '../text-result.ts'
+import { nativeTextFormat } from '../native-text-capability.ts'
 import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
 import { uuidv7 } from '../../core/ids.ts'
 import type { Tx } from '../../infra/sqlite/driver.ts'
@@ -81,6 +83,7 @@ const ARTIFACT_LOOKUP = 'SELECT a.artifact_id AS artifact_id, a.sha256 AS sha256
   + 'FROM artifacts a JOIN artifact_contents c ON c.artifact_id = a.artifact_id '
   + 'LEFT JOIN node_runs n ON n.node_run_id = c.node_run_id '
   + 'WHERE a.run_id = ? AND c.file_name = ? AND n.replacement_node_run_id IS NULL'
+  + " AND (CASE WHEN json_valid(a.evidence_index) THEN json_extract(a.evidence_index,'$.kind') END IS NOT 'orchestra.chat-text.v1')"
 
 const TOOL_LOOKUP = 'SELECT t.execution_id AS execution_id, t.node_run_id AS node_run_id, t.attempt AS attempt, '
   + 't.tool AS tool, t.exit_code AS exit_code, t.finished_at AS finished_at '
@@ -106,12 +109,16 @@ function rank(outcome: AcceptanceOutcome): number {
 
 /** 交付项主键：node_id + 标题，同名重复时补序号，保证稳定可重放且不撞唯一键。 */
 function deliverableKeys(items: ParsedDeliverable[]): string[] {
-  const seen = new Map<string, number>()
+  const counts = new Map<string, number>()
+  const assigned = new Set<string>()
   return items.map((item) => {
     const base = item.node_id + '|' + item.title
-    const count = seen.get(base) ?? 0
-    seen.set(base, count + 1)
-    return count === 0 ? base : base + '#' + String(count + 1)
+    let count = (counts.get(base) ?? 0) + 1
+    let key = count === 1 ? base : base + '#' + count
+    while (assigned.has(key)) key = base + '#' + ++count
+    counts.set(base, count)
+    assigned.add(key)
+    return key
   })
 }
 
@@ -169,6 +176,9 @@ function evaluateArtifact(
     kind: 'artifact' as const,
     rule_version: ruleVersion,
   }
+  // 通过只代表「已登记、来自本步骤、满足字节与时效」，不代表内容正确。
+  // 同时把格式归属写进证据：文本生产器声明的格式与工具产出的二进制件在校验范围上是两回事（D01）。
+  const nativeFormat = nativeTextFormat(fileName)
   const rows = tx.all<ArtifactRow>(ARTIFACT_LOOKUP, [runId, fileName])
   if (rows.length === 0) {
     return {
@@ -224,6 +234,8 @@ function evaluateArtifact(
       node_id: best.row.node_id,
       retain_until: best.row.retain_until,
       expired: best.expired,
+      native_text_format: nativeFormat,
+      capability_scope: nativeFormat === null ? 'artifact_registered_only' : 'native_text',
     },
   }
 }
@@ -275,6 +287,8 @@ function evaluateDeliverable(
   now: string,
   item: ParsedDeliverable,
   deliverableKey: string,
+  plan: PlanRow,
+  index: number,
 ): DeliverableResult {
   const ruleVersion = sha256Hex(canonicalJson(item.rule))
   if (item.parse_error !== null) {
@@ -291,23 +305,10 @@ function evaluateDeliverable(
   }
   if (item.kind === 'artifact') return evaluateArtifact(tx, runId, now, item, deliverableKey, ruleVersion)
   if (item.kind === 'chat/text_result') {
-    // 会话结果已落成真实 UTF-8 文件（chat-result.md）时可自动核验，否则如实说不能（P05）。
-    const file = tx.get<{ artifact_id: string; sha256: string }>(
-      `SELECT a.artifact_id, a.sha256 FROM artifacts a JOIN artifact_contents c USING(artifact_id)
-        WHERE a.run_id = ? AND c.file_name = 'chat-result.md' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1`, [runId],
-    )
-    return {
-      deliverable_key: deliverableKey,
-      title: item.title,
-      node_id: item.node_id,
-      kind: 'chat/text_result',
-      rule_version: ruleVersion,
-      outcome: file ? 'passed' : 'unverifiable',
-      reason: file ? null : 'chat_text_result_not_exported',
-      evidence: file
-        ? { artifact_id: file.artifact_id, sha256: file.sha256, note: '会话结果已导出为 chat-result.md' }
-        : { title: item.title, note: '会话结果尚未导出为可下载的 UTF-8 文件' },
-    }
+    const file = readBoundText(tx, runId, item.node_id, plan.plan_id, plan.content_hash, index, now)
+    return { deliverable_key: deliverableKey, title: item.title, node_id: item.node_id, kind: item.kind,
+      rule_version: ruleVersion, outcome: file ? 'passed' : 'unverifiable',
+      reason: file ? null : 'chat_text_result_not_exported', evidence: { title: item.title, ...file } }
   }
   return evaluateToolEvidence(tx, runId, item, deliverableKey, ruleVersion)
 }
@@ -325,7 +326,7 @@ export function evaluateRunAcceptance(tx: Tx, runId: string, now: string): RunAc
     return { outcome: 'unverifiable', plan_id: plan.plan_id, content_hash: plan.content_hash, results: [] }
   }
   const keys = deliverableKeys(parsed.items)
-  const results = parsed.items.map((item, index) => evaluateDeliverable(tx, runId, now, item, keys[index] ?? ''))
+  const results = parsed.items.map((item, index) => evaluateDeliverable(tx, runId, now, item, keys[index] ?? '', plan, index))
   return { outcome: summarize(results), plan_id: plan.plan_id, content_hash: plan.content_hash, results }
 }
 

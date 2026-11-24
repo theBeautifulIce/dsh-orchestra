@@ -3,6 +3,7 @@ import { appendNodeRunEvent, assertChainIntact, readChain } from '../infra/db/le
 import type { Tx } from '../infra/sqlite/driver.ts'
 import type { NodeRunRow } from './commands/lease.ts'
 import type { ReworkBinding } from './rework-coordinator.ts'
+import { textTarget } from './text-result.ts'
 import { approvedArtifactRequirements } from './task-planning.ts'
 
 const publicationEvent = 'artifact.published_for_attempt'
@@ -19,10 +20,17 @@ type Publication = {
   size_bytes: number
 }
 
+export function matchesPublication(rule: { file_name: string; textIndex?: number }, fileName: string, id: string,
+  plan: { planId: string; contentHash: string }, binding: ReworkBinding) {
+  if (rule.file_name !== fileName) return false
+  if (rule.textIndex === undefined) return !id.startsWith('chat_')
+  return textTarget(plan.planId, plan.contentHash, rule.textIndex, binding).artifactId === id
+}
+
 export function recordArtifactPublication(tx: Tx, secret: string, binding: ReworkBinding,
   node: { run_id: string; node_id: string }, fileName: string, artifact: { artifact_id: string; sha256: string; size_bytes: number }) {
   const approved = approvedArtifactRequirements(tx, node.run_id, node.node_id)
-  if (!approved?.rules.some((rule) => rule.file_name === fileName)) return
+  if (!approved || !approved.rules.some((rule) => matchesPublication(rule, fileName, artifact.artifact_id, approved, binding))) return
   assertChainIntact(tx, secret, binding.node_run_id)
   appendNodeRunEvent(tx, secret, binding.node_run_id, publicationEvent, {
     ...artifact, file_name: fileName, run_id: node.run_id, plan_id: approved.planId, plan_hash: approved.contentHash,
@@ -41,7 +49,8 @@ export function verifyArtifactCompletion(tx: Tx, secret: string, row: NodeRunRow
   const evidence = []
   for (const rule of approved.rules) {
     const receipt = published.find(({ publication }) => publication.attempt === row.attempt
-      && publication.action_generation === row.action_generation && publication.file_name === rule.file_name
+      && publication.action_generation === row.action_generation
+      && matchesPublication(rule, publication.file_name, publication.artifact_id, approved, row)
       && publication.run_id === row.run_id && publication.plan_id === approved.planId && publication.plan_hash === approved.contentHash)
     if (!receipt) return null
     const { seq, publication } = receipt

@@ -199,8 +199,8 @@ it('uses the approved planning entry point when the host requires a plan for pub
     await view.click(view.container.querySelector('.task-plan-entry input[type="checkbox"]')!)
     await view.click(button('确认后启动任务'))
     expect(writes).toEqual([
-      { path: '/v1/task-plans', body: { goal: goal?.value, requirements: ['交付本次报告'] } },
-      { path: '/v1/task-plans', body: { goal: goal?.value, requirements: ['交付本次报告'] } },
+      { path: '/v1/task-plans', body: { goal: goal?.value, requirements: ['交付本次报告'], workflow_id: 'wf1', workflow_version: '2' } },
+      { path: '/v1/task-plans', body: { goal: goal?.value, requirements: ['交付本次报告'], workflow_id: 'wf1', workflow_version: '2' } },
       { path: '/v1/task-plans/confirm', body: { plan_id: 'p', content_hash: 'hash', confirmed: true } },
     ])
     expect(button('查看本次运行')).toBeDefined()
@@ -360,5 +360,28 @@ it('reuses the same manual operation after a lost response and offers no run unt
     const link = button('查看本次运行')!
     await view.click(link)
     expect(open).toHaveBeenCalledWith('committed-task', link, 'committed-run')
+  } finally { view.unmount() }
+})
+
+it('continues the workflow picker past 100 published entries', async () => {
+  const fake = createFakeService(({ params }) => {
+    expect(params.get('published')).toBe('1')
+    return { ok: true, data: params.get('cursor') === 'next'
+      ? page([workflowItem({ workflow_id: 'last', name: '最后一个流程' })])
+      : page(Array.from({ length: 100 }, (_, i) => workflowItem({ workflow_id: 'w' + i })), 'next') }
+  })
+  const client = createApiClient('http://panel.test', fake.fetcher)
+  const view = await renderPanel(<PanelShell activeRoute="tasks" serviceConnected onNavigate={() => {}}>
+    <TaskStartForm commands={createTaskCommands(client)} api={createResourcesApi(client)} onCreated={() => {}} />
+  </PanelShell>)
+  try {
+    await view.flush()
+    await change(view.container.querySelector('input')!, '复核日报')
+    await change(view.container.querySelector('select')!, 'w0')
+    await view.click(view.findAll('button').find(b => b.textContent === '加载更多流程')!)
+    await view.flush()
+    expect(view.text()).toContain('最后一个流程')
+    expect(view.container.querySelector('input')?.value).toBe('复核日报')
+    expect(view.container.querySelector('select')?.value).toBe('w0')
   } finally { view.unmount() }
 })

@@ -24,6 +24,9 @@ export type RunDeliveryCheck = {
   reason: string | null
   evaluated_at: string
   rule_version: string
+  title?: string
+  sha256?: string
+  item_index?: number
   artifact_id?: string
   file_name?: string
   minimum_bytes?: number
@@ -167,6 +170,17 @@ function readDeliveryChecks({ tx }: ReadCtx, runId: string, includeArtifactIds: 
   return { has_more: rows.length > 50, items: rows.slice(0, 50).map(({ evidence_json, ...row }) => {
     const value = (JSON.parse(evidence_json) as { evidence?: unknown } | null)?.evidence
     const evidence = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+    if (row.kind === 'chat/text_result') {
+      if (row.outcome === 'passed' && evidence.publication !== 'orchestra.chat-text.v1') {
+        return { ...row, outcome: 'unverifiable' as const, reason: 'chat_text_result_not_exported' }
+      }
+      return { ...row,
+        ...(typeof evidence.title === 'string' && { title: evidence.title }),
+        ...(typeof evidence.file_name === 'string' && { file_name: evidence.file_name }),
+        ...(isCount(evidence.item_index) && { item_index: evidence.item_index }),
+        ...(includeArtifactIds && typeof evidence.artifact_id === 'string' && typeof evidence.sha256 === 'string'
+          && { artifact_id: evidence.artifact_id, sha256: evidence.sha256 }) }
+    }
     if (row.kind === 'artifact') return { ...row,
       ...(includeArtifactIds && typeof evidence.artifact_id === 'string' && { artifact_id: evidence.artifact_id }),
       ...(typeof evidence.file_name === 'string' && { file_name: evidence.file_name }),

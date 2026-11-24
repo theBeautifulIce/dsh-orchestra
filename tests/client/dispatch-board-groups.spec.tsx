@@ -88,7 +88,7 @@ it.each([false, true, undefined])('handles 200 records with has_more=%s', async 
     await view.flush()
     expect(view.findAll(groupSelector)).toHaveLength(has_more === false ? 1 : 0)
     expect(view.findAll('.task-card-steps li strong')).toHaveLength(200)
-    expect(view.text().includes('本次最多读取 200 条')).toBe(has_more !== false)
+    expect(view.text().includes('已读取 200 条尝试记录')).toBe(has_more !== false)
   } finally { view.unmount() }
 })
 

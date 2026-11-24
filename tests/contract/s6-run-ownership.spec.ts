@@ -215,3 +215,77 @@ it('confirms a multi-file step against the review set captured at hold time', as
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+it('waits for every file when the hold was taken before anything was delivered', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-review-early-hold-'))
+  let fixture: Awaited<ReturnType<typeof boot>> | undefined
+  try {
+    fixture = await boot(dir, 'S6')
+    await install(fixture)
+    const started = await fixture.post<{ run_id: string }>('/v1/runs/start', startInput(), primarySession)
+    const runId = started.data!.run_id
+    const nodeRunId = String(fixture.db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id='source'").get(runId)?.node_run_id)
+    // 先点留验、后交文件：留验时清单为空，不能把它当成「无需核对」（D03）。
+    const held = await fixture.post<{ hold_id: string; revision: number }>('/v1/rework/hold', hold(runId, nodeRunId), primarySession)
+    expect(held).toMatchObject({ status: 200, data: { status: 'held' } })
+    const dispatch = await fixture.post('/v1/runs/dispatch', { runId, nodes: {
+      source: { tools: [{ command: tool, args: [], cwd: '.', timeoutMs: 5_000 }], input: {}, outputSchema: {} },
+    } })
+    expect(dispatch).toMatchObject({ status: 200 })
+    const report = registerRunArtifact(fixture.db, { artifactId: 'early-report', runId, nodeRunId, fileName: 'report.md', bytes: Buffer.from('report body') })
+    const detail = registerRunArtifact(fixture.db, { artifactId: 'early-detail', runId, nodeRunId, fileName: 'data.csv', bytes: Buffer.from('a,b') })
+    const accept = (artifact: { artifact_id: string; sha256: string }) => ({ operation_id: uuidv7(), run_id: runId,
+      node_run_id: nodeRunId, action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+    const first = await fixture.post<{ status: string; pending?: string[] }>('/v1/rework/hold', accept(report), primarySession)
+    expect(first).toMatchObject({ status: 200, data: { status: 'held', pending: ['data.csv'] } })
+    expect(fixture.db.raw.prepare('SELECT status FROM runs WHERE run_id=?').get(runId)).toMatchObject({ status: 'running' })
+    expect(await fixture.post('/v1/rework/hold', accept(detail), primarySession))
+      .toMatchObject({ status: 200, data: { status: 'accepted' } })
+    expect(fixture.db.raw.prepare('SELECT status FROM delivery_review_holds WHERE run_id=?').get(runId)).toMatchObject({ status: 'accepted' })
+  } finally {
+    await fixture?.service.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+it('rejects a conclusion from an old page after the hold was withdrawn and taken again', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-review-hold-cas-'))
+  let fixture: Awaited<ReturnType<typeof boot>> | undefined
+  try {
+    fixture = await boot(dir, 'S6')
+    await install(fixture)
+    const started = await fixture.post<{ run_id: string }>('/v1/runs/start', startInput(), primarySession)
+    const runId = started.data!.run_id
+    const nodeRunId = String(fixture.db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id='source'").get(runId)?.node_run_id)
+    const dispatch = await fixture.post('/v1/runs/dispatch', { runId, nodes: {
+      source: { tools: [{ command: tool, args: [], cwd: '.', timeoutMs: 5_000 }], input: {}, outputSchema: {} },
+    } })
+    expect(dispatch).toMatchObject({ status: 200 })
+    const report = registerRunArtifact(fixture.db, { artifactId: 'cas-report', runId, nodeRunId, fileName: 'report.md', bytes: Buffer.from('report body') })
+    const detail = registerRunArtifact(fixture.db, { artifactId: 'cas-detail', runId, nodeRunId, fileName: 'data.csv', bytes: Buffer.from('a,b') })
+    const pageA = await fixture.post<{ hold_id: string; revision: number }>('/v1/rework/hold', hold(runId, nodeRunId), primarySession)
+    expect(pageA).toMatchObject({ status: 200 })
+    const seenA = { hold_id: pageA.data!.hold_id, expected_revision: pageA.data!.revision }
+    const accept = (artifact: { artifact_id: string; sha256: string }) => ({ operation_id: uuidv7(), run_id: runId,
+      node_run_id: nodeRunId, action: 'accept' as const, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
+    expect(await fixture.post('/v1/rework/hold', { ...accept(report), ...seenA }, primarySession))
+      .toMatchObject({ status: 200, data: { status: 'held' } })
+    // B 页撤销并以同一节点重建留验：新一轮有自己的身份，A 页手上的旧身份随即失效。
+    expect(await fixture.post('/v1/rework/hold', { operation_id: uuidv7(), run_id: runId, node_run_id: nodeRunId,
+      action: 'withdraw' as const, ...seenA, expected_revision: seenA.expected_revision + 1 }, primarySession))
+      .toMatchObject({ status: 200, data: { status: 'withdrawn' } })
+    const pageB = await fixture.post<{ hold_id: string; revision: number }>('/v1/rework/hold', hold(runId, nodeRunId), primarySession)
+    expect(pageB).toMatchObject({ status: 200, data: { status: 'held' } })
+    expect(pageB.data!.hold_id).not.toBe(seenA.hold_id)
+    expect(await fixture.post('/v1/rework/hold', { ...accept(report), ...seenA }, primarySession))
+      .toMatchObject({ status: 409, error: { code: 'STALE_GENERATION' } })
+    expect(await fixture.post('/v1/rework/hold', { ...accept(detail), ...seenA }, primarySession))
+      .toMatchObject({ status: 409, error: { code: 'STALE_GENERATION' } })
+    expect(await fixture.post('/v1/rework/hold', { ...accept(detail), hold_id: pageB.data!.hold_id,
+      expected_revision: pageB.data!.revision }, primarySession))
+      .toMatchObject({ status: 200, data: { status: 'held' } })
+  } finally {
+    await fixture?.service.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

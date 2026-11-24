@@ -90,7 +90,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
         collaborationEnabled: result.data.collaboration_enabled === true,
         runNotesEnabled: result.data.run_notes_enabled === true,
         reworkEnabled: result.data.rework_enabled === true,
-        taskTriggersEnabled: result.data.task_triggers_enabled !== false,
+        taskTriggersEnabled: result.data.task_triggers_enabled === true,
         reworkPlannerEnabled: result.data.rework_planner_enabled === true,
       }))
       return true

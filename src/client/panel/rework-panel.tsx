@@ -231,7 +231,10 @@ function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled, ru
   }, [api, commands, runId, refresh, plannerEnabled])
   const node = nodes.find(n => n.node_run_id === nodeId)
   const artifact = artifacts.find(a => a.artifact_id === artifactId && a.source_node_run_id === nodeId)
-  const held = holds.some(h => h.node_id === node?.node_id && h.status === 'held')
+  const hold = holds.find(h => h.node_id === node?.node_id && h.status === 'held')
+  const held = hold !== undefined
+  // 留验身份原样带回：另一页签已经换代时，服务端必须拒绝这次提交（D04）。
+  const seenHold = hold?.hold_id ? { hold_id: hold.hold_id, expected_revision: hold.revision } : {}
   async function inspect() {
     if (!canWrite || !node || !artifact) return
     setBusy(true); setNotice('')
@@ -247,7 +250,7 @@ function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled, ru
     setBusy(true); setNotice('')
     try {
       if (action === 'request' && artifact) await commands.request({ run_id: runId, target_node_run_id: nodeId, source_artifact_id: artifact.artifact_id, source_artifact_hash: artifact.sha256, expected_revision: node.revision, reason: reason.trim(), expected_result: expected.trim(), preserve_requirements: preserve.split('\n').map(s => s.trim()).filter(Boolean), suggested_scope: scope, evidence_ids: [] })
-      else if (action !== 'request') await commands.hold({ run_id: runId, node_run_id: nodeId, action, ...(action === 'accept' && artifact ? { artifact_id: artifact.artifact_id, sha256: artifact.sha256 } : {}) })
+      else if (action !== 'request') await commands.hold({ run_id: runId, node_run_id: nodeId, action, ...seenHold, ...(action === 'accept' && artifact ? { artifact_id: artifact.artifact_id, sha256: artifact.sha256 } : {}) })
       setNotice('已保存'); setRefresh(n => n + 1); setHolds((await commands.listHolds(runId)).data.items); onChanged()
     } catch (e) { setNotice(errorText(e)); if (e instanceof ApiError && e.code === 'OPERATION_OUTCOME_UNKNOWN') setUnknownOperation((e.details as { operation_id: string }).operation_id) }
     finally { setBusy(false) }

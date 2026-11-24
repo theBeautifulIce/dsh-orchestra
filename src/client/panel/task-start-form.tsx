@@ -14,14 +14,25 @@ const AUTONOMY_HELP: Record<Autonomy, string> = {
   supervised: '你可处理的决定会进入「审批中心 → 待处理」。超时仍等待获授权的处理。',
 }
 
-export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborationEnabled, onPlanWorkflow }: {
+type TaskStartFormProps = {
   api: ResourcesApi; commands: TaskCommands; onCreated: () => void
   collaborationEnabled?: boolean
   onOpenRun?: (taskId: string, trigger: HTMLButtonElement, runId: string) => void
   onPlanWorkflow?: (workflow: WorkflowListItem & { current_version: number }, title: string) => void
-}) {
+}
+
+export function TaskStartForm(props: TaskStartFormProps) {
+  const [source, setSource] = useState({ api: props.api, epoch: 0 })
+  if (source.api !== props.api) setSource({ api: props.api, epoch: source.epoch + 1 })
+  return <TaskStartFormBody key={source.epoch} {...props} />
+}
+
+function TaskStartFormBody({ api, commands, onCreated, onOpenRun, collaborationEnabled, onPlanWorkflow }: TaskStartFormProps) {
   const [workflows, setWorkflows] = useState<WorkflowListItem[] | null>(null)
   const [failed, setFailed] = useState(false)
+  const [pageLoading, setPageLoading] = useState(true)
+  const [page, setPage] = useState<{ cursor?: string }>({})
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [title, setTitle] = useState('')
   const [selected, setSelected] = useState('')
   const [autonomy, setAutonomy] = useState<Autonomy>('autonomous')
@@ -32,12 +43,23 @@ export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborati
   const [receipt, setReceipt] = useState<{ taskId: string; runId: string } | null>(null)
   useEffect(() => {
     let current = true
-    // 服务端按 reusable 过滤后再分页，第 100 条之后的可用流程也能选到（P03）。
-    void api.listWorkflows({ status: 'active', scope: 'reusable', limit: 100 }).then(({ data }) => {
-      if (current) setWorkflows(data.items.filter((item) => item.current_version !== null))
-    }).catch(() => { if (current) setFailed(true) })
+    setPageLoading(true)
+    setFailed(false)
+    void api.listWorkflows({ status: 'active', scope: 'reusable', published: 1, limit: 100, cursor: page.cursor })
+      .then(({ data }) => {
+        if (!current) return
+        if (page.cursor && data.next_cursor === page.cursor) throw new Error('流程列表游标没有前进')
+        setWorkflows(previous => {
+          const combined = new Map((page.cursor ? previous ?? [] : []).map(item => [item.workflow_id, item]))
+          for (const item of data.items) if (item.current_version !== null) combined.set(item.workflow_id, item)
+          return [...combined.values()]
+        })
+        setNextCursor(data.next_cursor)
+      })
+      .catch(() => { if (current) setFailed(true) })
+      .finally(() => { if (current) setPageLoading(false) })
     return () => { current = false }
-  }, [api])
+  }, [api, page])
   async function submit(event: FormEvent) {
     event.preventDefault()
     const workflow = workflows?.find((item) => item.workflow_id === selected)
@@ -69,7 +91,10 @@ export function TaskStartForm({ api, commands, onCreated, onOpenRun, collaborati
     } finally { setBusy(false) }
   }
   return <form className="task-launch-form" onSubmit={(event) => { void submit(event) }} aria-label="从已发布流程创建任务">
-    {failed && <p role="alert">暂时无法读取已发布流程。关闭后重新打开可再试。</p>}
+    {failed && <p role="alert">暂时无法读取已发布流程。 <button type="button"
+      onClick={() => setPage({ ...page })}>重试读取</button></p>}
+    {nextCursor && !failed && <button type="button" disabled={pageLoading || busy}
+      onClick={() => setPage({ cursor: nextCursor })}>加载更多流程</button>}
     {!workflows && !failed && <p role="status">正在读取已发布流程…</p>}
     {workflows?.length === 0 && <p>发布一个可复用流程后，就可以从这里创建任务。</p>}
     {workflows && workflows.length > 0 && <>

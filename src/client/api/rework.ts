@@ -21,7 +21,13 @@ export type RunTopology = {
 
 export type ReworkScope = 'targeted_revision' | 'rerun_node' | 'replan_subgraph'
 export type ReworkPlan = { plan_hash: string; proposal: { reason: string; changes: Array<{ node_id: string; instruction: string }>; preserved_node_ids: string[]; additional_edges?: Array<{from:string;to:string}>; insert_steps?: Array<{node_id:string;before_node_id:string;instruction:string}> }; revision: number }
-export type ReviewHold = { run_id: string; node_id: string; node_run_id: string; status: 'held' | 'accepted' | 'withdrawn'; artifact_id: string | null; sha256: string | null }
+export type ReviewHold = { run_id: string; node_id: string; node_run_id: string; status: 'held' | 'accepted' | 'withdrawn';
+  artifact_id: string | null; sha256: string | null
+  /** 读到的留验身份：提交时原样带回，服务端据此拒绝旧页签的结论（D04）。 */
+  hold_id: string | null
+  revision: number
+  reviewed_files?: Array<{ artifact_id: string; sha256: string; file_name: string | null }>
+  pending?: string[] }
 export type ReworkRequestInput = { run_id: string; target_node_run_id: string; source_artifact_id: string; source_artifact_hash: string; reason: string; expected_result: string; preserve_requirements: string[]; suggested_scope: ReworkScope; evidence_ids: string[]; expected_revision: number }
 export type ReworkReviewInput = { request_id: string; expected_revision: number; action: 'authorize' | 'reject' | 'reject_final' | 'accept' | 'request_changes' | 'escalate'; note: string; artifact_id?: string; artifact_hash?: string }
 
@@ -50,7 +56,8 @@ export function createReworkApi(client: ApiClient) {
     getPlan: (request_id: string) => client.get<{ plan: ReworkPlan | null }>('/v1/rework/plan', { request_id }),
     approvePlan: (input: { request_id: string; expected_revision: number; plan_hash: string }) => command('/v1/rework/plan/approve', input),
     listHolds: (run_id: string) => client.get<{ items: ReviewHold[] }>('/v1/rework/holds', { run_id }),
-    hold: (input: { run_id: string; node_run_id: string; action: 'hold' | 'accept' | 'withdraw'; artifact_id?: string; sha256?: string }) => command('/v1/rework/hold', input),
+    hold: (input: { run_id: string; node_run_id: string; action: 'hold' | 'accept' | 'withdraw'; artifact_id?: string; sha256?: string
+      hold_id?: string; expected_revision?: number }) => command('/v1/rework/hold', input),
     getOperation: (operation_id: string) => client.get<OperationRow>('/v1/operations/get', { operation_id }),
   }
 }

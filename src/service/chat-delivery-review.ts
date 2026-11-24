@@ -102,7 +102,9 @@ export function formatDeliveryReviewNotice(review: ChatDeliveryReview) {
     '任务　' + line(review.title),
     '步骤　' + line(review.step),
     '待审成果　' + file + (review.revised ? `（第 ${review.revised.round} 轮修订）` : ''),
-    '审核原因　' + (review.revised ? '修订已完成，请核对本轮成果是否达到要求。' : '该步骤已交付，当前运行等待人工验收。'),
+    // 无文件时不能说「已交付」：这一步已结束，但没有可核对的内容（D06）。
+    '审核原因　' + (review.revised ? '修订已完成，请核对本轮成果是否达到要求。'
+      : review.artifact ? '该步骤已交付，当前运行等待人工验收。' : '步骤已结束，尚无可核对文件，当前运行等待人工处理。'),
     '审核标准　' + (review.criteria.length ? review.criteria.slice(0, 4).map(line).join('、') : '请对照原始任务要求核对成果。'),
     '处理方式　' + (!review.artifact ? '先提交这一步的成果文件，或撤销这次留验让运行继续收尾。'
       : review.artifact.expired ? '成果已过期，请在 Orchestra 的任务结果中核对登记。'

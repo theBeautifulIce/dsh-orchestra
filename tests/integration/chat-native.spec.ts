@@ -20,6 +20,7 @@ import { registerRunArtifact } from '../../src/service/artifact-store.ts'
 import { createDeliveryReviewHost } from '../../src/service/delivery-review.ts'
 import { recordArtifactPublication } from '../../src/service/artifact-completion.ts'
 import { applyRunAcceptance } from '../../src/service/commands/run-acceptance.ts'
+import { formatChatApproval } from '../../src/core/chat-approval-text.ts'
 import { classifyChatTask } from '../../src/service/chat-task-intent.ts'
 import { reportChatRun } from '../../src/service/chat-task-receipts.ts'
 import { installNativeChat } from '../../src/service/chat-native.ts'
@@ -405,7 +406,8 @@ it('names the real reason for an unusable dispatch instead of a character-count 
       content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }],
     } as unknown as Message
     await human.admit(onlyImage)
-    await expect(human.call()).resolves.toMatchObject({ state: 'error', reason: 'only_attachments' })
+    expect(await human.checkTool('read')).toBeUndefined()
+    expect(test.planner).not.toHaveBeenCalled()
 
     await human.admit(user('/orchestra ' + '目'.repeat(2001)))
     await expect(human.call()).resolves.toMatchObject({ state: 'error', reason: 'goal_too_long' })
@@ -587,7 +589,7 @@ it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named a
       await expect(human.call()).resolves.toMatchObject({ state: 'launch_declined', title: 'F8 演练' })
       expect(count(service, 'runs')).toBe(0)
       expect(service.orchestra.db.raw.prepare('SELECT COUNT(*) AS n FROM decisions').get()).toMatchObject({ n: 0 })
-      expect(JSON.stringify(await human.render())).toContain('没有创建运行或待办')
+      expect(JSON.stringify(await human.render())).toContain('继续未启动的计划')
       return
     }
     const receipt = await human.call()
@@ -603,7 +605,8 @@ it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named a
       '审批原因　计划包含人工审批步骤，启动前需要你确认这份计划。',
       '审批内容　批准启动这份计划，共 2 个步骤。',
       '确认后　按计划启动，流程里的人工审批仍须单独处理。',
-      expect.stringContaining('计划步骤　批准合成数据核对'),
+      '计划步骤　共 2 步', '1. 批准合成数据核对', '2. 整理报告', '将交付　report.md',
+      expect.stringMatching(/^计划版本　[0-9a-f-]{36} \/ [0-9a-f]{64}$/u),
     ])
     const steps = () => service.orchestra.db.raw.prepare('SELECT node_id, status FROM node_runs WHERE run_id=? ORDER BY seq').all(receipt.run_id)
     await expect.poll(steps, { timeout: 5_000 }).toEqual([{ node_id: 'gate', status: 'blocked_pre' }, { node_id: 'draft', status: 'queued' }])
@@ -1352,4 +1355,95 @@ it('C03 澄清后的补充答复续接草稿，不重新分类成聊天', async 
     expect(goal).toContain('帮我整理一下')
     expect(goal).toContain('office-sample.csv')
   } finally { await test.close() }
+})
+
+function attachmentOnlyMessage(): Message {
+  type ImagePart = Extract<Message['content'][number], { type: 'image' }>
+  const attachmentId = uuidv7() as ImagePart['attachment']['attachmentId']
+  return { ...user(''), content: [{ type: 'image', attachment: {
+    attachmentId, mediaType: 'image/png', bytes: 68, width: 1, height: 1, name: 'sample.png',
+  } }] }
+}
+
+it('入口回归 C03 drops a cancelled clarification before the following message', async () => {
+ const t=await fixture()
+ try {
+  const h=t.session('work','audit-clarify')
+  await h.admit(user('帮我整理一下'))
+  expect(await h.call()).toMatchObject({state:'clarification_required'})
+  await h.admit(user('算了'))
+  expect(t.planner).toHaveBeenCalledTimes(0)
+  await h.admit(user('这次按负责人分组'))
+  await h.call()
+  expect(t.planner).not.toHaveBeenCalled()
+ } finally {await t.close()}
+})
+it('入口回归 C10 preserves the outcome of a previously successful task', async () => {
+ const t=await fixture()
+ try {
+  const h=t.session('work','audit-stop')
+  await h.admit(user('/orchestra 归纳会议事项，交付清单'))
+  const r=await h.call()
+  expect(r.state).toBe('started')
+  const db=t.services.get('audit-stop')!.orchestra.db
+  db.raw.prepare("UPDATE node_runs SET status='done' WHERE run_id=?").run(r.run_id)
+  db.raw.prepare("UPDATE runs SET status='succeeded',ended_at=? WHERE run_id=?").run(new Date().toISOString(),r.run_id)
+  await h.admit(user('请停止刚才的任务'))
+  const outcome=await h.invoke({action:'stop',run_id:r.run_id})
+  expect(JSON.parse(outcome.text).status).toBe('succeeded')
+  expect(outcome.summary).toContain('此前已完成')
+ } finally {await t.close()}
+})
+it('入口回归 C10 waits for execution confirmation before reporting an active task stopped', async () => {
+ const t=await fixture()
+ try {
+  const h=t.session('work','audit-active')
+  await h.admit(user('/orchestra 归纳会议事项，交付清单'))
+  const r=await h.call()
+  expect(r.state).toBe('started')
+  const db=t.services.get('audit-active')!.orchestra.db
+  db.raw.prepare("UPDATE node_runs SET status='started',executor_session_id='fixture-child' WHERE run_id=?").run(r.run_id)
+  await h.admit(user('请停止刚才的任务'))
+  t.approval.mockResolvedValueOnce('allowed-once')
+  const outcome=await h.call({action:'stop',run_id:r.run_id})
+  const attempt=db.raw.prepare("SELECT status,fence_state FROM node_runs WHERE run_id=?").get(r.run_id)
+  expect(outcome.state).toBe('stop_requested')
+  expect(outcome.status).toBe('running')
+  expect(attempt).toMatchObject({status:'stopping'})
+ } finally {await t.close()}
+})
+it('入口回归 C04 leaves ordinary image attachments with the host', async () => {
+ const t=await fixture()
+ try {
+  const h=t.session('work','audit-file')
+  const msg = attachmentOnlyMessage()
+  await h.admit(msg)
+  await h.call()
+  expect(await h.checkTool('read')).toBeUndefined()
+ } finally {await t.close()}
+})
+
+it('入口回归 C05 defers the task even when the user separately protects the source file',async()=>{
+ const t=await fixture()
+ try {const h=t.session('work','audit-delay')
+ const input='请生成审计报告。先不要执行这项任务。不要修改原文件。'
+ await h.admit(user(input));await h.call()
+ expect(t.planner).not.toHaveBeenCalled()
+ }finally{await t.close()}
+})
+it('入口回归 C04 keeps native read available after a standalone file',async()=>{
+ const t=await fixture()
+ try {const h=t.session('work','audit-read')
+ const msg = attachmentOnlyMessage()
+ await h.admit(msg)
+ expect(await h.checkTool('read')).toBeUndefined()
+ }finally{await t.close()}
+})
+
+it('入口回归 C07 shows every approved step, deliverables and plan version', ()=>{
+const final = '核对后发送完整审核结果与最新修订明细；将清单与摘要交给负责本次项目验收的客户甲'
+const text = formatChatApproval({step:'启动', reason:'核对范围', operation:'启动', consequence:'开始运行',
+planSteps:[...Array.from({length:8}, (_, i) => '阶段' + (i + 1)), final],
+deliverables:['核对清单'], planVersion:'plan-9 / hash-9'})
+expect(text).toContain('9. ' + final);expect(text).toContain('核对清单');expect(text).toContain('plan-9 / hash-9')
 })

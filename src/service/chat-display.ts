@@ -1,3 +1,4 @@
+import type { ChatTextPreview } from './chat-text-previews.ts'
 import { operatorReason, operatorStatus } from '../core/operator-language.ts'
 import type { AnyOrchErrorCode } from '../core/errors.ts'
 import type { RunDeliveryCheck } from './queries/runs.ts'
@@ -16,8 +17,9 @@ type RunDisplay = {
   blocking: BlockingStep[]
   decisions: Decision[]
   deliveryReviews?: ChatDeliveryReview[]
-  rework?: Array<{ request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string }>
+  rework?: Array<{ run_id?: string; request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string; revision?: number }>
   delivery_checks: RunDeliveryCheck[]
+  text_results?: ChatTextPreview[]
   nodes?: Step[]
   artifacts: Array<{ artifact_id: string; file_name?: string }>
 }
@@ -134,6 +136,12 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
     : view.settling && !view.terminal ? '正在确认执行结果' : RUN_LABEL.get(view.status) ?? operatorStatus(view.status)
   const heading = taskHeading(view.title, state)
   const lines: string[] = []
+  for (const item of view.text_results ?? []) {
+    lines.push(item.title)
+    if (item.text) lines.push(item.text)
+    if (item.truncated) lines.push('完整正文见本次任务「结果」中的「' + item.file_name + '」。')
+    lines.push('')
+  }
   for (const review of view.deliveryReviews ?? []) lines.push(formatDeliveryReviewNotice(review), '')
   if (view.rework?.length) {
     lines.push('返工待处理　' + view.rework.map((item) => {
@@ -175,15 +183,17 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
   if (view.terminal || view.delivery_checks.length > 0) {
     lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
     // 文件层结论与内容结论分开说：自动核对只看登记、大小与有效期（D01）。
-    if (view.acceptance === 'passed') lines.push('以上自动核对只覆盖文件是否登记、大小与有效期；内容是否达到要求仍需人工核对。')
+    if (view.acceptance === 'passed' && view.delivery_checks.some((item) => item.kind === 'artifact')) lines.push('以上自动核对只覆盖文件是否登记、大小与有效期；内容是否达到要求仍需人工核对。')
     for (const check of view.delivery_checks.filter(({ outcome }) => outcome !== 'passed').slice(0, 5)) {
-      const title = check.file_name || (check.kind === 'tool_evidence' ? '工具执行证据' : '交付文件')
+      const title = check.title || check.file_name || (check.kind === 'tool_evidence' ? '工具执行证据'
+        : check.kind === 'chat/text_result' ? '会话正文' : '交付文件')
       if (check.reason) lines.push(`「${title}」${check.outcome === 'failed' ? '未达到验收要求' : '验收结果待核实'}。${sentence(operatorReason(check.reason))}`)
     }
   }
   const accepted = new Set(view.delivery_checks.flatMap(({ artifact_id, kind, outcome }) =>
     artifact_id && kind === 'artifact' && outcome === 'passed' ? [artifact_id] : []))
-  const registered = view.artifacts.flatMap(({ artifact_id, file_name }) => file_name ? [{ artifact_id, file_name }] : [])
+  const shownText = new Set(view.delivery_checks.filter((c) => c.kind === 'chat/text_result' && c.outcome === 'passed').map((c) => c.artifact_id))
+  const registered = view.artifacts.filter((file) => !shownText.has(file.artifact_id)).flatMap(({ artifact_id, file_name }) => file_name ? [{ artifact_id, file_name }] : [])
   const acceptedFiles = registered.filter(({ artifact_id, file_name }) =>
     accepted.has(artifact_id) && registered.filter((file) => file.file_name === file_name).length === 1)
     .map(({ file_name }) => file_name)
@@ -203,13 +213,13 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
 }
 
 export type ChatOutcome =
-  | { state: 'started'; title: string; run_id: string }
+  | { state: 'started'; title: string; run_id: string; task_id?: string }
   | { state: 'quality_blocked'; issues: string[]; plan_id: string; title: string }
   | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
   | { state: 'launch_declined'; plan_id: string; title: string }
   | { state: 'stop_requested'; run_id: string; status: string; skipped_irreversible: number; pending_decisions: number }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
-  | { state: 'clarification_required' | 'usage' | 'queued'; message: string }
+  | { state: 'clarification_required' | 'usage' | 'queued' | 'draft_discarded'; message: string }
   | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue; reason?: ChatErrorReason }
 
 function startErrorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>): readonly [string, string] {
@@ -284,7 +294,9 @@ function errorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>, action?
 export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'status' | 'artifact' | 'review' | 'stop') {
   switch (outcome.state) {
     case 'started':
-      return { heading: taskHeading(outcome.title, '已接单'), body: '已接收任务，执行进度可在 Orchestra 面板查看。' }
+      return { heading: taskHeading(outcome.title, '已接单'), body: '已接收任务，执行进度可在 Orchestra 面板查看。'
+        // 纯文字回执给出可直接搜索的完整任务编号，不假定宿主有可点工具卡（T16）。
+        + (outcome.task_id ? '\n在 Orchestra 的「任务」中搜索任务编号：' + outcome.task_id : '') }
     case 'quality_blocked':
       return { heading: taskHeading(outcome.title, '未启动本次任务'), body: [
         ...new Set(outcome.issues.slice(0, 5).map((issue) => sentence(operatorReason(issue)))),
@@ -293,26 +305,28 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
     case 'approval_pending':
       return { heading: taskHeading(outcome.title, '等待人工批准'), body: '目前没有记录新的批准决定。要继续处理，可重新打开审批卡或在 Orchestra 面板查看待办。' }
     case 'stop_requested': {
-      const stopped = ['cancelled', 'succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned'].includes(outcome.status)
+      const statusText: Record<string,string> = {
+        cancelled:'已停止', succeeded:'此前已完成', succeeded_with_unverified:'已结束，有待核实项',
+        failed:'运行已失败', failed_with_unverified:'运行已失败，有待核实项', orphaned:'运行已失去关联'
+      }
+      const label = statusText[outcome.status]
       const details = [
-        outcome.skipped_irreversible > 0 ? `有 ${outcome.skipped_irreversible} 个不可逆步骤没有中断，需要单独核实。` : '',
-        outcome.pending_decisions > 0 ? `还有 ${outcome.pending_decisions} 项人工决定没有处理。` : '',
+        outcome.skipped_irreversible ? `有 ${outcome.skipped_irreversible} 个不可逆步骤仍需核实。` : '',
+        outcome.pending_decisions ? `还有 ${outcome.pending_decisions} 项人工决定。` : ''
       ].filter(Boolean)
-      return { heading: 'Orchestra ' + (stopped ? '已停止' : '已收到停止请求'), body: [
-        stopped ? '本次运行已停止，执行记录与已交付文件都保留。' : '停止请求已经提交，正在等待执行器确认；期间可能还有一次在途的结果回报。',
-        ...details,
-        stopped ? '外部影响是否已发生仍以执行证据为准，请在结果里核对。' : '确认停止后，请再核对这次尝试的外部影响是否已发生。',
-      ].join('\n') }
+      return {heading:'Orchestra ' + (label ?? '已收到停止请求'),
+        body:[label ? '当前结果已登记，请查看执行记录。' : '停止请求已登记，正在等待执行器确认。',...details].join('\n')}
     }
     case 'launch_declined':
       // 启动被拒绝时既没有运行也没有待办，不能指向面板里的空入口（C06）。
-      return { heading: taskHeading(outcome.title, '未启动本次任务'), body: '这份计划没有启动，也没有创建运行或待办。需要时把目标重新发一次，就能重新核对计划；放弃的方案不会留在任务表里。' }
+      return { heading: taskHeading(outcome.title, '未启动本次任务'), body: '已保留本次草稿。打开本会话的 Orchestra → 任务 → 继续未启动的计划，可核对原方案并重新确认。' }
     case 'approved':
     case 'rejected':
       return { heading: taskHeading(outcome.title, outcome.state === 'approved' ? '已登记批准' : '已登记拒绝'),
         body: '后续执行状态可在 Orchestra 面板查看。' }
     case 'clarification_required':
       return { heading: 'Orchestra 需要明确的交付目标', body: outcome.message }
+    case 'draft_discarded': return { heading: 'Orchestra 已放弃草稿', body: outcome.message }
     case 'usage':
       return { heading: 'Orchestra 用法 · /orchestra 任务内容', body: outcome.message }
     case 'queued':

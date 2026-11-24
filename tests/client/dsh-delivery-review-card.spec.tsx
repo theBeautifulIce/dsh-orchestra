@@ -80,15 +80,26 @@ it('requires taking a readable version before accepting a result that has no in-
     sessions: { list: { getSnapshot: () => ({ byId: { [sessionId]: { id: sessionId, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } },
     workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId, sessionIds: [sessionId] }], archivedSessionIds: [] }), subscribe: () => () => {} } },
   }
-  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ok: true, schema_version: 1, as_of_seq: 1,
-    data: { items: [{ node_run_id: 'current-attempt', status: 'held' }] } })))
+  vi.stubGlobal('fetch', vi.fn(async (target: string) => {
+    const path = new URL(new URL(String(target), 'dsh-app://app').searchParams.get('path')!, 'http://fixture.test').pathname
+    const data = path === '/v1/rework/holds' ? { items: [{ node_run_id: 'current-attempt', status: 'held', hold_id: 'h1', revision: 1 }] }
+      : { kind: 'preview', file_name: artifact.file_name, sha256: artifact.sha256, text: '净额 109.50', truncated: false }
+    return Response.json({ ok: true, schema_version: 1, as_of_seq: 1, data })
+  }))
   const view = await renderPanel(<DshDeliveryReviewCard scope={scope} sources={sources} />)
   const button = (text: string) => view.findAll('button').find(element => element.textContent === text)!
   try {
-    // 没有会话内全文：先给出取得版本的入口，确认前不能通过。
+    // 没有会话内全文：没读到这一版之前，勾选也不能通过（D08）。
     expect((button('通过验收') as HTMLButtonElement).disabled).toBe(true)
     const confirm = view.findAll('input').find(input => (input as HTMLInputElement).type === 'checkbox') as HTMLInputElement
+    expect(confirm.disabled).toBe(true)
     await act(async () => { confirm.click() })
+    expect((button('通过验收') as HTMLButtonElement).disabled).toBe(true)
+    // 真正取得并核验这一版之后才能提交结论。
+    await view.click(button('预览内容'))
+    await view.flush()
+    // Markdown 成果按阅读视图呈现，不再直接把原始标记塞进 pre（D11）。
+    expect(view.text()).toContain('109.50')
     expect((button('通过验收') as HTMLButtonElement).disabled).toBe(false)
   } finally { view.unmount() }
 })

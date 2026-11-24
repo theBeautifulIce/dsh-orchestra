@@ -28,6 +28,19 @@ it('包声明保留私有发布、默认阶段和显式宿主注入', () => {
   expect(readFileSync('cordis.patch.yml', 'utf8')).toMatch(/id: dsh-orchestra, name: dsh-orchestra/)
 })
 
+it('安装指南指向同一份带版本的预发行工件，也给出摘要文件名', () => {
+  const docs = ['README.md', 'README.en.md'].map(name => readFileSync(name, 'utf8'))
+  const target = /https:\/\/github\.com\/theBeautifulIce\/dsh-orchestra\/releases\/download\/v([^/\s]+)\/dsh-orchestra-([^)]*)\.tgz/u
+  const assets = docs.map(doc => {
+    const match = doc.match(target)
+    expect(match).toBeTruthy()
+    expect(match![1]).toBe(match![2])
+    expect(doc).toContain('SHA256SUMS.txt')
+    return match![0]
+  })
+  expect(assets[0]).toBe(assets[1])
+})
+
 it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版清单', () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-package-inject-'))
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
@@ -53,7 +66,9 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
     writeFileSync(join(root, 'package/package.json'), JSON.stringify({
       ...manifest, dsh: { ...manifest.dsh, client: { ...manifest.dsh.client, inject } },
     }))
-    execFileSync('tar', ['-czf', archive, '-C', root, ...Object.keys(files)])
+    // Windows 上的 GNU tar 会把 `C:` 当成远端主机名，必须显式声明本地路径。
+    const local = process.platform === 'win32' ? ['--force-local'] : []
+    execFileSync('tar', [...local, '-czf', archive, '-C', root, ...Object.keys(files)])
     return archive
   }
   try {
@@ -64,6 +79,11 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
     const valid = pack('candidate', [...candidate].reverse())
     expect(inspectPackage(valid).migrations).toHaveLength(57)
     expect(() => inspectPackage(valid, { previous: true })).toThrow('DSH client inject must contain exactly')
+    files['package/docs/assets/readme/extra.txt'] = 'extra'
+    mkdirSync(join(root, 'package/docs/assets/readme'), { recursive: true })
+    writeFileSync(join(root, 'package/docs/assets/readme/extra.txt'), 'extra')
+    expect(() => inspectPackage(pack('extra', candidate))).toThrow('undeclared paths')
+    delete files['package/docs/assets/readme/extra.txt']
     const legacy = pack('previous', previous)
     expect(inspectPackage(legacy, { previous: true }).migrations).toHaveLength(57)
     expect(() => inspectPackage(legacy)).toThrow('DSH client inject must contain exactly')
@@ -168,9 +188,11 @@ it.runIf(Boolean(installed && tarball && sha))('实装 tarball 的服务、迁�
     ])
     const view = await renderPanel(createElement(components.find(({ slot }) => slot.name === 'main')!.component))
     try {
-      await view.flush()
+      await expect.poll(async () => {
+        await view.flush()
+        return view.text()
+      }, { timeout: 4000 }).toContain('S6')
       expect(view.text()).toContain('设置')
-      expect(view.text()).toContain('S6')
       expect(view.text()).toContain('服务已连接')
     } finally { view.unmount() }
     await legacy.dispose()
