@@ -254,7 +254,7 @@ function readExecutionStates(tx: ReadTx, runId: string, isWaiting?: (nodeRunId: 
  * 游标按 (seq, attempt, node_run_id) 升序推进，与展示顺序一致。
  */
 export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeRunId: string) => boolean,
-  cursorInput?: string): { items: NodeRunView[]; as_of_seq: number; has_more: boolean; next_cursor: string | null } {
+  cursorInput?: string, only?: 'attention'): { items: NodeRunView[]; as_of_seq: number; has_more: boolean; next_cursor: string | null } {
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
   const filter = { run_id: runId }
@@ -264,6 +264,13 @@ export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeR
     const executionState = readExecutionStates(ctx.tx, runId, isWaiting)
     const where = ['n.run_id = ?']
     const values: unknown[] = [runId]
+    if (only === 'attention') {
+      // 队列先读“真正需要人处理”的步骤：超过 200 条尝试时，第 201 项阻塞也要一次看到（T05）。
+      where.push("n.replacement_node_run_id IS NULL")
+      where.push("n.status IN ('blocked_pre','blocked_post','indeterminate_side_effect','startup_unknown','paused_bridge_missing')")
+      where.push(`n.attempt = (SELECT MAX(m.attempt) FROM node_runs m
+        WHERE m.run_id = n.run_id AND m.node_id = n.node_id AND m.replacement_node_run_id IS NULL)`)
+    }
     if (cursorInput) {
       const cursor = decodeCursor(cursorInput, 'nodes', filter, now)
       const [seq, attempt] = cursor.last_key.split('\t').map(Number)

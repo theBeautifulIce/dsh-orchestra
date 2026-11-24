@@ -1,4 +1,4 @@
-import type { TaskSummary } from '../../service/queries/tasks.ts'
+import type { TaskNextAction, TaskSummary } from '../../service/queries/tasks.ts'
 import type { RunSummary } from '../../service/queries/runs.ts'
 import type { NodeRunView } from '../../service/queries/nodes.ts'
 import type { DecisionView } from '../../service/queries/decisions.ts'
@@ -11,7 +11,7 @@ import type { LedgerVerify } from '../../service/queries/verify_ledger.ts'
 import type { OperationRow } from '../../service/queries/get_operation.ts'
 
 export type {
-  TaskSummary, RunSummary, NodeRunView, DecisionView, UnverifiedEffectView,
+  TaskSummary, TaskNextAction, RunSummary, NodeRunView, DecisionView, UnverifiedEffectView,
   WorkflowListItem, WorkflowVersionView, WorkflowView, EvidenceView, ArtifactView, AttestationView,
   LedgerVerify, RunArtifact, ArtifactContentMode, ArtifactContentView,
   OperationRow,

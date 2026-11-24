@@ -33,11 +33,13 @@ function loadMore(view: { findAll: (selector: string) => Element[] }): Element {
 }
 
 describe('收到 reload 之后重新从第一页取数', () => {
-  it('任务页在第二页收到 reload：保留已加载窗口与位置，只重读当前页', async () => {
+  it('任务页在第二页收到 reload：从首页重建已加载窗口并移除已归档行', async () => {
     const first = taskSummary({ task_id: 't1', title: '任务一' })
     const second = taskSummary({ task_id: 't2', title: '任务二' })
+    let refreshed = false
     const { api, service } = apiFrom((query) => {
       const cursor = query.params.get('cursor')
+      if (refreshed) return { ok: true, data: cursor ? page([]) : page([{ ...first, title: '任务一更新' }], 'cursor-current') }
       return { ok: true, data: cursor ? page([second]) : page([first], 'cursor-2') }
     })
     const view = await renderPanel(<TaskListScreen api={api} onSelectTask={noop} />)
@@ -50,19 +52,16 @@ describe('收到 reload 之后重新从第一页取数', () => {
     expect(view.findAll('article').length).toBe(2)
     expect(view.text()).toContain('任务二')
 
+    refreshed = true
     const before = service.calls.length
     await view.rerender(<TaskListScreen api={api} onSelectTask={noop} reloadVersion={1} />)
     await view.flush()
 
-    // 实时刷新不再把用户踢回第一页：第二页的任务与选中位置都保留（T07）。
-    expect(view.findAll('article').length).toBe(2)
-    expect(view.text()).toContain('任务一')
-    expect(view.text()).toContain('任务二')
+    expect(view.findAll('article')).toHaveLength(1)
+    expect(view.text()).toContain('任务一更新')
+    expect(view.text()).not.toContain('任务二')
     const after = service.calls.slice(before)
-    expect(after.length).toBeGreaterThan(0)
-    for (const call of after) {
-      expect(call.params.get('cursor')).toBe('cursor-2')
-    }
+    expect(after.map(call => call.params.get('cursor'))).toEqual([null, 'cursor-current'])
     view.unmount()
   })
 

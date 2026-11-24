@@ -1,6 +1,6 @@
 import { OrchError } from '../../core/errors.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
-import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
+import { UNVERIFIED_EFFECT_OCCURRED } from '../../infra/db/unverified-effects.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx } from './read-tx.ts'
 
@@ -48,7 +48,7 @@ export function listUnverifiedEffects(db: Db, params: ListEffectsParams = {}): {
   const filter = { run_id: params.run_id ?? null }
 
   return withReadTx(db, (ctx) => {
-    const where = [UNVERIFIED_EFFECT]
+    const where = [UNVERIFIED_EFFECT_OCCURRED]
     const values: unknown[] = []
     if (filter.run_id) {
       where.push('n.run_id = ?')

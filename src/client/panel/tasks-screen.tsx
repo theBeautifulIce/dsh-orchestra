@@ -1,6 +1,6 @@
 import { Component, createRef, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { ListTasksParams, ResourcesApi } from '../api/resources.ts'
-import type { TaskSummary } from '../api/types.ts'
+import type { TaskNextAction, TaskSummary } from '../api/types.ts'
 import { TASK_LANES, type TaskLane } from '../../core/task-workspace.ts'
 import { TaskFlowView } from './task-flow-view.tsx'
 import { TaskPlanForm, type WorkflowPlanRequest } from './task-plan-form.tsx'
@@ -42,7 +42,7 @@ export function unverifiedStatusView(status: string): { label: string; tone: str
 
 export type TaskListScreenProps = {
   api: ResourcesApi
-  onSelectTask: (taskId: string, trigger: HTMLButtonElement, runId?: string) => void
+  onSelectTask: (taskId: string, trigger: HTMLButtonElement, runId?: string, action?: TaskNextAction) => void
   selectedTaskId?: string | null
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
@@ -139,7 +139,6 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   const [dateInvalid, setDateInvalid] = useState(false)
   const [startOpen, setStartOpen] = useState(false)
   const [workflowPlan, setWorkflowPlan] = useState<{ sequence: number; request: WorkflowPlanRequest }>()
-  const [cursor, setCursor] = useState<string | undefined>()
   const [items, setItems] = useState<TaskSummary[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -155,32 +154,45 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   useEffect(() => {
     if (lastReloadVersion.current === reloadVersion) return
     lastReloadVersion.current = reloadVersion
-    // 常规刷新不把用户踢回第一页：保留游标与已加载窗口，重读当前页（T07）。
-    // 真正的重建由 search/筛选变化与断流恢复触发。
+    // 常规刷新不把用户踢回第一页：从首页按最新游标重建已加载窗口（T07）。
     setReload((value) => value + 1)
   }, [reloadVersion])
 
+  const [visiblePages, setVisiblePages] = useState(1)
   useEffect(() => {
     let current = true
-    setLoading(true)
-    setError(false)
-    void api.listTasks({ limit: 50, cursor, ...filter }).then((result) => {
+    async function readWindow() {
+      setLoading(true)
+      setError(false)
+      const all = new Map<string,TaskSummary>()
+      const seen = new Set<string>()
+      let cursor: string | undefined
+      let counts: Partial<Record<TaskLane, number>> = {}
+      let waterline = 0
+      for (let page=0; current && page<visiblePages; page++) {
+        const r = await api.listTasks({ ...filter, limit:50, cursor })
+        if (!current) return
+        if (page===0) counts = (r.data as {lane_counts?: typeof counts}).lane_counts ?? {}
+        waterline = page===0 ? r.as_of_seq : Math.min(waterline,r.as_of_seq)
+        for (const item of r.data.items) all.set(item.task_id,item)
+        cursor = r.data.next_cursor ?? undefined
+        if (!cursor) break
+        if (seen.has(cursor)) throw new Error('任务分页未前进')
+        seen.add(cursor)
+      }
       if (!current) return
-      setItems((previous) => mergeByTaskId(cursor ? previous : [], result.data.items))
-      setNextCursor(result.data.next_cursor)
-      setLaneCounts((result.data as { lane_counts?: Partial<Record<TaskLane, number>> }).lane_counts ?? {})
-      onSnapshot?.(result.as_of_seq)
-    }).catch(() => {
-      if (!current) return
-      setError(true)
-    }).finally(() => {
-      if (current) setLoading(false)
-    })
+      setItems([...all.values()])
+      setLaneCounts(counts)
+      setNextCursor(cursor ?? null)
+      onSnapshot?.(waterline)
+    }
+    void readWindow().catch(() => { if (current) setError(true) })
+      .finally(() => { if (current) setLoading(false) })
     return () => { current = false }
-  }, [api, cursor, filter, reload, onSnapshot])
+  }, [api,filter,visiblePages,reload,onSnapshot])
 
   function updateFilter(next: Partial<ListTasksParams>) {
-    setCursor(undefined)
+    setVisiblePages(1)
     setNextCursor(null)
     setItems([])
     setLoading(true)
@@ -200,7 +212,6 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
   }
 
   function refresh() {
-    setCursor(undefined)
     setReload((n) => n + 1)
   }
 
@@ -289,14 +300,16 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
           expanded={expandedTaskId === task.task_id} onExpand={() => setExpandedTaskId((selected) => selected === task.task_id ? null : task.task_id)}
           steps={expandedTaskId === task.task_id && expandedRunId &&
             <CardSteps key={expandedRunId} snapshot={boardSteps} openBranches={openBranches} />}
-          onSelect={(trigger) => onSelectTask(task.task_id, trigger)} />)}
+          onSelect={(trigger, action) => action
+            ? onSelectTask(task.task_id, trigger, action.run_id ?? undefined, action)
+            : onSelectTask(task.task_id, trigger)} />)}
       </section>)}
     </div>}</TaskBoardScroll>}
     {items.length > 0 && (filter.archived || view === 'list') && <TaskTable tasks={items} archived={Boolean(filter.archived)} selectedTaskId={selectedTaskId} onSelect={onSelectTask} />}
     {items.length > 0 && !filter.archived && (view === 'flow' || view === 'queue') &&
       <TaskFlowView reworkEnabled={reworkEnabled} api={api} tasks={items} onOpenTask={onSelectTask} reloadVersion={reload} queue={view === 'queue'} />}
     {nextCursor && !error && <div style={{ display: 'flex', justifyContent: 'center' }}>
-      <button type="button" disabled={loading} onClick={() => setCursor(nextCursor)} style={buttonStyle}>加载更多</button>
+      <button type="button" disabled={loading} onClick={() => setVisiblePages(n=>n+1)} style={buttonStyle}>加载更多</button>
     </div>}
   </section>
 }
@@ -318,13 +331,17 @@ function dateBounds(period: string, from: string, to: string): Pick<ListTasksPar
 
 function TaskTable({ tasks, archived, selectedTaskId, onSelect }: { tasks: TaskSummary[]; archived: boolean; selectedTaskId?: string | null; onSelect: TaskListScreenProps['onSelectTask'] }) {
   return <div className="task-table-scroll"><table className="task-table" aria-label={archived ? '归档任务' : '任务列表'}>
-    <thead><tr><th scope="col">任务</th><th scope="col">状态</th><th scope="col">关注事项</th><th scope="col">运行</th><th scope="col">{archived ? '归档时间' : '更新时间'}</th></tr></thead>
+    <thead><tr><th scope="col">任务</th><th scope="col">下一步</th><th scope="col">状态</th><th scope="col">关注事项</th><th scope="col">运行</th><th scope="col">{archived ? '归档时间' : '更新时间'}</th></tr></thead>
     <tbody>{tasks.map((task) => <tr key={task.task_id} data-selected={selectedTaskId === task.task_id || undefined}>
       <td><button className="task-link" type="button" onClick={(event) => onSelect(task.task_id, event.currentTarget)}>{task.title || '未命名任务'}</button>
         <small>{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</small></td>
+      <td>{task.next_action
+        ? <button type="button" className="task-link" data-task-primary-action={task.next_action.kind}
+            onClick={(event) => onSelect(task.task_id, event.currentTarget, task.next_action?.run_id ?? undefined, task.next_action)}>{task.next_action.label}</button>
+        : <span>{'—'}</span>}</td>
       <td>{taskCardStatus(task).label ?? <UnknownState value={task.status} />}</td>
       <td>{task.attention_reason ? operatorReason(task.attention_reason) : '—'}
-        <small>{task.open_decision_count} 项{COPY.awaitingDecision}</small>
+        {task.open_decision_count > 0 && <small>{task.open_decision_count} 项{COPY.awaitingDecision}</small>}
         <small><TaskWaitAndHeartbeat task={task} /></small>
         <small><TaskRisk level={task.max_side_effect_level} /></small>
       </td><td>{task.run_count} 次</td>
@@ -356,7 +373,8 @@ function mergeByTaskId(previous: TaskSummary[], incoming: TaskSummary[]): TaskSu
 }
 
 function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps }: {
-  task: TaskSummary; selected: boolean; compact: boolean; onSelect: (trigger: HTMLButtonElement) => void
+  task: TaskSummary; selected: boolean; compact: boolean
+  onSelect: (trigger: HTMLButtonElement, action?: TaskNextAction) => void
   expanded: boolean; onExpand: () => void; steps: ReactNode
 }) {
   const stepsId = useId()
@@ -385,7 +403,13 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
       {reworkItems > 0 && <strong>{reworkItems} 项返工待处理</strong>}
       {hasUnverified && <strong><span style={{ color: tone }}>{task.unverified_count} {tone ? COPY.unverifiedBadge : '项待核实'}</span></strong>}
       {!task.open_decision_count && !awaitingReview && !reworkItems && !hasUnverified && attention && <strong>{attention}</strong>}
-      {hasUnverified && <span>{COPY.pendingIrreversible}</span>}
+      {/* 只有真有不可逆策略的步骤才说「不可逆」；其余只说发生过对外动作（T03）。 */}
+      {hasUnverified && <span>{task.max_side_effect_level === 'irreversible' ? COPY.pendingIrreversible : COPY.pendingExternalEffect}</span>}
+    </div>}
+    {/* 首屏只给一个能办的动作：直接打开当前这个人该处理的那一份（T01/T02）。 */}
+    {task.next_action && <div className="task-card-primary">
+      <button type="button" className="task-primary-button" data-task-primary-action={task.next_action.kind}
+        onClick={(event) => onSelect(event.currentTarget, task.next_action)}>{task.next_action.label}</button>
     </div>}
     <div className="task-card-meta">
       {/* 无待办、无异常时，运行次数、风险与心跳收进技术细节，首屏只留时间（T10）。 */}
@@ -413,14 +437,14 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
   </article>
 }
 
-function CardSteps({ snapshot: { nodes, partial, failed, refresh }, openBranches }: {
+function CardSteps({ snapshot: { nodes, partial, failed, refresh, loadMore }, openBranches }: {
   snapshot: ReturnType<typeof useRunStepSnapshot>; openBranches: Set<string>
 }) {
   return <>
     {failed && <p role="alert">{nodes ? '步骤刷新失败，仍显示上次读取结果。' : '步骤读取失败。'}
       <button className="task-quiet-button" type="button" data-task-card-focus="retry-steps" onClick={refresh}>重试</button></p>}
     {!nodes && !failed && <p role="status">正在读取步骤…</p>}
-    {nodes && <TaskStepOverview nodes={nodes} partial={partial} openBranches={openBranches} />}
+    {nodes && <TaskStepOverview nodes={nodes} partial={partial} onLoadMore={loadMore} openBranches={openBranches} />}
   </>
 }
 

@@ -3,10 +3,10 @@ import { readReleaseGateCard, type ReleaseGateCardState } from '../release-workf
 import type { TaskLane, TaskOrigin } from '../../core/task-workspace.ts'
 import type { Autonomy } from '../runs.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
-import { UNVERIFIED_EFFECT } from '../../infra/db/unverified-effects.ts'
+import { UNVERIFIED_EFFECT, UNVERIFIED_EFFECT_OCCURRED } from '../../infra/db/unverified-effects.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { attentionWeight, deriveAttention, maxSideEffectLevel, DELIVERY_ACCEPTANCE, type Attention, type DeliveryAcceptance, type SideEffectLevel } from './attention.ts'
-import { withReadTx } from './read-tx.ts'
+import { withReadTx, type ReadTx } from './read-tx.ts'
 
 const TASKS_LIMIT_MAX = 100
 
@@ -44,6 +44,8 @@ export type TaskSummary = {
   current_run_status: string | null
   delivery_acceptance?: DeliveryAcceptance
   goal_met?: boolean
+  /** 当前操作者最能推进这件事的那一个动作（T01/T02/T10）。 */
+  next_action?: TaskNextAction
 }
 
 /** 验收结论取值由 SQL 汇总；脏数据一律回落到 not_applicable，视图不因它崩。 */
@@ -161,7 +163,7 @@ const DELIVERY_REVIEWS = `FROM delivery_review_holds h
 const REWORK_ITEMS = `FROM rework_requests q WHERE q.status IN ('proposed','needs_human_approval','escalated')
   AND q.run_id IN ${CURRENT_TREE}`
 const UNVERIFIED_NODES = `FROM node_runs n WHERE n.run_id IN ${CURRENT_TREE}
-  AND ${EXECUTED_NODE_STATUS} AND ${UNVERIFIED_EFFECT}`
+  AND ${UNVERIFIED_EFFECT_OCCURRED}`
 const ORPHANED_NODES = `FROM node_runs n WHERE n.run_id IN ${CURRENT_TREE}
   AND n.status = 'orphaned' AND n.replacement_node_run_id IS NULL`
 const RUN_ACCEPTANCE = `FROM run_acceptance_results a WHERE a.run_id = t.current_run_id`
@@ -174,7 +176,8 @@ const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflo
   (SELECT COUNT(*) FROM runs r WHERE r.task_id = t.task_id AND r.parent_run_id IS NULL) AS run_count,
   CASE
     WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'failed') THEN 'failed'
-    WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'unverifiable') THEN 'unverifiable'
+    WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND (a.outcome = 'unverifiable' OR (a.kind='chat/text_result' AND a.outcome='passed'
+      AND (CASE WHEN json_valid(a.evidence_json) THEN json_extract(a.evidence_json,'$.evidence.publication') END IS NOT 'orchestra.chat-text.v1')))) THEN 'unverifiable'
     WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE}) THEN 'passed'
     WHEN EXISTS (SELECT 1 FROM start_run_operations o JOIN task_plans plan
       ON plan.launch_operation_id = o.operation_id WHERE o.task_id = t.task_id AND o.run_id = t.current_run_id) THEN 'pending'
@@ -217,7 +220,7 @@ export function getWorkspaceOverview(db: Db, includeRelease = false): { item: Wo
       'SELECT lane, COUNT(*) AS count FROM task_attention_order WHERE archived = 0 GROUP BY lane')
     for (const row of counts) lanes[row.lane] = row.count
     const decisions = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM human_decision_inbox')
-    const effects = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM node_runs n WHERE ' + UNVERIFIED_EFFECT)
+    const effects = ctx.tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM node_runs n WHERE ' + UNVERIFIED_EFFECT_OCCURRED)
     return { item: { lanes, open_decisions: decisions?.count ?? 0, unverified_effects: effects?.count ?? 0,
       ...(includeRelease ? { release_gate: readReleaseGateCard(ctx.tx) } : {}) }, as_of_seq: ctx.as_of_seq }
   })
@@ -275,7 +278,7 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}):
     )) laneCounts[row.lane] = Number(row.count)
     const hasMore = rows.length > limit
     const page = hasMore ? rows.slice(0, limit) : rows
-    const items = page.map((row) => taskSummary(row, now))
+    const items = attachNextActions(ctx.tx, page.map((row) => taskSummary(row, now)))
     const last = page[page.length - 1]
     const nextCursor = hasMore && last
       ? encodeCursor(makeCursor('tasks', filter, `${last.sort_weight}\t${last.sort_at}`, last.task_id, ctx.as_of_seq, now))
@@ -284,11 +287,102 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}):
   })
 }
 
+export type TaskNextAction = {
+  kind: 'review' | 'decision' | 'rework' | 'progress'
+  /** 一句话说明要办什么，直接进按钮文案。 */
+  label: string
+  run_id: string | null
+  node_id?: string | null
+  node_run_id?: string | null
+  artifact_id?: string | null
+  sha256?: string | null
+  file_name?: string | null
+  decision_id?: string | null
+}
+
+/** 任务行只给一个最有用的动作；其余运行信息留在详情里（T01/T02/T10）。 */
+function attachNextActions(tx: ReadTx, items: TaskSummary[]): TaskSummary[] {
+  if (!items.length) return items
+  const placeholders = items.map(() => '?').join(',')
+  const ids = items.map((item) => item.task_id)
+  const tree = `(WITH RECURSIVE roots(task_id,run_id) AS (
+      SELECT task_id,current_run_id FROM tasks WHERE task_id IN (${placeholders}) AND current_run_id IS NOT NULL
+      UNION SELECT roots.task_id,c.run_id FROM roots JOIN runs c
+        ON c.parent_run_id=roots.run_id AND c.task_id=roots.task_id
+    ) SELECT task_id,run_id FROM roots)`
+  const holds = tx.all<{ task_id: string; run_id: string; node_id: string; node_run_id: string;
+    review_set_json: string | null; accepted_json: string | null; artifact_id: string | null; sha256: string | null;
+    file_name: string | null; updated_at: string }>(
+    `SELECT t.task_id,h.run_id,h.node_id,hn.node_run_id,h.review_set_json,h.accepted_json,h.updated_at,
+       a.artifact_id,a.sha256,c.file_name
+     FROM ${tree} t
+     JOIN delivery_review_holds h ON h.run_id=t.run_id AND h.status='held'
+     JOIN node_runs hn ON hn.run_id=h.run_id AND hn.node_id=h.node_id
+       AND hn.replacement_node_run_id IS NULL AND hn.status='done'
+     LEFT JOIN artifacts a ON a.run_id=h.run_id AND a.artifact_id=(
+       SELECT ra.artifact_id FROM artifacts ra JOIN artifact_contents rc USING(artifact_id)
+       WHERE ra.run_id=h.run_id AND rc.node_run_id=hn.node_run_id
+       ORDER BY ra.created_at DESC, ra.artifact_id DESC LIMIT 1)
+     LEFT JOIN artifact_contents c ON c.artifact_id=a.artifact_id
+     ORDER BY h.updated_at DESC`, ids)
+  const decisions = tx.all<{ task_id: string; run_id: string; decision_id: string }>(
+    `SELECT t.task_id,d.run_id,d.decision_id FROM ${tree} t JOIN human_decision_inbox d ON d.run_id=t.run_id
+     ORDER BY d.created_at,d.decision_id`, ids)
+  const reviewByTask = new Map<string, TaskNextAction>()
+  for (const hold of holds) {
+    if (reviewByTask.has(hold.task_id)) continue
+    const file = pendingFile(hold.review_set_json, hold.accepted_json)
+    reviewByTask.set(hold.task_id, {
+      kind: 'review', label: file?.file_name ? `打开「${file.file_name}」验收` : '打开成果验收',
+      run_id: hold.run_id, node_id: hold.node_id, node_run_id: hold.node_run_id,
+      artifact_id: file?.artifact_id ?? hold.artifact_id, sha256: file?.sha256 ?? hold.sha256,
+      file_name: file?.file_name ?? hold.file_name,
+    })
+  }
+  const decisionByTask = new Map<string, TaskNextAction>()
+  for (const decision of decisions) {
+    if (decisionByTask.has(decision.task_id)) continue
+    decisionByTask.set(decision.task_id, { kind: 'decision', label: '查看待批准事项', run_id: decision.run_id,
+      decision_id: decision.decision_id })
+  }
+  return items.map((item) => {
+    const review = reviewByTask.get(item.task_id)
+    if (review) return { ...item, next_action: review }
+    const decision = decisionByTask.get(item.task_id)
+    if (decision) return { ...item, next_action: decision }
+    if ((item.rework_count ?? 0) > 0) {
+      return { ...item, next_action: { kind: 'rework', label: '处理返工待办', run_id: item.current_run_id } }
+    }
+    if ((item.open_decision_count > 0 || item.unverified_count > 0) && item.current_run_id) {
+      return { ...item, next_action: { kind: 'progress', label: '查看进度', run_id: item.current_run_id } }
+    }
+    return item
+  })
+}
+
+/** 留验清单里第一份还没确认的文件；还没封存时回落到最近登记件。 */
+function pendingFile(reviewSetJson: string | null, acceptedJson: string | null):
+{ artifact_id: string; sha256: string; file_name: string | null } | null {
+  const parse = (raw: string | null): Array<{ artifact_id?: unknown; sha256?: unknown; file_name?: unknown }> => {
+    if (typeof raw !== 'string' || raw.length === 0) return []
+    try {
+      const value = JSON.parse(raw) as unknown
+      return Array.isArray(value) ? value as Array<{ artifact_id?: unknown; sha256?: unknown; file_name?: unknown }> : []
+    } catch { return [] }
+  }
+  const files = parse(reviewSetJson).flatMap((item) => typeof item.artifact_id === 'string' && typeof item.sha256 === 'string'
+    ? [{ artifact_id: item.artifact_id, sha256: item.sha256, file_name: typeof item.file_name === 'string' ? item.file_name : null }] : [])
+  const accepted = parse(acceptedJson)
+  const pending = files.find((file) => !accepted.some((done) =>
+    done.artifact_id === file.artifact_id && done.sha256 === file.sha256))
+  return pending ?? null
+}
+
 export function getTaskSummarySnapshot(db: Db, taskId: string, now = Date.now()): { item: TaskSummary; as_of_seq: number } {
   return withReadTx(db, (ctx) => {
     const row = ctx.tx.get<TaskRow>(TASK_PAGE_START + 'task_id = ?) ' + TASK_SUMMARY_SELECT, [taskId])
     if (!row) throw new OrchError('NOT_FOUND', '没找到这个任务', { task_id: taskId })
-    return { item: taskSummary(row, now), as_of_seq: ctx.as_of_seq }
+    return { item: attachNextActions(ctx.tx, [taskSummary(row, now)])[0]!, as_of_seq: ctx.as_of_seq }
   })
 }
 

@@ -14,7 +14,7 @@ export type ListTasksParams = {
   trigger_kind?: TaskOrigin | 'unknown'; archived?: '1'; updated_from?: string; updated_before?: string
 }
 export type ListDecisionsParams = { run_id?: string; status?: string; inbox?: 'human'; limit?: number; cursor?: string }
-export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; scope?: string; query?: string; owner_task_id?: string }
+export type ListWorkflowsParams = { limit?: number; cursor?: string; status?: string; scope?: string; query?: string; published?: 1; owner_task_id?: string }
 export type ListEventsParams = { from_seq?: number; limit?: number; cursor?: string }
 export type ListMemoryBatchesParams = { task_id?: string; limit?: number; cursor?: string }
 export type ActivityItem = Pick<EventView, 'seq' | 'event_id' | 'type' | 'occurred_at' | 'run_id' | 'node_run_id' | 'decision_id'> & {
@@ -49,9 +49,9 @@ export function createResourcesApi(client: ApiClient) {
       client.get('/v1/runs', compact(params)),
     getRun: (run_id: string): Promise<ApiResult<RunSummary>> =>
       client.get('/v1/runs/get', { run_id }),
-    listNodes: (run_id: string, limit?: number, cursor?: string):
+    listNodes: (run_id: string, limit?: number, cursor?: string, only?: 'attention'):
     Promise<ApiResult<{ items: NodeRunView[]; has_more?: boolean; next_cursor?: string | null }>> =>
-      client.get('/v1/node-runs', { run_id, limit }),
+      client.get('/v1/node-runs', { run_id, limit, cursor, only }),
     getNode: (node_run_id: string): Promise<ApiResult<NodeRunView>> =>
       client.get('/v1/node-runs/get', { node_run_id }),
     listDecisions: (params: ListDecisionsParams = {}): Promise<ApiResult<Page<DecisionView>>> =>

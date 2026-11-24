@@ -3,15 +3,21 @@ import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 import { registerRunArtifactInTx, isArtifactFileName } from './artifact-store.ts'
+import { nativeTextBytes } from './native-text-capability.ts'
 import { reworkRequestSchema, reworkReviewSchema, type ReworkBinding, type ReworkHost } from './rework-coordinator.ts'
 import { runIdempotentCommand, requestHashOf } from './commands/idempotency.ts'
 import { assertReworkRunActive } from './rework-runtime.ts'
 import { recordArtifactPublication } from './artifact-completion.ts'
 
+import { readApprovedTaskPlanForRun } from './task-planning.ts'
+import { textTarget } from './text-result.ts'
+
 const key = z.string().min(1).max(256)
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const publish = z.strictObject({ operation_id: z.uuidv7(), file_name: key.refine(isArtifactFileName),
   text: z.string().min(1).max(65536) })
+const publishText = z.strictObject({ operation_id: z.uuidv7(), deliverable_index: z.number().int().min(0).max(19),
+  text: z.string().min(1).max(65536).refine((text) => Boolean(text.trim()) && !text.includes('\0') && Buffer.from(text, 'utf8').toString('utf8') === text, '请提交完整的 UTF-8 会话正文') })
 const read = z.strictObject({ artifact_id: key, artifact_hash: hash, offset: z.number().int().nonnegative().default(0) })
 
 /** The host owns the session binding. No run, producer, evidence or filename comes from an agent-supplied path. */
@@ -29,8 +35,8 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
   }
   return withTx(db, (tx) => {
     assertReworkRunActive(tx, runId)
-    if (action === 'publish') {
-      const data = publish.parse(body)
+    if (action === 'publish' || action === 'publish_text_result') {
+      const data = action === 'publish' ? publish.parse(body) : publishText.parse(body)
       return runIdempotentCommand(tx, { kind: 'rework.artifact', operationId: data.operation_id,
         requestHash: requestHashOf('rework.artifact', { binding, ...data }), now }, () => {
         const producer = tx.get<{ run_id: string; node_id: string; lease_id: string | null; lease_expires_at: string | null }>(
@@ -39,15 +45,30 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
           [binding.node_run_id, binding.attempt, binding.action_generation],
         )
         if (!producer || producer.run_id !== runId) throw new OrchError('STALE_GENERATION', '成果提交对应的执行尝试已失效')
-        if (Buffer.byteLength(data.text) > 65536) throw new OrchError('RANGE_TOO_LARGE', '每份文本成果最多 64 KiB')
+        // 普通文本交付按同一份能力声明校验格式与 UTF-8 边界；正文交付另有自己的正文规则（D01）。
+        const bytes = 'deliverable_index' in data ? Buffer.from(data.text) : nativeTextBytes(data.file_name, data.text)
+        if (bytes.length > 65536) throw new OrchError('RANGE_TOO_LARGE', '每份文本成果最多 64 KiB')
+        let target: { artifactId: string; fileName: string; evidenceIndex?: unknown }
+        if ('deliverable_index' in data) {
+          if (!producer.lease_id || !producer.lease_expires_at || !(Date.parse(producer.lease_expires_at) > Date.parse(now))) {
+            throw new OrchError('STALE_GENERATION', '正文提交租约已失效')
+          }
+          const plan = readApprovedTaskPlanForRun(tx, runId)
+          const item = plan?.proposal.deliverables[data.deliverable_index]
+          if (!plan || item?.acceptance.kind !== 'chat/text_result' || item.node_id !== producer.node_id) {
+            throw new OrchError('FORBIDDEN', '当前步骤没有这项已批准的会话交付')
+          }
+          target = textTarget(plan.plan_id, plan.content_hash, data.deliverable_index, binding)
+        } else {
+          target = { artifactId: 'out_' + sha256Hex(JSON.stringify([binding.node_run_id, data.file_name])), fileName: data.file_name }
+        }
         const count = tx.get<{ n: number }>('SELECT COUNT(*) AS n FROM artifact_contents WHERE node_run_id=?', [binding.node_run_id])
-        if ((count?.n ?? 0) >= 8) throw new OrchError('RANGE_TOO_LARGE', '每次执行最多提交八份文本成果')
-        const artifactId = 'out_' + sha256Hex(JSON.stringify([binding.node_run_id, data.file_name]))
-        const firstPublication = !tx.get('SELECT 1 FROM artifacts WHERE artifact_id=?', [artifactId])
-        const artifact = registerRunArtifactInTx(tx, { artifactId,
-          runId, nodeRunId: binding.node_run_id, bytes: Buffer.from(data.text), fileName: data.file_name }, now)
+        const firstPublication = !tx.get('SELECT 1 FROM artifacts WHERE artifact_id=?', [target.artifactId])
+        if (firstPublication && (count?.n ?? 0) >= 8) throw new OrchError('RANGE_TOO_LARGE', '每次执行最多提交八份文本成果')
+        const artifact = registerRunArtifactInTx(tx, { ...target,
+          runId, nodeRunId: binding.node_run_id, bytes }, now)
         if (secret && firstPublication && producer.lease_id && producer.lease_expires_at && Date.parse(producer.lease_expires_at) > Date.parse(now)) {
-          recordArtifactPublication(tx, secret, binding, producer, data.file_name, artifact)
+          recordArtifactPublication(tx, secret, binding, producer, target.fileName, artifact)
         }
         return artifact
       }).result

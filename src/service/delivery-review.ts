@@ -6,12 +6,19 @@ import { withTx, type Db } from '../infra/sqlite/driver.ts'
 import { withReadTx, type ReadTx } from './queries/read-tx.ts'
 import { requestHashOf, runIdempotentCommand } from './commands/idempotency.ts'
 import { closeRun } from './commands/run-close.ts'
+import { advanceReview, reviewFilesForDoneAttempt } from './review-manifest.ts'
+import { startHold, submitHold, type HoldKey, type SeenHold } from './review-cas.ts'
 
 const holdKeys = { operation_id: z.uuidv7(), run_id: z.string().min(1).max(256), node_run_id: z.string().min(1).max(256) }
+/** 读到的留验身份：新客户端必须带上，旧页签的结论只能落到它读到的那一代（D04）。 */
+const seenHold = {
+  hold_id: z.string().min(1).max(128).optional(),
+  expected_revision: z.number().int().min(1).optional(),
+}
 export const deliveryHoldSchema = z.discriminatedUnion('action', [
-  z.strictObject({ ...holdKeys, action: z.literal('hold') }),
-  z.strictObject({ ...holdKeys, action: z.literal('withdraw') }),
-  z.strictObject({ ...holdKeys, action: z.literal('accept'), artifact_id: z.string().min(1).max(256), sha256: z.string().regex(/^[a-f0-9]{64}$/) }),
+  z.strictObject({ ...holdKeys, ...seenHold, action: z.literal('hold') }),
+  z.strictObject({ ...holdKeys, ...seenHold, action: z.literal('withdraw') }),
+  z.strictObject({ ...holdKeys, ...seenHold, action: z.literal('accept'), artifact_id: z.string().min(1).max(256), sha256: z.string().regex(/^[a-f0-9]{64}$/) }),
 ])
 
 export function hasDeliveryReviewHold(tx: ReadTx, runId: string): boolean {
@@ -79,12 +86,27 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
     list(actor: string, runId?: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
         if (runId) requireReviewOperator(tx, secret, actor, runId, humanOnly)
-        const items = tx.all(`SELECT h.run_id,h.node_id,n.node_run_id,
+        const rows = tx.all<{ run_id: string; node_id: string; node_run_id: string; status: string;
+          artifact_id: string | null; sha256: string | null; updated_at: string
+          hold_id: string | null; revision: number; review_set_json: string | null; accepted_json: string | null }>(
+          `SELECT h.run_id,h.node_id,n.node_run_id,
           CASE WHEN n.node_run_id=h.node_run_id THEN h.status ELSE 'held' END AS status,
-          h.artifact_id,h.sha256,h.updated_at FROM delivery_review_holds h
+          h.artifact_id,h.sha256,h.updated_at,h.hold_id,h.revision,h.review_set_json,h.accepted_json
+          FROM delivery_review_holds h
           JOIN node_runs n ON n.run_id=h.run_id AND n.node_id=h.node_id AND n.replacement_node_run_id IS NULL
           WHERE h.owner_actor=? AND (? IS NULL OR h.run_id=?) ORDER BY h.updated_at DESC LIMIT 150`,
-        [actor, runId ?? null, runId ?? null])
+          [actor, runId ?? null, runId ?? null])
+        // 带上读到的身份与剩余应审文件：旧页签据此提交，服务端据此拒绝过期结论（D04/D03）。
+        const items = rows.map(({ review_set_json: rawSet, accepted_json: rawAccepted, ...row }) => {
+          const files = readReviewSet(rawSet) ?? []
+          const accepted = readAccepted(rawAccepted)
+          return {
+            ...row,
+            reviewed_files: files.map((item) => ({ artifact_id: item.artifact_id, sha256: item.sha256, file_name: item.file_name })),
+            pending: files.filter((item) => !accepted.some((done) =>
+              done.artifact_id === item.artifact_id && done.sha256 === item.sha256)).map((item) => item.file_name ?? item.artifact_id),
+          }
+        })
         return { items, as_of_seq }
       })
     },
@@ -98,74 +120,82 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
           WHERE r.run_id=? AND n.node_run_id=? AND n.node_type='agent' AND n.replacement_node_run_id IS NULL
           AND r.status='running' AND r.cancel_requested_at IS NULL`, [body.run_id, body.node_run_id])
         if (!node) throw new OrchError('STALE_GENERATION', '只能审核进行中运行的当前智能体步骤')
-        const key = [body.run_id, node.node_id]
+        const holdKey: HoldKey = { runId: body.run_id, nodeId: node.node_id, attemptId: body.node_run_id, actor }
+        const seen: SeenHold | undefined = body.hold_id !== undefined && body.expected_revision !== undefined
+          ? { hold_id: body.hold_id, expected_revision: body.expected_revision } : undefined
         if (body.action === 'hold') {
-          // 当轮应审清单在留验时固定：之后新增或替换的版本不会混进这一轮（D03）。
-          const reviewSet = tx.all<ReviewItem>(`SELECT a.artifact_id,a.sha256,c.file_name
-            FROM artifacts a JOIN artifact_contents c USING(artifact_id)
-            WHERE a.run_id=? AND c.node_run_id=? AND (a.retain_until IS NULL OR a.retain_until>?)
-            ORDER BY a.created_at, a.artifact_id`, [body.run_id, body.node_run_id, now])
-          tx.run(`INSERT INTO delivery_review_holds(run_id,node_id,node_run_id,owner_actor,status,updated_at,review_set_json,accepted_json,revision)
-            VALUES(?,?,?,?,'held',?,?, '[]', 1) ON CONFLICT(run_id,node_id) DO UPDATE SET node_run_id=excluded.node_run_id,
-            status='held',artifact_id=NULL,sha256=NULL,updated_at=excluded.updated_at,
-            review_set_json=excluded.review_set_json,accepted_json='[]',revision=delivery_review_holds.revision+1`,
-          [...key, body.node_run_id, actor, now, JSON.stringify(reviewSet)])
-        } else {
-          if (!tx.get('SELECT 1 FROM delivery_review_holds WHERE run_id=? AND node_id=? AND owner_actor=?', [...key, actor])) {
-            throw new OrchError('NOT_FOUND', '该步骤没有人工留验要求')
-          }
-          if (body.action === 'withdraw') {
-            // 撤销也服从同一代次：另一个页面已经提交的结论不能被悄悄撤掉。
-            if (tx.run("DELETE FROM delivery_review_holds WHERE run_id=? AND node_id=? AND status='held'", key).changes !== 1) {
-              throw new OrchError('STALE_GENERATION', '该留验已由其他页面处理，请刷新后再试')
-            }
-          } else {
-            if (tx.get(`SELECT 1 FROM rework_requests WHERE run_id=?
-              AND (target_node_run_id=? OR new_node_run_id=?)
-              AND status NOT IN ('closed','declined','cancelled')`, [body.run_id, body.node_run_id, body.node_run_id])) {
-              throw new OrchError('STALE_GENERATION', '该步骤正在返工，请在修订成果待办中提交验收')
-            }
-            const artifact = tx.get<{ bytes: Uint8Array }>(`SELECT c.bytes FROM artifacts a JOIN artifact_contents c USING(artifact_id)
-              WHERE a.run_id=? AND c.node_run_id=? AND a.artifact_id=? AND a.sha256=? AND (a.retain_until IS NULL OR a.retain_until>?)`,
-            [body.run_id, body.node_run_id, body.artifact_id, body.sha256, now])
-            if (node.status !== 'done' || !artifact || sha256Hex(Buffer.from(artifact.bytes)) !== body.sha256) throw new OrchError('CONFIRMATION_MISMATCH', '成果版本与当前已完成步骤不符')
-            const current = tx.get<{ status: string; review_set_json: string | null; accepted_json: string | null; revision: number }>(
-              'SELECT status,review_set_json,accepted_json,revision FROM delivery_review_holds WHERE run_id=? AND node_id=?', key)
-            if (!current || current.status !== 'held') {
-              throw new OrchError('STALE_GENERATION', '该留验已由其他页面提交，请刷新当前结论后再核对')
-            }
-            const reviewSet = readReviewSet(current.review_set_json)
-            const prior = readAccepted(current.accepted_json)
-            const confirmed = [...prior.filter((item) => item.artifact_id !== body.artifact_id),
-              { artifact_id: body.artifact_id, sha256: body.sha256 }]
-            if (reviewSet && reviewSet.length > 0
-              && !reviewSet.some((item) => item.artifact_id === body.artifact_id && item.sha256 === body.sha256)) {
-              throw new OrchError('CONFIRMATION_MISMATCH', '这份成果不在本次应审清单内，请刷新后核对当前版本')
-            }
-            const pending = (reviewSet ?? []).filter((item) =>
-              !confirmed.some((done) => done.artifact_id === item.artifact_id && done.sha256 === item.sha256))
-            // 清单没齐就继续等：整组只确认一份时，运行不能因此结束（D03）。
-            const complete = pending.length === 0
-            const accepted = complete
-              ? tx.run(`UPDATE delivery_review_holds SET status='accepted',node_run_id=?,artifact_id=?,sha256=?,accepted_json=?,updated_at=?
-                WHERE run_id=? AND node_id=? AND status='held' AND revision=?`,
-              [body.node_run_id, body.artifact_id, body.sha256, JSON.stringify(confirmed), now, ...key, current.revision])
-              : tx.run(`UPDATE delivery_review_holds SET accepted_json=?,updated_at=?
-                WHERE run_id=? AND node_id=? AND status='held' AND revision=?`,
-              [JSON.stringify(confirmed), now, ...key, current.revision])
-            if (accepted.changes !== 1) throw new OrchError('STALE_GENERATION', '该留验已由其他页面提交，请刷新当前结论后再核对')
-            if (!complete) {
-              appendEvent(tx, { type: 'rework.hold_' + body.action, runId: body.run_id, nodeRunId: body.node_run_id,
-                payload: { ...body, actor, pending: pending.length } })
-              return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action,
-                status: 'held' as const, pending: pending.map((item) => item.file_name ?? item.artifact_id) }
-            }
+          // 新留验不预冻结清单：留验早于交付时冻结的会是空集，验收那一刻再按完整尝试封存（D03）。
+          const started = startHold(tx, holdKey, body.operation_id, now, seen)
+          appendEvent(tx, { type: 'rework.hold_hold', runId: body.run_id, nodeRunId: body.node_run_id,
+            payload: { ...body, actor, hold_id: started.hold_id, revision: started.revision } })
+          return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action,
+            status: 'held' as const, hold_id: started.hold_id, revision: started.revision }
+        }
+        const current = tx.get<{ status: string; review_set_json: string | null; accepted_json: string | null;
+          revision: number; hold_id: string | null; node_run_id: string }>(
+          'SELECT status,review_set_json,accepted_json,revision,hold_id,node_run_id FROM delivery_review_holds WHERE run_id=? AND node_id=? AND owner_actor=?',
+          [body.run_id, node.node_id, actor])
+        if (!current) throw new OrchError('NOT_FOUND', '该步骤没有人工留验要求')
+        if (current.status !== 'held') {
+          throw new OrchError('STALE_GENERATION', '该留验已由其他页面提交，请刷新当前结论后再核对')
+        }
+        if (seen !== undefined) {
+          if (current.hold_id !== seen.hold_id || current.revision !== seen.expected_revision) {
+            throw new OrchError('STALE_GENERATION', '留验已更新，请刷新当前结论后再核对')
           }
         }
-        appendEvent(tx, { type: 'rework.hold_' + body.action, runId: body.run_id, nodeRunId: body.node_run_id, payload: { ...body, actor } })
-        if (body.action !== 'hold') closeRun(tx, secret, body.run_id, now)
+        if (body.action === 'withdraw') {
+          // 撤销同样服从代次：另一个页面已经提交的结论不能被悄悄撤掉（D04）。
+          const withdrawn = submitHold(tx, holdKey, seen ?? { hold_id: current.hold_id ?? body.operation_id,
+            expected_revision: current.revision }, now, null)
+          appendEvent(tx, { type: 'rework.hold_withdraw', runId: body.run_id, nodeRunId: body.node_run_id,
+            payload: { ...body, actor, hold_id: withdrawn.hold_id, withdrawn_revision: current.revision } })
+          closeRun(tx, secret, body.run_id, now)
+          return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action,
+            status: 'withdrawn' as const, hold_id: withdrawn.hold_id, revision: withdrawn.revision }
+        }
+        if (tx.get(`SELECT 1 FROM rework_requests WHERE run_id=?
+          AND (target_node_run_id=? OR new_node_run_id=?)
+          AND status NOT IN ('closed','declined','cancelled')`, [body.run_id, body.node_run_id, body.node_run_id])) {
+          throw new OrchError('STALE_GENERATION', '该步骤正在返工，请在修订成果待办中提交验收')
+        }
+        const artifact = tx.get<{ bytes: Uint8Array }>(`SELECT c.bytes FROM artifacts a JOIN artifact_contents c USING(artifact_id)
+          WHERE a.run_id=? AND c.node_run_id=? AND a.artifact_id=? AND a.sha256=? AND (a.retain_until IS NULL OR a.retain_until>?)`,
+        [body.run_id, body.node_run_id, body.artifact_id, body.sha256, now])
+        if (node.status !== 'done' || !artifact || sha256Hex(Buffer.from(artifact.bytes)) !== body.sha256) {
+          throw new OrchError('CONFIRMATION_MISMATCH', '成果版本与当前已完成步骤不符')
+        }
+        // 本轮应审清单：已封存就按封存件核对；未封存则按当前已完成尝试与计划必交件封存一次（D03）。
+        // 同一文件名的多版只占一个应审位，用户确认的那一版就是这一位的版本。
+        const sealed = reviewFilesForDoneAttempt(tx, body.run_id, body.node_run_id, node.node_id, now, current.review_set_json)
+        const confirmedName = tx.get<{ file_name: string }>(
+          'SELECT c.file_name FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE a.artifact_id=?',
+          [body.artifact_id])?.file_name
+        if (!confirmedName) throw new OrchError('CONFIRMATION_MISMATCH', '成果版本与当前已完成步骤不符')
+        const files = sealed.map((item) => item.file_name === confirmedName
+          ? { artifact_id: body.artifact_id, sha256: body.sha256, file_name: confirmedName } : item)
+        if (!files.some((item) => item.artifact_id === body.artifact_id && item.sha256 === body.sha256)) {
+          throw new OrchError('CONFIRMATION_MISMATCH', '这份成果不在本次应审清单内，请刷新后核对当前版本')
+        }
+        const previous = readAccepted(current.accepted_json)
+        const next = advanceReview(files, previous, { artifact_id: body.artifact_id, sha256: body.sha256 })
+        const submitted = submitHold(tx, holdKey, seen ?? { hold_id: current.hold_id ?? body.operation_id,
+          expected_revision: current.revision }, now, {
+          files,
+          accepted: next.accepted,
+          complete: next.complete,
+          file: { artifact_id: body.artifact_id, sha256: body.sha256 },
+        })
+        appendEvent(tx, { type: 'rework.hold_accept', runId: body.run_id, nodeRunId: body.node_run_id,
+          payload: { ...body, actor, hold_id: submitted.hold_id, revision: submitted.revision, pending: next.pending.length } })
+        if (!next.complete) {
+          return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action,
+            status: 'held' as const, pending: next.pending.map((item) => item.file_name ?? item.artifact_id),
+            hold_id: submitted.hold_id, revision: submitted.revision }
+        }
+        closeRun(tx, secret, body.run_id, now)
         return { run_id: body.run_id, node_run_id: body.node_run_id, action: body.action,
-          status: body.action === 'hold' ? 'held' as const : 'accepted' as const }
+          status: 'accepted' as const, hold_id: submitted.hold_id, revision: submitted.revision }
       }).result)
     },
   }

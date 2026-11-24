@@ -590,7 +590,7 @@ describe('交付验收阶段', () => {
 })
 
 describe('P05 会话文字结果的验收', () => {
-  it('有导出的 chat-result.md 就通过，没有就如实待核验', () => {
+  it('旧版同名 chat-result.md 不能证明已提交正文', () => {
     const { db } = freshLedger()
     const catalog = catalogFor(db, 'wf-chat-text')
     const created = createRun(db, catalog, {
@@ -608,7 +608,7 @@ describe('P05 会话文字结果的验收', () => {
     expect(before).toHaveLength(1)
     expect(before[0]?.outcome).toBe('unverifiable')
     expect(before[0]?.reason).toBe('chat_text_result_not_exported')
-    // 会话结果已落成真实 UTF-8 文件后，自动核验通过。
+    // 普通同名登记仍然缺少已批准交付项的来源。
     seedArtifact(db, {
       artifactId: 'art-chat-text',
       runId: created.run_id,
@@ -619,6 +619,6 @@ describe('P05 会话文字结果的验收', () => {
     withTx(db, (tx) => applyRunAcceptance(tx, created.run_id, LATER))
     const after = acceptanceRows(db, created.run_id)
     expect(after).toHaveLength(1)
-    expect(after[0]?.outcome).toBe('passed')
+    expect(after[0]?.outcome).toBe('unverifiable')
   })
 })

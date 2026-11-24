@@ -23,13 +23,18 @@ import { verifyArtifactCompletion } from '../../src/service/artifact-completion.
 import { readOutstandingFiles } from '../../src/service/chat-expected-files.ts'
 import { fakeAgentBridge } from '../fixtures/agent-bridge.ts'
 
+import { describeChatRun } from '../../src/service/chat-display.ts'
+import { readChatTextPreviews } from '../../src/service/chat-text-previews.ts'
+import { evaluateRunAcceptance } from '../../src/service/commands/run-acceptance.ts'
+import { getRun } from '../../src/service/queries/runs.ts'
+
 const roles = ['目录', '链接', '术语', '日期', '引用', '数字', '格式', '附件', '重复项', '缺失项']
 const allBranchIds = roles.map((_, i) => 'review_' + (i + 1))
 const allNames = roles.map((role) => role + '核对')
 const descriptor = { name: 'ro.check', capability: 'read_only' as const, command: { bin: 'check', args: [] } }
 const goal = '分别核对十类交付内容，然后汇总审核结论'
 
-it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败', '部分汇合', '停机后续跑'] as const)('具名分支共享一个运行与并发上限：%s', async (scenario) => {
+it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败', '部分汇合', '停机后续跑'] as const)('具名分支共享一个运行与并发上限：%s', async (scenario) => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-parallel-plan-'))
   const secret = 'parallel-plan-contract-secret'
   const registry = new ToolRegistry()
@@ -38,7 +43,8 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
   const names = partialJoin ? allNames.slice(0, 4) : allNames
   const joinSources = partialJoin ? branchIds.slice(0, 2) : branchIds
   const joinAllowsTool = scenario === '合流有工具权限但仅验收成果'
-  const outputOnly = partialJoin || scenario === '纯成果' || joinAllowsTool || scenario === '成果门槛' || scenario === '重启与重试'
+  const textPlan = scenario === '固定会话正文'
+  const outputOnly = textPlan || partialJoin || scenario === '纯成果' || joinAllowsTool || scenario === '成果门槛' || scenario === '重启与重试'
   const blockedOutputs = scenario === '成果门槛'
   const toolsFor = (nodeId: string) => !outputOnly || (blockedOutputs && nodeId === branchIds[4]) ? [descriptor.name] : []
   if (!outputOnly || blockedOutputs || joinAllowsTool) registry.register(descriptor)
@@ -79,9 +85,31 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
             const result = callDshRework(db, service.rework!, binding, { action: 'read', ...ref }) as { text: string }
             joinTexts.push(result.text)
           }
-          if (outputOnly) {
+          if (textPlan) {
+            const obligations = (input.input as { deliverables: { deliverable_index: number }[] }).deliverables
+            expect(obligations.map((x) => x.deliverable_index)).toEqual([10, 11])
+            const send = (index: number, text: string, operation_id = uuidv7()) => callDshRework(db, service.rework!, binding, {
+              action: 'publish_text_result', deliverable_index: index, operation_id, text,
+            }, undefined, secret)
+            expect(() => send(0, '本步骤无权提交')).toThrow()
+            expect(() => send(10, '   ')).toThrow()
+            callDshRework(db, service.rework!, binding, { action: 'publish', operation_id: uuidv7(),
+              file_name: '会话正文-11.md', text: '同名无关文件' }, undefined, secret)
+            const states = () => withTx(db, tx => evaluateRunAcceptance(tx, node.run_id, new Date().toISOString()).results
+              .filter((r) => r.kind === 'chat/text_result').map((r) => r.outcome))
+            expect(states()).toEqual(['passed','unverifiable','unverifiable'])
+            const operationId = uuidv7()
+            const first = send(10, '已核对十项，需补交两份附件。', operationId)
+            expect(send(10, '已核对十项，需补交两份附件。', operationId)).toEqual(first)
+            expect(() => send(10, '更换了内容', operationId)).toThrow()
+            expect(states()).toEqual(['passed','passed','unverifiable'])
+            send(11, '第二项交付的正文。')
+          } else if (outputOnly) {
             publish(role, joinTexts.join('\n'))
           }
+        } else if (textPlan && role === names[0]) {
+          callDshRework(db, service.rework!, binding, { action: 'publish_text_result', operation_id: uuidv7(),
+            deliverable_index: 0, text: role + '完成' }, undefined, secret)
         } else if (!blockedOutputs) {
           publish(role, role + '完成')
           if (scenario === '纯成果' && role === names[0]) {
@@ -176,8 +204,10 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
         })),
         deliverables: outputOnly ? [...workflow!.nodes.map((node) => ({
           title: node.title, node_id: node.id, goal_ids: ['goal'],
-          acceptance: { kind: 'artifact', file_name: node.title + '.txt', minimum_bytes: 8 },
-        })), ...(blockedOutputs ? [{ title: '真实工具证据', node_id: branchIds[4], goal_ids: ['goal'],
+          acceptance: textPlan && (node.id === 'join_review' || node.id === branchIds[0]) ? { kind: 'chat/text_result' }
+            : { kind: 'artifact', file_name: node.title + '.txt', minimum_bytes: 8 },
+        })), ...(textPlan ? [{ title: '汇总审核', node_id: 'join_review', goal_ids: ['goal'],
+          acceptance: { kind: 'chat/text_result' } }] : []), ...(blockedOutputs ? [{ title: '真实工具证据', node_id: branchIds[4], goal_ids: ['goal'],
           acceptance: { kind: 'tool_evidence', tool: descriptor.name, exit_code: 0 } }] : [])] : [{ title: '审核结果', node_id: 'join_review', goal_ids: ['goal'],
           acceptance: { kind: 'tool_evidence', tool: descriptor.name, exit_code: 0 } }],
         risks: [],
@@ -369,7 +399,27 @@ it.each(['完成', '纯成果', '合流有工具权限但仅验收成果', '成�
         expect(sql.prepare('SELECT COUNT(*) AS n FROM tool_executions').get()).toEqual({ n: 0 })
         expect(sql.prepare(`SELECT COUNT(*) AS n FROM node_run_events WHERE type='report_applied'
           AND json_extract(payload,'$.artifact_proof.source')='artifact.published_for_attempt'`).get()).toEqual({ n: 11 })
-        expect(sql.prepare("SELECT COUNT(*) AS n FROM run_acceptance_results WHERE outcome='passed'").get()).toEqual({ n: 11 })
+        expect(sql.prepare("SELECT COUNT(*) AS n FROM run_acceptance_results WHERE outcome='passed'").get()).toEqual({ n: textPlan ? 12 : 11 })
+        if (textPlan) {
+          const run = getRun(service.orchestra.db, run_id, { includeAcceptanceArtifactIds: true })
+          const checks = run.delivery_checks!.items
+          const previews = readChatTextPreviews(service.orchestra.db, run_id, checks)
+          expect(previews.map((x) => x.text)).toEqual([names[0] + '完成','已核对十项，需补交两份附件。','第二项交付的正文。'])
+          const view = { title: '交付审核', status: run.status, terminal: true, settling: false, acceptance: 'passed',
+            counts: [], blocking: [], decisions: [], delivery_checks: checks, artifacts: [], text_results: previews }
+          for (const proactive of [true,false]) {
+            const { body } = describeChatRun(view, proactive)
+            expect(body).toContain('已核对十项，需补交两份附件。')
+            expect(body).toContain('第二项交付的正文。')
+            expect(body).toContain(names[0] + '完成')
+            expect(body).not.toContain('同名无关文件')
+          }
+          const id = checks.find((c) => c.kind === 'chat/text_result')!.artifact_id!
+          sql.prepare('UPDATE artifact_contents SET bytes=? WHERE artifact_id=?').run(Buffer.from('改动正文'), id)
+          expect(readChatTextPreviews(service.orchestra.db, run_id, checks)).toHaveLength(2)
+          expect(withTx(service.orchestra.db, tx => evaluateRunAcceptance(tx, run_id, new Date().toISOString()))
+            .results.filter((r) => r.kind === 'chat/text_result').map((r) => r.outcome).sort()).toEqual(['passed','passed','unverifiable'])
+        }
       }
     }
     const seenInputs = spawned.map(stepOf)

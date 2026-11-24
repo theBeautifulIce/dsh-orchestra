@@ -7,6 +7,8 @@ type ApprovalFields = {
   operation: string
   consequence: string
   planSteps?: string[]
+  deliverables?: string[]
+  planVersion?: string
   confirmUntil?: string
 }
 
@@ -25,10 +27,12 @@ export function formatChatApproval(fields: ApprovalFields) {
     '确认后　' + singleLine(fields.consequence, 180),
   ]
   if (fields.planSteps?.length) {
-    // 批准前至少能看清前 8 步并知道总数；更多的才提示去计划页看完整列表（C07）。
-    const examples = fields.planSteps.slice(0, 8).map((step) => singleLine(step, 36))
-    const total = `（共 ${fields.planSteps.length} 步${fields.planSteps.length > 8 ? '，可在任务计划中查看完整列表' : ''}）`
-    lines.push('计划步骤　' + examples.join('、') + total)
+    // 步骤描述的长度已由计划 schema 限制。保留每一步的完整正文和受影响对象。
+    const plain = (value: string) => value.replace(/[\s\u202a-\u202e\u2066-\u2069]+/gu, ' ').trim()
+    lines.push('计划步骤　共 ' + fields.planSteps.length + ' 步')
+    for (const [i, text] of fields.planSteps.entries()) lines.push((i + 1) + '. ' + plain(text))
+    for (const item of fields.deliverables ?? []) lines.push('将交付　' + plain(item))
+    if (fields.planVersion) lines.push('计划版本　' + plain(fields.planVersion))
   }
   if (fields.confirmUntil) lines.push('有效至　' + fields.confirmUntil)
   return lines.join('\n')

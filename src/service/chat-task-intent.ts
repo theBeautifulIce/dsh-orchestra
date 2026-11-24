@@ -53,10 +53,28 @@ function classifyTaskDetails(details: string): ChatTaskIntent {
   return 'clarify'
 }
 
+type ScopedClause = { text: string; target: 'work' | 'constraint' | 'defer' }
+function scopeClauses(input: string): ScopedClause[] {
+  // 先拆成短句，再判定每一条否定约束的作用对象；保留原文交给规划器。
+  return input.split(/[。！？!?；;，,\n]|\.(?=\s|$)|(?=不要|不得|无需|不用|请勿|别|\bdo not\b|\bdon't\b)/iu).map(text => text.trim()).filter(Boolean)
+    .map(text => ({
+      text,
+      target: blocksStart(text) ? 'defer' : restrictedDeferral.test(text) ? 'constraint' : 'work',
+    }))
+}
+export function shouldDeferTask(text: string): boolean {
+  return scopeClauses(text.normalize('NFKC')).some(clause => clause.target === 'defer')
+}
+function blocksStart(text: string): boolean {
+  // 只豁免同一处短语。删除这个局部约束后仍有延期指令，就暂缓整项任务。
+  const remainder = text.replace(new RegExp(restrictedDeferral.source, 'giu'), ' ')
+  return deferred.test(remainder)
+}
+
 /** Classify an authenticated operator message before the conversation model can act. */
 export function classifyChatTask(text: string): ChatTaskIntent {
   const input = text.trim().normalize('NFKC')
-  if (!input || (deferred.test(input) && !restrictedDeferral.test(input)) || withheld.test(input)) return 'conversation'
+  if (!input || scopeClauses(input).some(c => c.target === 'defer') || withheld.test(input)) return 'conversation'
   const unquoted = input.replace(/“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"/gu, ' ')
   const pivot = operatorPivot.exec(unquoted)
   const reported = reportedSpeech.test(unquoted) || /^(?:这是(?:一个|一条)?测试案例|请看以下示例|假如|假设|例如|例子)/u.test(input)

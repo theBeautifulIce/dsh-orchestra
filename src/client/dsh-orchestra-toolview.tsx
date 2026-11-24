@@ -1,6 +1,8 @@
 import type { ReactElement } from 'react'
 import { DshDeliveryReviewCard, type DshDeliveryReview } from './dsh-delivery-review-card.tsx'
 import { isDshLocalShell, type DshLocalPanelSources } from './dsh-local-panel.tsx'
+import { ReceiptAction } from './receipt-action.tsx'
+import { receiptLocation } from '../core/receipt-location.ts'
 
 const slotName = 'tool.call.toolview'
 const toolName = 'orchestra_task'
@@ -38,7 +40,14 @@ function OrchestraToolRow(owner: ToolOwner, sources?: DshLocalPanelSources) {
     ? 'Orchestra 未能完成这次操作。请在 Orchestra 面板确认任务状态后再试。'
     : '请在 Orchestra 面板查看这次操作的结果。')
     : 'Orchestra 正在处理这次操作…'
-  return <p role={isError ? 'alert' : 'status'} style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</p>
+  // 服务端签发过定位对象时给一个只读入口；没有就保持原纯文字路径（T16）。
+  const target = result?.meta && typeof result.meta === 'object' && 'location' in result.meta
+    ? receiptLocation.safeParse((result.meta as { location?: unknown }).location) : undefined
+  const linkable = !isError && target?.success && sources && typeof window !== 'undefined' && isDshLocalShell(window.location.href)
+  return <>
+    <p role={isError ? 'alert' : 'status'} style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</p>
+    {linkable && <ReceiptAction location={target.data} sources={sources} />}
+  </>
 }
 
 export function registerNativeOrchestraToolView(ctx: NativeOrchestraToolViewContext, reviewSources?: () => DshLocalPanelSources | undefined) {

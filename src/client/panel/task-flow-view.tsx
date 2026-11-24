@@ -42,7 +42,7 @@ export function TaskFlowView({ api, tasks, onOpenTask, reloadVersion, reworkEnab
 }
 
 function TaskRunQueue({ api, task, reloadVersion }: { api: ResourcesApi; task: TaskSummary; reloadVersion: number }) {
-  const { nodes, partial, failed, refresh } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
+  const { nodes, partial, loadMore, failed, refresh } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
   return <section className="task-flow-main" aria-label="任务队列">
     <header className="task-flow-run-head">
       <h2>队列 · {task.title || '未命名任务'}</h2>
@@ -50,7 +50,7 @@ function TaskRunQueue({ api, task, reloadVersion }: { api: ResourcesApi; task: T
     </header>
     {failed ? <p role="alert" className="task-flow-empty">队列读取失败。<button className="task-quiet-button" type="button" onClick={refresh}>重试</button></p>
       : !nodes ? <p role="status" className="task-flow-empty">正在读取队列…</p>
-        : <TaskStepOverview nodes={nodes} partial={partial} queue />}
+        : <TaskStepOverview nodes={nodes} partial={partial} onLoadMore={loadMore} queue />}
   </section>
 }
 
@@ -60,7 +60,7 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
   const [run, setRun] = useState<RunSummary>()
   const [runError, setRunError] = useState(false)
   const [retry, setRetry] = useState(0)
-  const { nodes, partial, failed: nodeError, refresh: refreshNodes } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
+  const { nodes, partial, loadMore, failed: nodeError, refresh: refreshNodes } = useRunStepSnapshot(api, task.current_run_id, reloadVersion)
   useEffect(() => {
     if (!task.current_run_id) return
     let current = true
@@ -97,7 +97,7 @@ function TaskRunFlow({ api, task, reloadVersion, onOpenTask, reworkEnabled }: {
     </header>
     {runError && <p role="alert" className="task-flow-empty">运行信息读取失败。<button className="task-quiet-button" type="button" onClick={() => setRetry((n) => n + 1)}>重试</button></p>}
     {nodeError && <p role="alert" className="task-flow-empty">执行步骤读取失败。<button className="task-quiet-button" type="button" onClick={refreshNodes}>重试</button></p>}
-    {partial && <p className="task-flow-empty">部分步骤或较新的尝试未显示。</p>}
+    {partial && <p className="task-flow-empty">部分步骤或较新的尝试未显示。{loadMore && <button type="button" className="task-quiet-button" onClick={loadMore}>继续读取步骤</button>}</p>}
     {runtimeDoc && !topology.failed && !topology.loading && <WorkflowDependencyView doc={runtimeDoc} nodes={nodes} />}
     {hasRun && !nodes && !nodeError && <p role="status" className="task-flow-empty">正在读取执行步骤…</p>}
     {(!hasRun || nodes) && <TaskRunSteps nodes={nodes ?? []} doc={runtimeDoc} run={run}

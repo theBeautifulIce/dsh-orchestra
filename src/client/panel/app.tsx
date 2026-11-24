@@ -80,6 +80,7 @@ export function PanelApp(props: PanelAppProps) {
   const memoryRecovery = useMemo(() => createMemoryRecoveryApi(client), [client])
   const taskCommands = useMemo(() => createTaskCommands(client), [client])
   const triggerCommands = useMemo(() => createTaskTriggerCommands(client), [client])
+  const writableTriggers = props.taskTriggersEnabled === true ? triggerCommands : undefined
   const [route, setRoute] = useState<PanelRoute>(props.initialRoute ?? 'tasks')
   const [taskId, setTaskId] = useState<string | null>(null)
   const [taskRunId, setTaskRunId] = useState<string>()
@@ -210,8 +211,10 @@ export function PanelApp(props: PanelAppProps) {
     screen = <div className="task-workspace">
       <TaskListScreen reworkEnabled={props.reworkEnabled} collaborationEnabled={props.collaborationEnabled}
         workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan} api={api} commands={taskCommands} selectedTaskId={taskId}
-        triggerManager={props.taskTriggersEnabled === false ? undefined :
-          <TaskTriggerManager api={api} commands={triggerCommands} onChanged={() => setReloadVersion((version) => version + 1)} />} onSelectTask={(id, trigger, runId) => {
+        triggerManager={!writableTriggers ? undefined :
+          <TaskTriggerManager api={api} commands={writableTriggers} onChanged={() => setReloadVersion((version) => version + 1)} />} onSelectTask={(id, trigger, runId, action) => {
+        // 待批准事项直接进审批中心，其余动作带着精确目标打开任务详情（T01/T02）。
+        if (action?.kind === 'decision' && action.decision_id) { openDecision(action.decision_id); return }
         taskTrigger.current = trigger
         setTaskRunId(runId)
         setTaskId(id)
@@ -276,7 +279,7 @@ export function PanelApp(props: PanelAppProps) {
     {taskId && <TaskDetailScreen rework={rework} modelEscalation={modelEscalation} reworkPlannerEnabled={props.reworkPlannerEnabled} key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
       setTaskId(null)
       taskTrigger.current?.focus({ preventScroll: true })
-    }} taskCommands={taskCommands} triggerCommands={triggerCommands} onArchiveChanged={() => setReloadVersion((version) => version + 1)}
+    }} taskCommands={taskCommands} triggerCommands={writableTriggers} onArchiveChanged={() => setReloadVersion((version) => version + 1)}
       onOpenDecision={openDecision}
       notesClient={props.runNotesEnabled ? client : undefined}
       onOpenMemory={props.memoryEnabled ? () => { setTaskId(null); setRoute('memory') } : undefined}

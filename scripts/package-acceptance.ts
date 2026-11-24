@@ -9,6 +9,11 @@ const baseFiles = new Set([
   'package/cordis.patch.yml', 'package/orchestra.config.json',
 ])
 const migrationPath = /^package\/lib\/infra\/sqlite\/migrations\/(\d{3})_[a-z0-9_]+\.sql$/
+const publicDocs = new Set([
+  'package/LICENSE', 'package/README.en.md',
+  'package/docs/assets/readme/board.png', 'package/docs/assets/readme/queue.png',
+  'package/docs/assets/readme/results.png', 'package/docs/assets/readme/workflow.png',
+])
 const guideFiles = ['docs/runbook.md', 'docs/trial-circles.md']
 // The pinned G5 predecessor predates the native slash menu. Both builds
 // advertise 0.1.0, so the rehearsal's existing previous role selects this contract.
@@ -27,20 +32,22 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
   const bytes = readFileSync(archive)
   const sha256 = sha256Hex(bytes)
   if (options.expectedSha256 && options.expectedSha256 !== sha256) throw new Error('Archive SHA256 mismatch')
-  const entries = execFileSync('tar', ['-tf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/).sort()
+  // Windows 的 GNU tar 会把 `C:` 当成远端主机名，先声明这是本地归档。
+  const tarLocal = process.platform === 'win32' ? ['--force-local'] : []
+  const entries = execFileSync('tar', [...tarLocal, '-tf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/).sort()
   if (new Set(entries).size !== entries.length
-    || entries.some((name) => !baseFiles.has(name) && name !== 'package/README.md' &&
+    || entries.some((name) => !baseFiles.has(name) && !publicDocs.has(name) && name !== 'package/README.md' &&
       !guideFiles.some((file) => name === 'package/' + file) && !migrationPath.test(name))) {
     throw new Error('Package has duplicate or undeclared paths')
   }
-  const metadata = execFileSync('tar', ['-tvf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/)
+  const metadata = execFileSync('tar', [...tarLocal, '-tvf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/)
   if (metadata.length !== entries.length || metadata.some((line) => !line.startsWith('-'))) {
     throw new Error('Package must contain ordinary files only')
   }
   for (const required of baseFiles) if (!entries.includes(required)) throw new Error('Missing package file: ' + required)
   if (!options.previous && !entries.includes('package/README.md')) throw new Error('Candidate package has no installation README')
 
-  const read = (name: string) => execFileSync('tar', ['-xOf', archive, 'package/' + name], { maxBuffer: 10 * 1024 * 1024 })
+  const read = (name: string) => execFileSync('tar', [...tarLocal, '-xOf', archive, 'package/' + name], { maxBuffer: 10 * 1024 * 1024 })
   const manifest = JSON.parse(read('package.json').toString('utf8'))
   if (!options.previous && Array.isArray(manifest.files)) {
     for (const file of guideFiles) {

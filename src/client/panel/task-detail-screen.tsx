@@ -176,9 +176,16 @@ export function TaskDetailScreen({
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
       </>}
       {!showRun && data && <>
-        {taskTab === '概览' && latest && rework && <ReworkPanel api={api} commands={rework} runId={latest.run_id} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
-        {taskTab === '概览' && <TaskOverview data={data} latest={latest} api={api} reloadVersion={reloadVersion} commands={taskCommands}
-          triggerCommands={triggerCommands} onArchiveChanged={onArchiveChanged} onOpenRun={openRun} />}
+        {taskTab === '概览' && latest && <ResultLanding api={api} run={latest}
+          reloadVersion={reloadVersion} />}
+        {taskTab === '概览' && <TaskOverview data={data} latest={latest} api={api}
+          reloadVersion={reloadVersion} commands={taskCommands} triggerCommands={triggerCommands}
+          onArchiveChanged={onArchiveChanged} onOpenRun={openRun} />}
+        {taskTab === '概览' && latest && rework &&
+          <ReworkPanel key={latest.run_id} api={api} commands={rework} runId={latest.run_id}
+            runStatus={latest.status} plannerEnabled={reworkPlannerEnabled}
+            reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
+
         {taskTab === '编排' && <TaskOrchestration reworkEnabled={Boolean(rework)} api={api} task={data.task} run={latest} reloadVersion={reloadVersion}
           onOpenDecision={onOpenDecision} />}
         {taskTab === '事件' && <TaskEventTimeline api={api} scope={{ taskId }} reloadVersion={reloadVersion} />}
@@ -693,11 +700,11 @@ function DeliveryChecks({ checks }: { checks: RunSummary['delivery_checks'] }) {
     <h3 style={sectionTitleStyle}>交付验收</h3>
     {!checks?.items.length && <p style={mutedStyle}>{checks ? '本次运行暂无已记录的交付验收。' : '未读取到本次运行的验收记录。'}</p>}
     {checks?.items.map((check) => <article key={check.result_id} style={cardStyle}>
-      <h4 style={evidenceHeadingStyle}>{check.kind === 'artifact' ? '产物' : '工具验收'}
-        {(check.file_name ?? check.tool) && ` · ${check.file_name ?? check.tool}`} · {DELIVERY_OUTCOME[check.outcome] ?? '结果未记录'}</h4>
+      <h4 style={evidenceHeadingStyle}>{check.kind === 'artifact' ? '产物' : check.kind === 'chat/text_result' ? '会话正文' : '工具验收'}
+        {(check.title ?? check.file_name ?? check.tool) && ` · ${check.title ?? check.file_name ?? check.tool}`} · {DELIVERY_OUTCOME[check.outcome] ?? '结果未记录'}</h4>
       {check.kind === 'artifact' ? <>
         <p style={mutedStyle}>规则核对产物名称、来源步骤和文件大小。内容可在「结果」中查看。</p>
-      </> : <>
+      </> : check.kind === 'chat/text_result' ? <p style={mutedStyle}>规则核对负责步骤提交的正文版本。可在会话阅读，也可在结果页下载。</p> : <>
         <p style={mutedStyle}>规则核对指定步骤的工具执行结果。</p>
       </>}
       {check.reason && <p>{deliveryReason(check.reason)}</p>}
@@ -777,3 +784,13 @@ const attentionStyle = { margin: 0, padding: 9, borderRadius: 8, background: '#f
 const cardStyle = { minWidth: 0, padding: 11, marginBottom: 6, border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.surface }
 const quietButtonStyle = { minHeight: 36, justifySelf: 'start' as const, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' }
 const errorStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: 14, borderRadius: 8, background: '#fff1f0', color: COLOR.danger, fontSize: FONT_PX.body } as const
+
+function ResultLanding({api,run,reloadVersion}:{
+  api:ResourcesApi; run:RunSummary; reloadVersion:number
+}) {
+  const finished = ['succeeded','succeeded_with_unverified','failed','failed_with_unverified',
+    'cancelled','orphaned'].includes(run.status)
+  const delivery = useRunDelivery(api,run,finished,false,reloadVersion)
+  if (!finished) return null
+  return <RunResult api={api} run={run} delivery={delivery} verifying={false} nodes={null}/>
+}

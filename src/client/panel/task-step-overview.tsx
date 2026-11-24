@@ -10,31 +10,35 @@ type StepRead = {
   runId: string
   reloadVersion: number
   retry: number
+  pages: number
   failed: boolean
-  data?: { nodes: NodeRunView[]; partial: boolean }
+  data?: { nodes: NodeRunView[]; partial: boolean; canLoadMore: boolean }
 }
 
 export function useRunStepSnapshot(api: ResourcesApi, runId: string | null, reloadVersion: number, retainPrevious = false) {
   const [snapshot, setSnapshot] = useState<StepRead>()
   const [retry, setRetry] = useState(0)
+  const [pageRequest, setPageRequest] = useState<{ runId: string; pages: number }>()
+  const pages = pageRequest?.runId === runId ? pageRequest.pages : 1
   useEffect(() => {
     if (!runId) return
     let active = true
-    const key = { api, runId, reloadVersion, retry }
-    void api.listNodes(runId, PAGE_LIMIT).then(({ data }) => {
-      if (data.items.some((node) => node.run_id !== runId)) throw new Error('步骤归属与当前运行不符')
-      if (active) setSnapshot({ ...key, data: { nodes: data.items, partial: data.has_more ?? data.items.length >= PAGE_LIMIT }, failed: false })
+    const key = { api, runId, reloadVersion, retry, pages }
+    void readStepWindow(api, runId, pages, () => active).then((data) => {
+      if (active && data) setSnapshot({ ...key, data, failed: false })
     }).catch(() => {
       if (active) setSnapshot((previous) => ({
         ...key, failed: true, data: previous?.api === api && previous.runId === runId ? previous.data : undefined,
       }))
     })
     return () => { active = false }
-  }, [api, runId, reloadVersion, retry])
+  }, [api, runId, reloadVersion, retry, pages])
   const sameRun = snapshot?.api === api && snapshot.runId === runId ? snapshot : undefined
-  const current = sameRun?.reloadVersion === reloadVersion && sameRun.retry === retry ? sameRun : undefined
+  const current = sameRun?.reloadVersion === reloadVersion && sameRun.retry === retry && sameRun.pages === pages ? sameRun : undefined
   const data = retainPrevious ? sameRun?.data : current?.failed ? undefined : current?.data
-  return { nodes: data?.nodes, partial: data?.partial, failed: current?.failed, refresh: () => setRetry((value) => value + 1) }
+  const loadMore = current?.data?.canLoadMore && runId
+    ? () => setPageRequest({ runId, pages: pages + 1 }) : undefined
+  return { nodes: data?.nodes, partial: data?.partial, loadMore, failed: current?.failed, refresh: () => setRetry((value) => value + 1) }
 }
 
 const GROUPS = [
@@ -45,6 +49,7 @@ const GROUPS = [
   { id: 'waiting', title: '等待条件' },
   { id: 'attention', title: '暂停、重试与异常' },
   { id: 'finished', title: '已结束' },
+  { id: 'unknown', title: '状态待识别' },
 ] as const
 type QueueGroup = (typeof GROUPS)[number]['id']
 
@@ -54,10 +59,10 @@ function queueGroup(node: NodeRunView): QueueGroup {
   if (state === 'waiting_capacity') return 'capacity'
   if (state === 'waiting_dependencies') return 'dependencies'
   if (state === 'ready') return 'ready'
-  if (state === 'done' || state === 'cancelled' || state === 'superseded') return 'finished'
-  // 正常等待不是异常：等外部条件、排队原因未知都单独成组，只有真需要人处理的才进 attention（T09）。
-  if (state === 'waiting' || state === 'queued_unknown') return 'waiting'
-  return 'attention'
+  if (['done','cancelled','superseded'].includes(state)) return 'finished'
+  if (['waiting','queued','queued_unknown'].includes(state)) return 'waiting'
+  if (['blocked','failed'].includes(nodeExecutionPhase(node).tone)) return 'attention'
+  return 'unknown'
 }
 
 type StepLabels = {
@@ -171,8 +176,8 @@ function BoardSteps({ steps, labels, partial, openBranches }: {
   </div>
 }
 
-export function TaskStepOverview({ nodes, queue = false, partial = nodes.length >= PAGE_LIMIT, openBranches }: {
-  nodes: readonly NodeRunView[]; queue?: boolean; partial?: boolean; openBranches?: Set<string>
+export function TaskStepOverview({ nodes, queue = false, partial = nodes.length >= PAGE_LIMIT, openBranches, onLoadMore }: {
+  nodes: readonly NodeRunView[]; onLoadMore?: () => void; queue?: boolean; partial?: boolean; openBranches?: Set<string>
 }) {
   const steps = [...currentAttempts(nodes).values()]
   const labels = stepLabels(steps)
@@ -196,6 +201,40 @@ export function TaskStepOverview({ nodes, queue = false, partial = nodes.length 
         </section>
       })}
     </div> : <BoardSteps steps={steps} labels={labels} partial={partial} openBranches={openBranches} />}
-    {partial && <p className="task-flow-empty">本次最多读取 {PAGE_LIMIT} 条尝试记录，可能还有步骤或较新的尝试未显示。</p>}
+    {partial && <p className="task-flow-empty">已读取 {nodes.length} 条尝试记录，仍有步骤未显示。
+      {onLoadMore && <button type="button" className="task-quiet-button" onClick={onLoadMore}>继续读取步骤</button>}</p>}
   </>
+}
+
+export async function readStepWindow(api: ResourcesApi, runId: string,
+  pages: number, current: () => boolean) {
+  const nodes = new Map<string, NodeRunView>()
+  const seen = new Set<string>()
+  let cursor: string | undefined
+  let partial = false
+  for (let i=0; i<pages; i++) {
+    if (!current()) return undefined
+    const { data } = await api.listNodes(runId, PAGE_LIMIT, cursor)
+    if (!current()) return undefined
+    for (const item of data.items) {
+      if (item.run_id !== runId) throw new Error('步骤归属变化')
+      nodes.set(item.node_run_id, item)
+    }
+    cursor = data.next_cursor ?? undefined
+    partial = Boolean(cursor || (data.has_more ?? data.items.length >= PAGE_LIMIT))
+    if (!cursor) break
+    if (seen.has(cursor)) throw new Error('步骤分页未前进，请重试')
+    seen.add(cursor)
+  }
+  // 还有没读到的步骤时，再补一次「真正需要人处理」的：它们可能排在第 200 条之后（T05）。
+  // 只有确实存在更多页才多发这一次请求。
+  if (cursor && pages === 1) {
+    const { data } = await api.listNodes(runId, 50, undefined, 'attention')
+    if (!current()) return undefined
+    for (const item of data.items) {
+      if (item.run_id !== runId) throw new Error('步骤归属变化')
+      if (!nodes.has(item.node_run_id)) nodes.set(item.node_run_id, item)
+    }
+  }
+  return { nodes:[...nodes.values()], partial, canLoadMore:Boolean(cursor) }
 }

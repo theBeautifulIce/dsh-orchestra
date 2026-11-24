@@ -581,3 +581,34 @@ it('P05 会话文字结果是一等交付类型，不再借用文件规则来验
   await expect(planCommands.confirmTaskPlan(plan.plan_id, plan.content_hash)).resolves.toMatchObject({ run_id: expect.any(String) })
   expect(db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toMatchObject({ n: 1 })
 })
+
+it('pins an explicitly selected published workflow outside the discovery pool', async () => {
+  const host = await boot(async () => valid(), undefined, { empty: true })
+  host.publish('review', reviewDoc, '2026-11-17T01:00:00.000Z')
+  for (let n = 0; n < 200; n++) host.publish('w-' + n, reviewDoc, '2026-11-18T01:00:00.000Z')
+  const result = await host.planCommands.proposeTaskPlan('核对项目交付', ['核验'], undefined,
+    { workflow_id: 'review', workflow_version: '1' })
+  expect(result.proposal.workflow_id).toBe('review')
+  expect(result.quality.ready).toBe(true)
+}, 30_000)
+
+it('subworkflow can plan read-only child tools without delegating them to its parent',async()=>{
+ let tools:string[]=[]
+ const {publish,planCommands}=await boot(async ()=>({ title:'处理报告',workflow_id:'parent',workflow_version:'1',
+  steps:[{node_id:'sub',description:'取数据',goal_ids:['goal'],depends_on:[],tools,complexity:'routine',model_reason:'核对来源'},
+         {node_id:'summary',description:'汇总',goal_ids:['goal'],depends_on:['sub'],tools:[],complexity:'routine',model_reason:'生成汇总'}],
+  risks:[],deliverables:[{title:'结果',node_id:'summary',goal_ids:['goal'],acceptance:{kind:'artifact',file_name:'result.md',minimum_bytes:1}}]}),undefined,{empty:true})
+ publish('child',reviewDoc)
+ publish('parent',{name:'复核汇总',nodes:[
+ {node_id:'t',type:'trigger',title:'触发',position:{x:0,y:0}},
+ {node_id:'sub',type:'subworkflow',title:'资料核验',position:{x:10,y:0},config:{workflow_id:'child',pinned_version:1}},
+ {node_id:'summary',type:'agent',title:'汇总',position:{x:20,y:0}}
+ ],edges:[{from:'t',to:'sub'},{from:'sub',to:'summary'}]})
+ for(const choice of [[],['ro.check']]){
+  tools=choice
+  const p=await planCommands.proposeTaskPlan('汇总核验',[],undefined,{workflow_id:'parent',workflow_version:'1'})
+  const errors=p.quality.checks.flatMap(x=>x.issues)
+  expect(p.quality.ready).toBe(choice.length === 0)
+  if (choice.length) expect(errors.join(' ')).toContain('控制步骤')
+ }
+})

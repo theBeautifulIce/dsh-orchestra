@@ -115,7 +115,7 @@ export type ServerQueries = {
     items: RunSummary[]; next_cursor?: string | null; as_of_seq: number
   }
   getRun: (runId: string) => RunSummary
-  listNodes: (runId: string, limit?: number, cursor?: string) =>
+  listNodes: (runId: string, limit?: number, cursor?: string, only?: 'attention') =>
     { items: NodeRunView[]; as_of_seq: number; has_more?: boolean; next_cursor?: string | null }
   getNode: (nodeRunId: string) => { item: NodeRunView; as_of_seq: number }
   getArtifact: (artifactId: string, now: number) => { item: ArtifactView; as_of_seq: number }
@@ -691,9 +691,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     }
     if (req.method === 'GET' && url.pathname === '/v1/node-runs' && deps.queries) {
       const runId = stringParam(url, 'run_id', 256) ?? ''
+      const only = stringParam(url, 'only', 32) === 'attention' ? 'attention' as const : undefined
       const result = deps.queries.listNodes(runId, Math.min(intParam(url, 'limit', 100), 200),
-        stringParam(url, 'cursor', 512) ?? undefined)
-      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, has_more: result.has_more }))
+        stringParam(url, 'cursor', 512) ?? undefined, only)
+      sendJson(res, 200, okEnvelope(result.as_of_seq, { items: result.items, has_more: result.has_more, next_cursor: result.next_cursor ?? null }))
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/node-runs/get' && deps.queries) {
@@ -981,6 +982,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         owner_task_id: stringParam(url, 'owner_task_id', 256),
         status: stringParam(url, 'status', 64),
         scope: stringParam(url, 'scope', 32),
+        published: url.searchParams.get('published') === '1',
         query: stringParam(url, 'query', 200),
         limit: Math.min(intParam(url, 'limit', 50), 100),
         cursor: stringParam(url, 'cursor', 4096),

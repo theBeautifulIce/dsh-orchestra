@@ -1,3 +1,4 @@
+import { textResultFileName } from './text-result.ts'
 import { z } from 'zod'
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
@@ -10,7 +11,9 @@ import type { ToolRegistry } from '../executor/tools.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
 import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { ARTIFACT_MAX_BYTES, isArtifactFileName } from './artifact-store.ts'
+import { nativeTextFormat, nativeTextFormats, nativeTextLimits } from './native-text-capability.ts'
 import { bindChatPlan, findChatPlan, type ChatTaskOrigin } from './chat-task-receipts.ts'
+import { assertSubworkflowGraphFor } from './commands/subworkflow.ts'
 import { startRun, startTrustedTaskLocalRun } from './commands/start-run.ts'
 import { createWorkflow, publishContextFor, publishDraft, runtimeProjection, testWorkflowDraft } from './commands/workflows.ts'
 import { withReadTx, type ReadTx } from './queries/read-tx.ts'
@@ -131,7 +134,7 @@ function toPlanView(row: PlanRow): TaskPlanView {
 }
 
 type PublishedRow = { workflow_id: string; name: string; version: string; content_hash: string }
-const PUBLISHED_SELECT = 'SELECT w.workflow_id, w.name, v.version, v.content_hash FROM workflows w '
+const PUBLISHED_SELECT = 'SELECT w.workflow_id, w.name, v.version, v.content_hash, v.doc_json FROM workflows w '
   + "JOIN workflow_versions v ON v.workflow_id = w.workflow_id WHERE w.status = 'active' AND w.scope = 'reusable' "
   + 'AND v.published_by IS NOT NULL'
 // 已启动的运行只认自己固定下来的版本：流程被停用、后来又发新版本，都不改变这次运行的绑定
@@ -209,7 +212,7 @@ function compareWorkflowIds(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
 }
 
-function readChoice(catalog: WorkflowCatalog, registry: ToolRegistry | undefined, row: PublishedRow): PublishedChoice | null {
+function readChoice(catalog: WorkflowCatalog, registry: ToolRegistry | undefined, row: PublishedRow, tx: ReadTx, ownerTaskId: string | null): PublishedChoice | null {
   const def = catalog.get(row.workflow_id, row.version)
   if (catalog.definitionHash(row.workflow_id, row.version) !== row.content_hash || def.nodes.length > 100) return null
   const nodes = def.nodes.map((node) => {
@@ -221,31 +224,56 @@ function readChoice(catalog: WorkflowCatalog, registry: ToolRegistry | undefined
       declaredTools, toolAllow: declaredTools.filter((tool) => registry?.lookup(tool)?.capability === 'read_only'),
       // 子流程声明的只读工具在计划期就摊开，便于递归校验（P06）。
       ...(node.type === 'subworkflow' && node.subworkflow
-        ? { subflowTools: declaredToolsOfSubflow(catalog, registry, node.subworkflow.workflow_id, String(node.subworkflow.pinned_version)) }
+        ? { subflowTools: declaredToolsOfSubflow(tx, catalog, registry, node.subworkflow.workflow_id, node.subworkflow.pinned_version, ownerTaskId) }
         : {}),
     }
   })
   return { workflow: { workflowId: row.workflow_id, version: row.version, title: row.name, nodes }, hash: row.content_hash }
 }
 
-/** 子流程声明的只读工具；读不到子流程定义时返回空数组，由调用方决定是否拦。 */
-function declaredToolsOfSubflow(catalog: WorkflowCatalog, registry: ToolRegistry | undefined, workflowId: string, version: string): string[] {
-  try {
-    const child = catalog.get(workflowId, version)
-    return [...new Set(child.nodes.flatMap((node) => {
-      const policy = catalog.toolPolicyFor(workflowId, version, node.node_id)
-      return policy.allow.filter((tool) => !policy.deny.includes(tool)
-        && registry?.lookup(tool)?.capability === 'read_only')
-    }))]
-  } catch { return [] }
+/** Descendant tools describe work performed by the fixed children, never by their parent control node. */
+function declaredToolsOfSubflow(tx: ReadTx, catalog: WorkflowCatalog, registry: ToolRegistry | undefined,
+  workflowId: string, version: number, ownerTaskId: string | null): string[] {
+  const ref = { workflowId, pinnedVersion: version }
+  assertSubworkflowGraphFor(catalog, ref, { requirePublished: true, rootDepth: 1 })
+  const found = new Set<string>()
+  const visited = new Set<string>()
+  function collect(id: string, pin: number): void {
+    const key = JSON.stringify([id, pin])
+    if (visited.has(key)) return
+    visited.add(key)
+    const target = tx.get<{ scope: string; owner_task_id: string | null }>(
+      'SELECT w.scope, w.owner_task_id FROM workflows w JOIN workflow_versions v USING(workflow_id) '
+      + 'WHERE w.workflow_id=? AND v.version=? AND v.published_by IS NOT NULL', [id, String(pin)])
+    if (!target) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '找不到已发布的子流程固定版本')
+    if (target.scope === 'task_local' && (!ownerTaskId || ownerTaskId !== target.owner_task_id)) {
+      throw new OrchError('FORBIDDEN', '该子流程属于另一项任务')
+    }
+    for (const n of catalog.get(id, pin).nodes) {
+      if (n.subworkflow) collect(n.subworkflow.workflow_id, n.subworkflow.pinned_version)
+      const policy = catalog.toolPolicyFor(id, pin, n.node_id)
+      for (const tool of policy.allow) {
+        if (policy.deny.includes(tool)) continue
+        if (registry?.lookup(tool)?.capability !== 'read_only') {
+          throw new OrchError('TOOL_NOT_ALLOWED', '子流程工具未登记为只读', { workflow_id: id, tool })
+        }
+        found.add(tool)
+      }
+    }
+  }
+  collect(workflowId, version)
+  return [...found].sort()
 }
 
 /** 版本没加载过时按"固定版本不可用"处理，不让内部错误码漏给调用方 */
-function readChoiceSafe(catalog: WorkflowCatalog, registry: ToolRegistry | undefined, row: PublishedRow): PublishedChoice | null {
+function readChoiceSafe(catalog: WorkflowCatalog, registry: ToolRegistry | undefined, row: PublishedRow, tx: ReadTx, ownerTaskId: string | null): PublishedChoice | null {
   try {
-    return readChoice(catalog, registry, row)
+    return readChoice(catalog, registry, row, tx, ownerTaskId)
   } catch (error) {
-    if (error instanceof OrchError && error.code === 'NOT_FOUND') return null
+    if (error instanceof OrchError && [
+      'NOT_FOUND', 'WORKFLOW_NOT_PUBLISHED', 'TOOL_NOT_ALLOWED', 'FORBIDDEN',
+      'WORKFLOW_SUBWORKFLOW_VERSION_MISSING', 'SUBWORKFLOW_DEPTH_EXCEEDED', 'SUBWORKFLOW_CYCLE',
+    ].includes(error.code)) return null
     throw error
   }
 }
@@ -294,33 +322,41 @@ function missingApprovalSteps(namedApprovals: string[], workflow: WorkflowCandid
     node.type === 'approval' && node.approvalPrompt === name && ancestors.has(node.id)))
 }
 
-// 个人宿主的原生生产器只写 UTF-8 文本，且同一节点最多 8 份、单份最多 64 KiB。
-// 计划阶段就按这套能力校验，避免批准一份执行器永远交付不了的计划（D01/D02）。
+// 个人宿主的原生生产器只写 UTF-8 文本。能力声明收敛到 native-text-capability，
+// 计划、确认启动与原生发布共用同一份，避免三处各列一张黑名单（D01/D02）。
 export const NATIVE_PRODUCER = {
-  files_per_node: 8,
-  bytes_per_file: 64 * 1024,
-  binary_extension: /\.(?:xlsx?|xlsm|xlsb|docx?|docm|pptx?|pptm|pdf|zip|7z|rar|gz|tgz|tar|png|jpe?g|gif|bmp|webp|tiff?|ico|mp4|mov|avi|mkv|mp3|wav|flac|ogg|sqlite3?|db|exe|dll|bin)$/iu,
+  files_per_node: nativeTextLimits.files,
+  bytes_per_file: nativeTextLimits.bytes,
+  supported_formats: nativeTextFormats(),
 } as const
 
 /** 交付能力核对：格式、单份字节与同一节点的件数都要是当前宿主真能产出的。 */
 export function deliveryCapabilityIssues(deliverables: readonly { node_id: string; acceptance: { kind: string; file_name?: string; minimum_bytes?: number } }[]): string[] {
   const issues: string[] = []
-  const perNode = new Map<string, number>()
+  // 件数按不同文件名去重后按节点统计；会话正文按交付项独立计数（D02）。
+  const perNode = new Map<string, { files: Set<string>; texts: number }>()
   for (const item of deliverables) {
     const rule = item.acceptance
-    if (rule.kind !== 'artifact' || !rule.file_name) continue
-    perNode.set(item.node_id, (perNode.get(item.node_id) ?? 0) + 1)
-    if (NATIVE_PRODUCER.binary_extension.test(rule.file_name)) {
-      issues.push(`「${rule.file_name}」不是当前宿主能写出的文本格式。请改成 .md、.txt、.csv 或 .json，或改用工具执行证据验收。`)
+    if (rule.kind !== 'artifact' && rule.kind !== 'chat/text_result') continue
+    const slot = perNode.get(item.node_id) ?? { files: new Set<string>(), texts: 0 }
+    perNode.set(item.node_id, slot)
+    if (rule.kind === 'chat/text_result') { slot.texts += 1; continue }
+    if (!rule.file_name) continue
+    slot.files.add(rule.file_name)
+    if (!nativeTextFormat(rule.file_name)) {
+      issues.push(`「${rule.file_name}」不是当前宿主能写出的文本格式。请改成 ${NATIVE_PRODUCER.supported_formats.slice(0, 4).join('、')} 等已登记格式，或改用工具执行证据验收。`)
     }
     const minimum = rule.minimum_bytes ?? 0
-    if (minimum > NATIVE_PRODUCER.bytes_per_file) {
-      issues.push(`「${rule.file_name}」要求至少 ${minimum} 字节，当前宿主单份文本最多 ${NATIVE_PRODUCER.bytes_per_file} 字节。请拆成多份或降低字节要求。`)
+    if (minimum > nativeTextLimits.bytes) {
+      issues.push(`「${rule.file_name}」要求至少 ${minimum} 字节，当前宿主单份文本最多 ${nativeTextLimits.bytes} 字节。请拆成多份或降低字节要求。`)
     }
   }
-  for (const [nodeId, count] of perNode) {
-    if (count > NATIVE_PRODUCER.files_per_node) {
-      issues.push(`${nodeId} 安排了 ${count} 份文件，当前宿主同一节点最多交付 ${NATIVE_PRODUCER.files_per_node} 份。请拆到多个步骤。`)
+  for (const [nodeId, slot] of perNode) {
+    if (slot.files.size > nativeTextLimits.files) {
+      issues.push(`${nodeId} 需要 ${slot.files.size} 份不同文件，当前宿主同一节点最多交付 ${nativeTextLimits.files} 份。请拆到多个步骤。`)
+    }
+    if (slot.texts > nativeTextLimits.files) {
+      issues.push(`${nodeId} 安排了 ${slot.texts} 段会话正文，当前宿主同一节点最多交付 ${nativeTextLimits.files} 段。请拆到多个步骤。`)
     }
   }
   return issues
@@ -362,12 +398,8 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
     if (node && [...new Set([...node.declaredTools, ...step.tools])].some((tool) => !node.toolAllow.includes(tool))) {
       issues.tools.push(step.node_id + ' 的工具未注册、超出授权或无法用于只读执行。')
     }
-    // 子流程不再一刀切禁止：按递归摊开的只读工具做覆盖校验（P06）。
-    if (node?.type === 'subworkflow') {
-      const missing = (node.subflowTools ?? []).filter((tool) => !step.tools.includes(tool))
-      if (missing.length > 0) {
-        issues.tools.push(step.node_id + ' 的子流程还需要这些只读工具：' + missing.join('、') + '。请在步骤里声明后重新规划。')
-      }
+    if (node?.type === 'subworkflow' && step.tools.length) {
+      issues.tools.push(step.node_id + ' 是调度子流程的控制步骤，不直接执行工具；请将该步骤的 tools 留空。')
     }
     if (node?.type === 'wait' && !proposal.risks.some((risk) => risk.node_id === node.id)) {
       issues.risks.push(step.node_id + ' 是等待节点，须说明超时风险和应对措施。')
@@ -428,8 +460,15 @@ export function approvedArtifactRequirements(tx: ReadTx, runId: string, nodeId: 
     const { proposal } = assertApprovedPlan(row, run.workflow_id, run.version)
     const step = proposal.steps.find((item) => item.node_id === nodeId)
     if (!step || step.tools.length > 0) return null
-    const rules = proposal.deliverables.filter((item) => item.node_id === nodeId).map((item) => item.acceptance)
-    if (rules.length === 0 || !rules.every((rule) => rule.kind === 'artifact')) return null
+    const rules: Array<{ file_name: string; minimum_bytes: number; textIndex?: number }> = []
+    for (const [index, item] of proposal.deliverables.entries()) {
+      if (item.node_id !== nodeId) continue
+      if (item.acceptance.kind === 'artifact') rules.push(item.acceptance)
+      else if (item.acceptance.kind === 'chat/text_result') {
+        rules.push({ file_name: textResultFileName(index), minimum_bytes: 1, textIndex: index })
+      } else return null
+    }
+    if (!rules.length) return null
     return { planId: row.plan_id, contentHash: row.content_hash, rules }
   } catch {
     return null
@@ -767,11 +806,16 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
           ...(input.workflow_version === undefined ? {} : { workflow_version: input.workflow_version }) }
         // 候选检索：先捞一个较大的池子，再按任务适配性排序，最后才截断
         const choices = withReadTx(db, ({ tx }) => {
-          const rows = tx.all<CandidateRow>(CANDIDATE_SELECT)
+          const rows = brief.workflow_id
+            ? tx.all<CandidateRow>(PUBLISHED_SELECT + ' AND w.workflow_id = ? AND v.version = '
+              + (brief.workflow_version ? '?' : 'CAST(w.current_version AS TEXT)'),
+              brief.workflow_version ? [brief.workflow_id, brief.workflow_version] : [brief.workflow_id])
+            : tx.all<CandidateRow>(CANDIDATE_SELECT)
           const tokens = goalTokens(brief)
           const approvals = requestedApprovalSteps(brief)
           const scored = rows.flatMap((row) => {
-            const choice = readChoice(catalog, registry, row)
+            const choice = brief.workflow_id ? readChoice(catalog, registry, row, tx, null)
+              : readChoiceSafe(catalog, registry, row, tx, null)
             return choice && missingApprovalSteps(approvals, choice.workflow).length === 0
               ? [{ choice, score: relevanceScore(tokens, row) }]
               : []
@@ -796,7 +840,10 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         }
         const outcome = await askPlanner(brief, choices.map((item) => item.workflow), budget, caller)
         // 主脑判定候选池里没有一个适合这次任务：走同一条自动生成路径
-        if (outcome.kind === 'no_candidate') return proposeAuto(brief, actor, now, budget, caller, origin)
+        if (outcome.kind === 'no_candidate') {
+          if (brief.workflow_id) throw new OrchError('VERDICT_POLICY_UNMET', '所选固定流程不适用于本次目标，请调整目标或另选流程')
+          return proposeAuto(brief, actor, now, budget, caller, origin)
+        }
         const proposal = outcome.proposal
         const selected = choices.find(({ workflow }) => workflow.workflowId === proposal.workflow_id && workflow.version === proposal.workflow_version)
         const quality = evaluate(brief, proposal, selected?.workflow)
@@ -835,7 +882,8 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
           : undefined
         return { meta, published }
       })
-      const current = check.published ? readChoice(catalog, registry, check.published) : null
+      const current = check.published ? withReadTx(db, ({ tx }) =>
+        readChoice(catalog, registry, check.published!, tx, row.owner_task_id)) : null
       // 新根运行准入：流程被停用就拒启动，错误要和"版本不匹配"分得开
       if (check.meta !== null && check.meta.status !== 'active') {
         throw new OrchError('FORBIDDEN', 'Workflow 已停用，无法启动新任务', { workflow_id: proposal.workflow_id })
@@ -942,7 +990,7 @@ export function resolveApprovedPlanNodeSpecs(
     // 已启动的运行只认自己固定下来的版本：流程被停用、后来又发了新版本，都不改变这次运行的绑定
     const pinned = tx.get<PublishedRow>(PINNED_VERSION_SELECT + ' WHERE w.workflow_id = ? AND v.version = ?',
       [run.workflow_id, run.workflow_version])
-    const choice = pinned ? readChoiceSafe(catalog, registry, pinned) : null
+    const choice = pinned ? readChoiceSafe(catalog, registry, pinned, tx, run.task_id) : null
     if (!choice || choice.hash !== row.workflow_hash) {
       throw new OrchError('CONFIRMATION_MISMATCH', '已批准计划的固定流程版本已不可用')
     }
@@ -961,7 +1009,8 @@ export function resolveApprovedPlanNodeSpecs(
         task_goal: brief.goal,
         requirements: brief.requirements.filter(({ id }) => step.goal_ids.includes(id)),
         step: step.description,
-        deliverables: proposal.deliverables.filter((item) => item.node_id === step.node_id),
+        deliverables: proposal.deliverables.flatMap((item, index) => item.node_id === step.node_id
+          ? [{ ...item, ...(item.acceptance.kind === 'chat/text_result' && { deliverable_index: index }) }] : []),
         risks: proposal.risks.filter((item) => item.node_id === step.node_id || item.node_id === undefined),
       },
     }]))

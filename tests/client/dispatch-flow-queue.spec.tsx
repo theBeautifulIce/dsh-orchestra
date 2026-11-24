@@ -141,7 +141,7 @@ it('keeps capacity, dependency waits, upstream failure and unknown queue reasons
     ], has_more: true } }))
     await act(async () => stale.resolve({ ok: true, data: { items: initial } }))
     expect(queue('就绪待派发')?.textContent).toContain('通知仓库')
-    expect(view.text()).toContain('可能还有步骤或较新的尝试未显示')
+    expect(view.text()).toContain('仍有步骤未显示')
     expect(view.text()).not.toContain('核对总额')
     expect(service.calls.map(({ params }) => params.get('run_id'))).toEqual(['r1', 'r1', 'r2'])
   } finally { view.unmount() }
