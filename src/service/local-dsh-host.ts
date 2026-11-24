@@ -12,6 +12,8 @@ import { ERROR_STATUS, failEnvelope, okEnvelope, OrchError } from '../core/error
 import { MEMORY_TOOL_PREFIX } from '../core/memory-graph.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type ToolDescriptor } from '../executor/tools.ts'
+import { createDshJsonCompletion } from '../executor/dsh-json.ts'
+import { SEMANTIC_INSTRUCTIONS } from './semantic-admission.ts'
 import { createWindowsReadOnlyHost } from '../executor/windows-readonly-host.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
@@ -396,9 +398,16 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     }, 'Orchestra personal services')
     if (nativeChat) host.inject(['systemPrompt', 'sessions', 'webServer'], (chatCtx) => {
       const settings = profileDir && isAbsolute(profileDir) ? createNativeChatRoutingSettings(profileDir) : undefined
+      const complete = createDshJsonCompletion(host.llm)
       installNativeChat(chatCtx, {
         operator: human,
         signal: stop.signal,
+        async interpret(input, agent, signal, assertCurrent) {
+          if (!complete) throw new OrchError('SERVICE_UNAVAILABLE', '当前模型服务没有可用的任务理解接口，请检查服务后重试')
+          const fallback = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined
+          const selection = agent.model.current() ?? fallback?.currentSelection()
+          return complete(selection, SEMANTIC_INSTRUCTIONS, input, signal, assertCurrent)
+        },
         autoRouteEnabled() {
           if (!settings) throw new OrchError('SERVICE_UNAVAILABLE', '无法读取此 Desktop 用户的自动接管设置')
           return settings.read().enabled

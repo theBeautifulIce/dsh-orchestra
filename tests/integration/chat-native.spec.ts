@@ -21,7 +21,8 @@ import { createDeliveryReviewHost } from '../../src/service/delivery-review.ts'
 import { recordArtifactPublication } from '../../src/service/artifact-completion.ts'
 import { applyRunAcceptance } from '../../src/service/commands/run-acceptance.ts'
 import { formatChatApproval } from '../../src/core/chat-approval-text.ts'
-import { classifyChatTask } from '../../src/service/chat-task-intent.ts'
+import { chatSemanticFixture } from '../fixtures/chat-semantic-model.ts'
+import type { SemanticInput } from '../../src/service/semantic-admission.ts'
 import { reportChatRun } from '../../src/service/chat-task-receipts.ts'
 import { installNativeChat } from '../../src/service/chat-native.ts'
 
@@ -32,6 +33,7 @@ type Guard = Parameters<Context['tools']['guard']>[0]
 type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 
 async function fixture(options: { profile?: string; version?: string; enabled?: false | 'desktop'; host?: string;
+  interpret?: (input: SemanticInput) => unknown | Promise<unknown>;
   routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError; dispatchPlans?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'orchestra-native-chat-'))
   const ctx = new Context()
@@ -76,7 +78,15 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   await writeFile(join(controllerPackage, 'package.json'), JSON.stringify({ version: options.version ?? '0.2.2-rc.5' }))
   ctx.provide('profileContext', { name: options.profile ?? 'desktop', dir: directory, installAnchor: join(directory, 'package.json') })
   ctx.provide('webServer', { host: options.host ?? '127.0.0.1' })
-  ctx.provide('llm', {})
+  const interpret = vi.fn(options.interpret ?? chatSemanticFixture)
+  ctx.provide('llm', { async prepareCall(config: object) {
+    return { config, async *stream(request: { messages: Array<{ content: Array<{ text: string }> }>; tools: unknown[] }) {
+      expect(request.tools).toEqual([])
+      const raw = await interpret(JSON.parse(request.messages[0]!.content[0]!.text))
+      yield { type: 'block-end', block: { type: 'text', text: JSON.stringify(raw) } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+  } })
   ctx.provide('tools', {
     register(definition: Definition, options: Activation) { tool = definition; activation = options },
     guard(check: Guard) { guard = check },
@@ -142,6 +152,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
         hasService: ({ sessionId }) => services.has(sessionId),
         async serviceFor({ sessionId }) { return services.get(sessionId) ?? openService(sessionId, join(directory, sessionId + '.sqlite')) },
         autoRouteEnabled: () => options.routing!.enabled,
+        interpret: async input => interpret(input),
       })
     })
   })
@@ -200,7 +211,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     const checkTool = (name: string, parent?: symbol) => guard?.({ agent, name, signal: signal.signal, parent } as Parameters<Guard>[0])
     return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn }
   }
-  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn,
+  return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn, interpret,
     registered: () => ({ activation: activation!, prompt: prompt!, tool: tool! }),
     deny: (value: boolean) => { deny = value }, badPlan: (value: boolean) => { badPlan = value },
     plannerUnavailable: (value: boolean) => { plannerUnavailable = value },
@@ -359,7 +370,7 @@ it('binds ordinary native conversation, live owner input and one durable run per
     expect(human.checkTool('read')).toBeUndefined()
     const ambiguous = await human.admit(user('请帮我处理一下'))
     expect(ambiguous).toMatchObject({ kind: 'enter', messages: [expect.anything(), expect.objectContaining({
-      content: [expect.objectContaining({ text: expect.stringContaining('请说明希望拿到什么结果') })],
+      content: [expect.objectContaining({ text: expect.stringContaining('交付目标') })],
     })] })
     expect(test.serve).not.toHaveBeenCalled()
     const admitted = await human.admit(assigned)
@@ -486,81 +497,14 @@ it('admits the complete named income concentration task through the native owner
   } finally { await test.close() }
 })
 
-it.each([
-  ['读当前工作区的办公流水表，汇总收入和退款并输出 Markdown 报告。', 'task'],
-  ['把我提供的会议记录整理成纪要和待办清单，按负责人分组。', 'task'],
-  ['为下周园区开放日撰写一段面向家长的活动介绍。', 'task'],
-  ['供应商有三家，预算上限是十万元。我现在要你按价格与交期对比它们并制作一份优先级清单。', 'task'],
-  ['以下是本次背景。\n请帮我整理一份给项目组的三点沟通摘要。', 'task'],
-  ['请核对我上传的成本表，只读不修改原表。', 'task'],
-  ['执行任务「月末归档」：把我提供的会议记录整理成纪要。', 'task'],
-  ['请开展一项名叫季度复盘的工作。\n一、生成一份季度摘要。', 'task'],
-  ['帮我做个叫「台账复核」的任务，使用已授权的 costs.xlsx 生成汇总表。', 'task'],
-  ['请完成名为「三项独立流水核对」的任务。使用当前工作区已授权的 office-sample.csv。请并行独立核对收入、退款和记录数，各自交付报告。', 'task'],
-  ['请并行分别核对已授权的流水表和发票，交付两份报告。', 'task'],
-  ['能帮我并行独立核对两份已授权的流水并各出一份报告吗？', 'task'],
-  ['能帮我分别统计已授权的收入和退款并汇总为表格吗？', 'task'],
-  ['并行生成两份报告可行吗？', 'conversation'],
-  ['并行生成两份报告需要多久？', 'conversation'],
-  ['分别汇总成两份表格会消耗多少额度？', 'conversation'],
-  ['核对 office-sample.csv 要什么权限？', 'conversation'],
-  ['读取 office-sample.csv，交付收入摘要。顺便看看结果是否有异常？', 'task'],
-  ['分别统计已授权的收入和退款再汇总成表格应该怎么做？', 'conversation'],
-  ['分别统计收入和退款再汇总成表格，可以讲讲实现思路吗？', 'conversation'],
-  ['Please summarize the provided file into a report. Do not change the original.', 'task'],
-  ['请检查当前工作区的代码并输出报告，不要执行任何命令。', 'task'],
-  ['请审计这个项目，给我一份问题清单。', 'task'],
-  ['先不要执行这项任务，等我确认预算再开始。', 'conversation'],
-  ['请并行生成两份报告，分别说明两种方案是否可行。', 'task'],
-  ['请并行独立核对两份已授权的流水，各写一份报告回答“金额相符吗？”', 'task'],
-  ['请完成名为「流水核对」的任务。请并行独立核对已授权的流水与发票，但先不要执行。', 'conversation'],
-  ['请完成一项名为「生成审计报告」的任务。', 'clarify'],
-  ['请完成一项名为「成本核对」的任务，使用当前工作区已授权的 costs.xlsx。', 'clarify'],
-  ['请完成一项名为「成本核对」的任务。先讨论如何生成汇总表。', 'conversation'],
-  ['执行任务「成本核对」：核对 costs.xlsx 应该怎么做？', 'conversation'],
-  ['请执行任务「成本核对」。请查看当前任务的进度。', 'conversation'],
-  ['请完成一项名为「成本核对」的任务。客户说：请生成报价表。', 'conversation'],
-  ['请完成一项名为「成本核对」的任务；客户说：\n请生成报价表。', 'conversation'],
-  ['示例：请完成一项名为「成本核对」的任务。\n请生成报价表。', 'conversation'],
-  ['请完成一项名为「成本核对」的任务。现在不要执行，稍后再说。\n请生成报价表。', 'conversation'],
-  ['请执行任务「成本核对」。等我确认后再核对 costs.xlsx 并生成报告。', 'conversation'],
-  ['请教我怎么写报告', 'conversation'],
-  ['帮我解释一下如何生成汇总表', 'conversation'],
-  ['先说方案，等我确认再开始', 'conversation'],
-  ['你可以整理 CSV 和生成报告吗？', 'conversation'],
-  ['怎么读取当前工作区的 CSV？', 'conversation'],
-  ['先别读取或整理表格，稍后再说。', 'conversation'],
-  ['请不要生成这份报告。', 'conversation'],
-  ['请不要生成汇总表，只说明表的结构。', 'conversation'],
-  ['请解释一下报告里“生成汇总表”的含义。', 'conversation'],
-  ['请告诉我这份报告写了什么。', 'conversation'],
-  ['Please explain how to write a report for our board.', 'conversation'],
-  ['Can you explain what tools I can use to read the report?', 'conversation'],
-  ['仅做可行性分析，介绍目前方案的风险。', 'conversation'],
-  ['请查看上一个任务的运行结果。', 'conversation'],
-  ['例子：请生成报价汇总表。', 'conversation'],
-  ['下面是客户在会上转述的原话。\n请根据授权样本生成一份 Markdown 报告。', 'conversation'],
-  ['老师说：\n请生成一份报告。', 'conversation'],
-  ['请看以下示例：\n请生成报告。', 'conversation'],
-  ['给我一些起草会议纪要的建议。', 'conversation'],
-  ['请在不读取附件的情况下给我解释报告的写作方法。', 'conversation'],
-  ['帮我理解怎么写项目计划。', 'conversation'],
-  ['请评估一下能否读取 costs.xlsx 中的数据并生成报表。', 'conversation'],
-  ['请提供一些起草月报的建议，先讲结构，再讲细节。', 'conversation'],
-  ['Would you recommend trying to create a weekly report?', 'conversation'],
-  ['这是一个测试案例。请生成季度报告。', 'conversation'],
-  ['修一下这个 bug，改好后跑测试', 'task'],
-  ['帮我把错别字都改掉并保存', 'task'],
-  ['经理说：现在请你生成报价表。', 'conversation'],
-  ['同事的原话是“以下不用复核”。\n我现在需要你核对报价并交付风险清单。', 'task'],
-  ['客户说：请生成报告。\n我的实际要求是编一份项目进度简报。', 'task'],
-  ['请帮我处理一下。', 'clarify'],
-] as const)('classifies authenticated wording %s as %s', (text, intent) => {
-  expect(classifyChatTask(text)).toBe(intent)
-})
-
 it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named approval and delivery constraints in chat planning (%s)', async (scenario) => {
-  const test = await fixture({ routing: { enabled: true }, dispatchPlans: true })
+  const test = await fixture({ routing: { enabled: true }, dispatchPlans: true, interpret: input => ({
+    kind: 'task', relation: 'new', timing: 'immediate', quote: input.current.text, constraints: [
+      { id: 'review', kind: 'approval_before', scope: 'steps', action: '计算', reviewer: { kind: 'operator' },
+        source_message_id: input.current.message_id, quote: '在我批准前，计算步骤必须等待' },
+      ...(scenario === 'no files' ? [{ id: 'no-file', kind: 'no_workspace_files', source_message_id: input.current.message_id, quote: '不要读写文件' }] : []),
+    ],
+  }) })
   const gateType = scenario === 'wait' ? 'wait' : 'approval'
   const approvalName = '批准合成数据核对'
   const draft = {
@@ -579,7 +523,7 @@ it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named a
   test.planner.mockImplementation(async (input) => {
     const plan = await originalPlan(input)
     const draftStep = plan.steps[0]!
-    return { ...plan, title: 'F8 演练', steps: [
+    return { ...plan, title: 'F8 演练', constraint_bindings: [{ constraint_id: 'c1', approval_node_id: 'gate', protected_node_ids: ['draft'] }], steps: [
       { ...draftStep, node_id: 'gate', description: approvalName },
       { ...draftStep, depends_on: ['gate'] },
     ], risks: gateType === 'wait' ? [{ severity: 'low', description: '事件可能延迟', mitigation: '等待到期', node_id: 'gate' }] : [] }
@@ -601,7 +545,7 @@ it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named a
     }
     const receipt = await human.call()
     if (scenario !== 'approval') {
-      expect(receipt).toMatchObject({ state: 'quality_blocked', issues: [expect.stringContaining(scenario === 'wait' ? approvalName : '不写文件')] })
+      expect(receipt).toMatchObject({ state: 'quality_blocked', issues: [expect.stringContaining(scenario === 'wait' ? '审批' : '文件')] })
       expect(count(service, 'runs')).toBe(0)
       expect(test.approval).not.toHaveBeenCalled()
       return
@@ -1511,4 +1455,109 @@ it('keeps a new material revision unstarted when an older native approval comple
     expect(count(service, 'runs')).toBe(0)
     expect(service.planning.progress('local-dsh:fixture').items).toMatchObject([{ plan_id: updated.plan_id, stage: 'approval' }])
   } finally { approvalResult.resolve('rejected'); await test.close() }
+})
+
+it('uses the production semantic transport for previously unseen task wording and persists its source-bound contract', async () => {
+  const test = await fixture({ interpret: input => ({ kind: 'task', relation: 'new', timing: 'immediate',
+    quote: input.current.text, constraints: [] }) })
+  try {
+    const human = test.session('work', 'semantic-production')
+    const request = user('请出一份周报。')
+    await human.admit(request)
+    expect(await human.call()).toMatchObject({ state: 'started' })
+    expect(test.interpret).toHaveBeenCalledTimes(1)
+    expect(test.planner.mock.calls[0]?.[0].requirements_contract).toMatchObject({ version: 1,
+      start_policy: 'immediate', sources: [{ message_id: request.id, text: '请出一份周报。' }] })
+  } finally { await test.close() }
+})
+
+it('replays a durable admission after the live Agent is recreated even when the model becomes unavailable', async () => {
+  const test = await fixture()
+  try {
+    const original = test.session('work', 'semantic-replay')
+    const request = user('/orchestra 整理一份周报')
+    await original.admit(request)
+    const accepted = await original.call()
+    expect(accepted).toMatchObject({ state: 'started' })
+    const before = test.interpret.mock.calls.length
+    test.interpret.mockImplementation(() => { throw Error('model unavailable after restart') })
+    const reopened = test.session('work', 'semantic-replay')
+    await reopened.admit({ ...request, id: uuidv7() as Message['id'] })
+    expect(await reopened.call()).toMatchObject({ state: 'started', run_id: accepted.run_id })
+    expect(test.interpret).toHaveBeenCalledTimes(before)
+    expect(test.planner).toHaveBeenCalledTimes(1)
+    expect(count(test.services.get('semantic-replay')!, 'runs')).toBe(1)
+  } finally { await test.close() }
+})
+
+it('returns a durable plan-only preview with no execution and no native approval popup', async () => {
+  const test = await fixture({ interpret: input => ({ kind: 'task', relation: 'new', timing: 'plan_only',
+    quote: input.current.text, constraints: [] }) })
+  try {
+    const human = test.session('work', 'semantic-plan')
+    const message = user('/orchestra 先给我一份周报计划，确认后再执行')
+    await human.admit(message)
+    expect(await human.call()).toMatchObject({ state: 'plan_ready', plan_id: expect.any(String) })
+    expect(test.planner).toHaveBeenCalledTimes(1)
+    expect(test.approval).not.toHaveBeenCalled()
+    const service = test.services.get('semantic-plan')!
+    expect(count(service, 'runs')).toBe(0)
+    const plan = service.orchestra.db.raw.prepare('SELECT plan_id,content_hash,created_by FROM task_plans').get()!
+    service.planning.discard({ plan_id: String(plan.plan_id), content_hash: String(plan.content_hash) }, String(plan.created_by), new Date().toISOString())
+    await human.admit(message)
+    expect(await human.call()).toMatchObject({ state: 'draft_discarded' })
+    expect(test.interpret).toHaveBeenCalledTimes(1)
+  } finally { await test.close() }
+})
+
+it('holds without creating a plan, ignores acknowledgments, and rejects a fabricated note capability', async () => {
+  const test = await fixture({ interpret: input => input.current.text === '查看摘要'
+    ? { kind: 'brain_notes', quote: '查看摘要' }
+    : { kind: 'task', relation: 'new', timing: 'held', quote: input.current.text, constraints: [] } })
+  try {
+    const human = test.session('work', 'semantic-held')
+    await human.admit(user('请整理周报，先别执行，也别改原件'))
+    expect(await human.call()).toMatchObject({ state: 'task_held' })
+    await human.admit(user('收到'))
+    expect(test.interpret).toHaveBeenCalledTimes(1)
+    expect(test.serve).not.toHaveBeenCalled()
+    await human.admit(user('查看摘要'))
+    expect(await human.call({ action: 'review_brain_notes' })).toMatchObject({ state: 'error' })
+    expect(test.planner).not.toHaveBeenCalled()
+  } finally { await test.close() }
+})
+
+it('keeps ordinary image questions and long explanations with host tools and skips interpretation when disabled', async () => {
+  const routing = { enabled: true }
+  const test = await fixture({ routing })
+  try {
+    const human = test.session('work', 'semantic-ordinary')
+    const withImage = { ...attachmentOnlyMessage(), content: [
+      { type: 'text', text: '这张图讲什么？' }, ...attachmentOnlyMessage().content,
+    ] } as Message
+    await human.admit(withImage)
+    expect(human.checkTool('read')).toBeUndefined()
+    await human.admit(user('请解释以下文字：' + '示例'.repeat(1100)))
+    expect(human.checkTool('read')).toBeUndefined()
+    routing.enabled = false
+    await human.admit(user('请出一份周报'))
+    expect(test.interpret).not.toHaveBeenCalled()
+    expect(test.planner).not.toHaveBeenCalled()
+  } finally { await test.close() }
+})
+
+it('discards a semantic result after automatic routing is disabled while the model is running', async () => {
+  const routing = { enabled: true }
+  const blocked = Promise.withResolvers<unknown>()
+  const test = await fixture({ routing, interpret: async () => blocked.promise })
+  try {
+    const human = test.session('work', 'semantic-setting')
+    const pending = human.admit(user('请出周报'))
+    await expect.poll(() => test.interpret.mock.calls.length).toBe(1)
+    routing.enabled = false
+    blocked.resolve({ kind: 'task', relation: 'new', timing: 'immediate', quote: '请出周报', constraints: [] })
+    await pending
+    expect(test.planner).not.toHaveBeenCalled()
+    expect(human.checkTool('read')).toBeUndefined()
+  } finally { await test.close() }
 })

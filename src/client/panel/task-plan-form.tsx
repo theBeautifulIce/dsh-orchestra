@@ -5,6 +5,7 @@ import { ApiError } from '../api/client.ts'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { TaskCommands } from '../api/task-commands.ts'
 import type { TaskPlanView } from '../../service/task-planning.ts'
+import type { TaskRequirement } from '../../core/task-requirements.ts'
 import { MODEL_LEVELS } from '../../executor/model-routing.ts'
 import { PanelCommandButton } from './shell.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
@@ -14,6 +15,21 @@ const checkLabels = {
   tools: '工具可用及授权', dependencies: '执行依赖', risks: '风险及应对',
 }
 const severityLabels = { low: '低风险', medium: '中风险', high: '高风险' }
+
+function requirementLabel(constraint: TaskRequirement): string {
+  switch (constraint.kind) {
+    case 'chat_only': return '在本次聊天中交付正文'
+    case 'no_workspace_files': return '不在工作区创建文件'
+    case 'read_only': return '仅执行只读操作'
+    case 'no_external_send': return '不通过执行工具向外发送内容'
+    case 'preserve_input': return `保持输入材料不变：${constraint.target}`
+    case 'approval_before': {
+      const reviewer = constraint.reviewer.kind === 'named' ? constraint.reviewer.name : '当前操作人'
+      return constraint.scope === 'task' ? `开始任务前由${reviewer}批准`
+        : `执行「${constraint.action}」前由${reviewer}批准`
+    }
+  }
+}
 
 function proposalFailure(error: unknown): string {
   if (error instanceof ApiError && error.code === 'OPERATION_TIMEOUT'
@@ -30,6 +46,17 @@ function Brief({ plan }: { plan: TaskPlanView }) {
     <div><strong>目标</strong><p style={descriptionStyle}>{brief.goal}</p></div>
     {brief.requirements.length > 0 && <div><strong>必须满足</strong>
       <ul style={listStyle}>{brief.requirements.map(({ id, text }) => <li key={id}>{text}</li>)}</ul></div>}
+    {brief.requirements_contract && <section aria-label="执行约束">
+      <strong>执行约束</strong>
+      <p style={descriptionStyle}>{brief.requirements_contract.start_policy === 'plan_only'
+        ? '本次只生成计划，后续执行需另行确认。' : '按已确认的执行条件开始任务。'}</p>
+      {brief.requirements_contract.constraints.length > 0 && <ul style={listStyle}>
+        {brief.requirements_contract.constraints.map(constraint => <li key={constraint.id}>
+          {requirementLabel(constraint)}
+          <p style={descriptionStyle}>原始要求：{constraint.quote}</p>
+        </li>)}
+      </ul>}
+    </section>}
     <div><strong>交付物与验收条件</strong>
       <ul style={listStyle}>
         {proposal.deliverables.map(({ title, node_id, goal_ids, acceptance }, index) => <li key={index}>
@@ -293,7 +320,9 @@ function TaskPlanFormBody({api,commands,onStarted,onOpenRun,workflowRequest,onCl
           {proposalCancelled && <p style={descriptionStyle}>已取消生成，输入已保留。可以重新生成计划。</p>}
         </div>
       </div>}
-      {editingDraft && <p style={descriptionStyle}>正在调整「{editingDraft.proposal.title}」。新计划保存成功后，原计划将被替代。</p>}
+      {editingDraft && <p style={descriptionStyle}>正在调整「{editingDraft.proposal.title}」。新计划保存成功后，原计划将被替代。
+        {editingDraft.brief.requirements_contract && '原有执行约束和指定流程版本会继续保留；需要解除约束或改用另一流程时，请新建任务并重新核对。'}
+      </p>}
       {plan && <section style={contentStyle} aria-label="计划复核">
         <h2 style={headingStyle}>{plan.proposal.title}</h2>
         <details style={detailStyle}><summary>固定流程版本</summary>
@@ -331,7 +360,7 @@ function TaskPlanFormBody({api,commands,onStarted,onOpenRun,workflowRequest,onCl
         {!plan.launch && <div style={contentStyle}>
           {plan.quality.ready && <>
             <label><input type="checkbox" checked={confirmed} disabled={busy !== null}
-              onChange={(event) => setConfirmed(event.target.checked)} /> 我已核对目标、交付物、风险和固定流程版本。</label>
+              onChange={(event) => setConfirmed(event.target.checked)} /> 我已核对目标、执行约束、交付物、风险和固定流程版本。</label>
             <PanelCommandButton disabled={!confirmed || busy !== null} onClick={() => { void start() }}>
               {busy === 'start' ? '正在取得启动回执…' : '确认后启动任务'}
             </PanelCommandButton>

@@ -1,3 +1,5 @@
+import { requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
+import { requirementIssues } from './task-requirement-checks.ts'
 import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { textResultFileName } from './text-result.ts'
@@ -47,7 +49,7 @@ const acceptance = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('tool_evidence'), tool: key, exit_code: z.literal(0) }),
   z.strictObject({ kind: z.literal('chat/text_result') }),
 ])
-const proposalSchema = z.strictObject({
+const legacyProposalSchema = z.strictObject({
   title: z.string().trim().min(1).max(200),
   workflow_id: key,
   workflow_version: z.string().regex(/^[1-9]\d{0,14}$/),
@@ -56,6 +58,10 @@ const proposalSchema = z.strictObject({
   risks: z.array(z.strictObject({ severity: z.enum(['low', 'medium', 'high']), description: claim, mitigation: claim,
     node_id: key.optional() })).max(20),
 })
+const proposalSchema = legacyProposalSchema.extend({
+  constraint_bindings: z.array(constraintBindingSchema).max(40).optional(),
+})
+
 /**
  * 「没有可用的候选流程」信号：主脑判定候选池里没有一个适合这次任务时显式回这个分支，
  * 服务端据此自动生成任务专属流程（task_local）。用独立分支而不是空字符串或魔法值，
@@ -71,9 +77,12 @@ export const planInputSchema = z.strictObject({
   goal: z.string().trim().min(1).max(2000),
   requirements: z.array(z.string().trim().min(1).max(300)).max(12).default([]),
   revises: draftReferenceSchema.optional(),
+  requirements_contract: requirementsContractSchema.optional(),
   // 用户明确指定流程时，约束进结构化字段，而不是让主脑再猜一次（P02）。
   workflow_id: z.string().trim().min(1).max(120).optional(),
   workflow_version: z.string().regex(/^[1-9]\d{0,14}$/u).optional(),
+}).refine(input => input.workflow_version === undefined || input.workflow_id !== undefined, {
+  path: ['workflow_id'], message: '指定版本还需要流程 ID',
 })
 export const planConfirmSchema = z.strictObject({
   plan_id: z.uuidv7(), content_hash: z.string().regex(/^[0-9a-f]{64}$/), confirmed: z.literal(true),
@@ -92,13 +101,15 @@ export type TaskPlanInput = z.infer<typeof planInputSchema>
 export type TaskPlanProposal = z.infer<typeof proposalSchema>
 export type PlanConfirm = z.infer<typeof planConfirmSchema>
 type Goal = { id: string; text: string }
-type PlanInput = { goal: string; requirements: Goal[]; workflow_id?: string; workflow_version?: string; materials?: PlanMaterial[] }
+type PlanInput = { goal: string; requirements: Goal[]; workflow_id?: string; workflow_version?: string; materials?: PlanMaterial[]; requirements_contract?: RequirementsContract }
 type WorkflowCandidate = {
   workflowId: string; version: string; title: string
-  nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[]; subflowTools?: string[] }>
+  nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; sideEffectPolicy?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[]; subflowTools?: string[] }>
 }
 type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
+  /** A tool-free adapter may interpret unstructured panel input before any plan or workflow is persisted. */
+  interpret?: (input: TaskPlanInput, signal: AbortSignal, previous?: Pick<PlanInput, 'goal' | 'requirements' | 'requirements_contract' | 'workflow_id' | 'workflow_version'>) => Promise<unknown>
   propose(input: PlanInput & { workflows: WorkflowCandidate[]; model_profiles?: readonly ModelPlanningProfile[] }, signal: AbortSignal, onProgress?: () => void): Promise<unknown>
   timeoutMs?: number
   /** This planner reports nonempty provider output through onProgress. */
@@ -107,7 +118,7 @@ export type TaskPlanningOptions = {
    * 自动生成任务专属流程的能力：没有可复用的合适流程时，由服务端生成 task_local 流程。
    * 不装配它就退回原来的口径：提示先发布至少一个可复用流程。
    */
-  workflowGenerator?: (input: { goal: string }, signal: AbortSignal, onProgress?: () => void) => Promise<unknown>
+  workflowGenerator?: (input: { goal: string; requirements_contract?: RequirementsContract }, signal: AbortSignal, onProgress?: () => void) => Promise<unknown>
   workflowStreamProgress?: boolean
   /** 运行时允许的节点类型（发布层校验用）。 */
   runtimeNodeTypes?: ReadonlySet<string>
@@ -117,6 +128,7 @@ type PlanCheck = (typeof checks)[number]
 export type PlanQuality = { ready: boolean; checks: Array<{ check: PlanCheck; passed: boolean; issues: string[] }> }
 export type TaskPlanView = {
   plan_id: string
+  contract_version?: 1 | 2
   content_hash: string
   brief: PlanInput
   proposal: TaskPlanProposal
@@ -131,20 +143,32 @@ export type TaskPlanView = {
   auto_workflow_id?: string | null
 }
 type PlanRow = {
+  contract_version: 1 | 2
   plan_id: string; input_json: string; proposal_json: string; quality_json: string; content_hash: string
   workflow_hash: string | null; launch_operation_id: string; created_at: string
   task_id: string | null; run_id: string | null
   owner_task_id: string | null; auto_workflow_id: string | null
 }
-const PLAN_SELECT = `SELECT p.plan_id, p.input_json, p.proposal_json, p.quality_json, p.content_hash,
+const PLAN_SELECT = `SELECT p.contract_version, p.plan_id, p.input_json, p.proposal_json, p.quality_json, p.content_hash,
   p.workflow_hash, p.launch_operation_id, p.created_at, o.task_id, o.run_id,
   p.owner_task_id, p.auto_workflow_id
   FROM task_plans p LEFT JOIN start_run_operations o ON o.operation_id = p.launch_operation_id`
 
 function toPlanView(row: PlanRow): TaskPlanView {
+  if (row.contract_version !== 1 && row.contract_version !== 2) {
+    throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', '无法读取这份计划的需求契约版本')
+  }
+  const brief = JSON.parse(row.input_json) as PlanInput
+  if ((row.contract_version === 2) !== (brief.requirements_contract !== undefined)) {
+    throw new OrchError('CONFIRMATION_MISMATCH', '计划的需求契约与版本不一致')
+  }
+  if (row.contract_version === 2 && !requirementsContractSchema.safeParse(brief.requirements_contract).success) {
+    throw new OrchError('CONFIRMATION_MISMATCH', '计划的结构化需求无法校验')
+  }
+  const proposal = (row.contract_version === 1 ? legacyProposalSchema : proposalSchema).parse(JSON.parse(row.proposal_json))
   return {
-    plan_id: row.plan_id, content_hash: row.content_hash, brief: JSON.parse(row.input_json) as PlanInput,
-    proposal: proposalSchema.parse(JSON.parse(row.proposal_json)), quality: JSON.parse(row.quality_json) as PlanQuality,
+    plan_id: row.plan_id, contract_version: row.contract_version, content_hash: row.content_hash, brief, proposal,
+    quality: JSON.parse(row.quality_json) as PlanQuality,
     created_at: row.created_at, launch: row.task_id && row.run_id ? { task_id: row.task_id, run_id: row.run_id } : null,
     owner_task_id: row.owner_task_id, auto_workflow_id: row.auto_workflow_id,
   }
@@ -236,7 +260,7 @@ function readChoice(catalog: WorkflowCatalog, registry: ToolRegistry | undefined
     const policy = catalog.toolPolicyFor(row.workflow_id, row.version, node.node_id)
     const declaredTools = [...new Set(policy.allow.filter((tool) => !policy.deny.includes(tool)))]
     return {
-      id: node.node_id, type: node.type, approvalPrompt: node.approval?.prompt,
+      id: node.node_id, type: node.type, approvalPrompt: node.approval?.prompt, sideEffectPolicy: node.side_effect_policy,
       dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
       declaredTools, toolAllow: declaredTools.filter((tool) => registry?.lookup(tool)?.capability === 'read_only'),
       // 子流程声明的只读工具在计划期就摊开，便于递归校验（P06）。
@@ -396,13 +420,16 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
     issues.workflow.push('计划没有使用你指定的流程版本，请重新规划。')
   }
   if (!workflow) issues.workflow.push('候选未选中本次提供的活跃、已发布流程版本。')
-  else for (const name of missingApprovalSteps(requestedApprovalSteps(brief), workflow)) {
+  else if (!brief.requirements_contract) for (const name of missingApprovalSteps(requestedApprovalSteps(brief), workflow)) {
     issues.dependencies.push(`缺少作为执行前置条件的人工审批「${name}」。请检查流程后重新规划。`)
   }
   const goals = [{ id: 'goal', text: brief.goal }, ...brief.requirements]
-  const prohibitsWritingFiles = goals.some(({ text }) => /(?:^|[，,。；;\n])\s*(?:不要|不得|不允许|禁止)\s*(?:读写|写入|写出|写|生成|创建)\s*(?:任何\s*)?文件/u.test(text))
+  const prohibitsWritingFiles = !brief.requirements_contract && goals.some(({ text }) => /(?:^|[，,。；;\n])\s*(?:不要|不得|不允许|禁止)\s*(?:读写|写入|写出|写|生成|创建)\s*(?:任何\s*)?文件/u.test(text))
   if (prohibitsWritingFiles && proposal.deliverables.some(({ acceptance }) => acceptance.kind === 'artifact')) {
     issues.deliverables.push('任务要求不写文件，但计划安排了文件交付。请调整交付方式后重新规划。')
+  }
+  if (brief.requirements_contract && workflow) {
+    issues.dependencies.push(...requirementIssues(brief.requirements_contract, proposal, workflow.nodes))
   }
   const expectedGoals = new Set(goals.map((item) => item.id))
   const nodes = new Map((workflow?.nodes ?? []).map((node) => [node.id, node]))
@@ -458,15 +485,16 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
   return { ready: results.every((result) => result.passed), checks: results }
 }
 
-function planHash(view: Pick<TaskPlanView, 'brief' | 'proposal' | 'quality'>, workflowHash: string | null): string {
-  return sha256Hex(canonicalJson({ schema: 1, ...view, workflow_hash: workflowHash }))
+function planHash(view: Pick<TaskPlanView, 'brief' | 'proposal' | 'quality'>, workflowHash: string | null,
+  version: 1 | 2 = view.brief.requirements_contract ? 2 : 1): string {
+  return sha256Hex(canonicalJson({ schema: version, ...view, workflow_hash: workflowHash }))
 }
 
 function assertApprovedPlan(row: PlanRow, workflowId: string | null, workflowVersion: string | null): TaskPlanView {
   const view = toPlanView(row)
   const { brief, proposal, quality } = view
   if (!quality.ready || proposal.workflow_id !== workflowId || proposal.workflow_version !== workflowVersion
-    || row.content_hash !== planHash({ brief, proposal, quality }, row.workflow_hash)) {
+    || row.content_hash !== planHash({ brief, proposal, quality }, row.workflow_hash, row.contract_version)) {
     throw new OrchError('CONFIRMATION_MISMATCH', '已启动任务的规划内容或固定流程绑定不符')
   }
   return view
@@ -650,6 +678,7 @@ function candidateFromRuntime(def: WorkflowDefinition, doc: WorkflowDoc, registr
     return {
       id: node.node_id, type: node.type,
       approvalPrompt: node.approval?.prompt,
+      sideEffectPolicy: node.side_effect_policy,
       title: docs.get(node.node_id)?.title,
       description: docs.get(node.node_id)?.contract?.description as string | undefined,
       dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
@@ -736,7 +765,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       { timeout: '主脑没有在时限内生成计划', failure: '主脑暂时未能产出计划' },
       options?.streamProgress ? budget.taskStage : budget.task, options?.streamProgress ? budget.idle : null,
     )
-    const parsed = proposalSchema.safeParse(candidate)
+    const parsed = (brief.requirements_contract ? proposalSchema : legacyProposalSchema).safeParse(candidate)
     if (parsed.success) {
       for (const step of parsed.data.steps) {
         if (step.preferred_model_ref === undefined) continue
@@ -762,9 +791,10 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     }
     const runtimeNodeTypes = options?.runtimeNodeTypes ?? DEFAULT_RUNTIME_NODE_TYPES
     const goal = [brief.goal, ...brief.requirements.map((item) => item.text)].join('；')
+    const generationInput = { goal, ...(brief.requirements_contract && { requirements_contract: brief.requirements_contract }) }
     // 1) 主脑出流程草案：放在事务外，主脑耗时不能占着写锁
     const draft = await callPlanningStage(
-      (signal, onProgress) => onProgress ? generator({ goal }, signal, onProgress) : generator({ goal }, signal), caller,
+      (signal, onProgress) => onProgress ? generator(generationInput, signal, onProgress) : generator(generationInput, signal), caller,
       { timeout: '主脑没有在时限内生成流程', failure: '主脑暂时未能生成流程' },
       options?.workflowStreamProgress ? budget.taskStage : budget.task, options?.workflowStreamProgress ? budget.idle : null,
     )
@@ -784,6 +814,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     }
     const quality = evaluate(brief, proposal, autoCandidate)
     const hash = planHash({ brief, proposal, quality }, workflowHash)
+    const version = brief.requirements_contract ? 2 : 1
     const id = uuidv7()
     caller?.throwIfAborted()
     // 3) 预留任务 + 建流程 + 发布 + 落计划：同一笔事务
@@ -800,9 +831,9 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       const result = publishDraft(tx, {
         workflowId, revision: 1, baseVersion: 0, note: '自动生成的任务专属流程', actor, now,
       }, ctx, { requireTest: true, tools: registry, catalog })
-      tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
-        + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now, reserved.task_id, workflowId])
+      tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id, contract_version)'
+        + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now, reserved.task_id, workflowId, version])
       finishDraftRevision(tx, revision, id, actor, now)
       bindChatPlan(tx, origin, id)
       if (origin) bindPlanningProgress(tx, origin.requestKey, id, proposal.title, Date.parse(now))
@@ -822,6 +853,12 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       origin?.assertCurrent()
       const existing = origin && findChatPlan(db, origin)
       if (existing) return get(existing, actor)
+      const parsedInput = planInputSchema.safeParse(input)
+      if (!parsedInput.success) throw new OrchError('PAYLOAD_SCHEMA_INVALID', '任务需求格式不正确', {
+        fields: parsedInput.error.issues.slice(0, 12).map(issue => issue.path.join('.')),
+      })
+      input = parsedInput.data
+      let previous: Pick<PlanInput, 'goal' | 'requirements' | 'requirements_contract' | 'workflow_id' | 'workflow_version'> | undefined
       const revision = input.revises ? { reference: input.revises,
         requestHash: requestHashOf('task_plan.revise', input) } : undefined
       if (revision) {
@@ -834,13 +871,51 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
           if (end.successor_id && end.request_hash === revision.requestHash) return get(end.successor_id, actor)
           throw new OrchError('CONFIRMATION_MISMATCH', '这份计划已调整或放弃，请读取当前计划')
         }
+        const original = get(revision.reference.plan_id, actor).view.brief
+        previous = { goal: original.goal, requirements: original.requirements,
+          ...(original.workflow_id && { workflow_id: original.workflow_id }),
+          ...(original.workflow_version && { workflow_version: original.workflow_version }),
+          ...(original.requirements_contract && { requirements_contract: original.requirements_contract }) }
+        if (original.requirements_contract && !input.requirements_contract && !options?.interpret) {
+          throw new OrchError('PAYLOAD_SCHEMA_INVALID', '调整这份计划需要完整的结构化约束，请保留或明确更新原要求')
+        }
       }
       if (!options?.propose) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
       const budget = readTimeouts()
       return withPlanningBudget(budget.request, callerSignal, async (caller) => {
-        const brief = { goal: input.goal, requirements: input.requirements.map((text, index) => ({ id: 'R' + (index + 1), text })),
-          ...(input.workflow_id === undefined ? {} : { workflow_id: input.workflow_id }),
-          ...(input.workflow_version === undefined ? {} : { workflow_version: input.workflow_version }) }
+        let normalized = input
+        if (!input.requirements_contract && options.interpret) {
+          const interpreted = await callPlanningStage(signal => options.interpret!(structuredClone(input), signal, previous && structuredClone(previous)), caller,
+            { timeout: '需求解释超过处理时限', failure: '暂时未能解释任务需求' }, budget.task)
+          const result = planInputSchema.safeParse(interpreted)
+          if (!result.success || !result.data.requirements_contract) {
+            throw new OrchError('PAYLOAD_SCHEMA_INVALID', '需求解释缺少完整的结构化约束，请补充后重新规划')
+          }
+          if ((input.workflow_id !== undefined && result.data.workflow_id !== input.workflow_id)
+            || (input.workflow_version !== undefined && result.data.workflow_version !== input.workflow_version)) {
+            throw new OrchError('CONFIRMATION_MISMATCH', '面板选择的流程与文字需求中的流程不一致，请确认具体版本')
+          }
+          normalized = result.data
+        }
+        if (previous?.requirements_contract) {
+          const next = normalized.requirements_contract ?? previous.requirements_contract
+          try {
+            normalized = { ...normalized, requirements_contract: mergeRequirementsContracts(previous.requirements_contract, next) }
+          } catch {
+            throw new OrchError('PAYLOAD_SCHEMA_INVALID', '修订需求的来源或约束不一致，请重新核对原要求')
+          }
+        }
+        if ((previous?.workflow_id && normalized.workflow_id && previous.workflow_id !== normalized.workflow_id)
+          || (previous?.workflow_version && normalized.workflow_version && previous.workflow_version !== normalized.workflow_version)) {
+          throw new OrchError('CONFIRMATION_MISMATCH', '修订须保留已明确指定的流程版本，改变流程请新建任务并重新确认')
+        }
+        normalized = { ...normalized,
+          ...(previous?.workflow_id && { workflow_id: previous.workflow_id }),
+          ...(previous?.workflow_version && { workflow_version: previous.workflow_version }) }
+        const brief: PlanInput = { goal: normalized.goal, requirements: normalized.requirements.map((text, index) => ({ id: 'R' + (index + 1), text })),
+          ...(normalized.workflow_id === undefined ? {} : { workflow_id: normalized.workflow_id }),
+          ...(normalized.workflow_version === undefined ? {} : { workflow_version: normalized.workflow_version }),
+          ...(normalized.requirements_contract && { requirements_contract: normalized.requirements_contract }) }
         // 候选检索：先捞一个较大的池子，再按任务适配性排序，最后才截断
         const choices = withReadTx(db, ({ tx }) => {
           const rows = brief.workflow_id
@@ -849,7 +924,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
               brief.workflow_version ? [brief.workflow_id, brief.workflow_version] : [brief.workflow_id])
             : tx.all<CandidateRow>(CANDIDATE_SELECT)
           const tokens = goalTokens(brief)
-          const approvals = requestedApprovalSteps(brief)
+          const approvals = brief.requirements_contract ? [] : requestedApprovalSteps(brief)
           const scored = rows.flatMap((row) => {
             const choice = brief.workflow_id ? readChoice(catalog, registry, row, tx, null)
               : readChoiceSafe(catalog, registry, row, tx, null)
@@ -883,15 +958,19 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         }
         const proposal = outcome.proposal
         const selected = choices.find(({ workflow }) => workflow.workflowId === proposal.workflow_id && workflow.version === proposal.workflow_version)
+        if (brief.workflow_id && !selected) {
+          throw new OrchError('WORKFLOW_DEFINITION_INVALID', '规划器未使用指定的固定流程版本')
+        }
         const quality = evaluate(brief, proposal, selected?.workflow)
         const workflowHash = selected?.hash ?? null
         const hash = planHash({ brief, proposal, quality }, workflowHash)
+        const version = brief.requirements_contract ? 2 : 1
         const id = uuidv7()
         caller.throwIfAborted()
         withTx(db, (tx) => {
-          tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
-            + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)',
-            [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now])
+          tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id, contract_version)'
+            + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)',
+            [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now, version])
           finishDraftRevision(tx, revision, id, actor, now)
           bindChatPlan(tx, origin, id)
           if (origin) bindPlanningProgress(tx, origin.requestKey, id, proposal.title, Date.parse(now))
@@ -906,10 +985,13 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
   }) => {
       const { row, view } = get(planId, actor)
       const { brief, proposal, quality } = view
-      if (contentHash !== row.content_hash || row.content_hash !== planHash({ brief, proposal, quality }, row.workflow_hash)) {
+      if (contentHash !== row.content_hash || row.content_hash !== planHash({ brief, proposal, quality }, row.workflow_hash, row.contract_version)) {
         throw new OrchError('CONFIRMATION_MISMATCH', '待确认计划的内容已发生变化')
       }
       if (view.launch) return { ...view.launch, replayed: true }
+      if (row.contract_version === 1 && options?.interpret) {
+        throw new OrchError('CONFIRMATION_REQUIRED', '旧计划未保存结构化需求，请重新规划并确认执行范围')
+      }
       withReadTx(db, ({ tx }) => assertDraftActive(tx, { plan_id: planId, content_hash: contentHash }, actor))
       if (!quality.ready) throw new OrchError('VERDICT_POLICY_UNMET', '计划质量检查存在阻断项')
       const check = withReadTx(db, ({ tx }) => {
@@ -935,9 +1017,13 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         chat.origin.assertCurrent()
         if (findChatPlan(db, chat.origin) !== planId) throw new OrchError('FORBIDDEN', '计划与当前会话消息的绑定不一致')
         const definition = catalog.get(proposal.workflow_id, proposal.workflow_version)
+        if (brief.requirements_contract?.start_policy === 'plan_only') {
+          throw new OrchError('CONFIRMATION_REQUIRED', '这份计划只供预览，请在面板确认后启动')
+        }
+        const requiresContractApproval = brief.requirements_contract?.constraints.some(constraint => constraint.kind === 'approval_before' && constraint.scope === 'task')
         const needsApproval = definition.nodes.some((node) => node.side_effect_policy === 'irreversible'
           || node.side_effect_policy === 'compensable' || (node.type !== 'agent' && node.type !== 'wait'))
-        if ((needsApproval || Boolean(brief.materials?.length)) && !chat.nativeApproval) throw new OrchError('CONFIRMATION_REQUIRED', '此工作流需要在当前会话中批准后才能启动')
+        if ((needsApproval || requiresContractApproval || Boolean(brief.materials?.length)) && !chat.nativeApproval) throw new OrchError('CONFIRMATION_REQUIRED', '此工作流需要在当前会话中批准后才能启动')
       }
       // 自动生成的是任务专属流程：只走服务端可信编排路径。
       // 任务号取自服务端落库的计划行，不来自请求体，客户端伪造不了。
@@ -1009,12 +1095,12 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
           name: input.items[index]!.name, nodes, expires_ms: Date.parse(now)+30*60_000, draft: input.plan_id }))]
         if (materials.length > 8) throw new OrchError('RANGE_TOO_LARGE','本计划最多授权 8 份材料')
         const brief: PlanInput = { ...view.brief, materials }
-        const contentHash = planHash({ brief, proposal:view.proposal, quality:view.quality },row.workflow_hash)
+        const contentHash = planHash({ brief, proposal:view.proposal, quality:view.quality },row.workflow_hash,row.contract_version)
         const id=uuidv7()
         tx.run(`INSERT INTO task_plans (plan_id,created_by,input_json,proposal_json,quality_json,workflow_hash,
-          content_hash,launch_operation_id,created_at,owner_task_id,auto_workflow_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          content_hash,launch_operation_id,created_at,owner_task_id,auto_workflow_id,contract_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
           [id,actor,JSON.stringify(brief),row.proposal_json,row.quality_json,row.workflow_hash,contentHash,
-            uuidv7(),now,row.owner_task_id,row.auto_workflow_id])
+            uuidv7(),now,row.owner_task_id,row.auto_workflow_id,row.contract_version])
         tx.run('INSERT INTO task_plan_draft_end(plan_id,successor_id,request_hash,ended_at) VALUES (?,?,?,?)',
           [input.plan_id,id,requestHashOf('plan.materials',{...input,actor}),now])
         tx.run('UPDATE chat_task_receipts SET plan_id=? WHERE plan_id=?',[id,input.plan_id])
@@ -1134,6 +1220,7 @@ export function resolveApprovedPlanNodeSpecs(
       tools: step.tools.map((command) => ({ command, args: [], cwd: '.', timeoutMs: 15_000 })),
       input: {
         task_goal: brief.goal,
+        ...(brief.requirements_contract && { requirements_contract: brief.requirements_contract }),
         requirements: brief.requirements.filter(({ id }) => step.goal_ids.includes(id)),
         step: step.description,
         deliverables: proposal.deliverables.flatMap((item, index) => item.node_id === step.node_id

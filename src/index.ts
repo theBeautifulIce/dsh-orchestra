@@ -82,6 +82,8 @@ import {
 import { bridgeHostAgentFactory } from './executor/bridge.ts'
 import { createDshExecutor, createDshPlanningCallback } from './executor/dsh-host.ts'
 import { createDshPrivateNotes } from './executor/dsh-private-notes.ts'
+import { createDshTaskRequirements } from './executor/dsh-task-requirements.ts'
+import { resolveSemanticWorkflow } from './service/semantic-workflow.ts'
 import { createCollaborationHost, type CollaborationHost } from './service/collaboration.ts'
 import { createRunNotes, type RunNotes } from './service/run-notes.ts'
 import { callDshCollaboration } from './service/dsh-collaboration.ts'
@@ -171,6 +173,13 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
       ...(planner ? { reworkPlanner: createDshPlanningCallback(planner, 'rework') } : {}),
       ...(planner ? { planning: {
         propose: createDshPlanningCallback(planner),
+        interpret: createDshTaskRequirements({ ...planner,
+          isAuthorized: () => serviceOptions.projectContext?.isAuthorized() !== false,
+          resolveWorkflow: hint => {
+            if (!plannerDb) throw new OrchError('SERVICE_UNAVAILABLE', '流程目录尚未就绪')
+            return resolveSemanticWorkflow(plannerDb, hint)!
+          },
+        }),
         streamProgress: true,
         ...(workflowGenerator ? { workflowGenerator, workflowStreamProgress: true } : {}),
       } } : {}),
