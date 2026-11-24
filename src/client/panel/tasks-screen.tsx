@@ -484,9 +484,9 @@ const taskTitleStyle = { display: 'block', width: '100%', overflow: 'hidden', te
   lineHeight: 1.5, textAlign: 'left' as const, cursor: 'pointer' }
 const compactTitleStyle = { ...taskTitleStyle, display: '-webkit-box', whiteSpace: 'normal' as const,
   WebkitBoxOrient: 'vertical' as const, WebkitLineClamp: 2 }
-const searchInputStyle = { minWidth: 0, width: 240, height: 38, padding: '0 11px', border: `1px solid ${COLOR.line}`, borderRadius: 7, color: COLOR.ink, fontSize: FONT_PX.body }
-const buttonStyle = { minHeight: 38, padding: '0 14px', border: 0, borderRadius: 7, background: COLOR.ink, color: '#ffffff', fontSize: FONT_PX.menu, cursor: 'pointer' } as const
-const quietButtonStyle = { minHeight: 36, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer' } as const
-const emptyStyle = { border: `1px dashed ${COLOR.line}`, borderRadius: 9, padding: 36, textAlign: 'center' as const, color: COLOR.inkMuted, fontSize: FONT_PX.body }
+const searchInputStyle = { minWidth: 0, width: 240, height: 44, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 8, color: COLOR.ink, fontSize: FONT_PX.body }
+const buttonStyle = { minHeight: 44, padding: '0 16px', border: 0, borderRadius: 8, background: COLOR.link, color: '#ffffff', fontSize: FONT_PX.body, cursor: 'pointer' } as const
+const quietButtonStyle = { minHeight: 44, padding: '0 14px', border: `1px solid ${COLOR.line}`, borderRadius: 8, background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.body, cursor: 'pointer' } as const
+const emptyStyle = { border: `1px dashed ${COLOR.line}`, borderRadius: 12, padding: 36, textAlign: 'center' as const, color: COLOR.inkMuted, fontSize: FONT_PX.body }
 const errorStyle = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: 14, borderRadius: 8, background: '#fff1f0', color: COLOR.danger, fontSize: FONT_PX.body } as const
 const visuallyHidden = { position: 'absolute' as const, width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden' as const, clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap' as const, border: 0 }

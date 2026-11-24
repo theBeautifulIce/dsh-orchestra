@@ -26,7 +26,7 @@ import { UnverifiedEffects } from './unverified-effects.tsx'
 import { WorkflowCanvas } from './workflow-canvas.tsx'
 import { WorkflowListScreen } from './workflow-list.tsx'
 import { TaskDetailScreen, type TaskDetailScreenProps } from './task-detail-screen.tsx'
-import { TaskListScreen } from './tasks-screen.tsx'
+import { TaskListScreen, type TaskListScreenProps } from './tasks-screen.tsx'
 import { TaskTriggerManager } from './task-trigger-manager.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
 
@@ -193,6 +193,15 @@ export function PanelApp(props: PanelAppProps) {
     setRoute('decisions')
   }
 
+  const openTask: TaskListScreenProps['onSelectTask'] = (id, trigger, runId, action) => {
+    // 总览与任务页共用精确目标，审批始终进入原有审批中心。
+    if (action?.kind === 'decision' && action.decision_id) { openDecision(action.decision_id); return }
+    taskTrigger.current = trigger
+    setTaskAction(action)
+    setTaskRunId(runId)
+    setTaskId(id)
+  }
+
   const showServiceStatus = props.additionalScreens?.settings == null
   const settingsSections = [
     ...(props.nativeChatRoutingEnabled ? [{ id: 'chat-routing-title', label: '会话路由' }] : []),
@@ -208,20 +217,14 @@ export function PanelApp(props: PanelAppProps) {
 
   let screen: ReactNode
   if (route === 'overview') {
-    screen = <OverviewScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onNavigate={setRoute} />
+    screen = <OverviewScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onNavigate={setRoute} onSelectTask={openTask} />
   } else if (route === 'tasks') {
     screen = <div className="task-workspace">
       <TaskListScreen reworkEnabled={props.reworkEnabled} collaborationEnabled={props.collaborationEnabled}
         workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan} scopeLabel={props.scopeLabel} api={api} commands={taskCommands} selectedTaskId={taskId}
         triggerManager={!writableTriggers ? undefined :
-          <TaskTriggerManager api={api} commands={writableTriggers} onChanged={() => setReloadVersion((version) => version + 1)} />} onSelectTask={(id, trigger, runId, action) => {
-        // 待批准事项直接进审批中心，其余动作带着精确目标打开任务详情（T01/T02）。
-        if (action?.kind === 'decision' && action.decision_id) { openDecision(action.decision_id); return }
-        taskTrigger.current = trigger
-        setTaskAction(action)
-        setTaskRunId(runId)
-        setTaskId(id)
-      }} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
+          <TaskTriggerManager api={api} commands={writableTriggers} onChanged={() => setReloadVersion((version) => version + 1)} />} onSelectTask={openTask}
+      reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
     </div>
   } else if (route === 'decisions') {
     screen = <DecisionInbox key={decisionId ?? 'all'} decisionId={decisionId} onShowAll={() => setDecisionId(undefined)}
@@ -238,7 +241,9 @@ export function PanelApp(props: PanelAppProps) {
       ?? <MemoryPanel api={api} recovery={memoryRecovery} memoryEnabled={props.memoryEnabled} proposalOnly={props.memoryProposalOnly}
         reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecisions={() => { setRoute('decisions') }} onOpenTasks={() => setRoute('tasks')} />
   } else if (route === 'settings') {
-    screen = <section className="ops-page ops-settings-page"><h1>设置</h1><div className="ops-settings-section">
+    screen = <section className="ops-page ops-settings-page"><header className="ops-page-header"><div>
+      <h1>设置</h1><p className="ops-meta">管理会话、模型与执行方式，查看当前服务和记忆能力。</p>
+    </div></header><div className="ops-settings-section">
       {props.nativeChatRoutingEnabled && <ChatRoutingSettings client={client} reloadVersion={settingsReloadVersion} writable={writesEnabled.current} />}
       {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot}
         plannerHeadingRef={setPlannerHeading} submodelHeadingRef={setSubmodelHeading} />}
