@@ -1,4 +1,9 @@
+import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
+import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { textResultFileName } from './text-result.ts'
+import { saveMaterials, bindMaterials, revokeMaterial, materialGrant, type PlanMaterial } from './plan-materials.ts'
+import { readPlanningProgress, bindPlanningProgress } from './chat-planning-progress.ts'
+import { runIdempotentCommand, requestHashOf } from './commands/idempotency.ts'
 import { z } from 'zod'
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
@@ -14,13 +19,13 @@ import { ARTIFACT_MAX_BYTES, isArtifactFileName } from './artifact-store.ts'
 import { nativeTextFormat, nativeTextFormats, nativeTextLimits } from './native-text-capability.ts'
 import { bindChatPlan, findChatPlan, type ChatTaskOrigin } from './chat-task-receipts.ts'
 import { assertSubworkflowGraphFor } from './commands/subworkflow.ts'
-import { startRun, startTrustedTaskLocalRun } from './commands/start-run.ts'
+import { startTrustedTaskLocalRun } from './commands/start-run.ts'
 import { createWorkflow, publishContextFor, publishDraft, runtimeProjection, testWorkflowDraft } from './commands/workflows.ts'
 import { withReadTx, type ReadTx } from './queries/read-tx.ts'
 import { createPlanningSettingsHost, withPlanningBudget, type PlanningTimeoutSnapshot } from './planning-settings.ts'
 import type { NodeSpec } from './dispatcher.ts'
 import type { TriggerRunReady } from './task-trigger-dispatch.ts'
-import { reserveTaskInTx } from './runs.ts'
+import { reserveTaskInTx, createRunInTx } from './runs.ts'
 import { definitionHashOf, type WorkflowCatalog } from './workflows.ts'
 
 const claim = z.string().trim().min(1).max(500)
@@ -65,6 +70,7 @@ type PlannerOutcome = { kind: 'proposal'; proposal: TaskPlanProposal } | { kind:
 export const planInputSchema = z.strictObject({
   goal: z.string().trim().min(1).max(2000),
   requirements: z.array(z.string().trim().min(1).max(300)).max(12).default([]),
+  revises: draftReferenceSchema.optional(),
   // 用户明确指定流程时，约束进结构化字段，而不是让主脑再猜一次（P02）。
   workflow_id: z.string().trim().min(1).max(120).optional(),
   workflow_version: z.string().regex(/^[1-9]\d{0,14}$/u).optional(),
@@ -73,11 +79,20 @@ export const planConfirmSchema = z.strictObject({
   plan_id: z.uuidv7(), content_hash: z.string().regex(/^[0-9a-f]{64}$/), confirmed: z.literal(true),
 })
 
+export const materialGrantSchema = z.strictObject({
+  operation_id: z.uuidv7(), plan_id: z.uuidv7(), content_hash: z.string().regex(/^[0-9a-f]{64}$/u),
+  nodes: z.array(key).min(1).max(100),
+  items: z.array(z.strictObject({ name: z.string().max(120), body: z.string().max(65536) })).min(1).max(8),
+})
+export const materialRevokeSchema = z.strictObject({
+  plan_id: z.uuidv7(), content_hash: z.string().regex(/^[0-9a-f]{64}$/u), material_id: z.uuidv7(),
+})
+
 export type TaskPlanInput = z.infer<typeof planInputSchema>
 export type TaskPlanProposal = z.infer<typeof proposalSchema>
 export type PlanConfirm = z.infer<typeof planConfirmSchema>
 type Goal = { id: string; text: string }
-type PlanInput = { goal: string; requirements: Goal[]; workflow_id?: string; workflow_version?: string }
+type PlanInput = { goal: string; requirements: Goal[]; workflow_id?: string; workflow_version?: string; materials?: PlanMaterial[] }
 type WorkflowCandidate = {
   workflowId: string; version: string; title: string
   nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[]; subflowTools?: string[] }>
@@ -107,6 +122,8 @@ export type TaskPlanView = {
   proposal: TaskPlanProposal
   quality: PlanQuality
   created_at: string
+  material_recipients?: string[]
+  material_states?: Array<{ id: string; state: 'active' | 'revoked' | 'expired'; expires_ms: number }>
   launch: { task_id: string; run_id: string } | null
   /** 自动生成的流程归属的预留任务号（只有自动生成的计划才有） */
   owner_task_id?: string | null
@@ -335,12 +352,19 @@ export function deliveryCapabilityIssues(deliverables: readonly { node_id: strin
   const issues: string[] = []
   // 件数按不同文件名去重后按节点统计；会话正文按交付项独立计数（D02）。
   const perNode = new Map<string, { files: Set<string>; texts: number }>()
-  for (const item of deliverables) {
+  for (const [index,item] of deliverables.entries()) {
     const rule = item.acceptance
     if (rule.kind !== 'artifact' && rule.kind !== 'chat/text_result') continue
     const slot = perNode.get(item.node_id) ?? { files: new Set<string>(), texts: 0 }
     perNode.set(item.node_id, slot)
-    if (rule.kind === 'chat/text_result') { slot.texts += 1; continue }
+    if (rule.kind === 'chat/text_result') {
+      slot.texts += 1
+      if (deliverables.some(other=>other.node_id===item.node_id && other.acceptance.kind==='artifact'
+        && other.acceptance.file_name===textResultFileName(index))) {
+        issues.push(`「${textResultFileName(index)}」用于本步骤的会话正文，请为普通文件另取名称。`)
+      }
+      continue
+    }
     if (!rule.file_name) continue
     slot.files.add(rule.file_name)
     if (!nativeTextFormat(rule.file_name)) {
@@ -602,26 +626,6 @@ function buildAutoDoc(draft: unknown, registry: ToolRegistry | undefined, runtim
       if (node.node_id !== inferredTrigger && !incoming.has(node.node_id)) edges.push({ from: inferredTrigger, to: node.node_id })
     }
   }
-  // 「配置审批节点」是配置说明，不是一步工作：已有审批节点时把这类说明节点收掉，
-  // 否则会话里会多出两个并列步骤（C07）。
-  const approvalExists = nodes.some((node) => node.type === 'approval')
-  const metaApprovalNode = (node: WorkflowDoc['nodes'][number]) => node.type === 'agent'
-    && /^(?:配置|设置|添加|新增|安排|设立)(?:一个|一道)?(?:独立的?)?(?:人工)?审批节点?$/u.test(node.title)
-  if (approvalExists) {
-    const metaIds = new Set(nodes.filter(metaApprovalNode).map((node) => node.node_id))
-    for (const id of metaIds) {
-      const incoming = edges.filter((edge) => edge.to === id).map((edge) => edge.from)
-      const outgoing = edges.filter((edge) => edge.from === id).map((edge) => edge.to)
-      for (const from of incoming) for (const to of outgoing) if (from !== to && !edges.some((edge) => edge.from === from && edge.to === to)) edges.push({ from, to })
-    }
-    if (metaIds.size > 0) {
-      for (let index = nodes.length - 1; index >= 0; index -= 1) if (metaIds.has(nodes[index]!.node_id)) nodes.splice(index, 1)
-      for (let index = edges.length - 1; index >= 0; index -= 1) {
-        const edge = edges[index]!
-        if (metaIds.has(edge.from) || metaIds.has(edge.to)) edges.splice(index, 1)
-      }
-    }
-  }
   const doc: WorkflowDoc = { name: source.name, nodes, edges }
   const saved = validateSaveLayer(doc, { expectedName: source.name })
   if (saved.report.errors.length > 0) {
@@ -694,14 +698,32 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     automatic_workflow: options?.workflowGenerator ? options.workflowStreamProgress ? 'streaming' : 'fixed' : 'unavailable',
     standalone_workflow: 'unavailable',
   }, options?.timeoutMs).snapshot) {
+  withTx(db,tx=>tx.run("UPDATE chat_planning_progress SET stage='failed' WHERE stage='planning'"))
   const explicitTimeout = options?.timeoutMs
   if (explicitTimeout !== undefined && (!Number.isSafeInteger(explicitTimeout) || explicitTimeout < 1000 || explicitTimeout > 120_000)) {
     throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑规划时限必须在 1 到 120 秒之间')
   }
+  const viewOf = (row: PlanRow, tx: ReadTx, timestamp = Date.now()): TaskPlanView => {
+    const view = toPlanView(row)
+    view.material_states = (view.brief.materials ?? []).map(material => {
+      const stored = tx.get<{ revoked: number; expires_ms: number }>(
+        'SELECT revoked,expires_ms FROM plan_materials WHERE id=?', [material.id])
+      return { id: material.id, expires_ms: stored?.expires_ms ?? material.expires_ms,
+        state: !stored || stored.revoked ? 'revoked' : stored.expires_ms <= timestamp ? 'expired' : 'active' }
+    })
+    try {
+      const definition = catalog.get(view.proposal.workflow_id, view.proposal.workflow_version)
+      view.material_recipients = definition.nodes.filter(node => node.type === 'agent').map(node => node.node_id)
+    } catch (error) {
+      if (!(error instanceof OrchError) || error.code !== 'NOT_FOUND' || view.quality.ready) throw error
+      view.material_recipients = []
+    }
+    return view
+  }
   const get = (planId: string, actor: string) => withReadTx(db, ({ tx, as_of_seq }) => {
     const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE p.plan_id = ? AND p.created_by = ?', [planId, actor])
     if (!row) throw new OrchError('NOT_FOUND', '没有对应的任务计划')
-    return { row, view: toPlanView(row), as_of_seq }
+    return { row, view: viewOf(row, tx), as_of_seq }
   })
   /** 主脑提案：完整提案，或者显式的「没有可用候选」信号 */
   const askPlanner = async (brief: PlanInput, workflows: WorkflowCandidate[], budget: PlanningTimeoutSnapshot, caller: AbortSignal): Promise<PlannerOutcome> => {
@@ -733,7 +755,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
    * 没有可复用的合适流程时：生成任务专属流程（task_local），再基于它产出一份完整计划。
    * 预留任务 + 建流程 + 发布 + 落计划在同一笔事务里：失败不留孤儿流程，也不留悬空预留任务。
    */
-  const proposeAuto = async (brief: PlanInput, actor: string, now: string, budget: PlanningTimeoutSnapshot, caller: AbortSignal, origin?: ChatTaskOrigin): Promise<ReturnType<typeof get>> => {
+  const proposeAuto = async (brief: PlanInput, actor: string, now: string, budget: PlanningTimeoutSnapshot, caller: AbortSignal, origin?: ChatTaskOrigin, revision?: DraftRevision): Promise<ReturnType<typeof get>> => {
     const generator = options?.workflowGenerator
     if (!generator) {
       throw new OrchError('VERDICT_UNSUPPORTED', '主脑判定没有可用流程，但服务端没有装配流程生成能力')
@@ -781,7 +803,9 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
         + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now, reserved.task_id, workflowId])
+      finishDraftRevision(tx, revision, id, actor, now)
       bindChatPlan(tx, origin, id)
+      if (origin) bindPlanningProgress(tx, origin.requestKey, id, proposal.title, Date.parse(now))
       appendEvent(tx, {
         type: 'task_plan.proposed',
         payload: { plan_id: id, content_hash: hash, quality_ready: quality.ready, auto_workflow_id: workflowId },
@@ -798,6 +822,19 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       origin?.assertCurrent()
       const existing = origin && findChatPlan(db, origin)
       if (existing) return get(existing, actor)
+      const revision = input.revises ? { reference: input.revises,
+        requestHash: requestHashOf('task_plan.revise', input) } : undefined
+      if (revision) {
+        const end = withReadTx(db, ({ tx }) => {
+          const ending = readDraftEnding(tx, revision.reference, actor)
+          if (!ending) assertDraftActive(tx, revision.reference, actor)
+          return ending
+        })
+        if (end) {
+          if (end.successor_id && end.request_hash === revision.requestHash) return get(end.successor_id, actor)
+          throw new OrchError('CONFIRMATION_MISMATCH', '这份计划已调整或放弃，请读取当前计划')
+        }
+      }
       if (!options?.propose) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
       const budget = readTimeouts()
       return withPlanningBudget(budget.request, callerSignal, async (caller) => {
@@ -836,13 +873,13 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         // 候选池里一个都没有：走自动生成；没有生成能力就还是让调用方先去发布流程
         if (choices.length === 0) {
           if (!options.workflowGenerator) throw new OrchError('WORKFLOW_NOT_PUBLISHED', '请先发布至少一个可复用流程')
-          return proposeAuto(brief, actor, now, budget, caller, origin)
+          return proposeAuto(brief, actor, now, budget, caller, origin, revision)
         }
         const outcome = await askPlanner(brief, choices.map((item) => item.workflow), budget, caller)
         // 主脑判定候选池里没有一个适合这次任务：走同一条自动生成路径
         if (outcome.kind === 'no_candidate') {
           if (brief.workflow_id) throw new OrchError('VERDICT_POLICY_UNMET', '所选固定流程不适用于本次目标，请调整目标或另选流程')
-          return proposeAuto(brief, actor, now, budget, caller, origin)
+          return proposeAuto(brief, actor, now, budget, caller, origin, revision)
         }
         const proposal = outcome.proposal
         const selected = choices.find(({ workflow }) => workflow.workflowId === proposal.workflow_id && workflow.version === proposal.workflow_version)
@@ -855,7 +892,9 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
           tx.run('INSERT INTO task_plans (plan_id, created_by, input_json, proposal_json, quality_json, workflow_hash, content_hash, launch_operation_id, created_at, owner_task_id, auto_workflow_id)'
             + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)',
             [id, actor, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash, hash, uuidv7(), now])
+          finishDraftRevision(tx, revision, id, actor, now)
           bindChatPlan(tx, origin, id)
+          if (origin) bindPlanningProgress(tx, origin.requestKey, id, proposal.title, Date.parse(now))
           appendEvent(tx, { type: 'task_plan.proposed', payload: { plan_id: id, content_hash: hash, quality_ready: quality.ready } })
         })
         return get(id, actor)
@@ -871,6 +910,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         throw new OrchError('CONFIRMATION_MISMATCH', '待确认计划的内容已发生变化')
       }
       if (view.launch) return { ...view.launch, replayed: true }
+      withReadTx(db, ({ tx }) => assertDraftActive(tx, { plan_id: planId, content_hash: contentHash }, actor))
       if (!quality.ready) throw new OrchError('VERDICT_POLICY_UNMET', '计划质量检查存在阻断项')
       const check = withReadTx(db, ({ tx }) => {
         const meta = tx.get<{ scope: string; status: string; owner_task_id: string | null }>(
@@ -897,7 +937,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         const definition = catalog.get(proposal.workflow_id, proposal.workflow_version)
         const needsApproval = definition.nodes.some((node) => node.side_effect_policy === 'irreversible'
           || node.side_effect_policy === 'compensable' || (node.type !== 'agent' && node.type !== 'wait'))
-        if (needsApproval && !chat.nativeApproval) throw new OrchError('CONFIRMATION_REQUIRED', '此工作流需要在当前会话中批准后才能启动')
+        if ((needsApproval || Boolean(brief.materials?.length)) && !chat.nativeApproval) throw new OrchError('CONFIRMATION_REQUIRED', '此工作流需要在当前会话中批准后才能启动')
       }
       // 自动生成的是任务专属流程：只走服务端可信编排路径。
       // 任务号取自服务端落库的计划行，不来自请求体，客户端伪造不了。
@@ -906,36 +946,123 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         if (!ownerTaskId) {
           throw new OrchError('FORBIDDEN', '任务专属流程缺少归属任务', { workflow_id: proposal.workflow_id })
         }
-        const started = withTx(db, (tx) => startTrustedTaskLocalRun(tx, catalog, {
-          taskId: ownerTaskId, workflowId: proposal.workflow_id, workflowVersion: proposal.workflow_version,
-          taskTitle: proposal.title, autonomy: 'supervised', triggerKind: 'manual', operationId: row.launch_operation_id,
-          allowReplay: true, now,
-        }))
+        const started = withTx(db, (tx) => {
+          const prior = tx.get<{ task_id: string; run_id: string }>(
+            'SELECT task_id,run_id FROM start_run_operations WHERE operation_id=?', [row.launch_operation_id])
+          if (prior) return { ...prior, replayed: true }
+          assertDraftActive(tx, { plan_id: planId, content_hash: contentHash }, actor)
+          const result = startTrustedTaskLocalRun(tx, catalog, {
+            taskId: ownerTaskId, workflowId: proposal.workflow_id, workflowVersion: proposal.workflow_version,
+            taskTitle: proposal.title, autonomy: 'supervised', triggerKind: 'manual', operationId: row.launch_operation_id,
+            allowReplay: true, now,
+          })
+          for (const material of brief.materials ?? []) bindMaterials(tx, materialGrant(actor, material.draft),
+            [material], result.run_id, Date.parse(now))
+          return result
+        })
         return { task_id: started.task_id, run_id: started.run_id, replayed: started.replayed }
       }
       // The persisted operation ID is only visible here. The start receipt back-links the approved plan in the same commit as the new run.
-      const started = startRun(db, catalog, { taskTitle: proposal.title, workflowId: proposal.workflow_id,
-        workflowVersion: proposal.workflow_version, autonomy: 'supervised', triggerKind: 'manual', operationId: row.launch_operation_id, now })
+      const params = { taskTitle: proposal.title, workflowId: proposal.workflow_id,
+        workflowVersion: proposal.workflow_version, autonomy: 'supervised' as const, triggerKind: 'manual' as const,
+        operationId: row.launch_operation_id, now }
+      catalog.requireWorkflowCapability(proposal.workflow_id)
+      const started = withTx(db, tx => {
+        const prior = tx.get<{ task_id: string; run_id: string }>(
+          'SELECT task_id,run_id FROM start_run_operations WHERE operation_id=?', [row.launch_operation_id])
+        if (prior) return { ...prior, replayed: true }
+        assertDraftActive(tx, { plan_id: planId, content_hash: contentHash }, actor)
+        const result = createRunInTx(tx, catalog, params)
+        for (const material of brief.materials ?? []) bindMaterials(tx, materialGrant(actor, material.draft),
+          [material], result.run_id, Date.parse(now))
+        return { ...result, replayed: false }
+      })
       return { task_id: started.task_id, run_id: started.run_id, replayed: started.replayed }
   }
   return {
     enabled: options !== undefined,
     get requestTimeoutMs() { return readTimeouts().request },
     get,
-    /** 未启动的计划草稿：只有原创建者能看到，用来取回、调整或放弃（P01）。 */
-    listDrafts(actor: string, taskId?: string) {
-      return withReadTx(db, ({ tx, as_of_seq }) => {
-        const rows = tx.all<PlanRow>(PLAN_SELECT + ` WHERE p.created_by = ?
-          AND (? IS NULL OR p.owner_task_id = ?)
-          AND NOT EXISTS (SELECT 1 FROM start_run_operations o2 WHERE o2.operation_id = p.launch_operation_id)
-          ORDER BY p.created_at DESC LIMIT 20`, [actor, taskId ?? null, taskId ?? null])
-        return { items: rows.map(toPlanView), as_of_seq }
+    progress(actor: string, since = Date.now() - 24*60*60_000) {
+      return withReadTx(db, ({ tx, as_of_seq }) => ({ items: readPlanningProgress(tx, actor, since), as_of_seq }))
+    },
+    grantMaterials(input: z.infer<typeof materialGrantSchema>, actor: string, now: string) {
+      return withTx(db, tx => runIdempotentCommand(tx, { kind: 'plan.materials', operationId: input.operation_id,
+        requestHash: requestHashOf('plan.materials', { ...input, actor }), now }, () => {
+        const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE p.plan_id=? AND p.created_by=?', [input.plan_id,actor])
+        if (!row) throw new OrchError('NOT_FOUND','没有对应的任务计划')
+        const view = toPlanView(row)
+        if (view.content_hash !== input.content_hash || view.launch
+          || tx.get('SELECT 1 FROM task_plan_draft_end WHERE plan_id=?',[input.plan_id]))
+          throw new OrchError('CONFIRMATION_MISMATCH','计划已变化，请重新取回后授权')
+        const def = catalog.get(view.proposal.workflow_id,view.proposal.workflow_version)
+        const nodes = [...new Set(input.nodes)].sort()
+        if (nodes.some(id => !view.proposal.steps.some(step => step.node_id===id)
+          || !def.nodes.some(node => node.node_id===id && node.type==='agent')))
+          throw new OrchError('FORBIDDEN','只能授权本计划中的实际执行步骤')
+        if (new Set(input.items.map(item => item.name)).size !== input.items.length)
+          throw new OrchError('PAYLOAD_SCHEMA_INVALID','同一次授权的材料名称不能重复')
+        const pins = saveMaterials(tx, materialGrant(actor,input.plan_id), input.items, Date.parse(now))
+        const currentMaterials = (view.brief.materials ?? []).filter(material => !input.items.some(item => item.name===material.name) && tx.get(
+          'SELECT 1 FROM plan_materials WHERE id=? AND revoked=0 AND expires_ms>?',[material.id,Date.parse(now)]))
+        const materials = [...currentMaterials, ...pins.map((pin,index) => ({ ...pin,
+          name: input.items[index]!.name, nodes, expires_ms: Date.parse(now)+30*60_000, draft: input.plan_id }))]
+        if (materials.length > 8) throw new OrchError('RANGE_TOO_LARGE','本计划最多授权 8 份材料')
+        const brief: PlanInput = { ...view.brief, materials }
+        const contentHash = planHash({ brief, proposal:view.proposal, quality:view.quality },row.workflow_hash)
+        const id=uuidv7()
+        tx.run(`INSERT INTO task_plans (plan_id,created_by,input_json,proposal_json,quality_json,workflow_hash,
+          content_hash,launch_operation_id,created_at,owner_task_id,auto_workflow_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          [id,actor,JSON.stringify(brief),row.proposal_json,row.quality_json,row.workflow_hash,contentHash,
+            uuidv7(),now,row.owner_task_id,row.auto_workflow_id])
+        tx.run('INSERT INTO task_plan_draft_end(plan_id,successor_id,request_hash,ended_at) VALUES (?,?,?,?)',
+          [input.plan_id,id,requestHashOf('plan.materials',{...input,actor}),now])
+        tx.run('UPDATE chat_task_receipts SET plan_id=? WHERE plan_id=?',[id,input.plan_id])
+        tx.run('UPDATE chat_planning_progress SET plan_id=?,title=?,updated_ms=? WHERE plan_id=?',[id,view.proposal.title,Date.parse(now),input.plan_id])
+        appendEvent(tx,{ type:'task_plan.proposed',payload:{ plan_id:id,content_hash:contentHash,materials_count:materials.length } })
+        const updated = tx.get<PlanRow>(PLAN_SELECT + ' WHERE p.plan_id=?', [id])!
+        return viewOf(updated, tx, Date.parse(now))
+      }).result)
+    },
+    revokeMaterial(input: z.infer<typeof materialRevokeSchema>, actor: string) {
+      return withTx(db, tx => {
+        const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE p.plan_id=? AND p.created_by=?',[input.plan_id,actor])
+        if (!row || row.content_hash!==input.content_hash) throw new OrchError('CONFIRMATION_MISMATCH','计划版本已变化')
+        const material = toPlanView(row).brief.materials?.find(item=>item.id===input.material_id)
+        if (!material) throw new OrchError('NOT_FOUND','这份计划没有对应材料')
+        return { revoked: revokeMaterial(tx,materialGrant(actor,material.draft),material.id) > 0 }
       })
+    },
+    /** 未启动的计划草稿：只有原创建者能看到，用来取回、调整或放弃（P01）。 */
+    listDrafts(actor: string, taskId?: string, options: { cursor?: string; limit?: number } = {}) {
+      const limit = Math.min(Math.max(options.limit ?? 20, 1), 100)
+      const filter = { actor, taskId: taskId ?? null, limit }
+      const cursor = options.cursor ? decodeCursor(options.cursor, 'plan-drafts', filter) : undefined
+      return withReadTx(db, ({ tx, as_of_seq }) => {
+        const where = ["p.created_by=?", "NOT EXISTS (SELECT 1 FROM task_plan_draft_end e WHERE e.plan_id=p.plan_id)",
+          "NOT EXISTS (SELECT 1 FROM start_run_operations o2 WHERE o2.operation_id=p.launch_operation_id)"]
+        const params: unknown[] = [actor]
+        if (taskId) { where.push('p.owner_task_id=?'); params.push(taskId) }
+        if (cursor) {
+          where.push('(p.created_at < ? OR (p.created_at = ? AND p.plan_id < ?))')
+          params.push(cursor.last_key, cursor.last_key, cursor.last_id)
+        }
+        const rows = tx.all<PlanRow>(PLAN_SELECT + ' WHERE ' + where.join(' AND ')
+          + ' ORDER BY p.created_at DESC, p.plan_id DESC LIMIT ?', [...params, limit + 1])
+        const items = rows.slice(0, limit)
+        const last = items.at(-1)
+        return { items: items.map(row => viewOf(row, tx)), as_of_seq,
+          next_cursor: rows.length > limit && last ? encodeCursor(makeCursor('plan-drafts', filter,
+            last.created_at, last.plan_id, as_of_seq)) : null }
+      })
+    },
+    discard(reference: { plan_id: string; content_hash: string }, actor: string, now: string) {
+      return discardDraft(db, reference, actor, now)
     },
     getForTask(taskId: string, actor: string) {
       return withReadTx(db, ({ tx, as_of_seq }) => {
         const row = tx.get<PlanRow>(PLAN_SELECT + ' WHERE o.task_id = ? AND p.created_by = ?', [taskId, actor])
-        return { item: row ? toPlanView(row) : null, as_of_seq }
+        return { item: row ? viewOf(row, tx) : null, as_of_seq }
       })
     },
     propose: (input: TaskPlanInput, actor: string, now: string, signal?: AbortSignal) => propose(input, actor, now, signal),
@@ -1011,6 +1138,8 @@ export function resolveApprovedPlanNodeSpecs(
         step: step.description,
         deliverables: proposal.deliverables.flatMap((item, index) => item.node_id === step.node_id
           ? [{ ...item, ...(item.acceptance.kind === 'chat/text_result' && { deliverable_index: index }) }] : []),
+        materials: (brief.materials ?? []).filter(material => material.nodes.includes(step.node_id))
+          .map(({ id, digest, name, expires_ms }) => ({ id, digest, name, expires_ms })),
         risks: proposal.risks.filter((item) => item.node_id === step.node_id || item.node_id === undefined),
       },
     }]))

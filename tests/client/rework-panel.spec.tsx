@@ -7,7 +7,8 @@ import { createReworkApi, type ReworkItem } from '../../src/client/api/rework.ts
 import { createResourcesApi } from '../../src/client/api/resources.ts'
 import type { ArtifactContentView, RunArtifact } from '../../src/client/api/types.ts'
 import { ReworkPanel, LineComparison } from '../../src/client/panel/rework-panel.tsx'
-import { deferred, renderPanel, nodeRunView, type PanelView } from './harness.ts'
+import { PanelApp } from '../../src/client/panel/app.tsx'
+import { deferred, renderPanel, nodeRunView, runSummary, taskSummary, type PanelView } from './harness.ts'
 
 const oldHash = 'a'.repeat(64), newHash = 'b'.repeat(64)
 const request = { request_id: 'rw1', run_id: 'r1', requester_actor: 'human', target_node_run_id: 'old', target_attempt: 1, source_artifact_id: 'v1', source_artifact_hash: oldHash, reason: '缺少时间字段', expected_result: '补充真实采集时间', suggested_scope: 'targeted_revision', status: 'awaiting_review', revision: 3, round_no: 1, max_rounds: 3, new_node_run_id: 'new', updated_at: '2026-11-19' } as ReworkItem
@@ -71,7 +72,7 @@ function versionsFixture({ before = source, a = revisionA, b = revisionB, form =
     switch (path) {
       case '/v1/rework/get': data = { item: history }; break
       case '/v1/artifacts': data = { items: versions.map(v => v.metadata), has_more: false }; break
-      case '/v1/rework/holds': data = { items: [{ run_id: 'r1', node_id: 'n1', node_run_id: 'old', status: 'held' }] }; break
+      case '/v1/rework/holds': data = { items: [{ run_id: 'r1', node_id: 'n1', node_run_id: 'old', status: 'held',hold_id:'held-version',revision:1 }] }; break
       case '/v1/artifacts/content': {
         reads.push(query)
         const selected = versions.find(v => v.metadata.artifact_id === query?.artifact_id && v.metadata.run_id === query?.run_id)
@@ -130,8 +131,12 @@ describe('成果审核与返工', () => {
         selected: select.value,
         text: form.querySelector('pre')?.textContent,
       }
+      expect(button(form, '通过成果验收').disabled).toBe(true)
       await view.click(button(form, '通过成果验收'))
-      const [criteria, reason, expected] = form.querySelectorAll('textarea')
+      expect(fixture.posts).toHaveLength(0)
+      await view.click(button(form, '预览内容'))
+      await view.click(button(form, '通过成果验收'))
+      const [criteria, , reason, expected] = form.querySelectorAll('textarea')
       await fill(criteria!, '核对 B 的内容')
       await view.click(button(form, '请主脑检查成果'))
       await fill(reason!, '记录对 B 的意见')
@@ -147,7 +152,6 @@ describe('成果审核与返工', () => {
       expect(observed.label).toContain('report.txt · 登记记录 3')
       expect(observed.label).not.toContain(b.metadata.sha256.slice(0, 12))
       expect(form.querySelector('details:not([open])')?.textContent).toContain(b.metadata.sha256)
-      await view.click(button(form, '预览内容'))
       expect(form.querySelector('pre')?.textContent).toBe('内容 B')
       await view.click(button(form, '下载产物'))
       expect(save.mock.instances[0]).toMatchObject({ download: 'report.txt', href: 'blob:report' })
@@ -215,6 +219,8 @@ describe('成果审核与返工', () => {
         const select = details.querySelector('select')!
         expect(select.options[0]?.textContent).not.toBe(select.options[1]?.textContent)
         await fill(view.findAll('textarea')[0]!, '审核本轮 B')
+        expect(button(view.container, '通过验收').disabled).toBe(true)
+        await view.click(button(details.querySelectorAll('section[aria-label="report.txt的内容"]')[1]!, '预览内容'))
         await view.click(button(view.container, '通过验收'))
         expect(fixture.posts[0]).toMatchObject({ path: '/v1/rework/review', body: {
           request_id: 'rw1', expected_revision: 3, action: 'accept', artifact_id: 'B', artifact_hash: revisionB.metadata.sha256,
@@ -297,22 +303,22 @@ describe('成果审核与返工', () => {
     } finally { view.unmount() }
   })
 
-  it('separates quality acceptance and pins the revised artifact and CAS revision', async () => {
-    const { client, posts } = clientFor()
-    const view = await renderPanel(<ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)} />)
-    await view.flush()
-    expect(view.text()).toContain('第 1 / 3 轮')
-    expect(view.text()).toContain('允许补齐数据')
-    expect(view.text()).toContain('核验工具授权已变化')
-    expect(view.text()).toContain('v1')
-    expect(view.text()).toContain('v2')
-    expect(view.text()).not.toContain('拒绝执行')
-    await fill(view.findAll('textarea')[0]!, '修订数据符合要求')
-    await view.click(view.findAll('button').find(b => b.textContent === '通过验收')!)
-    expect(posts[0]?.path).toBe('/v1/rework/review')
-    expect(posts[0]?.body).toMatchObject({ request_id: 'rw1', expected_revision: 3, action: 'accept', artifact_id: 'v2', artifact_hash: newHash, note: '修订数据符合要求' })
-    expect(posts[0]?.body).not.toHaveProperty('actor')
-    view.unmount()
+  it('requires reading the exact revised version before quality acceptance', async () => {
+    const fixture = versionsFixture({locked:true})
+    const view = await renderPanel(fixture.panel)
+    try {
+      await fill(view.findAll('textarea')[0]!, '修订数据符合要求')
+      const acceptButton=button(view.container,'通过验收')
+      expect(acceptButton.disabled).toBe(true)
+      await view.click(acceptButton)
+      expect(fixture.posts).toHaveLength(0)
+      const details=openDetails(view,'修改前后成果与版本')
+      await view.click(button(details.querySelectorAll('section[aria-label="report.txt的内容"]')[1]!, '预览内容'))
+      expect(acceptButton.disabled).toBe(false)
+      await view.click(acceptButton)
+      expect(fixture.posts[0]?.body).toMatchObject({request_id:'rw1',expected_revision:3,action:'accept',artifact_id:'A',artifact_hash:revisionA.metadata.sha256})
+      expect(fixture.posts[0]?.body).not.toHaveProperty('actor')
+    } finally {view.unmount()}
   })
   it('does not offer authorization of an unreviewed topology proposal', async () => {
     const { client } = clientFor({ ...request, status: 'needs_human_approval', suggested_scope: 'replan_subgraph' })
@@ -376,9 +382,9 @@ describe('成果审核与返工', () => {
     await fill(view.findAll('select')[0]!, 'old')
     await fill(view.findAll('select')[1]!, 'v1')
     const fields = view.findAll('textarea')
-    await fill(fields[1]!, '第三章缺少数据')
-    await fill(fields[2]!, '补充真实测试数据')
-    await fill(fields[3]!, '保留其余章节')
+    await fill(fields[2]!, '第三章缺少数据')
+    await fill(fields[3]!, '补充真实测试数据')
+    await fill(fields[4]!, '保留其余章节')
     await view.click(view.findAll('button').filter(b => b.textContent === '要求修改').at(-1)!)
     expect(posts[0]?.body).toMatchObject({ run_id: 'r1', target_node_run_id: 'old', expected_revision: 7, source_artifact_id: 'v1', source_artifact_hash: oldHash, reason: '第三章缺少数据', expected_result: '补充真实测试数据', preserve_requirements: ['保留其余章节'], suggested_scope: 'targeted_revision' })
     view.unmount()
@@ -420,16 +426,117 @@ describe('成果审核与返工', () => {
   })
 })
 
-  it('closes the ordinary authorize entry when the step has more than one source artifact', async () => {
-    const { client, posts } = clientFor({ ...request, status: 'needs_human_approval', source_artifact_count: 2 })
-    const view = await renderPanel(<ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)} runId="r1" />)
+it('requires a concrete file list, then authorizes every original and approved attachment', async () => {
+  const item={...request,status:'needs_human_approval',source_artifact_count:2}
+  const {client,posts}=clientFor(item)
+  const originalGet=client.get
+  const files=[{...artifacts[0]!,file_name:'report.md'},{...artifacts[0]!,artifact_id:'appendix',file_name:'data.csv'}]
+  client.get=async<T,>(path:string,query?:Record<string,string|number|undefined>)=>path==='/v1/artifacts'
+    ?{data:{items:files,next_cursor:null} as T,as_of_seq:9}:originalGet<T>(path,query)
+  const view=await renderPanel(<ReworkPanel api={createResourcesApi(client)} commands={createReworkApi(client)}/>)
+  try {
+    await fill(view.findAll('textarea')[0]!, '按已确认的文件方案修改')
+    expect(view.text()).toContain('本轮文件处理方案')
+    await fill(view.findAll('textarea')[1]!, 'audit.md')
+    await fill(view.findAll('select')[0]!, 'remove')
+    const authorize=button(view.container,'授权返工')
+    expect(authorize.disabled).toBe(false)
+    await view.click(authorize)
+    expect(posts[0]?.body).toMatchObject({action:'authorize',file_manifest:{originals:[
+      {artifact_id:'appendix',action:'remove'},{artifact_id:'v1',action:'revise'},
+    ],attachments:['audit.md']}})
+  }finally {view.unmount()}
+})
+
+
+it('主按钮定位A后逐份验收：已验A不自动替换，剩余B可明确选择、阅读并完成本轮', async () => {
+  const a = { ...revisionA, metadata: { ...revisionA.metadata, file_name: '报告.txt' } }
+  const b = { ...revisionB, metadata: { ...revisionB.metadata, file_name: '附件.txt' } }
+  const versions = [source, a, b]
+  const sealed = [a, b].map(({metadata}) => ({artifact_id:metadata.artifact_id,sha256:metadata.sha256,file_name:metadata.file_name!}))
+  const accepted: typeof sealed = []
+  const reads: string[] = []
+  const posted: Record<string, unknown>[] = []
+  const readyB = deferred<ArtifactContentView>()
+  let item: ReworkItem = { ...request, source_artifact_id:source.metadata.artifact_id, source_artifact_hash:source.metadata.sha256 }
+  const nextAction = {kind:'review' as const,label:'打开「报告.txt」验收',run_id:'r1',node_run_id:'new',
+    artifact_id:'A',sha256:a.metadata.sha256,file_name:'报告.txt',request_id:'rw1'}
+  const task = taskSummary({lane:'attention',next_action:nextAction,delivery_review_count:1})
+  const client: ApiClient = {
+    async get<T>(path: string, query?: Record<string, string | number | undefined>) {
+      let data: unknown
+      switch(path) {
+        case '/v1/tasks': data={items:[task],next_cursor:null}; break
+        case '/v1/tasks/get': data=task; break
+        case '/v1/runs': data={items:[runSummary()]}; break
+        case '/v1/runs/get': data=runSummary(); break
+        case '/v1/node-runs': data={items:[nodeRunView({node_run_id:'new',node_id:'report',node_type:'agent',status:'done'})],next_cursor:null}; break
+        case '/v1/artifacts': data={items:versions.map(file=>file.metadata),next_cursor:null}; break
+        case '/v1/rework': data={items:[item]}; break
+        case '/v1/rework/holds': data={items:[]}; break
+        case '/v1/rework/get': data={item:{request:item,reviews:[],attempts:[{attempt_id:'round-1',round_no:1,
+          new_node_run_id:'new',result_artifact_id:'A',result_artifact_hash:a.metadata.sha256,
+          result_manifest_json:JSON.stringify(sealed),accepted_files_json:JSON.stringify(accepted)}]}}; break
+        case '/v1/artifacts/content': {
+          const selected=versions.find(file=>file.metadata.artifact_id===query?.artifact_id)!
+          reads.push(selected.metadata.artifact_id)
+          data=selected===b ? await readyB.promise : content(selected,query?.mode)
+          break
+        }
+        default: throw new ApiError('NOT_FOUND','fixture',false)
+      }
+      return {data:data as T,as_of_seq:item.revision}
+    },
+    async post<T>(path: string,payload: unknown) {
+      if(path!=='/v1/rework/review') throw new Error(path)
+      const body=payload as Record<string,unknown>
+      expect(body).toMatchObject({action:'accept',request_id:'rw1',expected_revision:item.revision})
+      const file=sealed.find(file=>file.artifact_id===body.artifact_id && file.sha256===body.artifact_hash)!
+      expect(file).toBeDefined()
+      expect(accepted.some(done=>done.artifact_id===file.artifact_id)).toBe(false)
+      posted.push(body)
+      accepted.push(file)
+      item={...item,revision:item.revision+1,status:accepted.length===sealed.length?'closed':'awaiting_review'}
+      return {data:{request_id:item.request_id,status:item.status} as T,as_of_seq:item.revision}
+    },
+  }
+  const view=await renderPanel(<PanelApp client={client} serviceConnected reworkEnabled/>)
+  const card=()=>view.container.querySelector<HTMLElement>('article[aria-label="第 1 轮返工"]')!
+  try {
     await view.flush()
-    const reason = view.findAll('textarea')[0]!
-    await fill(reason, '按新要求修改')
-    expect(view.text()).toContain('这一步登记了 2 份成果')
-    const button = view.findAll('button').find(b => b.textContent === '授权返工')!
-    expect((button as HTMLButtonElement).disabled).toBe(true)
-    await view.click(button)
-    expect(posts.some(post => post.path === '/v1/rework/review')).toBe(false)
-    view.unmount()
-  })
+    await view.click(button(view.container,nextAction.label))
+    await view.flush()
+    expect(card().textContent).toContain('内容 A')
+    expect(reads).toEqual(['A'])
+    await fill(card().querySelector('textarea')!,'已核对报告A')
+    await view.click(button(card(),'通过验收'))
+    await view.flush()
+    expect(posted).toHaveLength(1)
+    expect(posted[0]).toMatchObject({artifact_id:'A',artifact_hash:a.metadata.sha256})
+    expect(item.status).toBe('awaiting_review')
+    expect(card().textContent).toContain('本轮已核对 1 / 2 份')
+    const next=card().querySelector<HTMLSelectElement>('select')!
+    expect(next).not.toBeNull()
+    expect(next.value).toBe('')
+    expect(next.selectedOptions[0]?.textContent).toBe('选择下一份待核对文件')
+    expect(Array.from(next.options).map(option=>option.value)).toEqual(['','B'])
+    expect(reads).toEqual(['A'])
+    expect(button(card(),'通过验收').disabled).toBe(true)
+    await fill(card().querySelector('textarea')!,'已核对附件B')
+    await fill(next,'B')
+    await view.flush()
+    expect(reads).toEqual(['A','B'])
+    expect(button(card(),'通过验收').disabled).toBe(true)
+    await view.click(button(card(),'通过验收'))
+    expect(posted).toHaveLength(1)
+    await act(async()=>{readyB.resolve(content(b))})
+    await view.flush()
+    expect(card().textContent).toContain('内容 B')
+    expect(button(card(),'通过验收').disabled).toBe(false)
+    await view.click(button(card(),'通过验收'))
+    await view.flush()
+    expect(posted.map(body=>[body.artifact_id,body.artifact_hash])).toEqual([['A',a.metadata.sha256],['B',b.metadata.sha256]])
+    expect(item.status).toBe('closed')
+    expect(card().textContent).toContain('本轮已核对 2 / 2 份')
+  } finally {view.unmount()}
+})

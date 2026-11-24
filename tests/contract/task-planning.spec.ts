@@ -14,7 +14,17 @@ import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { createTaskCommands } from '../../src/client/api/task-commands.ts'
 import { createTaskPlanningHost } from '../../src/service/task-planning.ts'
 import { WorkflowCatalog } from '../../src/service/workflows.ts'
+import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
+import { discardDraft } from '../../src/service/task-plan-drafts.ts'
+import { expireMaterials } from '../../src/service/plan-materials.ts'
 import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
+import { callDshRework } from '../../src/service/dsh-rework.ts'
+import { createReworkHost } from '../../src/service/rework-coordinator.ts'
+import { sha256Hex } from '../../src/core/canonical.ts'
+import { loadNodeRun } from '../../src/service/commands/lease.ts'
+import { verifyArtifactCompletion } from '../../src/service/artifact-completion.ts'
+import { createDeliveryReviewHost } from '../../src/service/delivery-review.ts'
+import { registerRunArtifact } from '../../src/service/artifact-store.ts'
 
 const closers: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -296,6 +306,102 @@ it('同一节点超过 8 份文件时要求拆分到多个步骤', async () => {
   const plan = await planCommands.proposeTaskPlan('核对项目交付', ['保留系统证据'])
   expect(plan.quality.ready).toBe(false)
   expect(plan.quality.checks.find((check) => check.check === 'deliverables')?.issues.join('\n')).toMatch(/同一节点最多交付 8 份/u)
+})
+
+it('规划允许的八份文件和一段正文可以全部实际发布，普通文件第九份仍被拒绝',async()=>{
+  const {planCommands,db}=await boot(async()=>{
+    const candidate=valid()
+    candidate.deliverables=[...Array.from({length:8},(_,i)=>({title:'文件'+i,node_id:'verify',goal_ids:['goal','R1'],
+      acceptance:{kind:'artifact' as const,file_name:'file-'+i+'.md',minimum_bytes:1}})),
+    {title:'会话总结',node_id:'verify',goal_ids:['goal','R1'],acceptance:{kind:'chat/text_result'}}]
+    return candidate
+  })
+  const plan=await planCommands.proposeTaskPlan('核对项目交付',['保留系统证据'])
+  expect(plan.quality.ready).toBe(true)
+  const {run_id}=await planCommands.confirmTaskPlan(plan.plan_id,plan.content_hash)
+  const node=db.raw.prepare("SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_id='verify'").get(run_id) as {node_run_id:string;attempt:number;action_generation:number}
+  const at=new Date().toISOString()
+  withTx(db,tx=>tx.run("UPDATE node_runs SET status='started',lease_id='count-test',lease_expires_at=? WHERE node_run_id=?",[new Date(Date.now()+60_000).toISOString(),node.node_run_id]))
+  const host=createReworkHost(db,'planning-contract-secret')
+  for(let i=0;i<8;i++)callDshRework(db,host,node,{action:'publish',operation_id:uuidv7(),file_name:'file-'+i+'.md',text:'complete file'},at)
+  expect(()=>callDshRework(db,host,node,{action:'publish_text_result',operation_id:uuidv7(),deliverable_index:8,text:'全部文件已核对'},at)).not.toThrow()
+  expect(db.raw.prepare('SELECT COUNT(*) AS n FROM artifact_contents WHERE node_run_id=?').get(node.node_run_id)).toMatchObject({n:9})
+  expect(()=>callDshRework(db,host,node,{action:'publish',operation_id:uuidv7(),file_name:'file-9.md',text:'over limit'},at)).toThrow(/八份文本文件/)
+})
+
+it('普通文件不能与本步骤生成的会话正文使用同一文件名',async()=>{
+  const {planCommands}=await boot(async()=>{
+    const candidate=valid()
+    candidate.deliverables=[{title:'文件',node_id:'verify',goal_ids:['goal','R1'],acceptance:{kind:'artifact',file_name:'会话正文-2.md',minimum_bytes:1}},
+      {title:'总结',node_id:'verify',goal_ids:['goal','R1'],acceptance:{kind:'chat/text_result'}}]
+    return candidate
+  })
+  const plan=await planCommands.proposeTaskPlan('核对项目交付',['保留系统证据'])
+  expect(plan.quality.ready).toBe(false)
+  expect(plan.quality.checks.find(check=>check.check==='deliverables')?.issues.join('\n')).toMatch(/会话正文.*另取名称/)
+})
+
+it('多文件返工复制保留的文件和会话正文，并为新尝试生成可验证的纯成果完成证据',async()=>{
+  const {planCommands,db}=await boot(async()=>{
+    const candidate=valid()
+    candidate.steps[1]!.tools=[]
+    candidate.deliverables=[
+      {title:'报告',node_id:'verify',goal_ids:['goal','R1'],acceptance:{kind:'artifact',file_name:'report.md',minimum_bytes:1}},
+      {title:'原始数据',node_id:'verify',goal_ids:['goal','R1'],acceptance:{kind:'artifact',file_name:'data.csv',minimum_bytes:1}},
+      {title:'会话总结',node_id:'verify',goal_ids:['goal','R1'],acceptance:{kind:'chat/text_result'}},
+    ]
+    return candidate
+  })
+  const plan=await planCommands.proposeTaskPlan('核对项目交付',['保留系统证据'])
+  expect(plan.quality.ready).toBe(true)
+  const {run_id}=await planCommands.confirmTaskPlan(plan.plan_id,plan.content_hash)
+  const nodeId=String(db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id='verify'").get(run_id)!.node_run_id)
+  const secret='planning-contract-secret',at=new Date().toISOString()
+  const host=createReworkHost(db,secret)
+  const start=(id:string)=>withTx(db,tx=>{
+    tx.run("UPDATE node_runs SET status='started',side_effect_policy='pure',lease_id='manifest-test',lease_expires_at=? WHERE node_run_id=?",[new Date(Date.now()+60_000).toISOString(),id])
+    const row=loadNodeRun(tx,id)
+    return {node_run_id:id,attempt:row.attempt,action_generation:row.action_generation}
+  })
+  const old=start(nodeId)
+  for(const file_name of ['report.md','data.csv'])callDshRework(db,host,old,{action:'publish',operation_id:uuidv7(),file_name,text:'original bytes'},at,secret)
+  callDshRework(db,host,old,{action:'publish_text_result',operation_id:uuidv7(),deliverable_index:2,text:'保留的会话正文'},at,secret)
+  withTx(db,tx=>tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?",[nodeId]))
+  const originals=db.raw.prepare('SELECT a.artifact_id,a.sha256,c.file_name FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE c.node_run_id=? ORDER BY c.file_name').all(nodeId) as Array<{artifact_id:string;sha256:string;file_name:string}>
+  const source=originals.find(file=>file.file_name==='report.md')!
+  const owner='service:'+sha256Hex(secret).slice(0,8)
+  const request=host.request({operation_id:uuidv7(),run_id,target_node_run_id:nodeId,expected_revision:withTx(db,tx=>loadNodeRun(tx,nodeId)).revision,
+    source_artifact_id:source.artifact_id,source_artifact_hash:source.sha256,reason:'更正报告',expected_result:'数据与正文原样保留',
+    file_manifest:{originals:originals.map(file=>({...file,action:file.file_name==='report.md'?'revise':'keep'})),attachments:[]}},owner,at)
+  expect(request.status).toBe('scheduled')
+  const current=start(request.new_node_run_id!)
+  callDshRework(db,host,current,{action:'publish',operation_id:uuidv7(),file_name:'report.md',text:'revised bytes'},at,secret)
+  const proof=withTx(db,tx=>verifyArtifactCompletion(tx,secret,{...loadNodeRun(tx,current.node_run_id),status:'verifying'},at))
+  expect(proof?.proof.artifacts.map(file=>file.file_name)).toEqual(['report.md','data.csv','会话正文-3.md'])
+  const copied=db.raw.prepare("SELECT a.artifact_id,a.sha256,a.evidence_index FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE c.node_run_id=? AND c.file_name='会话正文-3.md'").get(current.node_run_id)!
+  expect(copied.sha256).toBe(sha256Hex('保留的会话正文'))
+  expect(JSON.parse(String(copied.evidence_index))).toMatchObject({kind:'orchestra.chat-text.v1',node_run_id:current.node_run_id,attempt:current.attempt})
+  expect(copied.artifact_id).not.toBe(originals.find(file=>file.file_name==='会话正文-3.md')!.artifact_id)
+})
+
+it('人工验收不能借同名新版满足的字节门槛去通过不合格旧稿，也不能借旧版通过不合格新版',async()=>{
+  const {planCommands,db}=await boot(async()=>valid())
+  const plan=await planCommands.proposeTaskPlan('核对项目交付',['保留系统证据'])
+  const {run_id}=await planCommands.confirmTaskPlan(plan.plan_id,plan.content_hash)
+  const node_run_id=String(db.raw.prepare("SELECT node_run_id FROM node_runs WHERE run_id=? AND node_id='verify'").get(run_id)!.node_run_id)
+  const at=new Date().toISOString(), later=new Date(Date.now()+1).toISOString(),last=new Date(Date.now()+2).toISOString()
+  withTx(db,tx=>tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?",[node_run_id]))
+  const old=registerRunArtifact(db,{artifactId:'short-old',runId:run_id,nodeRunId:node_run_id,fileName:'交付.md',bytes:Buffer.from('x')},at)
+  const latest=registerRunArtifact(db,{artifactId:'qualified-new',runId:run_id,nodeRunId:node_run_id,fileName:'交付.md',bytes:Buffer.from('x'.repeat(160))},later)
+  const owner='service:'+sha256Hex('planning-contract-secret').slice(0,8),host=createDeliveryReviewHost(db,'planning-contract-secret')
+  const held=host.change({operation_id:uuidv7(),run_id,node_run_id,action:'hold'},owner,at)
+  const selected=(artifact:typeof old)=>({operation_id:uuidv7(),run_id,node_run_id,action:'accept' as const,artifact_id:artifact.artifact_id,sha256:artifact.sha256,hold_id:held.hold_id,expected_revision:held.revision})
+  expect(()=>host.change(selected(old),owner,later)).toThrow(/应审清单/)
+  const accepted=host.change(selected(latest),owner,later)
+  expect(accepted.status).toBe('accepted')
+  registerRunArtifact(db,{artifactId:'short-newest',runId:run_id,nodeRunId:node_run_id,fileName:'交付.md',bytes:Buffer.from('x')},last)
+  const again=host.change({operation_id:uuidv7(),run_id,node_run_id,action:'hold',hold_id:accepted.hold_id,expected_revision:accepted.revision},owner,last)
+  expect(()=>host.change({...selected(latest),hold_id:again.hold_id,expected_revision:again.revision},owner,last)).toThrow(/成果不齐/)
 })
 
 it('人工确认之前重新校验工具；已撤销工具能力的计划不能创建运行', async () => {
@@ -611,4 +717,169 @@ it('subworkflow can plan read-only child tools without delegating them to its pa
   expect(p.quality.ready).toBe(choice.length === 0)
   if (choice.length) expect(errors.join(' ')).toContain('控制步骤')
  }
+})
+
+
+it('生成的合法工作步骤不会因展示标题含配置审批节点而丢失', async () => {
+  let offered: string[] = []
+  const generated = {
+    name: '配置核对',
+    nodes: [
+      { node_id: 'start', type: 'trigger', title: '开始' },
+      { node_id: 'configure', type: 'agent', title: '配置审批节点',
+        config: { tools: { allow: ['ro.check'] } },
+        contract: { description: '核对现有系统审批配置并交付核对报告' } },
+      { node_id: 'approve', type: 'approval', title: '人工确认配置',
+        config: { prompt: '请核对配置报告', on_timeout: 'fail' } },
+      { node_id: 'finish', type: 'agent', title: '交付结论' },
+    ],
+    edges: [{ from: 'start', to: 'configure' }, { from: 'configure', to: 'approve' },
+      { from: 'approve', to: 'finish' }],
+  }
+  const host = await boot(async (input) => {
+    const workflow = input.workflows[0]!
+    offered = workflow.nodes.map(node => node.id)
+    return {
+      title: '配置复核', workflow_id: workflow.workflowId, workflow_version: workflow.version,
+      steps: workflow.nodes.map(node => ({ node_id: node.id, description: node.title ?? '检查配置',
+        goal_ids: ['goal'], depends_on: node.dependsOn, tools: node.toolAllow,
+        complexity: 'routine', model_reason: '核对已有配置' })),
+      deliverables: [{ title: '核对结论', node_id: 'finish', goal_ids: ['goal'],
+        acceptance: { kind: 'artifact', file_name: 'check.md', minimum_bytes: 1 } }],
+      risks: [],
+    }
+  }, undefined, { empty: true, workflowGenerator: async () => generated })
+  await host.planCommands.proposeTaskPlan('核对现有配置并交付结论', [])
+  expect(offered).toEqual(['configure', 'approve', 'finish'])
+  const doc = JSON.parse(String(host.db.raw.prepare('SELECT doc_json FROM workflow_versions').get()?.doc_json))
+  expect(doc.nodes.find((node: { node_id: string }) => node.node_id === 'configure')).toMatchObject({ title: '配置审批节点' })
+  expect(doc.edges).toContainEqual({ from: 'configure', to: 'approve' })
+})
+
+
+it('草稿按双键分页且操作者隔离，新草稿不会把旧草稿挤出后页', async () => {
+  const host = await boot(async () => valid())
+  const oldIds: string[] = []
+  for (let i = 0; i < 23; i++) {
+    const { view } = await host.planning!.propose({ goal: '核对-' + i, requirements: ['保留证据'] }, 'alice', now)
+    oldIds.push(view.plan_id)
+  }
+  await host.planning!.propose({ goal: '其他人的草稿', requirements: ['保留证据'] }, 'bob', now)
+  const first = host.planning!.listDrafts('alice')
+  expect(first.items).toHaveLength(20)
+  expect(first.next_cursor).toBeTruthy()
+  await host.planning!.propose({ goal: '分页中新建', requirements: ['保留证据'] }, 'alice', now)
+  const next = host.planning!.listDrafts('alice', undefined, { cursor: first.next_cursor! })
+  expect(next.items).toHaveLength(3)
+  expect([...first.items, ...next.items].map(p => p.plan_id).sort()).toEqual(oldIds.sort())
+  expect(() => host.planning!.listDrafts('bob', undefined, { cursor: first.next_cursor! })).toThrow('过滤条件变了')
+})
+
+it('调整草稿原子替换、同请求重试取得后继，旧草稿不能启动或撤销', async () => {
+  const planner = vi.fn(async () => valid())
+  const host = await boot(planner)
+  const first = await host.planCommands.proposeTaskPlan('核对项目', ['保留证据'])
+  const reference = { plan_id: first.plan_id, content_hash: first.content_hash }
+  const second = await host.planCommands.proposeTaskPlan('调整目标', ['保留证据'], undefined, undefined, reference)
+  const replay = await host.planCommands.proposeTaskPlan('调整目标', ['保留证据'], undefined, undefined, reference)
+  expect(replay.plan_id).toBe(second.plan_id)
+  expect(planner).toHaveBeenCalledTimes(2)
+  expect((await host.api.listPlanDrafts()).data.items.map(p => p.plan_id)).toEqual([second.plan_id])
+  await expect(host.planCommands.confirmTaskPlan(first.plan_id, first.content_hash)).rejects.toMatchObject({ code: 'CONFIRMATION_MISMATCH' })
+  await expect(host.planCommands.discardTaskPlan(first.plan_id, first.content_hash)).rejects.toMatchObject({ code: 'CONFIRMATION_MISMATCH' })
+  await expect(host.planCommands.discardTaskPlan(second.plan_id, second.content_hash)).resolves.toMatchObject({ discarded: true, replayed: false })
+  await expect(host.planCommands.discardTaskPlan(second.plan_id, second.content_hash)).resolves.toMatchObject({ discarded: true, replayed: true })
+  expect((await host.api.listPlanDrafts()).data.items).toEqual([])
+  await expect(host.planCommands.confirmTaskPlan(second.plan_id, second.content_hash)).rejects.toMatchObject({ code: 'CONFIRMATION_MISMATCH' })
+})
+
+it('已启动计划不能放弃；失败的重新规划保留原草稿', async () => {
+  let fail = false
+  const host = await boot(async () => { if (fail) throw new Error('fixture unavailable'); return valid() })
+  const original = await host.planCommands.proposeTaskPlan('核对项目', ['保留证据'])
+  fail = true
+  await expect(host.planCommands.proposeTaskPlan('调整目标', ['保留证据'], undefined, undefined,
+    { plan_id: original.plan_id, content_hash: original.content_hash })).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+  expect((await host.api.listPlanDrafts()).data.items.map(p => p.plan_id)).toEqual([original.plan_id])
+  await host.planCommands.confirmTaskPlan(original.plan_id, original.content_hash)
+  await expect(host.planCommands.discardTaskPlan(original.plan_id, original.content_hash)).rejects.toMatchObject({ code: 'CONFIRMATION_MISMATCH' })
+})
+
+it('面板调整原生会话草稿仍保留回报归属，放弃后规划状态不再显示待确认', async () => {
+  const host = await boot(async () => valid())
+  const origin = { messageKey: 'message', requestKey: 'request', inputHash: 'original-input',
+    signal: new AbortController().signal, assertCurrent: () => {} }
+  const original = (await host.planning!.proposeFromChat({ goal: '原会话任务', requirements: ['核验'] }, 'alice', now, origin)).view
+  host.db.raw.prepare(`INSERT INTO chat_planning_progress(request_key,actor,scope,input_hash,stage,plan_id,updated_ms)
+    VALUES ('request','alice','workspace-session','original-input','declined',?,?)`).run(original.plan_id, Date.parse(now))
+  const next = (await host.planning!.propose({ goal: '补充目标', requirements: ['核验'],
+    revises: { plan_id: original.plan_id, content_hash: original.content_hash } }, 'alice', now)).view
+  expect(host.db.raw.prepare('SELECT plan_id FROM chat_task_receipts WHERE request_key=?').get('request')).toMatchObject({ plan_id: next.plan_id })
+  expect(host.db.raw.prepare('SELECT plan_id,stage FROM chat_planning_progress WHERE request_key=?').get('request'))
+    .toMatchObject({ plan_id: next.plan_id, stage: 'approval' })
+  const started = host.planning!.confirm({ plan_id: next.plan_id, content_hash: next.content_hash, confirmed: true }, 'alice', now)
+  expect(host.db.raw.prepare(`SELECT o.run_id FROM chat_task_receipts c JOIN task_plans p USING(plan_id)
+    JOIN start_run_operations o ON o.operation_id=p.launch_operation_id WHERE c.request_key='request'`).get())
+    .toMatchObject({ run_id: started.run_id })
+  const another = (await host.planning!.propose({ goal: '另一个目标', requirements: ['核验'] }, 'alice', now)).view
+  host.db.raw.prepare(`INSERT INTO chat_planning_progress(request_key,actor,scope,input_hash,stage,plan_id,updated_ms)
+    VALUES ('another','alice','workspace-session','another-input','approval',?,?)`).run(another.plan_id, Date.parse(now))
+  host.planning!.discard({ plan_id: another.plan_id, content_hash: another.content_hash }, 'alice', now)
+  expect(host.db.raw.prepare("SELECT stage FROM chat_planning_progress WHERE request_key='another'").get()).toMatchObject({ stage: 'cancelled' })
+})
+
+it('material revision rebinds the native receipt, rejects stale starts and renews expired grants without orphan runs', async () => {
+  const { planning, db } = await boot(async () => valid())
+  const stamp = new Date().toISOString()
+  const origin = { messageKey: 'material-native-message', requestKey: 'material-native-request', inputHash: 'a'.repeat(64),
+    signal: new AbortController().signal, assertCurrent() {} }
+  const original = (await planning.proposeFromChat({ goal: '核对交付', requirements: ['工具验证'] }, 'owner', stamp, origin)).view
+  const input = { operation_id: uuidv7(), plan_id: original.plan_id, content_hash: original.content_hash,
+    nodes: ['collect'], items: [{ name: '清单.csv', body: '文件,状态\n报告,已交付' }] }
+  const revised = planning.grantMaterials(input, 'owner', stamp)
+  expect(planning.grantMaterials(input, 'owner', stamp).plan_id).toBe(revised.plan_id)
+  expect(() => planning.grantMaterials({ ...input, operation_id: uuidv7() }, 'owner', stamp))
+    .toThrow(/计划已变化/u)
+  const replay = (await planning.proposeFromChat({ goal: '核对交付', requirements: ['工具验证'] }, 'owner', stamp, origin)).view
+  expect(replay.plan_id).toBe(revised.plan_id)
+  expect(planning.listDrafts('owner').items[0]?.material_recipients).toEqual(['collect', 'verify'])
+  expect(() => planning.launchFromChat(original.plan_id, original.content_hash, 'owner', stamp, origin, true)).toThrow()
+  const expiredAt = Date.parse(stamp) + 30 * 60_000 + 1
+  const later = new Date(expiredAt).toISOString()
+  expect(() => planning.confirm({ plan_id: revised.plan_id, content_hash: revised.content_hash, confirmed: true }, 'owner', later))
+    .toThrow(/材料或授权发生变化/u)
+  expect(db.raw.prepare('SELECT count(*) n FROM runs').get()?.n).toBe(0)
+  expect(db.raw.prepare('SELECT count(*) n FROM start_run_operations').get()?.n).toBe(0)
+  expect(withTx(db, tx => expireMaterials(tx, expiredAt))).toBe(1)
+  const renewed = planning.grantMaterials({ ...input, operation_id: uuidv7(), plan_id: revised.plan_id,
+    content_hash: revised.content_hash }, 'owner', later)
+  expect(renewed.brief.materials).toHaveLength(1)
+  expect(renewed.brief.materials![0]!.id).not.toBe(revised.brief.materials![0]!.id)
+  const launched = planning.launchFromChat(renewed.plan_id, renewed.content_hash, 'owner', later, origin, true)
+  expect(planning.launchFromChat(renewed.plan_id, renewed.content_hash, 'owner', later, origin, true).run_id).toBe(launched.run_id)
+  expect(db.raw.prepare('SELECT count(*) n FROM runs').get()?.n).toBe(1)
+  expect(JSON.stringify(db.raw.prepare('SELECT receipt_json FROM inbox').all())).not.toContain('报告,已交付')
+})
+
+
+it('另一连接在确认读取后废弃草稿，启动写事务返回版本冲突且不留下运行', async () => {
+  const host = await boot(async () => valid())
+  const plan = (await host.planning!.propose({ goal: '并发核对', requirements: ['核验'] }, 'alice', now)).view
+  const second = openDb(host.db.file)
+  const execute = host.db.raw.exec.bind(host.db.raw)
+  let beforeWrite = true
+  const boundary = vi.spyOn(host.db.raw, 'exec').mockImplementation(sql => {
+    if (beforeWrite && sql === 'BEGIN IMMEDIATE') {
+      beforeWrite = false
+      discardDraft(second, { plan_id: plan.plan_id, content_hash: plan.content_hash }, 'alice', now)
+    }
+    return execute(sql)
+  })
+  try {
+    expect(() => host.planning!.confirm({ plan_id: plan.plan_id, content_hash: plan.content_hash, confirmed: true }, 'alice', now))
+      .toThrowError(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
+    expect(beforeWrite).toBe(false)
+    expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()?.n).toBe(0)
+    expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM start_run_operations').get()?.n).toBe(0)
+  } finally { boundary.mockRestore(); second.raw.close() }
 })

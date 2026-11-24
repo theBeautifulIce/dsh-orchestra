@@ -16,7 +16,9 @@ export function DshDeliveryReviewCard({ scope, sources }: { scope: DshDeliveryRe
   const api = useMemo(() => createResourcesApi(client), [client])
   const commands = useMemo(() => createReworkApi(client), [client])
   return <section aria-label="待审成果">
-    {scope.reviews.map((review) => <Review key={(review.artifact?.artifact_id ?? review.nodeRunId) + ':' + (review.revised?.revision ?? review.nodeRevision)}
+    {scope.reviews.map((review) => <Review key={JSON.stringify([scope.workspaceId,scope.sessionId,
+      review.artifact?.artifact_id ?? review.nodeRunId,review.artifact?.sha256,
+      review.hold?.hold_id,review.hold?.expected_revision,review.revised?.revision ?? review.nodeRevision])}
       review={review} api={api} commands={commands} />)}
   </section>
 }
@@ -59,14 +61,11 @@ function Review({ review, api, commands }: {
           return
         }
       } else {
-        const { data } = await commands.listHolds(artifact.run_id)
-        const hold = data.items.find((item) => item.status === 'held' && item.node_run_id === review.nodeRunId)
-        if (!hold) {
-          setNotice('这条待办已处理或成果版本已更新。请刷新任务结果。')
+        if (!review.hold) {
+          setError('这条待办缺少本轮留验身份，请重新打开任务结果。')
           return
         }
-        // 把读到的留验身份带回去：另一个页签已经换代时，这次结论必须失败（D04）。
-        const seen = hold.hold_id ? { hold_id: hold.hold_id, expected_revision: hold.revision } : {}
+        const seen = review.hold
         if (action === 'accept') await commands.hold({ run_id: artifact.run_id, node_run_id: review.nodeRunId, action: 'accept',
           ...seen, artifact_id: artifact.artifact_id, sha256: artifact.sha256 })
         else {
@@ -148,10 +147,11 @@ function PendingDelivery({ review, commands }: {
     if (busy) return
     setBusy(true); setError('')
     try {
-      await commands.hold({ run_id: review.runId, node_run_id: review.nodeRunId, action: 'withdraw' })
+      if (!review.hold) throw new Error('这条待办缺少本轮留验身份，请重新打开任务结果。')
+      await commands.hold({ run_id: review.runId, node_run_id: review.nodeRunId, action: 'withdraw', ...review.hold })
       setNotice('已撤销这次留验，运行会继续收尾。')
     } catch (cause) {
-      setError(cause instanceof ApiError ? operatorReason(cause.message) : '撤销未完成，请稍后重试')
+      setError(cause instanceof Error ? operatorReason(cause.message) : '撤销未完成，请稍后重试')
     } finally { setBusy(false) }
   }
   return <article aria-label="待审成果">

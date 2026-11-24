@@ -25,7 +25,7 @@ import { WorkflowConcurrencySettings } from './workflow-concurrency-settings.tsx
 import { UnverifiedEffects } from './unverified-effects.tsx'
 import { WorkflowCanvas } from './workflow-canvas.tsx'
 import { WorkflowListScreen } from './workflow-list.tsx'
-import { TaskDetailScreen } from './task-detail-screen.tsx'
+import { TaskDetailScreen, type TaskDetailScreenProps } from './task-detail-screen.tsx'
 import { TaskListScreen } from './tasks-screen.tsx'
 import { TaskTriggerManager } from './task-trigger-manager.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
@@ -52,6 +52,7 @@ export type PanelAppProps = {
   reworkPlannerEnabled?: boolean
   initialRoute?: PanelRoute
   workflowLaunchRequiresPlan?: boolean
+  scopeLabel?: string
   runNotesEnabled?: boolean
   createEventStream?: (onInvalidate: (type: string) => void, onStatus: (status: StreamStatus) => void) => EventStream
   additionalScreens?: Partial<Record<Exclude<PanelRoute, 'tasks'>, ReactNode>>
@@ -84,6 +85,7 @@ export function PanelApp(props: PanelAppProps) {
   const [route, setRoute] = useState<PanelRoute>(props.initialRoute ?? 'tasks')
   const [taskId, setTaskId] = useState<string | null>(null)
   const [taskRunId, setTaskRunId] = useState<string>()
+  const [taskAction, setTaskAction] = useState<TaskDetailScreenProps['initialAction']>()
   const taskTrigger = useRef<HTMLElement | null>(null)
   const [workflowId, setWorkflowId] = useState<string | null>(null)
   const [decisionId, setDecisionId] = useState<string>()
@@ -210,12 +212,13 @@ export function PanelApp(props: PanelAppProps) {
   } else if (route === 'tasks') {
     screen = <div className="task-workspace">
       <TaskListScreen reworkEnabled={props.reworkEnabled} collaborationEnabled={props.collaborationEnabled}
-        workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan} api={api} commands={taskCommands} selectedTaskId={taskId}
+        workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan} scopeLabel={props.scopeLabel} api={api} commands={taskCommands} selectedTaskId={taskId}
         triggerManager={!writableTriggers ? undefined :
           <TaskTriggerManager api={api} commands={writableTriggers} onChanged={() => setReloadVersion((version) => version + 1)} />} onSelectTask={(id, trigger, runId, action) => {
         // 待批准事项直接进审批中心，其余动作带着精确目标打开任务详情（T01/T02）。
         if (action?.kind === 'decision' && action.decision_id) { openDecision(action.decision_id); return }
         taskTrigger.current = trigger
+        setTaskAction(action)
         setTaskRunId(runId)
         setTaskId(id)
       }} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
@@ -229,7 +232,7 @@ export function PanelApp(props: PanelAppProps) {
     screen = <ActivityScreen api={api} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'collaboration' && props.collaborationEnabled) {
     screen = <CollaborationScreen client={client} reloadVersion={reloadVersion} onSnapshot={onSnapshot}
-      onOpenRun={(task, run) => { setTaskId(task); setTaskRunId(run) }} />
+      onOpenRun={(task, run) => { setTaskAction(undefined); setTaskId(task); setTaskRunId(run) }} />
   } else if (route === 'memory') {
     screen = props.additionalScreens?.memory
       ?? <MemoryPanel api={api} recovery={memoryRecovery} memoryEnabled={props.memoryEnabled} proposalOnly={props.memoryProposalOnly}
@@ -276,7 +279,7 @@ export function PanelApp(props: PanelAppProps) {
     collaborationEnabled={props.collaborationEnabled}
     settingsSections={settingsSections}
   >{screen}
-    {taskId && <TaskDetailScreen rework={rework} modelEscalation={modelEscalation} reworkPlannerEnabled={props.reworkPlannerEnabled} key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} onBack={() => {
+    {taskId && <TaskDetailScreen rework={rework} modelEscalation={modelEscalation} reworkPlannerEnabled={props.reworkPlannerEnabled} key={taskId + ':' + (taskRunId ?? '')} api={api} taskId={taskId} initialRunId={taskRunId} initialAction={taskAction} onBack={() => {
       setTaskId(null)
       taskTrigger.current?.focus({ preventScroll: true })
     }} taskCommands={taskCommands} triggerCommands={writableTriggers} onArchiveChanged={() => setReloadVersion((version) => version + 1)}

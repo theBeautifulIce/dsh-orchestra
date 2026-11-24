@@ -139,6 +139,7 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
         if (current.status !== 'held') {
           throw new OrchError('STALE_GENERATION', '该留验已由其他页面提交，请刷新当前结论后再核对')
         }
+        if (!seen) throw new OrchError('CONFIRMATION_REQUIRED', '请刷新并携带本轮留验身份后提交')
         if (seen !== undefined) {
           if (current.hold_id !== seen.hold_id || current.revision !== seen.expected_revision) {
             throw new OrchError('STALE_GENERATION', '留验已更新，请刷新当前结论后再核对')
@@ -146,8 +147,7 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
         }
         if (body.action === 'withdraw') {
           // 撤销同样服从代次：另一个页面已经提交的结论不能被悄悄撤掉（D04）。
-          const withdrawn = submitHold(tx, holdKey, seen ?? { hold_id: current.hold_id ?? body.operation_id,
-            expected_revision: current.revision }, now, null)
+          const withdrawn = submitHold(tx, holdKey, seen, now, null)
           appendEvent(tx, { type: 'rework.hold_withdraw', runId: body.run_id, nodeRunId: body.node_run_id,
             payload: { ...body, actor, hold_id: withdrawn.hold_id, withdrawn_revision: current.revision } })
           closeRun(tx, secret, body.run_id, now)
@@ -166,21 +166,15 @@ export function createDeliveryReviewHost(db: Db, secret: string, humanOnly = fal
           throw new OrchError('CONFIRMATION_MISMATCH', '成果版本与当前已完成步骤不符')
         }
         // 本轮应审清单：已封存就按封存件核对；未封存则按当前已完成尝试与计划必交件封存一次（D03）。
-        // 同一文件名的多版只占一个应审位，用户确认的那一版就是这一位的版本。
+        // 同名旧版不能替换最新版本或已封存版本，更不能借新版的字节数通过必交条件。
         const sealed = reviewFilesForDoneAttempt(tx, body.run_id, body.node_run_id, node.node_id, now, current.review_set_json)
-        const confirmedName = tx.get<{ file_name: string }>(
-          'SELECT c.file_name FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE a.artifact_id=?',
-          [body.artifact_id])?.file_name
-        if (!confirmedName) throw new OrchError('CONFIRMATION_MISMATCH', '成果版本与当前已完成步骤不符')
-        const files = sealed.map((item) => item.file_name === confirmedName
-          ? { artifact_id: body.artifact_id, sha256: body.sha256, file_name: confirmedName } : item)
+        const files = sealed
         if (!files.some((item) => item.artifact_id === body.artifact_id && item.sha256 === body.sha256)) {
           throw new OrchError('CONFIRMATION_MISMATCH', '这份成果不在本次应审清单内，请刷新后核对当前版本')
         }
         const previous = readAccepted(current.accepted_json)
         const next = advanceReview(files, previous, { artifact_id: body.artifact_id, sha256: body.sha256 })
-        const submitted = submitHold(tx, holdKey, seen ?? { hold_id: current.hold_id ?? body.operation_id,
-          expected_revision: current.revision }, now, {
+        const submitted = submitHold(tx, holdKey, seen, now, {
           files,
           accepted: next.accepted,
           complete: next.complete,

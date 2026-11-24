@@ -51,6 +51,7 @@ export type TaskListScreenProps = {
   reworkEnabled?: boolean
   collaborationEnabled?: boolean
   workflowLaunchRequiresPlan?: boolean
+  scopeLabel?: string
 }
 
 /** 任务状态文案与色板：display_status 优先，未验证终态走独立文案。 */
@@ -127,7 +128,7 @@ class TaskBoardScroll extends Component<{ children: ReactNode }> {
   }
 }
 
-export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled, workflowLaunchRequiresPlan }: TaskListScreenProps) {
+export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersion = 0, onSnapshot, commands, triggerManager, reworkEnabled, collaborationEnabled, workflowLaunchRequiresPlan, scopeLabel = '当前连接' }: TaskListScreenProps) {
   const [search, setSearch] = useState('')
   const [view, setView] = useState(() => readDisplayPreferences().preferences.taskView)
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
@@ -221,9 +222,10 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
     <style>{TASK_WORKSPACE_CSS}{TASK_META_CSS}{NARROW_TASK_CSS}</style>
     <header className="task-page-header">
       <div>
-      <h1 id="tasks-title" style={titleStyle}>{filter.archived ? '归档箱' : '任务'}</h1>
+      <p className="task-scope" role="status">{scopeLabel}中的任务</p>
+        <h1 id="tasks-title" style={titleStyle}>{filter.archived ? '归档箱' : '任务'}</h1>
       <p style={mutedStyle}>{filter.archived ? '归档任务仍可查看运行记录、结果与证据，也可以取回。'
-        : '这里只显示当前会话的任务。展开看板看进度，打开任务查看结果和证据。'}</p>
+        : '展开任务可查看进度，打开成果可核对本次交付。'}</p>
       </div>
       {!filter.archived && <div className="task-page-actions">
         {commands && <button type="button" aria-expanded={startOpen} onClick={() => setStartOpen(!startOpen)} style={buttonStyle}>
@@ -293,7 +295,7 @@ export function TaskListScreen({ api, onSelectTask, selectedTaskId, reloadVersio
       : Object.values(filter).some(Boolean) ? '没有符合筛选条件的任务。'
         : COPY.emptyTasks}</div>}
     {!filter.archived && view === 'board' && !error && <TaskBoardScroll>{(!loading || items.length > 0) && <div className="task-board">
-      {TASK_LANES.map(({ id, label }) => <section key={id} className="task-column" data-task-column={id} aria-labelledby={`tasks-${id}`}>
+      {[...TASK_LANES].sort((a, b) => Number(b.id === 'attention') - Number(a.id === 'attention')).map(({ id, label }) => <section key={id} className="task-column" data-task-column={id} aria-labelledby={`tasks-${id}`}>
         <h2 id={`tasks-${id}`} className="task-column-title">{label}<span>{laneCounts[id] ?? grouped[id].length}</span></h2>
         {grouped[id].length === 0 && <p className="task-column-empty">{(laneCounts[id] ?? 0) > 0 ? '此页暂无，继续加载可看到' : '暂无任务'}</p>}
         {grouped[id].map((task) => <TaskCard key={task.task_id} task={task} selected={task.task_id === selectedTaskId} compact={Boolean(selectedTaskId)}
@@ -333,19 +335,19 @@ function TaskTable({ tasks, archived, selectedTaskId, onSelect }: { tasks: TaskS
   return <div className="task-table-scroll"><table className="task-table" aria-label={archived ? '归档任务' : '任务列表'}>
     <thead><tr><th scope="col">任务</th><th scope="col">下一步</th><th scope="col">状态</th><th scope="col">关注事项</th><th scope="col">运行</th><th scope="col">{archived ? '归档时间' : '更新时间'}</th></tr></thead>
     <tbody>{tasks.map((task) => <tr key={task.task_id} data-selected={selectedTaskId === task.task_id || undefined}>
-      <td><button className="task-link" type="button" onClick={(event) => onSelect(task.task_id, event.currentTarget)}>{task.title || '未命名任务'}</button>
+      <td data-label="任务"><button className="task-link" type="button" onClick={(event) => onSelect(task.task_id, event.currentTarget)}>{task.title || '未命名任务'}</button>
         <small>{taskOriginLabel(task)} · {taskAutonomyLabel(task)}</small></td>
-      <td>{task.next_action
+      <td data-label="下一步">{task.next_action
         ? <button type="button" className="task-link" data-task-primary-action={task.next_action.kind}
             onClick={(event) => onSelect(task.task_id, event.currentTarget, task.next_action?.run_id ?? undefined, task.next_action)}>{task.next_action.label}</button>
         : <span>{'—'}</span>}</td>
-      <td>{taskCardStatus(task).label ?? <UnknownState value={task.status} />}</td>
-      <td>{task.attention_reason ? operatorReason(task.attention_reason) : '—'}
+      <td data-label="状态">{taskCardStatus(task).label ?? <UnknownState value={task.status} />}</td>
+      <td data-label="当前情况">{task.attention_reason ? operatorReason(task.attention_reason) : '—'}
         {task.open_decision_count > 0 && <small>{task.open_decision_count} 项{COPY.awaitingDecision}</small>}
         <small><TaskWaitAndHeartbeat task={task} /></small>
         <small><TaskRisk level={task.max_side_effect_level} /></small>
-      </td><td>{task.run_count} 次</td>
-      <td>{archived && task.archived_at ? new Date(task.archived_at).toLocaleString() : formatDate(task.updated_at)}</td>
+      </td><td data-label="运行次数">{task.run_count} 次</td>
+      <td data-label={archived ? '归档时间' : '更新时间'}>{archived && task.archived_at ? new Date(task.archived_at).toLocaleString() : formatDate(task.updated_at)}</td>
     </tr>)}</tbody>
   </table></div>
 }

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { Tx } from '../infra/sqlite/driver.ts'
+import type { ReadTx } from './queries/read-tx.ts'
 import { OrchError } from '../core/errors.ts'
 import { readApprovedTaskPlanForRun } from './task-planning.ts'
 
@@ -9,7 +9,7 @@ const reviewFile = z.object({
 })
 export type ReviewFile = z.infer<typeof reviewFile>
 export function reviewFilesForDoneAttempt(
-  tx: Tx, runId: string, attemptId: string, nodeId: string, now: string,
+  tx: ReadTx, runId: string, attemptId: string, nodeId: string, now: string,
   sealedJson: string | null
 ): ReviewFile[] {
   if (sealedJson !== null) {
@@ -30,14 +30,15 @@ export function reviewFilesForDoneAttempt(
   const plan = readApprovedTaskPlanForRun(tx, runId)
   const mandatory = plan?.proposal.deliverables.flatMap(item =>
     item.node_id === nodeId && item.acceptance.kind === 'artifact' ? [item.acceptance] : []) ?? []
-  if (!rows.length || rows.some(file => file.expired) || mandatory.some(rule =>
-    !rows.some(file => file.file_name === rule.file_name && file.size >= rule.minimum_bytes))) {
+  const byName = new Map<string, typeof rows[number]>()
+  for (const row of rows) byName.set(row.file_name, row)
+  const selected = [...byName.values()]
+  if (!selected.length || selected.some(file => file.expired) || mandatory.some(rule =>
+    !selected.some(file => file.file_name === rule.file_name && file.size >= rule.minimum_bytes))) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '本轮成果不齐或已过期，可补交或撤销留验')
   }
   // 同一文件名的重复登记是同一份交付的新旧版本：一个名字只占一个应审位，取最新一版。
-  const byName = new Map<string, ReviewFile>()
-  for (const row of rows) byName.set(row.file_name, { artifact_id: row.artifact_id, sha256: row.sha256, file_name: row.file_name })
-  return [...byName.values()]
+  return selected.map(row => ({artifact_id:row.artifact_id,sha256:row.sha256,file_name:row.file_name}))
 }
 
 export function advanceReview(files: readonly ReviewFile[],

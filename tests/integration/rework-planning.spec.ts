@@ -101,10 +101,10 @@ it('holds a final delivery before close, rejects stale bytes and closes on expli
   try {
     const delivery = createDeliveryReviewHost(db, TEST_SECRET)
     const hold = { run_id: 'r1', node_run_id: 'nr1', action: 'hold' as const, operation_id: uuidv7() }
-    delivery.change(hold, operator, now)
+    const seen=delivery.change(hold, operator, now)
     withTx(db, tx => tx.run("UPDATE node_runs SET status='done' WHERE node_run_id='nr2'"))
     expect(withTx(db, tx => closeRun(tx, TEST_SECRET, 'r1', now))).toBeNull()
-    const accept = { ...hold, operation_id: uuidv7(), action: 'accept' as const, artifact_id: 'old', sha256: sha256Hex('draft') }
+    const accept = { ...hold, operation_id: uuidv7(), action: 'accept' as const, hold_id:seen.hold_id,expected_revision:seen.revision,artifact_id: 'old', sha256: sha256Hex('draft') }
     expect(() => delivery.change({ ...accept, sha256: '0'.repeat(64) }, operator, now)).toThrow()
     expect(() => delivery.change(accept, 'other', now)).toThrow()
     delivery.change(accept, operator, now)

@@ -8,6 +8,7 @@ import type { Tx } from '../infra/sqlite/driver.ts'
 import { appendNodeRunEvent, assertChainIntact } from '../infra/db/ledger.ts'
 import { applyTransition, createNodeRun } from './commands/nodes.ts'
 import { pinnedTopologyForRun } from './run-readiness.ts'
+import { readReworkFiles } from './rework-manifest.ts'
 
 export type RuntimeReworkRequest = {
   request_id: string; run_id: string; target_node_run_id: string
@@ -86,7 +87,14 @@ export function snapshotArtifactInputs(tx: Tx, consumerNodeRunId: string, upstre
   for (const id of ids) {
     const up = nodeOf(tx, id)
     if (up.run_id !== consumer.run_id || up.status !== 'done' || (reworkBlocksNode(tx, id) && !isCandidateReviewer(tx, consumerNodeRunId, id))) throw new OrchError('STALE_GENERATION', 'upstream result is not accepted and current')
-    inputs.push(...tx.all<ArtifactInput>('SELECT c.node_run_id AS upstream_node_run_id,a.artifact_id,a.sha256 AS artifact_hash,c.file_name FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE c.node_run_id = ? ORDER BY a.artifact_id', [id]))
+    const available=tx.all<ArtifactInput>('SELECT c.node_run_id AS upstream_node_run_id,a.artifact_id,a.sha256 AS artifact_hash,c.file_name FROM artifacts a JOIN artifact_contents c USING(artifact_id) WHERE c.node_run_id = ? ORDER BY a.artifact_id', [id])
+    const sealed=tx.get<{result_manifest_json:string|null}>('SELECT result_manifest_json FROM rework_attempts WHERE new_node_run_id=?',[id])
+    if (sealed?.result_manifest_json != null) {
+      const files=readReworkFiles(sealed.result_manifest_json)
+      const exact=available.filter(file=>files.some(ref=>ref.artifact_id===file.artifact_id && ref.sha256===file.artifact_hash && ref.file_name===file.file_name))
+      if (exact.length!==files.length || files.length===0) throw new OrchError('CONFIRMATION_MISMATCH','已封存的返工成果未能完整绑定给下游')
+      inputs.push(...exact)
+    } else inputs.push(...available)
   }
   if (new Set(inputs.map(i => i.upstream_node_run_id + ':' + i.file_name)).size !== inputs.length) throw new OrchError('STALE_GENERATION', 'ambiguous upstream artifact versions')
   tx.run('INSERT INTO input_snapshots VALUES (?,?,?)', [consumerNodeRunId, consumer.attempt, now])
@@ -141,7 +149,7 @@ export function authorizeReworkRuntime(tx: Tx, secret: string, req: RuntimeRewor
   if (n.run_id !== req.run_id || n.status !== 'done' || n.replacement_node_run_id) throw new OrchError('STALE_GENERATION', 'rework source must be the current completed attempt')
   assertSafe(tx, n)
   assertReworkReplacementAllowed(tx, n)
-  if ((req.approved_scope ?? req.suggested_scope ?? 'targeted_revision') === 'targeted_revision' && (tx.get<{n:number}>('SELECT COUNT(*) AS n FROM artifact_contents WHERE node_run_id=?',[n.node_run_id])?.n ?? 0) > 1) throw new OrchError('FORBIDDEN','multiple source artifacts require an explicit preservation protocol')
+  if (!tx.get('SELECT 1 FROM rework_requests WHERE request_id=? AND file_manifest_json IS NOT NULL',[req.request_id]) && (tx.get<{n:number}>('SELECT COUNT(DISTINCT file_name) AS n FROM artifact_contents WHERE node_run_id=?',[n.node_run_id])?.n ?? 0)>1) throw new OrchError('FORBIDDEN','多份原件需要逐份批准处理方式')
   const affected = descendants(tx, req, n)
   const proposedIds = new Set([n.node_run_id, ...affected.map(node => node.node_run_id)])
   for (const other of tx.all<RuntimeReworkRequest>(`SELECT * FROM rework_requests WHERE run_id=? AND request_id<>? AND status NOT IN ${resolved}`, [req.run_id, req.request_id])) {

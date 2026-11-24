@@ -126,7 +126,7 @@ describe('任务列表页', () => {
     const view = await renderPanel(<TaskListScreen api={api} onSelectTask={noop} />)
     await view.flush()
     expect(view.findAll('[data-task-column]').map((column) => [column.getAttribute('data-task-column'), column.querySelector('button')?.textContent])).toEqual([
-      ['upcoming', '下一项'], ['running', '正在跑'], ['attention', '仍待核实'], ['finished', '已交付'],
+      ['attention', '仍待核实'], ['upcoming', '下一项'], ['running', '正在跑'], ['finished', '已交付'],
     ])
     view.unmount()
   })

@@ -257,7 +257,7 @@ export function listNodes(db: Db, runId: string, limit = 100, isWaiting?: (nodeR
   cursorInput?: string, only?: 'attention'): { items: NodeRunView[]; as_of_seq: number; has_more: boolean; next_cursor: string | null } {
   if (!Number.isInteger(limit) || limit < 1) throw new OrchError('PAYLOAD_SCHEMA_INVALID', 'limit 要是正整数', { limit })
   if (limit > 200) throw new OrchError('RANGE_TOO_LARGE', '一次最多要 200 条', { limit })
-  const filter = { run_id: runId }
+  const filter = { run_id: runId, ...(only ? { only } : {}) }
   const now = Date.now()
   return withReadTx(db, (ctx) => {
     const { settling, nodes } = readRunNodeDisplay(ctx.tx, runId)

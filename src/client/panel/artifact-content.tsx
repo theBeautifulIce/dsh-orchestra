@@ -4,6 +4,8 @@ import type { ArtifactContentMode, ArtifactContentView, RunArtifact } from '../a
 import { COLOR, FONT_PX } from './tokens.ts'
 import { MarkdownReading } from './markdown-reading.tsx'
 
+type ReadableArtifact = Omit<RunArtifact, 'created_at'>
+
 type Preview = Extract<ArtifactContentView, { kind: 'preview' }>
 type Download = Extract<ArtifactContentView, { kind: 'download' }>
 
@@ -23,19 +25,20 @@ function saveArtifact(artifact: Download): void {
   }
 }
 
-export function artifactContentKey(artifact: RunArtifact): string {
+export function artifactContentKey(artifact: ReadableArtifact): string {
   return JSON.stringify([artifact.run_id, artifact.artifact_id, artifact.sha256, artifact.file_name, artifact.retain_until])
 }
 
-export function matchesArtifactContent(content: ArtifactContentView, artifact: RunArtifact): boolean {
+export function matchesArtifactContent(content: ArtifactContentView, artifact: ReadableArtifact): boolean {
   return content.sha256 === artifact.sha256 && content.file_name === artifact.file_name
 }
 
-type ArtifactContentProps = { api: ResourcesApi; artifact: RunArtifact
+type ArtifactContentProps = { api: ResourcesApi; artifact: ReadableArtifact
   /** 取得并核验了哪一版：审核入口据此决定能不能提交结论（D08）。 */
-  onAcquired?: (acquired: { key: string; mode: ArtifactContentMode }) => void }
+  onAcquired?: (acquired: { key: string; mode: ArtifactContentMode }) => void
+  autoPreview?: boolean }
 
-export function useArtifactRetention(artifact?: RunArtifact): 'available' | 'expired' | 'invalid' {
+export function useArtifactRetention(artifact?: ReadableArtifact): 'available' | 'expired' | 'invalid' {
   const [, refresh] = useState(0)
   const deadline = artifact?.retain_until == null ? Infinity : Date.parse(artifact.retain_until)
   const markedExpired = artifact?.expired === true
@@ -54,20 +57,20 @@ export function useArtifactRetention(artifact?: RunArtifact): 'available' | 'exp
   return Number.isNaN(deadline) ? 'invalid' : 'available'
 }
 
-export function ArtifactContent({ api, artifact, onAcquired }: ArtifactContentProps) {
+export function ArtifactContent({ api, artifact, onAcquired, autoPreview }: ArtifactContentProps) {
   const retention = useArtifactRetention(artifact)
   if (retention === 'expired') return <p style={noteStyle}>已超过保留期限。仍可查看登记记录。</p>
   if (retention === 'invalid') return <p style={noteStyle}>产物保留期限未通过校验。仍可查看登记记录。</p>
   if (!artifact.file_name) return <p style={noteStyle}>这份产物仅有登记记录，内容尚未入库。</p>
-  return <ArtifactContentReader key={artifactContentKey(artifact)} api={api} artifact={artifact} onAcquired={onAcquired} />
+  return <ArtifactContentReader key={artifactContentKey(artifact)} api={api} artifact={artifact} onAcquired={onAcquired} autoPreview={autoPreview} />
 }
 
 /** 只有登记过的 Markdown 才给阅读视图：其它文本仍按原文呈现（D11）。 */
-function isMarkdown(artifact: RunArtifact): boolean {
+function isMarkdown(artifact: ReadableArtifact): boolean {
   return /\.(?:md|markdown)$/iu.test(artifact.file_name ?? '')
 }
 
-function ArtifactContentReader({ api, artifact, onAcquired }: ArtifactContentProps) {
+function ArtifactContentReader({ api, artifact, onAcquired, autoPreview }: ArtifactContentProps) {
   const [pending, setPending] = useState<ArtifactContentMode | null>(null)
   const [preview, setPreview] = useState<Preview | null>(null)
   const [notice, setNotice] = useState('')
@@ -99,6 +102,8 @@ function ArtifactContentReader({ api, artifact, onAcquired }: ArtifactContentPro
       if (active.current) setPending(null)
     }
   }
+
+  useEffect(() => { if (autoPreview) void load('preview') }, [autoPreview])
 
   return <section aria-label={artifact.file_name + '的内容'} style={{ marginTop: 10 }}>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>

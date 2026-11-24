@@ -6,8 +6,16 @@ import type { TaskPlanView } from '../../service/task-planning.ts'
 export function createTaskCommands(client: ApiClient) {
   return {
     async proposeTaskPlan(goal: string, requirements: string[], signal?: AbortSignal,
-      pin?: { workflow_id?: string; workflow_version?: string }) {
-      return (await client.post<TaskPlanView>('/v1/task-plans', { goal, requirements, ...pin }, signal)).data
+      pin?: { workflow_id?: string; workflow_version?: string }, revises?: { plan_id: string; content_hash: string }) {
+      return (await client.post<TaskPlanView>('/v1/task-plans', { goal, requirements, ...pin, ...(revises ? { revises } : {}) }, signal)).data
+    },
+    async discardTaskPlan(planId: string, contentHash: string) {
+      return (await client.post<{ plan_id: string; discarded: true; replayed: boolean }>('/v1/task-plans/discard', {
+        plan_id: planId, content_hash: contentHash,
+      })).data
+    },
+    async grantPlanMaterials(plan_id:string,content_hash:string,nodes:string[],items:Array<{name:string;body:string}>,operation_id:string) {
+      return (await client.post<TaskPlanView>('/v1/task-plans/materials',{plan_id,content_hash,nodes,items,operation_id})).data
     },
     async confirmTaskPlan(planId: string, contentHash: string) {
       try {

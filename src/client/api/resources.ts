@@ -38,11 +38,14 @@ export function createResourcesApi(client: ApiClient) {
       client.get('/v1/tasks', compact(params)),
     getTask: (task_id: string): Promise<ApiResult<TaskSummary>> =>
       client.get('/v1/tasks/get', { task_id }),
+    getPlanningProgress: () => client.get<{items:import('../../service/chat-planning-progress.ts').PlanningProgress[]}>('/v1/task-plans/progress'),
+    revokePlanMaterial: (plan_id:string,content_hash:string,material_id:string) =>
+      client.post<{revoked:boolean}>('/v1/task-plans/materials/revoke',{plan_id,content_hash,material_id}),
     getTaskPlanCapability: (): Promise<ApiResult<{ enabled: boolean }>> => client.get('/v1/task-plans/capability'),
     getTaskPlan: (plan_id: string): Promise<ApiResult<TaskPlanView>> => client.get('/v1/task-plans/get', { plan_id }),
     getTaskPlanForTask: (task_id: string): Promise<ApiResult<TaskPlanView | null>> => client.get('/v1/task-plans/by-task', { task_id }),
-    listPlanDrafts: (task_id?: string): Promise<ApiResult<{ items: TaskPlanView[] }>> =>
-      client.get('/v1/task-plans/drafts', task_id ? { task_id } : {}),
+    listPlanDrafts: (task_id?: string, cursor?: string): Promise<ApiResult<{ items: TaskPlanView[]; next_cursor?: string | null }>> =>
+      client.get('/v1/task-plans/drafts', compact({ task_id, cursor })),
     listTaskTriggers: (params: { task_id?: string } = {}): Promise<ApiResult<{ items: TaskTriggerView[] }>> =>
       client.get('/v1/task-triggers', compact(params)),
     listRuns: (params: { task_id?: string; workflow_id?: string; limit?: number; cursor?: string } = {}): Promise<ApiResult<{ items: RunSummary[]; next_cursor?: string | null }>> =>

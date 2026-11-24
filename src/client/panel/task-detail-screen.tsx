@@ -10,7 +10,7 @@ import type { createTaskTriggerCommands } from '../api/task-trigger-commands.ts'
 import { newOperationId } from '../api/workflow-commands.ts'
 import type { TaskTriggerView } from '../../core/task-trigger.ts'
 import type { ResourcesApi } from '../api/resources.ts'
-import type { NodeRunView, RunSummary, TaskSummary } from '../api/types.ts'
+import type { NodeRunView, RunSummary, TaskSummary, TaskNextAction } from '../api/types.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
 import { PanelCommandButton, UnknownState } from './shell.tsx'
@@ -32,6 +32,8 @@ export type TaskDetailScreenProps = {
   api: ResourcesApi
   taskId: string
   initialRunId?: string
+  /** 卡片上的主动作一路带到实际办理位置，禁止仅打开步骤页。 */
+  initialAction?: TaskNextAction
   onBack: () => void
   reloadVersion?: number
   onSnapshot?: (asOfSeq: number) => void
@@ -53,19 +55,21 @@ type TaskTab = (typeof TASK_TABS)[number]
 type RunTab = (typeof RUN_TABS)[number]
 
 export function TaskDetailScreen({
-  api, taskId, initialRunId, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision, notesClient,
+  api, taskId, initialRunId, initialAction, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision, notesClient,
 }: TaskDetailScreenProps) {
+  const actionRunId = initialAction?.run_id ?? initialRunId
+  const actionIsReview = initialAction?.kind === 'review' || initialAction?.kind === 'rework'
   const [loaded, setLoaded] = useState<{ api: ResourcesApi; taskId: string; data: DetailData }>()
   const data = loaded?.api === api && loaded.taskId === taskId ? loaded.data : undefined
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [reload, setReload] = useState(0)
   const [taskTab, setTaskTab] = useState<TaskTab>('概览')
-  const [runTab, setRunTab] = useState<RunTab>('步骤')
-  const [reviewRunId, setReviewRunId] = useState<string>()
+  const [runTab, setRunTab] = useState<RunTab>(actionIsReview ? '结果' : '步骤')
+  const [reviewRunId, setReviewRunId] = useState<string | undefined>(actionIsReview ? actionRunId : undefined)
   const [runSelection, setRunSelection] = useState<{ api: ResourcesApi; taskId: string; run: RunSummary }>()
   const [runRead, setRunRead] = useState<RunRead>()
-  const [showRun, setShowRun] = useState(Boolean(initialRunId))
+  const [showRun, setShowRun] = useState(Boolean(actionRunId))
   const close = useRef<HTMLButtonElement>(null)
   const dialog = useRef<HTMLDialogElement>(null)
   const body = useRef<HTMLDivElement>(null)
@@ -79,10 +83,11 @@ export function TaskDetailScreen({
     return () => { if (element.open && typeof element.close === 'function') element.close() }
   }, [])
   useEffect(() => {
-    setShowRun(Boolean(initialRunId))
+    setShowRun(Boolean(actionRunId))
     setRunSelection(undefined)
-    setRunTab('步骤')
-  }, [initialRunId, taskId])
+    setRunTab(actionIsReview ? '结果' : '步骤')
+    setReviewRunId(actionIsReview ? actionRunId : undefined)
+  }, [actionRunId, actionIsReview, taskId])
 
   useEffect(() => {
     let current = true
@@ -104,7 +109,7 @@ export function TaskDetailScreen({
   const taskState = task ? taskCardStatus(task) : null
   const latest = data?.runs.find((item) => item.run_id === task?.current_run_id) ?? data?.runs[0]
   const selection = runSelection?.api === api && runSelection.taskId === taskId ? runSelection.run : undefined
-  const selectedRunId = selection?.run_id ?? initialRunId
+  const selectedRunId = selection?.run_id ?? actionRunId
   const detail = runRead?.api === api && runRead.taskId === taskId && runRead.runId === selectedRunId ? runRead : undefined
   const detailFailed = detail?.failed && detail.revision === reloadVersion && detail.retry === reload
   const summary = data?.runs.find((item) => item.run_id === selectedRunId) ?? selection
@@ -171,7 +176,8 @@ export function TaskDetailScreen({
           : <RunDetails key={run.run_id} run={run} task={task} api={api} tab={runTab === '便条' ? '步骤' : runTab} reworkEnabled={Boolean(rework)} modelEscalation={modelEscalation}
           reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={onOpenDecision}
           onOpenResult={() => { setReviewRunId(run.run_id); setRunTab('结果'); resetScroll() }} />}
-        {rework && reviewRunId === run.run_id && <div hidden={runTab !== '结果'}><ReworkPanel key={run.run_id} api={api} commands={rework} runId={run.run_id} runStatus={run.status} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot} /></div>}
+        {rework && reviewRunId === run.run_id && <div hidden={runTab !== '结果'}><ReworkPanel key={run.run_id} api={api} commands={rework} runId={run.run_id} runStatus={run.status} plannerEnabled={reworkPlannerEnabled} reloadVersion={reloadVersion} onSnapshot={onSnapshot}
+          initialTarget={actionIsReview && actionRunId === run.run_id ? initialAction : undefined} /></div>}
         {runTab === '结果' && run.status === 'succeeded' && run.run_id === task.current_run_id && taskCommands && onOpenMemory
           && <StartMemory key={run.run_id} runId={run.run_id} commands={taskCommands} onOpenMemory={onOpenMemory} />}
       </>}

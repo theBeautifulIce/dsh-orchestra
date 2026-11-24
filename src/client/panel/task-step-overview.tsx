@@ -228,7 +228,7 @@ export async function readStepWindow(api: ResourcesApi, runId: string,
   }
   // 还有没读到的步骤时，再补一次「真正需要人处理」的：它们可能排在第 200 条之后（T05）。
   // 只有确实存在更多页才多发这一次请求。
-  if (cursor && pages === 1) {
+  if (cursor) {
     const { data } = await api.listNodes(runId, 50, undefined, 'attention')
     if (!current()) return undefined
     for (const item of data.items) {

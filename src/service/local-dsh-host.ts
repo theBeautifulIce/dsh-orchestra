@@ -79,7 +79,7 @@ const catalog = {
     '/v1/effects/unverified', '/v1/events', '/v1/events/stream', '/v1/evidence/get', '/v1/execution-history', '/v1/ledger/verify',
     '/v1/memory/batches', '/v1/model-escalation', '/v1/node-runs', '/v1/node-runs/get', '/v1/operations/get', '/v1/rework', '/v1/rework/get',
     '/v1/rework/holds', '/v1/rework/inspections', '/v1/rework/plan', '/v1/rework/topology', '/v1/runs', '/v1/runs/get', '/v1/settings/model-routing', '/v1/settings/planning-timeouts',
-    '/v1/task-plans/by-task', '/v1/task-plans/drafts', '/v1/task-plans/capability', '/v1/task-plans/get', '/v1/task-triggers', '/v1/tasks', '/v1/tasks/get',
+    '/v1/task-plans/by-task', '/v1/task-plans/progress', '/v1/task-plans/drafts', '/v1/task-plans/capability', '/v1/task-plans/get', '/v1/task-triggers', '/v1/tasks', '/v1/tasks/get',
     '/v1/workflows', '/v1/workflows/generate/capability', '/v1/workflows/get', '/v1/workflows/versions/get', '/v1/workspace/overview',
   ]),
   POST: new Set([
@@ -89,7 +89,7 @@ const catalog = {
     '/v1/collaboration/reassign', '/v1/collaboration/review', '/v1/collaboration/scopes', '/v1/decisions/acknowledge',
     '/v1/decisions/resolve', '/v1/effects/resolve', '/v1/model-escalation', '/v1/rework/hold', '/v1/rework/inspect',
     '/v1/rework/plan', '/v1/rework/plan/approve', '/v1/rework/request', '/v1/rework/review', '/v1/runs/start',
-    '/v1/settings/model-routing', '/v1/settings/planning-timeouts', '/v1/task-plans', '/v1/task-plans/confirm', '/v1/tasks/archive', '/v1/workflows',
+    '/v1/settings/model-routing', '/v1/settings/planning-timeouts', '/v1/task-plans', '/v1/task-plans/confirm', '/v1/task-plans/discard', '/v1/task-plans/materials', '/v1/task-plans/materials/revoke', '/v1/tasks/archive', '/v1/workflows',
     '/v1/workflows/generate', '/v1/workflows/open-draft', '/v1/workflows/publish', '/v1/workflows/status', '/v1/workflows/test',
     '/v1/workflows/update',
   ]),
@@ -413,6 +413,27 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
             throw new OrchError('FORBIDDEN', '工作区会话授权已失效')
           }
           return (await serviceFor(workspace, binding.sessionId).startup).service
+        },
+        async acquireService(binding) {
+          const workspace = selectedWorkspace(host, binding.workspaceId, binding.sessionId)
+          if (!workspace || identityFor(workspace, binding.sessionId) !== binding.identity) {
+            throw new OrchError('FORBIDDEN', '工作区会话授权已失效')
+          }
+          const lease = serviceFor(workspace, binding.sessionId)
+          lease.inflight += 1
+          let released = false
+          const release = () => {
+            if (released) return
+            released = true
+            lease.inflight -= 1
+            lease.lastUsed = Date.now()
+            void maybeRelease(binding.identity, lease)
+          }
+          try {
+            const { service } = await lease.startup
+            stop.signal.throwIfAborted()
+            return { service, release }
+          } catch (error) { release(); throw error }
         },
       })
       chatCtx.effect(() => {

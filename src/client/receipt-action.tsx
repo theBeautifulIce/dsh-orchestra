@@ -3,15 +3,19 @@ import { createApiClient } from './api/client.ts'
 import { createResourcesApi } from './api/resources.ts'
 import { createLocalSessionFetcher, localPanelBase, selectedSession, workspaceForSession,
   type DshLocalPanelSources } from './dsh-local-panel.tsx'
+import { ArtifactContent } from './panel/artifact-content.tsx'
+import { taskStatusView } from './panel/tasks-screen.tsx'
+import type { ArtifactView } from './api/types.ts'
 import type { ReceiptLocation } from '../core/receipt-location.ts'
 
 type Resources = ReturnType<typeof createResourcesApi>
+type ReceiptPanel = { title: string; body?: string; artifact?: ArtifactView }
 
 /**
  * 打开回执指向的对象（T16）。元数据只用于导航：这里按当前会话重新读一遍，
  * 归属、版本或权限变了就明确拒绝，绝不打开另一个任务的文件。
  */
-async function readReceiptTarget(api: Resources, ref: ReceiptLocation) {
+async function readReceiptTarget(api: Resources, ref: ReceiptLocation): Promise<ReceiptPanel> {
   const { data: run } = await api.getRun(ref.runId)
   if (run.task_id !== ref.taskId || run.run_id !== ref.runId) throw new Error('此回执与当前任务不匹配')
   if (ref.kind === 'decision') {
@@ -21,12 +25,12 @@ async function readReceiptTarget(api: Resources, ref: ReceiptLocation) {
   }
   if (ref.kind === 'artifact') {
     const { data: file } = await api.getArtifact(ref.artifactId)
-    if (file.run_id !== run.run_id || file.sha256 !== ref.sha256 || file.expired) throw new Error('本版本成果不可用')
-    const { data: preview } = await api.getArtifactContent(run.run_id, file.artifact_id, 'preview')
-    if (preview.kind !== 'preview' || preview.sha256 !== ref.sha256) throw new Error('成果版本已变化')
-    return { title: preview.file_name, body: preview.text + (preview.truncated ? '\n（预览已截断，完整内容请下载）' : '') }
+    if (file.artifact_id !== ref.artifactId || file.run_id !== run.run_id || file.sha256 !== ref.sha256 || file.expired) {
+      throw new Error('本版本成果不可用')
+    }
+    return { title: file.file_name ?? '本次成果', artifact: file }
   }
-  return { title: run.task_title || '本次任务', body: '状态：' + run.status }
+  return { title: run.task_title || '本次任务', body: '状态　' + (taskStatusView(run.status).label ?? '状态待识别') }
 }
 
 export function ReceiptAction({ location, sources }: { location: ReceiptLocation; sources: DshLocalPanelSources }) {
@@ -42,7 +46,7 @@ function ScopedReceipt({ location, sources }: { location: ReceiptLocation; sourc
   const api = useMemo(() => createResourcesApi(createApiClient(localPanelBase,
     createLocalSessionFetcher(sources, location.workspaceId, location.sessionId))),
   [sources, location.workspaceId, location.sessionId])
-  const [panel, setPanel] = useState<{ title: string; body: string }>()
+  const [panel, setPanel] = useState<ReceiptPanel>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const label = location.kind === 'artifact' ? '打开这份成果' : location.kind === 'decision' ? '查看这项待办' : '查看任务状态'
@@ -59,7 +63,7 @@ function ScopedReceipt({ location, sources }: { location: ReceiptLocation; sourc
     {error && <p role="alert" style={{ margin: '4px 0', color: '#b42318' }}>{error}</p>}
     {panel && <div style={{ marginTop: 4 }}>
       <strong>{panel.title}</strong>
-      <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 240, overflow: 'auto', margin: '4px 0' }}>{panel.body}</pre>
+      {panel.artifact ? <ArtifactContent api={api} artifact={panel.artifact} autoPreview /> : <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 240, overflow: 'auto', margin: '4px 0' }}>{panel.body}</pre>}
     </div>}
   </section>
 }

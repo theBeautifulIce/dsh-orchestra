@@ -1,16 +1,18 @@
 import { z } from 'zod'
+import { materialGrant, readMaterial } from './plan-materials.ts'
 import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { withTx, type Db } from '../infra/sqlite/driver.ts'
 import { registerRunArtifactInTx, isArtifactFileName } from './artifact-store.ts'
-import { nativeTextBytes } from './native-text-capability.ts'
+import { assertReworkPublication, materializeReworkPreserved } from './rework-manifest.ts'
+import { nativeTextBytes, nativeTextLimits } from './native-text-capability.ts'
 import { reworkRequestSchema, reworkReviewSchema, type ReworkBinding, type ReworkHost } from './rework-coordinator.ts'
 import { runIdempotentCommand, requestHashOf } from './commands/idempotency.ts'
 import { assertReworkRunActive } from './rework-runtime.ts'
 import { recordArtifactPublication } from './artifact-completion.ts'
 
 import { readApprovedTaskPlanForRun } from './task-planning.ts'
-import { textTarget } from './text-result.ts'
+import { textTarget, TEXT_PUBLICATION } from './text-result.ts'
 
 const key = z.string().min(1).max(256)
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
@@ -27,6 +29,24 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
     AND status IN ('started','verifying') AND replacement_node_run_id IS NULL`).get(binding.node_run_id, binding.attempt, binding.action_generation)
   if (!node) throw new OrchError('STALE_GENERATION', '该返工工具会话已过期')
   const runId = String(node.run_id)
+  if (action === 'read_material') return withTx(db,tx => {
+    assertReworkRunActive(tx,runId)
+    const input=z.strictObject({ material_id:z.uuidv7(), digest:hash, offset:z.number().int().nonnegative().default(0) }).parse(body)
+    const current=tx.get<{node_id:string;lease_expires_at:string|null}>(`SELECT node_id,lease_expires_at FROM node_runs
+      WHERE node_run_id=? AND attempt=? AND action_generation=? AND status IN ('started','verifying')
+        AND replacement_node_run_id IS NULL`,[binding.node_run_id,binding.attempt,binding.action_generation])
+    if (!current?.lease_expires_at || Date.parse(current.lease_expires_at)<=Date.parse(now))
+      throw new OrchError('STALE_GENERATION','材料读取租约已过期')
+    const plan=readApprovedTaskPlanForRun(tx,runId)
+    const material=plan?.brief.materials?.find(item=>item.id===input.material_id && item.digest===input.digest
+      && item.nodes.includes(current.node_id))
+    const owner=plan && tx.get<{created_by:string}>('SELECT created_by FROM task_plans WHERE plan_id=?',[plan.plan_id])
+    if (!material || !owner) throw new OrchError('FORBIDDEN','本步骤没有该材料的授权')
+    const text=readMaterial(tx,materialGrant(owner.created_by,material.draft),runId,current.node_id,material,Date.parse(now))
+    if (input.offset>text.length) throw new OrchError('PAYLOAD_SCHEMA_INVALID','读取位置超过材料长度')
+    const end=Math.min(text.length,input.offset+8192)
+    return { name:material.name,digest:material.digest,text:text.slice(input.offset,end),next_offset:end<text.length?end:null }
+  })
   if (action === 'inbox') return host.list(binding, runId)
   if (action === 'get') return host.get(z.strictObject({ request_id: key }).parse(body).request_id, binding)
   if (action === 'request') return host.request(reworkRequestSchema.parse(body), binding, now)
@@ -62,9 +82,19 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
         } else {
           target = { artifactId: 'out_' + sha256Hex(JSON.stringify([binding.node_run_id, data.file_name])), fileName: data.file_name }
         }
-        const count = tx.get<{ n: number }>('SELECT COUNT(*) AS n FROM artifact_contents WHERE node_run_id=?', [binding.node_run_id])
+        assertReworkPublication(tx, binding.node_run_id, target.fileName)
+        materializeReworkPreserved(tx, {...binding,...producer}, now, (name, receipt) => {
+          if (secret && producer.lease_id && producer.lease_expires_at && Date.parse(producer.lease_expires_at)>Date.parse(now)) {
+            recordArtifactPublication(tx, secret, binding, producer, name, receipt)
+          }
+        })
+        const count = tx.get<{ n: number }>(`SELECT COUNT(DISTINCT c.file_name) AS n
+          FROM artifact_contents c JOIN artifacts a USING(artifact_id) WHERE c.node_run_id=?
+          AND (CASE WHEN json_valid(a.evidence_index) THEN json_extract(a.evidence_index,'$.kind')=? ELSE 0 END IS 1)=?`,
+          [binding.node_run_id,TEXT_PUBLICATION,'deliverable_index' in data ? 1 : 0])
         const firstPublication = !tx.get('SELECT 1 FROM artifacts WHERE artifact_id=?', [target.artifactId])
-        if (firstPublication && (count?.n ?? 0) >= 8) throw new OrchError('RANGE_TOO_LARGE', '每次执行最多提交八份文本成果')
+        if (firstPublication && (count?.n ?? 0) >= nativeTextLimits.files) throw new OrchError('RANGE_TOO_LARGE',
+          'deliverable_index' in data ? '每次执行最多提交八段会话正文' : '每次执行最多提交八份文本文件')
         const artifact = registerRunArtifactInTx(tx, { ...target,
           runId, nodeRunId: binding.node_run_id, bytes }, now)
         if (secret && firstPublication && producer.lease_id && producer.lease_expires_at && Date.parse(producer.lease_expires_at) > Date.parse(now)) {
@@ -79,8 +109,12 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
       WHERE a.run_id=? AND a.artifact_id=? AND a.sha256=? AND (a.retain_until IS NULL OR a.retain_until>?)
       AND (EXISTS (SELECT 1 FROM artifact_consumptions i WHERE i.consumer_node_run_id=? AND i.artifact_id=a.artifact_id AND i.artifact_hash=a.sha256)
         OR EXISTS (SELECT 1 FROM rework_requests r WHERE r.new_node_run_id=? AND r.source_artifact_id=a.artifact_id
-          AND r.source_artifact_hash=a.sha256 AND r.status='scheduled'))`,
-    [runId, data.artifact_id, data.artifact_hash, now, binding.node_run_id, binding.node_run_id])
+          AND r.source_artifact_hash=a.sha256 AND r.status='scheduled'
+          OR r.new_node_run_id=? AND r.status='scheduled' AND EXISTS (
+            SELECT 1 FROM json_each(r.file_manifest_json,'$.originals') m
+            WHERE json_extract(m.value,'$.artifact_id')=a.artifact_id AND json_extract(m.value,'$.sha256')=a.sha256
+              AND json_extract(m.value,'$.action')<>'remove')))`,
+    [runId, data.artifact_id, data.artifact_hash, now, binding.node_run_id, binding.node_run_id, binding.node_run_id])
     if (!row) throw new OrchError('FORBIDDEN', '成果不在本次执行的输入范围内')
     const bytes = Buffer.from(row.bytes)
     if (sha256Hex(bytes) !== data.artifact_hash) throw new OrchError('CONFIRMATION_MISMATCH', '成果内容校验失败')

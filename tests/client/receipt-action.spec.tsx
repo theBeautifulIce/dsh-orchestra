@@ -23,14 +23,17 @@ function sources(selected: string, archived: string[] = []) {
   }
 }
 
-function stubFetch(override: { runId?: string; fileSha?: string } = {}) {
+function stubFetch(override: { runId?: string; fileSha?: string; fileId?: string; truncated?: boolean } = {}) {
   return vi.fn(async (target: string) => {
     const url = new URL(String(target), 'dsh-app://app')
-    const path = new URL(url.searchParams.get('path')!, 'http://fixture.test').pathname
+    const resource = new URL(url.searchParams.get('path')!, 'http://fixture.test')
+    const path = resource.pathname
     const data = path === '/v1/runs/get' ? { run_id: override.runId ?? 'run-42', task_id: 'task-42', task_title: '月报', status: 'succeeded' }
-      : path === '/v1/artifacts/get' ? { artifact_id: 'report-version', run_id: 'run-42', sha256: override.fileSha ?? sha,
+      : path === '/v1/artifacts/get' ? { artifact_id: override.fileId ?? 'report-version', run_id: 'run-42', sha256: override.fileSha ?? sha,
         file_name: 'report.md', expired: false, retain_until: null }
-        : { kind: 'preview', file_name: 'report.md', sha256: sha, text: '净额 109.50', truncated: false }
+        : resource.searchParams.get('mode') === 'download'
+          ? { kind: 'download', file_name: 'report.md', sha256: sha, size_bytes: 3, base64: 'AAEC' }
+          : { kind: 'preview', file_name: 'report.md', sha256: sha, text: '净额 109.50', truncated: override.truncated ?? false }
     return Response.json({ ok: true, schema_version: 1, as_of_seq: 1, data })
   })
 }
@@ -65,4 +68,43 @@ it('切换会话后不展示旧回执，版本不符时明确拒绝', async () =
       expect(view.text()).not.toContain('净额')
     } finally { view.unmount() }
   } finally { vi.unstubAllGlobals() }
+})
+
+
+it('T16 截断回执保留可执行下载入口，取得原回执指定的完整文件', async () => {
+  const fetcher=stubFetch({truncated:true})
+  vi.stubGlobal('fetch',fetcher)
+  const createObjectURL=vi.fn((_blob:Blob)=>'blob:receipt')
+  vi.stubGlobal('URL',class extends URL { static createObjectURL=createObjectURL; static revokeObjectURL=vi.fn() })
+  const saved=vi.spyOn(HTMLAnchorElement.prototype,'click').mockImplementation(()=>{})
+  const view=await renderPanel(<ReceiptAction location={location} sources={sources(sessionId)} />)
+  try {
+    await view.click(view.findAll('button')[0]!)
+    await view.flush()
+    expect(view.text()).toContain('预览仅显示前')
+    await view.click(view.findAll('button').find(button=>button.textContent==='下载产物')!)
+    await view.flush()
+    expect(saved).toHaveBeenCalledTimes(1)
+    expect(createObjectURL.mock.calls[0]?.[0]).toMatchObject({size:3,type:'application/octet-stream'})
+    expect(fetcher.mock.calls.some(([target])=> {
+      const resource=new URL(new URL(target,'dsh-app://app').searchParams.get('path')!,'http://fixture.test')
+      return resource.searchParams.get('artifact_id')==='report-version' && resource.searchParams.get('mode')==='download'
+    })).toBe(true)
+  } finally {view.unmount();vi.restoreAllMocks();vi.unstubAllGlobals()}
+})
+
+it('T16 相同内容散列但不同成果编号也拒绝，任务状态以中文显示', async () => {
+  vi.stubGlobal('fetch',stubFetch({fileId:'another-artifact'}))
+  const view=await renderPanel(<ReceiptAction location={location} sources={sources(sessionId)} />)
+  try {
+    await view.click(view.findAll('button')[0]!)
+    await view.flush()
+    expect(view.byRole('alert')).toHaveLength(1)
+    expect(view.text()).not.toContain('净额')
+    await view.rerender(<ReceiptAction location={{kind:'task',workspaceId,sessionId,taskId:'task-42',runId:'run-42'}} sources={sources(sessionId)} />)
+    await view.click(view.findAll('button')[0]!)
+    await view.flush()
+    expect(view.text()).not.toContain('succeeded')
+    expect(view.text()).toContain('已完成')
+  } finally {view.unmount();vi.unstubAllGlobals()}
 })
