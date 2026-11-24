@@ -306,9 +306,13 @@ function evaluateDeliverable(
   if (item.kind === 'artifact') return evaluateArtifact(tx, runId, now, item, deliverableKey, ruleVersion)
   if (item.kind === 'chat/text_result') {
     const file = readBoundText(tx, runId, item.node_id, plan.plan_id, plan.content_hash, index, now)
+    const producer = tx.get<{ status: string }>(`SELECT status FROM node_runs
+      WHERE run_id=? AND node_id=? AND replacement_node_run_id IS NULL ORDER BY attempt DESC,seq DESC LIMIT 1`, [runId, item.node_id])
+    const completed = producer?.status === 'done'
     return { deliverable_key: deliverableKey, title: item.title, node_id: item.node_id, kind: item.kind,
-      rule_version: ruleVersion, outcome: file ? 'passed' : 'unverifiable',
-      reason: file ? null : 'chat_text_result_not_exported', evidence: { title: item.title, ...file } }
+      rule_version: ruleVersion, outcome: file && completed ? 'passed' : 'unverifiable',
+      reason: !file ? 'chat_text_result_not_exported' : !completed ? 'chat_text_producer_not_completed' : null,
+      evidence: { title: item.title, ...file, producer_status: producer?.status ?? null } }
   }
   return evaluateToolEvidence(tx, runId, item, deliverableKey, ruleVersion)
 }

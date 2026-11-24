@@ -28,6 +28,7 @@ import { loadNodeRun } from '../../src/service/commands/lease.ts'
 import { verifyArtifactCompletion } from '../../src/service/artifact-completion.ts'
 import { createDeliveryReviewHost } from '../../src/service/delivery-review.ts'
 import { registerRunArtifact } from '../../src/service/artifact-store.ts'
+import { readNativeExecutionPolicy } from '../../src/service/native-execution-policy.ts'
 
 const closers: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -1197,4 +1198,36 @@ it('修订合并对同义结构约束去重并稳定编号，不接受同一来�
   expect(merged.start_policy).toBe('plan_only')
   expect(mergeRequirementsContracts(merged, next)).toEqual(merged)
   expect(() => mergeRequirementsContracts(prior, { ...next, sources: [{ message_id: 'human-message', text: '不同正文' }] })).toThrow()
+})
+
+it('执行权限从已启动计划读取，子流程继承原限制，绑定被改或跨任务父链均拒绝', async () => {
+  const host = await boot(async () => valid())
+  const contract = requirementsContract([{ ...constraintBase('readonly', '只读处理'), kind: 'read_only' }])
+  const view = (await host.planning!.propose({ goal: '核对', requirements: ['核验'], requirements_contract: contract }, 'owner', now)).view
+  const launch = host.planning!.confirm({ plan_id: view.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', now)
+  const node = host.db.raw.prepare("SELECT node_run_id,side_effect_policy FROM node_runs WHERE run_id=? AND node_id='collect'")
+    .get(launch.run_id) as { node_run_id: string; side_effect_policy: string }
+  expect(readNativeExecutionPolicy(host.db, node.node_run_id)).toEqual({
+    sideEffectPolicy: node.side_effect_policy, requirementsContract: contract,
+  })
+  expect(() => readNativeExecutionPolicy(host.db, 'model-invented-node')).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+  withTx(host.db, tx => {
+    tx.run(`INSERT INTO runs (run_id,task_id,workflow_id,workflow_version,workflow_definition_hash,status,revision,
+      parent_run_id,root_run_id,subworkflow_depth,created_at,updated_at)
+      SELECT 'permission-child',task_id,workflow_id,workflow_version,workflow_definition_hash,'running',0,
+        run_id,run_id,1,created_at,updated_at FROM runs WHERE run_id=?`, [launch.run_id])
+    tx.run(`INSERT INTO node_runs (node_run_id,run_id,node_id,seq,node_type,attempt,status,revision,side_effect_policy,created_at,updated_at)
+      VALUES ('permission-child-node','permission-child','collect',0,'agent',1,'queued',0,'pure',?,?)`, [now, now])
+  })
+  expect(readNativeExecutionPolicy(host.db, 'permission-child-node')).toEqual({ sideEffectPolicy: 'pure', requirementsContract: contract })
+  const original = host.db.raw.prepare('SELECT workflow_definition_hash FROM runs WHERE run_id=?')
+    .get(launch.run_id)!.workflow_definition_hash as string
+  withTx(host.db, tx => tx.run('UPDATE runs SET workflow_definition_hash=? WHERE run_id=?', ['0'.repeat(64), launch.run_id]))
+  expect(() => readNativeExecutionPolicy(host.db, 'permission-child-node')).toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
+  withTx(host.db, tx => {
+    tx.run('UPDATE runs SET workflow_definition_hash=? WHERE run_id=?', [original, launch.run_id])
+    tx.run(`INSERT INTO tasks (task_id,title,status,revision,created_at,updated_at) VALUES ('different-task','另一个任务','queued',0,?,?)`, [now, now])
+    tx.run("UPDATE runs SET task_id='different-task' WHERE run_id='permission-child'")
+  })
+  expect(() => readNativeExecutionPolicy(host.db, 'permission-child-node')).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
 })

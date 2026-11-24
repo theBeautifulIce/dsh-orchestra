@@ -11,6 +11,9 @@ import { applyRunAcceptance, evaluateRunAcceptance } from '../../src/service/com
 import { closeRun } from '../../src/service/commands/run-close.ts'
 import { getTaskSummary } from '../../src/service/queries/tasks.ts'
 import { getRun, listRuns } from '../../src/service/queries/runs.ts'
+import { registerRunArtifact } from '../../src/service/artifact-store.ts'
+import { textTarget } from '../../src/service/text-result.ts'
+import { readChatArtifactContent, readChatTextPreviews } from '../../src/service/chat-text-previews.ts'
 import { createRun } from '../../src/service/runs.ts'
 import { WorkflowCatalog } from '../../src/service/workflows.ts'
 import { freshLedger, TEST_SECRET } from '../fixtures/ledger.ts'
@@ -437,6 +440,23 @@ describe('交付验收阶段', () => {
     expect(view.lane).toBe('finished')
   })
 
+  it.each(['failed', 'cancelled'] as const)('执行 %s 即使文件结构验收通过也不能声称目标完成', status => {
+    const { db } = freshLedger()
+    const catalog = catalogFor(db, 'wf-incomplete')
+    const created = createRun(db, catalog, {
+      taskTitle: '未完成任务', workflowId: 'wf-incomplete', workflowVersion: '1', now: NOW,
+    })
+    seedPlan(db, { planId: 'plan-incomplete', taskId: created.task_id, runId: created.run_id,
+      deliverables: [artifactDeliverable('已有报告', 'report.pdf', 10)] })
+    seedArtifact(db, { artifactId: 'art-incomplete', runId: created.run_id, fileName: 'report.pdf',
+      nodeRunId: nodeRunId(db, created.run_id, 'n1'), bytes: 50 })
+    if (status === 'cancelled') withTx(db, tx => tx.run('UPDATE runs SET cancel_requested_at=? WHERE run_id=?', [NOW, created.run_id]))
+    expect(finishRun(db, created.run_id, status === 'failed' ? 'failed' : 'done')).toBe(status)
+    const view = getTaskSummary(db, created.task_id, Date.parse(NOW))
+    expect(view.delivery_acceptance).toBe('passed')
+    expect(view.goal_met).toBe(false)
+  })
+
   it('AC6 幂等重放：重复验收行数不变、结论稳定', () => {
     const { db } = freshLedger()
     const catalog = catalogFor(db, 'wf-replay')
@@ -590,6 +610,55 @@ describe('交付验收阶段', () => {
 })
 
 describe('P05 会话文字结果的验收', () => {
+  it('已提交正文也必须由当前步骤完成，阻塞说明不能变成已交付正文', () => {
+    const { db } = freshLedger()
+    const catalog = catalogFor(db, 'wf-chat-blocked')
+    const created = createRun(db, catalog, { taskTitle: '检索新闻', workflowId: 'wf-chat-blocked', workflowVersion: '1', now: NOW })
+    seedPlan(db, { planId: 'plan-chat-blocked', taskId: created.task_id, runId: created.run_id,
+      deliverables: [{ title: '检索结论', node_id: 'n1', goal_ids: ['g1'], acceptance: { kind: 'chat/text_result' } }] })
+    const nodeId = nodeRunId(db, created.run_id, 'n1')
+    const node = db.raw.prepare('SELECT attempt,action_generation FROM node_runs WHERE node_run_id=?').get(nodeId)!
+    const target = textTarget('plan-chat-blocked', 'a'.repeat(64), 0,
+      { node_run_id: nodeId, attempt: Number(node.attempt), action_generation: Number(node.action_generation) })
+    registerRunArtifact(db, { ...target, runId: created.run_id, nodeRunId: nodeId,
+      bytes: Buffer.from('已查指定来源，符合条件的条目为 0。') }, NOW)
+    const evaluate = () => withTx(db, tx => evaluateRunAcceptance(tx, created.run_id, NOW))
+    withTx(db, tx => tx.run("UPDATE node_runs SET status='blocked_post' WHERE node_run_id=?", [nodeId]))
+    expect(evaluate().results[0]).toMatchObject({ outcome: 'unverifiable', reason: 'chat_text_producer_not_completed',
+      evidence: { producer_status: 'blocked_post' } })
+    withTx(db, tx => tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?", [nodeId]))
+    expect(evaluate().results[0]).toMatchObject({ outcome: 'passed' })
+  })
+
+  it('早期正文不能耗尽最后一项的预览预算，完整64KiB以内正文可按已验收版本读取', () => {
+    const { db } = freshLedger()
+    const catalog = catalogFor(db, 'wf-chat-full')
+    const created = createRun(db, catalog, { taskTitle: '会话全文交付', workflowId: 'wf-chat-full', workflowVersion: '1', now: NOW })
+    const bodies = ['前期整理。'.repeat(1200), '复核记录。'.repeat(1200), '最终结论。'.repeat(3000)]
+    seedPlan(db, { planId: 'plan-chat-full', taskId: created.task_id, runId: created.run_id,
+      deliverables: bodies.map((_, index) => ({ title: '正文' + index, node_id: 'n1', goal_ids: ['g1'], acceptance: { kind: 'chat/text_result' } })) })
+    const nodeId = nodeRunId(db, created.run_id, 'n1')
+    const node = db.raw.prepare('SELECT attempt,action_generation FROM node_runs WHERE node_run_id=?').get(nodeId)!
+    for (const [index, text] of bodies.entries()) {
+      const target = textTarget('plan-chat-full', 'a'.repeat(64), index,
+        { node_run_id: nodeId, attempt: Number(node.attempt), action_generation: Number(node.action_generation) })
+      registerRunArtifact(db, { ...target, runId: created.run_id, nodeRunId: nodeId, bytes: Buffer.from(text) }, NOW)
+    }
+    expect(finishRun(db, created.run_id, 'done')).toBe('succeeded')
+    const checks = getRun(db, created.run_id, { includeAcceptanceArtifactIds: true }).delivery_checks!.items
+    const previews = readChatTextPreviews(db, created.run_id, checks, Date.parse(NOW))
+    expect(previews).toHaveLength(3)
+    expect(previews.every(preview => preview.text.length > 0 && preview.truncated && preview.artifact_id && preview.sha256)).toBe(true)
+    expect(previews.map(preview => Array.from(preview.text).length).reduce((sum, chars) => sum + chars, 0)).toBe(2400)
+    expect(previews[2]!.text).toContain('最终结论。')
+    const final = previews[2]!
+    const content = readChatArtifactContent(db, created.run_id, final.artifact_id, checks, Date.parse(NOW))
+    expect(content).toMatchObject({ kind: 'preview', text: bodies[2], truncated: false, sha256: final.sha256 })
+    // Generic file previews retain their smaller cap; only the exact accepted text version expands.
+    expect(readChatArtifactContent(db, created.run_id, final.artifact_id, [], Date.parse(NOW)))
+      .toMatchObject({ kind: 'preview', truncated: true })
+  })
+
   it('旧版同名 chat-result.md 不能证明已提交正文', () => {
     const { db } = freshLedger()
     const catalog = catalogFor(db, 'wf-chat-text')

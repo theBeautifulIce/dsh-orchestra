@@ -1,5 +1,6 @@
 // src/executor/session.ts —— agent 节点执行器（规格 5.2 行 442-449、4.1 行 272）
 import { OrchError } from '../core/errors.ts'
+import { ORCHESTRA_COMMUNICATION_GUIDE } from '../core/communication.ts'
 import { assertNoMemoryWriteTool, assertTaskSessionToolsAllowed } from '../core/memory-graph.ts'
 import { deriveEffectiveCapability, resolveDeclaredPolicy, type ToolDescriptor, type ToolRegistry } from './tools.ts'
 
@@ -110,6 +111,7 @@ export type HostAgentFactory = {
 // 指令文本里写明：完成由服务端收口，执行器不许自报完成（规格 5.2 行 448）
 export function buildInstruction(input: { nodeId: string; outputSchema: unknown }): string {
   return [
+    ORCHESTRA_COMMUNICATION_GUIDE,
     '你在执行编排里的一个节点，节点编号：' + input.nodeId + '。',
     '只按给的输入与工具策略做事，不要碰主会话的历史。',
     '做完把结果按 outputSchema 交上来；不要自己宣告节点完成，完成由服务端收口。',

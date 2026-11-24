@@ -4,6 +4,7 @@ import { resolvePinnedNodeId } from '../service/rework-extra-steps.ts'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { OrchError } from '../core/errors.ts'
+import { completionBlockReason, readExecutionCompletion } from '../core/execution-completion.ts'
 import type { Report } from '../core/report.ts'
 import type { Db } from '../infra/sqlite/driver.ts'
 import { makeTx, withTx } from '../infra/sqlite/driver.ts'
@@ -522,7 +523,10 @@ async function runNodeActions(
       const reason = stopFailure !== null
         ? 'agent_stop_unconfirmed'
         : err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
-      markBlocked(deps, p, reason, nowAt())
+      const completion = err instanceof OrchError && err.details.execution_completion
+        ? readExecutionCompletion({ output: { completion: err.details.execution_completion } }) : undefined
+      markBlocked(deps, p, completion && completion.outcome !== 'completed' ? completionBlockReason(completion) : reason,
+        nowAt(), completion?.missing)
     }
     throw err
   } finally {
@@ -761,6 +765,10 @@ function reportFromAgent(
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'Agent 报告必须是结构化对象', {})
   }
   const report = raw as Record<string, unknown>
+  const completion = readExecutionCompletion(report)
+  if (completion && completion.outcome !== 'completed') {
+    throw new OrchError('VERDICT_POLICY_UNMET', '执行未完成，已保留原因和下一步', { execution_completion: completion })
+  }
   if (report.status !== 'done') {
     throw new OrchError('VERDICT_POLICY_UNMET', 'Agent 没有提交 done 报告，节点不收口', { status: report.status })
   }
@@ -791,7 +799,7 @@ function anchorOf(clock: ClockProvider, now: string): { bootId: string; monotoni
 }
 
 // 失败或证据不足：从当前非终态落到 blocked_post，并留一条 verify_human 说明为什么卡住
-function markBlocked(deps: RunNodeDeps, p: RunNodeParams, reason: string, now: string): void {
+function markBlocked(deps: RunNodeDeps, p: RunNodeParams, reason: string, now: string, missing: string[] = []): void {
   try {
     withTx(deps.db, (tx) => {
       const row = loadNodeRun(tx, p.nodeRunId)
@@ -804,7 +812,7 @@ function markBlocked(deps: RunNodeDeps, p: RunNodeParams, reason: string, now: s
         revision: row.revision,
         now,
         reason: 'executor_blocked',
-        verifyHuman: { reason, missing: [] },
+        verifyHuman: { reason, missing },
       })
     })
   } catch {

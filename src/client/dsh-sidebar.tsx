@@ -3,6 +3,7 @@ import { DshLocalPanel, isDshLocalShell, type DshLocalPanelSources } from './dsh
 import { formatNativeOrchestraApprovalCards } from './dsh-orchestra-approval-card.ts'
 import { registerNativeOrchestraSlash, type NativeOrchestraSlashContext } from './dsh-orchestra-slash.ts'
 import { registerNativeOrchestraToolView, type NativeOrchestraToolViewContext } from './dsh-orchestra-toolview.tsx'
+import { registerNativeOrchestraNotices, type NativeOrchestraNoticeContext } from './dsh-orchestra-notice.tsx'
 import { createPanelHost, type PanelHostProps } from './panel-host.tsx'
 
 const panelId = 'dsh-orchestra'
@@ -32,6 +33,7 @@ export const inject = ['slots']
 
 /** Activate the host panel while a trusted transport is available in this scope. */
 export function apply(ctx: DshClientContext): void {
+  registerNativeOrchestraNotices(ctx as unknown as NativeOrchestraNoticeContext)
   let reviewSources: DshLocalPanelSources | undefined
   registerNativeOrchestraToolView(ctx, () => reviewSources)
   let explicit: Panel | undefined

@@ -152,6 +152,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@deepseek-ai/dsh-agent-preset-registry':
+        specifier: 0.2.2-rc.2
+        version: 0.2.2-rc.2(7dc2cadde39f038ea48d4288bf5377ae)
       '@types/markdown-it':
         specifier: ^14.2.0
         version: 14.2.0

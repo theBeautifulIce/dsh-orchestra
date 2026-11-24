@@ -599,6 +599,28 @@ describe('生产路径跑通单节点', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('结构化阻塞即使已运行工具也不假报完成，保留原因、缺项和下一步', async () => {
+    const { dir, orchestra, release, registry, agents, runner } = await setup()
+    const completion = { outcome: 'blocked', reason: '无法访问新闻来源',
+      next_action: '启用来源会话的检索工具后重试', missing: ['AIHOT 访问工具'] }
+    const bridge = fakeAgentClient({ agentId: 'agent_1', steps: [{ tool: 'ro.echo' }], at: NOW,
+      report: { status: 'failed', output: { summary: '未检索，当前没有可交付条目。', completion } } })
+    try {
+      await expect(runNode({ runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime',
+        registry, agents, runner, bridge }, {
+        nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [{ command: 'ro.echo', args: [], cwd: '.', timeoutMs: 5000 }],
+        now: NOW, ownerEpoch: 1, leaseTtlMs: 600000,
+      })).rejects.toMatchObject({ code: 'VERDICT_POLICY_UNMET' })
+      expect(nodeRow(orchestra.db).status).toBe('blocked_post')
+      const human = orchestra.db.raw.prepare("SELECT payload FROM node_run_events WHERE node_run_id='nrun_1' AND type='verify_human' ORDER BY seq DESC LIMIT 1").get()!
+      expect(JSON.parse(String(human.payload))).toMatchObject({
+        reason: '无法访问新闻来源；下一步：启用来源会话的检索工具后重试', missing: ['AIHOT 访问工具'],
+      })
+      expect(orchestra.db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='nrun_1' AND type='report_applied'").get()).toEqual({ n: 0 })
+    } finally { await release(); rmSync(dir, { recursive: true, force: true }) }
+  })
+
   it('Agent 请求不在本次节点工具清单里的工具：拒绝执行并阻断', async () => {
     const { dir, orchestra, release, registry, agents, bridge, runner } = await setup([{ tool: 'ro.echo' }])
     await expect(runNode(

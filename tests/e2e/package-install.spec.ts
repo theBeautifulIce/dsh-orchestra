@@ -23,6 +23,7 @@ it('包声明保留私有发布、默认阶段和显式宿主注入', () => {
   expect(manifest).toMatchObject({ private: true, exports: { '.': { default: './lib/index.js' }, './client': './lib/client.js' },
     dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web', inject: expect.arrayContaining([
       '@deepseek-ai/dsh-client-ui-sidebar', '@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-input-trigger',
+      '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-chat',
     ]) } } })
   expect(JSON.parse(readFileSync('orchestra.config.json', 'utf8')).phase).toBe('S2')
   expect(readFileSync('cordis.patch.yml', 'utf8')).toMatch(/id: dsh-orchestra, name: dsh-orchestra/)
@@ -45,8 +46,9 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
   const root = mkdtempSync(join(tmpdir(), 'orch-package-inject-'))
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
   const candidate = manifest.dsh.client.inject as string[]
-  const inputTrigger = '@deepseek-ai/dsh-client-ui-input-trigger'
-  const previous = candidate.filter((dependency) => dependency !== inputTrigger)
+  const addedClients = ['@deepseek-ai/dsh-client-ui-input-trigger',
+    '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-chat']
+  const previous = candidate.filter((dependency) => !addedClients.includes(dependency))
   const files: Record<string, string> = {
     'package/package.json': '',
     'package/lib/index.js': 'export function serveDshOrchestra() {}',
@@ -75,6 +77,8 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
       writeFileSync(join(root, file), content)
     }
     const valid = pack('candidate', [...candidate].reverse())
+    expect(candidate).toHaveLength(9)
+    expect(new Set(candidate).size).toBe(9)
     expect(inspectPackage(valid).migrations).toHaveLength(57)
     expect(() => inspectPackage(valid, { previous: true })).toThrow('DSH client inject must contain exactly')
     files['package/docs/assets/readme/extra.txt'] = 'extra'
@@ -85,9 +89,13 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
     const legacy = pack('previous', previous)
     expect(inspectPackage(legacy, { previous: true }).migrations).toHaveLength(57)
     expect(() => inspectPackage(legacy)).toThrow('DSH client inject must contain exactly')
-    expect(() => inspectPackage(pack('wrong-dependency', [...previous, '@deepseek-ai/dsh-client-ui-conversation'])))
+    for (const dependency of addedClients) {
+      expect(() => inspectPackage(pack('missing-client', candidate.filter(item => item !== dependency))))
+        .toThrow('DSH client inject must contain exactly')
+    }
+    expect(() => inspectPackage(pack('wrong-dependency', [...candidate.slice(0, -1), '@deepseek-ai/dsh-client-ui-unknown'])))
       .toThrow('DSH client inject must contain exactly')
-    expect(() => inspectPackage(pack('duplicate-dependency', [...previous, previous[0]!])))
+    expect(() => inspectPackage(pack('duplicate-dependency', [...candidate.slice(0, -1), candidate[0]!])))
       .toThrow('DSH client inject must contain exactly')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

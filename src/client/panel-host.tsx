@@ -35,6 +35,7 @@ export type PanelHostStatus = {
   executionCapacityEnabled?: boolean
   workflowConcurrencyEnabled?: boolean
   nativeChatRoutingEnabled?: boolean
+  nativeExecutionPermissionsEnabled?: boolean
   modelEscalationEnabled?: boolean
   collaborationEnabled?: boolean
   reworkEnabled?: boolean
@@ -73,7 +74,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
   const probe = useCallback(async (): Promise<boolean> => {
     const generation = ++probeGeneration.current
     try {
-      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; memory_proposal_only?: boolean; model_routing_enabled?: boolean; planning_timeouts_enabled?: boolean; execution_capacity_enabled?: boolean; workflow_concurrency_enabled?: boolean; native_chat_routing_enabled?: boolean; model_escalation_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean; run_notes_enabled?: boolean; task_triggers_enabled?: boolean }>('/health')
+      const result = await client.get<{ ok?: boolean; phase?: string; epoch?: number; memory_enabled?: boolean; memory_proposal_only?: boolean; model_routing_enabled?: boolean; planning_timeouts_enabled?: boolean; execution_capacity_enabled?: boolean; workflow_concurrency_enabled?: boolean; native_chat_routing_enabled?: boolean; native_execution_permissions_enabled?: boolean; model_escalation_enabled?: boolean; collaboration_enabled?: boolean; rework_enabled?: boolean; rework_planner_enabled?: boolean; run_notes_enabled?: boolean; task_triggers_enabled?: boolean }>('/health')
       if (generation !== probeGeneration.current) return false
       setStatus((previous) => ({
         ...previous,
@@ -87,6 +88,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
         executionCapacityEnabled: result.data.execution_capacity_enabled === true,
         workflowConcurrencyEnabled: result.data.workflow_concurrency_enabled === true,
         nativeChatRoutingEnabled: result.data.native_chat_routing_enabled === true,
+        nativeExecutionPermissionsEnabled: result.data.native_execution_permissions_enabled === true,
         modelEscalationEnabled: result.data.model_escalation_enabled === true,
         collaborationEnabled: result.data.collaboration_enabled === true,
         runNotesEnabled: result.data.run_notes_enabled === true,
@@ -141,6 +143,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     executionCapacityEnabled={status.executionCapacityEnabled}
     workflowConcurrencyEnabled={status.workflowConcurrencyEnabled}
     nativeChatRoutingEnabled={status.nativeChatRoutingEnabled}
+    nativeExecutionPermissionsEnabled={status.nativeExecutionPermissionsEnabled}
     collaborationEnabled={status.collaborationEnabled}
     reworkEnabled={status.reworkEnabled}
     taskTriggersEnabled={status.taskTriggersEnabled}

@@ -102,7 +102,7 @@ it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但�
             const first = send(10, '已核对十项，需补交两份附件。', operationId)
             expect(send(10, '已核对十项，需补交两份附件。', operationId)).toEqual(first)
             expect(() => send(10, '更换了内容', operationId)).toThrow()
-            expect(states()).toEqual(['passed','passed','unverifiable'])
+            expect(states()).toEqual(['passed','unverifiable','unverifiable'])
             send(11, '第二项交付的正文。')
           } else if (outputOnly) {
             publish(role, joinTexts.join('\n'))
