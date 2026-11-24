@@ -7,6 +7,7 @@ import { expect, it, vi } from 'vitest'
 import { serveDshOrchestra } from '../../src/index.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { installLocalDshHost, localDshHostConfig } from '../../src/service/local-dsh-host.ts'
+import { registerRunArtifact } from '../../src/service/artifact-store.ts'
 
 it('binds the native DSH route to one local workspace session and keeps the ledger credentials on the host', async () => {
   expect(localDshHostConfig.parse(undefined).local.enabled).toBe(false)
@@ -271,4 +272,87 @@ it('leases one service per session, reclaims a closed idle session and reports c
     vi.unstubAllGlobals()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+it('opens complete durable artifact versions through the authenticated host and rechecks scope on each real browser GET', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'orch-browser-host-'))
+  const ctx = new Context()
+  const workspace = { id: 'browser-work', path: directory, sessionIds: ['browser-session'] }
+  const archived: string[] = []
+  const agent = { session: { id: 'browser-session', header: { cwd: directory } }, model: { current: () => ({ provider: 'fixture', model: 'selected' }) } }
+  let handleRequest!: (request: Request) => Promise<Response>
+  ctx.provide('connection', { fetch: { register(options: { fetch: typeof handleRequest }) { handleRequest = options.fetch } } })
+  ctx.provide('workspaceRegistry', { archivedSessionIds: archived, list: () => [workspace],
+    get: (id: string) => id === workspace.id ? workspace : undefined })
+  ctx.provide('sessionController', { resolveAgent: async () => ({ agent }),
+    modelCatalog: async () => ({ groups: [{ id: 'fixture', models: [{ id: 'selected' }] }] }) })
+  ctx.provide('credentials', { modifyRecord: async () => ({ kind: 'grant', payload: 'd'.repeat(64) }) })
+  ctx.provide('agents', { get: (id: string) => id === agent.session.id ? agent : undefined })
+  ctx.provide('llm', {}); ctx.provide('tools', {})
+  let service!: Awaited<ReturnType<typeof serveDshOrchestra>>
+  const plugin = ctx.plugin(host => installLocalDshHost(host, localDshHostConfig.parse({ local: {
+    enabled: true, dataDirectory: join(directory, 'db'),
+  } }).local, async options => { service = await serveDshOrchestra(options); return service }, false))
+  const request = (path: string, body?: unknown, headers: Record<string, string> = {}) => handleRequest(new Request(
+    'http://dsh.internal/api/orchestra.request?' + new URLSearchParams({ workspaceId: workspace.id, sessionId: agent.session.id, path }), {
+      method: body ? 'POST' : 'GET', headers: { host: '127.0.0.1:3210', 'x-orchestra-request': '1', 'content-type': 'application/json', ...headers },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }))
+  let openedUrl = ''
+  try {
+    await plugin.await()
+    await expect.poll(() => typeof handleRequest).toBe('function')
+    expect((await request('/health')).status).toBe(200)
+    const { db } = service.orchestra
+    const now = new Date().toISOString()
+    withTx(db, tx => {
+      tx.run("INSERT INTO tasks(task_id,title,status,created_at,updated_at) VALUES ('browser-task','原始简报','succeeded',?,?)", [now, now])
+      tx.run("INSERT INTO runs(run_id,task_id,status,created_at,updated_at) VALUES ('browser-run','browser-task','succeeded',?,?)", [now, now])
+    })
+    const full = '# 原始简报\n\n' + '核验后的资料完整保留。\n'.repeat(3000) + '\n全文最后一行：COMPLETE-END-字节✓'
+    const artifact = registerRunArtifact(db, { runId: 'browser-run', artifactId: 'browser-artifact', fileName: '原始简报.md', bytes: Buffer.from(full) })
+    const target = { kind: 'artifact', workspaceId: workspace.id, sessionId: agent.session.id,
+      taskId: 'browser-task', runId: 'browser-run', artifactId: artifact.artifact_id, sha256: artifact.sha256 }
+    expect((await request('/v1/artifacts/open-browser', target, { 'x-orchestra-request': '0' })).status).toBe(403)
+    expect((await request('/v1/artifacts/open-browser', target, { 'sec-fetch-site': 'cross-site' })).status).toBe(403)
+    expect((await request('/v1/artifacts/open-browser', { ...target, sessionId: 'another-session' })).status).toBe(403)
+    expect((await request('/v1/artifacts/open-browser', { ...target, taskId: 'another-task' })).status).toBe(403)
+    expect((await request('/v1/artifacts/open-browser', { ...target, sha256: 'f'.repeat(64) })).status).toBe(409)
+    const opened = await request('/v1/artifacts/open-browser', target)
+    expect(opened.status).toBe(200)
+    const envelope = await opened.json()
+    openedUrl = envelope.data.url
+    expect(JSON.stringify(envelope)).not.toContain('d'.repeat(64))
+    const response = await fetch(openedUrl)
+    expect(response.status).toBe(200)
+    const html = await response.text()
+    expect(html.split('核验后的资料完整保留。')).toHaveLength(3001)
+    expect(Buffer.from(html).includes(Buffer.from('全文最后一行：COMPLETE-END-字节✓'))).toBe(true)
+    const downloaded = await request('/v1/artifacts/download', target)
+    expect(downloaded.status).toBe(200)
+    const download = (await downloaded.json()).data
+    expect(download).toMatchObject({ kind: 'download', file_name: '原始简报.md', sha256: target.sha256, size_bytes: Buffer.byteLength(full) })
+    expect(Buffer.from(download.base64, 'base64')).toEqual(Buffer.from(full))
+    expect((await request('/v1/artifacts/download', { ...target, taskId: 'wrong-task' })).status).toBe(403)
+    expect((await request('/v1/artifacts/download', { ...target, sha256: 'e'.repeat(64) })).status).toBe(409)
+    const binary = Buffer.from([37, 80, 68, 70, 45, 49, 46, 55, 0, 255, 254, 1, 2, 3])
+    const pdf = registerRunArtifact(db, { runId: 'browser-run', artifactId: 'pdf-original', fileName: '附件.pdf', bytes: binary })
+    const pdfDownload = await request('/v1/artifacts/download', { ...target, artifactId: pdf.artifact_id, sha256: pdf.sha256 })
+    expect(Buffer.from((await pdfDownload.json()).data.base64, 'base64')).toEqual(binary)
+    archived.push(agent.session.id)
+    expect((await fetch(openedUrl)).status).toBe(403)
+    archived.length = 0
+    agent.session.header.cwd = join(directory, 'changed')
+    expect((await fetch(openedUrl)).status).toBe(403)
+    agent.session.header.cwd = directory
+    withTx(db, tx => tx.run('UPDATE artifacts SET retain_until=? WHERE artifact_id=?', [new Date(Date.now() - 1000).toISOString(), artifact.artifact_id]))
+    expect((await fetch(openedUrl)).status).toBe(410)
+    withTx(db, tx => tx.run('UPDATE artifacts SET retain_until=NULL WHERE artifact_id=?', [artifact.artifact_id]))
+    const reopened = await request('/v1/artifacts/open-browser', target)
+    expect(reopened.status).toBe(200)
+    expect((await reopened.json()).data.url).not.toBe(openedUrl)
+    withTx(db, tx => tx.run('UPDATE artifact_contents SET bytes=? WHERE artifact_id=?', [Buffer.from('tampered'), artifact.artifact_id]))
+    expect((await fetch(openedUrl)).status).toBe(409)
+  } finally { await plugin.dispose(); await rm(directory, { recursive: true, force: true }) }
+  await expect(fetch(openedUrl)).rejects.toThrow()
 })

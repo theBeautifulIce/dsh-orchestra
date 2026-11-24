@@ -151,21 +151,36 @@ sequenceDiagram
     Engine-->>Chat: Report the recorded outcome
 ~~~
 
-- **From chat.** Provide the goal, allowed inputs, deliverables, and acceptance criteria. `/orchestra <task>` explicitly routes one request. The bare command shows its usage.
+- **From chat.** Provide the goal, allowed inputs, deliverables, and acceptance criteria. The default `/orchestra <task>` explicitly routes one request. Rename it under **Settings → Task command**; only the saved name remains active. The bare command shows its usage.
 - **From the panel.** Use **Tasks → Plan with natural language** to check the selected workflow, deliverables, and permissions before launch. Start from a published workflow for repeat work.
 - **Track parallel work.** Switch among the board, workflow, queue, and list. Open a run to see step attempts, results, evidence, and events.
 - **Approve and review.** Handle launch and execution authorization in the conversation or approval center. In **Results → Delivery review and rework**, inspect the recorded version and submit specific feedback. In builds with conversational delivery review, a step held for review or a revised result awaiting acceptance also sends a structured notice to the originating conversation. Open the inline text or file controls and submit a verdict. Accepting the revised version settles its applicable review hold.
+- **Open deliverables from the source conversation.** Open an artifact's named link to read its complete version, or use **Download original** to save the file. See [complete deliverables](#read-complete-deliverables-in-chat) below.
 - **Retry after verification.** Enable the verified retry option for an agent step in a workflow draft and publish that version for new runs. See the [F8 acceptance report](docs/reviews/acceptance/f8-plugin-only-2026-11-21.md) for the evidence and host requirements.
 
 ![DSH Desktop results view with a synthetic artifact, preview, download, and rework controls](docs/assets/readme/results.png)
 
 *An isolated Desktop acceptance test. The results view displays the registered artifact and available actions.*
 
+### Read complete deliverables in chat
+
+After a task ends, its source conversation retains the result summary and named artifact links. Open a name to read the complete registered version in **DSH Desktop's built-in browser**. A normal summary, retry notice, or later reply does not hide these links. **Download original** beside each artifact saves the original file directly from the conversation. Each action binds the task, run, and SHA-256 and rechecks source access and the version before reading.
+
+The browser supports complete UTF-8 text, Markdown, and PNG, JPEG, GIF, and WebP images. HTML and SVG are shown as source text without executing scripts or loading remote images. Use **Download original** for PDF, Office, and other binary files. The existing 8 MiB artifact limit still applies. Markdown above 256 KiB uses a complete plain-text view.
+
+This preview uses the native **Desktop Browser** in DSH 0.2.2-rc.5 and compatible versions. The Web iframe fallback is outside this preview's supported scope. Desktop Browser blocks direct page downloads, so downloads start from the conversation card. Keep access to the original conversation. After a link expires, DSH restarts, or a connection recovers, open the same artifact name to obtain a fresh reader link. Expired artifact retention or a version mismatch produces an explicit error.
+
+For older messages without artifact cards, ask for the task's status in its source conversation to obtain the recorded artifact links. Conversation excerpts summarize the work; they do not truncate the original artifacts stored with the task.
+
 ### Shared context and settings
 
 Create a plain UTF-8 `ORCHESTRA.md` at the authorized workspace root. Describe the project's goal, important locations, and verification rules. Keep the most important text in the first 120 lines and 4 KiB. The run pins one snapshot at first dispatch. Later steps reuse it and receive applicable task requirements and upstream artifact references.
 
 Use **Settings** to configure planner and worker models, automatic routing, planning and execution limits, queue capacity, and workflow concurrency. DSH supplies the model catalog and available reasoning efforts. Approved tools determine what an agent can read. `local.allowWorkspaceListing` defaults to off and limits listing to allowed entries at the first level. A trusted host can set `local.sampleFile` to an explicitly authorized text file for sample reads.
+
+**Task command** is saved per Desktop profile and defaults to `/orchestra`. Use 1–32 ASCII letters, digits, hyphens, or underscores, starting with a letter. Input is normalized to lowercase without the leading slash. The setting checks after an input pause and again before saving against host commands, user-invocable skills, and client commands. A conflict displays its source and prevents saving. Renaming does not change running tasks. Reopen settings after enabling or disabling plugins to refresh checks. DSH does not expose a complete catalog of arbitrary third-party input rules, so rules outside its public command catalogs cannot be checked.
+
+**Execution permissions** and **Planning limits** share the A workbench's settings controls. A permission mode applies to future execution attempts within host authorization and task constraints. Timeout fields display all three digits and wrap on narrow panels.
 
 ### Personal Desktop and self-managed hosts
 

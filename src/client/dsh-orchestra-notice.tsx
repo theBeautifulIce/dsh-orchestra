@@ -1,10 +1,13 @@
 import type { ReactElement } from 'react'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
+import { artifactVersionKey, chatArtifactLink, type ChatArtifactLink } from '../core/receipt-location.ts'
+import { ArtifactLinks, downloadChatArtifact, openChatArtifact, type ArtifactBrowser, type OpenChatArtifact } from './dsh-artifact-links.tsx'
+import type { DshLocalPanelSources } from './dsh-local-panel.tsx'
 
 const noticeKind = 'orchestra-notice'
 const slotName = 'conversation.chat.turnTail'
 
-type Notice = { id: string; seq: number; title: string; text: string }
+type Notice = { id: string; seq: number; title: string; text: string; artifacts?: ChatArtifactLink[] }
 type Event = { type: string; seq: number; surfaceOp?: unknown; data?: unknown }
 type Match = { event: Event; location: unknown }
 type NoticeContext = { key: string; id: string; start?: Match; state?: Notice }
@@ -12,19 +15,23 @@ type Observable<T> = { getSnapshot(): T; subscribe(listener: () => void): () => 
 type TailProps = {
   turn: { turn: number; end?: { data?: { reason?: { kind?: string } } }; data: { get(key: string): unknown } }
   useNotices(turn: string): readonly Notice[] | undefined
+  openArtifact?: OpenChatArtifact
+  downloadArtifact?: OpenChatArtifact
 }
 
 function readNotice(event: Event): Notice | undefined {
   if (event.type !== 'user/message' || event.surfaceOp !== 'append' || !event.data || typeof event.data !== 'object') return
   const data = event.data as { id?: unknown; source?: unknown; content?: unknown }
   if (!data.source || typeof data.source !== 'object' || !Array.isArray(data.content) || typeof data.id !== 'string') return
-  const source = data.source as { kind?: unknown; form?: unknown; summary?: unknown }
+  const source = data.source as { kind?: unknown; form?: unknown; summary?: unknown; artifacts?: unknown }
   if (source.kind !== ORCHESTRA_MESSAGE_SOURCE || source.form !== 'notice') return
   const text = data.content.flatMap((block: unknown) => block && typeof block === 'object'
     && (block as { type?: unknown }).type === 'text' && typeof (block as { text?: unknown }).text === 'string'
     ? [(block as { text: string }).text] : []).join('\n')
   if (!text.trim()) return
-  return { id: data.id, seq: event.seq, title: typeof source.summary === 'string' ? source.summary : 'Orchestra 任务结果', text }
+  const artifacts = chatArtifactLink.array().max(50).safeParse(source.artifacts)
+  return { id: data.id, seq: event.seq, title: typeof source.summary === 'string' ? source.summary : 'Orchestra 任务结果', text,
+    ...(artifacts.success && { artifacts: artifacts.data }) }
 }
 
 /** DSH rc.5 Conversation projection. The original notice remains the durable source. */
@@ -45,12 +52,15 @@ export const orchestraNoticeDefinition = {
 }
 
 /** A closed turn must show its recorded result even when the model never produced a final answer. */
-export function OrchestraNoticeTail({ turn, useNotices }: TailProps): ReactElement | null {
+export function OrchestraNoticeTail({ turn, useNotices, openArtifact, downloadArtifact }: TailProps): ReactElement | null {
   const notices = useNotices(String(turn.turn)) ?? []
   const tail = turn.data.get('turn-tail') as { closing?: { finalNode?: { seq?: number } } | null } | undefined
   const answeredThrough = turn.end?.data?.reason?.kind === 'completed' ? tail?.closing?.finalNode?.seq ?? -1 : -1
   const pending = notices.filter((notice) => notice.seq > answeredThrough)
-  if (!turn.end || pending.length === 0) return null
+  // The final answer may replace a fallback summary. It must never hide the actual deliverables.
+  const artifacts = [...new Map(notices.flatMap(notice => notice.artifacts ?? [])
+    .map(artifact => [artifactVersionKey(artifact.location), artifact])).values()]
+  if (!turn.end || (pending.length === 0 && artifacts.length === 0)) return null
   return <div data-orchestra-notice-fallback>
     {pending.map((notice) => <section key={notice.id} aria-label={notice.title} role="status"
       style={{ marginBlock: 12, padding: 16, border: '1px solid #d8dee8', borderRadius: 10, overflowWrap: 'anywhere' }}>
@@ -58,6 +68,7 @@ export function OrchestraNoticeTail({ turn, useNotices }: TailProps): ReactEleme
       <div style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>{notice.text.startsWith(notice.title + '\n')
         ? notice.text.slice(notice.title.length + 1) : notice.text}</div>
     </section>)}
+    <ArtifactLinks artifacts={artifacts} openArtifact={openArtifact} downloadArtifact={downloadArtifact} />
   </div>
 }
 
@@ -78,9 +89,13 @@ type Ready = {
   }
 }
 
-export type NativeOrchestraNoticeContext = { inject(names: string[], callback: (ready: Ready) => void): unknown }
+export type NativeOrchestraNoticeContext = { inject(names: string[], callback: (ready: Ready & ArtifactBrowser) => void): unknown }
 
-export function registerNativeOrchestraNotices(ctx: NativeOrchestraNoticeContext): void {
+export function registerNativeOrchestraNotices(ctx: NativeOrchestraNoticeContext,
+  sources?: () => DshLocalPanelSources | undefined) {
+  let browser: ArtifactBrowser | undefined
+  const openArtifact: OpenChatArtifact = (artifact, signal) => openChatArtifact(artifact, sources?.(), browser, signal)
+  const downloadArtifact: OpenChatArtifact = (artifact, signal) => downloadChatArtifact(artifact, sources?.(), signal)
   ctx.inject(['slots', 'sessions', 'uiConversation'], (ready) => {
     ready.effect(() => ready.uiConversation.events.register(orchestraNoticeDefinition), 'orchestra: durable chat notices')
     ready.slots.inject(slotName, () => ready.slots.register({ name: slotName, id: 'orchestra-notice',
@@ -88,7 +103,13 @@ export function registerNativeOrchestraNotices(ctx: NativeOrchestraNoticeContext
         const binding = ready.sessions.binding(sessionId)
         if (!binding) throw new Error('Orchestra notice has no session binding')
         const chat = ready.uiConversation.binding(binding).target('chat')
-        return { keyedHooks: { notices(turn) {
+        return { downloadArtifact: async (artifact: ChatArtifactLink, signal?: AbortSignal) => {
+          if (artifact.location.sessionId !== sessionId) throw new Error('此成果不属于当前会话。')
+          return downloadArtifact(artifact, signal)
+        }, openArtifact: async (artifact: ChatArtifactLink, signal?: AbortSignal) => {
+          if (artifact.location.sessionId !== sessionId) throw new Error('此成果不属于当前会话。')
+          return openArtifact(artifact, signal)
+        }, keyedHooks: { notices(turn) {
           const snapshot = chat.getSnapshot()
           if (!snapshot) throw new Error('Orchestra notice has no chat projection')
           return snapshot.nodes.turnDataSource(Number(turn), noticeKind)
@@ -96,4 +117,11 @@ export function registerNativeOrchestraNotices(ctx: NativeOrchestraNoticeContext
       },
     }, OrchestraNoticeTail))
   })
+  ctx.inject(['sidebarRight', 'sidebarRightTabs'], (ready) => {
+    ready.effect(() => {
+      browser = ready
+      return () => { if (browser === ready) browser = undefined }
+    }, 'orchestra: native artifact browser')
+  })
+  return { openArtifact, downloadArtifact }
 }

@@ -19,6 +19,8 @@ import { SettingsScreen } from './settings-screen.tsx'
 import { ModelRoutingSettings } from './model-routing-settings.tsx'
 import { PlanningTimeoutSettings } from './planning-timeout-settings.tsx'
 import { ChatRoutingSettings } from './chat-routing-settings.tsx'
+import { CommandSettings } from './command-settings.tsx'
+import type { ClientCommandReservations } from '../dsh-command-reservations.ts'
 import { ExecutionPermissionSettings } from './execution-permission-settings.tsx'
 import { DisplayPreferenceSettings } from './display-preference-settings.tsx'
 import { ExecutionCapacitySettings } from './execution-capacity-settings.tsx'
@@ -41,6 +43,8 @@ export type PanelAppProps = {
   modelRoutingEnabled?: boolean
   planningTimeoutsEnabled?: boolean
   nativeChatRoutingEnabled?: boolean
+  nativeCommandSettingsEnabled?: boolean
+  clientCommands?: ClientCommandReservations
   nativeExecutionPermissionsEnabled?: boolean
   executionCapacityEnabled?: boolean
   workflowConcurrencyEnabled?: boolean
@@ -207,6 +211,7 @@ export function PanelApp(props: PanelAppProps) {
   const showServiceStatus = props.additionalScreens?.settings == null
   const settingsSections = [
     ...(props.nativeChatRoutingEnabled ? [{ id: 'chat-routing-title', label: '会话路由' }] : []),
+    ...(props.nativeCommandSettingsEnabled ? [{ id: 'task-command-title', label: '任务命令' }] : []),
     ...(props.nativeExecutionPermissionsEnabled ? [{ id: 'execution-permissions-title', label: '执行权限' }] : []),
     ...(props.modelRoutingEnabled && plannerHeading ? [{ id: plannerHeading.id, label: '主脑模型' }] : []),
     ...(props.modelRoutingEnabled && submodelHeading ? [{ id: submodelHeading.id, label: '子模型及能力' }] : []),
@@ -248,6 +253,7 @@ export function PanelApp(props: PanelAppProps) {
       <h1>设置</h1><p className="ops-meta">管理会话、模型与执行方式，查看当前服务和记忆能力。</p>
     </div></header><div className="ops-settings-section">
       {props.nativeChatRoutingEnabled && <ChatRoutingSettings client={client} reloadVersion={settingsReloadVersion} writable={writesEnabled.current} />}
+      {props.nativeCommandSettingsEnabled && <CommandSettings client={client} reloadVersion={settingsReloadVersion} writable={writesEnabled.current} clientCommands={props.clientCommands} />}
       {props.nativeExecutionPermissionsEnabled && <ExecutionPermissionSettings client={client} reloadVersion={settingsReloadVersion} writable={writesEnabled.current} />}
       {props.modelRoutingEnabled && <ModelRoutingSettings client={client} reloadVersion={settingsReloadVersion} onSnapshot={onSnapshot}
         plannerHeadingRef={setPlannerHeading} submodelHeadingRef={setSubmodelHeading} />}

@@ -151,7 +151,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
   for (const item of view.text_results ?? []) {
     lines.push(item.title)
     if (item.text) lines.push(item.text)
-    if (item.truncated) lines.push('这里只显示部分正文。请继续读取「' + item.file_name + '」的完整正文，再完成会话交付。')
+    if (item.truncated) lines.push('以上是正文节选。完整成果请点击会话中的「' + item.title + '」。')
     lines.push('')
   }
   for (const review of view.deliveryReviews ?? []) lines.push(formatDeliveryReviewNotice(review), '')
@@ -232,7 +232,8 @@ export type ChatOutcome =
   | { state: 'launch_declined'; plan_id: string; title: string }
   | { state: 'stop_requested'; run_id: string; status: string; skipped_irreversible: number; pending_decisions: number }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
-  | { state: 'clarification_required' | 'task_held' | 'usage' | 'queued' | 'draft_discarded'; message: string }
+  | { state: 'clarification_required' | 'task_held' | 'command_unavailable' | 'queued' | 'draft_discarded'; message: string }
+  | { state: 'usage'; command?: string; message: string }
   | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue; reason?: ChatErrorReason }
 
 function startErrorDisplay(outcome: Extract<ChatOutcome, { state: 'error' }>): readonly [string, string] {
@@ -346,7 +347,9 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
       return { heading: 'Orchestra 已暂缓任务', body: outcome.message }
     case 'draft_discarded': return { heading: 'Orchestra 已放弃草稿', body: outcome.message }
     case 'usage':
-      return { heading: 'Orchestra 用法 · /orchestra 任务内容', body: outcome.message }
+      return { heading: `Orchestra 用法 · /${outcome.command ?? 'orchestra'} 任务内容`, body: outcome.message }
+    case 'command_unavailable':
+      return { heading: 'Orchestra 任务命令暂不可用', body: outcome.message }
     case 'queued':
       return { heading: 'Orchestra 已排队新消息', body: outcome.message }
     case 'error':

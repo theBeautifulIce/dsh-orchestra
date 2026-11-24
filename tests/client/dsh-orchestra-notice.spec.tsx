@@ -4,12 +4,17 @@ import { ORCHESTRA_MESSAGE_SOURCE } from '../../src/core/dsh-message-source.ts'
 import { OrchestraNoticeTail, orchestraNoticeDefinition, registerNativeOrchestraNotices,
   type NativeOrchestraNoticeContext } from '../../src/client/dsh-orchestra-notice.tsx'
 import { renderPanel } from './harness.ts'
+import type { ChatArtifactLink } from '../../src/core/receipt-location.ts'
 
 const notice = { id: 'notice-1', seq: 75, title: '新闻整理：执行受阻',
   text: '新闻整理：执行受阻\n原因：无法访问新闻来源。\n下一步：启用检索工具后重试。' }
 const event = { type: 'user/message', seq: notice.seq, surfaceOp: 'append', data: {
   id: notice.id, source: { kind: ORCHESTRA_MESSAGE_SOURCE, form: 'notice', summary: notice.title },
   content: [{ type: 'text', text: notice.text }],
+} }
+const artifact: ChatArtifactLink = { title: '最终完整简报', fileName: '会话正文-3.md', location: {
+  kind: 'artifact', workspaceId: 'workspace', sessionId: 'source-session', taskId: 'task', runId: 'run',
+  artifactId: 'artifact', sha256: 'a'.repeat(64),
 } }
 
 it('projects only durable Orchestra notices and keeps recovery instructions out of the result', () => {
@@ -45,6 +50,37 @@ it('avoids a duplicate fallback after a completed final answer and waits while t
     await view.rerender(<OrchestraNoticeTail turn={{ turn: 4, data: new Map() }} useNotices={() => [notice]} />)
     expect(view.byRole('status')).toHaveLength(0)
   } finally { view.unmount() }
+})
+
+it('keeps named original artifacts beside a completed final answer and deduplicates by exact recorded version', async () => {
+  const turn = { turn: 4, end: { data: { reason: { kind: 'completed' } } },
+    data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }
+  const openArtifact = vi.fn(async () => {})
+  const secondVersion = { ...artifact, title: '最终完整简报（修订）', location: { ...artifact.location, artifactId: 'revised-artifact', sha256: 'b'.repeat(64) } }
+  const view = await renderPanel(<OrchestraNoticeTail turn={turn} openArtifact={openArtifact} useNotices={() => [
+    { ...notice, artifacts: [artifact] },
+    { ...notice, id: 'retry-notice', seq: 76, artifacts: [artifact, secondVersion] },
+  ]} />)
+  try {
+    expect(view.byRole('status')).toHaveLength(0)
+    expect(view.text()).not.toContain('执行受阻')
+    expect(view.findAll('a').map(link => link.textContent)).toEqual(['最终完整简报', '最终完整简报（修订）'])
+    await view.click(view.findAll('a')[0]!)
+    expect(openArtifact).toHaveBeenCalledWith(artifact, expect.any(AbortSignal))
+    expect(view.container.innerHTML).not.toMatch(/http:|token|secret/u)
+  } finally { view.unmount() }
+})
+
+it('restores only validated artifact identities from durable source metadata', () => {
+  const withArtifacts = { ...event, data: { ...event.data, source: { ...event.data.source, artifacts: [artifact] } } }
+  const restored = orchestraNoticeDefinition.start({ key: 'notice', id: notice.id }, { event: withArtifacts, location: {} })
+  expect(restored.artifacts).toEqual([artifact])
+  for (const invalid of [{ ...artifact, url: 'http://unsafe.invalid' }, { ...artifact, location: { ...artifact.location, sha256: 'invalid' } }]) {
+    const state = orchestraNoticeDefinition.start({ key: 'notice', id: notice.id }, {
+      event: { ...withArtifacts, data: { ...withArtifacts.data, source: { ...withArtifacts.data.source, artifacts: [invalid] } } }, location: {},
+    })
+    expect(state.artifacts).toBeUndefined()
+  }
 })
 
 it('retains distinct task outcomes and renders supplied text as text', async () => {

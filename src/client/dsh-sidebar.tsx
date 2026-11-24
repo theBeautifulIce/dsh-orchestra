@@ -2,6 +2,7 @@ import { useSyncExternalStore, type ReactElement } from 'react'
 import { DshLocalPanel, isDshLocalShell, type DshLocalPanelSources } from './dsh-local-panel.tsx'
 import { formatNativeOrchestraApprovalCards } from './dsh-orchestra-approval-card.ts'
 import { registerNativeOrchestraSlash, type NativeOrchestraSlashContext } from './dsh-orchestra-slash.ts'
+import { createClientCommandReservations, type ClientCommandReservations, type DshCommandUi } from './dsh-command-reservations.ts'
 import { registerNativeOrchestraToolView, type NativeOrchestraToolViewContext } from './dsh-orchestra-toolview.tsx'
 import { registerNativeOrchestraNotices, type NativeOrchestraNoticeContext } from './dsh-orchestra-notice.tsx'
 import { createPanelHost, type PanelHostProps } from './panel-host.tsx'
@@ -25,6 +26,7 @@ export type DshOrchestraPanelTransport = PanelHostProps & { fetcher: NonNullable
 
 type Panel = () => ReactElement
 type DshClientContext = DshPanelContext & NativeOrchestraSlashContext & NativeOrchestraToolViewContext & {
+  commandUi: DshCommandUi
   inject(names: string[], callback: (ctx: DshClientContext) => void): unknown
   orchestraPanelTransport: DshOrchestraPanelTransport
 }
@@ -33,9 +35,11 @@ export const inject = ['slots']
 
 /** Activate the host panel while a trusted transport is available in this scope. */
 export function apply(ctx: DshClientContext): void {
-  registerNativeOrchestraNotices(ctx as unknown as NativeOrchestraNoticeContext)
   let reviewSources: DshLocalPanelSources | undefined
-  registerNativeOrchestraToolView(ctx, () => reviewSources)
+  let clientCommands: ClientCommandReservations | undefined
+  let refreshLocal: (() => void) | undefined
+  const { openArtifact, downloadArtifact } = registerNativeOrchestraNotices(ctx as unknown as NativeOrchestraNoticeContext, () => reviewSources)
+  registerNativeOrchestraToolView(ctx, () => reviewSources, openArtifact, downloadArtifact)
   let explicit: Panel | undefined
   let local: Panel | undefined
   let unmount: (() => unknown) | undefined
@@ -80,18 +84,25 @@ export function apply(ctx: DshClientContext): void {
   ctx.effect(function* () {
     yield formatNativeOrchestraApprovalCards(window.document)
   }, 'orchestra: native approval fields')
-  ctx.inject(['sessions', 'workspaces', 'inputTriggers'], ready => {
+  ctx.inject(['sessions', 'workspaces', 'inputTriggers', 'commandUi'], ready => {
     ready.effect(function* () {
-      yield registerNativeOrchestraSlash(ready, (input, init) => window.fetch(input, init))
+      const reservations = createClientCommandReservations(ready.commandUi)
+      clientCommands = reservations
+      refreshLocal?.()
+      yield () => { clientCommands = undefined; reservations.dispose(); refreshLocal?.() }
+      yield registerNativeOrchestraSlash(ready, (input, init) => window.fetch(input, init), reservations)
     }, 'orchestra: native slash suggestion')
   })
   ctx.inject(['slots', 'sessions', 'workspaces'], function bindLocalShell(ready) {
     ready.effect(function* () {
       const { sessions, workspaces } = ready
       reviewSources = { sessions, workspaces }
-      local = () => <DshLocalPanel sessions={sessions} workspaces={workspaces} />
-      refresh()
-      yield () => { local = undefined; reviewSources = undefined; return refresh() }
+      refreshLocal = () => {
+        local = () => <DshLocalPanel sessions={sessions} workspaces={workspaces} clientCommands={clientCommands} />
+        refresh()
+      }
+      refreshLocal()
+      yield () => { refreshLocal = undefined; local = undefined; reviewSources = undefined; return refresh() }
     }, 'orchestra: local DSH workspace transport')
   })
 }

@@ -2,8 +2,9 @@ import { COLOR, FONT_PX } from './tokens.ts'
 
 export const PLANNING_TIMEOUT_STYLES = `
 .planning-timeouts { container: planning-timeouts / inline-size; }
-.planning-timeouts-form { display: grid; gap: 16px; padding: 14px 16px; }
+.planning-timeouts-form { display: grid; gap: 16px; padding: 18px 20px; }
 .planning-timeouts-intro, .planning-timeouts-status, .planning-timeouts-context p { margin: 0; }
+.planning-timeouts-intro { color: ${COLOR.inkMuted}; font-size: ${FONT_PX.menu}px; line-height: 1.65; }
 .planning-timeouts-context {
   display: grid; gap: 8px; padding: 9px 12px;
   background: #f5f8fc; border: 1px solid #e3e9f1; border-radius: 7px;
@@ -26,7 +27,11 @@ export const PLANNING_TIMEOUT_STYLES = `
   grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center;
   gap: 7px; font-variant-numeric: tabular-nums;
 }
-.planning-timeouts-value input { inline-size: 7ch; min-inline-size: 66px; }
+/* Reserve text space separately from padding, borders and the native number stepper. */
+.ops-panel-viewport .planning-timeouts-value input {
+  inline-size: calc(5ch + 3rem); min-inline-size: calc(5ch + 3rem);
+  flex: none; text-align: right;
+}
 .planning-timeouts-value input[aria-invalid=true] { border-color: ${COLOR.danger}; }
 .planning-timeouts-value span, .planning-timeouts-help { color: ${COLOR.inkMuted}; }
 .planning-timeouts-help { grid-column: 1; font-size: ${FONT_PX.menu}px; }
@@ -36,7 +41,7 @@ export const PLANNING_TIMEOUT_STYLES = `
 .planning-timeouts-status { color: ${COLOR.inkMuted}; font-size: ${FONT_PX.menu}px; }
 .planning-timeouts-status[role=alert] { color: ${COLOR.danger}; }
 @container planning-timeouts (max-width: 460px) {
-  .planning-timeouts-form { padding-inline: 12px; }
+  .planning-timeouts-form { padding-inline: 16px; }
   .planning-timeouts-row { row-gap: 6px; }
   .planning-timeouts-value { grid-row: 1; }
   .planning-timeouts-help { grid-column: 1 / -1; }

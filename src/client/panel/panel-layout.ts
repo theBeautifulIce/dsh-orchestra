@@ -131,6 +131,23 @@ export const PANEL_LAYOUT_CSS = `
 .ops-panel-viewport .ops-settings-page { width: 100%; max-width: 1100px; margin-inline: auto; }
 .ops-panel-viewport .ops-settings-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
 .ops-panel-viewport .ops-settings-section fieldset { min-width: 0; }
+.ops-panel-viewport .ops-setting-body { display: grid; gap: 16px; min-width: 0; container: orchestra-setting / inline-size; }
+.ops-panel-viewport .ops-setting-body p { margin: 0; }
+.ops-panel-viewport .ops-setting-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  align-items: start; gap: 12px 24px; min-width: 0;
+}
+.ops-panel-viewport .ops-setting-copy { display: grid; gap: 5px; min-width: 0; }
+.ops-panel-viewport .ops-setting-label { font-weight: 650; }
+.ops-panel-viewport .ops-setting-control { display: grid; gap: 8px; min-width: 0; }
+.ops-panel-viewport .ops-setting-control > .ops-field { width: 100%; }
+.ops-panel-viewport .ops-setting-help, .ops-panel-viewport .ops-setting-feedback,
+.ops-panel-viewport .ops-setting-note { color: ${COLOR.inkMuted}; font-size: ${FONT_PX.menu}px; line-height: 1.65; overflow-wrap: anywhere; }
+.ops-panel-viewport .ops-setting-feedback[role=alert] { color: ${COLOR.danger}; }
+.ops-panel-viewport .ops-setting-note { padding-top: 12px; border-top: 1px solid ${COLOR.line}; }
+@container orchestra-setting (max-width: 620px) {
+  .ops-panel-viewport .ops-setting-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+}
 .ops-panel-viewport .ops-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr)); align-items: start; gap: 20px; }
 .ops-panel-viewport .ops-card-grid:empty { display: none; }
 .ops-panel-viewport .ops-inset { padding: 18px 20px; }
