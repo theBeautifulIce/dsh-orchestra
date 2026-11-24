@@ -2,10 +2,11 @@
 import { expect, it } from 'vitest'
 import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
+import type { WorkflowView } from '../../src/client/api/types.ts'
 import { PanelApp } from '../../src/client/panel/app.tsx'
 import { TaskListScreen } from '../../src/client/panel/tasks-screen.tsx'
 import { readStepWindow } from '../../src/client/panel/task-step-overview.tsx'
-import { createFakeService, nodeRunView, renderPanel, runSummary, taskSummary } from './harness.ts'
+import { createFakeService, nodeRunView, renderPanel, runSummary, taskSummary, workflowItem } from './harness.ts'
 
 it('T05 继续读取后仍保留尚在后页的受阻项，并在读完时去重', async () => {
   const step=(index:number)=>nodeRunView({node_run_id:'node-'+index,node_id:'step-'+index,status:'queued'})
@@ -70,4 +71,68 @@ it('T14/T15 待处理列先出现，范围来自入口声明，独立连接不�
     await view.click(view.findAll('button').find(button=>button.textContent==='列表')!)
     expect(view.findAll('tbody td[data-label]').map(cell=>cell.getAttribute('data-label'))).toEqual(['任务','下一步','状态','当前情况','运行次数','更新时间'])
   } finally {view.unmount()}
+})
+
+it.each([false, true])('流程页打开 B 运行只使用本次目标（此前打开 A 验收：%s）', async (previousReview) => {
+  const sha = 'a'.repeat(64)
+  const action = { kind: 'review' as const, label: '打开「A 报告.md」验收', run_id: 'run-a', node_run_id: 'node-a',
+    artifact_id: 'artifact-a', sha256: sha, file_name: 'A 报告.md' }
+  const taskA = taskSummary({ task_id: 'task-a', current_run_id: 'run-a', title: '任务 A', lane: 'attention', next_action: action, delivery_review_count: 1 })
+  const taskB = taskSummary({ task_id: 'task-b', current_run_id: 'run-b', title: '任务 B' })
+  const runA = runSummary({ run_id: 'run-a', task_id: 'task-a', task_title: '任务 A' })
+  const runB = runSummary({ run_id: 'run-b', task_id: 'task-b', task_title: '任务 B' })
+  const fileA = { artifact_id: 'artifact-a', run_id: 'run-a', source_node_run_id: 'node-a', sha256: sha,
+    file_name: 'A 报告.md', retain_until: null, created_at: taskA.updated_at }
+  const workflow = workflowItem({ name: '核对流程', current_version: 1, has_draft: false, node_count: 1 })
+  const workflowView: WorkflowView = { workflow, draft: null,
+    current: { workflow_id: workflow.workflow_id, version: 1, based_on_version: null,
+      definition: { name: '核对流程', nodes: [{ node_id: 'start', type: 'trigger', title: '开始' }], edges: [] },
+      definition_hash: 'hash', publish_note: '', published_at: taskA.updated_at, published_by: 'human:alice', projection_missing: [] },
+    validation: { errors: [], warnings: [] }, versions: [] }
+  const service = createFakeService(({ path, params }) => {
+    if (path === '/v1/tasks') return { ok: true, data: { items: [taskA, taskB], next_cursor: null } }
+    if (path === '/v1/tasks/get') return { ok: true, data: params.get('task_id') === 'task-a' ? taskA : taskB }
+    if (path === '/v1/runs') return { ok: true, data: { items: params.get('task_id') === 'task-a' ? [runA] : [runB], next_cursor: null } }
+    if (path === '/v1/runs/get') return { ok: true, data: params.get('run_id') === 'run-a' ? runA : runB }
+    if (path === '/v1/node-runs') return { ok: true, data: { items: params.get('run_id') === 'run-a'
+      ? [nodeRunView({ run_id: 'run-a', node_run_id: 'node-a', node_id: 'report', node_type: 'agent', status: 'done' })] : [], has_more: false } }
+    if (path === '/v1/artifacts') return { ok: true, data: { items: params.get('run_id') === 'run-a' ? [fileA] : [], next_cursor: null } }
+    if (path === '/v1/artifacts/content') return { ok: true, data: { kind: 'preview', file_name: fileA.file_name, sha256: sha, text: 'A 的精确交付正文', truncated: false } }
+    if (path === '/v1/rework') return { ok: true, data: { items: [] } }
+    if (path === '/v1/rework/holds') return { ok: true, data: { items: params.get('run_id') === 'run-a'
+      ? [{ run_id: 'run-a', node_id: 'report', node_run_id: 'node-a', status: 'held', hold_id: 'hold-a', revision: 1 }] : [] } }
+    if (path === '/v1/workflows') return { ok: true, data: { items: [workflow], next_cursor: null } }
+    if (path === '/v1/workflows/get') return { ok: true, data: workflowView }
+    return { ok: false, error: { code: 'NOT_FOUND', message: 'fixture', retryable: false } }
+  })
+  const view = await renderPanel(<PanelApp client={createApiClient('http://panel.test', service.fetcher)} serviceConnected reworkEnabled />)
+  const clickText = async (label: string) => {
+    const target = view.findAll('button').find(button => button.textContent === label)
+    expect(target, '缺少实际按钮：' + label).toBeDefined()
+    await view.click(target!)
+    await view.flush()
+  }
+  try {
+    await view.flush()
+    if (previousReview) {
+      await clickText(action.label)
+      const inspector = view.container.querySelector('#task-inspector')!
+      expect(inspector.querySelector('[aria-pressed="true"]')?.textContent).toBe('结果')
+      expect(inspector.textContent).toContain('A 的精确交付正文')
+      expect(Array.from(inspector.querySelectorAll('select')).map(select => select.value)).toContain('artifact-a')
+      await clickText('关闭')
+    }
+    await clickText('Workflow 管理')
+    await clickText('查看流程')
+    await clickText('运行记录')
+    const requestsBefore = service.calls.length
+    await clickText('任务 B')
+    const selectedRuns = service.calls.slice(requestsBefore)
+      .filter(call => call.path === '/v1/runs/get').map(call => call.params.get('run_id'))
+    const inspector = view.container.querySelector('#task-inspector')!
+    expect(inspector.querySelector('#task-detail-title')?.textContent).toBe('任务 B')
+    expect(selectedRuns, '实际请求运行应是用户刚点选的 B').toEqual(['run-b'])
+    expect(inspector.querySelector('[aria-pressed="true"]')?.textContent).toBe('步骤')
+    expect(inspector.querySelector('[role="alert"]')).toBeNull()
+  } finally { view.unmount() }
 })
