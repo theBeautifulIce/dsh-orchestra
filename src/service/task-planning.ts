@@ -106,7 +106,7 @@ type Goal = { id: string; text: string }
 type PlanInput = { goal: string; requirements: Goal[]; workflow_id?: string; workflow_version?: string; materials?: PlanMaterial[]; requirements_contract?: RequirementsContract }
 type WorkflowCandidate = {
   workflowId: string; version: string; title: string
-  nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; sideEffectPolicy?: string; dependsOn: string[]; toolAllow: string[]; declaredTools: string[]; subflowTools?: string[] }>
+  nodes: Array<{ id: string; type: string; title?: string; description?: string; approvalPrompt?: string; sideEffectPolicy?: string; dependsOn: string[]; conditionalFanout?: boolean; toolAllow: string[]; declaredTools: string[]; subflowTools?: string[] }>
 }
 type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
@@ -265,6 +265,7 @@ function readChoice(catalog: WorkflowCatalog, registry: ToolRegistry | undefined
     const declaredTools = [...new Set(policy.allow.filter((tool) => !policy.deny.includes(tool)))]
     return {
       id: node.node_id, type: node.type, approvalPrompt: node.approval?.prompt, sideEffectPolicy: node.side_effect_policy,
+      ...(node.type === 'parallel' && node.parallel?.join !== 'all' && { conditionalFanout: true }),
       dependsOn: (def.edges ?? []).filter((edge) => edge.to === node.node_id).map((edge) => edge.from),
       declaredTools, toolAllow: declaredTools.filter((tool) => registry?.lookup(tool)?.capability === 'read_only'),
       // 子流程声明的只读工具在计划期就摊开，便于递归校验（P06）。

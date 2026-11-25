@@ -53,13 +53,14 @@ function snapshot(tx: ReadTx, requestId: string, actor: string, revision: number
   const definition = tx.get<{ definition_json: string }>(`SELECT w.definition_json FROM runs r JOIN workflow_versions w
     ON w.workflow_id=COALESCE(r.workflow_id,'default') AND w.version=r.workflow_version WHERE r.run_id=?`, [request.run_id])
   if (!definition) throw new OrchError('WORKFLOW_VERSION_IMMUTABLE', '缺少用于校验局部规划的固定流程')
-  const pinned = JSON.parse(definition.definition_json) as { nodes: {node_id:string}[]; edges?: {from:string;to:string}[] }
+  const pinned = JSON.parse(definition.definition_json) as { nodes: {node_id:string; type?: string; parallel?: { join?: string }}[]; edges?: {from:string;to:string}[] }
   const edges = runtimeEdges(tx, request.run_id, pinned.edges ?? [])
   const reviewer = nodes.find(n => n.node_run_id === request.requester_node_run_id)?.node_id ?? null
   const sources = readApprovedTaskPlanForRun(tx, request.run_id)?.brief.requirements_contract?.sources
   const fixedRoster = sources && contractAgentRoster(sources)
   return { request_id: requestId, revision, original_hash: request.source_artifact_hash, reason: request.reason, ...(fixedRoster?.closed && { fixed_agent_roster: true }),
     ...(fixedRoster && fixedRoster.parallelCount > 1 && { parallel_agents: fixedRoster.parallelCount }),
+    ...(fixedRoster && fixedRoster.parallelCount > 1 && { optional_groups: pinned.nodes.filter(n => n.type === 'parallel' && n.parallel?.join !== 'all').map(n => n.node_id) }),
     expected_result: request.expected_result, preserve: JSON.parse(request.preserve_requirements_json) as string[],
     budget: request.budget_remaining, target: target.node_id, allowed, nodes, edges, reviewer, pinned_node_ids: pinned.nodes.map(n => n.node_id) }
 }
@@ -78,7 +79,8 @@ function approvedEdges(proposal: Proposal, state: ReturnType<typeof snapshot>) {
     edges.push(edge)
   }
   if (state.parallel_agents && proposal.additional_edges.length && concurrentAgentCapacity(state.nodes.map(node => ({
-    id: node.node_id, type: node.node_type, dependsOn: edges.filter(edge => edge.to === node.node_id).map(edge => edge.from),
+    id: node.node_id, type: node.node_type, conditionalFanout: state.optional_groups?.includes(node.node_id),
+    dependsOn: edges.filter(edge => edge.to === node.node_id).map(edge => edge.from),
   }))) < state.parallel_agents) throw new OrchError('FORBIDDEN', '原任务要求代理并行，返工不能让这些代理互相等待。')
   const inserted = new Set<string>()
   const before = new Set<string>()

@@ -114,6 +114,14 @@ it('combines roster facts across a held message and its continuation before acce
     { id: 'summary', type: 'agent', dependsOn: ['a', 'b'] }])).toBeUndefined()
   expect(fixedRosterIssue(minimumOnly, [{ id: 'prepare', type: 'tool', dependsOn: [] },
     { id: 'a', type: 'agent', dependsOn: ['prepare'] }, { id: 'b', type: 'agent', dependsOn: ['prepare'] }])).toBeUndefined()
+  expect(fixedRosterIssue(minimumOnly, [{ id: 'choose', type: 'branch', dependsOn: [] },
+    { id: 'A', type: 'agent', dependsOn: ['choose'] }, { id: 'B', type: 'agent', dependsOn: ['choose'] }]))
+    .toContain('至少 2 个代理')
+  expect(fixedRosterIssue(minimumOnly, [{ id: 'A', type: 'agent', dependsOn: [] },
+    { id: 'B', type: 'agent', dependsOn: [] }, { id: 'merge', type: 'agent', dependsOn: ['A', 'B'] }])).toBeUndefined()
+  expect(fixedRosterIssue(minimumOnly, [{ id: 'A', type: 'agent', dependsOn: [] }, { id: 'B', type: 'agent', dependsOn: [] },
+    { id: 'merge', type: 'tool', dependsOn: ['A', 'B'] }, { id: 'choose', type: 'branch', dependsOn: ['merge'] },
+    { id: 'left', type: 'policy', dependsOn: ['choose'] }, { id: 'right', type: 'policy', dependsOn: ['choose'] }])).toBeUndefined()
 
   const conflicting = { ...input('现在开始，安排三个代理，不额外启动代理。', 'roster-conflict'), draft: held }
   expect(interpretSemanticAdmission(conflicting, task(conflicting, { relation: 'continue', draft_revision: held.revision,
@@ -127,6 +135,7 @@ it.each([
     'If an unavailable peer does not reply, report whether a reply was received.'],
   ['裁剪后的协作未回复', '商品 B 单价缺失。如果协作请求未完成，请如实说明有没有收到回复。',
     '协作请求未完成，请如实说明有没有收到回复'],
+  ['审批未完成', '如果审批未完成，请如实说明审批状态。', '如果审批未完成，请如实说明审批状态。'],
 ] as const)('does not grant a data-gap permission for %s', (_name, text, quote) => {
   const source = input(text, 'collaboration-gap')
   const forged = task(source, { constraints: [{ id: 'gap', kind: 'report_data_gap', source_message_id: 'collaboration-gap', quote }] })
@@ -138,6 +147,17 @@ it.each([
   expect(outcome).toMatchObject({ kind: 'ready', request: { goal: text } })
   if (outcome.kind !== 'ready') throw new Error('A collaboration result should remain ordinary executable task text')
   expect(outcome.request.requirements_contract.constraints.some(item => item.kind === 'report_data_gap')).toBe(false)
+})
+
+it('keeps a genuine missing-material grant when an unrelated approval status is also reported', () => {
+  const text = '如果审批未完成，请如实说明审批状态。商品 B 单价缺失。金额核算发现必要数据缺失时，应如实报告未完成金额和下一步。'
+  const source = input(text, 'mixed-approval-and-material')
+  const quote = '金额核算发现必要数据缺失时，应如实报告未完成金额和下一步'
+  const outcome = interpretSemanticAdmission(source, task(source, { constraints: [{ id: 'gap', kind: 'report_data_gap',
+    source_message_id: 'mixed-approval-and-material', quote }] }))
+  expect(outcome).toMatchObject({ kind: 'ready', request: { requirements_contract: {
+    constraints: [{ kind: 'report_data_gap', quote }],
+  } } })
 })
 
 it('T10 keeps collaboration receipts in the task text when the model mislabels them as a data gap, without a correction call', async () => {

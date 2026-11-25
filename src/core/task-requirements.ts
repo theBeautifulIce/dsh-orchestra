@@ -49,6 +49,10 @@ const permissionSubject = /审批|批准|授权|只读|工作区|文件|联网|�
 const missingMaterial = /(?:数据|材料|资料|字段|输入|单价|金额|价格|数量|清单|交付物)(?:仍然?|尚且?|严重|部分|仍|已|尚|有)?(?:缺失|缺少|缺口|不全|不完整|不足|未知|未提供|未完成)|(?:缺少|缺失|未提供|不完整的)(?:必要的?|所需的?|部分|的)?(?:数据|材料|资料|字段|输入|单价|金额|价格|数量|清单|交付物)|\b(?:missing|unavailable|incomplete)\s+(?:(?:required|necessary|input)\s+)?(?:data|inputs?|materials?|prices?|fields?|deliverables?)\b/iu
 const gapReportVerb = /上报|汇报|报告|说明|指出|列出|注明|标注|\b(?:report|explain|identify|list)\b/iu
 const gapMarker = /缺失|缺口|缺少|缺价|未完成|无法完成|不能完成|不完整|\b(?:missing|incomplete|unavailable)\b/iu
+const incompleteWork = /(?:未完成|无法完成|不能完成|不完整)(?:的)?(?:业务|工作|核算|计算|金额|数量|交付物|交付项|报表|报告)|(?:业务工作|核算|计算|金额|数量|交付物|报表)(?:仍|尚)?(?:未完成|不完整)|\b(?:missing|unavailable|incomplete|unfinished)\s+(?:business\s+)?(?:work|deliverables?|calculations?|amounts?)\b/iu
+const processStatus = /审批|批准|权限|授权|测试(?:是否|状态|结果|条件|场景)|运行(?:状态|结果)|执行状态|\b(?:approval|permission|test (?:status|result|condition)|execution status)\b/iu
+const approvalStatus = /(?:审批|审核|批准)(?:的)?(?:状态|进度)|\bapproval (?:status|progress)\b/iu
+const gatedAction = /只有|才能|之前|批准后|审批后|审核后|未经|方可|先审批|再(?:开始|执行)|\b(?:only after|before|unless|must approve)\b/iu
 function mentionsPeerOutcome(sentence: string) {
   return peerSubject.test(sentence) && executionEvent.test(sentence)
 }
@@ -61,15 +65,21 @@ function citationContexts(source: string, quote: string): string[] {
 
 export function citedExecutionObservation(source: string, quote: string) {
   const contexts = citationContexts(source, quote)
-  return contexts.length > 0 && contexts.every(sentence => mentionsPeerOutcome(sentence)
-    && !permissionSubject.test(sentence) && !missingMaterial.test(sentence))
+  return contexts.length > 0 && contexts.every(sentence => !missingMaterial.test(sentence) && (
+    mentionsPeerOutcome(sentence) && !permissionSubject.test(sentence)
+    || approvalStatus.test(sentence) && gapReportVerb.test(sentence) && !gatedAction.test(sentence)
+      && !permissionSubject.test(sentence.replace(/审批|审核|批准|approval/giu, ''))))
 }
 
 export function authorizesDataGap(source: string, quote: string) {
   if (!quote || !source.includes(quote) || !gapReportVerb.test(quote) || !gapMarker.test(quote) || deniedGapReport.test(quote)) return false
-  // When observations and real missing inputs share a sentence, the citation
-  // itself must identify the missing material. A peer's status cannot authorize a partial delivery.
-  return missingMaterial.test(quote) || ![quote, ...citationContexts(source, quote)].some(mentionsPeerOutcome)
+  // Admission needs positive evidence of a missing input or unfinished business
+  // deliverable. A status report alone never grants partial-execution authority.
+  if (missingMaterial.test(quote)) return true
+  const contexts = citationContexts(source, quote)
+  if (contexts.length && contexts.every(sentence => missingMaterial.test(sentence))
+    && !mentionsPeerOutcome(quote) && !processStatus.test(quote)) return true
+  return incompleteWork.test(quote) && ![quote, ...contexts].some(text => mentionsPeerOutcome(text) || processStatus.test(text))
 }
 
 export const taskRequirementSchema = z.discriminatedUnion('kind', [

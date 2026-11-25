@@ -918,8 +918,10 @@ it('结构化约束经真实规划入口持久化，生成器与规划器取得�
   expect(view.quality.ready).toBe(true)
 })
 
-it('协作未回复不能作为数据缺口权限放行高风险部分结果', async () => {
-  const quote = '如果协作请求未完成，请如实说明有没有收到回复'
+it.each([
+  ['协作未回复', '如果协作请求未完成，请如实说明有没有收到回复'],
+  ['审批状态', '如果审批未完成，请如实说明审批状态'],
+] as const)('%s 不能作为数据缺口权限放行高风险部分结果', async (_kind, quote) => {
   const contract: RequirementsContract = { version: 1, start_policy: 'immediate',
     sources: [{ message_id: 'human-message', text: `核查库存。商品 B 单价缺失。${quote}。数量核算独立完成。` }],
     constraints: [{ ...constraintBase('gap', quote), kind: 'report_data_gap' }],

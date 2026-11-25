@@ -5,6 +5,7 @@ export type RequirementNode = {
   id: string
   type: string
   dependsOn: string[]
+  conditionalFanout?: boolean
   approvalPrompt?: string
   sideEffectPolicy?: string
   declaredTools: string[]
@@ -32,15 +33,47 @@ function approvalPrecedes(nodes: Map<string, RequirementNode>, approvalId: strin
   return visited.has(approvalId)
 }
 
-type RosterNode = Pick<RequirementNode, 'id' | 'type' | 'dependsOn'>
+type RosterNode = Pick<RequirementNode, 'id' | 'type' | 'dependsOn' | 'conditionalFanout'>
+
+// Branches execute one alternative. A role after a merge counts when every
+// alternative reaches that same role. Roles on ordinary parallel paths coexist.
+function guaranteedAgents(workflow: readonly RosterNode[]) {
+  const agents = workflow.filter(node => node.type === 'agent')
+  if (!workflow.some(node => node.type === 'branch' || node.conditionalFanout)) return agents
+  const successors = new Map<string, RosterNode[]>()
+  for (const node of workflow) for (const parent of node.dependsOn) {
+    const children = successors.get(parent) ?? []
+    children.push(node)
+    successors.set(parent, children)
+  }
+  const memo = new Map<string, Set<string>>()
+  function guaranteedFrom(node: RosterNode): Set<string> {
+    const cached = memo.get(node.id)
+    if (cached) return cached
+    const roles = new Set<string>(node.type === 'agent' ? [node.id] : [])
+    memo.set(node.id, roles)
+    const children = (successors.get(node.id) ?? []).map(guaranteedFrom)
+    if (node.type === 'branch' || node.conditionalFanout) {
+      for (const id of children[0] ?? []) if (children.every(child => child.has(id))) roles.add(id)
+    } else {
+      for (const child of children) for (const id of child) roles.add(id)
+    }
+    return roles
+  }
+  const required = new Set<string>()
+  for (const root of workflow.filter(node => !node.dependsOn.length))
+    for (const id of guaranteedFrom(root)) required.add(id)
+  return agents.filter(node => required.has(node.id))
+}
 // Maximum number of mutually independent agent roles in the workflow DAG.
 // By Dilworth's theorem this is the number of roles minus a maximum matching
 // between roles and their transitive predecessors. Common preparation and later
 // aggregation can therefore coexist with the requested parallel group.
-export function concurrentAgentCapacity(workflow: readonly RosterNode[]) {
+export function concurrentAgentCapacity(workflow: readonly RosterNode[], agents = guaranteedAgents(workflow)) {
   const nodes = new Map(workflow.map(node => [node.id, node]))
+  const participating = new Set(agents.map(node => node.id))
   const predecessors = new Map<string, string[]>()
-  for (const role of workflow.filter(node => node.type === 'agent')) {
+  for (const role of agents) {
     const visited = new Set<string>()
     const pending = [...role.dependsOn]
     const upstream: string[] = []
@@ -49,7 +82,7 @@ export function concurrentAgentCapacity(workflow: readonly RosterNode[]) {
       if (visited.has(id)) continue
       visited.add(id)
       const node = nodes.get(id)
-      if (node?.type === 'agent') upstream.push(id)
+      if (participating.has(id)) upstream.push(id)
       if (node) pending.push(...node.dependsOn)
     }
     predecessors.set(role.id, upstream)
@@ -77,9 +110,10 @@ export function rosterWorkflowIssue(roster: ReturnType<typeof contractAgentRoste
   if (roster.conflicting) return '同一任务指定了不同的参与人数，请确认后再开始。'
   if (roster.closed && workflow.some(node => node.type === 'subworkflow')) return '任务限定了参与代理，当前不能核实子流程的参与者。'
   const count = workflow.filter(node => node.type === 'agent').length
-  if (roster.count && (count < roster.count || roster.closed && count !== roster.count))
+  const agents = guaranteedAgents(workflow)
+  if (roster.count && (agents.length < roster.count || roster.closed && count !== roster.count))
     return `任务要求由${roster.closed ? '指定的' : '至少'} ${roster.count} 个代理执行，请核对计划人数。`
-  if (roster.parallelCount > 1 && concurrentAgentCapacity(workflow) < roster.parallelCount)
+  if (roster.parallelCount > 1 && concurrentAgentCapacity(workflow, agents) < roster.parallelCount)
     return `任务要求 ${roster.parallelCount} 个代理并行执行，当前流程让代理互相等待。`
 }
 
