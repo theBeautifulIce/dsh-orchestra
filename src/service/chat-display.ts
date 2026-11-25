@@ -259,7 +259,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
 
 export type ChatOutcome =
   | { state: 'started'; title: string; run_id: string; task_id?: string }
-  | { state: 'plan_ready'; plan_id: string; title: string }
+  | { state: 'plan_ready'; plan_id: string; title: string; approval_channel?: 'panel' }
   | { state: 'quality_blocked'; issues: string[]; plan_id: string; title: string }
   | { state: 'approval_pending'; plan_id?: string; run_id?: string; title: string }
   | { state: 'launch_declined'; plan_id: string; title: string }
@@ -346,7 +346,8 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
         + (outcome.task_id ? '\n在 Orchestra 的「任务」中搜索任务编号：' + outcome.task_id : '') }
     case 'plan_ready':
       return { heading: taskHeading(outcome.title, '计划已准备'),
-        body: '已按本次要求保存计划草稿。打开本会话的 Orchestra → 任务 → 继续未启动的计划，可核对目标和限制条件，再决定是否启动。' }
+        body: (outcome.approval_channel === 'panel' ? '当前宿主不提供审批弹窗，本次计划尚未启动。工作流人工审批仍然有效。' : '已按本次要求保存计划草稿。')
+          + '打开本会话的 Orchestra → 任务 → 继续未启动的计划，可核对目标和限制条件，再决定是否启动。' }
     case 'quality_blocked':
       return { heading: taskHeading(outcome.title, '未启动本次任务'), body: [
         ...new Set(outcome.issues.slice(0, 5).map((issue) => sentence(operatorReason(issue)))),

@@ -8,6 +8,7 @@ import { canonicalJson } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
 import type { RequirementsContract } from '../core/task-requirements.ts'
+import { restrictedTaskToolReason } from '../core/task-access.ts'
 import { PUBLIC_READ_TOOL } from './public-read.ts'
 
 type Agent = AgentHandle['agent']
@@ -44,8 +45,10 @@ export function nativeToolEffect(name: string): NativeToolEffect {
     : externalWriteTools.has(name) ? 'external_write' : 'unknown'
 }
 
-export function nativeToolConstraint(name: string, effect: NativeToolEffect, policy: NativeExecutionPolicy): string | undefined {
+export function nativeToolConstraint(name: string, effect: NativeToolEffect, policy: NativeExecutionPolicy, trustedFileFree = false): string | undefined {
   if (governedTools.has(name)) return '此工具必须通过 Orchestra 对应的任务或记忆治理入口执行。'
+  const accessDenied = restrictedTaskToolReason(policy.requirementsContract, trustedFileFree)
+  if (accessDenied) return accessDenied
   // The current ordinary executor records pure attempts. A broad preference cannot change that invariant.
   if (policy.sideEffectPolicy === 'pure' && effect !== 'read') return '此节点只允许已确认的只读能力。此工具的副作用未获节点授权。'
   const constraints = policy.requirementsContract?.constraints ?? []

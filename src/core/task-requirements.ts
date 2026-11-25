@@ -13,7 +13,10 @@ const reviewer = z.discriminatedUnion('kind', [
 
 export const taskRequirementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...common, kind: z.literal('chat_only') }),
+  // Retain the v1 meaning of no_workspace_files: no creation or modification.
   z.strictObject({ ...common, kind: z.literal('no_workspace_files') }),
+  z.strictObject({ ...common, kind: z.literal('no_workspace_read') }),
+  z.strictObject({ ...common, kind: z.literal('no_network') }),
   z.strictObject({ ...common, kind: z.literal('read_only') }),
   z.strictObject({ ...common, kind: z.literal('no_external_send') }),
   z.strictObject({ ...common, kind: z.literal('preserve_input'), target: z.string().trim().min(1).max(500) }),

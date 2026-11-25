@@ -19,7 +19,9 @@ const severityLabels = { low: '低风险', medium: '中风险', high: '高风险
 function requirementLabel(constraint: TaskRequirement): string {
   switch (constraint.kind) {
     case 'chat_only': return '在本次聊天中交付正文'
-    case 'no_workspace_files': return '不在工作区创建文件'
+    case 'no_workspace_files': return '不创建或修改工作区文件'
+    case 'no_workspace_read': return '不读取工作区文件（可用已授权内部材料）'
+    case 'no_network': return '执行工具不访问网络（模型服务连接不变）'
     case 'read_only': return '仅执行只读操作'
     case 'no_external_send': return '不通过执行工具向外发送内容'
     case 'preserve_input': return `保持输入材料不变：${constraint.target}`

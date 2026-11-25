@@ -1,4 +1,5 @@
 import type { ConstraintBinding, RequirementsContract } from '../core/task-requirements.ts'
+import { taskAccess } from '../core/task-access.ts'
 
 export type RequirementNode = {
   id: string
@@ -42,6 +43,11 @@ export function requirementIssues(contract: RequirementsContract, proposal: Cont
     }
     bindings.set(binding.constraint_id, binding)
   }
+  const access = taskAccess(contract)
+  if (access.restricted && (proposal.steps.some(step => step.tools.length > 0)
+    || workflow.some(node => node.declaredTools.length > 0 || node.type === 'tool' || node.type === 'subworkflow'))) {
+    issues.push('任务禁止网络访问或工作区读取。固定命令、工具节点及子流程尚无可信的访问能力证明；请使用受控文本代理和已授权的内部材料。')
+  }
   for (const constraint of contract.constraints) {
     if ((constraint.kind === 'chat_only' || constraint.kind === 'no_workspace_files')
       && proposal.deliverables.some(item => item.acceptance.kind === 'artifact')) {
@@ -74,7 +80,7 @@ export function requirementIssues(contract: RequirementsContract, proposal: Cont
       }
       continue
     }
-    const needsReadOnly = ['read_only', 'preserve_input', 'no_workspace_files', 'no_external_send'].includes(constraint.kind)
+    const needsReadOnly = ['read_only', 'preserve_input', 'no_workspace_files', 'no_external_send', 'no_network', 'no_workspace_read'].includes(constraint.kind)
     if (needsReadOnly && workflow.some(node => node.type === 'subworkflow'
       || (node.sideEffectPolicy !== undefined && node.sideEffectPolicy !== 'pure'))) {
       issues.push(`约束 ${constraint.id} 需要受控的只读执行，当前流程包含尚不能证明符合该约束的子流程或副作用步骤。`)
@@ -86,4 +92,25 @@ export function requirementIssues(contract: RequirementsContract, proposal: Cont
     }
   }
   return issues
+}
+
+/** If host popups are disabled, an explicit fail-closed workflow gate can be
+ * the first human decision instead of demanding the same approval twice.
+ * The caller must supply the catalog's corroborated agent effects, not the
+ * publisher's unverified pure declaration, and must still check plan quality.
+ * Other control nodes, fixed tools, materials, and whole-task approval are
+ * deliberately not eligible for this narrow path. */
+export function canStartAtRequiredGate(contract: RequirementsContract | undefined,
+  proposal: ContractPlan, workflow: readonly RequirementNode[]): boolean {
+  if (!contract || contract.start_policy !== 'immediate') return false
+  const approvals = contract.constraints.filter(item => item.kind === 'approval_before')
+  if (!approvals.length || approvals.some(item => item.scope !== 'steps' || item.reviewer.kind !== 'operator')) return false
+  const agents = workflow.filter(node => node.type === 'agent')
+  const gates = workflow.filter(node => node.type === 'approval')
+  if (!agents.length || !gates.length || workflow.some(node => !['agent', 'approval'].includes(node.type)
+    || node.declaredTools.length > 0) || agents.some(node => node.sideEffectPolicy !== 'pure')
+    || proposal.steps.some(step => step.tools.length > 0)) return false
+  const requiredGates = new Set((proposal.constraint_bindings ?? []).map(binding => binding.approval_node_id))
+  if (gates.some(gate => !requiredGates.has(gate.id))) return false
+  return requirementIssues(contract, proposal, workflow).length === 0
 }

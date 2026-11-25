@@ -1,5 +1,5 @@
 import { requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
-import { requirementIssues } from './task-requirement-checks.ts'
+import { canStartAtRequiredGate, requirementIssues } from './task-requirement-checks.ts'
 import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { textResultFileName } from './text-result.ts'
@@ -982,6 +982,7 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
   const launch = (planId: string, contentHash: string, actor: string, now: string, chat?: {
     origin: ChatTaskOrigin
     nativeApproval: boolean
+    allowRequiredGateStart: boolean
   }) => {
       const { row, view } = get(planId, actor)
       const { brief, proposal, quality } = view
@@ -1023,7 +1024,16 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         const requiresContractApproval = brief.requirements_contract?.constraints.some(constraint => constraint.kind === 'approval_before' && constraint.scope === 'task')
         const needsApproval = definition.nodes.some((node) => node.side_effect_policy === 'irreversible'
           || node.side_effect_policy === 'compensable' || (node.type !== 'agent' && node.type !== 'wait'))
-        if ((needsApproval || requiresContractApproval || Boolean(brief.materials?.length)) && !chat.nativeApproval) throw new OrchError('CONFIRMATION_REQUIRED', '此工作流需要在当前会话中批准后才能启动')
+        // Only a fully covered, corroborated pure workflow may start at its
+        // explicitly requested human gate when native popups are unavailable.
+        // No step is approved here, and no task-level approval is waived.
+        const gateOnlyStart = chat.allowRequiredGateStart && !brief.materials?.length
+          && definition.nodes.every(node => node.type !== 'approval' || node.approval?.on_timeout === 'fail')
+          && canStartAtRequiredGate(brief.requirements_contract, proposal, current.workflow.nodes.map(node => ({
+            ...node, sideEffectPolicy: node.type === 'agent'
+              ? catalog.initialAgentEffect(definition.nodes.find(item => item.node_id === node.id)!) : node.sideEffectPolicy,
+          })))
+        if (((needsApproval && !gateOnlyStart) || requiresContractApproval || Boolean(brief.materials?.length)) && !chat.nativeApproval) throw new OrchError('CONFIRMATION_REQUIRED', '此工作流需要批准计划后才能启动')
       }
       // 自动生成的是任务专属流程：只走服务端可信编排路径。
       // 任务号取自服务端落库的计划行，不来自请求体，客户端伪造不了。
@@ -1157,10 +1167,10 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
       if (input.confirmed !== true) throw new OrchError('CONFIRMATION_REQUIRED', '请核对计划后确认启动')
       return launch(input.plan_id, input.content_hash, actor, now)
     },
-    launchFromChat(planId: string, contentHash: string, actor: string, now: string, origin: ChatTaskOrigin, nativeApproval = false) {
+    launchFromChat(planId: string, contentHash: string, actor: string, now: string, origin: ChatTaskOrigin, nativeApproval = false, allowRequiredGateStart = false) {
       origin.assertCurrent()
       if (findChatPlan(db, origin) !== planId) throw new OrchError('FORBIDDEN', '计划与当前会话消息的绑定不一致')
-      return launch(planId, contentHash, actor, now, { origin, nativeApproval })
+      return launch(planId, contentHash, actor, now, { origin, nativeApproval, allowRequiredGateStart })
     },
   }
 }

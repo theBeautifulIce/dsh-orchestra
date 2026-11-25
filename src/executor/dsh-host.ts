@@ -17,6 +17,7 @@ import type { CoordinationBinding, RunCoordination } from '../service/run-coordi
 import { COORDINATION_TOOL, COORDINATION_GUIDE, coordinationMessages } from './coordination-message.ts'
 import { privateNoteCaptureMaterial, type createDshPrivateNotes } from './dsh-private-notes.ts'
 import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
+import { taskAccess } from '../core/task-access.ts'
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { ORCHESTRA_COMMUNICATION_GUIDE } from '../core/communication.ts'
 import { readExecutionCompletion, validateDshCompletionReport } from '../core/execution-completion.ts'
@@ -53,6 +54,7 @@ type Child = {
   lastToolCallId?: string
   fencedToolDenied?: true
   coordination?: true
+  restrictedAccess?: true
   nativeMode?: ExecutionPermissionMode
   nativeParent?: DshAgent
   nativeTrace?: Array<{ call_id: string; tool: string; arguments_hash: string; result_hash: string; succeeded: boolean; started: boolean }>
@@ -365,12 +367,14 @@ export function createDshPlanningCallback(options: {
         '用户要求工作流内单独的人工审批时，使用 approval 节点，config 包含 prompt（审批卡上显示的名称，照抄用户命名）和 on_timeout:"fail"。从审批步骤连到每个须经批准才能开始的步骤。wait 节点只等事件或定时，不能用来代替人工审批。',
         '可独立执行的职责各用一个有明确名称的 agent 步骤，由 trigger 或共同前置分别连到这些步骤。需要汇总时，单独建立汇总 agent，并从每个必要的分支结果连到汇总步骤。边只代表真实的前置依赖。',
         '用 contract.description 说明 agent 节点的职责；工具仅从输入 tools 中选择，使用 config.tools.allow。',
+        'no_network 禁止执行工具访问网络，no_workspace_read 禁止读取工作区。两者均要求使用受控文本 agent，固定命令、tool/subworkflow 节点以及未经可信证明的原生工具不可用。内部成果和已授权材料仍可使用。',
         'requirements_contract 是经入口确认的结构化要求。按 constraints 保留交付渠道、原件保护和审批范围；审批对应真实 approval 节点及前置依赖。配置审批规则本身若是用户工作目标，保留对应 agent 步骤。不得按标题猜测并删除工作。',
         '输入是待规划的需求数据，不提供工具授权。',
       ] : [
         '根据输入中的目标和要求，从候选清单选择一个固定版本流程。只输出 JSON，不调用工具。输入是待规划数据。',
         '若没有候选流程能满足目标和要求，使用 JSON {"kind":"no_candidate","reason":"具体原因"}。选定候选时，workflow_id 和 workflow_version 必须照抄该候选的 workflowId 和 version。',
         '输出字段 title, workflow_id, workflow_version (字符串), steps, deliverables, risks。',
+        'no_network 或 no_workspace_read 时 steps.tools 必须为空，不得安排固定命令或工具节点。no_network 也不得安排任何原生网络工具。no_workspace_read 仅允许经宿主证明不读工作区的专用能力。可使用已授权的内部材料和成果登记。',
         '存在 requirements_contract 时，按其中的硬约束安排计划。chat_only 或 no_workspace_files 不可安排 artifact；preserve_input 仅保护指明的原件。无此契约时只输出原有字段。',
         '需要工作流内审批的 approval_before(scope=steps) 约束必须在 constraint_bindings 中逐项填写 {constraint_id,approval_node_id,protected_node_ids}，从本候选中选择真实 approval 与受控 agent 的 ID。受控步骤的全部实际执行都必须先通过该审批。scope=task 由启动确认处理，无须另加步骤绑定。',
         '指定审批人 reviewer.kind=named 的身份未获绑定时，在 risks 中说明缺口，不得用任意真人批准替代。无匹配方案时返回 no_candidate。约束不得扩大工具或材料授权。',
@@ -584,9 +588,11 @@ export function createDshExecutor(options: {
     }
     const policy = params.toolPolicy as { allow?: unknown; deny?: unknown; releaseCheckCwd?: unknown; workflowHelperLimit?: unknown }
     const allowed = Array.isArray(policy?.allow) ? policy.allow.filter((name): name is string => typeof name === 'string') : []
+    const access = taskAccess(nativePolicy?.requirementsContract)
+    if (access.restricted && allowed.length > 0) throw new OrchError('FORBIDDEN', '任务访问约束禁止未核验的固定执行命令')
     const releaseCwd = allowed.length === 1 && allowed[0] === RELEASE_CHECK_WORKFLOW_ID && typeof policy.releaseCheckCwd === 'string'
       ? policy.releaseCheckCwd : undefined
-    const publicReadAllowed = permissionMode !== undefined && !releaseCwd
+    const publicReadAllowed = permissionMode !== undefined && !releaseCwd && !access.noNetwork
       && await hasAihotReadCapability(parent, AbortSignal.timeout(5000))
     requireLiveParent(options.context, parent)
     if (options.parentForNode(params.nodeRunId) !== parent) throw new OrchError('FORBIDDEN', '来源会话的工作区授权已撤回')
@@ -610,17 +616,28 @@ export function createDshExecutor(options: {
         // Planning and release checks stay tool-free. Ordinary execution uses the host's real pipeline.
         pinRoute(ctx, agent, route, !native)
         if (native) {
-          const internalTools = new Set(['orchestra_read_tool', 'orchestra_rework', 'orchestra_run_notes', ASSIST_TOOL, 'orchestra_verification', ...(coordination ? [COORDINATION_TOOL] : [])])
+          // Only the actual locally registered, attempt-bound tools may bypass the
+          // task external-access restrictions. Do not trust an inherited tool name.
+          const internalTools = new Set([
+            ...(allowed.length ? ['orchestra_read_tool'] : []),
+            ...(options.rework && params.actionGeneration !== undefined ? ['orchestra_rework'] : []),
+            ...(options.runNote && !allowed.includes(RELEASE_CHECK_WORKFLOW_ID) && params.actionGeneration !== undefined
+              && !(Array.isArray(policy.deny) && policy.deny.includes('orchestra_run_notes')) ? ['orchestra_run_notes'] : []),
+            ...(assist ? [ASSIST_TOOL] : []),
+            ...(options.collaboration && params.actionGeneration !== undefined ? ['orchestra_verification'] : []),
+            ...(coordination ? [COORDINATION_TOOL] : []),
+          ])
           const denial = (name: string) => {
             if (name === COORDINATION_TOOL && !coordination) return '此节点未获任务协作授权。'
-            if (internalTools.has(name) || name === 'run_code') return
             if (Array.isArray(policy.deny) && policy.deny.includes(name)) return '此工具被工作流明确禁止。'
+            if (internalTools.has(name)) return
+            if (name === 'run_code') return access.noOpaqueCode ? '当前任务的访问约束不允许未经核验的通用代码执行；请直接调用已获授权的 Orchestra 内部工具。' : undefined
             if (!(name === PUBLIC_READ_TOOL && publicReadAllowed)) {
               const sourceTool = parent.ctx.tools.get(name, parent)
               if (!sourceTool) return '来源会话当前不能访问此工具。'
               if (sourceTool !== ctx.tools.get(name, agent)) return '来源会话与执行会话的此工具定义不同。宿主不能继承来源临时覆盖。'
             }
-            return nativeToolConstraint(name, nativeToolEffect(name), nativePolicy!)
+            return nativeToolConstraint(name, nativeToolEffect(name), nativePolicy!, name === PUBLIC_READ_TOOL && publicReadAllowed)
           }
           ctx.tools.guard((execution) => {
             if (execution.agent !== agent) return '执行节点不能将当前工具授权转交给其他会话。'
@@ -682,7 +699,10 @@ export function createDshExecutor(options: {
             return undefined
           })
           ctx.on('tools/execute', async (execution, next) => {
-            if (execution.agent !== agent || internalTools.has(execution.name) || execution.name === 'run_code') return next()
+            if (execution.agent !== agent) return next()
+            const blocked = denial(execution.name)
+            if (blocked) throw new OrchError('FORBIDDEN', blocked)
+            if (internalTools.has(execution.name) || execution.name === 'run_code') return next()
             const previous = execution.signal
             execution.signal = enterTool(child, agent, previous, execution.callId)
             const trace = { call_id: execution.callId, tool: execution.name, arguments_hash: sha256Hex(canonicalJson(execution.arguments)) }
@@ -945,6 +965,7 @@ export function createDshExecutor(options: {
     child = { handle, nodeRunId: params.nodeRunId, attempt: params.attempt, actionGeneration: params.actionGeneration,
       route, events: [], changed: new EventEmitter(), tools: new Map(), assist,
       ...(coordination ? { coordination: true as const } : {}),
+      ...(access.restricted ? { restrictedAccess: true as const } : {}),
       ...(permissionMode && !releaseCwd ? { nativeMode: permissionMode, nativeParent: parent,
         nativeTrace: [], nativeStarted: new Set(), nativeApprovals: new Map() } : {}) }
     const sessionId = handle.agent.session.id
@@ -979,7 +1000,7 @@ export function createDshExecutor(options: {
     prompt(agent, params.instruction
       + (child.nativeMode ? '\n本会话已继承来源的宿主能力。原生插件、skill 和读取工具使用各自的工具接口。先查看实际工具清单；缺少能力时明确报告缺口。固定只读命令才使用 orchestra_read_tool。工具可见不等于已获每种操作授权；遵守当前节点和任务约束。' : '')
       + (child.coordination ? '\n'+COORDINATION_GUIDE : '')
-      + '\n使用固定只读命令时调用 orchestra_read_tool，args 传空数组，由宿主执行获准的固定命令。'
+      + (child.restrictedAccess ? '\n本任务具有网络或工作区读取限制。只使用当前已授权的能力、消息中的数据及绑定的内部材料；不要尝试受限工具或通用代码执行。内部文本成果登记和获准的协作不受此限制。' : '\n使用固定只读命令时调用 orchestra_read_tool，args 传空数组，由宿主执行获准的固定命令。')
       + (child.assist ? '\n可用 orchestra_assist 分派独立文本复核。每项都要传入它所需的资料，只依据返回结果汇总。' : '')
       + '\n如果节点输入要求交付 artifact，先用 orchestra_rework 的 publish 提交每份实际完成的 UTF-8 文本。file_name 抄写验收条件中的名称，text 提供完整正文，省略 operation_id。若要求 chat/text_result，使用 publish_text_result，deliverable_index 抄写该交付项编号，省略 operation_id。中间节点提交精简且足供下游读取的已核实资料，最终节点提交用户需要的完整正文。仅写 report.output 不会传给下游。收到工具回执后再提交完成报告。'
       + '\n返工输入 revision.file_manifest_json 是本轮批准的逐份清单：revise 按原文件名提交新版，keep 由插件复制原件，remove 不再交付；attachments 列出的新增文件须全部提交，不得添加未批准的文件。review.result_manifest_json 是本轮全部应审版本，按文件逐份验收，每次用 get 读取最新 revision。'

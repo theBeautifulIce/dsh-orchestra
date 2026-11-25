@@ -4,13 +4,14 @@ import { expect, it, vi } from 'vitest'
 import { createDshExecutor } from '../../src/executor/dsh-host.ts'
 import { dshCapabilitySnapshot, nativeToolConstraint } from '../../src/executor/dsh-execution-capabilities.ts'
 import type { ExecutionPermissionMode } from '../../src/core/execution-permissions.ts'
+import type { RequirementsContract } from '../../src/core/task-requirements.ts'
 
 type Options = Parameters<typeof createDshExecutor>[0]
 type Agent = NonNullable<ReturnType<Options['parentForNode']>>
 type Pre = (exec: ToolExecution, next: () => Promise<PreToolDecision>) => Promise<PreToolDecision>
 type Around = (exec: ToolExecution, next: () => Promise<ToolExecutionResult>) => Promise<ToolExecutionResult>
 
-function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'allow', effect: 'read', reason: '任务要求读取公开资讯。' }) {
+function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'allow', effect: 'read', reason: '任务要求读取公开资讯。' }, requirementsContract?: RequirementsContract) {
   const route = { provider: 'p', model: 'm' }
   const live = new Map<string, unknown>()
   const presetWrites: string[] = []
@@ -63,7 +64,7 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
   const host = createDshExecutor({ context, parentForNode: () => authorized ? parent as unknown as Agent : undefined,
     models: [{ ...route, ref: 'p/m', capacity: 'routine' }], recommend: () => ({ complexity: 'routine', reason: 'test' }),
     executionPermissionMode: () => mode, onNativeApprovalPending: pending,
-    nativeToolPolicyForNode: () => ({ sideEffectPolicy: 'pure' }),
+    nativeToolPolicyForNode: () => ({ sideEffectPolicy: 'pure', ...(requirementsContract ? { requirementsContract } : {}) }),
   })
   async function start() {
     const spawned = await host.bridge.spawn({ nodeRunId: 'node', attempt: 1, actionGeneration: 1, input: {},
@@ -230,4 +231,23 @@ it('规划快照单独提供实际只读工具，未知命令不伪装成可用�
   expect(nativeToolConstraint('read', 'read', { sideEffectPolicy: 'pure' })).toBeUndefined()
   expect(nativeToolConstraint('unknown', 'unknown', { sideEffectPolicy: 'pure' })).toContain('副作用未获节点授权')
   await f.host.close()
+})
+
+it.each(['full', 'inherit', 'user', 'brain'] as const)('offline/read boundary also blocks the actual native execution hook in %s mode', async mode => {
+  const source = { message_id: 'm', text: '不联网，不读写工作区文件' }
+  const f = fixture(mode, undefined, { version: 1, start_policy: 'immediate', sources: [source], constraints: [
+    { id: 'net', kind: 'no_network', source_message_id: 'm', quote: '不联网' },
+    { id: 'read', kind: 'no_workspace_read', source_message_id: 'm', quote: '不读写工作区文件' },
+    { id: 'write', kind: 'no_workspace_files', source_message_id: 'm', quote: '不读写工作区文件' },
+  ] })
+  try {
+    await f.start()
+    for (const name of ['bili_hot', 'read', 'write', 'pwsh', 'run_code']) {
+      const next = vi.fn(async () => ({ content: [], isError: false as const, value: {} }))
+      expect(f.guard(f.call(name))).toBeTruthy()
+      expect((await f.pre(f.call(name))).kind).toBe('deny')
+      await expect(f.run(f.call(name), next)).rejects.toThrow()
+      expect(next).not.toHaveBeenCalled()
+    }
+  } finally { await f.host.close() }
 })

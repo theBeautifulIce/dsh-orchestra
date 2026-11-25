@@ -38,7 +38,7 @@ type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 
 async function fixture(options: { profile?: string; version?: string; enabled?: false | 'desktop'; host?: string;
   interpret?: (input: SemanticInput) => unknown | Promise<unknown>;
-  routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError; dispatchPlans?: boolean } = {}) {
+  routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError; dispatchPlans?: boolean; approvalPolicy?: 'ask' | 'never' } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'orchestra-native-chat-'))
   const ctx = new Context()
   const commandNames: string[] = []
@@ -101,7 +101,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   ctx.provide('systemPrompt', { section(section: { text: typeof prompt }) { prompt = section.text } })
   const flush = vi.fn(async () => true)
   ctx.provide('sessions', { flush })
-  ctx.provide('approval', { request: approval })
+  ctx.provide('approval', { request: approval, overrideOf: () => options.approvalPolicy })
   ctx.provide('connection', { fetch: { register({ path }: { path: string }) { routes.push(path) } } })
   ctx.provide('credentials', { modifyRecord: async () => ({ kind: 'grant', payload: 'a'.repeat(64) }) })
   ctx.provide('workspaceRegistry', {
@@ -549,8 +549,8 @@ it('admits the complete named income concentration task through the native owner
   } finally { await test.close() }
 })
 
-it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named approval and delivery constraints in chat planning (%s)', async (scenario) => {
-  const test = await fixture({ routing: { enabled: true }, dispatchPlans: true, interpret: input => ({
+it.each(['approval', 'wait', 'no files', 'declined', 'never'] as const)('enforces named approval and delivery constraints in chat planning (%s)', async (scenario) => {
+  const test = await fixture({ routing: { enabled: true }, dispatchPlans: true, approvalPolicy: scenario === 'never' ? 'never' : 'ask', interpret: input => ({
     kind: 'task', relation: 'new', timing: 'immediate', quote: input.current.text, constraints: [
       { id: 'review', kind: 'approval_before', scope: 'steps', action: '计算', reviewer: { kind: 'operator' },
         source_message_id: input.current.message_id, quote: '在我批准前，计算步骤必须等待' },
@@ -596,14 +596,15 @@ it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named a
       return
     }
     const receipt = await human.call()
-    if (scenario !== 'approval') {
+    if (scenario !== 'approval' && scenario !== 'never') {
       expect(receipt).toMatchObject({ state: 'quality_blocked', issues: [expect.stringContaining(scenario === 'wait' ? '审批' : '文件')] })
       expect(count(service, 'runs')).toBe(0)
       expect(test.approval).not.toHaveBeenCalled()
       return
     }
     expect(receipt).toMatchObject({ state: 'started', title: 'F8 演练' })
-    expect(test.approval.mock.calls[0]?.[0].reason.split('\n')).toEqual([
+    if (scenario === 'never') expect(test.approval).not.toHaveBeenCalled()
+    else expect(test.approval.mock.calls[0]?.[0].reason.split('\n')).toEqual([
       'Orchestra 审批', '任务　F8 演练', '步骤　启动前确认（整项任务）',
       '审批原因　计划包含人工审批步骤，启动前需要你确认这份计划。',
       '审批内容　批准启动这份计划，共 2 个步骤。',
@@ -620,6 +621,13 @@ it.each(['approval', 'wait', 'no files', 'declined'] as const)('enforces named a
     const notification = () => test.notices.find(({ message }) => message.content.some((part) => part.type === 'text' && part.text.includes(approvalName)))
     await expect.poll(notification, { timeout: 5_000 }).toMatchObject({ sessionId: 'parent' })
     await human.admit(notification()!.message, false)
+    if (scenario === 'never') {
+      await expect(human.call({ action: 'review', decision_title: approvalName })).resolves.toMatchObject({ kind: 'panel_review', location: { decisionId: list.data.items[0].decision_id } })
+      expect(test.approval).not.toHaveBeenCalled()
+      expect(test.spawn).not.toHaveBeenCalled()
+      expect(steps()[0]).toEqual({ node_id: 'gate', status: 'blocked_pre' })
+      return
+    }
     await expect(human.call({ action: 'review', decision_title: approvalName })).resolves.toMatchObject({ state: 'approved' })
     expect(test.approval.mock.calls[1]?.[0].reason.split('\n')).toEqual([
       'Orchestra 审批', '任务　F8 演练', '步骤　批准合成数据核对',

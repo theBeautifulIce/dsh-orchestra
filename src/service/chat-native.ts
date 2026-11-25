@@ -46,6 +46,8 @@ type Turn = { number: number; signal: AbortSignal; human?: Message; noticeRun?: 
   notesOnly?: boolean; brainNotesOnly?: boolean; brainReviewStarted?: boolean; reportReminderSent?: boolean;
   admissionFailureCalls?: number; admissionFailureReminderSent?: boolean }
 type NativeApproval = {
+  overrideOf?(session: Agent['session']): 'ask' | 'never' | undefined
+  config?: { policy?: 'ask' | 'never' }
   request(input: { agent: Agent; toolName: string; callId?: ToolExecution['callId']; reason: string; signal: AbortSignal }): Promise<string>
 }
 
@@ -56,6 +58,7 @@ const prompt = [
   'Acknowledge admission once. Do not repeat the request. Routine progress stays in the panel unless requested. Do not execute task work yourself.',
   'When the notice says task understanding failed and no run started, do not call any tool, including orchestra_task start or status. Report that exact reason and finish. Do not claim a saved draft without a recorded draft receipt. Only a new human message can retry admission.',
   'Only a fresh receipt for this exact request proves admission. Plans, promises, user messages and old receipts do not prove admission. Do not claim a start or schedule without that receipt. Use status for existing tasks. Claim successful delivery only with recorded acceptance.',
+  'DSH tool authorization, plan startup confirmation and workflow human approval are distinct. A disabled host popup does not invalidate a workflow approval. If the plan receipt directs the operator to the panel, do not ask for a permission change or call start/status; no run exists yet. When understanding reports a constraint, quote the recorded requirement rather than invent a policy conflict.',
   'For planning or startup failure, state the recorded reason and next step. Do not invent missing inputs or request information already supplied. Do not suggest a nonexistent run or a new command as a repair. If automatic routing settings could not be read, relay the notice. If no notice exists for a dispatch request, direct the operator to the configured task command in Orchestra settings. Never assume its name.',
   'Greetings, discussion, explanation, advice, brainstorming and capability questions remain ordinary conversation. Do not create tasks for them.',
   'Ask only for a critical missing item. Retain the draft goal and restrictions. A clear request to resume can continue that draft. Do not ask for a complete restatement when the draft is available.',
@@ -157,7 +160,8 @@ const ADMISSION_FAILED_REMINDER = '本次任务理解失败，尚未启动任何
 
 function admissionNotice(outcome: ChatOutcome): Message {
   // Show a failed admission immediately, even if the source model never finishes.
-  return noticeMessage(uuidv7() as Message['id'], describeChatOutcome(outcome, 'start'), [], [], isAdmissionFailure(outcome))
+  return noticeMessage(uuidv7() as Message['id'], describeChatOutcome(outcome, 'start'), [], [], isAdmissionFailure(outcome)
+    || (outcome.state === 'plan_ready' && outcome.approval_channel === 'panel'))
 }
 
 function describeBlocking(db: Service['orchestra']['db'], runId: string) {
@@ -740,9 +744,15 @@ export function installNativeChat(host: Context, options: {
     text: ({ agent }) => agent && options.bindingFor(agent) ? prompt : '',
   })
 
+  const nativeApprovalFor = (agent: Agent) => {
+    const approval = (agent.ctx?.get?.('approval') ?? host.get('approval')) as NativeApproval | undefined
+    if (typeof approval?.request !== 'function') return undefined
+    if ((approval.overrideOf?.(agent.session) ?? approval.config?.policy) === 'never') return undefined
+    return approval
+  }
   const requestApproval = async (exec: ToolExecution | undefined, agent: Agent, reason: string, signal: AbortSignal) => {
-    const approval = host.get('approval') as NativeApproval | undefined
-    if (!approval) throw new OrchError('CONFIRMATION_REQUIRED', '此会话没有可用的 DSH 审批通道，任务需要人工处理')
+    const approval = nativeApprovalFor(agent)
+    if (!approval) throw new OrchError('CONFIRMATION_REQUIRED', '当前会话不提供宿主审批弹窗。请在 Orchestra 面板处理；工作流审批要求仍有效。')
     return await approval.request({ agent, toolName: TOOL_NAME, ...(exec ? { callId: exec.rootCallId ?? exec.callId } : {}), reason, signal }) === 'allowed-once'
   }
   const approveOnce = async (turn: Turn, key: string, exec: ToolExecution | undefined, agent: Agent, reason: string, signal: AbortSignal) => {
@@ -827,17 +837,23 @@ export function installNativeChat(host: Context, options: {
             withTx(service.orchestra.db, tx => advancePlanning(tx, progress, 'approval', null, Date.now()))
             return { state: 'plan_ready' as const, plan_id: view.plan_id, title: view.proposal.title }
           }
+          const popupUnavailable = !nativeApprovalFor(agent)
           const launch = (approved: boolean) => {
             if (findChatPlan(service.orchestra.db, origin) !== view.plan_id) {
               throw new OrchError('CONFIRMATION_MISMATCH', '本次计划已更新，请重新核对', { reason: 'plan_updated' })
             }
             return service.planning.launchFromChat(
-              view.plan_id, view.content_hash, options.operator, new Date().toISOString(), origin, approved,
+              view.plan_id, view.content_hash, options.operator, new Date().toISOString(), origin, approved, popupUnavailable,
             )
           }
           let started
           try { started = launch(false) } catch (error) {
             if (!(error instanceof OrchError) || error.code !== 'CONFIRMATION_REQUIRED') throw error
+            if (popupUnavailable || !nativeApprovalFor(agent)) {
+              assertCurrent()
+              withTx(service.orchestra.db, tx => advancePlanning(tx, progress, 'approval', null, Date.now()))
+              return { state: 'plan_ready' as const, plan_id: view.plan_id, title: view.proposal.title, approval_channel: 'panel' as const }
+            }
             const definition = service.orchestra.catalog.get(view.proposal.workflow_id, view.proposal.workflow_version)
             const hasApprovalStep = definition.nodes.some((node) => node.type === 'approval')
             const hasEffects = definition.nodes.some((node) => node.side_effect_policy === 'irreversible' || node.side_effect_policy === 'compensable')
@@ -999,7 +1015,7 @@ export function installNativeChat(host: Context, options: {
       if (decision.run_id !== runId || (turn.noticeRun && input.resolution !== 'approved')) {
         throw new OrchError('FORBIDDEN', '该裁决不属于当前会话的待确认运行，或需要原有核验证据')
       }
-      if (decision.kind === 'audit_result' || !decision.allowed_resolutions?.includes(input.resolution)
+      if (!nativeApprovalFor(agent) || decision.kind === 'audit_result' || !decision.allowed_resolutions?.includes(input.resolution)
         || decision.resolution_unavailable_reason || decision.required_evidence?.length) {
         const explanation = describeDecision(decision)
         return { kind: 'panel_review' as const, title: explanation.title, summary: explanation.summary,
