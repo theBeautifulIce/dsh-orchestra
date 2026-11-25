@@ -454,12 +454,12 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     }, 'Orchestra personal services')
     if (nativeChat) host.inject(['systemPrompt', 'sessions', 'webServer'], (chatCtx) => {
       const settings = profileDir && isAbsolute(profileDir) ? createNativeChatRoutingSettings(profileDir) : undefined
-      const complete = createDshJsonCompletion(host.llm)
+      const complete = createDshJsonCompletion(host.llm, 'admission')
       installNativeChat(chatCtx, {
         operator: human,
         signal: stop.signal,
         async interpret(input, agent, signal, assertCurrent) {
-          if (!complete) throw new OrchError('SERVICE_UNAVAILABLE', '当前模型服务没有可用的任务理解接口，请检查服务后重试')
+          if (!complete) throw new OrchError('SERVICE_UNAVAILABLE', '当前模型服务没有可用的任务理解接口，请检查服务后重试', { reason: 'semantic_unavailable' })
           const fallback = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined
           const selection = agent.model.current() ?? fallback?.currentSelection()
           return complete(selection, SEMANTIC_INSTRUCTIONS, input, signal, assertCurrent)

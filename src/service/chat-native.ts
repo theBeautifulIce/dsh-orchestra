@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { withTx } from '../infra/sqlite/driver.ts'
+import { visitChatReports } from './chat-report-isolation.ts'
 import { beginPlanningProgress, advancePlanning } from './chat-planning-progress.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
@@ -56,8 +57,8 @@ const prompt = [
   'Greetings, discussion, explanation, advice, brainstorming and capability questions remain ordinary conversation. Do not create tasks for them.',
   'Ask only for a critical missing item. Retain the draft goal and restrictions. A clear request to resume can continue that draft. Do not ask for a complete restatement when the draft is available.',
   'Use action=status with the exact task_title for a named or earlier task. Use the latest task only for an unambiguous reference. Otherwise ask which task. In a notice, omit task_title and run_id to use its verified source run.',
-  'For accepted files, read status.artifacts, then use action=artifact with the exact artifact_id. Never invent an identifier. Use file_name only for one matching version. Summarize the retrieved evidence and its recorded acceptance in the original conversation.',
-  'When a chat result is truncated, use the status artifact references and their exact read arguments. Read each required result before summarizing it. A preview is not the complete result. Keep the final summary concise and cover every requested item. The host shows full original artifacts as named links. Never ask the operator to supply identifiers already present in these references.',
+  'For artifact access use status.artifacts and action=artifact with the exact artifact_id. Never invent an identifier. Use file_name only for one matching version.',
+  'Use the recorded acceptance, available facts and named links for a concise delivery summary. A preview is not the full result. Read the exact artifact when its contents are needed to answer or verify a claim, and read every required result when the operator asks for complete contents in chat. Do not fetch all artifact bodies merely to restate the receipt; do not claim to have reviewed unread content. Preserve every requested delivery item and its original link. Use the supplied exact read arguments; never ask for identifiers already supplied.',
   'Every terminal or blocking notice needs a final answer. State the result, reason and next step. Report failure, cancellation, missing access and pending verification explicitly. Do not attempt task work to repair the result. After a denied tool call, use the notice or action=status and finish the explanation.',
   'For a pending decision, report what needs the operator and show the supplied attention link. Read status once when needed. Use action=review with its exact decision_title only when the operator asks to handle that item. If the response is panel_review, explain the reason and finish. Do not retry review with invented resolutions or poll while waiting for the operator. A refusal leaves the decision open unless the human authorizes that exact rejected resolution.',
   'For 待审成果 and 审核标准, use action=review_delivery for the verified run. Use the supplied task, step, artifact and criteria. Do not open an authorization popup or submit a review for the operator. For a direct review request, locate the task with status first.',
@@ -1123,22 +1124,22 @@ export function installNativeChat(host: Context, options: {
       cursors.set(agent, receipts.length === 16 ? receipts.at(-1)!.cursor : 0)
       const checked = checkedModelRecovery.get(agent) ?? new Map()
       checkedModelRecovery.set(agent, checked)
-      for (const receipt of receipts) {
+      await visitChatReports(receipts, () => !options.signal.aborted && sameBinding(agent, binding), async (receipt) => {
         const isCurrent = () => sameBinding(agent, binding)
         const retrying = await service.recoverChatModelAssignment?.({ actor: options.operator, runId: receipt.run_id, signal: options.signal,
           checked, isCurrent }).catch(() => undefined)
-        if (options.signal.aborted || !isCurrent()) return
+        if (options.signal.aborted || !isCurrent()) return 'stop'
         const facts = describeRun(service, receipt.run_id, options.operator)
         const view = retrying?.length ? { ...facts,
           blocking: facts.blocking.filter(({ node_run_id }) => !retrying.includes(node_run_id)) } : facts
         const priorKey = receipt.reported_key?.startsWith('delivered:') ? receipt.reported_key.slice('delivered:'.length) : null
         const report = nextReport(view, priorKey)
         if (!report || receipt.reported_key === 'delivered:' + report.key
-          || options.signal.aborted || !sameBinding(agent, binding)) continue
+          || options.signal.aborted || !sameBinding(agent, binding)) return
         const { key, notify } = report
         if (!notify) {
           reportChatRun(service.orchestra.db, receipt.run_id, 'delivered:' + key)
-          continue
+          return
         }
         const digest = sha256Hex(JSON.stringify([binding.identity, receipt.run_id, key]))
         const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}` as Message['id']
@@ -1171,7 +1172,7 @@ export function installNativeChat(host: Context, options: {
           } finally { pending.delete(id) }
         }
         const consumedAtCheckpoint = agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.id === id)
-        if (!await host.sessions.flush(agent.session) || options.signal.aborted) return
+        if (!await host.sessions.flush(agent.session) || options.signal.aborted || !isCurrent()) return 'stop'
         // Inbox persistence is not delivery. A queued or claimed message can be
         // discarded before user/message commits. Acknowledge the visible source
         // event only; retry the same ID when an unconsumed notice is lost.
@@ -1179,7 +1180,7 @@ export function installNativeChat(host: Context, options: {
           claimedNotices.get(agent)?.delete(id)
           reportChatRun(service.orchestra.db, receipt.run_id, 'delivered:' + key)
         }
-      }
+      })
     } finally { lease.release() }
   }
   const interval = setInterval(() => {

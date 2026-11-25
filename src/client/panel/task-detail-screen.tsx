@@ -429,7 +429,7 @@ function StartMemory({ runId, commands, onOpenMemory }: { runId: string; command
     {state === 'done'
       ? <><p role="status">已取得整理回执，可在记忆页查看批次状态。</p><button type="button" style={quietButtonStyle} onClick={onOpenMemory}>查看记忆批次</button></>
       : <form onSubmit={(event) => { event.preventDefault(); void submit() }} style={{ display: 'grid', gap: 8, marginTop: 8 }}>
-        <label>希望下次复用什么？ <textarea value={reason} required maxLength={500} placeholder="例如：保留这次核对数据口径的步骤和验证依据" disabled={state === 'busy' || state === 'unknown'} onChange={(event) => setReason(event.target.value)} /></label>
+        <label style={{ display: 'grid', gap: 6 }}>希望下次复用什么？<textarea className="ops-field" rows={3} style={{ width: '100%', resize: 'vertical' }} value={reason} required maxLength={500} placeholder="例如：保留这次核对数据口径的步骤和验证依据" disabled={state === 'busy' || state === 'unknown'} onChange={(event) => setReason(event.target.value)} /></label>
         <p style={mutedStyle}>系统会从本次运行提议记忆条目。请在审批中心核对，获批条目的写入结果可在「记忆」中查看。</p>
         {state === 'error' && <p role="alert">{errorText}</p>}
         {state === 'unknown' && <p role="status">结果暂不可确认。再次查询会保留原回执编号。</p>}

@@ -20,3 +20,10 @@ export const ORCHESTRA_REPORT_ONLY_REMINDER = [
   '现在用已有通知给出最终回复：执行结果、具体原因、下一步。',
   '确实缺少状态时，只调用 orchestra_task 的 status。不要自行补做任务。',
 ].join('\n')
+
+/** A structured model call already supplies a purpose-specific schema and rules. */
+export const ORCHESTRA_STRUCTURED_COMMUNICATION_GUIDE = [
+  'ORCHESTRA_COMMUNICATION_STE80：只返回要求的结构化字段，不复述输入或思考过程。',
+  '自由文本先写结论，再写依据、缺口和下一步；保持用户语言。区分事实、推断和未知。',
+  '保持引用、标识符、路径、数值、限制及否定条件原样。不得为压缩内容而删除要求、证据或完整成果。',
+].join('\n')

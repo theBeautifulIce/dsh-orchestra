@@ -95,6 +95,16 @@ export const PANEL_LAYOUT_CSS = `
 .ops-panel-viewport .ops-page select, .ops-panel-viewport .ops-page textarea { font-family: inherit; }
 .ops-panel-viewport .ops-actions, .ops-panel-viewport .ops-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .ops-panel-viewport .ops-toolbar { justify-content: space-between; }
+/* Low-specificity safety net for new raw controls in the workbench. Explicit
+   component classes and scoped layout rules retain priority. Do not alter
+   native checkboxes, radios, file inputs, range inputs or hidden fields. */
+.ops-panel-viewport :where(button:not([class]):not([style]), textarea:not([class]):not([style]), select:not([class]):not([style]), input:not([class]):not([style]):is(:not([type]), [type=text], [type=number], [type=search], [type=date], [type=time], [type=email], [type=password], [type=url], [type=tel])) {
+  box-sizing: border-box; min-width: 0; max-width: 100%; min-height: 44px; border: 1px solid ${COLOR.line};
+  border-radius: 8px; color: ${COLOR.ink}; background: ${COLOR.surface}; font: inherit; font-size: ${FONT_PX.body}px; padding: 9px 12px;
+}
+.ops-panel-viewport :where(button:not([class]):not([style])) { cursor: pointer; font-weight: 550; }
+.ops-panel-viewport :where(button:not([class]):not([style]):disabled) { color: ${COLOR.inkMuted}; background: ${COLOR.sidebar}; cursor: not-allowed; }
+.ops-panel-viewport :where(button:not([class]):not([style]):focus-visible, textarea:not([class]):not([style]):focus-visible, select:not([class]):not([style]):focus-visible) { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
 .ops-panel-viewport .ops-button, .ops-panel-viewport .ops-field {
   box-sizing: border-box; min-height: 44px; border: 1px solid ${COLOR.line}; border-radius: 8px;
   color: ${COLOR.ink}; background: ${COLOR.surface}; font: inherit; font-size: ${FONT_PX.body}px;

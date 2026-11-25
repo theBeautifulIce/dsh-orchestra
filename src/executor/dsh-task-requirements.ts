@@ -15,7 +15,7 @@ export function createDshTaskRequirements(options: PlanningContext & {
   isAuthorized?: () => boolean
   resolveWorkflow: (hint: SemanticWorkflow) => WorkflowSelection
 }) {
-  const complete = createDshJsonCompletion(options.context.llm)
+  const complete = createDshJsonCompletion(options.context.llm, 'admission')
   return async (input: Input, signal: AbortSignal): Promise<Input> => {
     signal.throwIfAborted()
     if (input.requirements_contract) {

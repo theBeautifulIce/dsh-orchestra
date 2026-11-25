@@ -56,3 +56,38 @@ it('renders reference text literally, saves into the visible run, and reuses an 
     expect(view.text()).toContain('步骤 source')
   } finally { view.unmount() }
 })
+
+it('uses the shared A-workbench controls and clears the old draft when the run changes', async () => {
+  const writes: string[] = []
+  const client = createApiClient('http://panel.test', async (input, init) => {
+    if (init?.method === 'POST') writes.push(String(init.body))
+    const run = new URL(String(input)).searchParams.get('run_id')
+    return { ok: true, status: 200, json: async () => ({ ok: true, schema_version: 1, as_of_seq: 1,
+      data: { items: [{ note_id: run, author: 'source', source: 'node', attempt: 1, body: `note-${run}`, created_at: '2026-11-21T00:00:00.000Z' }] } }) } as Response
+  })
+  const panel = (runId: string, connected = true) => <PanelShell activeRoute="tasks" onNavigate={() => undefined} serviceConnected={connected}>
+    <RunNotes client={client} runId={runId} reloadVersion={0} />
+  </PanelShell>
+  const view = await renderPanel(panel('first'))
+  try {
+    await view.flush()
+    const input = view.container.querySelector<HTMLTextAreaElement>('textarea.ops-field')!
+    expect(input).toBeTruthy()
+    expect(input.labels?.[0]?.textContent).toBe('添加运行便条')
+    expect(view.container.querySelector('form.ops-run-notes-form .ops-button.ops-button--primary')).toBeTruthy()
+    expect(view.text()).toContain('note-first')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'old draft')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await view.rerender(panel('first', false))
+    expect(view.container.querySelector<HTMLTextAreaElement>('textarea')!.disabled).toBe(true)
+    await act(async () => { view.container.querySelector('form.ops-run-notes-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) })
+    expect(writes).toEqual([])
+    await view.rerender(panel('second'))
+    await view.flush()
+    expect(view.container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('')
+    expect(view.text()).not.toContain('note-first')
+    expect(view.text()).toContain('note-second')
+  } finally { view.unmount() }
+})

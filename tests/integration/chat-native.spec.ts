@@ -1930,3 +1930,33 @@ it('uses the configured command only, preserves typed admission and blocks a lat
     expect(await human.call()).toMatchObject({ state: 'started' })
   } finally { await test.close() }
 })
+
+it('a failed source notice cannot starve another run in the same conversation', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('/orchestra 整理第一批合同'))
+    const first = await human.call()
+    await human.admit(user('/orchestra 整理第二批合同'))
+    const second = await human.call()
+    const { db } = test.services.get('parent')!.orchestra
+    withTx(db, tx => tx.run("UPDATE runs SET status='failed',ended_at=? WHERE run_id IN (?,?)", [new Date().toISOString(), first.run_id, second.run_id]))
+    const original = human.agent.steer.bind(human.agent)
+    const spy = vi.spyOn(human.agent, 'steer').mockImplementationOnce(() => { throw new Error('first notice unavailable') })
+    spy.mockImplementation(original)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(1)
+    expect(test.notices[0]!.message.source).toMatchObject({ summary: expect.stringContaining(second.title) })
+    await human.admit(test.notices[0]!.message, false)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(2)
+    expect(test.notices[1]!.message.source).toMatchObject({ summary: expect.stringContaining(first.title) })
+    await human.admit(test.notices[1]!.message, false)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(db.raw.prepare('SELECT reported_key FROM chat_task_receipts').all()).toEqual([
+      { reported_key: 'delivered:terminal:failed' }, { reported_key: 'delivered:terminal:failed' },
+    ])
+    expect(test.notices).toHaveLength(2)
+  } finally { await test.close(); vi.useRealTimers() }
+})

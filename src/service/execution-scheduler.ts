@@ -165,11 +165,13 @@ class Scheduler {
     this.concurrencyLimit = concurrency
     this.maxWaiting = maxWaiting
     this.pump()
+    this.settleClose()
   }
 
   configureWorkflowLimits(resolve: ResolveWorkflowLimits): void {
     this.resolveWorkflowLimits = resolve
     this.pump()
+    this.settleClose()
   }
 
   run<T>(fn: () => Promise<T> | T, opts?: ExecutionTaskOptions): Promise<T> {
@@ -244,7 +246,20 @@ class Scheduler {
   // 按入队顺序取首个仍有所有所需名额的任务。
   private pump(): void {
     while (this.running < this.concurrencyLimit && this.queue.length > 0) {
-      const idx = this.queue.findIndex((task) => this.canStart(task))
+      // A failed limit lookup is not permission to run without the limit. Reject
+      // only that queued attempt; otherwise pump() can strand unrelated work and
+      // even prevent the previous launch() from resolving its result.
+      let idx = -1
+      for (let i = 0; i < this.queue.length;) {
+        const task = this.queue[i]!
+        try {
+          if (this.canStart(task)) { idx = i; break }
+          i++
+        } catch (error) {
+          this.queue.splice(i, 1)
+          task.reject(error)
+        }
+      }
       if (idx < 0) return
       const [task] = this.queue.splice(idx, 1)
       if (!task) return

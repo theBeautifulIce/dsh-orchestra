@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { OrchError } from '../core/errors.ts'
-import { ORCHESTRA_COMMUNICATION_GUIDE } from '../core/communication.ts'
+import { ORCHESTRA_STRUCTURED_COMMUNICATION_GUIDE } from '../core/communication.ts'
 
 type Llm = Context['llm']
 type StreamOptions = Parameters<Llm['stream']>[0]
@@ -9,7 +9,9 @@ export type JsonModelRoute = { provider: string; model: string; reasoningEffort?
 const unavailable = () => new OrchError('SERVICE_UNAVAILABLE', '暂时无法确认任务含义，请稍后重试', { reason: 'semantic_unavailable' })
 
 /** One bounded JSON call. No session history, tool registry or agent loop is supplied. */
-export function createDshJsonCompletion(llm: Llm | undefined) {
+export const SEMANTIC_ADMISSION_TIMEOUT_MS = 30_000
+
+export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admission' | 'permission' = 'permission') {
   if (typeof llm?.prepareCall !== 'function') return
   const runtime = llm
   let active = 0
@@ -20,7 +22,10 @@ export function createDshJsonCompletion(llm: Llm | undefined) {
     if (Buffer.byteLength(body, 'utf8') > 32_768) throw unavailable()
     active++
     const local = new AbortController()
-    const timeout = setTimeout(() => local.abort(), 8_000)
+    const timeoutReason = purpose === 'admission'
+      ? new OrchError('OPERATION_TIMEOUT', '任务理解超时，尚未开始执行', { reason: 'semantic_timeout' })
+      : unavailable()
+    const timeout = setTimeout(() => local.abort(timeoutReason), purpose === 'admission' ? SEMANTIC_ADMISSION_TIMEOUT_MS : 8_000)
     timeout.unref()
     const lifetime = AbortSignal.any([local.signal, signal])
     const work = (async () => {
@@ -36,7 +41,7 @@ export function createDshJsonCompletion(llm: Llm | undefined) {
         || (reasoningEffort != null && prepared.config.reasoningEffort !== reasoningEffort)) throw unavailable()
       const messages: StreamOptions['messages'] = [{ id: randomUUID() as NonNullable<StreamOptions['messages'][number]['id']>,
         role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: body }] }]
-      const stream = prepared.stream({ provider, model, maxTokens, system: `${ORCHESTRA_COMMUNICATION_GUIDE}\n${instructions}`, messages, tools: [], signal: lifetime,
+      const stream = prepared.stream({ provider, model, maxTokens, system: `${ORCHESTRA_STRUCTURED_COMMUNICATION_GUIDE}\n${instructions}`, messages, tools: [], signal: lifetime,
         ...(prepared.config.reasoningEffort === undefined ? {} : { reasoningEffort: prepared.config.reasoningEffort }) })
       let output = ''
       let length = 0
@@ -71,7 +76,11 @@ export function createDshJsonCompletion(llm: Llm | undefined) {
       if (lifetime.aborted) onAbort()
     })
     try { return await Promise.race([work, aborted]) }
-    catch { throw unavailable() }
+    catch {
+      // Caller cancellation and provider errors keep the existing redacted failure contract.
+      if (!signal.aborted && local.signal.reason === timeoutReason) throw timeoutReason
+      throw unavailable()
+    }
     finally {
       lifetime.removeEventListener('abort', onAbort)
       clearTimeout(timeout)
