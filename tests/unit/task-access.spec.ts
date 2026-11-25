@@ -3,6 +3,7 @@ import { taskAccessCases, accessContract } from '../fixtures/task-access-cases.t
 import { interpretSemanticAdmission, type SemanticInput } from '../../src/service/semantic-admission.ts'
 import { requirementsContractSchema, mergeRequirementsContracts, type TaskRequirement } from '../../src/core/task-requirements.ts'
 import { nativeToolConstraint } from '../../src/executor/dsh-execution-capabilities.ts'
+import { dshPlanningInput } from '../../src/executor/planning-input.ts'
 import { canStartAtRequiredGate, requirementIssues } from '../../src/service/task-requirement-checks.ts'
 
 for (const item of taskAccessCases) it(item.name, item.run)
@@ -84,3 +85,65 @@ it('拒绝模型编造审批名称或用来源中另一段普通文字替代明�
   expect(interpretSemanticAdmission(namedGateInput, { ...namedGateReply,
     constraints: [{ ...namedGateConstraint, gate_name: gateName }] })).toMatchObject({ kind: 'ready' })
 })
+
+it.each([
+  '预算 10000 元，实际支出 7600 元。',
+  '| 项目 | 金额 |\n| --- | ---: |\n| 预算 | 10000 |\n| 支出 | 7600 |',
+  '预算：\n10000 元\n实际支出：\n7600 元',
+])('审批前规划保留真实步骤和名称，暂不提供计算数字（%s）', material => {
+  const namedTask = 'T03-预算审核 2026'
+  const namedGate = '批准预算 2026 复核'
+  const action = '计算 10000 元扣除 7600 元后的剩余金额和支出比例'
+  const quote = `只有批准后，才能${action}`
+  const goal = `创建任务「${namedTask}」，设置审批步骤「${namedGate}」，安排 2 个执行步骤。\n${material}\n${quote}。`
+  const step: TaskRequirement = { id: 'gate', kind: 'approval_before', scope: 'steps', action, gate_name: namedGate,
+    reviewer: { kind: 'operator' }, source_message_id: 'm', quote }
+  const payload = { goal, requirements: [{ id: 'R1', text: '使用 10000 与 7600 的原值，保留 2 个执行步骤' }],
+    requirements_contract: { version: 1, start_policy: 'immediate', sources: [{ message_id: 'm', text: goal }],
+      timing: { source_message_id: 'm', quote: goal }, constraints: [step] },
+  }
+  const original = structuredClone(payload)
+  const projected = dshPlanningInput(payload).payload
+  const serialized = JSON.stringify(projected)
+  expect(serialized).not.toMatch(/10000|7600/u)
+  expect(serialized).toContain(`任务「${namedTask}」`)
+  expect(serialized).toContain(`审批步骤「${namedGate}」`)
+  expect(serialized).toContain('安排 2 个执行步骤')
+  expect(projected).toMatchObject({ requirements: [{ id: 'R1', text: expect.stringContaining('保留 2 个执行步骤') }],
+    requirements_contract: { constraints: [{ kind: 'approval_before', scope: 'steps', gate_name: namedGate,
+      action: expect.stringMatching(/^计算 .*剩余金额和支出比例$/u), reviewer: { kind: 'operator' } }] },
+  })
+  expect(payload).toEqual(original)
+})
+
+it('普通任务的规划保留原始数字和来源', () => {
+  const goal = '核对已列明的两个项目：预算 10000 元、实际支出 7600 元，不联网。'
+  const contract = requirementsContractSchema.parse({ version: 1, start_policy: 'immediate',
+    sources: [{ message_id: 'm', text: goal }], constraints: [
+      { id: 'net', kind: 'no_network', source_message_id: 'm', quote: '不联网' },
+    ],
+  })
+  const payload = { goal, requirements_contract: contract, requirements: [{ id: 'R1', text: '结果中列两笔原值 10000 与 7600' }] }
+  expect(dshPlanningInput(payload)).toMatchObject({ offline: true, payload })
+  expect(dshPlanningInput(payload).payload).toBe(payload)
+})
+
+it.each(['不联网', '商品 B 单价缺失', '不要报告缺失单价', 'Do not report missing prices'])(
+  '不给普通事实、访问限制或明确禁止报告的原句赋予部分结果授权（%s）', quote => {
+    const current: SemanticInput = { explicit: true, current: { message_id: 'stock', text: `核对库存。${quote}。` } }
+    const gap = { id: 'gap', kind: 'report_data_gap', quote, source_message_id: current.current.message_id }
+    const contract = { version: 1, start_policy: 'immediate', sources: [current.current], constraints: [gap] }
+    expect(requirementsContractSchema.safeParse(contract).success).toBe(false)
+    expect(interpretSemanticAdmission(current, { kind: 'task', relation: 'new', timing: 'immediate',
+      quote: '核对库存', constraints: [gap] })).toMatchObject({ kind: 'clarify' })
+  })
+
+it.each([['不要报告未完成项', '报告未完成项'], ['Do not report missing prices', 'report missing prices']])(
+  '不允许删掉同一句的否定词来伪造部分结果授权（%s）', (denied, clipped) => {
+    const current: SemanticInput = { explicit: true, current: { message_id: 'stock', text: `核对库存。${denied}。` } }
+    const gap = { id: 'gap', kind: 'report_data_gap', quote: clipped, source_message_id: current.current.message_id }
+    expect(requirementsContractSchema.safeParse({ version: 1, start_policy: 'immediate',
+      sources: [current.current], constraints: [gap] }).success).toBe(false)
+    expect(interpretSemanticAdmission(current, { kind: 'task', relation: 'new', timing: 'immediate',
+      quote: '核对库存', constraints: [gap] })).toMatchObject({ kind: 'clarify' })
+  })

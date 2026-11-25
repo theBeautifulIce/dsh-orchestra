@@ -479,7 +479,7 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
   const highRiskNodes = new Set(proposal.risks.filter(risk => risk.severity === 'high').map(risk => risk.node_id))
   const access = taskAccess(brief.requirements_contract)
   const independentTextWork = access.noNetwork && access.noWorkspaceRead
-    && workflow?.nodes.every(node => node.type === 'agent' && (node.sideEffectPolicy ?? 'pure') === 'pure'
+    && workflow?.nodes.every(node => node.type === 'agent' && node.sideEffectPolicy === 'pure'
     && !node.declaredTools.length) && proposal.steps.every(step => !step.tools.length)
     && proposal.deliverables.every(item => item.acceptance.kind === 'chat/text_result')
     && workflow.nodes.some(node => !node.dependsOn.length && !highRiskNodes.has(node.id)

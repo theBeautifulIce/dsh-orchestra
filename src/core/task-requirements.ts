@@ -10,6 +10,7 @@ const reviewer = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('operator') }),
   z.strictObject({ kind: z.literal('named'), name: z.string().trim().min(1).max(120) }),
 ])
+const deniedGapReport = /(?:不(?:要|必|得|用|需)|无需|禁止|勿)\s*(?:再|主动|如实)?\s*(?:上报|汇报|报告|说明|指出|列出|注明|标注)|\b(?:do not|don't|never)\s+(?:report|explain|identify|list)\b/iu
 
 export const taskRequirementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...common, kind: z.literal('chat_only') }),
@@ -28,8 +29,7 @@ export const taskRequirementSchema = z.discriminatedUnion('kind', [
     const quote = constraint.quote
     const report = /上报|汇报|报告|说明|指出|列出|注明|标注|\b(?:report|explain|identify|list)\b/iu
     const gap = /缺失|缺口|缺少|缺价|未完成|无法完成|不能完成|不完整|\b(?:missing|incomplete|unavailable)\b/iu
-    const denied = /(?:不(?:要|必|得|用|需)|无需|禁止|勿)\s*(?:再|主动|如实)?\s*(?:上报|汇报|报告|说明|指出|列出|注明|标注)|\b(?:do not|don't|never)\s+(?:report|explain|identify|list)\b/iu
-    if (!report.test(quote) || !gap.test(quote) || denied.test(quote)) {
+    if (!report.test(quote) || !gap.test(quote) || deniedGapReport.test(quote)) {
       ctx.addIssue({ code: 'custom', path: ['quote'], message: '须引用用户要求报告缺失或未完成项的原句' })
     }
   }
@@ -64,8 +64,15 @@ export const requirementsContractSchema = z.strictObject({
     ctx.addIssue({ code: 'custom', path: ['constraints'], message: '需求约束编号不能重复' })
   }
   for (const [index, constraint] of contract.constraints.entries()) {
-    if (!sources.get(constraint.source_message_id)?.includes(constraint.quote)) {
+    const source = sources.get(constraint.source_message_id)
+    if (!source?.includes(constraint.quote)) {
       ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '约束引用不在对应来源消息中' })
+    }
+    if (source && constraint.kind === 'report_data_gap') {
+      const before = source.slice(0, source.indexOf(constraint.quote)).split(/[，,。！？；;\n]/u).at(-1) ?? ''
+      if (deniedGapReport.test(before + constraint.quote)) {
+        ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '缺口处理引用不能省略原句中的否定' })
+      }
     }
     if (constraint.kind === 'approval_before' && constraint.gate_name && !sources.get(constraint.source_message_id)?.includes(constraint.gate_name)) {
       ctx.addIssue({ code: 'custom', path: ['constraints', index, 'gate_name'], message: '审批卡名称须来自同一条原始消息' })

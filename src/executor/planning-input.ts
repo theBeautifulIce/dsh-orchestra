@@ -24,7 +24,16 @@ export function dshPlanningInput(input: unknown) {
       if (text.trim() && block.includes(text.trim())) return placeholder
       text = text.replaceAll(block, placeholder)
     }
-    return text
+    // Free prose, table rows and copied requirement clauses can contain the
+    // same operands without a data label. Keep structural counts (e.g. two
+    // steps), named task/card identifiers and the operation; defer operands.
+    return text.replace(/(?:任务|流程|审批(?:步骤|节点)?)\s*[「“][^」”\r\n]{1,80}[」”]|[+−-]?\p{Nd}+(?:[.,，．]\p{Nd}+)*(?:[eE][+-]?\d+)?|[零〇一二两三四五六七八九十百千万亿点]+(?=\s*(?:元|块|美元|欧元|千克|公斤|%|％))/gu,
+      (value, offset: number) => {
+        if (/^(?:任务|流程|审批)/u.test(value)) return value
+        const rest = text.slice(offset + value.length)
+        const structural = /^\s*(?:(?:个|名|项|条)\s*)?(?:执行步骤|步骤|节点|代理|分支|列|段落|deliverables?\b|steps?\b|agents?\b|columns?\b)/iu.test(rest)
+        return structural ? value : '〔输入值〕'
+      })
   }
   const brief = input as Record<string, unknown>
   // The ledger keeps the citations. Repeating them alongside the verified

@@ -918,7 +918,7 @@ it('结构化约束经真实规划入口持久化，生成器与规划器取得�
 })
 
 it.each(['cited independent branch', 'ordinary high risk', 'forged source', 'unapproved quote', 'fabricated intent',
-  'dependent branch', 'uses external tool', 'violates chat restriction'] as const)(
+  'dependent branch', 'undeclared effect', 'uses external tool', 'violates chat restriction'] as const)(
   'only admits a verified partial outcome with an independently runnable text branch (%s)', async scenario => {
     const missingPrice = '商品 B 单价缺失'
     const reportGap = '金额核算发现必要数据缺失时，应如实报告未完成金额和下一步'
@@ -954,7 +954,8 @@ ${reportGap}。数量核算独立完成，不等待金额核算。
     const value = { node_id: 'value', type: 'agent' as const, title: '库存金额', position: { x: 100, y: 0 },
       config: { side_effect_policy: 'pure' } }
     const quantity = { node_id: 'quantity', type: 'agent' as const, title: '库存数量', position: { x: 100, y: 100 },
-      config: { side_effect_policy: 'pure', ...(scenario === 'uses external tool' ? { tools: { allow: ['ro.check'] } } : {}) } }
+      config: { ...(scenario === 'undeclared effect' ? {} : { side_effect_policy: 'pure' }),
+        ...(scenario === 'uses external tool' ? { tools: { allow: ['ro.check'] } } : {}) } }
     host.publish('inventory', { name: '库存核查',
       nodes: [{ node_id: 'start', type: 'trigger', title: '触发', position: { x: 0, y: 0 } }, value, quantity],
       edges: [{ from: 'start', to: 'value' }, { from: scenario === 'dependent branch' ? 'value' : 'start', to: 'quantity' }],
