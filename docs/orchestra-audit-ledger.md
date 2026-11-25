@@ -9,6 +9,16 @@
 | 日期 | 轮次 | 候选提交 | 结论 | P0 | P1 | P2 | P3 | 范围与遗留 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-11-25 | 1 | `d0c10a50` | 通过 | 0 | 0 | 1 | 0 | 原会话七个用例完成实机核验，日用 Orchestra 已加载。暂缓但尚未启动的任务在桌面重启后需要重述。[独立审计报告](audits/S6-task-session-reliability-independent-audit-round1.md) |
+| 2026-11-26 | 2 | `8c5f7ca0` | 未通过 | 0 | 2 | 1 | 0 | 拆成两条消息时可漏掉人数限制；汇报求助状态可能被误认成缺数授权；文件型成果的标题和序号可能丢失。[第 2 轮](audits/S6-task-session-reliability-independent-audit-round2.md) |
+| 2026-11-26 | 3 | `cd6e8851` | 未通过 | 0 | 2 | 0 | 0 | 上轮三项已修复。真实流程二选一时可能高估并行人数，单纯汇报审批状态可能被误认成缺数授权。[第 3 轮](audits/S6-task-session-reliability-independent-audit-round3.md) |
+| 2026-11-26 | 4 | `4ce0b93b` | 未通过 | 0 | 1 | 1 | 0 | 真实停止后存在只有阻塞事件、没有可办核验卡的运行。另发现看板待办在分页后仍扫描历史数据。[第 4 轮](audits/S6-task-session-reliability-independent-audit-round4.md) |
+| 2026-11-26 | 5 | `8e3d0fcf` | 有条件通过 | 0 | 0 | 1 | 0 | 上轮两项在实机和严格性能原件中关闭。T07 的两份长报告首次登记时附上正确标题仍被拒收，导致逐字重发 6575 个字符。[第 5 轮](audits/S6-task-session-reliability-independent-audit-round5.md) |
+| 2026-11-26 | 6 | `e4dc739a` | 未通过 | 0 | 1 | 1 | 0 | 两份历史报告的原参数首发均成功。原题 T10 曾在任务建立前被引文校验挡住，同时发现部分合法业务标题仍受文件名限制。[第 6 轮](audits/S6-task-session-reliability-independent-audit-round6.md) |
+| 2026-11-26 | 7 | `fc2b8d4c` | 未通过 | 0 | 1 | 0 | 0 | 业务标题修复已通过。本地两种错误分类能把「不联网」并入人数或重派指令，最终执行合同缺失联网限制。[第 7 轮](audits/S6-task-session-reliability-independent-audit-round7.md) |
+| 2026-11-26 | 8 | `00560edd` | 未通过 | 0 | 1 | 0 | 0 | 两种错误分类已修复。T10 在真实求助窗口停止后信箱关闭，重开后两名代理已有停止回执，原运行却仍无终态和可办卡。[第 8 轮](audits/S6-task-session-reliability-independent-audit-round8.md) |
+| 2026-11-26 | 9 | `a02357cf` | 未通过 | 0 | 1 | 0 | 0 | 旧运行在同库重开后自行关闭并通知来源。已取消、没有交付也没有可办理事项的任务仍错误占用待办。[第 9 轮](audits/S6-task-session-reliability-independent-audit-round9.md) |
+| 2026-11-26 | 10 | `f6f97857` | 未通过 | 0 | 1 | 1 | 0 | 同库待办、新任务停止与重启均通过。T06 的真实规划在输出上限处丢单，T07 一份已登记的原件又生成了 4868 字符并遭拒。[第 10 轮](audits/S6-task-session-reliability-independent-audit-round10.md) |
+| 2026-11-26 | 11 | `f5eee562` | 通过 | 0 | 0 | 0 | 0 | 原题 T06 在同款模型完成，截断由同会话限次恢复覆盖。T07 三份原件各登记一次，具名打开，后续查询仅读第三份。独立审计建议结束专项。[第 11 轮](audits/S6-task-session-reliability-independent-audit-round11.md) |
 
 ### S5 开发审计
 
