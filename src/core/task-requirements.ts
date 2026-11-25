@@ -63,6 +63,22 @@ function citationContexts(source: string, quote: string): string[] {
   return sentences.filter(sentence => sentence.includes(quote))
 }
 
+/** A worker retry rule stays with its step. It cannot establish a closed roster for the whole run. */
+export function citesAgentRedispatchRule(source: string, quote: string) {
+  const contexts = citationContexts(source, quote)
+  const redispatch = /(?:不(?:得|要|可|应|能|必|用)?|禁止|勿)\s*(?:(?:重复|循环|反复)?(?:查询|轮询|等待)\s*(?:或|和|并|、)\s*)?(?:重新|重复|再次)(?:派发|指派|派遣|调度|分派)(?:该|此|原|同一)?(?:代理|智能体)|\b(?:do not|don't|never)\s+(?:(?:poll|wait|retry)\s+(?:or|and)\s+)?(?:redispatch|reassign|re-dispatch)\s+(?:(?:the|this|that|same|either)\s+)?(?:agents?|workers?)\b/iu
+  const rosterWording = /额外|新增|另外|另行|只允许|仅限|不得增加|\b(?:extra|additional|new|only)\b/iu
+  return contexts.length > 0 && contexts.every(sentence => redispatch.test(sentence) && !rosterWording.test(sentence))
+}
+
+// Only this list of validator-owned explanations may appear in model correction instructions.
+export const citationIssueMessages = {
+  missingQuote: '约束引用不在对应来源消息中',
+  roster: '须引用整项任务禁止新增代理的原句。单个代理的查询或重新派发要求应保留在原步骤',
+  negatedGap: '缺口处理引用不能省略原句中的否定',
+  gap: '协作或运行状态不能作为缺少输入时部分执行的依据',
+} as const
+
 export function citedExecutionObservation(source: string, quote: string) {
   const contexts = citationContexts(source, quote)
   return contexts.length > 0 && contexts.every(sentence => !missingMaterial.test(sentence) && (
@@ -135,16 +151,16 @@ export const storedRequirementsContractSchema = z.strictObject({
   for (const [index, constraint] of contract.constraints.entries()) {
     const source = sources.get(constraint.source_message_id)
     if (!source?.includes(constraint.quote)) {
-      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '约束引用不在对应来源消息中' })
+      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: citationIssueMessages.missingQuote })
     }
     if (constraint.kind === 'no_extra_agents' && (!explicitAgentRoster(constraint.quote)
       || explicitAgentRoster(source ?? '')?.quote !== explicitAgentRoster(constraint.quote)?.quote)) {
-      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '须逐字引用限制新增代理的原句' })
+      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: citationIssueMessages.roster })
     }
     if (source && constraint.kind === 'report_data_gap') {
       const before = source.slice(0, source.indexOf(constraint.quote)).split(/[，,。！？；;\n]/u).at(-1) ?? ''
       if (deniedGapReport.test(before + constraint.quote)) {
-        ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '缺口处理引用不能省略原句中的否定' })
+        ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: citationIssueMessages.negatedGap })
       }
     }
     if (constraint.kind === 'approval_before' && constraint.gate_name && !sources.get(constraint.source_message_id)?.includes(constraint.gate_name)) {
@@ -162,7 +178,7 @@ export const requirementsContractSchema = storedRequirementsContractSchema.super
   const sources = new Map(contract.sources.map(source => [source.message_id, source.text]))
   for (const [index, constraint] of contract.constraints.entries()) {
     if (constraint.kind === 'report_data_gap' && !authorizesDataGap(sources.get(constraint.source_message_id) ?? '', constraint.quote)) {
-      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '协作或运行状态不能作为缺少输入时部分执行的依据' })
+      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: citationIssueMessages.gap })
     }
   }
   if (contractAgentRoster(contract.sources)?.conflicting) {

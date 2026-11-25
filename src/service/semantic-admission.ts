@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { uuidv7 } from '../core/ids.ts'
-import { citedExecutionObservation, contractAgentRoster, explicitAgentRoster, explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
+import { citationIssueMessages, citedExecutionObservation, citesAgentRedispatchRule, contractAgentRoster, explicitAgentRoster, explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
 import { isOrdinaryChat, explicitNotesRequest } from './chat-task-intent.ts'
 import type { ChatTaskOrigin } from './chat-task-receipts.ts'
 
@@ -115,9 +115,13 @@ export function semanticResponseNeedsCorrection(raw: unknown, input?: SemanticIn
 }
 
 function schemaLocation(error: z.ZodError): string {
-  // Use validator-owned field names and indexes only. Never put model content into correction instructions.
-  return error.issues.slice(0, 3).map(issue => (issue.path.filter(part => typeof part === 'number'
-    || typeof part === 'string' && /^[a-z_]{1,36}$/u.test(part)).join('.') || 'reply') + ' (' + issue.code + ')').join(', ')
+  return error.issues.slice(0, 3).map(issue => {
+    const path = issue.path.filter(part => typeof part === 'number'
+      || typeof part === 'string' && /^[a-z_]{1,36}$/u.test(part)).join('.') || 'reply'
+    const explanation = issue.code === 'custom' && Object.values(citationIssueMessages).some(text => text === issue.message)
+      ? ' ' + issue.message : ''
+    return `${path} (${issue.code})${explanation}`
+  }).join(', ')
 }
 
 // Reporting a runtime observation is part of the verbatim task. It cannot grant
@@ -196,8 +200,15 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
     return retainUnclear(input, pending, ['constraints'],
       '补充内容较长，已暂缓这项草稿。请先放弃该草稿，再将目标与限制整理成一条完整请求。', now, true)
   }
+  const classified: TaskRequirement[] = []
   for (const constraint of reply.constraints) {
     if (!cited(sources, constraint.source_message_id, constraint.quote)) return invalid('约束 ' + constraint.kind + ' 的 source_message_id 与 quote 未共同指向连续原文。')
+    if (constraint.kind === 'no_extra_agents') {
+      const source = sources.find(item => item.message_id === constraint.source_message_id)!
+      const roster = explicitAgentRoster(source.text)
+      if (roster) constraint.quote = roster.quote
+      else if (citesAgentRedispatchRule(source.text, constraint.quote)) continue
+    }
     if (constraint.kind === 'preserve_input' && !constraint.quote.includes(constraint.target)) return invalid()
     if (constraint.kind === 'approval_before' && ((constraint.action && !constraint.quote.includes(constraint.action))
       || (constraint.reviewer.kind === 'named' && !constraint.quote.includes(constraint.reviewer.name)))) return invalid()
@@ -210,6 +221,7 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
         || (names.length > 0 && !names.includes(constraint.gate_name)))) return invalid()
       if (names.length === 1) constraint.gate_name = names[0]!
     }
+    classified.push(constraint)
   }
   if (reply.unresolved.some(item => !cited(sources, item.source_message_id, item.quote))) return invalid()
   const pin = reply.workflow
@@ -232,10 +244,10 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
   // A model omission cannot relax a prior restriction or silently replace a pinned workflow.
   const rosterConstraints: TaskRequirement[] = sources.flatMap(source => {
     const roster = explicitAgentRoster(source.text)
-    return roster && !reply.constraints.some(item => item.kind === 'no_extra_agents' && item.source_message_id === source.message_id)
+    return roster && !classified.some(item => item.kind === 'no_extra_agents' && item.source_message_id === source.message_id)
       ? [{ id: 'roster', kind: 'no_extra_agents', source_message_id: source.message_id, quote: roster.quote }] : []
   })
-  const constraints = [...new Map([...old?.constraints ?? [], ...reply.constraints, ...rosterConstraints].map(constraint => {
+  const constraints = [...new Map([...old?.constraints ?? [], ...classified, ...rosterConstraints].map(constraint => {
     const { id: _id, ...meaning } = constraint
     return [JSON.stringify(meaning), meaning] as const
   })).values()].map((constraint, index) => ({ id: 'c' + (index + 1), ...constraint }))

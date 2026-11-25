@@ -33,6 +33,7 @@ const allBranchIds = roles.map((_, i) => 'review_' + (i + 1))
 const allNames = roles.map((role) => role + '核对')
 const descriptor = { name: 'ro.check', capability: 'read_only' as const, command: { bin: 'check', args: [] } }
 const goal = '分别核对十类交付内容，然后汇总审核结论'
+const secondTextTitle = 'A/B 方案：成本? ' + '分项评估'.repeat(62)
 
 it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但仅验收成果', '成果门槛', '取消', '重启与重试', '分支失败', '部分汇合', '停机后续跑'] as const)('具名分支共享一个运行与并发上限：%s', async (scenario) => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-parallel-plan-'))
@@ -109,7 +110,7 @@ it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但�
             expect(() => send(10, report, operationId, '会话正文-12.md')).toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
             expect(() => send(10, '更换了内容', operationId)).toThrow()
             expect(states()).toEqual(['passed','unverifiable','unverifiable'])
-            send(11, '第二项交付的正文。')
+            send(11, '第二项交付的正文。', uuidv7(), secondTextTitle)
           } else if (outputOnly) {
             publish(role, joinTexts.join('\n'))
           }
@@ -212,7 +213,7 @@ it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但�
           title: node.title, node_id: node.id, goal_ids: ['goal'],
           acceptance: textPlan && (node.id === 'join_review' || node.id === branchIds[0]) ? { kind: 'chat/text_result' }
             : { kind: 'artifact', file_name: node.title + '.txt', minimum_bytes: 8 },
-        })), ...(textPlan ? [{ title: '汇总审核', node_id: 'join_review', goal_ids: ['goal'],
+        })), ...(textPlan ? [{ title: secondTextTitle, node_id: 'join_review', goal_ids: ['goal'],
           acceptance: { kind: 'chat/text_result' } }] : []), ...(blockedOutputs ? [{ title: '真实工具证据', node_id: branchIds[4], goal_ids: ['goal'],
           acceptance: { kind: 'tool_evidence', tool: descriptor.name, exit_code: 0 } }] : [])] : [{ title: '审核结果', node_id: 'join_review', goal_ids: ['goal'],
           acceptance: { kind: 'tool_evidence', tool: descriptor.name, exit_code: 0 } }],

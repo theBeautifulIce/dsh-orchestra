@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { createSemanticSession, interpretSemanticAdmission, semanticResponseNeedsCorrection, SEMANTIC_INSTRUCTIONS,
+import { createSemanticSession, interpretSemanticAdmission, semanticCorrectionHint, semanticResponseNeedsCorrection, SEMANTIC_INSTRUCTIONS,
   type SemanticInput, type SemanticOutcome } from '../../src/service/semantic-admission.ts'
 import { createDshJsonCompletion } from '../../src/executor/dsh-json.ts'
 import { createDshSemanticInterpreter } from '../../src/executor/dsh-task-requirements.ts'
@@ -187,6 +187,8 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
         { id: 'network', kind: 'no_network', source_message_id: wire.current.message_id, quote: '不联网' },
         { id: 'workspace', kind: 'no_workspace_read', source_message_id: wire.current.message_id, quote: '不读写工作区文件' },
         { id: 'files', kind: 'no_workspace_files', source_message_id: wire.current.message_id, quote: '不读写工作区文件' },
+        { id: 'readonly', kind: 'read_only', source_message_id: wire.current.message_id, quote: '只读代理' },
+        { id: 'no-retry', kind: 'no_extra_agents', source_message_id: wire.current.message_id, quote: '不得循环查询或重新派发代理' },
         { id: 'gap', kind: 'report_data_gap', source_message_id: wire.current.message_id, quote: '结果和发生的协作异常返回本会话' },
       ] })
       yield { type: 'block-end', block: { type: 'text', text: JSON.stringify(proposal) } }
@@ -206,12 +208,35 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
       { kind: 'no_network', source_message_id: 't10-new', quote: '不联网' },
       { kind: 'no_workspace_read', source_message_id: 't10-new', quote: '不读写工作区文件' },
       { kind: 'no_workspace_files', source_message_id: 't10-new', quote: '不读写工作区文件' },
+      { kind: 'read_only', source_message_id: 't10-new', quote: '只读代理' },
     ],
   } } })
   if (result.kind !== 'ready') throw new Error('Expected the T10 task to remain ready')
   expect(result.request.requirements_contract.constraints.some(item => item.kind === 'report_data_gap')).toBe(false)
   expect(result.request.goal).toContain('结果和发生的协作异常返回本会话')
   expect(result.request.goal).toContain('所有操作必须实际通过插件执行')
+  expect(result.request.goal).toContain('不得循环查询或重新派发代理')
+})
+
+it('keeps real roster limits and rejects unsupported or uncited scopes when handling a retry instruction', () => {
+  const rule = 'Do not redispatch the agent'
+  const global = 'No additional agents'
+  const text = `Assign two parallel agents. ${rule}. ${global}.`
+  const source = input(text, 'roles')
+  const request = (source: SemanticInput, quote: string, id = 'roles') => task(source, { constraints: [
+    { id: 'roster', kind: 'no_extra_agents', source_message_id: id, quote },
+  ] })
+  expect(interpretSemanticAdmission(source, request(source, rule))).toMatchObject({ kind: 'ready', request: {
+    goal: text, requirements_contract: { constraints: [{ kind: 'no_extra_agents', quote: global }] },
+  } })
+  const scoped = input(`Assign two parallel agents. ${rule}.`, 'roles')
+  expect(interpretSemanticAdmission(scoped, request(scoped, rule))).toMatchObject({ kind: 'ready', request: {
+    goal: scoped.current.text, requirements_contract: { constraints: [] },
+  } })
+  expect(interpretSemanticAdmission(scoped, request(scoped, rule, 'unrelated'))).toMatchObject({ kind: 'clarify' })
+  const unknown = input('请按原有人员安排核对。', 'roles')
+  expect(semanticCorrectionHint(request(unknown, '按原有人员安排'), unknown)).toContain('整项任务禁止新增代理')
+  expect(interpretSemanticAdmission(unknown, request(unknown, '按原有人员安排'))).toMatchObject({ kind: 'clarify' })
 })
 
 it('T10 retains a real held restriction on resume and rejects forged or negated gap reports', () => {

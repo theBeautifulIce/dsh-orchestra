@@ -20,7 +20,7 @@ const fileName = key.refine(isArtifactFileName)
 const publish = z.strictObject({ operation_id: z.uuidv7(), file_name: fileName,
   text: z.string().min(1).max(65536) })
 const publishText = z.strictObject({ operation_id: z.uuidv7(), deliverable_index: z.number().int().min(0).max(19),
-  file_name: fileName.optional(),
+  file_name: z.string().optional(),
   text: z.string().min(1).max(65536).refine((text) => Boolean(text.trim()) && !text.includes('\0') && Buffer.from(text, 'utf8').toString('utf8') === text, '请提交完整的 UTF-8 会话正文') })
 const read = z.strictObject({ artifact_id: key, artifact_hash: hash, offset: z.number().int().nonnegative().default(0) })
 
