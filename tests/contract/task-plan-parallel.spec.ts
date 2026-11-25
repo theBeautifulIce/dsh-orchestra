@@ -105,6 +105,9 @@ it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但�
             expect(() => send(0, report, operationId, names[0])).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
             expect(() => send(10, report, operationId, '../汇总审核')).toThrow()
             const first = send(10, report, operationId, '汇总审核')
+            expect(first).toMatchObject({ deliverable_index: 10, publication_status: 'registered',
+              next_action: expect.stringContaining('剩余工作') })
+            expect(first).not.toHaveProperty('text')
             expect(send(10, report, operationId)).toEqual(first)
             expect(send(10, report, operationId, '会话正文-11.md')).toEqual(first)
             expect(() => send(10, report, operationId, '会话正文-12.md')).toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))

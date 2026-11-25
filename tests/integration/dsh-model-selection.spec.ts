@@ -83,6 +83,49 @@ it('每个主脑阶段固定该次选择，旧供应商额度错误可安全回�
   ])
 })
 
+it.each([
+  ['plan', 'success'], ['workflow', 'success'], ['plan', 'truncated'], ['plan', 'no_message'],
+  ['plan', 'wrong_route'], ['plan', 'wrong_initial_route'], ['rework', 'truncated'],
+] as const)('handles a native length stop in the same %s agent (%s)', async (purpose, followup) => {
+  const route = { provider: 'fixture', model: 'planner', reasoningEffort: 'high' }
+  const events: unknown[] = []
+  const prompts: string[] = []
+  const dispose = vi.fn(async () => {})
+  const create = vi.fn(async (options: { agentOptions: typeof route & { maxTokens: number } }) => {
+    expect(options.agentOptions.maxTokens).toBe(8192)
+    const agent = { session: { snapshotEvents: () => [...events] }, whenIdle: async () => {},
+      followup(message: { content: { text: string }[] }) {
+        prompts.push(message.content[0]!.text)
+        const first = prompts.length === 1
+        const wrongRoute = first ? followup === 'wrong_initial_route' : followup === 'wrong_route'
+        const config = wrongRoute ? { ...route, model: 'different' } : route
+        events.push({ type: 'request/header', data: { header: { config } } })
+        if (first || followup !== 'no_message') events.push({ type: 'assistant/message', data: { message: {
+          content: [{ type: 'text', text: first ? '{"stale":true}' : '{"complete":true}' }],
+        } } })
+        events.push({ type: 'turn/end', data: { reason: { kind: first || followup === 'truncated' ? 'max-tokens' : 'completed' } } })
+      } }
+    return { agent, dispose }
+  })
+  type Parent = NonNullable<ReturnType<Parameters<typeof createDshPlanningCallback>[0]['parent']>>
+  const parent = { session: { id: 'parent', header: { cwd: process.cwd() } }, ctx: { agents: { create } } } as unknown as Parent
+  const context = { agents: { get: () => parent }, llm: { listModels: async () => [{ id: route.model }],
+    resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'high' }] } }) } } as unknown as Context
+  const result = createDshPlanningCallback({ context, parent: () => parent, model: route }, purpose)({ goal: 'fixture input marker' })
+  if (followup === 'success') await expect(result).resolves.toEqual({ complete: true })
+  else if (followup === 'wrong_route' || followup === 'wrong_initial_route') {
+    await expect(result).rejects.toMatchObject({ code: 'PROTOCOL_VERSION_MISMATCH' })
+  }
+  else await expect(result).rejects.toMatchObject({ details: { planning_issue: followup === 'no_message' ? 'format' : 'length' } })
+  expect(create).toHaveBeenCalledTimes(1)
+  expect(dispose).toHaveBeenCalledTimes(1)
+  expect(prompts).toHaveLength(purpose === 'rework' || followup === 'wrong_initial_route' ? 1 : 2)
+  if (prompts.length > 1) {
+    expect(prompts[1]).not.toContain('fixture input marker')
+    expect(prompts[1]).not.toContain('stale')
+  }
+})
+
 it('keeps built-in coordination in both planning prompts while offline or workspace-read restrictions suppress skill discovery', async () => {
   type Options = Parameters<typeof createDshPlanningCallback>[0]
   const route = { provider: 'fixture', model: 'gpt-6.2-sol', reasoningEffort: 'medium' }

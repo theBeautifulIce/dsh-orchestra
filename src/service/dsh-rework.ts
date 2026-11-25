@@ -86,7 +86,7 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
       )
       if (!producer || producer.run_id !== runId) throw new OrchError('STALE_GENERATION', '成果提交对应的执行尝试已失效')
       const { data, target } = bindPublication(tx, binding, runId, producer.node_id, action, body)
-      return runIdempotentCommand(tx, { kind: 'rework.artifact', operationId: data.operation_id,
+      const receipt = runIdempotentCommand(tx, { kind: 'rework.artifact', operationId: data.operation_id,
         requestHash: requestHashOf('rework.artifact', { binding, ...data }), now }, () => {
         const bytes = 'deliverable_index' in data ? Buffer.from(data.text) : nativeTextBytes(data.file_name, data.text)
         if (bytes.length > 65536) throw new OrchError('RANGE_TOO_LARGE', '每份文本成果最多 64 KiB')
@@ -114,6 +114,9 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
         }
         return artifact
       }).result
+      return { ...receipt, publication_status: 'registered',
+        ...('deliverable_index' in data ? { deliverable_index: data.deliverable_index } : { file_name: data.file_name }),
+        next_action: '本项原件已保存，无需重发或回读。继续本步骤的剩余工作，完成后只交简短完成报告。若原件确需修订，在报告中说明具体问题，走正式返工。' }
     }
     if (action !== 'read') throw new OrchError('PAYLOAD_SCHEMA_INVALID', '未知成果操作')
     const data = read.parse(body)

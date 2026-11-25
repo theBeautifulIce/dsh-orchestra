@@ -301,7 +301,9 @@ it.each(['valid', 'repair', 'still malformed', 'expired'] as const)(
     expect(f.prompts[0]).toContain('publish_text_result 的成功回执已证明登记，无须再读自己的交付')
     const tool = 'orchestra_rework'
     const published = await f.executeLocal(tool, { action: 'publish', file_name: 'result.md', text: '退款 2 笔，合计 100 元。' }, 'publish')
-    expect(published).toMatchObject({ artifact_id: expect.any(String), sha256: expect.any(String) })
+    expect(published).toMatchObject({ artifact_id: expect.any(String), sha256: expect.any(String),
+      publication_status: 'registered', file_name: 'result.md', next_action: expect.stringContaining('无需重发或回读') })
+    expect(published).not.toHaveProperty('text')
     await expect(f.executeLocal(tool, { action: 'read', run_id: 'run' }, 'invalid-read'))
       .rejects.toMatchObject({ issues: expect.arrayContaining([
         expect.objectContaining({ path: ['artifact_id'] }), expect.objectContaining({ path: ['artifact_hash'] }),
