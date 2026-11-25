@@ -8,7 +8,7 @@ import { createDshJsonCompletion } from '../../src/executor/dsh-json.ts'
 import { createDshSemanticInterpreter } from '../../src/executor/dsh-task-requirements.ts'
 import { fixedRosterIssue, requirementIssues } from '../../src/service/task-requirement-checks.ts'
 import { createSemanticDraftCheckpoints } from '../../src/service/semantic-draft-checkpoints.ts'
-import { requirementsContractSchema, type RequirementsContract } from '../../src/core/task-requirements.ts'
+import { requirementsContractSchema, storedRequirementsContractSchema, type RequirementsContract } from '../../src/core/task-requirements.ts'
 
 function input(text: string, message_id = 'u1'): SemanticInput { return { current: { message_id, text }, explicit: false } }
 function task(current: SemanticInput, changes: object = {}) {
@@ -158,6 +158,32 @@ it('keeps a genuine missing-material grant when an unrelated approval status is 
   expect(outcome).toMatchObject({ kind: 'ready', request: { requirements_contract: {
     constraints: [{ kind: 'report_data_gap', quote }],
   } } })
+})
+
+it.each([
+  ['安排两个并行代理，不额外启动代理。不联网。', '不联网', true],
+  ['A 不得重新派发代理，不联网。', '不联网', false],
+  ['A 不得重新派发代理，不联网。', '不得重新派发代理，不联网', false],
+  ['不联网，不额外启动代理。', '不联网，不额外启动代理', true],
+] as const)('asks for correction when the proposed roster citation would absorb a network limit: %s', (text, quote, closed) => {
+  const source = input(text)
+  const mistaken = { id: 'roster', kind: 'no_extra_agents', source_message_id: 'u1', quote }
+  expect(interpretSemanticAdmission(source, task(source, { constraints: [mistaken] }))).toMatchObject({ kind: 'clarify', invalidReply: true })
+  const corrected = interpretSemanticAdmission(source, task(source, { constraints: [
+    { id: 'net', kind: 'no_network', source_message_id: 'u1', quote: '不联网' },
+  ] }))
+  expect(corrected.kind).toBe('ready')
+  if (corrected.kind !== 'ready') throw new Error('Expected the correctly cited policy to be admitted')
+  expect(corrected.request.requirements_contract.constraints.map(item => item.kind)).toEqual(closed ? ['no_network', 'no_extra_agents'] : ['no_network'])
+})
+
+it('keeps historic plans with broader citations readable and requires a single roster clause on new admissions', () => {
+  const text = '不联网，不额外启动代理。'
+  const historical = { version: 1, start_policy: 'immediate', sources: [{ message_id: 'u', text }], constraints: [
+    { id: 'roster', kind: 'no_extra_agents', source_message_id: 'u', quote: text },
+  ] }
+  expect(storedRequirementsContractSchema.safeParse(historical).success).toBe(true)
+  expect(requirementsContractSchema.safeParse(historical).success).toBe(false)
 })
 
 it('T10 keeps collaboration receipts in the task text when the model mislabels them as a data gap, without a correction call', async () => {

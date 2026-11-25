@@ -205,9 +205,7 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
     if (!cited(sources, constraint.source_message_id, constraint.quote)) return invalid('约束 ' + constraint.kind + ' 的 source_message_id 与 quote 未共同指向连续原文。')
     if (constraint.kind === 'no_extra_agents') {
       const source = sources.find(item => item.message_id === constraint.source_message_id)!
-      const roster = explicitAgentRoster(source.text)
-      if (roster) constraint.quote = roster.quote
-      else if (citesAgentRedispatchRule(source.text, constraint.quote)) continue
+      if (citesAgentRedispatchRule(source.text, constraint.quote)) continue
     }
     if (constraint.kind === 'preserve_input' && !constraint.quote.includes(constraint.target)) return invalid()
     if (constraint.kind === 'approval_before' && ((constraint.action && !constraint.quote.includes(constraint.action))

@@ -63,12 +63,18 @@ function citationContexts(source: string, quote: string): string[] {
   return sentences.filter(sentence => sentence.includes(quote))
 }
 
-/** A worker retry rule stays with its step. It cannot establish a closed roster for the whole run. */
+const agentPrefix = /^(?:(?:代理|智能体)\s*[A-Z]|[A-Z]|(?:agent|worker)\s+[A-Z])\s+/iu
+const redispatchClause = /^(?:(?:不(?:得|要|可|应|能|必|用)?|禁止|勿)\s*(?:(?:重复|循环|反复)?(?:查询|轮询|等待)\s*(?:或|和|并|、)\s*)?(?:重新|重复|再次)(?:派发|指派|派遣|调度|分派)(?:该|此|原|同一)?(?:代理|智能体)|(?:do not|don't|never)\s+(?:(?:poll|wait|retry)\s+(?:or|and)\s+)?(?:redispatch|reassign|re-dispatch)\s+(?:(?:the|this|that|same|either)\s+)?(?:agents?|workers?))$/iu
+
+function clauseText(quote: string) {
+  return quote.trim().replace(/[，,。.!?！？；;]+$/u, '').trim()
+}
+
+/** The cited instruction itself and its source clause must both be solely about redispatch. */
 export function citesAgentRedispatchRule(source: string, quote: string) {
-  const contexts = citationContexts(source, quote)
-  const redispatch = /(?:不(?:得|要|可|应|能|必|用)?|禁止|勿)\s*(?:(?:重复|循环|反复)?(?:查询|轮询|等待)\s*(?:或|和|并|、)\s*)?(?:重新|重复|再次)(?:派发|指派|派遣|调度|分派)(?:该|此|原|同一)?(?:代理|智能体)|\b(?:do not|don't|never)\s+(?:(?:poll|wait|retry)\s+(?:or|and)\s+)?(?:redispatch|reassign|re-dispatch)\s+(?:(?:the|this|that|same|either)\s+)?(?:agents?|workers?)\b/iu
-  const rosterWording = /额外|新增|另外|另行|只允许|仅限|不得增加|\b(?:extra|additional|new|only)\b/iu
-  return contexts.length > 0 && contexts.every(sentence => redispatch.test(sentence) && !rosterWording.test(sentence))
+  const cited = clauseText(quote).replace(agentPrefix, '')
+  return source.includes(quote) && redispatchClause.test(cited) && source.split(/[，,。.!?！？；;\r\n]/u)
+    .some(clause => clause.trim().replace(agentPrefix, '') === cited)
 }
 
 // Only this list of validator-owned explanations may appear in model correction instructions.
@@ -177,6 +183,12 @@ export const storedRequirementsContractSchema = z.strictObject({
 export const requirementsContractSchema = storedRequirementsContractSchema.superRefine((contract, ctx) => {
   const sources = new Map(contract.sources.map(source => [source.message_id, source.text]))
   for (const [index, constraint] of contract.constraints.entries()) {
+    if (constraint.kind === 'no_extra_agents') {
+      const roster = explicitAgentRoster(constraint.quote)
+      if (roster && clauseText(constraint.quote) !== roster.quote) {
+        ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: citationIssueMessages.roster })
+      }
+    }
     if (constraint.kind === 'report_data_gap' && !authorizesDataGap(sources.get(constraint.source_message_id) ?? '', constraint.quote)) {
       ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: citationIssueMessages.gap })
     }
