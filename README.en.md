@@ -2,227 +2,231 @@
 
 [简体中文](README.md) · [English](README.en.md)
 
-**Send one task in DSH, run independent steps in parallel, and get deliverables you can verify in the original conversation.**
+**From managing agent conversations to managing task workflows.**
 
-DSH Orchestra is a workflow orchestration plugin for DeepSeek Harness (DSH). Describe the goal, available materials, and expected deliverables. The planner proposes steps, models, and execution order. From one task card you can track each step, open the actual deliverables, and decide when to authorize work, accept results, or send a revision back.
+**Hand off a goal. Let agents coordinate through dependencies. Receive results you can verify in the original conversation.**
 
-- **Reconcile records** · Check receipts, refunds, and samples independently, then consolidate the required results.
-- **Research and write** · Split research by topic and give the final writing step the registered findings it needs.
-- **Review and revise** · Read a result alongside its criteria and send feedback to the step that produced it. Review the new version when it is ready.
+DSH Orchestra is a workflow orchestration plugin for DeepSeek Harness (DSH). Give it a goal, the materials it may use, and the result you expect. Orchestra organizes the work into steps, starts independent steps when capacity allows, and passes registered results to the steps that need them. You follow one task, open its deliverables, and send a specific version back for revision when needed.
 
-[Quick start](#quick-start) · [Capabilities](#capabilities) · [Architecture](#architecture) · [Usage](#usage) · [Development and validation](#development-and-validation) · [License](#license)
+The unit of work is a **task with a plan, dependencies, deliverables, and acceptance criteria**. Its worker conversations, progress, approvals, and results belong to that task. This makes a longer assignment easier to follow from the first request through the final review.
 
-![Orchestra desktop workflow view showing parallel checks, a join, and different reasons for waiting](docs/assets/readme/workflow.png)
+[Why Orchestra](#why-orchestra) · [A concrete example](#one-task-several-coordinated-deliverables) · [Quick start](#quick-start) · [Usage](#work-from-your-conversation) · [Architecture](#architecture) · [Development](#development-and-validation) · [Issues](#issues-and-ideas-welcome)
 
-*An isolated acceptance-test screenshot. Sales and cost checks feed the consolidation step. The independent archive step has its own status.*
+## Why Orchestra
+
+| What you need | What Orchestra provides |
+| --- | --- |
+| Hand off a whole assignment | A planner turns the goal into steps and deliverable criteria. It can reuse an eligible published workflow or generate one for the task. |
+| Coordinate work across agents | The scheduler follows dependencies and capacity. Independent checks can run in parallel; a consolidation step receives the upstream results it needs. |
+| See what needs attention | One task card connects steps, attempts, results, and human actions. The workflow shows dependencies; the queue explains whether a step is waiting for capacity, an upstream result, or you. |
+| Inspect the actual deliverable | Registered artifacts retain their version and provenance. The source conversation provides named links and original-file downloads alongside the result summary. |
+| Request a precise revision | Review and feedback bind to an exact artifact version. Supported rework can return to its producing step or use a scoped replan, with a new version available for review. |
+| Handle interruptions with evidence | Receipts, events, attempts, and evidence preserve what the system observed. Recovery and retry follow the recorded state and the workflow's policy. |
+
+Useful assignments include research by topic followed by a consolidated report, independent financial checks followed by a reconciliation, and documents that need review and several rounds of revision. Define the allowed inputs and desired outputs when you hand off the work.
+
+## One task, several coordinated deliverables
+
+A recorded Desktop acceptance run checked income, refunds, and row counts separately. The net calculation then used the income and refund reports. The row-count check finished independently.
+
+```mermaid
+flowchart TD
+    T["One reconciliation task"] --> I["Check income"]
+    T --> R["Check refunds"]
+    T --> C["Count data rows"]
+    I --> IA["Income report"]
+    R --> RA["Refund report"]
+    IA --> N["Calculate net amount"]
+    RA --> N
+    N --> NA["Net report"]
+    C --> CA["Row-count report"]
+```
+
+| Deliverable | Recorded result | Relationship |
+| --- | --- | --- |
+| [Income report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-income.md) | Two receipts, **200.00** | Reads the original sample |
+| [Refund report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-refund.md) | One refund, **20.00** | Checks the original sample independently |
+| [Row-count report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-rows.md) | **3 data rows** | Produces its own finding |
+| [Net report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-net.md) | **180.00** | Uses the two registered upstream reports: 200.00 − 20.00 |
+
+The source reports and [Desktop run record](docs/reviews/acceptance/dispatch-views.md) make the calculation and handoffs inspectable. This recorded example uses different inputs from the **109.50** quick-start exercise below.
+
+![Recorded Desktop workflow view showing parallel work, dependencies, and step status](docs/assets/readme/workflow.png)
+
+*Historical Desktop acceptance screenshot. It illustrates the task workflow; the current A workbench can differ in layout.*
+
+### From request to review
+
+```mermaid
+flowchart TD
+    G["Goal and deliverable criteria"] --> P["Plan and check required authorization"]
+    P --> E["Dispatch ready steps"]
+    E -->|Blocked or failed| B["Report the reason and required action"]
+    E -->|Results registered| A["Deliverables and evidence"]
+    A --> Q{"Human review required?"}
+    Q -->|No| F["Return outcome and artifact links"]
+    Q -->|Yes| H["Inspect the exact version"]
+    H -->|Accept| F
+    H -->|Request changes| W["Rework within the permitted scope"]
+    W --> E
+```
+
+Starting work and accepting its results are separate decisions. Required approvals show the scope of the action. Delivery review concerns the actual result and its criteria. Recovery from a block or failure follows the available evidence and permitted actions; the graph does not imply an unconditional retry.
 
 ## Quick start
 
-### Install
+### Choose a build and install it
 
-1. Download [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz). The [prerelease page](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1) includes `SHA256SUMS.txt`. This release targets DSH 0.2.2. Native chat dispatch and approval were verified on DSH Desktop 0.2.2-rc.5. For a local build, see [development and validation](#development-and-validation).
-2. Install it using the DSH Desktop plugin manager. Reload as requested by DSH and check that **Orchestra** appears in the sidebar. The package registers its server and web client through Cordis.
-3. Open a workspace and a normal conversation within it. Under **Orchestra → Settings**, check the service connection, model configuration, and automatic task routing. The personal Desktop adapter enables automatic routing for explicit work requests by default. The planner follows the conversation model by default. You can pin a configured provider, model, and supported reasoning effort. Worker models are configured separately.
-4. The package targets the DSH `0.2.2` series. Native Desktop chat routing and approval acceptance runs used `0.2.2-rc.5`. Check the health panel and host integration for other environments.
+**This README describes the current `main` branch.** The published beta is an earlier release snapshot. For the current task-command settings, conversation artifact links, and subsequent fixes, use a package built from the matching `main` commit. The npm version alone does not identify those later builds.
 
-### Send a synthetic task from the original conversation
-
-Send this message with automatic routing enabled. When automatic routing is off, prefix it with `/orchestra `. Ordinary questions stay in the DSH conversation.
-
-~~~
-Please calculate the net amount for this synthetic exercise. Use only the two simulated receipts of 83.25 and 41.75 and the simulated refund of 15.50 provided here. Write the inputs, calculation, and net result to a new dedicated Markdown deliverable named orchestra-sample-net.md. Show two decimal places.
-~~~
-
-Look for the Orchestra acceptance receipt. In **Tasks → this run → Results**, open the registered deliverable. The expected net amount is **109.50**. The original conversation receives applicable approval requests, actionable blocks, and results. Use the task panel or ask about the named task in the original conversation to check progress.
-
-## Design principles
-
-- **Plan before dispatch.** The planner proposes the workflow, responsibilities, models, and deliverables. The service validates the pinned version, tool scope, approval requirements, and launch receipt.
-- **Keep one card per task.** Expand it for named steps, use the workflow graph to see dependencies and joins, and use the queue to see why a step is waiting. Parallelism follows the task graph and configured capacity.
-- **Reuse two layers of context.** Pin a version of project structure and constraints. Send the current goals, acceptance criteria, and applicable upstream results with each step.
-- **Separate authorization from delivery review.** Launch and execution approvals ask for informed consent. Delivery review lets the operator read a specific result and accept it or send it back with concrete feedback.
-- **Recover from recorded facts.** Timeouts, disconnections, and late reports remain distinguishable. A new attempt depends on trusted evidence and the retry policy of the published workflow.
-
-## Capabilities
-
-~~~mermaid
-flowchart TD
-    T["One task · one pinned plan"] --> S["Shared prerequisites · inputs and criteria"]
-    S --> A["Check receipts"]
-    S --> B["Check refunds"]
-    S --> C["Independent spot check"]
-    A --> J["Join · wait for declared dependencies"]
-    B --> J
-    C --> R["Record independent findings"]
-    J --> D["Deliver the reconciliation"]
-    R --> D
-    D --> H{"Human review required?"}
-    H -->|Yes| V["Review the artifact and criteria"]
-    V -->|Request changes| F["Send specific feedback to the original step"]
-    F --> N["Revise under the run policy"]
-    N --> V
-    V -->|Accept| E["Record the acceptance outcome"]
-    H -->|No| E
-~~~
-
-| Capability | How it works |
+| Build | How to get it |
 | --- | --- |
-| Natural-language routing | Explicit work requests can start in a normal Desktop conversation. `/orchestra` also works when automatic routing is disabled. The panel can show a plan before launch. |
-| Versioned workflows | Edit drafts, validate, simulate, publish versions, and disable workflows. A run stays bound to its published definition. The planner can reuse an eligible workflow or generate one for a task. |
-| Steps and parallel execution | Agent steps, waits, approvals, policy and branch steps, trusted tools, subworkflows, and dedicated parallel groups are subject to publishing rules and host support. Parallel groups support all, any, or quorum joins within topology constraints. |
-| Models and capacity | Five complexity levels run from routine to expert. Set each model's capability ceiling, description, and supported reasoning effort. Configure session capacity, per-run parallelism, per-step concurrency across runs, and helpers per step. |
-| Execution diagnostics | See the actual model, reasoning effort, attempts, timing, and evidence. Long runs, blocks, and repeated qualifying rework can trigger diagnosis. Escalation requires evidence and a stronger approved model. |
-| Delivery review and rework | Browse registered artifacts, preview text, download original files, and review acceptance criteria. Feedback is tied to the exact version and can request a targeted revision or a scoped replan. |
-| Cross-checks | Authorize a dependent step to verify an upstream finding independently. The operator can adopt or dismiss its conclusion and evidence. |
-| Context, notes, and memory | Project snapshots and task context support the current run. Scoped notes carry operational information. Durable memory requires the host's memory plugin and human approval. |
-| Recoverable execution | The ledger links events, receipts, attempts, and artifacts. Supported runbooks include continued observation, confirmation that an attempt never started, and verification of external effects. Retry eligibility depends on the pinned workflow and trusted evidence. |
+| Current `main` | Build from source using the [commands below](#development-and-validation), or install a package supplied with its matching commit and SHA-256. |
+| Published beta snapshot | Download [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz). The [prerelease page](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1) provides `SHA256SUMS.txt`; use the [tagged README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.en.md) for that snapshot's instructions. |
 
-<div>
-  <img width="320" src="docs/assets/readme/board.png" alt="Narrow-window board with one task card expanded to show parallel steps">
-  <img width="320" src="docs/assets/readme/queue.png" alt="Narrow-window queue distinguishing capacity, upstream dependencies, and human action">
-</div>
+1. Install the chosen `.tgz` in the **DSH Desktop plugin manager** and reload the plugin. Orchestra appears in the sidebar.
+2. Open a workspace and a normal conversation within it. In **Orchestra → Settings**, check the connection, planner model, worker models, and automatic task routing. The personal adapter enables routing of explicit work requests by default; the planner follows the conversation model unless you choose another configured model.
+3. Send a task with clear inputs and a deliverable. Use the task card to follow execution and handle any required action.
 
-*The same synthetic task in two views. The board groups the steps. The queue explains the waits.*
+The package targets DSH `0.2.2`. Recorded native chat dispatch and approval acceptance used Desktop `0.2.2-rc.5`. Full artifact preview targets its native Browser and compatible hosts. Check the health panel for the capabilities available in your host.
+
+### Try a task with a result you can check
+
+With automatic routing enabled, send this in the workspace conversation. Otherwise, prefix it with your task command, which defaults to `/orchestra `.
+
+```text
+Create a task named "Sample net amount". Use only the two simulated receipts of 83.25 and 41.75 and the simulated refund of 15.50 in this message. Calculate the net amount to two decimal places. Deliver a new file named orchestra-sample-net.md containing the inputs, calculation, and result. Do not read or modify existing files, tasks, or workflows.
+```
+
+Look for the Orchestra receipt. The expected result is **109.50**. Open the registered file in **Tasks → this run → Results**, or use the artifact name in the source conversation on a current build. Ask about the named task in the same conversation to check its status.
+
+## Work from your conversation
+
+### Start, follow, and revise
+
+- **Start from chat.** Provide the goal, permitted materials, deliverables, and acceptance criteria. The task command explicitly routes one request even when automatic routing is off. Ordinary questions remain in the DSH conversation.
+- **Plan from the panel.** Open **Tasks → Plan with natural language** to inspect a plan before launch. For repeat work, start from an eligible published workflow. Workflow drafts support validation and rehearsal before publishing; an active run keeps its pinned version.
+- **Follow the handoffs.** The board, workflow, queue, and list expose different parts of the same task. Open a step for its model, reasoning effort, attempts, timing, and evidence.
+- **Review a version.** In **Results → Delivery review and rework**, read the deliverable and submit specific feedback. A held or revised result can also send a review notice to the originating conversation. Accepting a revised version settles its applicable review hold.
+- **Inspect a problem before retrying.** Long runs, blocks, and repeated qualifying rework can trigger diagnosis; escalation requires evidence and a stronger approved model. See [rework design](docs/design/rework-orchestration.md) and [verified-retry acceptance](docs/reviews/acceptance/f8-plugin-only-2026-11-21.md).
+
+![Recorded Desktop result view with artifact preview, download, and rework controls](docs/assets/readme/results.png)
+
+*Historical acceptance screenshot of registered results and review actions. The current A workbench can differ in layout.*
+
+### Open the complete deliverable
+
+Current builds keep named artifact links alongside the summary in the source conversation. A normal final reply or later message does not hide them. Open a name in **DSH Desktop's built-in browser**, or choose **Download original** on the conversation card. Each action checks the source conversation and the exact artifact version.
+
+| Content | How to read it |
+| --- | --- |
+| Supported UTF-8 text, including Markdown, TXT, JSON, and CSV | Complete browser view; Markdown above 256 KiB uses complete plain text |
+| PNG, JPEG, GIF, WebP | Image preview in the native Browser |
+| HTML and SVG | Source text without script execution or automatic remote-image loading |
+| PDF, Office, and files with other extensions | **Download original** from the conversation card |
+
+The existing 8 MiB artifact limit applies. The native Desktop Browser is supported; the Web iframe fallback is outside this preview's scope. If a reader link expires or DSH restarts, click the same artifact name again. Older messages without artifact cards can obtain them through a task-status query in the original conversation. Expired retention or an unavailable version returns a reason instead of silently substituting a different file.
+
+### Configure the task once, keep its context together
+
+| Setting or context | What it controls |
+| --- | --- |
+| Task command | Defaults to `/orchestra`; rename it per Desktop profile. Checks run after input and again before saving against public host commands, user-invocable skills, and client commands. Only the saved name remains active. |
+| Execution permissions | Defaults to all host permissions. Other modes use source-session inheritance, planner approval, or user approval. Host authorization, task scope, and node tool restrictions remain the upper bound; a new setting applies to future attempts. |
+| Models and capacity | Configure five worker complexity levels, model ceilings and supported reasoning effort, session capacity, run parallelism, and step/helper limits. |
+| Planning and execution limits | Set the applicable time budgets and inspect the reason when a stage exceeds them. |
+| Project context | Put goals, important locations, and rules in a plain UTF-8 `ORCHESTRA.md` at the authorized workspace root. Prioritize the first 120 lines and 4 KiB; a run pins its snapshot at first dispatch. |
+| Task context and notes | Steps receive their requirements and applicable upstream artifacts. Scoped notes preserve operational information during the run. |
+
+Reopen the task-command settings after enabling or disabling plugins. DSH does not expose every third-party input rule, so rules outside its public command catalogs cannot all be checked.
+
+Ordinary execution nodes run only native tools confirmed to be read-only.
+
+The personal Desktop adapter supports local task routing and execution. Independent collaboration requests, durable memory writes, shared trial rings, and the QQ on-call connector require additional wiring by a trusted host; they are not part of the default personal adapter. When memory is wired, **Organize as memory** requires review and approval of the proposal, source, and scope. Project context and task notes work independently of durable memory.
+
+### If a task needs attention
+
+| What you see | Next step |
+| --- | --- |
+| A chat answer with no Orchestra receipt | Check automatic routing and the current task command in a normal workspace conversation. |
+| A step is waiting | Check the queue for capacity, upstream dependencies, or human action; open the step for details. |
+| Planning times out or a level has no candidate model | Check model availability, capability settings, and planning limits. |
+| DSH closes or the computer sleeps | Reopen DSH, inspect the original run and recovery actions, then proceed from recorded facts. Local execution depends on the running host. |
 
 ## Architecture
 
-~~~mermaid
+**DSH supplies the execution environment. Orchestra coordinates the task and records its progress.** The conversation and workbench are two interfaces to that same task record.
+
+```mermaid
 flowchart TD
-    U["Operator · DSH conversation / Orchestra panel"]
-    subgraph DS["Trusted DSH host"]
-        G["Authenticated workspace and session"]
-        M["Model catalog · child sessions · authorized tools"]
+    U["Conversation and workbench"]
+    subgraph O["Orchestra"]
+        P["Plan and pin the workflow"]
+        S["Schedule by dependencies and capacity"]
+        B["Execution bridge"]
+        R["Review and recovery"]
+        L[("Task ledger and artifacts")]
+        P --> S --> B
+        B --> R
+        P --> L
+        S --> L
+        R --> L
+        R -->|Permitted rework or recovery| S
     end
-    subgraph OR["Orchestra plugin"]
-        P["Task planner · deliverables and policy checks"]
-        W["Published versions · topology and dependencies"]
-        D["Scheduler · capacity · step attempts"]
-        X["DSH execution bridge"]
-        C["Approval · delivery review · verification and recovery"]
-        L[("SQLite single-writer ledger<br/>events · receipts · evidence · artifacts")]
-        Q["Queries and event subscriptions"]
+    subgraph D["DSH host"]
+        M["Models and worker sessions"]
+        T["Authorized tools and plugins"]
+        M --> T
     end
-    U --> G --> P --> W --> D --> X --> M
+    U -->|Goals and inputs| P
+    U -->|Approvals and feedback| R
     P -.->|Planner model call| M
-    M --> X --> C
-    D --> C
-    C -->|Authorization, acceptance, or guarded retry| D
-    P --> L
-    W --> L
-    D --> L
-    C --> L --> Q --> U
-~~~
+    B -->|Scoped work| M
+    M -->|Reports and artifact references| B
+    L -->|Status, results, and required actions| U
+```
 
-1. **Intake and planning.** Bind the request to the current workspace and conversation. Validate the planner's goals, deliverables, dependencies, tools, and risks.
-2. **Version binding and scheduling.** Pin the run to a plan and workflow definition. Dispatch steps whose dependencies and capacity requirements are satisfied.
-3. **Execution and settlement.** Create isolated DSH child sessions through the execution bridge. Provide scoped context and approved tools. Record reports, decisions, artifacts, and evidence.
-4. **Visibility and recovery.** Read projections through authenticated queries and event subscriptions. Send actionable and terminal notices to the originating conversation. Resolve recovery actions against the original attempt and available evidence.
+The service is the sole SQLite writer. Authenticated commands and queries connect the panel and source conversation to task state; events, receipts, evidence, and artifact versions make the handoffs traceable. The personal adapter isolates ledgers by workspace and conversation. Tool access remains subject to DSH and the relevant service's permissions.
 
-The service owns SQLite writes. The panel uses a trusted transport for queries and commands. The personal adapter isolates ledgers by workspace and conversation under `orchestra/personal` in the DSH data directory. A self-managed host binds authenticated operators to approval, collaboration, and rework operations. Access to models, tools, and data follows the host's permissions and the services' own policies.
-
-## Usage
-
-### Launch, track, and review work
-
-~~~mermaid
-sequenceDiagram
-    actor User as Operator
-    participant Chat as DSH conversation
-    participant Engine as Orchestra
-    participant Worker as Subagent
-    User->>Chat: Submit the task and deliverable criteria
-    Chat->>Engine: Bind the source conversation and plan
-    opt Launch authorization required
-        Engine-->>Chat: Show the scope and consequences
-        User->>Chat: Authorize launch
-    end
-    Engine->>Worker: Dispatch when dependencies and capacity allow
-    Worker-->>Engine: Register the result and execution evidence
-    opt Human delivery review required
-        Engine-->>Chat: Present the result and review criteria
-        User->>Chat: Inspect and accept or request changes
-        opt Changes requested
-            Chat->>Engine: Bind feedback to the artifact version
-            Engine->>Worker: Schedule rework under policy
-            Worker-->>Engine: Register the revised version
-            Engine-->>Chat: Request a new review
-        end
-    end
-    Engine-->>Chat: Report the recorded outcome
-~~~
-
-- **From chat.** Provide the goal, allowed inputs, deliverables, and acceptance criteria. The default `/orchestra <task>` explicitly routes one request. Rename it under **Settings → Task command**; only the saved name remains active. The bare command shows its usage.
-- **From the panel.** Use **Tasks → Plan with natural language** to check the selected workflow, deliverables, and permissions before launch. Start from a published workflow for repeat work.
-- **Track parallel work.** Switch among the board, workflow, queue, and list. Open a run to see step attempts, results, evidence, and events.
-- **Approve and review.** Handle launch and execution authorization in the conversation or approval center. In **Results → Delivery review and rework**, inspect the recorded version and submit specific feedback. In builds with conversational delivery review, a step held for review or a revised result awaiting acceptance also sends a structured notice to the originating conversation. Open the inline text or file controls and submit a verdict. Accepting the revised version settles its applicable review hold.
-- **Open deliverables from the source conversation.** Open an artifact's named link to read its complete version, or use **Download original** to save the file. See [complete deliverables](#read-complete-deliverables-in-chat) below.
-- **Retry after verification.** Enable the verified retry option for an agent step in a workflow draft and publish that version for new runs. See the [F8 acceptance report](docs/reviews/acceptance/f8-plugin-only-2026-11-21.md) for the evidence and host requirements.
-
-![DSH Desktop results view with a synthetic artifact, preview, download, and rework controls](docs/assets/readme/results.png)
-
-*An isolated Desktop acceptance test. The results view displays the registered artifact and available actions.*
-
-### Read complete deliverables in chat
-
-After a task ends, its source conversation retains the result summary and named artifact links. Open a name to read the complete registered version in **DSH Desktop's built-in browser**. A normal summary, retry notice, or later reply does not hide these links. **Download original** beside each artifact saves the original file directly from the conversation. Each action binds the task, run, and SHA-256 and rechecks source access and the version before reading.
-
-The browser supports complete UTF-8 text, Markdown, and PNG, JPEG, GIF, and WebP images. HTML and SVG are shown as source text without executing scripts or loading remote images. Use **Download original** for PDF, Office, and other binary files. The existing 8 MiB artifact limit still applies. Markdown above 256 KiB uses a complete plain-text view.
-
-This preview uses the native **Desktop Browser** in DSH 0.2.2-rc.5 and compatible versions. The Web iframe fallback is outside this preview's supported scope. Desktop Browser blocks direct page downloads, so downloads start from the conversation card. Keep access to the original conversation. After a link expires, DSH restarts, or a connection recovers, open the same artifact name to obtain a fresh reader link. Expired artifact retention or a version mismatch produces an explicit error.
-
-For older messages without artifact cards, ask for the task's status in its source conversation to obtain the recorded artifact links. Conversation excerpts summarize the work; they do not truncate the original artifacts stored with the task.
-
-### Shared context and settings
-
-Create a plain UTF-8 `ORCHESTRA.md` at the authorized workspace root. Describe the project's goal, important locations, and verification rules. Keep the most important text in the first 120 lines and 4 KiB. The run pins one snapshot at first dispatch. Later steps reuse it and receive applicable task requirements and upstream artifact references.
-
-Use **Settings** to configure planner and worker models, automatic routing, planning and execution limits, queue capacity, and workflow concurrency. DSH supplies the model catalog and available reasoning efforts. Approved tools determine what an agent can read. `local.allowWorkspaceListing` defaults to off and limits listing to allowed entries at the first level. A trusted host can set `local.sampleFile` to an explicitly authorized text file for sample reads.
-
-**Task command** is saved per Desktop profile and defaults to `/orchestra`. Use 1–32 ASCII letters, digits, hyphens, or underscores, starting with a letter. Input is normalized to lowercase without the leading slash. The setting checks after an input pause and again before saving against host commands, user-invocable skills, and client commands. A conflict displays its source and prevents saving. Renaming does not change running tasks. Reopen settings after enabling or disabling plugins to refresh checks. DSH does not expose a complete catalog of arbitrary third-party input rules, so rules outside its public command catalogs cannot be checked.
-
-**Execution permissions** and **Planning limits** share the A workbench's settings controls. A permission mode applies to future execution attempts within host authorization and task constraints. Timeout fields display all three digits and wrap on narrow panels.
-
-### Personal Desktop and self-managed hosts
-
-| Environment | Scope |
-| --- | --- |
-| Personal DSH Desktop | Local chat routing, planning, model configuration, run views, and supported human actions. The personal adapter does not wire shared trial rings, durable memory writes, or the QQ on-call connector. |
-| Trusted self-managed DSH host | Use `serveDshOrchestra` with an isolated data path, phase, authorized sessions, executor, model catalog, and registered tools. Bind authenticated operators with `resolveHttpHuman` and provide authenticated workspace transport through `orchestraPanelTransport`. Configure memory, collaboration, or notification adapters as needed. |
-
-When durable memory is wired, use **Organize as memory** from a successful run's results. Review the proposal, source, and scope before approving the write. Project snapshots and run notes are usable independently. See the [trial rings](docs/trial-circles.md) and [operations and rollback runbook](docs/runbook.md) for hosted controls.
-
-### First-run troubleshooting
-
-| What you see | Where to check |
-| --- | --- |
-| The conversation responds without an Orchestra receipt | Check automatic task routing under Settings and use a normal workspace conversation. Use `/orchestra` to route a single request explicitly. |
-| A step stays pending | Check the queue for available capacity, upstream dependencies, or human action. Open the step for its selected model and blocking reason. |
-| Planning timed out or a level has no model candidate | Check the planner, available models, and assessed capability levels. Adjust the planning budget to fit the task. |
-| Your computer slept or DSH closed | Local execution depends on the running host. After reopening, inspect the original run and any recovery actions before proceeding. |
+A self-managed host uses `serveDshOrchestra` to supply execution and model/tool services, `resolveHttpHuman` for authenticated human actions, and `orchestraPanelTransport` for the panel. See the [design notes](docs/design-notes.md), [operations and rollback runbook](docs/runbook.md), and [trial-ring guide](docs/trial-circles.md) for those integrations.
 
 ## Development and validation
 
-| Path | Responsibility |
-| --- | --- |
-| [`src/index.ts`](src/index.ts) and [`src/service`](src/service/) | Host wiring, planning, workflow versions, dispatch, commands, evidence, and run queries |
-| [`src/executor`](src/executor/) | DSH child-session bridge, model routing, tools, and execution reports |
-| [`src/core`](src/core/) and [`src/infra`](src/infra/) | Workflow definitions, rules, state, and the SQLite ledger |
-| [`src/client`](src/client/) | DSH sidebar, native chat tool views, and the operations panel |
-| [`tests`](tests/) and [acceptance index](docs/reviews/acceptance/README.md) | Unit, contract, integration, and UI tests, plus acceptance evidence |
+Use the Node and pnpm versions declared in [`package.json`](package.json). From the repository root, run:
 
-Use the Node and pnpm versions declared in [`package.json`](package.json). Run these commands in the repository root. The example uses PowerShell.
-
-~~~powershell
+```powershell
 pnpm install --frozen-lockfile
-pnpm check
+pnpm typecheck
+pnpm exec vitest run --reporter=dot --maxWorkers=2
+pnpm build
 New-Item -ItemType Directory -Force .tmp/packages | Out-Null
 pnpm pack --pack-destination .tmp/packages
-~~~
+```
 
-Install the resulting `dsh-orchestra-*.tgz` in the intended DSH profile. A self-managed web profile can use `dsh plugin --profile web add <absolute-path-to-tgz>` and then wire its authenticated panel transport and workspace permissions. Use the installed DSH host's own package manager for plugin installation.
+Install the resulting `.tgz` in the intended DSH profile and reload the plugin. Pulling source changes does not update an already installed plugin. For a self-managed web profile, use `dsh plugin --profile web add <absolute-path-to-tgz>` and configure the authenticated host transport and permissions.
 
-See the [design notes](docs/design-notes.md), [rework design](docs/design/rework-orchestration.md), [dispatch and view acceptance](docs/reviews/acceptance/dispatch-views.md), and [Desktop acceptance](docs/reviews/acceptance/desktop.md). The 24-hour soak and 72-hour R0 observation are separate formal S6 checks. Short-window evidence, targeted regression results, and installation receipts are recorded for their own candidates. Release status follows the evidence for the same frozen candidate.
+| Path | Responsibility |
+| --- | --- |
+| [`src/index.ts`](src/index.ts), [`src/service`](src/service/) | Host wiring, planning, workflow versions, scheduling, commands, results |
+| [`src/executor`](src/executor/) | DSH execution bridge, model routing, tools, reports |
+| [`src/core`](src/core/), [`src/infra`](src/infra/) | Workflow rules, state, evidence, SQLite ledger |
+| [`src/client`](src/client/) | Native chat views and the Orchestra workbench |
+| [`tests`](tests/), [acceptance index](docs/reviews/acceptance/README.md) | Unit, contract, integration, UI tests and recorded acceptance evidence |
+
+Acceptance records identify the candidate they tested. The [Desktop record](docs/reviews/acceptance/desktop.md), targeted checks, and short observation windows do not replace the formal 24-hour soak or 72-hour R0 observation. Release status follows the evidence for the same frozen candidate.
 
 ## License
 
-Source is available for use without charge for purposes permitted by the PolyForm Noncommercial License 1.0.0. Commercial use requires separate authorization from the rights holder. The license text governs use, copying, modifications, distribution, and its listed permitted purposes. DSH, third-party dependencies, and model providers have their own terms. [License text](LICENSE) · [Official PolyForm terms](https://polyformproject.org/licenses/noncommercial/1.0.0)
+Source is available for purposes permitted by the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use requires separate authorization from the rights holder. DSH, dependencies, and model providers have their own terms. [Official PolyForm terms](https://polyformproject.org/licenses/noncommercial/1.0.0).
+
+## Issues and ideas welcome
+
+**Have a task you want Orchestra to handle better? We welcome your feedback.**
+
+[Open an Issue](https://github.com/theBeautifulIce/dsh-orchestra/issues/new) · [Browse existing Issues](https://github.com/theBeautifulIce/dsh-orchestra/issues)
+
+- **Bug reports:** include the DSH and plugin version or commit, operating system, reproduction steps, expected and actual behavior, and a relevant redacted log or screenshot.
+- **Feature requests:** describe the task, the step that gets in your way, and the outcome you want.
+- **Usability and documentation:** tell us which page, message, diagram, or instruction was unclear and what you expected to find.
+
+Please remove credentials and private task material before posting. Concrete examples help us improve how work moves from the first request to a usable deliverable.
