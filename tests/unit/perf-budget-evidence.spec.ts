@@ -105,3 +105,34 @@ it('只接受已用 run_id 索引限定范围的回执排序和返工边排序',
     'list_nodes: unclassified temporary sort USE TEMP B-TREE FOR ORDER BY',
   ]))
 })
+
+it('只接受从当前页任务开始并按父运行索引查找的待办，拒绝历史全表扫描', () => {
+  const report = evidence()
+  const actions: PerfStatement = {
+    sql: 'SELECT t.task_id,q.run_id,q.request_id FROM (WITH RECURSIVE roots(task_id,run_id) AS ('
+      + 'SELECT task_id,current_run_id FROM tasks WHERE task_id IN (?) AND current_run_id IS NOT NULL '
+      + 'UNION SELECT roots.task_id,c.run_id FROM roots CROSS JOIN runs c ON c.parent_run_id=roots.run_id AND c.task_id=roots.task_id'
+      + ') SELECT task_id,run_id FROM roots) t CROSS JOIN rework_requests q ON q.run_id=t.run_id ORDER BY q.created_at,q.request_id',
+    bindings: ['task-on-page'], calls: 1, method: 'all',
+    plan: [
+      { id: 1, parent: 0, detail: 'CO-ROUTINE roots' },
+      { id: 2, parent: 1, detail: 'SETUP' },
+      { id: 3, parent: 2, detail: 'SEARCH tasks USING INDEX sqlite_autoindex_tasks_1 (task_id=?)' },
+      { id: 4, parent: 1, detail: 'RECURSIVE STEP' },
+      { id: 5, parent: 4, detail: 'SCAN roots' },
+      { id: 6, parent: 4, detail: 'SEARCH c USING INDEX idx_runs_parent (parent_run_id=?)' },
+      { id: 7, parent: 0, detail: 'SCAN roots' },
+      { id: 8, parent: 0, detail: 'SEARCH q USING INDEX rework_run_status (run_id=?)' },
+      { id: 9, parent: 0, detail: 'USE TEMP B-TREE FOR ORDER BY' },
+    ],
+  }
+  report.base_tables.push('rework_requests')
+  report.cases.list_tasks.statements.push(actions)
+  expect(assessPerfReport(report).errors).toEqual([])
+  actions.plan[7]!.detail = 'SCAN q USING INDEX rework_run_status'
+  expect(assessPerfReport(report).errors).toContain('list_tasks: base scan SCAN q USING INDEX rework_run_status')
+  actions.plan[7]!.detail = 'SEARCH q USING INDEX other_status (status=?)'
+  expect(assessPerfReport(report).errors).toContain('list_tasks: task actions are not indexed by the displayed run trees')
+  actions.plan[5]!.detail = 'SEARCH c USING INDEX idx_runs_task (task_id=?)'
+  expect(assessPerfReport(report).errors).toContain('list_tasks: unclassified scan SCAN roots')
+})

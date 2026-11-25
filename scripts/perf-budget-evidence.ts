@@ -66,29 +66,70 @@ function baseNames(sql: string, tables: string[]) {
   return aliases
 }
 
+// Recursive CTE scans can be bounded even though SQLite prints SCAN for their
+// working tables. Check the seed and each recursion's indexed parent lookup.
+function taskTreeScope(stmt: PerfStatement, boundedTaskPage: boolean) {
+  const { sql, plan } = stmt
+  const steps = plan.filter(row => row.detail === 'RECURSIVE STEP')
+  if (!steps.length || !steps.every(step => plan.some(row => row.parent === step.id
+    && /^SEARCH c USING (?:COVERING )?INDEX \S+ \(parent_run_id=\?\)/.test(row.detail)))) return
+  if (boundedTaskPage && /WITH RECURSIVE tree\(run_id\) AS \(\s*SELECT t\.current_run_id WHERE t\.current_run_id IS NOT NULL/.test(sql)
+    && /c\.parent_run_id = tree\.run_id AND c\.task_id = t\.task_id/.test(sql)) return 'tree'
+  const seed = /WITH RECURSIVE roots\(task_id,run_id\) AS \(\s*SELECT task_id,current_run_id FROM tasks WHERE task_id IN \((\?(?:,\?)*)\) AND current_run_id IS NOT NULL/.exec(sql)
+  const ids = seed?.[1]?.split(',').length ?? 0
+  const boundIds = stmt.bindings.slice(0, ids)
+  const setups = plan.filter(row => row.detail === 'SETUP')
+  if (ids > 0 && ids <= 100 && boundIds.length === ids && boundIds.every(id => typeof id === 'string')
+    && /c\.parent_run_id=roots\.run_id AND c\.task_id=roots\.task_id/.test(sql)
+    && setups.length === steps.length && setups.every(setup => plan.some(row => row.parent === setup.id
+      && /^SEARCH tasks USING (?:COVERING )?INDEX \S+ \(task_id=\?\)/.test(row.detail)))) return 'roots'
+}
+
 function validatePlans(route: string, statements: PerfStatement[], tables: string[], diagnostics: string[]): string[] {
   const errors: string[] = []
   for (const stmt of statements) {
     const aliases = baseNames(stmt.sql, tables)
     const materialize = stmt.plan.find(({ detail }) => detail === 'MATERIALIZE task_page')
-    const boundedTaskPage = materialize && stmt.sql.includes('task_page AS MATERIALIZED') && /LIMIT \?\)/i.test(stmt.sql)
+    const boundedTaskPage = Boolean(materialize && stmt.sql.includes('task_page AS MATERIALIZED') && /LIMIT \?\)/i.test(stmt.sql))
+    const tree = route === 'list_tasks' || route === 'list_tasks_filtered' ? taskTreeScope(stmt, boundedTaskPage) : undefined
+    const actionLookups = [...stmt.sql.matchAll(/CROSS JOIN (?:delivery_review_holds|human_decision_inbox|rework_requests) ([hdq]) ON \1\.run_id=t\.run_id/g)]
+    const indexedActions = stmt.plan.flatMap(row => {
+      const alias = /^SEARCH (h|decisions|q) USING (?:COVERING )?INDEX \S+ \(run_id=\?/.exec(row.detail)?.[1]
+      return alias && stmt.plan.some(root => root.parent === row.parent && root.detail === 'SCAN roots') ? [alias] : []
+    })
+    const actionRows = tree === 'roots' && actionLookups.length > 0 && actionLookups.every(([, alias]) =>
+      indexedActions.includes(alias === 'd' ? 'decisions' : alias!))
+    if (actionLookups.length && !actionRows) errors.push(`${route}: task actions are not indexed by the displayed run trees`)
     for (const row of stmt.plan) {
       const scan = /^SCAN (?:TABLE )?(\w+)/.exec(row.detail)?.[1]?.toLowerCase()
       if (scan) {
         if (aliases.has(scan)) errors.push(`${route}: base scan ${row.detail}`)
         else if (boundedTaskPage && (scan === 'p' || scan === 'task_page')) diagnostics.push(`${route}: ${row.detail} bounded by task page LIMIT`)
-        else if (scan === 'sqlite_master' && stmt.sql === "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'service_meta'") {
+        else if ((tree && scan === tree) || (tree === 'tree' && row.detail === 'SCAN CONSTANT ROW')) {
+          diagnostics.push(`${route}: ${row.detail} visits descendants of the selected task roots`)
+        } else if (actionRows && scan === 'targets' && stmt.plan.some(step => step.detail === 'CO-ROUTINE targets')
+          && /SELECT \* FROM targets ORDER BY updated_at DESC,task_id,node_run_id/.test(stmt.sql)) {
+          diagnostics.push(`${route}: ${row.detail} contains review actions for the displayed tasks`)
+        } else if (scan === 'sqlite_master' && stmt.sql === "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'service_meta'") {
           diagnostics.push(`${route}: ${row.detail} inspects schema metadata for the read connection`)
         } else errors.push(`${route}: unclassified scan ${row.detail}`)
       }
       if (!row.detail.includes('TEMP B-TREE')) continue
-      if (boundedTaskPage && row.parent === materialize.id) {
+      if (boundedTaskPage && row.parent === materialize?.id) {
         errors.push(`${route}: task candidate sort is not index ordered (${row.detail})`)
       } else if (boundedTaskPage && row.parent === 0 && row.detail.includes('ORDER BY')) {
         diagnostics.push(`${route}: ${row.detail} sorts the hydrated task page only`)
       } else if (boundedTaskPage && row.detail.includes('group_concat(DISTINCT)')
         && stmt.plan.some((step) => step.parent === row.parent && /^SEARCH n USING INDEX .+ \(run_id=\?\)/.test(step.detail))) {
         diagnostics.push(`${route}: ${row.detail} deduplicates side-effect policy values for one indexed current run per task`)
+      } else if (tree === 'tree' && row.detail === 'USE TEMP B-TREE FOR ORDER BY'
+        && stmt.plan.some(arm => arm.id === row.parent && (arm.detail === 'LEFT' || arm.detail === 'RIGHT')
+          && stmt.plan.some(merge => merge.id === arm.parent && merge.detail === 'MERGE (UNION)'))
+        && stmt.plan.some(probe => probe.parent === row.parent && /^SEARCH (?:h|rq) USING (?:COVERING )?INDEX \S+ \(run_id=\?/.test(probe.detail))) {
+        diagnostics.push(`${route}: ${row.detail} merges review rows for one task's indexed run tree`)
+      } else if (actionRows && row.parent === 0 && row.detail === 'USE TEMP B-TREE FOR ORDER BY'
+        && /ORDER BY (?:updated_at DESC,task_id,node_run_id|d\.created_at,d\.decision_id|q\.created_at,q\.request_id)\s*$/.test(stmt.sql)) {
+        diagnostics.push(`${route}: ${row.detail} orders the actions belonging to this page's run trees`)
       } else if (route === 'get_run' && /WHERE o\.run_id = \? ORDER BY p\.created_at, p\.plan_id LIMIT 1/.test(stmt.sql)
         && row.detail === 'USE TEMP B-TREE FOR ORDER BY' && stmt.plan.some((step) => step.parent === row.parent
           && /^SEARCH o USING (?:COVERING )?INDEX \S+ \(run_id=\?\)$/.test(step.detail))) {

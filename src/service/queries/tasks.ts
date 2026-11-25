@@ -1,6 +1,6 @@
 import { OrchError } from '../../core/errors.ts'
 import { readReleaseGateCard, type ReleaseGateCardState } from '../release-workflow.ts'
-import type { TaskLane, TaskOrigin } from '../../core/task-workspace.ts'
+import { TASK_LANES, type TaskLane, type TaskOrigin } from '../../core/task-workspace.ts'
 import type { Autonomy } from '../runs.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { UNVERIFIED_EFFECT_OCCURRED } from '../../infra/db/unverified-effects.ts'
@@ -154,7 +154,7 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
 // 当前根运行的整棵运行树：子流程的人工事项也要算在父任务上（T02）。
 const CURRENT_TREE = `(WITH RECURSIVE tree(run_id) AS (
     SELECT t.current_run_id WHERE t.current_run_id IS NOT NULL
-    UNION SELECT c.run_id FROM runs c JOIN tree ON c.parent_run_id = tree.run_id AND c.task_id = t.task_id
+    UNION SELECT c.run_id FROM tree CROSS JOIN runs c ON c.parent_run_id = tree.run_id AND c.task_id = t.task_id
   ) SELECT run_id FROM tree)`
 const OPEN_DECISIONS = `FROM human_decision_inbox d WHERE d.run_id IN ${CURRENT_TREE}`
 // 与实际办理入口一致：当前有效尝试和本轮返工成果都要进入待验收计数。
@@ -224,6 +224,7 @@ JOIN tasks t ON t.task_id = p.task_id ${CURRENT_RUN_JOINS}`
 const TASK_PAGE_START = `WITH task_page AS MATERIALIZED (
   SELECT task_id, sort_at, sort_weight, lane FROM task_attention_order WHERE `
 const TASK_PAGE_ORDER = ' ORDER BY sort_weight DESC, sort_at DESC, task_id DESC'
+const LANE_COUNTS = TASK_LANES.map(({ id }) => `COUNT(*) FILTER (WHERE lane = '${id}') AS ${id}`).join(', ')
 
 export type WorkspaceOverview = {
   lanes: Record<TaskLane, number>
@@ -292,9 +293,10 @@ export function listTaskSummaries(db: Db, params: ListTaskParams = {}):
       [...values, limit + 1],
     )
     const laneCounts: Partial<Record<TaskLane, number>> = {}
-    for (const row of ctx.tx.all<{ lane: TaskLane; count: number }>(
-      TASK_PAGE_START + baseWhere.join(' AND ') + ') SELECT lane, COUNT(*) AS count FROM task_page GROUP BY lane', baseValues,
-    )) laneCounts[row.lane] = Number(row.count)
+    const counts = ctx.tx.get<Record<TaskLane, number>>(
+      `SELECT ${LANE_COUNTS} FROM task_attention_order WHERE ${baseWhere.join(' AND ')}`, baseValues,
+    )
+    for (const { id } of TASK_LANES) if (counts && counts[id] > 0) laneCounts[id] = counts[id]
     const hasMore = rows.length > limit
     const page = hasMore ? rows.slice(0, limit) : rows
     const items = attachNextActions(ctx.tx, page.map((row) => taskSummary(row, now)), params.actor, now)
@@ -328,7 +330,7 @@ function attachNextActions(tx: ReadTx, items: TaskSummary[], actor: string | und
   const at = new Date(now).toISOString()
   const tree = `(WITH RECURSIVE roots(task_id,run_id) AS (
       SELECT task_id,current_run_id FROM tasks WHERE task_id IN (${placeholders}) AND current_run_id IS NOT NULL
-      UNION SELECT roots.task_id,c.run_id FROM roots JOIN runs c
+      UNION SELECT roots.task_id,c.run_id FROM roots CROSS JOIN runs c
         ON c.parent_run_id=roots.run_id AND c.task_id=roots.task_id
     ) SELECT task_id,run_id FROM roots)`
   type ReviewTarget = {
@@ -336,15 +338,17 @@ function attachNextActions(tx: ReadTx, items: TaskSummary[], actor: string | und
     request_id: string | null; review_set_json: string | null; accepted_json: string | null;
     artifact_id: string | null; sha256: string | null; file_name: string | null;
   }
+  // Start each lookup from the displayed tasks. SQLite can otherwise start at every
+  // historical node, review, or approval and only afterwards filter by these runs.
   const reviews = tx.all<ReviewTarget>(
     `WITH current_tree AS ${tree}, targets AS (
       SELECT t.task_id,h.run_id,hn.node_id,hn.node_run_id,NULL AS request_id,
         CASE WHEN hn.node_run_id=h.node_run_id THEN h.review_set_json END AS review_set_json,
         CASE WHEN hn.node_run_id=h.node_run_id THEN h.accepted_json END AS accepted_json,
         NULL AS artifact_id,NULL AS sha256,NULL AS file_name,h.updated_at
-      FROM current_tree t JOIN delivery_review_holds h ON h.run_id=t.run_id
+      FROM current_tree t CROSS JOIN delivery_review_holds h ON h.run_id=t.run_id
       JOIN runs r ON r.run_id=h.run_id AND r.status='running' AND r.cancel_requested_at IS NULL
-      JOIN node_runs hn ON hn.run_id=h.run_id AND hn.node_id=h.node_id
+      CROSS JOIN node_runs hn ON hn.run_id=h.run_id AND hn.node_id=h.node_id
         AND hn.replacement_node_run_id IS NULL AND hn.status='done'
       WHERE (h.status='held' OR h.node_run_id<>hn.node_run_id) AND (? IS NULL OR h.owner_actor=?)
         AND hn.attempt=(SELECT MAX(n.attempt) FROM node_runs n
@@ -355,9 +359,9 @@ function attachNextActions(tx: ReadTx, items: TaskSummary[], actor: string | und
       UNION ALL
       SELECT t.task_id,q.run_id,n.node_id,n.node_run_id,q.request_id,
         w.result_manifest_json,w.accepted_files_json,a.artifact_id,a.sha256,c.file_name,q.updated_at
-      FROM current_tree t JOIN rework_requests q ON q.run_id=t.run_id
+      FROM current_tree t CROSS JOIN rework_requests q ON q.run_id=t.run_id
       JOIN runs r ON r.run_id=q.run_id AND r.status='running' AND r.cancel_requested_at IS NULL
-      JOIN rework_attempts w ON w.request_id=q.request_id AND w.round_no=q.round_no AND w.status='awaiting_review'
+      CROSS JOIN rework_attempts w ON w.request_id=q.request_id AND w.round_no=q.round_no AND w.status='awaiting_review'
       JOIN node_runs n ON n.node_run_id=q.new_node_run_id AND n.node_run_id=w.new_node_run_id
         AND n.run_id=q.run_id AND n.status='done' AND n.replacement_node_run_id IS NULL
       LEFT JOIN artifacts a ON a.artifact_id=w.result_artifact_id AND a.sha256=w.result_artifact_hash AND a.run_id=q.run_id
@@ -388,7 +392,7 @@ function attachNextActions(tx: ReadTx, items: TaskSummary[], actor: string | und
     })
   }
   const decisions = tx.all<{ task_id: string; run_id: string; decision_id: string }>(
-    `SELECT t.task_id,d.run_id,d.decision_id FROM ${tree} t JOIN human_decision_inbox d ON d.run_id=t.run_id
+    `SELECT t.task_id,d.run_id,d.decision_id FROM ${tree} t CROSS JOIN human_decision_inbox d ON d.run_id=t.run_id
      ORDER BY d.created_at,d.decision_id`, ids)
   const decisionByTask = new Map<string, TaskNextAction>()
   for (const decision of decisions) {
@@ -397,7 +401,7 @@ function attachNextActions(tx: ReadTx, items: TaskSummary[], actor: string | und
       decision_id: decision.decision_id })
   }
   const reworks = tx.all<{ task_id: string; run_id: string; request_id: string }>(
-    `SELECT t.task_id,q.run_id,q.request_id FROM ${tree} t JOIN rework_requests q ON q.run_id=t.run_id
+    `SELECT t.task_id,q.run_id,q.request_id FROM ${tree} t CROSS JOIN rework_requests q ON q.run_id=t.run_id
      JOIN runs qr ON qr.run_id=q.run_id AND qr.status='running' AND qr.cancel_requested_at IS NULL
      WHERE q.status IN ('proposed','needs_human_approval','escalated') AND (? IS NULL OR q.owner_actor=?)
      ORDER BY q.created_at,q.request_id`, [...ids,actor ?? null,actor ?? null])
