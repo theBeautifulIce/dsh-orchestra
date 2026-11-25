@@ -77,12 +77,13 @@ Starting work and accepting its results are separate decisions. Required approva
 
 ### Choose a build and install it
 
-**This README describes the current `main` branch.** The published beta is an earlier release snapshot. For the current task-command settings, conversation artifact links, and subsequent fixes, use a package built from the matching `main` commit. The npm version alone does not identify those later builds.
+**The current prerelease is `v0.1.0-beta.2`.** It brings together the A workbench, task-command settings, complete artifact links, and fixes for conversation reporting and execution permissions, with updater `1.1.0`. This README follows `main`; use the matching tagged README and release notes for a published package's features and usage.
 
 | Build | How to get it |
 | --- | --- |
+| Current prerelease `v0.1.0-beta.2` | Download [`dsh-orchestra-0.1.0-beta.2.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.2/dsh-orchestra-0.1.0-beta.2.tgz). The [prerelease page](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.2) provides the updater and `SHA256SUMS.txt`; see [this version's README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.2/README.en.md) for usage. |
 | Current `main` | Build from source using the [commands below](#development-and-validation), or install a package supplied with its matching commit and SHA-256. |
-| Published beta snapshot | Download [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz). The [prerelease page](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1) provides `SHA256SUMS.txt`; use the [tagged README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.en.md) for that snapshot's features and usage. |
+| Historical `v0.1.0-beta.1` | The [historical release](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1) and [its README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.en.md) remain available for reference. Use `beta.2` for a new installation. |
 
 ### Install into DSH Desktop
 
@@ -100,12 +101,12 @@ Set `$DshDesktopCommand` to the command inside your actual Desktop installation.
 If you already have a verified `.tgz`, you can install it manually. The following command uses the Desktop CLI selected above. Replace the package path with its actual absolute path and set `$env:DSH_HOME` if your Desktop uses a custom data directory:
 
 ```powershell
-$OrchestraPackage = 'D:\packages\dsh-orchestra-0.1.0-beta.1.tgz'
+$OrchestraPackage = 'D:\packages\dsh-orchestra-0.1.0-beta.2.tgz'
 & $DshDesktopCommand plugin --profile desktop add $OrchestraPackage
 if ($LASTEXITCODE -ne 0) { throw 'Orchestra installation failed. Check the command output.' }
 ```
 
-The `desktop` profile belongs to that Desktop installation; an npm-global `dsh` cannot replace its bundled CLI. Keep the local package for later dependency installation or recovery. The updater above checks the current `main` package contract. Install a historical beta snapshot through the official CLI above, and use its tagged README for its features and usage.
+The `desktop` profile belongs to that Desktop installation; an npm-global `dsh` cannot replace its bundled CLI. Keep the local package for later dependency installation or recovery. The updater above checks the package contract used by `beta.2` and current `main`. Install historical `beta.1` packages through the official CLI above, and use that tag's README for their features and usage.
 
 After the command succeeds, **reopen Desktop** and select **Orchestra** in the sidebar. If you use the updater, it also checks the installed files. Installation on disk and loading the new code are separate steps. Open a workspace and a normal conversation within it. In **Orchestra → Settings**, check the connection, planner model, worker models, and automatic task routing. The personal adapter enables routing of explicit work requests by default; the planner follows the conversation model unless you choose another configured model. Send a task with clear inputs and a deliverable, then use its task card to follow execution and handle any required action.
 

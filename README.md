@@ -77,12 +77,13 @@ flowchart TD
 
 ### 选择版本并安装
 
-**本 README 描述当前 `main`。** 已发布的 Beta 包是较早的版本快照。要使用当前的任务指令设置、会话成果链接及后续修复，请安装由对应 `main` 提交构建的包；仅看 npm 版本号无法区分这些后续构建。
+**当前预发行版本为 `v0.1.0-beta.2`。** 该版本汇集 A 版工作台、任务指令设置、完整成果链接、会话回报和执行权限修复，并配套更新工具 `1.1.0`。本 README 随 `main` 更新；已发布安装包的功能与用法，以对应标签的 README 和发布说明为准。
 
 | 版本 | 获取方式 |
 | --- | --- |
+| 当前预发行 `v0.1.0-beta.2` | 下载 [`dsh-orchestra-0.1.0-beta.2.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.2/dsh-orchestra-0.1.0-beta.2.tgz)。[预发行页](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.2)提供更新工具和 `SHA256SUMS.txt`；用法见[该版本的 README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.2/README.md)。 |
 | 当前 `main` | 按[源码构建命令](#开发与验证)生成安装包，或使用同时提供对应提交和 SHA-256 的构建包。 |
-| 已发布 Beta 快照 | 下载 [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz)。[预发行页](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1)提供 `SHA256SUMS.txt`；该快照的用法见[对应标签的 README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.md)。 |
+| 历史 `v0.1.0-beta.1` | 保留[历史发布页](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1)及[对应 README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.md)，便于核对旧版本。新安装建议使用 `beta.2`。 |
 
 ### 安装到 DSH Desktop
 
@@ -100,12 +101,12 @@ $DshDesktopCommand = 'D:\aboutAI\deepseekharness-desktop\resources\runtime\cli\b
 已经取得并核对过 `.tgz` 时，也可以手动安装。以下命令使用上面指定的 Desktop CLI；将包路径改为实际绝对路径，并在自定义数据目录下设置对应的 `$env:DSH_HOME`：
 
 ```powershell
-$OrchestraPackage = 'D:\packages\dsh-orchestra-0.1.0-beta.1.tgz'
+$OrchestraPackage = 'D:\packages\dsh-orchestra-0.1.0-beta.2.tgz'
 & $DshDesktopCommand plugin --profile desktop add $OrchestraPackage
 if ($LASTEXITCODE -ne 0) { throw 'Orchestra 安装失败，请查看命令输出。' }
 ```
 
-Desktop 的 `desktop` 配置由该安装管理，不能用 npm 全局 `dsh` 代替它自带的 CLI。保留本地安装包，供后续依赖安装和恢复使用。上面的更新工具面向当前 `main` 的包契约；历史 Beta 快照请通过上述官方 CLI 安装，功能与用法以对应标签说明为准。
+Desktop 的 `desktop` 配置由该安装管理，不能用 npm 全局 `dsh` 代替它自带的 CLI。保留本地安装包，供后续依赖安装和恢复使用。上面的更新工具适用于 `beta.2` 和当前 `main` 的包契约；历史 `beta.1` 请通过上述官方 CLI 安装，功能与用法以对应标签说明为准。
 
 命令成功后，**重新打开 Desktop**，从侧栏进入 **Orchestra**；使用更新工具时，它还会核对实际安装文件。磁盘安装完成与宿主加载新代码是两个步骤。打开工作区及其中的普通会话，在 **Orchestra → 设置**检查连接、主脑模型、子智能体模型和聊天任务自动接管。个人适配器默认接管明确任务；主脑默认跟随会话模型，也可指定已配置的模型。随后发送输入明确、交付要求具体的任务，从任务卡跟进执行并处理必要事项。
 
