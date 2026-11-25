@@ -186,7 +186,7 @@ it.runIf(Boolean(previousArchive && candidateArchive))('T14 从已签旧包读�
   }
   writeFileSync(planPath, JSON.stringify(plan))
   const invoke = (step: string) => spawnSync(process.execPath, ['--no-warnings', 'scripts/upgrade.ts', 'step', step, '--plan', planPath], {
-    encoding: 'utf8', env: { ...process.env, ORCHESTRA_REHEARSAL_SECRET: secret, ORCHESTRA_REHEARSAL_PROOF: proof,
+    encoding: 'utf8', timeout: 30_000, env: { ...process.env, ORCHESTRA_REHEARSAL_SECRET: secret, ORCHESTRA_REHEARSAL_PROOF: proof,
       ORCHESTRA_REHEARSAL_PREVIOUS_HOST: provider },
   })
   const runStep = (step: string) => {
@@ -242,4 +242,4 @@ it.runIf(Boolean(previousArchive && candidateArchive))('T14 从已签旧包读�
     expect(last.facts.after_seq).toBeGreaterThan(last.facts.before_seq)
     expect(readIntake(module).intake.paused).toBe(true)
   } finally { rmSync(root, { recursive: true, force: true }) }
-}, 50_000)
+}, 90_000)

@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
@@ -13,6 +14,7 @@ import { createExecutionScheduler } from '../../src/service/execution-scheduler.
 import { executionApprovalReceipts } from '../../src/service/execution-approval-receipts.ts'
 import { createModelRoutingSettingsHost } from '../../src/service/model-routing-settings.ts'
 import { PROJECT_CONTEXT_FILE } from '../../src/service/project-shared-context.ts'
+import { explicitAgentRoster } from '../../src/core/task-requirements.ts'
 import type { CoordinationItem } from '../../src/service/run-coordination.ts'
 import type { SemanticInput } from '../../src/service/semantic-admission.ts'
 import type { TaskPlanningOptions } from '../../src/service/task-planning.ts'
@@ -31,7 +33,7 @@ type Worker = {
   node: string
   tool<T>(name: string, input: Record<string, unknown>): Promise<T>
 }
-type Outcome = { outcome: 'completed' | 'blocked'; reason?: string; next_action?: string }
+type Outcome = { outcome: 'completed' | 'blocked'; reason?: string; next_action?: string | null; missing?: string[] }
 type Scenario = {
   title: string
   goal: string
@@ -75,6 +77,8 @@ function interpret(scenario: Scenario, { current, draft }: SemanticInput) {
     { ...source, id: 'network', kind: 'no_network', quote: access },
     { ...source, id: 'workspace-read', kind: 'no_workspace_read', quote: access },
     { ...source, id: 'workspace-write', kind: 'no_workspace_files', quote: access },
+    ...(explicitAgentRoster(current.text) ? [{ ...source, id: 'fixed-roster', kind: 'no_extra_agents',
+      quote: explicitAgentRoster(current.text)!.quote }] : []),
     ...(scenario.approval ? [{ ...source, id: 'approval', kind: 'approval_before', scope: 'steps', action: '计算',
       quote: '只有我批准该步骤后，才能计算预算剩余金额及支出比例', reviewer: { kind: 'operator' } }] : []),
   ] }
@@ -565,6 +569,8 @@ A、B 分别登记精简的中间文本成果。若收到协作信息，结合�
     await expect.poll(() => session.nodeStates(run), { timeout: 6_000 }).toEqual(expect.arrayContaining([
       { node_id: 'income', status: 'done' }, { node_id: 'refund', status: 'started' }, { node_id: 'summary', status: 'queued' },
     ]))
+    const originalBeforeLateReply = registered(session, run).find(([nodeId]) => nodeId === 'income')
+    expect(originalBeforeLateReply).toEqual(['income', '收入 3 笔，合计 1000 元'])
     allowReply.resolve()
     await expect.poll(() => status(session, run), { timeout: 8_000 }).toBe('succeeded')
     expect(session.children.slice(0, 2).sort()).toEqual(['income', 'refund'])
@@ -576,6 +582,7 @@ A、B 分别登记精简的中间文本成果。若收到协作信息，结合�
       ['income', '收入 3 笔，合计 1000 元'], ['refund', '退款 2 笔，合计 100 元'],
       ['summary', '收入合计 1000 元，退款合计 100 元，净收入 900 元'],
     ]))
+    expect(registered(session, run).find(([nodeId]) => nodeId === 'income')).toEqual(originalBeforeLateReply)
     expect(session.db.prepare('SELECT COUNT(*) AS n FROM artifact_consumptions').get()?.n).toBe(2)
     await expect.poll(session.noticeText, { timeout: 6_000 }).toContain('收入合计 1000 元，退款合计 100 元，净收入 900 元')
     const notice = await session.noticeText()
@@ -590,6 +597,19 @@ A、B 分别登记精简的中间文本成果。若收到协作信息，结合�
 it('T05 records the missing price without turning the known subtotal into the full value or stopping the quantity worker', async () => {
   const harness = await scenarioHarness()
   const finishQuantity = Promise.withResolvers<void>()
+  const originalPrepare = DatabaseSync.prototype.prepare
+  const bodyReadIds: string[] = []
+  const readSpy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
+    const statement = Reflect.apply(originalPrepare, this, [sql])
+    if (sql === 'SELECT bytes FROM artifact_contents WHERE artifact_id = ?') {
+      const originalGet = statement.get.bind(statement)
+      Object.defineProperty(statement, 'get', { configurable: true, value: (...parameters: unknown[]) => {
+        bodyReadIds.push(String(parameters[0]))
+        return Reflect.apply(originalGet, statement, parameters)
+      } })
+    }
+    return statement
+  })
   const missingPrice = /商品 B 单价缺失，已知小计 290 元，完整库存金额未定。补齐商品 B 单价后复核库存金额。/u
   const quantity = '库存数量合计 18 件。'
   try {
@@ -665,6 +685,10 @@ it('T05 records the missing price without turning the known subtotal into the fu
     expect(update.text).toMatch(missingPrice)
     expect(update.text).toContain(quantity)
     expect(update.text).toContain('整项任务仍在处理中')
+    const quantityArtifact = session.db.prepare(`SELECT a.artifact_id FROM artifacts a JOIN artifact_contents c USING(artifact_id)
+      JOIN node_runs n ON n.node_run_id=c.node_run_id WHERE a.run_id=? AND n.node_id='quantity'`)
+      .get(run)?.artifact_id as string
+    expect(bodyReadIds).toEqual([quantityArtifact])
     expect(session.db.prepare('SELECT status FROM runs WHERE run_id=?').get(run)?.status).toBe('running')
     expect(acceptance(session, run)).toEqual([])
     await expect.poll(deliveredKey, { timeout: 6_000 }).not.toBe(firstKey)
@@ -674,9 +698,10 @@ it('T05 records the missing price without turning the known subtotal into the fu
     await delay(4_100)
     expect(await session.readNotices()).toEqual(second)
     expect(reportKey()).toBe(secondKey)
+    expect(bodyReadIds).toEqual([quantityArtifact])
     expect(harness.workerErrors).toEqual([])
     expect(harness.outsideTool).not.toHaveBeenCalled()
-  } finally { finishQuantity.resolve(); await harness.close() }
+  } finally { finishQuantity.resolve(); readSpy.mockRestore(); await harness.close() }
 }, 35_000)
 
 it('T06 deduplicates identical 30-second requests and lets both workers finish with the other worker silent', async () => {
@@ -721,6 +746,7 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
         const values = new RegExp(`代理 ${name} 负责计算 ([\\d、]+)`, 'u').exec(worker.task.task_goal)![1]!.split('、').map(Number)
         const total = sum(values)
         await publish(worker, `代理 ${name} 合计 ${total}，平均值 ${total / values.length}`)
+        return { outcome: 'completed', reason: '完成', next_action: null, missing: [] }
       },
     })
     const run = await session.submit()
@@ -729,6 +755,17 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
     expect(registered(session, run)).toEqual(expect.arrayContaining([
       ['first', '代理 A 合计 120，平均值 30'], ['second', '代理 B 合计 120，平均值 30'],
     ]))
+    const applied = session.db.prepare("SELECT e.payload FROM node_run_events e JOIN node_runs n USING(node_run_id)"
+      + " WHERE n.run_id=? AND e.type='report_applied' ORDER BY e.seq")
+      .all(run) as { payload: string }[]
+    expect(applied).toHaveLength(2)
+    expect(applied.map(event => JSON.parse(event.payload).next_status)).toEqual(['done', 'done'])
+    const bridgeTurns = session.db.prepare("SELECT e.payload FROM node_run_events e JOIN node_runs n USING(node_run_id)"
+      + " WHERE n.run_id=? AND e.type='bridge.turn' ORDER BY e.seq").all(run) as { payload: string }[]
+    expect(bridgeTurns).toHaveLength(2)
+    for (const event of bridgeTurns) expect(JSON.parse(event.payload)).toMatchObject({ payload: { report: {
+      status: 'done', output: { completion: { outcome: 'completed', reason: '完成', next_action: null, missing: [] } },
+    } } })
     const { items } = session.service.coordination!.listHuman(run, owner)
     expect(items).toMatchObject([{ kind: 'request', source: '代理 A', target: '代理 B', state: 'unavailable', reply: null }])
     expect(items[0]!.expires_ms - items[0]!.created_ms).toBe(30_000)
@@ -743,6 +780,72 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
     expect(harness.workerErrors).toEqual([])
     expect(harness.outsideTool).not.toHaveBeenCalled()
   } finally { peerReady.resolve(); sent.resolve(); await harness.close() }
+}, 25_000)
+
+it('T09 interprets the fixed two-agent request, refuses one live reverse request, then allows the original reply', async () => {
+  const harness = await scenarioHarness()
+  const requestSent = Promise.withResolvers<void>()
+  const replied = Promise.withResolvers<void>()
+  let reverseAttempts = 0
+  try {
+    const session = await harness.session('T09', { title: 'T09-反向请求边界',
+      goal: `执行 T09 两代理协作测试。
+
+安排两个同时运行的独立代理：A 计算 25×16，B 计算 48×12。A 必须通过真实协作信箱向 B 发送一次核对请求。当该请求仍 pending 时，B 向 A 发起一次反向请求。若反向请求真实拒绝，不得绕过或重试；B 随后可以回复 A 的原请求。两名代理分别登记计算结果，正确结果为 A=400、B=576。
+
+不得额外启动代理。未观察到的条件如实记录为未观察；没有给出必要数据时应受阻，不能把未观察当成数据缺口授权。不联网，不读写工作区文件，结果返回会话。`,
+      chatQuote: '结果返回会话',
+      steps: [{ id: 'a', title: '代理 A' }, { id: 'b', title: '代理 B' }],
+      async work(worker) {
+        if (worker.node === 'a') {
+          const peers = await inbox<Inbox>(worker, { action: 'inbox' })
+          expect(peers.peers.map(peer => peer.title)).toEqual(['代理 B'])
+          const item = await inbox<CoordinationItem>(worker, { action: 'send', kind: 'request',
+            target_node_run_id: peers.peers[0]!.node_run_id, ttl_seconds: 30, body: '请核对 25×16 的乘法结果。' })
+          expect(item.state).toBe('pending')
+          requestSent.resolve()
+          await publish(worker, 'A：25×16=400。')
+          await replied.promise
+          return { outcome: 'completed', reason: '完成', next_action: null, missing: [] }
+        }
+        await requestSent.promise
+        const before = await inbox<Inbox>(worker, { action: 'inbox' })
+        expect(before.items).toMatchObject([{ kind: 'request', source: '代理 A', state: 'pending' }])
+        const peer = before.peers.find(candidate => candidate.title === '代理 A')!
+        reverseAttempts++
+        const reverse = await inbox(worker, { action: 'send', kind: 'request', target_node_run_id: peer.node_run_id,
+          ttl_seconds: 30, body: '请反向核对 48×12。' }).then(() => undefined, error => error)
+        expect(reverse).toMatchObject({ code: 'RESOLUTION_NOT_AVAILABLE', details: { reason: 'coordination_cycle' } })
+        const after = await inbox<Inbox>(worker, { action: 'inbox' })
+        expect(after.items).toHaveLength(1)
+        expect(after.items[0]).toMatchObject({ kind: 'request', source: '代理 A', state: 'pending' })
+        const original = after.items[0]!
+        const answer = await inbox<CoordinationItem>(worker, { action: 'reply', id: original.id,
+          revision: original.revision, body: '我独立复算 25×16=400，结果一致。' })
+        expect(answer).toMatchObject({ state: 'answered', reply: '我独立复算 25×16=400，结果一致。' })
+        replied.resolve()
+        await publish(worker, 'B：48×12=576。')
+        return { outcome: 'completed', reason: '完成', next_action: null, missing: [] }
+      },
+    })
+    const run = await session.submit()
+    await expect.poll(() => status(session, run), { timeout: 8_000 }).toBe('succeeded')
+    expect(session.children.sort()).toEqual(['a', 'b'])
+    expect(reverseAttempts).toBe(1)
+    expect(session.service.coordination!.listHuman(run, owner).items).toMatchObject([
+      { kind: 'request', source: '代理 A', target: '代理 B', state: 'answered',
+        reply: '我独立复算 25×16=400，结果一致。' },
+    ])
+    expect(registered(session, run)).toEqual(expect.arrayContaining([
+      ['a', 'A：25×16=400。'], ['b', 'B：48×12=576。'],
+    ]))
+    const input = session.db.prepare('SELECT input_json FROM task_plans').get()?.input_json
+    const contract = JSON.parse(String(input)).requirements_contract
+    expect(contract.constraints).toContainEqual(expect.objectContaining({ kind: 'no_extra_agents' }))
+    expect(contract.constraints).not.toContainEqual(expect.objectContaining({ kind: 'report_data_gap' }))
+    expect(acceptance(session, run)).toEqual(Array(2).fill({ kind: 'chat/text_result', outcome: 'passed' }))
+    expect(harness.workerErrors).toEqual([])
+  } finally { requestSent.resolve(); replied.resolve(); await harness.close() }
 }, 25_000)
 
 it('T10 closes and reopens the same store, retires a pending inbox request, and runs a fresh task', async () => {

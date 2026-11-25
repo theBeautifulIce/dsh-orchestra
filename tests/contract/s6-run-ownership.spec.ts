@@ -150,6 +150,58 @@ it('leaves service and historical starts unowned in S6 and preserves their S5 co
   }
 })
 
+it('stops only the owned S6 run after explicit confirmation and never invents a verified effect', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-operator-stop-'))
+  let fixture: Awaited<ReturnType<typeof boot>> | undefined
+  try {
+    fixture = await boot(dir, 'S6')
+    await install(fixture)
+    const input = { ...startInput(), startedBy: primary, actor: { kind: 'human' as const, id: primary } }
+    const started = await fixture.post<{ task_id: string; run_id: string }>('/v1/runs/start', input, primarySession)
+    expect(started.status).toBe(200)
+    const { task_id: taskId, run_id: runId } = started.data!
+    const nodeId = String(fixture.db.raw.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? ORDER BY seq LIMIT 1').get(runId)?.node_run_id)
+    fixture.db.raw.prepare("UPDATE node_runs SET status='started', side_effect_policy='irreversible' WHERE node_run_id=?").run(nodeId)
+
+    const request = { task_id: taskId, run_id: runId, confirmed: true }
+    const readRun = () => fixture!.db.raw.prepare('SELECT status,cancel_result,cancel_requested_at FROM runs WHERE run_id=?').get(runId) as
+      { status: string; cancel_result: string | null; cancel_requested_at: string | null }
+    const readNode = () => fixture!.db.raw.prepare('SELECT status,cancel_result,cancel_requested_at,side_effect_verified_none FROM node_runs WHERE node_run_id=?').get(nodeId) as
+      { status: string; cancel_result: string | null; cancel_requested_at: string | null; side_effect_verified_none: number }
+
+    expect(await fixture.post('/v1/runs/stop', { task_id: taskId, run_id: runId }, primarySession))
+      .toMatchObject({ status: 400, error: { code: 'PAYLOAD_SCHEMA_INVALID' } })
+    expect(await fixture.post('/v1/runs/stop', { ...request, confirmed: false }, primarySession))
+      .toMatchObject({ status: 400, error: { code: 'PAYLOAD_SCHEMA_INVALID' } })
+    expect(await fixture.post('/v1/runs/stop', { ...request, cancelResult: 'interrupted' }, primarySession))
+      .toMatchObject({ status: 400, error: { code: 'PAYLOAD_SCHEMA_INVALID' } })
+    expect(await fixture.post('/v1/runs/stop', request, otherSession))
+      .toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
+    expect(await fixture.post('/v1/runs/stop', { ...request, task_id: 'another-task' }, primarySession))
+      .toMatchObject({ status: 403, error: { code: 'FORBIDDEN' } })
+    expect(readRun()).toMatchObject({ status: 'running', cancel_result: null, cancel_requested_at: null })
+    expect(readNode()).toMatchObject({ status: 'started', cancel_result: null, cancel_requested_at: null, side_effect_verified_none: 0 })
+
+    const stopped = await fixture.post<{ state: string; run_id: string; status: string; terminal: boolean;
+      skipped_irreversible: number; pending_decisions: number }>('/v1/runs/stop', request, primarySession)
+    expect(stopped).toMatchObject({ status: 200, data: { state: 'stop_requested', run_id: runId,
+      terminal: false, skipped_irreversible: 1, pending_decisions: 0 } })
+    expect(readRun()).toMatchObject({ cancel_result: 'unknown' })
+    // The irreversible step is reported as skipped; it remains started and is
+    // never rewritten as stopped or as proof that no external effect occurred.
+    expect(readNode()).toMatchObject({ status: 'started', cancel_result: null, side_effect_verified_none: 0 })
+    expect(['succeeded', 'cancelled']).not.toContain(readRun().status)
+
+    const replay = await fixture.post('/v1/runs/stop', request, primarySession)
+    expect(replay.status).toBe(200)
+    expect(readRun()).toMatchObject({ cancel_result: 'unknown' })
+    expect(readNode()).toMatchObject({ status: 'started', cancel_result: null, side_effect_verified_none: 0 })
+  } finally {
+    await fixture?.service.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 it('accepts one review generation only, so a second page cannot overwrite a submitted conclusion', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-review-cas-'))
   let fixture: Awaited<ReturnType<typeof boot>> | undefined

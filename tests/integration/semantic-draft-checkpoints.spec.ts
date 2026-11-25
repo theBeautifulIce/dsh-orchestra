@@ -6,13 +6,15 @@ import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { openDb } from '../../src/infra/sqlite/driver.ts'
 import { createNativeChatRoutingSettings } from '../../src/service/native-chat-routing-settings.ts'
 import { createSemanticDraftCheckpoints, DRAFT_KEY_PREFIX } from '../../src/service/semantic-draft-checkpoints.ts'
-import { createSemanticSession, type SemanticInput } from '../../src/service/semantic-admission.ts'
+import { createSemanticSession, type SemanticInput, type SemanticLaunchOrigin } from '../../src/service/semantic-admission.ts'
 
 const source = '请整理月报，禁止联网，先别执行'
-function request(text: string, id: string, identity = 'workspace/session'): {
-  identity: string; requestId: string; hash: string; input: Omit<SemanticInput, 'draft'>; signal: AbortSignal; assertCurrent(): void
+function request(text: string, id: string, identity = 'workspace/session', launchOrigin?: SemanticLaunchOrigin): {
+  identity: string; requestId: string; hash: string; input: Omit<SemanticInput, 'draft'>; launchOrigin?: SemanticLaunchOrigin;
+  signal: AbortSignal; assertCurrent(): void
 } {
   return { identity, requestId: id, hash: id, input: { current: { message_id: id, text }, explicit: true },
+    ...(launchOrigin && { launchOrigin }),
     signal: new AbortController().signal, assertCurrent() {} }
 }
 function held(input: SemanticInput) {
@@ -53,6 +55,38 @@ it('rehydrates a signed held draft in a fresh session, requires explicit resume,
       return { kind: 'task', relation: 'new', timing: 'immediate', quote: input.current.text, constraints: [], missing: [] }
     })
     expect(newTask.kind).toBe('ready')
+  } finally { await rm(fixture.profile, { recursive: true, force: true }) }
+})
+
+it('keeps the held request recoverable when resume planning fails, the agent exits, and a new session resumes it', async () => {
+  const fixture = await profileFixture()
+  const origin = { messageKey: 'a'.repeat(64), requestKey: 'b'.repeat(64), inputHash: 'c'.repeat(64) }
+  try {
+    const firstSession = createSemanticSession(fixture.checkpoints)
+    await firstSession.admit(request(source, 'held'), async input => held(input))
+    firstSession.reset()
+
+    const resumedSession = createSemanticSession(fixture.checkpoints)
+    const resumed = await resumedSession.admit(request('现在开始执行月报', 'resume', 'workspace/session', origin), async input => {
+      expect(input.draft).toMatchObject({ timing: 'held', sources: [{ message_id: 'held', text: source }],
+        constraints: [{ kind: 'no_network', quote: '禁止联网' }] })
+      return { kind: 'task', relation: 'continue', timing: 'immediate', quote: input.current.text,
+        constraints: input.draft!.constraints, missing: [], draft_revision: input.draft!.revision, continuation: 'resume' }
+    })
+    expect(resumed.kind).toBe('ready')
+    // The host failed before accepting a run; production calls this when it retains the unstarted request.
+    resumedSession.retainUnstarted('resume', 'resume')
+    resumedSession.reset() // The agent exits before another human turn.
+
+    const restarted = createSemanticSession(fixture.checkpoints)
+    const afterExit = await restarted.admit({ ...request('请继续刚才的月报', 'after-exit'), hasPlan: async () => false }, async input => {
+      expect(input.draft).toMatchObject({ timing: 'held', sources: [
+        { message_id: 'held', text: source }, { message_id: 'resume', text: '现在开始执行月报' },
+      ], constraints: [{ kind: 'no_network', quote: '禁止联网' }] })
+      return { kind: 'task', relation: 'continue', timing: 'immediate', quote: input.current.text,
+        constraints: input.draft!.constraints, missing: [], draft_revision: input.draft!.revision, continuation: 'resume' }
+    })
+    expect(afterExit).toMatchObject({ kind: 'ready', launchOrigin: origin })
   } finally { await rm(fixture.profile, { recursive: true, force: true }) }
 })
 

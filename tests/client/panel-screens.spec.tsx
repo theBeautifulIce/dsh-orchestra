@@ -289,6 +289,23 @@ describe('等你决定页', () => {
     view.unmount()
   })
 
+  it('T03 当前会话没有待批项时，把空态范围和回到来源会话的入口说清楚', async () => {
+    const { api, service } = apiFrom(({ path }) => path === '/v1/decisions'
+      ? { ok: true, data: page([]) }
+      : { ok: true, data: page([]) })
+    const view = await renderPanel(<DecisionInbox api={api} scopeLabel="当前会话：人工审批预算计算任务" />)
+    try {
+      await view.flush()
+      const text = view.text()
+      expect(text).toContain('当前会话：人工审批预算计算任务')
+      expect(text).toContain(COPY.emptyDecisions)
+      expect(text).toContain('可从任务所在会话的审批通知打开对应待办。')
+      expect(text).not.toContain('全部会话均无待批项')
+      expect(view.findAll('article')).toHaveLength(0)
+      expect(service.calls.filter(call => call.path === '/v1/decisions')).toHaveLength(1)
+    } finally { view.unmount() }
+  })
+
   it('查询失败时显示错误提示和重试入口', async () => {
     const { api } = apiFrom(() => { throw new Error('服务没起来') })
     const view = await renderPanel(<DecisionInbox api={api} />)

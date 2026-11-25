@@ -1,7 +1,13 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { createSemanticSession, interpretSemanticAdmission, semanticResponseNeedsCorrection, SEMANTIC_INSTRUCTIONS,
   type SemanticInput, type SemanticOutcome } from '../../src/service/semantic-admission.ts'
 import { createDshJsonCompletion } from '../../src/executor/dsh-json.ts'
+import { createDshSemanticInterpreter } from '../../src/executor/dsh-task-requirements.ts'
+import { fixedRosterIssue, requirementIssues } from '../../src/service/task-requirement-checks.ts'
+import { createSemanticDraftCheckpoints } from '../../src/service/semantic-draft-checkpoints.ts'
 
 function input(text: string, message_id = 'u1'): SemanticInput { return { current: { message_id, text }, explicit: false } }
 function task(current: SemanticInput, changes: object = {}) {
@@ -23,6 +29,58 @@ it('validates semantic source, restriction scope and explicit version before pla
   expect(interpretSemanticAdmission(current, { ...raw, workflow: { name: '月报', version: '3', quote: '流程月报第 2 版', source_message_id: 'u1' } })).toMatchObject({ kind: 'clarify' })
   expect(interpretSemanticAdmission(current, task(current, { constraints: [{ id: 'a', kind: 'read_only', source_message_id: 'notice', quote: '别改原件' }] }))).toMatchObject({ kind: 'clarify' })
   expect(interpretSemanticAdmission(current, task(current, { constraints: [{ id: 'a', kind: 'preserve_input', source_message_id: 'u1', quote: '别改原件', target: 'other.csv' }] }))).toMatchObject({ kind: 'clarify' })
+})
+
+it('T09 corrects a bad roster enum once, keeps the exact two-agent boundary, and does not turn unobserved facts into a data gap', async () => {
+  const text = `执行 T09 两代理协作测试。安排两个同时运行的独立代理：A 计算 25×16，B 计算 48×12。A 向 B 发出一次请求；该请求仍 pending 时，B 向 A 发出一次反向请求。真实拒绝后不绕过、不重试，B 可回复原请求。未观察到指定条件应如实记录，不得当作数据缺口授权。不得额外启动代理。`
+  const original: SemanticInput = { current: { message_id: 't09', text }, explicit: true }
+  const systems: string[] = []
+  const wireIds: string[] = []
+  let calls = 0
+  const llm = { async prepareCall(config: unknown) {
+    return { config, async *stream({ messages, system }: { messages: Array<{ content: Array<{ text: string }> }>; system: string }) {
+      calls++
+      systems.push(system)
+      const wire = JSON.parse(messages[0]!.content[0]!.text) as SemanticInput
+      wireIds.push(wire.current.message_id)
+      const response = calls === 1 ? task(wire, { constraints: [{ id: 'roster', kind: 'no_extra_agent',
+        source_message_id: wire.current.message_id, quote: '不得额外启动代理' }] })
+        : task(wire, { constraints: [{ id: 'roster', kind: 'no_extra_agents',
+          source_message_id: wire.current.message_id, quote: '不得额外启动代理' }] })
+      yield { type: 'block-end', block: { type: 'text', text: JSON.stringify(response) } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+  } } as unknown as NonNullable<Parameters<typeof createDshJsonCompletion>[0]>
+  const interpret = createDshSemanticInterpreter(llm)!
+  const raw = await interpret({ provider: 'fixture', model: 'selected' }, original, new AbortController().signal, () => {})
+  const result = interpretSemanticAdmission(original, raw)
+  expect(wireIds).toEqual(['m1', 'm1'])
+  expect(calls).toBe(2)
+  expect(systems[1]).toContain('constraints.0.kind')
+  expect(result).toMatchObject({ kind: 'ready', request: { requirements_contract: {
+    constraints: [{ kind: 'no_extra_agents', source_message_id: 't09', quote: '不得额外启动代理' }],
+  } } })
+  if (result.kind !== 'ready') throw new Error('Expected a corrected roster task')
+  expect(result.request.requirements_contract.constraints.some(item => item.kind === 'report_data_gap')).toBe(false)
+
+  const three = [{ id: 'a', type: 'agent', dependsOn: [] }, { id: 'b', type: 'agent', dependsOn: [] },
+    { id: 'c', type: 'agent', dependsOn: [] }]
+  expect(fixedRosterIssue(result.request.requirements_contract, three)).toContain('2 个代理')
+  expect(fixedRosterIssue(result.request.requirements_contract, [{ id: 'a', type: 'agent', dependsOn: [] },
+    { id: 'b', type: 'agent', dependsOn: ['a'] }])).toContain('并行执行')
+  expect(fixedRosterIssue(result.request.requirements_contract, [{ id: 'a', type: 'agent', dependsOn: [] },
+    { id: 'b', type: 'agent', dependsOn: [] }, { id: 'nested', type: 'subworkflow', dependsOn: [] }])).toContain('子流程')
+  const twoIndependent = [{ id: 'a', type: 'agent', dependsOn: [] }, { id: 'b', type: 'agent', dependsOn: [] }]
+  expect(fixedRosterIssue(result.request.requirements_contract, twoIndependent)).toBeUndefined()
+  expect(requirementIssues(result.request.requirements_contract,
+    { steps: [{ node_id: 'a', tools: [] }, { node_id: 'b', tools: [] }], deliverables: [
+      { acceptance: { kind: 'chat/text_result' } }, { acceptance: { kind: 'chat/text_result' } },
+    ] }, twoIndependent.map(node => ({ ...node, declaredTools: [] })))).toEqual([])
+
+  const missingInput = input('请核对，但尚未提供必须使用的材料', 'missing-materials')
+  const held = interpretSemanticAdmission(missingInput, { kind: 'clarify', missing: ['materials'] })
+  expect(held).toMatchObject({ kind: 'clarify' })
+  expect(held).not.toHaveProperty('request.requirements_contract')
 })
 
 it('retains held timing, preserves previous constraints and pin, and allows a clear ordinary continuation without exposing draft IDs', () => {
@@ -187,6 +245,62 @@ it('does not silently drop an unresolved original boundary on a later model resp
   const second = { ...input('继续', 'u2'), draft: a }
   const result = interpretSemanticAdmission(second, task(second, { relation: 'continue', draft_revision: a.revision, continuation: 'resume' }))
   expect(result).toMatchObject({ kind: 'clarify', draft: { missing: ['constraints'], unresolved: [{ quote: '禁止任何持久化' }] } })
+})
+
+it('does not replay a ready start after a failed plan and a newer held restriction', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'orchestra-semantic-replay-'))
+  const checkpoints = createSemanticDraftCheckpoints(profile, async identity => 'signed-test-key:' + identity)
+  const session = createSemanticSession(checkpoints)
+  const origin = { messageKey: 'a'.repeat(64), requestKey: 'b'.repeat(64), inputHash: 'c'.repeat(64) }
+  const makeRequest = (text: string, id: string, launch = false) => ({
+    identity: 'workspace/session', requestId: id, hash: id,
+    input: { current: { message_id: id, text }, explicit: true },
+    ...(launch ? { launchOrigin: origin } : {}), signal: new AbortController().signal, assertCurrent() {},
+  })
+  const original = '整理月报，不得联网，先别执行'
+  try {
+    const first = makeRequest(original, 'held')
+    await session.admit(first, async input => task(input, { timing: 'held', constraints: [
+      { id: 'net', kind: 'no_network', source_message_id: input.current.message_id, quote: '不得联网' },
+    ] }))
+
+    const resumeText = '现在继续月报'
+    const resume = makeRequest(resumeText, 'resume', true)
+    const started = await session.admit(resume, async input => task(input, { relation: 'continue', timing: 'immediate',
+      draft_revision: input.draft!.revision, continuation: 'resume', constraints: input.draft!.constraints }))
+    expect(started).toMatchObject({ kind: 'ready', request: { requirements_contract: { start_policy: 'immediate' } } })
+    const createdPlans: unknown[] = []
+    await expect((async () => {
+      createdPlans.push(started.kind === 'ready' ? started.request : undefined)
+      throw new Error('synthetic planner failure before plan creation')
+    })()).rejects.toThrow('synthetic planner failure')
+    expect(createdPlans).toHaveLength(1)
+    // This is the same unstarted request retention hook used after planner failure.
+    session.retainUnstarted('resume', 'resume')
+
+    const addedText = '增加只读限制，还是先等我确认'
+    const added = await session.admit(makeRequest(addedText, 'restriction'), async input => task(input, {
+      relation: 'continue', timing: 'held', draft_revision: input.draft!.revision, continuation: 'supply',
+      constraints: [...input.draft!.constraints, { id: 'read', kind: 'read_only',
+        source_message_id: input.current.message_id, quote: '只读限制' }],
+    }))
+    expect(added).toMatchObject({ kind: 'held', draft: { timing: 'held', sources: [
+      { message_id: 'held', text: original }, { message_id: 'resume', text: resumeText },
+      { message_id: 'restriction', text: addedText },
+    ], constraints: [{ kind: 'no_network' }, { kind: 'read_only' }] } })
+
+    const replay = await session.admit(resume, async () => {
+      throw new Error('same original resume was reinterpreted as a new start')
+    })
+    expect(replay.kind).not.toBe('ready')
+    expect(replay).toMatchObject({ kind: 'held', draft: { timing: 'held',
+      sources: [{ message_id: 'held', text: original }, { message_id: 'resume', text: resumeText },
+        { message_id: 'restriction', text: addedText }],
+      constraints: [{ kind: 'no_network' }, { kind: 'read_only' }] } })
+  } finally {
+    session.reset()
+    await rm(profile, { recursive: true, force: true })
+  }
 })
 
 

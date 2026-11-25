@@ -153,6 +153,105 @@ it('times out an admission request while it is still waiting for a provider slot
   } finally { vi.useRealTimers() }
 })
 
+it('extends the admission deadline only after text progress, then stops after fifteen seconds of silence', async () => {
+  vi.useFakeTimers()
+  const entered = Promise.withResolvers<void>()
+  const progress = Promise.withResolvers<void>()
+  const blocked = Promise.withResolvers<void>()
+  try {
+    const complete = createDshJsonCompletion({ async prepareCall(config: unknown) {
+      return { config, async *stream() {
+        entered.resolve()
+        await progress.promise
+        yield { type: 'text-delta', text: '正在继续生成' }
+        await blocked.promise
+      } }
+    } } as unknown as Runtime, 'admission')!
+    let settled = false
+    const result = complete(route, 'interpret', {}, new AbortController().signal, current)
+      .then(value => ({ value }), error => ({ error })).finally(() => { settled = true })
+    await vi.advanceTimersByTimeAsync(0)
+    await entered.promise
+    await vi.advanceTimersByTimeAsync(59_000)
+    progress.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(13_999)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(result).resolves.toMatchObject({ error: { code: 'OPERATION_TIMEOUT', details: { reason: 'semantic_timeout' } } })
+  } finally {
+    blocked.resolve()
+    await vi.runOnlyPendingTimersAsync()
+    vi.useRealTimers()
+  }
+})
+
+it.each([{ purpose: 'admission' as const, timeout: 60_000, code: 'OPERATION_TIMEOUT' },
+  { purpose: 'permission' as const, timeout: 8_000, code: 'SERVICE_UNAVAILABLE' }])(
+  'stops an empty $purpose stream at its original deadline', async ({ purpose, timeout, code }) => {
+    vi.useFakeTimers()
+    const entered = Promise.withResolvers<void>()
+    const blocked = Promise.withResolvers<void>()
+    try {
+      const complete = createDshJsonCompletion({ async prepareCall(config: unknown) {
+        return { config, async *stream() { entered.resolve(); await blocked.promise } }
+      } } as unknown as Runtime, purpose)!
+      const outcome = complete(route, 'interpret', {}, new AbortController().signal, current).then(
+        value => ({ value }), error => ({ error }))
+      await vi.advanceTimersByTimeAsync(0)
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(timeout - 1)
+      await expect(Promise.race([outcome, Promise.resolve('still waiting')])).resolves.toBe('still waiting')
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(outcome).resolves.toMatchObject({ error: { code } })
+    } finally {
+      blocked.resolve()
+      await vi.runOnlyPendingTimersAsync()
+      vi.useRealTimers()
+    }
+  })
+
+it('keeps the admission extension within the absolute ninety-second ceiling', async () => {
+  vi.useFakeTimers()
+  const entered = Promise.withResolvers<void>()
+  const chunks = Array.from({ length: 4 }, () => Promise.withResolvers<void>())
+  const blocked = Promise.withResolvers<void>()
+  try {
+    const complete = createDshJsonCompletion({ async prepareCall(config: unknown) {
+      return { config, async *stream() {
+        entered.resolve()
+        for (let index = 0; index < chunks.length; index++) {
+          await chunks[index]!.promise
+          yield { type: 'text-delta', text: '进展' + index }
+        }
+        await blocked.promise
+      } }
+    } } as unknown as Runtime, 'admission')!
+    const outcome = complete(route, 'interpret', {}, new AbortController().signal, current).then(
+      value => ({ value }), error => ({ error }))
+    await vi.advanceTimersByTimeAsync(0)
+    await entered.promise
+    let elapsed = 0
+    for (const [index, at] of [59_000, 70_000, 80_000, 84_000].entries()) {
+      await vi.advanceTimersByTimeAsync(at - elapsed)
+      elapsed = at
+      chunks[index]!.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    await vi.advanceTimersByTimeAsync(5_999)
+    await expect(Promise.race([outcome, Promise.resolve('still waiting')])).resolves.toBe('still waiting')
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(outcome).resolves.toMatchObject({ error: { code: 'OPERATION_TIMEOUT', details: { reason: 'semantic_timeout' } } })
+  } finally {
+    blocked.resolve()
+    for (const chunk of chunks) chunk.resolve()
+    await vi.runOnlyPendingTimersAsync()
+    vi.useRealTimers()
+  }
+})
+
 function responseQueue(texts: string[]) {
   const systems: string[] = []
   const prepareCall = vi.fn(async (config: unknown) => ({ config, async *stream({ system }: { system: string }) {

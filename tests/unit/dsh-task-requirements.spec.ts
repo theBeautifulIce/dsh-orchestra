@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { expect, it, vi } from 'vitest'
-import { createDshTaskRequirements } from '../../src/executor/dsh-task-requirements.ts'
+import { createDshSemanticInterpreter, createDshTaskRequirements } from '../../src/executor/dsh-task-requirements.ts'
 import type { SemanticInput } from '../../src/service/semantic-admission.ts'
 
 type Options = Parameters<typeof createDshTaskRequirements>[0]
@@ -104,4 +104,48 @@ it('checks the trusted workspace and parent around the completion and has no reg
   const missing = createDshTaskRequirements({ context: { llm: {} } as Context,
     parent: () => undefined, model: route, resolveWorkflow: () => ({ workflow_id: 'unused', workflow_version: '1' }) })
   await expect(missing({ goal: '生成报告', requirements: [] }, signal())).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+})
+
+it('restores a one-character source id after shortening it on the model wire', async () => {
+  let wireId = ''
+  const stream = vi.fn(async function* ({ messages }: { messages: { content: { text: string }[] }[] }) {
+    const input = JSON.parse(messages[0]!.content[0]!.text) as SemanticInput
+    wireId = input.current.message_id
+    yield { type: 'block-end', block: { type: 'text', text: JSON.stringify({ kind: 'task', relation: 'new',
+      timing: 'immediate', quote: '按原样交付结果', constraints: [{ id: 'keep', kind: 'chat_only',
+        source_message_id: wireId, quote: '只在会话里交付' }], missing: [] }) } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const llm = { async prepareCall(config: unknown) { return { config, stream } } } as unknown as Context['llm']
+  const interpret = createDshSemanticInterpreter(llm)!
+  const input: SemanticInput = { current: { message_id: 'x', text: '按原样交付结果，只在会话里交付' }, explicit: true }
+  const result = await interpret(route, input, signal(), () => {}) as { constraints: { source_message_id: string }[] }
+  expect(wireId).toBe('m1')
+  expect(result.constraints[0]!.source_message_id).toBe('x')
+  expect(stream).toHaveBeenCalledOnce()
+})
+
+it.each(['wrong source id', 'non-contiguous quote'])('uses exactly one correction for a bad %s citation', async defect => {
+  let attempts = 0
+  const f = setup(input => {
+    attempts++
+    const bad = defect === 'wrong source id'
+      ? { source_message_id: 'm9', quote: '不得联网' }
+      : { source_message_id: input.current.message_id, quote: '不得联网且只在会话交付' }
+    const citation = attempts === 1 ? bad : { source_message_id: input.current.message_id, quote: '不得联网' }
+    return { ...task(input), constraints: [{ id: 'offline', kind: 'no_network', ...citation }] }
+  })
+  const result = await f.read({ goal: '整理材料，不得联网，且只在会话交付', requirements: [] }, signal())
+  expect(result.requirements_contract?.constraints).toMatchObject([{ kind: 'no_network', quote: '不得联网' }])
+  expect(f.stream).toHaveBeenCalledTimes(2)
+  expect(f.resolveWorkflow).not.toHaveBeenCalled()
+})
+
+it('accepts a genuine clarification without spending the single correction attempt', async () => {
+  const f = setup(() => ({ kind: 'clarify', missing: ['result'] }))
+  await expect(f.read({ goal: '整理资料', requirements: [] }, signal())).rejects.toMatchObject({
+    code: 'CONFIRMATION_REQUIRED', details: { reason: 'semantic_clarification_required' },
+  })
+  expect(f.stream).toHaveBeenCalledOnce()
+  expect(f.resolveWorkflow).not.toHaveBeenCalled()
 })

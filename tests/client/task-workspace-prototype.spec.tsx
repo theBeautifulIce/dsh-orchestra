@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createApiClient } from '../../src/client/api/client.ts'
 import { createResourcesApi } from '../../src/client/api/resources.ts'
 import { TaskDetailScreen } from '../../src/client/panel/task-detail-screen.tsx'
 import { TaskFlowView } from '../../src/client/panel/task-flow-view.tsx'
 import { TaskRunSteps } from '../../src/client/panel/task-run-steps.tsx'
+import { PanelShell } from '../../src/client/panel/shell.tsx'
 import { readCanvasDoc } from '../../src/client/panel/workflow-canvas-nodes.tsx'
-import { createFakeService, nodeRunView, renderPanel, runSummary, taskSummary, type FakeQuery, type FakeReply } from './harness.ts'
+import type { OperatorStopReceipt } from '../../src/service/operator-run-stop.ts'
+import { createFakeService, deferred, nodeRunView, renderPanel, runSummary, taskSummary, type FakeQuery, type FakeReply } from './harness.ts'
 
 const now = '2026-11-18T01:00:00.000Z'
 const task = taskSummary({ title: '每日 09:00 项目记忆巡检', trigger_kind: 'scheduled', run_count: 3, workflow_version: 3, current_run_id: 'r2' })
@@ -89,6 +91,122 @@ describe('任务工作台与排期详情', () => {
       expect(view.text()).toContain('已登记的文件：existing.md')
       expect(view.text()).not.toContain('older.md')
       expect(view.text()).not.toContain('尚未登记该文件')
+    } finally { view.unmount() }
+  })
+
+  it('运行结果用验收名称展示原件，不把内部文件名当成果标题', async () => {
+    const accepted = '用户体验检查报告'
+    const internalName = '会话正文-3.md'
+    const { api } = apiFrom(({ path }) => {
+      if (path === '/v1/tasks/get') return { ok: true, data: task }
+      if (path === '/v1/runs') return { ok: true, data: { items: [recent] } }
+      if (path === '/v1/runs/get') return { ok: true, data: recent }
+      if (path === '/v1/node-runs') return { ok: true, data: { items: [] } }
+      if (path === '/v1/artifacts') return { ok: true, data: { items: [{
+        artifact_id: 'accepted-result', run_id: 'r2', file_name: internalName, title: accepted,
+        sha256: 'b'.repeat(64), retain_until: null, created_at: now, expired: false,
+      }], has_more: false } }
+      return missing
+    })
+    const view = await renderPanel(<TaskDetailScreen api={api} taskId={task.task_id} initialRunId="r2" onBack={() => {}} />)
+    try {
+      await view.click(view.findAll('button').find(button => button.textContent === '结果')!)
+      await view.flush()
+      expect(view.findAll('summary').some(summary => summary.textContent === accepted)).toBe(true)
+      expect(view.findAll('summary').some(summary => summary.textContent === internalName)).toBe(false)
+      expect(view.text()).toContain('交付产物')
+    } finally { view.unmount() }
+  })
+
+  it('停止按钮必须经过二步确认，双击只发一次，并保留未知结果提示', async () => {
+    const active = runSummary({ run_id: 'r2', status: 'running', display_status: 'running', operator_stop_state: 'available' })
+    let stopState: 'available' | 'requested' = 'available'
+    const { api } = apiFrom(({ path, params }) => {
+      if (path === '/v1/tasks/get') return { ok: true, data: task }
+      if (path === '/v1/runs') return { ok: true, data: { items: [{ ...active, operator_stop_state: stopState }] } }
+      if (path === '/v1/runs/get') return { ok: true, data: { ...active, operator_stop_state: stopState } }
+      if (path === '/v1/node-runs') return { ok: true, data: { items: [] } }
+      return missing
+    })
+    const pending = deferred<OperatorStopReceipt>()
+    const stopRun = vi.fn(() => pending.promise)
+    const view = await renderPanel(<PanelShell activeRoute="tasks" onNavigate={() => {}} serviceConnected>
+      <TaskDetailScreen api={api} taskId={task.task_id} initialRunId="r2" onBack={() => {}} stopRun={stopRun} />
+    </PanelShell>)
+    try {
+      await view.flush()
+      const begin = view.findAll('button').find(button => button.textContent === '停止这次运行')!
+      expect(begin).toBeDefined()
+      expect(stopRun).not.toHaveBeenCalled()
+      await view.click(begin)
+      expect(view.text()).toContain('确认停止')
+      expect(view.text()).toContain('正在执行的外部操作可能仍需核验')
+      expect(stopRun).not.toHaveBeenCalled()
+
+      const confirm = view.findAll('button').find(button => button.textContent === '确认停止')!
+      await view.click(confirm)
+      expect(stopRun).toHaveBeenCalledTimes(1)
+      expect(stopRun).toHaveBeenCalledWith('t1', 'r2')
+      await view.click(confirm)
+      expect(stopRun).toHaveBeenCalledTimes(1)
+
+      pending.resolve({ state: 'stop_requested', run_id: 'r2', status: 'running', terminal: false,
+        skipped_irreversible: 1, pending_decisions: 0 })
+      await view.flush()
+      expect(view.text()).toContain('已收到停止请求，正在等待执行器确认')
+      expect(view.text()).toContain('仍有 1 个不可逆步骤需核实')
+      stopState = 'requested'
+      await view.flush()
+      expect(view.text()).not.toContain('确认停止')
+    } finally { view.unmount() }
+  })
+
+  it('切换运行后不会沿用旧运行的确认状态，且已结束运行不提供停止按钮', async () => {
+    const latestRun = runSummary({ run_id: 'r2', status: 'running', display_status: 'running', operator_stop_state: 'available' })
+    const earlierRun = runSummary({ run_id: 'r1', status: 'running', display_status: 'running', operator_stop_state: 'available' })
+    let selected = latestRun
+    const { api } = apiFrom(({ path, params }) => {
+      if (path === '/v1/tasks/get') return { ok: true, data: task }
+      if (path === '/v1/runs') return { ok: true, data: { items: [latestRun, earlierRun] } }
+      if (path === '/v1/runs/get') return { ok: true, data: params.get('run_id') === selected.run_id ? { ...selected } : { ...earlierRun } }
+      if (path === '/v1/node-runs') return { ok: true, data: { items: [] } }
+      return missing
+    })
+    const stopRun = vi.fn(async (_taskId: string, runId: string): Promise<OperatorStopReceipt> => ({
+      state: 'stop_requested', run_id: runId, status: 'running', terminal: false,
+      skipped_irreversible: 0, pending_decisions: 0,
+    }))
+    const view = await renderPanel(<PanelShell activeRoute="tasks" onNavigate={() => {}} serviceConnected>
+      <TaskDetailScreen api={api} taskId={task.task_id} onBack={() => {}} stopRun={stopRun} />
+    </PanelShell>)
+    try {
+      await view.flush()
+      await view.click(view.findAll('button').find(button => button.textContent === '停止这次运行')!)
+      expect(view.text()).toContain('确认停止')
+      await view.click(view.findAll('button').find(button => button.textContent?.startsWith('运行'))!)
+      await view.flush()
+      const runRow = view.findAll('.task-run-history button').find(button => button.textContent?.includes('r1'))
+        ?? view.findAll('.task-run-history button')[1]
+      expect(runRow).toBeDefined()
+      await view.click(runRow!)
+      await view.flush()
+      expect(view.text()).toContain('这次运行')
+      expect(view.text()).not.toContain('确认停止')
+      await view.click(view.findAll('button').find(button => button.textContent === '停止这次运行')!)
+      expect(view.text()).toContain('确认停止')
+      await view.click(view.findAll('button').find(button => button.textContent === '确认停止')!)
+      await view.flush()
+      expect(stopRun).toHaveBeenCalledTimes(1)
+      expect(stopRun).toHaveBeenCalledWith('t1', 'r1')
+
+      selected = runSummary({ run_id: 'r1', status: 'cancelled', display_status: '已取消', operator_stop_state: 'closed' })
+      await view.rerender(<PanelShell activeRoute="tasks" onNavigate={() => {}} serviceConnected>
+        <TaskDetailScreen api={api} taskId={task.task_id} initialRunId="r1" onBack={() => {}} stopRun={stopRun} reloadVersion={1} />
+      </PanelShell>)
+      await view.flush()
+      expect(view.text()).not.toContain('停止这次运行')
+      expect(view.text()).not.toContain('确认停止')
+      expect(stopRun).toHaveBeenCalledTimes(1)
     } finally { view.unmount() }
   })
 

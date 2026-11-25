@@ -26,7 +26,8 @@ import { recordArtifactPublication } from '../../src/service/artifact-completion
 import { applyRunAcceptance } from '../../src/service/commands/run-acceptance.ts'
 import { formatChatApproval } from '../../src/core/chat-approval-text.ts'
 import { chatSemanticFixture } from '../fixtures/chat-semantic-model.ts'
-import type { SemanticInput } from '../../src/service/semantic-admission.ts'
+import type { SemanticDraftCheckpoints, SemanticInput } from '../../src/service/semantic-admission.ts'
+import { createSemanticDraftCheckpoints } from '../../src/service/semantic-draft-checkpoints.ts'
 import { reportChatRun } from '../../src/service/chat-task-receipts.ts'
 import { installNativeChat } from '../../src/service/chat-native.ts'
 import { createNativeCommandSettings } from '../../src/service/native-command-settings.ts'
@@ -39,8 +40,10 @@ type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 
 async function fixture(options: { profile?: string; version?: string; enabled?: false | 'desktop'; host?: string;
   interpret?: (input: SemanticInput) => unknown | Promise<unknown>;
-  routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError; dispatchPlans?: boolean; approvalPolicy?: 'ask' | 'never' } = {}) {
+  routing?: { enabled: boolean }; reportRequirements?: string[]; planningError?: OrchError; dispatchPlans?: boolean; approvalPolicy?: 'ask' | 'never';
+  draftCheckpoints?: (profileDir: string) => SemanticDraftCheckpoints } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'orchestra-native-chat-'))
+  const draftCheckpoints = options.draftCheckpoints?.(directory)
   const ctx = new Context()
   const commandNames: string[] = []
   ctx.provide('commands', { list: () => commandNames.map(name => ({ name, description: '已有命令' })) })
@@ -155,6 +158,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     host.inject(['agents', 'sessions', 'tools', 'systemPrompt'], (ready) => {
       installNativeChat(ready, {
         operator: 'local-dsh:fixture', signal: stop.signal,
+        ...(draftCheckpoints && { draftCheckpoints }),
         bindingFor(agent) {
           const sessionId = agent.session.id
           if (agents.get(sessionId) !== agent || agent.session.header.origin === 'subagent') return
@@ -2182,6 +2186,185 @@ it('T07: reads each explicitly named result once and leaves ambiguous or missing
     expect(count(test.services.get('t07-multi-read')!, 'runs')).toBe(initialRuns + 1)
     expect(test.planner).toHaveBeenCalledTimes(1)
   } finally { restoreReadSpy(); await test.close(); vi.useRealTimers() }
+})
+
+it.each([false, true])('普通工作区文件读取仍交给宿主；即使有同名历史原件也不误选（历史原件：%s）', async hasPriorArtifact => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const routing = { enabled: true }
+  const test = await fixture({ routing, ...(hasPriorArtifact ? { reportRequirements: ['README.md'] } : {}) })
+  try {
+    const human = test.session('work', 'workspace-readme-' + hasPriorArtifact)
+    if (hasPriorArtifact) {
+      await human.admit(user('/orchestra 整理 README.md 并交付同名原件'))
+      const { run_id: runId } = await human.call()
+      const { db } = test.services.get('workspace-readme-true')!.orchestra
+      const node = db.raw.prepare("SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_id='draft'")
+        .get(runId) as { node_run_id: string; attempt: number; action_generation: number }
+      const artifact = registerRunArtifact(db, { artifactId: 'orchestra-readme', runId, fileName: 'README.md',
+        bytes: Buffer.from('ORCHESTRA-REGISTERED-README'), nodeRunId: node.node_run_id })
+      const now = new Date().toISOString()
+      withTx(db, tx => {
+        recordArtifactPublication(tx, test.secret, node, { run_id: runId, node_id: 'draft' }, 'README.md', artifact)
+        tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?", [node.node_run_id])
+        tx.run("UPDATE runs SET status='succeeded',ended_at=? WHERE run_id=?", [now, runId])
+        applyRunAcceptance(tx, runId, now)
+      })
+      await vi.advanceTimersByTimeAsync(4000)
+      const notice = test.notices.find(item => item.message.source &&
+        (item.message.source as { summary?: string }).summary?.includes('README.md'))
+      expect(notice).toBeDefined()
+      await human.admit(notice!.message, false)
+      expect((await human.call({ action: 'status' })).run_id).toBe(runId)
+      expect((await human.call({ action: 'artifact', run_id: runId, artifact_id: artifact.artifact_id })).text)
+        .toBe('ORCHESTRA-REGISTERED-README')
+    }
+
+    routing.enabled = false
+    await writeFile(join(test.directory, 'README.md'), 'HOST-WORKSPACE-README-CONTENT')
+    const message = user('请读取上次提到的工作区文件 README.md')
+    const beforePlans = test.planner.mock.calls.length
+    const beforeRuns = hasPriorArtifact ? count(test.services.get('workspace-readme-true')!, 'runs') : 0
+    const turn = await human.admit(message)
+    expect(turn).toEqual({ kind: 'enter', messages: [message] })
+    if (turn.kind !== 'enter') throw new Error('Host workspace read should remain in the current turn')
+    expect(turn.messages.some(item => (item.source as { form?: string }).form === 'report_instruction')).toBe(false)
+    expect(human.checkTool('read')).toBeUndefined()
+    expect(test.planner).toHaveBeenCalledTimes(beforePlans)
+    expect(test.services.size).toBe(hasPriorArtifact ? 1 : 0)
+    if (hasPriorArtifact) expect(count(test.services.get('workspace-readme-true')!, 'runs')).toBe(beforeRuns)
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
+it('自动接管开启时，明确读取本地 README.md 的普通请求由宿主继续处理', async () => {
+  const text = '请读取上次提到的工作区文件 README.md'
+  const interpret = vi.fn((input: SemanticInput) => {
+    expect(input.current.text).toBe(text)
+    return { kind: 'conversation' }
+  })
+  const test = await fixture({ routing: { enabled: true }, interpret })
+  try {
+    const human = test.session('work', 'workspace-readme-auto-on')
+    await writeFile(join(test.directory, 'README.md'), 'HOST-WORKSPACE-README-CONTENT')
+    const message = user(text)
+    const turn = await human.admit(message)
+    expect(turn).toEqual({ kind: 'enter', messages: [message] })
+    if (turn.kind !== 'enter') throw new Error('Host workspace read should remain in the current turn')
+    expect(turn.messages.some(item => (item.source as { form?: string }).form === 'report_instruction')).toBe(false)
+    expect(human.checkTool('read')).toBeUndefined()
+    expect(test.interpret).not.toHaveBeenCalled()
+    expect(test.planner).not.toHaveBeenCalled()
+    expect(test.serve).not.toHaveBeenCalled()
+  } finally { await test.close() }
+})
+
+it('原生入口在规划失败且 Agent 退出后，用同一 SQLite 草稿恢复原始限制', async () => {
+  const interpreted: SemanticInput[] = []
+  const interpret = vi.fn((input: SemanticInput) => {
+    interpreted.push(structuredClone(input))
+    if (input.current.text.includes('先别执行')) return { kind: 'task', relation: input.draft ? 'continue' : 'new',
+      timing: 'held', quote: input.current.text, constraints: [{ id: 'offline', kind: 'no_network',
+        source_message_id: input.current.message_id, quote: '不联网' }], missing: [],
+      ...(input.draft && { draft_revision: input.draft.revision, continuation: 'supply' as const }) }
+    if (input.draft) return { kind: 'task', relation: 'continue', timing: 'immediate', quote: input.current.text,
+      constraints: input.draft.constraints, missing: [], draft_revision: input.draft.revision, continuation: 'resume' }
+    return { kind: 'conversation' }
+  })
+  const test = await fixture({ routing: { enabled: true }, interpret,
+    draftCheckpoints: profile => createSemanticDraftCheckpoints(profile, async identity => 'fixture-checkpoint-key:' + identity) })
+  const sessionId = 'held-planning-restart'
+  try {
+    const originalSession = test.session('work', sessionId)
+    await originalSession.admit(user('请整理月报，不联网，先别执行'))
+    await expect(originalSession.call()).resolves.toMatchObject({ state: 'task_held' })
+    expect(test.services.size).toBe(0)
+
+    test.plannerUnavailable(true)
+    await originalSession.admit(user('现在开始执行月报'))
+    await expect(originalSession.call()).resolves.toMatchObject({ state: 'error' })
+    const failedService = test.services.get(sessionId)!
+    expect(count(failedService, 'task_plans')).toBe(0)
+    expect(count(failedService, 'runs')).toBe(0)
+    expect(interpreted[1]).toMatchObject({ draft: { sources: [{ text: '请整理月报，不联网，先别执行' }],
+      constraints: [{ kind: 'no_network', quote: '不联网' }] } })
+
+    await test.restart(sessionId)
+    test.plannerUnavailable(false)
+    // A new Agent instance with the same authenticated workspace/session simulates restart.
+    const restartedSession = test.session('work', sessionId)
+    await restartedSession.admit(user('请继续刚才的月报'))
+    const launched = await restartedSession.call()
+    expect(launched).toMatchObject({ state: 'started' })
+    expect(interpreted[2]).toMatchObject({ draft: { sources: [
+      { text: '请整理月报，不联网，先别执行' }, { text: '现在开始执行月报' },
+    ], constraints: [{ kind: 'no_network', quote: '不联网' }] } })
+    const restartedService = test.services.get(sessionId)!
+    expect(count(restartedService, 'task_plans')).toBe(1)
+    expect(count(restartedService, 'runs')).toBe(1)
+    expect(test.planner).toHaveBeenCalledTimes(2)
+  } finally { await test.close() }
+})
+
+it('丢失已写计划的回执后，新 Agent 续接只返回原计划与运行', async () => {
+  let loseLaunchReceipt = true
+  let launchAcknowledgements = 0
+  const test = await fixture({ routing: { enabled: true }, interpret: input => {
+    if (input.current.text.includes('先别执行')) return { kind: 'task', relation: 'new', timing: 'held', quote: input.current.text,
+      constraints: [{ id: 'offline', kind: 'no_network', source_message_id: input.current.message_id, quote: '不联网' }], missing: [] }
+    if (input.draft) return { kind: 'task', relation: 'continue', timing: 'immediate', quote: input.current.text,
+      constraints: input.draft.constraints, missing: [], draft_revision: input.draft.revision, continuation: 'resume' }
+    return { kind: 'conversation' }
+  }, draftCheckpoints: profile => {
+    const checkpoints = createSemanticDraftCheckpoints(profile, async identity => 'fixture-checkpoint-key:' + identity)
+    return { read: identity => checkpoints.read(identity), write: async (identity, next, previous, assertCurrent) => {
+      if (!next && previous?.launchOrigin) {
+        launchAcknowledgements++
+        if (loseLaunchReceipt) {
+          loseLaunchReceipt = false
+          throw new Error('synthetic lost launch acknowledgement')
+        }
+      }
+      await checkpoints.write(identity, next, previous, assertCurrent)
+    } }
+  } })
+  const sessionId = 'held-plan-receipt-replay'
+  try {
+    const originalSession = test.session('work', sessionId)
+    await originalSession.admit(user('请整理月报，不联网，先别执行'))
+    await expect(originalSession.call()).resolves.toMatchObject({ state: 'task_held' })
+    await originalSession.admit(user('现在开始执行月报'))
+    // The plan/run are durable even though checkpoint cleanup fails. Drop the
+    // returned receipt as if the host reply was lost, then recover after restart.
+    const firstReceipt = await originalSession.call()
+    expect(firstReceipt).toMatchObject({ state: 'started' })
+    const service = test.services.get(sessionId)!
+    const planCount = count(service, 'task_plans')
+    const runCount = count(service, 'runs')
+    expect(planCount).toBe(1)
+    expect(runCount).toBe(1)
+    expect(launchAcknowledgements).toBe(1)
+    const firstRun = service.orchestra.db.raw.prepare('SELECT run_id FROM runs LIMIT 1').get()?.run_id
+    expect(firstRun).toBeDefined()
+
+    await test.restart(sessionId)
+    test.plannerUnavailable(true)
+    const restartedSession = test.session('work', sessionId)
+    await restartedSession.admit(user('请继续刚才的月报'))
+    const replay = await restartedSession.call()
+    expect(replay).toMatchObject({ state: 'started', run_id: firstRun })
+    expect(test.interpret).toHaveBeenLastCalledWith(expect.objectContaining({ current: expect.objectContaining({
+      text: '请继续刚才的月报',
+    }), draft: expect.objectContaining({
+      sources: expect.arrayContaining([
+        expect.objectContaining({ text: '请整理月报，不联网，先别执行' }),
+        expect.objectContaining({ text: '现在开始执行月报' }),
+      ]),
+      constraints: expect.arrayContaining([expect.objectContaining({ kind: 'no_network', quote: '不联网' })]),
+    }) }))
+    const restartedService = test.services.get(sessionId)!
+    expect(count(restartedService, 'task_plans')).toBe(planCount)
+    expect(count(restartedService, 'runs')).toBe(runCount)
+    expect(test.planner).toHaveBeenCalledTimes(1)
+  } finally { await test.close() }
 })
 
 

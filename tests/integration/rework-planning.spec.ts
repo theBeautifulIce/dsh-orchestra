@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { sha256Hex } from '../../src/core/canonical.ts'
+import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { registerRunArtifact } from '../../src/service/artifact-store.ts'
@@ -12,7 +12,7 @@ import { closeRun } from '../../src/service/commands/run-close.ts'
 import { TEST_SECRET, freshLedger, seed } from '../fixtures/ledger.ts'
 
 const operator = 'service:' + sha256Hex(TEST_SECRET).slice(0, 8)
-function setup(parallel = false) {
+function setup(parallel = false, fixedRoster = false) {
   const { db } = freshLedger()
   seed(db)
   const now = new Date().toISOString()
@@ -25,6 +25,26 @@ function setup(parallel = false) {
     tx.run("UPDATE node_runs SET status='done',side_effect_policy='pure' WHERE node_run_id='nr1'")
     tx.run("INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at) VALUES('nr2','r1','n2',2,'agent','queued','pure',?,?)", [now, now])
     if (parallel) tx.run("INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at) VALUES('nr3','r1','n3',3,'agent','queued','pure',?,?)", [now, now])
+    if (fixedRoster) {
+      const source = '不得额外启动代理。'
+      const brief = { goal: '对返工步骤进行数据复核', requirements: [{ id: 'g1', text: '复核原有步骤' }],
+        requirements_contract: { version: 1, start_policy: 'immediate', sources: [{ message_id: 't09', text: source }],
+          constraints: [{ id: 'roster', kind: 'no_extra_agents', source_message_id: 't09', quote: source }] } }
+      const proposal = { title: '固定代理名单返工', workflow_id: 'feedback', workflow_version: '1',
+        steps: ['n1', 'n2'].map(node_id => ({ node_id, description: '复核原有步骤', goal_ids: ['g1'], depends_on: [],
+          tools: [], complexity: 'routine', model_reason: '按返工要求复核' })),
+        deliverables: [{ title: '复核结果', node_id: 'n2', goal_ids: ['g1'], acceptance: { kind: 'chat/text_result' } }], risks: [] }
+      const quality = { ready: true, checks: [] }
+      const workflowHash = catalog.definitionHash('feedback', '1')
+      const contentHash = sha256Hex(canonicalJson({ schema: 2, brief, proposal, quality, workflow_hash: workflowHash }))
+      const operationId = uuidv7()
+      tx.run('INSERT INTO start_run_operations(operation_id,task_id,run_id,created_at) VALUES(?,?,?,?)',
+        [operationId, 't1', 'r1', now])
+      tx.run(`INSERT INTO task_plans(plan_id,created_by,input_json,proposal_json,quality_json,workflow_hash,content_hash,
+        launch_operation_id,created_at,owner_task_id,contract_version) VALUES(?,?,?,?,?,?,?,?,?,?,2)`,
+        [uuidv7(), operator, JSON.stringify(brief), JSON.stringify(proposal), JSON.stringify(quality), workflowHash,
+          contentHash, operationId, now, 't1'])
+    }
   })
   registerRunArtifact(db, { artifactId: 'old', runId: 'r1', nodeRunId: 'nr1', bytes: Buffer.from('draft'), fileName: 'report.md' })
   const feedback = createReworkHost(db, TEST_SECRET)
@@ -93,6 +113,27 @@ it('adds a scoped check before an affected step, preserves pinned topology and r
     expect(actual.edges).toEqual(expect.arrayContaining([{from:'n2',to:'n3'}, {from:'n1',to:'rw_check'},
       {from:'n2',to:'rw_check'}, {from:'rw_check',to:'n3'}]))
     expect(actual.held_node_ids).toContain('n3')
+  } finally { db.raw.close() }
+})
+
+it('keeps a fixed agent roster during rework while allowing changes to existing roles', async () => {
+  const { db, now, request } = setup(false, true)
+  try {
+    const row = request()
+    const body = { request_id: row.request_id, expected_revision: row.revision, operation_id: uuidv7() }
+    const proposal = { reason: '按原代理名单复核', changes: [
+      { node_id: 'n1', instruction: '重新核对样本' }, { node_id: 'n2', instruction: '按原角色汇总' }],
+      preserved_node_ids: [], insert_steps: [{ node_id: 'rw_check', before_node_id: 'n2', instruction: '新增一次代理复核' }] }
+    let output: unknown = proposal
+    const host = createReworkPlanningHost(db, TEST_SECRET, async () => output)
+    await expect(host.propose({ ...body, operation_id: uuidv7() }, operator, now))
+      .rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(host.get(row.request_id, operator).plan).toBeNull()
+    const { insert_steps: _insertSteps, ...existingRolesOnly } = proposal
+    output = existingRolesOnly
+    const accepted = await host.propose({ ...body, operation_id: uuidv7() }, operator, now)
+    expect(accepted.proposal.changes.map(change => change.node_id)).toEqual(['n1', 'n2'])
+    expect(accepted.proposal.insert_steps).toEqual([])
   } finally { db.raw.close() }
 })
 

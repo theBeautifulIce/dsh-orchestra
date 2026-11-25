@@ -61,6 +61,24 @@ it('serves a complete verified Markdown artifact over real loopback HTTP without
   await expect(fetch(url)).rejects.toThrow()
 })
 
+it('uses the accepted deliverable title for the real Browser document title even when the stored filename is generic', async () => {
+  const bytes = Buffer.from('# 正文标题\n\n验收原件正文。')
+  const sha256 = sha256Hex(bytes)
+  const reader = createArtifactBrowserReader({ read: async () => ({
+    title: '用户体验检查报告', fileName: '会话正文-3.md', bytes, sha256,
+  }) })
+  try {
+    const opened = await reader.open(location(sha256), 'accepted-title-binding')
+    const response = await fetch(opened.url)
+    expect(response.status).toBe(200)
+    const html = await response.text()
+    expect(html).toContain('<title>用户体验检查报告</title>')
+    expect(html).toContain('<h1>用户体验检查报告</h1>')
+    expect(html).not.toContain('<title>会话正文-3.md</title>')
+    expect(html).toContain('验收原件正文。')
+  } finally { await reader.close() }
+})
+
 it('expires access independently of the durable artifact identity and bounds active grants and size', async () => {
   const bytes = Buffer.from('历史成果末尾')
   const sha256 = sha256Hex(bytes)
