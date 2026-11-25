@@ -100,7 +100,7 @@ const catalog = {
   POST: new Set([
     artifactBrowserPath,
     artifactDownloadPath,
-    '/v1/run-notes', '/v1/run-coordination',
+    '/v1/run-notes', '/v1/run-coordination', '/v1/runs/stop',
     chatRoutingPath,
     taskCommandPath, taskCommandCheckPath,
     executionPermissionsPath,

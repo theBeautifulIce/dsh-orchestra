@@ -172,6 +172,7 @@ export const TASK_INSPECTOR_CSS = `
 .task-inspector::backdrop { background: #111c36a0; }
 .task-inspector-top { flex: none; background: #f8fafc; border-bottom: 1px solid ${COLOR.line}; padding: 22px 24px 0; }
 .task-inspector-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.task-stop-action { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-block: 8px; }
 .task-inspector-content { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; padding: 22px 24px; display: grid; gap: 16px; align-content: start; }
 .task-inspector-kicker { color: ${COLOR.inkMuted}; font-size: ${FONT_PX.helper}px; margin: 0 0 5px; }
 .task-inspector-badges { display: flex; flex-wrap: wrap; gap: 4px 7px; align-items: center; margin-top: 7px; font-size: ${FONT_PX.menu}px; }

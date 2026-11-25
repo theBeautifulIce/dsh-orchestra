@@ -28,6 +28,7 @@ import { attachChatDeliveryPreviews, listChatDeliveryReviews } from './chat-deli
 import { pendingReworkTree } from './rework-inbox-tree.ts'
 import type { ChatModelRecoveryChecks } from './chat-model-recovery.ts'
 import { isRunTerminal } from './commands/run-close.ts'
+import { operatorStopState, readOperatorRunStop, requestOperatorRunStop } from './operator-run-stop.ts'
 import { findRunArtifactIdsByName, getArtifact, listRunArtifacts } from './queries/artifacts.ts'
 import { getDecisionSnapshot, listDecisions } from './queries/decisions.ts'
 import { listNodes, readRunNodeDisplay } from './queries/nodes.ts'
@@ -1060,33 +1061,20 @@ export function installNativeChat(host: Context, options: {
           throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
         if (!turn.human || turn.noticeRun || turn.reportOnly || !nativeOwnerRequest(turn.human))
           throw new OrchError('FORBIDDEN', '停止操作需要当前会话中的真人确认')
-        const read = () => db.raw.prepare(
-          'SELECT status,cancel_requested_at FROM runs WHERE run_id=?'
-        ).get(runId) as { status: string; cancel_requested_at: string | null } | undefined
-        const initial = read()
-        if (!initial) throw new OrchError('NOT_FOUND','找不到这次运行')
-        const counts = { skipped_irreversible: 0, pending_decisions: 0 }
-        if (!isRunTerminal(initial.status) && !initial.cancel_requested_at) {
+        const initial = readOperatorRunStop(db, runId)
+        if (operatorStopState(initial.status, initial.cancel_requested_at) === 'available') {
           const reason = formatChatApproval({
-            task: describeRun(service,runId,options.operator).title,
+            task: initial.title,
             step:'停止这次运行', reason:'你将暂停后续执行并请求结束在途操作。',
             operation:'只停止当前选中的运行。', consequence:'正在执行的外部操作可能仍需核实。'
           })
           if (!await approveOnce(turn, 'stop:' + runId, exec, agent, reason, signal))
             throw new OrchError('CONFIRMATION_REQUIRED','未确认停止，运行保持原状态')
           assertCurrent()
-          const current = read()
-          if (current && !isRunTerminal(current.status) && !current.cancel_requested_at) {
-            // 当前同步命令会提交取消意图，并调用已注册的取消适配器。
-            const out = commands.cancelRun({runId,cancelResult:'unknown',graceMs:30_000,now:new Date().toISOString()})
-            counts.skipped_irreversible = out.skippedIrreversible.length
-            counts.pending_decisions = out.pendingHumanDecisions.length
-          }
         }
+        const receipt = requestOperatorRunStop(db, initial.task_id, runId, commands.cancelRun, new Date().toISOString())
         turn.lastStatusRun = runId
-        const latest = read()
-        if (!latest) throw new OrchError('NOT_FOUND','运行已不再可读取')
-        return {state:'stop_requested' as const,run_id:runId,status:latest.status,...counts}
+        return receipt
       }
       if (input.action === 'review_delivery') {
         const reviews = service.rework ? listChatDeliveryReviews(db, runId, options.operator) : []

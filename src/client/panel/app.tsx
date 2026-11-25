@@ -62,6 +62,7 @@ export type PanelAppProps = {
   workflowLaunchRequiresPlan?: boolean
   scopeLabel?: string
   runNotesEnabled?: boolean
+  runStopEnabled?: boolean
   createEventStream?: (onInvalidate: (type: string) => void, onStatus: (status: StreamStatus) => void) => EventStream
   additionalScreens?: Partial<Record<Exclude<PanelRoute, 'tasks'>, ReactNode>>
 }
@@ -302,6 +303,7 @@ export function PanelApp(props: PanelAppProps) {
     }} taskCommands={taskCommands} triggerCommands={writableTriggers} onArchiveChanged={() => setReloadVersion((version) => version + 1)}
       onOpenDecision={openDecision}
       notesClient={props.runNotesEnabled ? client : undefined}
+      stopRun={props.runStopEnabled ? taskCommands.stopRun : undefined}
       onOpenMemory={props.memoryEnabled ? () => { setTaskId(null); setRoute('memory') } : undefined}
       reloadVersion={reloadVersion} onSnapshot={onSnapshot} />}
   </PanelShell>

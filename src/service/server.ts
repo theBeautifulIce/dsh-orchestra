@@ -14,6 +14,7 @@ import { planningSettingsSchema, planningTimeoutDefaults, withPlanningBudget, ty
 import { executionCapacitySettingsSchema, type ExecutionCapacitySettingsHost } from './execution-capacity-settings.ts'
 import { workflowConcurrencySchema, type WorkflowConcurrencyHost } from './workflow-concurrency-settings.ts'
 import { runNoteHumanInput, type RunNotes } from './run-notes.ts'
+import { operatorStopInput, type OperatorStopReceipt } from './operator-run-stop.ts'
 import type { RunCoordination } from './run-coordination.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
@@ -72,6 +73,7 @@ export type ServerDeps = {
   preferNamedPipe?: boolean
   resolveHttpHuman?: ResolveHttpHuman
   runNotes?: RunNotes
+  stopOperatorRun?: (taskId: string, runId: string, human: string, now: string) => OperatorStopReceipt
   coordination?: RunCoordination
   phase: string
   epoch: number
@@ -372,6 +374,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
         execution_capacity_enabled: Boolean(deps.executionCapacitySettings && deps.resolveHttpHuman),
         workflow_concurrency_enabled: Boolean(deps.workflowConcurrencySettings && deps.resolveHttpHuman),
         run_notes_enabled: Boolean(deps.runNotes && deps.resolveHttpHuman),
+        run_stop_enabled: Boolean(deps.phase === 'S6' && deps.stopOperatorRun && deps.resolveHttpHuman),
         collaboration_enabled: Boolean(deps.collaboration), model_routing_enabled: Boolean(deps.modelSettings),
         rework_enabled: Boolean(deps.rework), rework_planner_enabled: deps.localPlanning?.enabled === true,
         model_escalation_enabled: Boolean(deps.modelEscalation),
@@ -383,6 +386,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     const bound = deps.phase === 'S6' ? await deps.resolveHttpHuman?.(req) : undefined
     const human = () => authenticatedHuman(deps, serviceActor, bound)
     const actor = bound ? human().id : serviceActor
+    if (req.method === 'POST' && url.pathname === '/v1/runs/stop' && deps.phase === 'S6' && deps.stopOperatorRun && deps.resolveHttpHuman) {
+      const stop = deps.stopOperatorRun
+      const operator = human().id
+      const input = parseBody(operatorStopInput, await readJsonBody(req), '停止这次运行')
+      const result = await queue.run(() => stop(input.task_id, input.run_id, operator, requestNow))
+      sendJson(res, 200, okEnvelope(deps.asOfSeq(), result))
+      return
+    }
     if (deps.coordination && deps.resolveHttpHuman && url.pathname === '/v1/run-coordination') {
       const run = stringParam(url, 'run_id') ?? ''
       const actorId = human().id

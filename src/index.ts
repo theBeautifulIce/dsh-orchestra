@@ -47,7 +47,8 @@ import { runStandaloneToolNode } from './executor/run-tool-node.ts'
 import { MEMORY_WORKFLOW_ID } from './service/commands/memory.ts'
 import { resolveWorkflowBranch } from './service/branch-routing.ts'
 import { refreshWorkflowParallelGroups } from './service/workflow-parallel.ts'
-import { closeRun } from './service/commands/run-close.ts'
+import { closeRun, isRunTerminal } from './service/commands/run-close.ts'
+import { requestOperatorRunStop } from './service/operator-run-stop.ts'
 import { settleCompensation, startCompensation } from './service/commands/compensation.ts'
 import { wakeOnEvent } from './service/commands/wait.ts'
 import { propagateRunCancellation } from './service/commands/subworkflow.ts'
@@ -332,11 +333,9 @@ export type Orchestra = {
 }
 
 // 只有走完取锁与 epoch 自增的启动链才许可建装配：单写者是启动前提，不是可选装饰（第五轮审计 P1-3）
-// run 终态集合：取消接口只在这些状态下回报 terminalStatus（S1 第 59 轮 P2-4）
 
 // 生产派发真正实现了的节点类型：parallel / decision 只有状态机与测试，允许发布会让 run 起不来（审计 P1-4）
 const RUNTIME_NODE_TYPES: ReadonlySet<string> = new Set(['agent', 'tool', 'policy', 'branch', 'approval', 'parallel', 'subworkflow', 'wait'])
-const RUN_TERMINAL = new Set(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unverified', 'orphaned', 'cancelled'])
 
 const ORCHESTRA_LOCK_PROOF = Symbol('orchestra-lock-proof')
 // 生产装配：一个进程一个写者，迁移在打开时跑完，命令统一走 runtime
@@ -650,7 +649,7 @@ export function createOrchestra(opts: OrchestraOptions & { db?: Db }, proof?: sy
             outcome = null
           }
         }
-        const terminalStatus = statusRow && RUN_TERMINAL.has(statusRow.status) ? statusRow.status : null
+        const terminalStatus = statusRow && isRunTerminal(statusRow.status) ? statusRow.status : null
         const attemptsToStop = out.cancelledNodes.map((id) => ({
           id, attempt: tx.get<{ attempt: number }>('SELECT attempt FROM node_runs WHERE node_run_id=?', [id])!.attempt,
         }))
@@ -890,6 +889,10 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       preferNamedPipe: opts.preferNamedPipe,
       resolveHttpHuman: opts.resolveHttpHuman,
       runNotes, coordination,
+      stopOperatorRun: opts.phase === 'S6' ? (taskId, runId, operator, now) => {
+        withReadTx(orchestra.db, ({ tx }) => requireReviewOperator(tx, opts.secret, operator, runId, true))
+        return requestOperatorRunStop(orchestra.db, taskId, runId, orchestra.commands.cancelRun, now)
+      } : undefined,
       phase: opts.phase,
       epoch: orchestra.db.epoch,
       asOfSeq: opts.asOfSeq,

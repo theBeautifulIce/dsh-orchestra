@@ -13,7 +13,7 @@ import type { ResourcesApi } from '../api/resources.ts'
 import type { NodeRunView, RunSummary, TaskSummary, TaskNextAction } from '../api/types.ts'
 import { COPY } from './copy.ts'
 import { COLOR, FONT_PX } from './tokens.ts'
-import { PanelCommandButton, UnknownState } from './shell.tsx'
+import { PanelCommandButton, UnknownState, usePanelCommandsEnabled } from './shell.tsx'
 import { taskAutonomyLabel, taskCardStatus, taskOriginLabel, taskStatusView } from './tasks-screen.tsx'
 import { TASK_INSPECTOR_CSS } from './task-workspace-styles.ts'
 import { TaskEventTimeline } from './task-event-timeline.tsx'
@@ -42,6 +42,7 @@ export type TaskDetailScreenProps = {
   modelEscalation?: ModelEscalationApi
   reworkPlannerEnabled?: boolean
   taskCommands?: TaskCommands
+  stopRun?: TaskCommands['stopRun']
   triggerCommands?: Pick<ReturnType<typeof createTaskTriggerCommands>, 'setEnabled'>
   onArchiveChanged?: () => void
   onOpenMemory?: () => void
@@ -56,7 +57,7 @@ type TaskTab = (typeof TASK_TABS)[number]
 type RunTab = (typeof RUN_TABS)[number]
 
 export function TaskDetailScreen({
-  api, taskId, initialRunId, initialAction, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision, notesClient,
+  api, taskId, initialRunId, initialAction, onBack, reloadVersion = 0, onSnapshot, rework, modelEscalation, reworkPlannerEnabled, taskCommands, triggerCommands, onArchiveChanged, onOpenMemory, onOpenDecision, notesClient, stopRun,
 }: TaskDetailScreenProps) {
   const actionRunId = initialAction?.run_id ?? initialRunId
   const actionIsReview = initialAction?.kind === 'review' || initialAction?.kind === 'rework'
@@ -115,6 +116,7 @@ export function TaskDetailScreen({
   const detailFailed = detail?.failed && detail.revision === reloadVersion && detail.retry === reload
   const summary = data?.runs.find((item) => item.run_id === selectedRunId) ?? selection
   const run = detail?.run ?? summary
+  const stopTarget = showRun ? run : latest
   useEffect(() => {
     if (!showRun || !selectedRunId) return
     let active = true
@@ -154,6 +156,8 @@ export function TaskDetailScreen({
         <span>{showRun && run ? formatTaskDate(run.started_at ?? run.created_at) : taskAutonomyLabel(task)}</span>
         {task.archived_at && <span className="task-type-badge">已归档</span>}
       </div>}
+      {task && stopRun && stopTarget?.operator_stop_state && stopTarget.task_id === taskId && <RunStopAction
+        key={stopTarget.run_id} run={stopTarget} title={task.title} stopRun={stopRun} onRefresh={() => setReload((n) => n + 1)} />}
       {showRun ? <div className="task-inspector-tabs" role="group" aria-label="运行详情视图">
         {RUN_TABS.filter((label) => (label !== '便条' && label !== '协作') || notesClient).map((label) => <button key={label} type="button" aria-pressed={runTab === label} onClick={() => {
           if (label === '结果') setReviewRunId(selectedRunId)
@@ -202,6 +206,51 @@ export function TaskDetailScreen({
       {data && taskTab === '运行' && <div hidden={showRun}><RunHistory data={data} api={api} selectedRunId={run?.run_id} onOpenRun={openRun} /></div>}
     </div>
   </dialog>
+}
+
+function RunStopAction({ run, title, stopRun, onRefresh }: {
+  run: RunSummary; title: string; stopRun: TaskCommands['stopRun']; onRefresh: () => void
+}) {
+  const writable = usePanelCommandsEnabled()
+  const submitting = useRef(false)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [receipt, setReceipt] = useState<Awaited<ReturnType<TaskCommands['stopRun']>>>()
+  const submit = async () => {
+    if (!writable || !confirming || submitting.current || receipt || run.operator_stop_state !== 'available') return
+    submitting.current = true
+    setBusy(true)
+    setError('')
+    try {
+      setReceipt(await stopRun(run.task_id, run.run_id))
+      setConfirming(false)
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : '还没收到停止回执，请核对运行状态后重试。')
+    } finally {
+      submitting.current = false
+      setBusy(false)
+      onRefresh()
+    }
+  }
+  if (run.operator_stop_state === 'closed' && !receipt) return null
+  if (receipt || run.operator_stop_state === 'requested') {
+    const closedStatus = run.operator_stop_state === 'closed' ? run.status : receipt?.terminal ? receipt.status : undefined
+    return <div role="status" className="task-stop-action">
+      {closedStatus ? <>这次运行已结束 · <RunStatusLabel status={closedStatus} displayStatus={closedStatus} /></>
+        : '已收到停止请求，正在等待执行器确认。'}
+      {Boolean(receipt?.skipped_irreversible) && <span>仍有 {receipt?.skipped_irreversible} 个不可逆步骤需核实。</span>}
+      {Boolean(receipt?.pending_decisions) && <span>还有 {receipt?.pending_decisions} 项人工决定。</span>}
+    </div>
+  }
+  return <div className="task-stop-action">
+    {confirming ? <>
+      <span>停止《{title}》的这次运行？正在执行的外部操作可能仍需核验。</span>
+      <PanelCommandButton disabled={busy} onClick={() => void submit()}>{busy ? '正在请求停止…' : '确认停止'}</PanelCommandButton>
+      <button type="button" className="task-quiet-button" disabled={busy} onClick={() => { setConfirming(false); setError('') }}>返回</button>
+    </> : <PanelCommandButton onClick={() => setConfirming(true)}>停止这次运行</PanelCommandButton>}
+    {error && <span role="alert">{error}</span>}
+  </div>
 }
 
 function TaskOverview({ data, latest, api, reloadVersion, commands, triggerCommands, onArchiveChanged, onOpenRun }: {

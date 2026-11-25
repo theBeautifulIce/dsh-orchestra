@@ -5,6 +5,9 @@ import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx, type ReadCtx } from './read-tx.ts'
 import { readProjectContextMetadata, type ProjectContextMetadata } from '../project-shared-context.ts'
 import type { AcceptanceKind, AcceptanceOutcome } from '../commands/run-acceptance.ts'
+import { isReleaseWorkflow } from '../../core/release-workflow-ids.ts'
+import { MEMORY_WORKFLOW_ID } from '../commands/memory.ts'
+import { operatorStopState } from '../operator-run-stop.ts'
 
 export type NodeRunCount = { status: string; count: number }
 export type NodeRunPreview = {
@@ -44,6 +47,7 @@ export type RunSummary = {
   workflow_version: number | null
   status: string
   display_status: string
+  operator_stop_state?: ReturnType<typeof operatorStopState>
   settling: boolean
   revision: number
   counts: NodeRunCount[]
@@ -66,7 +70,7 @@ export type RunSummary = {
 type RunRow = Record<string, unknown> & { run_id: string }
 
 const RUN_SELECT = `SELECT r.run_id, r.task_id, r.workflow_id, r.workflow_version, r.status, r.revision, r.settling,
-r.created_at, r.updated_at, r.started_at, r.ended_at, t.title AS task_title, o.due_at AS scheduled_for,
+r.created_at, r.updated_at, r.started_at, r.ended_at, r.cancel_requested_at, t.title AS task_title, o.due_at AS scheduled_for,
 COALESCE(tr.kind, (SELECT CASE WHEN json_valid(e.payload_redacted) THEN json_extract(e.payload_redacted, '$.trigger_kind') END
   FROM events e WHERE e.run_id = r.run_id AND e.type IN ('task.created', 'task.run_started') ORDER BY e.seq LIMIT 1)) AS trigger_kind
 FROM runs r JOIN tasks t ON t.task_id = r.task_id
@@ -93,15 +97,19 @@ function toRunSummary(ctx: ReadCtx, run: RunRow): RunSummary {
     + 'WHERE run_id = ? ORDER BY updated_at DESC, node_run_id DESC LIMIT 10', [runId],
   )
   const status = String(run.status ?? '')
+  const workflowId = typeof run.workflow_id === 'string' ? run.workflow_id : undefined
   return {
     run_id: runId,
     task_id: String(run.task_id ?? ''),
     task_title: typeof run.task_title === 'string' ? run.task_title : null,
-    workflow_id: typeof run.workflow_id === 'string' ? run.workflow_id : null,
+    workflow_id: workflowId ?? null,
     workflow_version: typeof run.workflow_version === 'number' ? run.workflow_version : null,
     status,
     // Preserve the ledger's terminal distinctions; presentation can add labels without collapsing them.
     display_status: status,
+    ...(!isReleaseWorkflow(workflowId) && workflowId !== MEMORY_WORKFLOW_ID && {
+      operator_stop_state: operatorStopState(status, run.cancel_requested_at),
+    }),
     settling: Number(run.settling ?? 0) === 1,
     revision: Number(run.revision ?? 0),
     counts,

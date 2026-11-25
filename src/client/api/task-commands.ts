@@ -2,9 +2,15 @@ import { ApiError, type ApiClient } from './client.ts'
 import { postWithOperationReceipt } from './commands.ts'
 import { newOperationId } from './workflow-commands.ts'
 import type { TaskPlanView } from '../../service/task-planning.ts'
+import type { OperatorStopReceipt } from '../../service/operator-run-stop.ts'
 
 export function createTaskCommands(client: ApiClient) {
   return {
+    async stopRun(taskId: string, runId: string) {
+      return (await client.post<OperatorStopReceipt>('/v1/runs/stop', {
+        task_id: taskId, run_id: runId, confirmed: true,
+      })).data
+    },
     async proposeTaskPlan(goal: string, requirements: string[], signal?: AbortSignal,
       pin?: { workflow_id?: string; workflow_version?: string }, revises?: { plan_id: string; content_hash: string }) {
       return (await client.post<TaskPlanView>('/v1/task-plans', { goal, requirements, ...pin, ...(revises ? { revises } : {}) }, signal)).data
