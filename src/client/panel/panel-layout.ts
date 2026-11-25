@@ -125,6 +125,20 @@ export const PANEL_LAYOUT_CSS = `
     background-position: right 16px center, right 11px center;
     background-size: 5px 5px; background-repeat: no-repeat;
   }
+  .ops-panel-viewport input[type="checkbox"]:not([role="switch"]) {
+    appearance: none; box-sizing: border-box; display: inline-grid; place-content: center;
+    border: 1px solid ${COLOR.inkMuted}; border-radius: 4px; background: ${COLOR.surface}; cursor: pointer;
+  }
+  .ops-panel-viewport input[type="checkbox"]:not([role="switch"]):is(:checked,:indeterminate) {
+    border-color: ${COLOR.link}; background: ${COLOR.link}; color: ${COLOR.surface};
+  }
+  .ops-panel-viewport input[type="checkbox"]:not([role="switch"]):checked::after {
+    content: ""; width: 4px; height: 8px; border: solid currentColor; border-width: 0 2px 2px 0;
+    transform: translateY(-1px) rotate(45deg);
+  }
+  .ops-panel-viewport input[type="checkbox"]:not([role="switch"]):indeterminate::after {
+    content: ""; width: 8px; height: 2px; background: currentColor; border: 0; transform: none;
+  }
   .ops-panel-viewport input[type="checkbox"][role="switch"] {
     appearance: none; inline-size: 34px; block-size: 20px; border: 1px solid ${COLOR.inkMuted}; border-radius: 12px;
     background: radial-gradient(circle at 9px center, ${COLOR.surface} 6px, transparent 7px) ${COLOR.inkMuted};
@@ -133,7 +147,7 @@ export const PANEL_LAYOUT_CSS = `
   .ops-panel-viewport input[type="checkbox"][role="switch"]:checked {
     border-color: ${COLOR.link}; background: radial-gradient(circle at 23px center, ${COLOR.surface} 6px, transparent 7px) ${COLOR.link};
   }
-  .ops-panel-viewport input[type="checkbox"][role="switch"]:disabled { opacity: .55; cursor: not-allowed; }
+  .ops-panel-viewport input[type="checkbox"]:disabled { opacity: .55; cursor: not-allowed; }
 }
 .ops-panel-viewport .ops-button { padding: 9px 14px; font-weight: 550; cursor: pointer; white-space: nowrap; }
 .ops-panel-viewport .ops-button:hover:not(:disabled) { background: #f3f5f8; }

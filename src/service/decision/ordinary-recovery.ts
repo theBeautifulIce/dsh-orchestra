@@ -1,4 +1,5 @@
 import { OrchError } from '../../core/errors.ts'
+import { deadlineFromRow, type ClockProvider } from '../../core/clock.ts'
 import { uuidv7 } from '../../core/ids.ts'
 import { isReleaseWorkflow } from '../../core/release-workflow-ids.ts'
 import type { NodeStatus } from '../../core/state-machine.ts'
@@ -6,6 +7,7 @@ import { appendEvent, appendNodeRunEvent, assertChainIntact, chainIsIntact, read
 import type { Tx } from '../../infra/sqlite/driver.ts'
 import type { UnsentAttemptBinding } from '../../executor/bridge.ts'
 import { activeDecision, cancelDecision, openDecision, type ResolveDecisionRequest } from '../commands/decisions.ts'
+import { pickReplayHead, stopObservationDeadline } from '../commands/cancel.ts'
 import { releaseLease } from '../commands/lease.ts'
 import { applyTransition } from '../commands/nodes.ts'
 import { ORDINARY_RETIRED_UNSENT_EVENT as unsentEvent, settleRetiredUnsentAttempt } from '../commands/effects.ts'
@@ -35,6 +37,7 @@ export type OrdinaryRecoveryNode = {
   replacement_node_run_id: string | null; side_effect_policy: string; wait_extensions: number
   startup_unknown_deadline_at: string | null; startup_unknown_boot_id: string | null; startup_unknown_monotonic_ns: number | null
   deadline_at: string | null; deadline_boot_id: string | null; deadline_monotonic_ns: number | null
+  action_remaining_ns: number | null; blocked_decision_id: string | null; recovery_uncertain: string | null
 }
 type Node = OrdinaryRecoveryNode
 export type OrdinaryRecoveryCard = { decision_id: string; run_id: string; node_run_id: string | null; kind: string; payload_json: string }
@@ -274,25 +277,54 @@ export function ordinaryHostStop(tx: RecoveryRead, secret: string, node: Pick<No
   return stopped.stopped_at
 }
 
-// A worker can report a blocker without creating a decision (for example, missing
-// input). Once its run is stopped, there must still be a way out after a restart.
-export function reconcileCancelledPostBlock(tx: Tx, secret: string, nodeId: string, now: string): void {
+// Cancellation can outlive both the executor and the service that asked it to stop.
+// Settle from the current attempt's durable facts, including when maintenance resumes on another boot.
+export function reconcileCancelledAgent(tx: Tx, secret: string, nodeId: string, now: string, clock: ClockProvider): void {
   const node = ordinaryNode(tx, nodeId)
-  if (!node || node.status !== 'blocked_post' || !node.run_cancel_requested_at || node.hang_reason || node.replacement_node_run_id) return
-  const protectedState = tx.get(`SELECT 1 FROM node_runs n WHERE n.node_run_id=? AND (
-    n.blocked_decision_id IS NOT NULL OR n.recovery_uncertain IS NOT NULL OR n.fence_state='armed'
-    OR EXISTS (SELECT 1 FROM decisions d WHERE d.node_run_id=n.node_run_id AND d.status IN ${active}))`, [nodeId])
-  if (protectedState) return
+  if (!node || (node.status !== 'stopping' && node.status !== 'blocked_post') || !node.run_cancel_requested_at
+    || (node.status === 'stopping' && !node.cancel_requested_at) || node.replacement_node_run_id
+    || node.blocked_decision_id || node.recovery_uncertain || node.fence_state === 'armed') return
+  const cards = tx.all<Card>(`SELECT decision_id,run_id,node_run_id,kind,payload_json FROM decisions
+    WHERE node_run_id=? AND status IN ${active}`, [nodeId])
+  const overrun = cards.length === 1 && cards[0]!.kind === 'action_overrun' && ordinaryRecoveryTarget(tx, cards[0]!) !== undefined
+  if ((cards.length > 0 && !overrun) || (node.hang_reason && !(overrun && node.hang_reason === 'action_overrun'))) return
   const stoppedAt = ordinaryHostStop(tx, secret, node)
-  const pureAndStopped = node.side_effect_policy === 'pure' && stoppedAt !== undefined && Date.parse(stoppedAt) <= Date.parse(now)
+  const confirmedStop = stoppedAt !== undefined && Date.parse(stoppedAt) <= Date.parse(now)
+  if (node.status === 'stopping' && (!confirmedStop || pickReplayHead(tx, nodeId, node.attempt))) {
+    // Preserve a queued report and any existing observation budget. A timeout opens
+    // a human decision; by itself it proves neither shutdown nor a business result.
+    if (overrun || deadlineFromRow(node)) return
+    const neverArmed = node.deadline_at === null && node.deadline_boot_id === null
+      && node.deadline_monotonic_ns === null && node.action_remaining_ns === null
+    const patch: Record<string, string | number | null> = neverArmed
+      ? stopObservationDeadline(clock) : { recovery_uncertain: 'action_deadline', recovery_uncertain_at: now }
+    applyTransition(tx, secret, { nodeRunId: nodeId, from: ['stopping'], to: 'stopping',
+      attempt: node.attempt, expectedRevision: node.revision, actionGeneration: node.action_generation,
+      rearmGeneration: node.rearm_generation, now, patch })
+    if (neverArmed) {
+      appendNodeRunEvent(tx, secret, nodeId, 'cancel.stop_observation_started', { ...identity(node), deadline_at: patch.deadline_at })
+    } else {
+      appendNodeRunEvent(tx, secret, nodeId, 'timer_uncertain', {
+        channel: 'action_deadline', reason: 'incomplete_stop_deadline', action_required: 'confirm_node_state',
+      })
+    }
+    return
+  }
+  const pureAndStopped = node.side_effect_policy === 'pure' && confirmedStop
     && !tx.get(`SELECT 1 FROM tool_executions WHERE node_run_id=? AND attempt=?
       UNION ALL SELECT 1 FROM bridge_tool_outbox WHERE node_run_id=? AND attempt=?
       UNION ALL SELECT 1 FROM node_run_events WHERE node_run_id=? AND type IN ('tool_started','bridge.tool.start','bridge.tool.result')
       LIMIT 1`, [nodeId, node.attempt, nodeId, node.attempt, nodeId])
-  applyTransition(tx, secret, { nodeRunId: nodeId, from: ['blocked_post'], to: pureAndStopped ? 'failed' : 'indeterminate_side_effect',
-    ruleId: pureAndStopped ? 'M-48' : 'M-50', attempt: node.attempt, expectedRevision: node.revision,
-    actionGeneration: node.action_generation, rearmGeneration: node.rearm_generation, bumpRearm: true, now })
-  appendNodeRunEvent(tx, secret, nodeId, 'cancel.post_block_reconciled', {
+  if (overrun) {
+    if (!pureAndStopped) return
+    retireOrdinaryActionDecision(tx, secret, node, now)
+  }
+  const unknownRule = node.status === 'stopping' ? 'M-35' : 'M-50'
+  applyTransition(tx, secret, { nodeRunId: nodeId, from: [node.status], to: pureAndStopped ? 'failed' : 'indeterminate_side_effect',
+    ruleId: pureAndStopped ? 'M-48' : unknownRule, attempt: node.attempt, expectedRevision: node.revision,
+    actionGeneration: node.action_generation, rearmGeneration: node.rearm_generation, bumpRearm: true, now, allowHung: overrun,
+    patch: { hang_reason: null, deadline_at: null, deadline_boot_id: null, deadline_monotonic_ns: null, action_remaining_ns: null } })
+  appendNodeRunEvent(tx, secret, nodeId, node.status === 'blocked_post' ? 'cancel.post_block_reconciled' : 'cancel.stopping_reconciled', {
     attempt: node.attempt, action_generation: node.action_generation, run_cancel_requested_at: node.run_cancel_requested_at,
     host_stopped_at: stoppedAt ?? null, disposition: pureAndStopped ? 'stopped_without_delivery' : 'human_verification',
   })

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { serveOrchestra, sweepNow } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
+import { ScriptedClock } from '../../src/core/clock.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
 import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
 import { openDecision } from '../../src/service/commands/decisions.ts'
@@ -52,6 +53,137 @@ it('recovers cancelled post-execution blockers on reopen and keeps uncertain eff
       expect(await response.json()).toMatchObject({ data: { allowed_resolutions: ['abandon'] } })
     }
     expect(db.prepare('SELECT COUNT(*) AS n FROM unverified_resolutions').get()).toEqual({ n: 0 })
+  } finally {
+    await service.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+it('reconciles a cancelled ordinary stop from current-attempt facts and preserves unrelated recovery state', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'orchestra-cancel-reconcile-'))
+  const secret = 'cancel-reconcile-ledger'
+  const at = '2026-11-26T10:00:00.000Z'
+  const options = { dbFile: join(directory, 'service.db'), secret, phase: 'S6' as const,
+    resolveHttpHuman: () => ({ id: 'fixture:operator' }), asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
+    appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }) }
+  const service = await serveOrchestra(options)
+  const db = service.orchestra.db
+  const bootA = new ScriptedClock('cancel-boot-a', { wallClockMs: Date.parse(at), monotonicNs: 0 })
+  const run = (id: string, cancelled = true) => {
+    withTx(db, tx => {
+      tx.run('INSERT INTO tasks(task_id,title,status,created_at,updated_at) VALUES (?,?,\'running\',?,?)', [id, id, at, at])
+      tx.run('INSERT INTO runs(run_id,task_id,status,cancel_requested_at,created_at,updated_at) VALUES (?,?,\'running\',?,?,?)',
+        [id, id, cancelled ? at : null, at, at])
+    })
+  }
+  const node = (id: string, status: string, settings: { policy?: string; fence?: string | null; uncertain?: string | null; cancel?: boolean } = {}) => {
+    withTx(db, tx => {
+      tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,attempt,action_generation,rearm_generation,
+        side_effect_policy,executor_agent_id,cancel_requested_at,fence_state,recovery_uncertain,created_at,updated_at)
+        VALUES (?,?,?,1,'agent',?,1,2,1,?,?,?,?,?,?,?)`,
+      [id, id, id, status, settings.policy ?? 'pure', id + ':executor', settings.cancel === false ? null : at,
+        settings.fence ?? null, settings.uncertain ?? null, at, at])
+      if (status === 'blocked_post') appendNodeRunEvent(tx, secret, id, 'verify_human', { reason: 'fixture blocker', missing: ['fixture input'] })
+    })
+  }
+  const stopReceipt = (id: string, clock: ScriptedClock, stoppedAt = new Date(clock.sample().wallClockMs).toISOString()) =>
+    withTx(db, tx => recordOrdinaryHostStop(tx, secret, { nodeRunId: id, attempt: 1, generation: 2,
+      agentId: id + ':executor', stoppedAt }))
+  const scan = (clock: ScriptedClock) => sweepNow({ ...service.orchestra.runtime, clock }, new Date(clock.sample().wallClockMs).toISOString())
+  const row = (id: string) => db.raw.prepare('SELECT status,hang_reason,deadline_at,deadline_boot_id,deadline_monotonic_ns,action_remaining_ns,fence_state,recovery_uncertain FROM node_runs WHERE node_run_id=?').get(id) as Record<string, unknown>
+  const openCount = (kind: string, id: string) => Number((db.raw.prepare("SELECT COUNT(*) AS n FROM decisions WHERE kind=? AND node_run_id=? AND status IN ('pending','acknowledged','blocked_for_human')").get(kind, id) as { n: number }).n)
+  try {
+    run('pure-blocked')
+    node('pure-blocked', 'blocked_post')
+    stopReceipt('pure-blocked', bootA)
+
+    run('tool-blocked')
+    node('tool-blocked', 'blocked_post', { policy: 'irreversible' })
+    withTx(db, tx => appendNodeRunEvent(tx, secret, 'tool-blocked', 'bridge.tool.start', { attempt: 1, tool: 'write_fixture' }))
+    stopReceipt('tool-blocked', bootA)
+
+    run('unknown-blocked')
+    node('unknown-blocked', 'blocked_post')
+    // The only recorded stop is for a stale attempt/generation and must not prove no effects.
+    withTx(db, tx => recordOrdinaryHostStop(tx, secret, { nodeRunId: 'unknown-blocked', attempt: 0, generation: 1,
+      agentId: 'unknown-blocked:executor', stoppedAt: at }))
+
+    run('timer')
+    node('timer', 'stopping')
+    run('queued')
+    node('queued', 'stopping')
+    withTx(db, tx => tx.run("INSERT INTO report_registry(report_id,node_run_id,attempt,report_seq,state,created_at,updated_at) VALUES ('queued-report','queued',1,1,'rejected',?,?)", [at, at]))
+    run('partial-clock')
+    node('partial-clock', 'stopping')
+    withTx(db, tx => tx.run("UPDATE node_runs SET deadline_at=? WHERE node_run_id='partial-clock'",
+      [new Date(Date.parse(at) + 30_000).toISOString()]))
+
+    run('armed')
+    node('armed', 'stopping', { fence: 'armed' })
+    run('protected')
+    node('protected', 'stopping', { uncertain: 'clock_anchor_uncertain' })
+    run('other-card')
+    node('other-card', 'blocked_post')
+    withTx(db, tx => openDecision(tx, { decisionId: 'unrelated-audit-card', runId: 'other-card', nodeRunId: 'other-card', kind: 'audit_result', createdAt: at }))
+    run('live', false)
+    node('live', 'stopping', { cancel: false })
+
+    scan(bootA)
+    expect(row('pure-blocked').status).toBe('failed')
+    expect(db.raw.prepare("SELECT status FROM runs WHERE run_id='pure-blocked'").get()).toEqual({ status: 'cancelled' })
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM unverified_resolutions WHERE node_run_id='pure-blocked'").get()).toEqual({ n: 0 })
+    expect(row('tool-blocked').status).toBe('indeterminate_side_effect')
+    expect(openCount('verify_human', 'tool-blocked')).toBe(1)
+    expect(row('unknown-blocked').status).toBe('indeterminate_side_effect')
+    expect(openCount('verify_human', 'unknown-blocked')).toBe(1)
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM unverified_resolutions WHERE node_run_id IN ('tool-blocked','unknown-blocked')").get()).toEqual({ n: 0 })
+    // Legacy partial anchors are preserved as uncertain; they do not get a fresh 30s window or wall-clock verdict.
+    expect(row('partial-clock')).toMatchObject({ status: 'stopping', deadline_at: new Date(Date.parse(at) + 30_000).toISOString(),
+      recovery_uncertain: 'action_deadline', deadline_boot_id: null, deadline_monotonic_ns: null })
+    expect(openCount('action_overrun', 'partial-clock')).toBe(0)
+
+    // Missing current stop proof starts one 30s monotonic observation budget, not a wall-clock guess.
+    const first = row('timer')
+    expect(first).toMatchObject({ status: 'stopping', deadline_boot_id: 'cancel-boot-a', deadline_monotonic_ns: 30_000_000_000,
+      action_remaining_ns: 30_000_000_000 })
+    scan(bootA)
+    expect(row('timer')).toEqual(first)
+    bootA.advanceMs(10_000); bootA.setWallClockMs(bootA.sample().wallClockMs + 10_000)
+    scan(bootA)
+    expect(row('timer')).toMatchObject({ deadline_boot_id: 'cancel-boot-a', deadline_monotonic_ns: 30_000_000_000,
+      action_remaining_ns: 20_000_000_000 })
+
+    // Simulate a service restart: only the persisted 20s checkpoint crosses the boot boundary.
+    const bootB = new ScriptedClock('cancel-boot-b', { wallClockMs: bootA.sample().wallClockMs, monotonicNs: 0 })
+    scan(bootB)
+    expect(row('timer')).toMatchObject({ status: 'stopping', deadline_boot_id: 'cancel-boot-b', deadline_monotonic_ns: 20_000_000_000,
+      action_remaining_ns: 20_000_000_000 })
+    bootB.advanceMs(19_999); bootB.setWallClockMs(bootB.sample().wallClockMs + 19_999)
+    scan(bootB)
+    expect(openCount('action_overrun', 'timer')).toBe(0)
+    bootB.advanceMs(1); bootB.setWallClockMs(bootB.sample().wallClockMs + 1)
+    scan(bootB)
+    expect(row('timer')).toMatchObject({ status: 'stopping', hang_reason: 'action_overrun' })
+    expect(openCount('action_overrun', 'timer')).toBe(1)
+
+    // A matching current-attempt pure stop receipt retires only its own overrun and settles as undelivered.
+    stopReceipt('timer', bootB)
+    scan(bootB)
+    expect(row('timer')).toMatchObject({ status: 'failed', hang_reason: null })
+    expect(db.raw.prepare("SELECT status,closed_reason FROM decisions WHERE node_run_id='timer' AND kind='action_overrun'").get())
+      .toMatchObject({ status: 'resolved', closed_reason: 'cancelled' })
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM node_run_events WHERE node_run_id='timer' AND type='cancel.stopping_reconciled'").get()).toEqual({ n: 1 })
+
+    // The unrelated queued report, card, running work, armed fence, and protected recovery state remain intact.
+    expect(db.raw.prepare("SELECT state FROM report_registry WHERE report_id='queued-report'").get()).toEqual({ state: 'rejected' })
+    expect(row('queued')).toMatchObject({ status: 'stopping' })
+    expect(openCount('action_overrun', 'queued')).toBe(1)
+    expect(db.raw.prepare("SELECT status FROM decisions WHERE decision_id='unrelated-audit-card'").get()).toEqual({ status: 'pending' })
+    expect(row('other-card').status).toBe('blocked_post')
+    expect(db.raw.prepare("SELECT status FROM runs WHERE run_id='live'").get()).toEqual({ status: 'running' })
+    expect(row('live')).toMatchObject({ status: 'stopping', deadline_boot_id: null })
+    expect(row('armed')).toMatchObject({ status: 'stopping', fence_state: 'armed', deadline_boot_id: null })
+    expect(row('protected')).toMatchObject({ status: 'stopping', recovery_uncertain: 'clock_anchor_uncertain', deadline_boot_id: null })
   } finally {
     await service.close()
     rmSync(directory, { recursive: true, force: true })

@@ -11,6 +11,12 @@ import { cancelWait } from './wait.ts'
 
 export type CancelResult = 'interrupted' | 'not_interruptible' | 'already_stopped' | 'unknown'
 
+export function stopObservationDeadline(clock: ClockProvider, afterMs = 30_000) {
+  const deadline = deadlineFromSample(clock, afterMs)
+  return { deadline_at: new Date(deadline.wallClockMs).toISOString(), deadline_boot_id: deadline.bootId,
+    deadline_monotonic_ns: deadline.monotonicNs, action_remaining_ns: Math.round(afterMs * 1e6) }
+}
+
 export type CancelParams = {
   nodeRunId: string
   attempt: number
@@ -282,7 +288,6 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
   if (params.clock.decide(anchored).kind !== 'expired') return false
   // 撤销失败只说明这行已被别人改过：返回 false 让 sweep 继续下一条，不许整批回滚（审计 P0-4）
   // 撤围栏同时重新武装 action_deadline，并在同一笔 CAS 里 Gr+1；旧定时器与旧执行器手里的 Gr 立刻失效。
-  const rearm = deadlineFromSample(params.clock, params.rearmActionDeadlineMs ?? 30_000)
   try {
     applyTransition(tx, secret, {
       nodeRunId: params.row.node_run_id,
@@ -299,11 +304,7 @@ export function revokeFence(tx: Tx, secret: string, params: { row: FenceRow; now
         fence_grace_until: null,
         fence_grace_boot_id: null,
         fence_grace_monotonic_ns: null,
-        deadline_at: new Date(rearm.wallClockMs).toISOString(),
-        deadline_boot_id: rearm.bootId,
-        deadline_monotonic_ns: rearm.monotonicNs,
-        // 重挂后动作截止的剩余检查点
-        action_remaining_ns: Math.round((params.rearmActionDeadlineMs ?? 30_000) * 1e6),
+        ...stopObservationDeadline(params.clock, params.rearmActionDeadlineMs),
       },
     })
   } catch {
