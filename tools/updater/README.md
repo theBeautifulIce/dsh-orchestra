@@ -61,7 +61,7 @@ if ($LASTEXITCODE -ne 0) { throw '源码拉取失败，请先处理 Git 输出�
 
 ```powershell
 .\Update-Orchestra.ps1 `
-  -Package 'D:\packages\dsh-orchestra-0.1.0-beta.1.tgz' `
+  -Package 'D:\packages\dsh-orchestra-0.1.0-beta.2.tgz' `
   -Dsh 'D:\aboutAI\deepseekharness-desktop\resources\runtime\cli\bin\dsh.cmd'
 ```
 
@@ -69,7 +69,7 @@ if ($LASTEXITCODE -ne 0) { throw '源码拉取失败，请先处理 Git 输出�
 
 如果你已经拿到可信的包摘要，可加 `-Sha256 '<64位SHA256>'`。工具始终计算包摘要；传入预期值时还会检查二者相等。
 
-同一个 `0.1.0-beta.1` 版本号下的新内容也能更新。工具按实际字节检查，不只比较版本号；候选包保存在带内容哈希的持久目录。
+同一个插件版本号下的新内容也能更新。工具按实际字节检查，不只比较版本号；候选包保存在带内容哈希的持久目录。
 
 ## 3. 智能体调用
 

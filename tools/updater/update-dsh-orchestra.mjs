@@ -17,7 +17,7 @@ const HELP = `DSH Orchestra updater ${UPDATER_VERSION} (Node >= 22.19)
 Build and update from an existing checkout:
   node update-dsh-orchestra.mjs --repo "D:\\aboutAI\\dsh-orchestra" [--dsh "...\\resources\\runtime\\cli\\bin\\dsh.cmd"]
 Install a previously built package:
-  node update-dsh-orchestra.mjs --package "D:\\packages\\dsh-orchestra-0.1.0-beta.1.tgz" [--sha256 HEX]
+  node update-dsh-orchestra.mjs --package "D:\\packages\\dsh-orchestra.tgz" [--sha256 HEX]
 
 Options:
   --repo DIR          Build this local checkout (default: current directory).
