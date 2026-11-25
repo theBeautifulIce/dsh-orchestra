@@ -116,7 +116,7 @@ export function PanelShell(props: PanelShellProps) {
       <div className="ops-shell" data-panel-route={props.activeRoute}>
         <aside aria-label="主导航" className="ops-shell-sidebar">
           <div className="ops-shell-identity">
-            <div className="ops-shell-brand">Orchestra<span aria-hidden="true" /></div>
+            <div className="ops-shell-brand">Orchestra</div>
             <p className="ops-shell-caption">任务与协作工作台</p>
           </div>
           <nav aria-label="主菜单" className="ops-main-menu">

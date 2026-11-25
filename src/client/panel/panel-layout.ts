@@ -24,10 +24,9 @@ export const PANEL_LAYOUT_CSS = `
 }
 .ops-panel-viewport .ops-shell-identity { padding: 0 12px 18px; }
 .ops-panel-viewport .ops-shell-brand {
-  display: flex; align-items: baseline; gap: 4px; font-size: ${FONT_PX.brand}px;
+  font-size: ${FONT_PX.brand}px;
   line-height: 1.4; letter-spacing: -.04em; font-weight: 750;
 }
-.ops-panel-viewport .ops-shell-brand > span { width: 5px; height: 5px; border-radius: 50%; background: ${COLOR.link}; }
 .ops-panel-viewport .ops-shell-caption { margin: 6px 0 0; font-size: ${FONT_PX.helper}px; color: ${COLOR.inkMuted}; }
 .ops-panel-viewport .ops-main-menu { display: grid; gap: 14px; }
 .ops-panel-viewport .ops-nav-group { display: grid; gap: 3px; }
