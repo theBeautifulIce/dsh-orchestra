@@ -30,6 +30,10 @@ export type SemanticDraft = { id: string; revision: number; sources: Source[]; c
   workflow?: SemanticWorkflow; unresolved: z.infer<typeof sourceQuote>[]; timing: 'immediate' | 'plan_only' | 'held' | 'unclear'; timing_source: Timing;
   missing: Missing[]; expires_at: number; requires_restatement?: boolean }
 export type SemanticInput = { current: Source; explicit: boolean; surface?: 'task_form'; draft?: SemanticDraft }
+export type SemanticDraftCheckpoints = {
+  read(identity: string): SemanticDraft | undefined | Promise<SemanticDraft | undefined>
+  write(identity: string, next: SemanticDraft | undefined, previous?: SemanticDraft, assertCurrent?: () => void): void | Promise<void>
+}
 export type SemanticRequest = { goal: string; requirements: string[]; requirements_contract: RequirementsContract; workflow?: SemanticWorkflow }
 export type SemanticOutcome =
   | { kind: 'ready'; request: SemanticRequest; draft?: SemanticDraft }
@@ -224,14 +228,24 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
 }
 
 /** Drafts belong to an authenticated workspace session, never to a model-produced identity. */
-export function createSemanticSession() {
+export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
   let identity: string | undefined
   let draft: SemanticDraft | undefined
+  let checkpoint: SemanticDraft | undefined
+  let loaded = false
   let epoch = 0
   let unstarted: { requestId: string; hash: string; generation: number; draft: SemanticDraft } | undefined
   const completed = new Map<string, { hash: string; outcome: SemanticOutcome }>()
+  function reset() {
+    epoch++; identity = undefined; draft = undefined; unstarted = undefined; checkpoint = undefined; loaded = false; completed.clear()
+  }
   return {
-    clear() { epoch++; identity = undefined; draft = undefined; unstarted = undefined; completed.clear() },
+    reset,
+    clear() {
+      const old = checkpoint, scope = identity
+      reset()
+      if (scope && old) return checkpoints?.write(scope, undefined, old)
+    },
     /** Keep the exact human sources until a run is accepted. Late failures cannot replace a newer draft. */
     retainUnstarted(requestId: string, hash: string): void {
       if (unstarted?.requestId !== requestId || unstarted.hash !== hash || unstarted.generation !== epoch) return
@@ -239,7 +253,7 @@ export function createSemanticSession() {
     },
     async admit(request: { identity: string; requestId: string; hash: string; input: Omit<SemanticInput, 'draft'>;
       signal: AbortSignal; assertCurrent(): void }, interpret: SemanticInterpreter): Promise<SemanticOutcome> {
-      if (identity !== request.identity) { epoch++; completed.clear(); draft = undefined; unstarted = undefined; identity = request.identity }
+      if (identity !== request.identity) { reset(); identity = request.identity }
       request.signal.throwIfAborted()
       request.assertCurrent()
       const old = completed.get(request.requestId)
@@ -248,20 +262,53 @@ export function createSemanticSession() {
       if (draft && draft.expires_at <= Date.now()) draft = undefined
       if (!request.input.explicit && isOrdinaryChat(request.input.current.text)) return { kind: 'conversation', ...(draft ? { draft } : {}) }
       const generation = ++epoch
+      const current = () => {
+        request.signal.throwIfAborted()
+        request.assertCurrent()
+        if (generation !== epoch) throw new Error('Semantic admission superseded')
+      }
+      if (checkpoints && (!loaded || checkpoint)) {
+        const saved = await checkpoints.read(request.identity)
+        current()
+        checkpoint = saved && saved.expires_at > Date.now() ? saved : undefined
+        draft = checkpoint && structuredClone(checkpoint)
+        loaded = true
+      }
+      if (draft?.timing === 'held' && draft.sources.some(source => source.message_id === request.input.current.message_id
+        && source.text === request.input.current.text)) {
+        return { kind: 'held', draft: structuredClone(draft), message: '这条消息已归入暂缓草稿。准备执行时，可直接说明继续哪项任务。' }
+      }
       const input = structuredClone({ ...request.input, ...(draft ? { draft } : {}) })
       let raw: unknown
       try { raw = await interpret(structuredClone(input), request.signal, request.assertCurrent) }
       catch (error) {
         request.signal.throwIfAborted()
         request.assertCurrent()
-        if (generation === epoch && draft) draft = retainUnclear(input, draft, ['constraints'],
-          '本轮消息尚未可靠解释，请先放弃旧草稿，再完整重述任务与限制。', Date.now(), true).draft
+        if (generation === epoch && draft) {
+          draft = retainUnclear(input, draft, ['constraints'],
+            '本轮消息尚未可靠解释，请先放弃旧草稿，再完整重述任务与限制。', Date.now(), true).draft
+          if (checkpoints && checkpoint) {
+            await checkpoints.write(request.identity, undefined, checkpoint, current)
+            checkpoint = undefined
+          }
+        }
         throw error
       }
       request.signal.throwIfAborted()
       request.assertCurrent()
       if (generation !== epoch) throw new Error('Semantic admission superseded')
       const result = interpretSemanticAdmission(input, raw)
+      if (checkpoints) {
+        // Only explicitly held drafts with known restrictions survive disposal. An
+        // unresolved new restriction invalidates the older resumable checkpoint.
+        const retained = result.draft
+        const next = retained?.timing === 'held' && !retained.requires_restatement && !retained.unresolved.length ? retained : undefined
+        if (next?.id !== checkpoint?.id || next?.revision !== checkpoint?.revision) {
+          await checkpoints.write(request.identity, next, checkpoint, current)
+          current()
+          checkpoint = next
+        }
+      }
       draft = result.draft
       unstarted = undefined
       if (result.kind === 'ready' && !result.draft) {

@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
@@ -59,6 +60,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   const approval = vi.fn(async (_request: { agent: Agent; toolName: string; callId: string; reason: string; signal: AbortSignal }) =>
     deny ? 'rejected' : 'allowed-once')
   const services = new Map<string, Service>()
+  const serviceDbFiles = new Map<string, string>()
   const spawn = vi.fn()
   const registry = new ToolRegistry()
   const planner = vi.fn(async ({ goal, workflows }: Parameters<NonNullable<Parameters<typeof serveOrchestra>[0]['planning']>['propose']>[0]): Promise<TaskPlanProposal> => {
@@ -134,6 +136,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     })
     const service: Service = { ...core, pendingNativeApprovals: () => [] }
     services.set(sessionId, service)
+    serviceDbFiles.set(sessionId, dbFile)
     return service
   }
   const serve = vi.fn<typeof serveDshOrchestra>(async ({ dbFile, dsh }) => openService(dsh.parentForNode('fixture')!.session.id, dbFile))
@@ -232,6 +235,12 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
     return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn, nextStep, events, dispatch: agentEvents(ctx, agent) }
   }
   return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn, interpret, flush, directory, commandNames,
+    async restart(sessionId: string) {
+      const prior = services.get(sessionId)
+      if (!prior) throw new Error('No service to restart for session ' + sessionId)
+      await prior.close()
+      return await openService(sessionId, serviceDbFiles.get(sessionId)!)
+    },
     registered: () => ({ activation: activation!, prompt: prompt!, tool: tool! }),
     deny: (value: boolean) => { deny = value }, badPlan: (value: boolean) => { badPlan = value },
     plannerUnavailable: (value: boolean) => { plannerUnavailable = value },
@@ -1855,6 +1864,45 @@ it('flush期间才消费的通知留到下一次耐久检查再确认', async ()
   } finally { await test.close(); vi.useRealTimers() }
 })
 
+it('同一 SQLite 重开后由真实通知泵送达取消回执且重复轮询不重复发送', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture({ routing: { enabled: false } })
+  try {
+    const sessionId = 'restart-cancel-notice'
+    const human = test.session('work', sessionId)
+    await human.admit(user('/orchestra 整理办公材料并交付审核报告'))
+    const { run_id: runId } = await human.call()
+    const serviceId = [...test.services.keys()][0]!
+    const prior = test.services.get(serviceId)!
+    const oldNodeRuns = prior.orchestra.db.raw.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? ORDER BY seq').all(runId)
+    const cancelled = prior.orchestra.commands.cancelRun({ runId, cancelResult: 'unknown', graceMs: 30_000,
+      now: new Date().toISOString() })
+    expect(cancelled.terminalStatus).toBe('cancelled')
+
+    const restarted = await test.restart(serviceId)
+    expect(restarted.orchestra.db.raw.prepare('SELECT status FROM runs WHERE run_id=?').get(runId)?.status).toBe('cancelled')
+    expect(restarted.orchestra.db.raw.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? ORDER BY seq').all(runId)).toEqual(oldNodeRuns)
+    const readReceipt = () => restarted.orchestra.db.raw.prepare(`SELECT reported_key FROM chat_task_receipts WHERE plan_id IN
+      (SELECT p.plan_id FROM task_plans p JOIN start_run_operations o ON p.launch_operation_id=o.operation_id WHERE o.run_id=?)`).get(runId)
+    expect(readReceipt()?.reported_key).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(test.notices).toHaveLength(1)
+    const notice = test.notices[0]!.message
+    expect(notice.source).toMatchObject({ kind: 'plugin:dsh-orchestra', form: 'notice', final: true,
+      summary: expect.stringContaining('已停止') })
+    expect(notice.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')).toContain('已停止')
+    await human.admit(notice, false)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(readReceipt()?.reported_key).toBe('delivered:terminal:cancelled')
+
+    await vi.advanceTimersByTimeAsync(4_000)
+    expect(test.notices).toHaveLength(1)
+    expect(test.notices[0]!.message.id).toBe(notice.id)
+    expect(readReceipt()?.reported_key).toBe('delivered:terminal:cancelled')
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
 it('exposes exact artifact read arguments to the model and persists every original result link beside its summary', async () => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   const test = await fixture()
@@ -1912,6 +1960,204 @@ it('exposes exact artifact read arguments to the model and persists every origin
     await expect(human.call({ action: 'artifact', run_id: runId, task_title: status.title, artifact_id: published[0]!.artifact_id }))
       .resolves.toMatchObject({ state: 'error', code: 'PAYLOAD_SCHEMA_INVALID' })
   } finally { await test.close(); vi.useRealTimers() }
+})
+
+it('T07: a later request reads only the named third original and starts no second task', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture({ routing: { enabled: true }, interpret: input => input.current.text.includes('系统风险检查报告')
+    ? { kind: 'task', relation: 'new', timing: 'immediate', quote: input.current.text,
+      constraints: [
+        { id: 'offline', kind: 'no_network', source_message_id: input.current.message_id, quote: '不得联网' },
+        { id: 'no-read', kind: 'no_workspace_read', source_message_id: input.current.message_id, quote: '不得读取工作区文件' },
+        { id: 'no-write', kind: 'no_workspace_files', source_message_id: input.current.message_id, quote: '不得写入工作区文件' },
+        { id: 'chat-only', kind: 'chat_only', source_message_id: input.current.message_id,
+          quote: '只给我简短总结和以报告标题为文字的完整原件链接，不要贴出正文' },
+      ], missing: [] }
+    : { kind: 'conversation' } })
+  const originalPlan = test.planner.getMockImplementation()!
+  const names = ['系统风险检查报告', '执行可靠性检查报告', '用户体验检查报告']
+  const endings = ['风险检查结束标记-甲', '可靠性检查结束标记-乙', '用户体验检查结束标记-丙']
+  const bodies = names.map((name, index) => '# ' + name + '\n\n'
+    + Array.from({ length: 70 }, (_, item) => '第' + (item + 1) + '项检查：核对完整内容与原始证据，确认没有遗漏。').join('\n')
+    + '\n' + endings[index])
+  expect(bodies.every(body => body.length >= 1500)).toBe(true)
+  let restoreReadSpy = () => {}
+  const originalPrepare = DatabaseSync.prototype.prepare
+  const contentReadIds: string[] = []
+  test.planner.mockImplementation(async input => ({ ...await originalPlan(input), deliverables: names.map(title => ({
+    title, node_id: 'draft', goal_ids: ['goal'], acceptance: { kind: 'chat/text_result' as const },
+  })) }))
+  try {
+    const human = test.session('work', 't07-originals')
+    const taskCountBefore = test.planner.mock.calls.length
+    await human.admit(user('请生成以下三份新报告：\n1.《系统风险检查报告》\n2.《执行可靠性检查报告》\n3.《用户体验检查报告》\n'
+      + '不得联网，不得读取工作区文件，不得写入工作区文件；允许内部登记原件。'
+      + '只给我简短总结和以报告标题为文字的完整原件链接，不要贴出正文。'))
+    const started = await human.call()
+    expect(started).toMatchObject({ state: 'started' })
+    expect(test.planner.mock.calls[0]?.[0].requirements_contract).toMatchObject({ start_policy: 'immediate', constraints: [
+      { kind: 'no_network' }, { kind: 'no_workspace_read' }, { kind: 'no_workspace_files' }, { kind: 'chat_only' },
+    ] })
+    const { run_id: runId } = started
+    const { db } = test.services.get('t07-originals')!.orchestra
+    const node = db.raw.prepare("SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_id='draft'")
+      .get(runId) as { node_run_id: string; attempt: number; action_generation: number }
+    const plan = db.raw.prepare('SELECT plan_id,content_hash FROM task_plans LIMIT 1').get() as { plan_id: string; content_hash: string }
+    const published = bodies.map((body, index) => registerRunArtifact(db, {
+      ...textTarget(plan.plan_id, plan.content_hash, index, node), runId, nodeRunId: node.node_run_id, bytes: Buffer.from(body),
+    }))
+    const now = new Date().toISOString()
+    withTx(db, tx => {
+      tx.run("UPDATE node_runs SET status='done' WHERE run_id=?", [runId])
+      tx.run("UPDATE runs SET status='succeeded',ended_at=? WHERE run_id=?", [now, runId])
+      applyRunAcceptance(tx, runId, now)
+    })
+    const readSpy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
+      const statement = Reflect.apply(originalPrepare, this, [sql])
+      if (sql === 'SELECT bytes FROM artifact_contents WHERE artifact_id = ?') {
+        const originalGet = statement.get.bind(statement)
+        Object.defineProperty(statement, 'get', { configurable: true, value: (...parameters: unknown[]) => {
+          contentReadIds.push(String(parameters[0]))
+          return Reflect.apply(originalGet, statement, parameters)
+        } })
+      }
+      return statement
+    })
+    restoreReadSpy = () => readSpy.mockRestore()
+    await vi.advanceTimersByTimeAsync(4000)
+    const notice = test.notices[0]!.message
+    const links = (notice.source as unknown as { artifacts: ChatArtifactLink[] }).artifacts
+    expect(contentReadIds).toEqual([])
+    expect(links.map(item => item.title)).toEqual(names)
+    expect(links.every(item => item.location.runId === runId && item.location.sessionId === 't07-originals')).toBe(true)
+    expect(JSON.stringify(notice.content)).not.toContain(endings[2])
+    await human.admit(notice, false)
+    expect(links.map(item => item.fileName)).toEqual(['会话正文-1.md', '会话正文-2.md', '会话正文-3.md'])
+    const explanationOnly = '只解释这三份报告名称代表什么，不要创建任务。'
+    const discussion = user(explanationOnly)
+    expect(await human.admit(discussion)).toEqual({ kind: 'enter', messages: [discussion] })
+    expect(test.planner.mock.calls.length - taskCountBefore).toBe(1)
+    expect(count(test.services.get('t07-originals')!, 'runs')).toBe(1)
+    // The follow-up cites only the third original. It must not be reclassified as work.
+    const followup = '请读取刚才第三份报告的完整原件，告诉我最后一条检查事项和末尾标记。不要重新生成报告，也不需要重新读取其他两份报告。'
+    const taskPlansBefore = count(test.services.get('t07-originals')!, 'task_plans')
+    const runsBefore = count(test.services.get('t07-originals')!, 'runs')
+    const toolCalls = vi.spyOn(human, 'call')
+    const turn = await human.admit(user(followup))
+    if (turn.kind !== 'enter') throw new Error('Expected the original follow-up to enter the native chat turn')
+    const instruction = turn.messages.find(message => (message.source as { form?: string }).form === 'report_instruction')
+    expect(instruction).toBeDefined()
+    const instructionText = instruction!.content.find(block => block.type === 'text')!.text
+    const payload = JSON.parse(instructionText.slice(instructionText.indexOf('{'), instructionText.lastIndexOf('}') + 1))
+    expect(payload).toEqual({ action: 'artifact', run_id: runId, artifact_id: links[2]!.location.artifactId })
+    expect(links.find(link => link.location.artifactId === payload.artifact_id)?.title).toBe('用户体验检查报告')
+    const onlyRequestedOriginal = await human.call(payload)
+    expect(contentReadIds).toEqual([links[2]!.location.artifactId])
+    expect(onlyRequestedOriginal.text).toBe(bodies[2])
+    expect(onlyRequestedOriginal.text).toContain('第70项检查')
+    expect(onlyRequestedOriginal.text.endsWith(endings[2])).toBe(true)
+    const artifactToolCalls = toolCalls.mock.calls.flatMap(([call]) => call && 'action' in call && call.action === 'artifact' ? [call] : [])
+    expect(artifactToolCalls).toHaveLength(1)
+    expect(artifactToolCalls[0]).toEqual({
+      action: 'artifact', run_id: runId, artifact_id: links[2]!.location.artifactId,
+    })
+    expect(await human.call({ action: 'artifact', run_id: runId, artifact_id: links[0]!.location.artifactId }))
+      .toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    await expect(human.call(payload)).resolves.toMatchObject({ state: 'error', code: 'RESOLUTION_NOT_AVAILABLE' })
+    expect(contentReadIds).toEqual([links[2]!.location.artifactId])
+    expect(count(test.services.get('t07-originals')!, 'task_plans')).toBe(taskPlansBefore)
+    expect(count(test.services.get('t07-originals')!, 'runs')).toBe(runsBefore)
+    expect(test.planner.mock.calls.length - taskCountBefore).toBe(1)
+  } finally { restoreReadSpy(); await test.close(); vi.useRealTimers() }
+})
+
+it('T07: reads each explicitly named result once and leaves ambiguous or missing selections unread', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const names = ['系统风险检查报告', '执行可靠性检查报告', '用户体验检查报告']
+  const endings = ['末尾风险标记', '末尾可靠性标记', '末尾体验标记']
+  const bodies = names.map((name, index) => '# ' + name + '\n\n'
+    + Array.from({ length: 50 }, (_, item) => '第' + (item + 1) + '项核验：读取已登记的样例事实并核对限制。').join('\n')
+    + '\n' + endings[index])
+  const test = await fixture({ routing: { enabled: true }, interpret: input => input.current.text.includes('T07 三份报告')
+    ? { kind: 'task', relation: 'new', timing: 'immediate', quote: input.current.text, constraints: [], missing: [] }
+    : { kind: 'conversation' } })
+  const originalPlan = test.planner.getMockImplementation()!
+  test.planner.mockImplementation(async input => ({ ...await originalPlan(input), deliverables: names.map(title => ({
+    title, node_id: 'draft', goal_ids: ['goal'], acceptance: { kind: 'chat/text_result' as const },
+  })) }))
+  let restoreReadSpy = () => {}
+  try {
+    const human = test.session('work', 't07-multi-read')
+    const initialRuns = 0
+    await human.admit(user('请完成 T07 三份报告，并只给我简短总结和每份报告标题的原件链接，不要贴出正文。'))
+    const started = await human.call()
+    expect(started).toMatchObject({ state: 'started' })
+    const runId = started.run_id
+    const { db } = test.services.get('t07-multi-read')!.orchestra
+    const node = db.raw.prepare("SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_id='draft'")
+      .get(runId) as { node_run_id: string; attempt: number; action_generation: number }
+    const plan = db.raw.prepare('SELECT plan_id,content_hash FROM task_plans LIMIT 1').get() as { plan_id: string; content_hash: string }
+    const published = bodies.map((body, index) => registerRunArtifact(db, {
+      ...textTarget(plan.plan_id, plan.content_hash, index, node), runId, nodeRunId: node.node_run_id, bytes: Buffer.from(body),
+    }))
+    const now = new Date().toISOString()
+    withTx(db, tx => {
+      tx.run("UPDATE node_runs SET status='done' WHERE run_id=?", [runId])
+      tx.run("UPDATE runs SET status='succeeded',ended_at=? WHERE run_id=?", [now, runId])
+      applyRunAcceptance(tx, runId, now)
+    })
+    const originalPrepare = DatabaseSync.prototype.prepare
+    const contentReadIds: string[] = []
+    const readSpy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
+      const statement = Reflect.apply(originalPrepare, this, [sql])
+      if (sql === 'SELECT bytes FROM artifact_contents WHERE artifact_id = ?') {
+        const originalGet = statement.get.bind(statement)
+        Object.defineProperty(statement, 'get', { configurable: true, value: (...parameters: unknown[]) => {
+          contentReadIds.push(String(parameters[0]))
+          return Reflect.apply(originalGet, statement, parameters)
+        } })
+      }
+      return statement
+    })
+    restoreReadSpy = () => readSpy.mockRestore()
+    await vi.advanceTimersByTimeAsync(4000)
+    const notice = test.notices[0]!.message
+    const links = (notice.source as unknown as { artifacts: ChatArtifactLink[] }).artifacts
+    expect(links.map(link => link.title)).toEqual(names)
+    expect(contentReadIds).toEqual([])
+    await human.admit(notice, false)
+
+    const explicit = '请读取刚才《执行可靠性检查报告》和《用户体验检查报告》的完整原件。'
+    const toolCalls = vi.spyOn(human, 'call')
+    const multiTurn = await human.admit(user(explicit))
+    if (multiTurn.kind !== 'enter') throw new Error('Expected an explicit multi-result read turn')
+    const instruction = multiTurn.messages.find(message => (message.source as { form?: string }).form === 'report_instruction')!
+    const instructionText = instruction.content.find(block => block.type === 'text')!.text
+    const requests = instructionText.split('\n').flatMap(line => line.startsWith('{') ? [JSON.parse(line)] : [])
+    expect(requests).toEqual([
+      { action: 'artifact', run_id: runId, artifact_id: links[1]!.location.artifactId },
+      { action: 'artifact', run_id: runId, artifact_id: links[2]!.location.artifactId },
+    ])
+    for (const [index, request] of requests.entries()) {
+      const outcome = await human.call(request)
+      expect(outcome.text).toBe(bodies[index + 1])
+      expect(outcome.text.endsWith(endings[index + 1]!)).toBe(true)
+    }
+    expect(contentReadIds).toEqual([links[1]!.location.artifactId, links[2]!.location.artifactId])
+    expect(toolCalls.mock.calls.filter(([call]) => call && 'action' in call && call.action === 'artifact')).toHaveLength(2)
+
+    for (const ambiguous of ['请读取刚才那份报告的完整原件。', '请读取刚才第4份报告的完整原件。']) {
+      const turn = await human.admit(user(ambiguous))
+      if (turn.kind !== 'enter') throw new Error('Expected an unresolved read request to stay in chat')
+      const fallback = turn.messages.find(message => (message.source as { form?: string }).form === 'report_instruction')
+      expect(fallback).toBeDefined()
+      expect(fallback!.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('"action":"artifact"') })
+      await expect(human.call({ action: 'start' })).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    }
+    expect(contentReadIds).toEqual([links[1]!.location.artifactId, links[2]!.location.artifactId])
+    expect(count(test.services.get('t07-multi-read')!, 'runs')).toBe(initialRuns + 1)
+    expect(test.planner).toHaveBeenCalledTimes(1)
+  } finally { restoreReadSpy(); await test.close(); vi.useRealTimers() }
 })
 
 

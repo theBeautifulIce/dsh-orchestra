@@ -1,5 +1,9 @@
 ## Agent skills
 
+### Git branch
+
+Keep the working checkout on `main` and sync verified commits to `origin/main`. Use the same main branch for implementation and acceptance.
+
 ### Commit attribution
 
 Preserve the actual human author and committer when maintaining commit history. Do not add an AI assistant as an author, committer, or `Co-Authored-By` entry unless the repository owner explicitly requests that attribution.

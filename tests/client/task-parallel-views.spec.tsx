@@ -159,6 +159,74 @@ it('keeps an older directly opened run mounted while refreshing its details', as
   } finally { view.unmount() }
 })
 
+it('keeps collaboration and notes on separate run tabs and never carries a note draft to another run', async () => {
+  const task = taskSummary({ task_id: 'scoped-task', current_run_id: 'run-two', run_count: 2 })
+  const newest = runSummary({ task_id: task.task_id, run_id: 'run-two', workflow_version: 2,
+    created_at: '2026-11-25T10:00:00.000Z' })
+  const older = runSummary({ task_id: task.task_id, run_id: 'run-one', workflow_version: 1,
+    created_at: '2026-11-24T10:00:00.000Z', status: 'succeeded', display_status: 'succeeded' })
+  const resources = createFakeService(({ path, params }) => {
+    if (path === '/v1/tasks/get') return { ok: true, data: task }
+    if (path === '/v1/runs') return { ok: true, data: page([newest, older]) }
+    if (path === '/v1/runs/get') return { ok: true, data: params.get('run_id') === 'run-one' ? older : newest }
+    if (path === '/v1/node-runs') return { ok: true, data: { items: [] } }
+    return { ok: true, data: page([]) }
+  })
+  const panelReads: Array<{ path: string; runId: string }> = []
+  const notesClient = createApiClient('http://panel-notes.test', async (input) => {
+    const url = new URL(String(input))
+    const runId = url.searchParams.get('run_id') ?? ''
+    panelReads.push({ path: url.pathname, runId })
+    const data = url.pathname === '/v1/run-notes'
+      ? { items: [{ note_id: 'note-' + runId, author: 'source', source: 'node', attempt: 1,
+          body: 'note-' + runId, created_at: '2026-11-25T10:00:00.000Z' }] }
+      : { items: [{ id: 'coord-' + runId, kind: 'blocker', state: 'reported', revision: 1,
+          source: 'source', target: null, body: 'coord-' + runId, reply: null, reason: null,
+          created_ms: 0, expires_ms: 120_000, evidence_strength: 'none' }] }
+    return { ok: true, status: 200, json: async () => ({ ok: true, schema_version: 1, as_of_seq: 1, data }) } as Response
+  })
+  const api = createResourcesApi(createApiClient('http://panel.test', resources.fetcher))
+  const screen = <TaskDetailScreen api={api} taskId={task.task_id} initialRunId="run-two" onBack={() => {}} notesClient={notesClient} />
+  const view = await renderPanel(screen)
+  const button = (label: string) => view.findAll('button').find((item) => item.textContent?.trim() === label)!
+  try {
+    await view.flush()
+    await view.click(button('协作'))
+    await view.flush()
+    expect(view.text()).toContain('coord-run-two')
+    expect(view.text()).not.toContain('note-run-two')
+    expect(panelReads).toEqual([{ path: '/v1/run-coordination', runId: 'run-two' }])
+
+    await view.click(button('便条'))
+    await view.flush()
+    expect(view.text()).toContain('note-run-two')
+    expect(view.text()).not.toContain('coord-run-two')
+    const input = view.container.querySelector<HTMLTextAreaElement>('textarea')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'draft for run two')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(input.value).toBe('draft for run two')
+
+    await view.click(button('返回任务'))
+    await view.click(view.findAll('button').find((item) => item.textContent?.trim().startsWith('运行'))!)
+    await view.flush()
+    await view.click(view.findAll('.task-run-history button')[1]!)
+    await view.flush()
+    expect(view.text()).toContain('run-one')
+    await view.click(button('便条'))
+    await view.flush()
+    expect(view.text()).toContain('note-run-one')
+    expect(view.text()).not.toContain('note-run-two')
+    expect(view.container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('')
+    expect(panelReads).toEqual([
+      { path: '/v1/run-coordination', runId: 'run-two' },
+      { path: '/v1/run-notes', runId: 'run-two' },
+      { path: '/v1/run-notes', runId: 'run-one' },
+    ])
+  } finally { view.unmount() }
+})
+
 it('rechecks the selected run after refresh until its project sources are fixed, without losing model evidence', async () => {
   const run = runSummary({ task_id: main.task_id, run_id: 'main-run' })
   let pinned = false

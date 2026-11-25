@@ -61,6 +61,67 @@ it('keeps real provider slots occupied after cancellation and recovers when they
   await expect(complete(route, 'interpret', {}, new AbortController().signal, current)).resolves.toEqual({})
 })
 
+it('queues two admission bursts FIFO, rejects overflow, and never exceeds two live provider streams', async () => {
+  const gates = Array.from({ length: 5 }, () => Promise.withResolvers<void>())
+  const started: number[] = []
+  let inFlight = 0
+  let peak = 0
+  const complete = createDshJsonCompletion({ async prepareCall(config: unknown) {
+    return { config, async *stream() {
+      const index = started.length
+      started.push(index)
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      await gates[index]!.promise
+      inFlight--
+      yield { type: 'block-end', block: { type: 'text', text: '{}' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+  } } as unknown as Runtime, 'admission')!
+  const abortLastQueued = new AbortController()
+  const calls = [0, 1, 2, 3].map(index => complete(route, 'interpret', { index },
+    index === 3 ? abortLastQueued.signal : new AbortController().signal, current))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(started).toEqual([0, 1])
+  await expect(complete(route, 'interpret', { index: 4 }, new AbortController().signal, current))
+    .rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', details: { reason: 'semantic_busy' } })
+  abortLastQueued.abort()
+  await expect(calls[3]).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+  gates[0]!.resolve()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(started).toEqual([0, 1, 2])
+  gates[1]!.resolve()
+  gates[2]!.resolve()
+  await expect(Promise.all(calls.slice(0, 3))).resolves.toEqual([{}, {}, {}])
+  expect(peak).toBeLessThanOrEqual(2)
+})
+
+it('times out an admission request while it is still waiting for a provider slot', async () => {
+  vi.useFakeTimers()
+  try {
+    const gate = Promise.withResolvers<void>()
+    let streams = 0
+    const complete = createDshJsonCompletion({ async prepareCall(config: unknown) {
+      return { config, async *stream() {
+        streams++
+        await gate.promise
+        yield { type: 'block-end', block: { type: 'text', text: '{}' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } }
+    } } as unknown as Runtime, 'admission')!
+    const holders = [0, 1].map(index => complete(route, 'interpret', { index }, new AbortController().signal, current))
+    await vi.advanceTimersByTimeAsync(0)
+    const waiting = complete(route, 'interpret', { index: 2 }, new AbortController().signal, current)
+    const waitingResult = waiting.then(value => ({ value }), error => ({ error }))
+    await vi.advanceTimersByTimeAsync(8_000)
+    await expect(waitingResult).resolves.toMatchObject({ error: { code: 'SERVICE_UNAVAILABLE', details: { reason: 'semantic_busy' } } })
+    expect(streams).toBe(2)
+    gate.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(Promise.all(holders)).resolves.toEqual([{}, {}])
+  } finally { vi.useRealTimers() }
+})
+
 function responseQueue(texts: string[]) {
   const systems: string[] = []
   const prepareCall = vi.fn(async (config: unknown) => ({ config, async *stream({ system }: { system: string }) {

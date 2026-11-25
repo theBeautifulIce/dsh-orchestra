@@ -18,6 +18,7 @@ import { SEMANTIC_INSTRUCTIONS, semanticResponseNeedsCorrection } from './semant
 import { createWindowsReadOnlyHost } from '../executor/windows-readonly-host.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
+import { createSemanticDraftCheckpoints } from './semantic-draft-checkpoints.ts'
 import { artifactBrowserPath, artifactDownloadPath, createArtifactBrowserReader } from './artifact-browser.ts'
 import { getArtifactContent } from './queries/artifacts.ts'
 import { getRun } from './queries/runs.ts'
@@ -458,6 +459,8 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       installNativeChat(chatCtx, {
         operator: human,
         signal: stop.signal,
+        ...(profileDir && isAbsolute(profileDir) && { draftCheckpoints: createSemanticDraftCheckpoints(profileDir,
+          identity => ledgerSecret(host, identity, join(localDataDirectory(options), identity + '.sqlite'))) }),
         async interpret(input, agent, signal, assertCurrent) {
           if (!complete) throw new OrchError('SERVICE_UNAVAILABLE', '当前模型服务没有可用的任务理解接口，请检查服务后重试', { reason: 'semantic_unavailable' })
           const fallback = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined

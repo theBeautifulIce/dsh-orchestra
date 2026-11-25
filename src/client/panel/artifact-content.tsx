@@ -107,9 +107,9 @@ function ArtifactContentReader({ api, artifact, onAcquired, autoPreview }: Artif
 
   return <section aria-label={artifact.file_name + '的内容'} style={{ marginTop: 10 }}>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-      <button type="button" style={buttonStyle} disabled={pending !== null} aria-expanded={preview !== null}
+      <button type="button" className="ops-button" disabled={pending !== null} aria-expanded={preview !== null}
         onClick={() => preview ? setPreview(null) : void load('preview')}>{preview ? '收起预览' : '预览内容'}</button>
-      <button type="button" style={buttonStyle} disabled={pending !== null} onClick={() => { void load('download') }}>下载产物</button>
+      <button type="button" className="ops-button" disabled={pending !== null} onClick={() => { void load('download') }}>下载产物</button>
     </div>
     {pending && <p role="status" style={noteStyle}>正在读取并核验产物…</p>}
     {notice && <p role="alert" style={noteStyle}>{notice}</p>}
@@ -122,10 +122,6 @@ function ArtifactContentReader({ api, artifact, onAcquired, autoPreview }: Artif
   </section>
 }
 
-const buttonStyle = {
-  minHeight: 36, padding: '0 12px', border: `1px solid ${COLOR.line}`, borderRadius: 7,
-  background: COLOR.surface, color: COLOR.ink, fontSize: FONT_PX.menu, cursor: 'pointer',
-}
 const noteStyle = { color: COLOR.inkMuted, fontSize: FONT_PX.helper, margin: '6px 0' }
 const previewStyle = {
   maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap' as const, overflowWrap: 'anywhere' as const,

@@ -302,7 +302,7 @@ export function createDshPlanningCallback(options: {
   let inFlight = 0
   return async (input: unknown, signal?: AbortSignal, onProgress?: () => void): Promise<unknown> => {
     signal?.throwIfAborted()
-    const planning = purpose === 'rework' ? { payload: input, offline: false, noWorkspaceRead: false } : dshPlanningInput(input)
+    const planning: ReturnType<typeof dshPlanningInput> = purpose === 'rework' ? { payload: input } : dshPlanningInput(input)
     const content = JSON.stringify(planning.payload)
     if (!content || Buffer.byteLength(content, 'utf8') > 96 * 1024) {
       throw new OrchError('RANGE_TOO_LARGE', '规划输入超过 DSH 运行上限')
@@ -408,6 +408,9 @@ export function createDshPlanningCallback(options: {
         ? await dshCapabilitySnapshot(parent, options.executionPermissionMode(), controller.signal) : undefined
       prompt(handle.agent, [...instructions,
         ...(purpose !== 'rework' ? [
+          ...(planning.linkedResults ? [
+            '用户只需会话摘要和每份原件的名称链接。Orchestra 会按登记的交付清单生成摘要与真实链接。只规划实际撰写或核验工作，勿设仅负责汇总链接、重复读取原件或再次发表摘要的节点。每份成果按用户列出的顺序与原名登记一份 chat/text_result，完整正文及指定末行存入它自己的原件。明确要求跨成果分析时才安排该分析。',
+          ] : []),
           '规划只描述要执行的操作、依赖和交付形式。对需要审批的工作，步骤、交付标题、风险和说明均不得预填计算结果、代入算式或提前完成该操作。已保留的输入会在批准后的执行步骤提供。',
           ...(options.coordinationAvailable ? ['宿主已为普通 pure 执行节点提供内部协作信箱 orchestra_coordination，除非流程明确禁用。它独立于 native_tools 和固定命令，可在离线、不读写工作区的任务中传递请求、回复或障碍。同行沟通在现有节点内完成，保留并行职责和正式成果依赖。',
             '可独立完成的工作在无人回复时继续，说明沟通缺口。只在实际缺少必需条件时安排重试或报告高风险。任务已由宿主强制执行的限制本身不是能力缺口。'] : []),

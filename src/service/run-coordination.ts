@@ -186,8 +186,10 @@ export function createRunCoordination(db: Db, secret: string, authorize: (tx: Re
     const perSource = tx.get<{ n: number }>('SELECT count(*) n FROM run_coordination WHERE run_id=? AND source_node=?', [node.run_id,node.node_run_id])!.n
     if (total >= MAX_RUN || perSource >= MAX_SOURCE) throw new OrchError('RANGE_TOO_LARGE', '协作记录已达上限，请合并信息并使用原任务回报')
     const edges = rows(tx, node.run_id).filter(row => row.state === 'pending' && !pendingState(tx,row,now))
-    if (target && (edges.length >= MAX_PENDING || reachable(edges, target.node_run_id, node.node_run_id)))
-      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '存在循环请求或等待事项过多，请继续原任务或向主脑报告问题')
+    if (target && reachable(edges, target.node_run_id, node.node_run_id))
+      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '此请求会形成循环等待，未写入信箱。可回复已有请求并继续原任务。', { reason: 'coordination_cycle' })
+    if (target && edges.length >= MAX_PENDING)
+      throw new OrchError('RESOLUTION_NOT_AVAILABLE', '本次运行待回应的协作事项已达上限。请先处理已有请求。', { reason: 'coordination_pending_limit' })
     const row: Row = { id: uuidv7(), run_id: node.run_id, source_node: node.node_run_id, source_attempt: node.attempt,
       source_generation: node.action_generation, source_session: node.executor_session_id, target_node: target?.node_run_id ?? null,
       target_attempt: target?.attempt ?? null, target_generation: target?.action_generation ?? null, target_session: target?.executor_session_id ?? null,

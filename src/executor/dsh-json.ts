@@ -54,21 +54,42 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
   const runtime = llm
   const admission = purpose === 'admission'
   let active = 0
+  const waiting = new Set<() => void>()
   const failure = (reason: AdmissionFailure) => admission
     ? new OrchError('SERVICE_UNAVAILABLE', admissionFailures[reason], { reason }) : unavailable()
+  function release() {
+    const next = waiting.values().next().value
+    if (next) next()
+    else active--
+  }
   return async (route: JsonModelRoute | undefined, instructions: string, input: unknown,
     signal: AbortSignal, assertCurrent: () => void, needsCorrection?: (raw: unknown) => boolean): Promise<unknown> => {
     if (signal.aborted) throw unavailable()
     if (!route) throw failure('semantic_model_missing')
-    if (active >= 2) throw failure('semantic_busy')
     const body = JSON.stringify(input)
     if (typeof body !== 'string' || Buffer.byteLength(body, 'utf8') > 32_768) throw failure('semantic_input_limit')
-    active++
+    const deadline = performance.now() + (admission ? SEMANTIC_ADMISSION_TIMEOUT_MS : 8_000)
+    if (active < 2) active++
+    else {
+      if (!admission || waiting.size >= 2) throw failure('semantic_busy')
+      // Absorb short bursts without opening another provider stream or extending
+      // the original deadline. A caller that disappears cannot be dispatched.
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => { waiting.delete(grant); clearTimeout(timer); signal.removeEventListener('abort', cancel) }
+        const grant = () => { cleanup(); resolve() }
+        const cancel = () => { cleanup(); reject(unavailable()) }
+        const timer = setTimeout(() => { cleanup(); reject(failure('semantic_busy')) }, 8_000)
+        timer.unref()
+        waiting.add(grant)
+        signal.addEventListener('abort', cancel, { once: true })
+        if (signal.aborted) cancel()
+      })
+    }
     const local = new AbortController()
     const timeoutReason = admission
       ? new OrchError('OPERATION_TIMEOUT', '任务理解超时，尚未开始执行', { reason: 'semantic_timeout' })
       : unavailable()
-    const timeout = setTimeout(() => local.abort(timeoutReason), admission ? SEMANTIC_ADMISSION_TIMEOUT_MS : 8_000)
+    const timeout = setTimeout(() => local.abort(timeoutReason), Math.max(1, deadline - performance.now()))
     timeout.unref()
     const lifetime = AbortSignal.any([local.signal, signal])
     const current = () => {
@@ -149,7 +170,7 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
       return raw
     })()
     // The two slots cover both attempts and remain occupied until actual work settles.
-    void work.then(() => { active-- }, () => { active-- })
+    void work.then(release, release)
     let onAbort: () => void = () => {}
     const aborted = new Promise<never>((_resolve, reject) => {
       onAbort = () => reject(unavailable())

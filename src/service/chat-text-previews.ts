@@ -56,15 +56,8 @@ function previewPublications(db: Db, runId: string, publications: Pick<RunDelive
  * version when the generic 32 KiB file preview would truncate delivery. */
 export function readChatArtifactContent(db: Db, runId: string, artifactId: string,
   checks: readonly RunDeliveryCheck[], now = Date.now()) {
-  const preview = getArtifactContent(db, runId, artifactId, 'preview', now).item
   const accepted = checks.find(check => check.kind === 'chat/text_result' && check.outcome === 'passed'
-    && check.artifact_id === artifactId && check.sha256 === preview.sha256 && check.file_name === preview.file_name)
-  if (preview.kind !== 'preview' || !preview.truncated || !accepted || preview.size_bytes > 65536) return preview
-  const full = getArtifactContent(db, runId, artifactId, 'download', now).item
-  if (full.kind !== 'download' || full.sha256 !== preview.sha256) return preview
-  try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(full.base64, 'base64'))
-    if (text.includes('\0')) return preview
-    return { ...preview, text, truncated: false }
-  } catch { return preview }
+    && check.artifact_id === artifactId)
+  return getArtifactContent(db, runId, artifactId, 'preview', now, accepted?.sha256 && accepted.file_name
+    ? { sha256: accepted.sha256, file_name: accepted.file_name } : undefined).item
 }

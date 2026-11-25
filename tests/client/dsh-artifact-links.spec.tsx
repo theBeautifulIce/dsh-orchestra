@@ -73,6 +73,34 @@ it('uses the public native Browser API with a live loopback URL whose complete e
   } finally { view.unmount(); vi.unstubAllGlobals(); await reader.close() }
 })
 
+it('opens each named T07 result as its own full original', async () => {
+  const names = ['系统风险检查报告', '执行可靠性检查报告', '用户体验检查报告']
+  const endings = ['完整原件末尾-风险', '完整原件末尾-可靠性', '完整原件末尾-体验']
+  const bodies = names.map((name, i) => '# ' + name + '\n\n' + ('检查事项' + (i + 1) + '：核对证据和限制，保留原始内容。\n').repeat(40) + endings[i])
+  const bytes = bodies.map(body => Buffer.from(body))
+  const artifacts = names.map((title, i) => ({ ...artifact, title, fileName: names[i] + '.md',
+    location: { ...artifact.location, artifactId: 'artifact-' + i, sha256: sha256Hex(bytes[i]!) } }))
+  const opened: Array<{ link: ChatArtifactLink; body: string }> = []
+  const openArtifact = vi.fn(async (link: ChatArtifactLink) => {
+    const index = Number(link.location.artifactId.slice('artifact-'.length))
+    opened.push({ link, body: bytes[index]!.toString('utf8') })
+  })
+  const view = await renderPanel(<ArtifactLinks artifacts={artifacts}
+    openArtifact={openArtifact} />)
+  try {
+    expect(view.findAll('a').map(link => link.textContent)).toEqual(names)
+    for (let i = 0; i < names.length; i++) {
+      await act(async () => {
+        await view.click(view.findAll('a')[i]!)
+      })
+      expect(opened[i]!.link).toMatchObject({ title: names[i], fileName: names[i] + '.md', location: { artifactId: 'artifact-' + i } })
+      expect(opened[i]!.body).toBe(bodies[i])
+      expect(opened[i]!.body.endsWith(endings[i]!)).toBe(true)
+    }
+    expect(openArtifact).toHaveBeenCalledTimes(3)
+  } finally { view.unmount() }
+})
+
 it('does not open a result after the selected session changes, and explains browser and transport failures', async () => {
   const host = sources()
   const reply = deferred<Response>()

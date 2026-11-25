@@ -63,6 +63,18 @@ export const supervisorCases: [string,()=>void|Promise<void>][] = [
    assert.equal(f.coordinator.updates(f.binding('a'))[0]?.reply,'已核对');assert.equal(f.coordinator.updates(f.binding('b')).length,0)
    assert.equal(n(f.db,'run_coordination'),1);assert.equal(f.db.raw.prepare("SELECT status FROM runs WHERE run_id='run1'").get()?.status,'running');assert.equal(f.db.raw.prepare("SELECT status FROM node_runs WHERE node_run_id='a'").get()?.status,'started')
  })],
+ ['recipient cannot send a direct reverse request while the original request is pending',scenario(f=>{
+   const original=f.send('a','b','需要确认的数据')
+   assert.equal(original.state,'pending')
+   assert.throws(()=>f.send('b','a','反向请求'),code('RESOLUTION_NOT_AVAILABLE'))
+   assert.equal(n(f.db,'run_coordination'),1)
+   assert.equal(f.list()[0]?.id,original.id)
+   const answered=f.reply('b',original,'已核对原请求')
+   assert.equal(answered.state,'answered')
+   assert.equal(answered.reply,'已核对原请求')
+   assert.equal(f.list()[0]?.state,'answered')
+   assert.equal(f.list()[0]?.reply,'已核对原请求')
+ })],
  ['cross-run, self, third-party and forged executor identity denied',scenario(f=>{
    assert.throws(()=>f.send('a','other'),code('FORBIDDEN'));assert.throws(()=>f.send('a','a'),code('FORBIDDEN'));const r=f.send('a','b');assert.throws(()=>f.reply('c',r),code('FORBIDDEN'))
    assert.throws(()=>f.coordinator.call({...f.binding('a'),executor_session_id:'forged'},{action:'inbox'}),code('FORBIDDEN'))
@@ -166,6 +178,18 @@ export const supervisorCases: [string,()=>void|Promise<void>][] = [
  ['supervisor coalesces commit bursts, isolates job errors, fallback and close',scenario(async f=>{
    let errors=0,events=0,ticks=0;const supervisor=createTaskSupervisor(f.db,{eventJobs:[{name:'bad',run(){throw Error('x')}},{name:'good',run(){events++}}],periodicJobs:[{name:'tick',run(){ticks++}}],onError(){errors++},debounceMs:10,intervalMs:100})
    supervisor.start();try{for(let i=0;i<8;i++)withTx(f.db,tx=>appendEvent(tx,{type:'run.test'}));await delay(40);assert.equal(events,1);assert.equal(errors,1);await delay(110);assert.ok(ticks>=1);assert.ok(events>=2)}finally{supervisor.close()};const stopped=events;withTx(f.db,tx=>appendEvent(tx,{type:'run.test'}));await delay(40);assert.equal(events,stopped)
+ })],
+ ['normal close cancels an event wake that has not started yet',scenario(async f=>{
+   let events=0
+   const supervisor=createTaskSupervisor(f.db,{eventJobs:[{name:'reconcile',run(){events++}}],periodicJobs:[],onError(){},debounceMs:30,intervalMs:10_000})
+   supervisor.start()
+   withTx(f.db,tx=>appendEvent(tx,{type:'run.test'}))
+   supervisor.close()
+   await delay(50)
+   assert.equal(events,0)
+   supervisor.poke()
+   await delay(40)
+   assert.equal(events,0)
  })],
  ['session publication independent and event wake coalesced',scenario(async f=>{
    const sessions=new Map([['slow',1],['fast',2]]);const ac=new AbortController();let release!:()=>void;const waiting=new Promise<void>(r=>{release=r});let fast=0,slow=0;const pump=createChatReportPump(sessions,async key=>{if(key==='slow'){slow++;await waiting}else fast++},ac.signal)

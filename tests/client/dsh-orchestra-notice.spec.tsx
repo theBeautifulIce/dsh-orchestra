@@ -194,21 +194,27 @@ it('does not restore actions with arbitrary URLs or hide a legacy text-only resu
   }
 })
 
-it.each([undefined, 'completed', 'cancelled', 'blocked'])('keeps a final result and its original artifact visible once when the source turn is %s', async kind => {
-  const withFinal = { ...event, data: { ...event.data, source: { ...event.data.source, final: true, artifacts: [artifact] } } }
-  const match = { event: withFinal, location: { kind: 'step', turn: { turn: 4 }, step: { step: 2 } } }
+it.each([undefined, 'completed', 'cancelled', 'blocked'])('keeps a T07 final result and all named original artifacts visible once when the source turn is %s', async kind => {
+  const artifacts: ChatArtifactLink[] = [
+    { ...artifact, title: '系统风险检查报告', fileName: '会话正文-1.md', location: { ...artifact.location, artifactId: 'risk' } },
+    { ...artifact, title: '执行可靠性检查报告', fileName: '会话正文-2.md', location: { ...artifact.location, artifactId: 'reliability' } },
+    { ...artifact, title: '用户体验检查报告', fileName: '会话正文-3.md', location: { ...artifact.location, artifactId: 'experience' } },
+  ]
+  const turn = { turn: 4, ...(kind && { end: { data: { reason: { kind } } } }),
+    data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }
+  const withFinal = { ...event, data: { ...event.data, source: { ...event.data.source, final: true, artifacts } } }
+  const match = { event: withFinal, location: { kind: 'step', turn, step: { step: 2 } } }
   const state = orchestraNoticeDefinition.start({ key: 'key', id: notice.id }, match)
   const node = orchestraNoticeDefinition.buildViewNode({ key: 'key', id: notice.id, start: match, state })!
-  expect(node.visibility).toBe('visible')
   const openArtifact = vi.fn(async () => {})
-  const view = await renderPanel(<><OrchestraAttentionNotice node={node} openArtifact={openArtifact} />
-    <OrchestraNoticeTail turn={{ turn: 4, ...(kind && { end: { data: { reason: { kind } } } }),
-      data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }} useNotices={() => [state]} openArtifact={openArtifact} /></>)
+  if (!turn.end) expect(node.visibility).toBe('visible')
+  const view = await renderPanel(turn.end
+    ? <OrchestraNoticeTail turn={turn} useNotices={() => [state]} openArtifact={openArtifact} />
+    : <OrchestraAttentionNotice node={node} openArtifact={openArtifact} />)
   try {
-    expect(view.byRole('status')).toHaveLength(1)
-    expect(view.text()).toContain('下一步：启用检索工具后重试。')
-    expect(view.findAll('a').map(link => link.textContent)).toEqual(['最终完整简报'])
-    await view.click(view.findAll('a')[0]!)
-    expect(openArtifact).toHaveBeenCalledWith(artifact, expect.any(AbortSignal))
+    expect(view.byRole('status')).toHaveLength(turn.end ? 0 : 1)
+    expect(view.findAll('a').map(link => link.textContent)).toEqual(artifacts.map(item => item.title))
+    await view.click(view.findAll('a')[2]!)
+    expect(openArtifact).toHaveBeenCalledExactlyOnceWith(artifacts[2], expect.any(AbortSignal))
   } finally { view.unmount() }
 })

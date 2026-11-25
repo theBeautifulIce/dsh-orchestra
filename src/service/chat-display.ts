@@ -24,6 +24,7 @@ type RunDisplay = {
   rework?: Array<{ run_id?: string; request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string; revision?: number }>
   delivery_checks: RunDeliveryCheck[]
   text_results?: ChatTextPreview[]
+  original_titles?: string[]
   failure_details?: Array<{ node_id: string; title: string; reason: string; next_action: string; missing: string[] }>
   nodes?: Step[]
   artifacts: Array<{ artifact_id: string; file_name?: string }>
@@ -166,6 +167,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
   const heading = taskHeading(view.title, state)
   const lines: string[] = []
   if (view.terminal) lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
+  if (view.original_titles?.length) lines.push('已登记的完整原件：' + view.original_titles.map(title => '《' + title + '》').join('、') + '。会话末尾可按名称打开。')
   for (const failure of view.failure_details ?? []) {
     lines.push(`步骤「${failure.title}」未完成。原因：${sentence(operatorReason(failure.reason))}`,
       `下一步：${sentence(operatorReason(failure.next_action))}`)

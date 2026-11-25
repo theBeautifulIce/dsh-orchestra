@@ -96,8 +96,8 @@ export const PANEL_LAYOUT_CSS = `
 .ops-panel-viewport .ops-actions, .ops-panel-viewport .ops-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .ops-panel-viewport .ops-toolbar { justify-content: space-between; }
 /* Low-specificity safety net for new raw controls in the workbench. Explicit
-   component classes and scoped layout rules retain priority. Do not alter
-   native checkboxes, radios, file inputs, range inputs or hidden fields. */
+   component classes retain priority. Checkbox, radio and disclosure controls
+   retain their native keyboard and screen-reader behavior. */
 .ops-panel-viewport :where(button:not([class]):not([style]), textarea:not([class]):not([style]), select:not([class]):not([style]), input:not([class]):not([style]):is(:not([type]), [type=text], [type=number], [type=search], [type=date], [type=time], [type=email], [type=password], [type=url], [type=tel])) {
   box-sizing: border-box; min-width: 0; max-width: 100%; min-height: 44px; border: 1px solid ${COLOR.line};
   border-radius: 8px; color: ${COLOR.ink}; background: ${COLOR.surface}; font: inherit; font-size: ${FONT_PX.body}px; padding: 9px 12px;
@@ -110,6 +110,31 @@ export const PANEL_LAYOUT_CSS = `
   color: ${COLOR.ink}; background: ${COLOR.surface}; font: inherit; font-size: ${FONT_PX.body}px;
 }
 .ops-panel-viewport .ops-field { padding: 9px 12px; max-width: 100%; min-width: 0; }
+.ops-panel-viewport :where(input[type="checkbox"],input[type="radio"]) {
+  accent-color: ${COLOR.link}; inline-size: 16px; block-size: 16px; vertical-align: middle;
+}
+.ops-panel-viewport summary::marker { color: ${COLOR.inkMuted}; }
+.ops-panel-viewport :where(select, button, summary, input, textarea):focus-visible {
+  outline: 2px solid ${COLOR.link}; outline-offset: 2px;
+}
+@media (forced-colors: none) {
+  .ops-panel-viewport select:not([multiple]):not([size]) {
+    appearance: none; padding-inline-end: 32px;
+    background-image: linear-gradient(45deg, transparent 50%, ${COLOR.inkMuted} 50%),
+      linear-gradient(135deg, ${COLOR.inkMuted} 50%, transparent 50%);
+    background-position: right 16px center, right 11px center;
+    background-size: 5px 5px; background-repeat: no-repeat;
+  }
+  .ops-panel-viewport input[type="checkbox"][role="switch"] {
+    appearance: none; inline-size: 34px; block-size: 20px; border: 1px solid ${COLOR.inkMuted}; border-radius: 12px;
+    background: radial-gradient(circle at 9px center, ${COLOR.surface} 6px, transparent 7px) ${COLOR.inkMuted};
+    cursor: pointer;
+  }
+  .ops-panel-viewport input[type="checkbox"][role="switch"]:checked {
+    border-color: ${COLOR.link}; background: radial-gradient(circle at 23px center, ${COLOR.surface} 6px, transparent 7px) ${COLOR.link};
+  }
+  .ops-panel-viewport input[type="checkbox"][role="switch"]:disabled { opacity: .55; cursor: not-allowed; }
+}
 .ops-panel-viewport .ops-button { padding: 9px 14px; font-weight: 550; cursor: pointer; white-space: nowrap; }
 .ops-panel-viewport .ops-button:hover:not(:disabled) { background: #f3f5f8; }
 .ops-panel-viewport .ops-button:disabled { color: ${COLOR.inkMuted}; background: #f8fafc; cursor: not-allowed; }

@@ -1,15 +1,19 @@
 import { requirementsContractSchema } from '../core/task-requirements.ts'
 import { taskAccess } from '../core/task-access.ts'
+import { chatDeliveryPreference } from '../core/chat-delivery-preference.ts'
 
 /** Keep the execution data on the approved plan. The planning model only needs
  * the operation and constraints when the operator has put that operation on hold. */
-export function dshPlanningInput(input: unknown) {
+export function dshPlanningInput(input: unknown): { payload: unknown; offline?: boolean; noWorkspaceRead?: boolean; linkedResults?: boolean } {
   if (!input || typeof input !== 'object' || !('requirements_contract' in input)) return { payload: input }
   const parsed = requirementsContractSchema.safeParse(input.requirements_contract)
   if (!parsed.success) return { payload: input }
   const contract = parsed.data
   const { noNetwork: offline, noWorkspaceRead } = taskAccess(contract)
-  if (!contract.constraints.some(c => c.kind === 'approval_before' && c.scope === 'steps')) return { payload: input, offline, noWorkspaceRead }
+  if (!contract.constraints.some(c => c.kind === 'approval_before' && c.scope === 'steps')) {
+    const preference = chatDeliveryPreference(contract.sources.map(source => source.text))
+    return { payload: input, offline, noWorkspaceRead, ...(preference.linksOnly && { linkedResults: true }) }
+  }
 
   const material = new Set<string>()
   // A labelled data field can share a line with the next instruction. Only

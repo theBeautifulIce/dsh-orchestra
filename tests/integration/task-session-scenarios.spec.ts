@@ -117,34 +117,35 @@ async function scenarioHarness({ projectContext = false } = {}) {
   await native.await()
 
   async function session(id: string, scenario: Scenario, options: { hostPlanning?: boolean; approvalPrompt?: string } = {}) {
+    let activeScenario = scenario
     const pendingNotices: Message[] = []
     const conversation: Message[] = []
     const events: Array<{ type: 'user/message'; data: Message }> = []
     const children: string[] = []
     const planningPrompts: Array<{ text: string; input: PlanRequest | WorkflowRequest }> = []
-    specs.set(id, scenario)
+    specs.set(id, activeScenario)
     const secret = 'isolated-scenario-' + id
     const workflowGenerator: NonNullable<TaskPlanningOptions['workflowGenerator']> = async ({ requirements_contract }) => {
       const gate = requirements_contract?.constraints.find(item => item.kind === 'approval_before')?.gate_name
-      const label = options.approvalPrompt ?? gate ?? scenario.approval
-      return { name: scenario.title, nodes: [{ node_id: 'start', type: 'trigger' },
+      const label = options.approvalPrompt ?? gate ?? activeScenario.approval
+      return { name: activeScenario.title, nodes: [{ node_id: 'start', type: 'trigger' },
         ...(label ? [{ node_id: 'gate', type: 'approval', title: label,
           config: { prompt: label, on_timeout: 'fail' } }] : []),
-        ...scenario.steps.map(step => ({ node_id: step.id, type: 'agent', title: step.title }))],
+        ...activeScenario.steps.map(step => ({ node_id: step.id, type: 'agent', title: step.title }))],
       edges: [...(label ? [{ from: 'start', to: 'gate' }] : []),
-        ...scenario.steps.flatMap(step => (step.after ?? [label ? 'gate' : 'start']).map(from => ({ from, to: step.id })))],
+        ...activeScenario.steps.flatMap(step => (step.after ?? [label ? 'gate' : 'start']).map(from => ({ from, to: step.id })))],
       }
     }
     const propose: TaskPlanningOptions['propose'] = async ({ workflows, requirements_contract }) => {
       const workflow = workflows[0]!
       const approval = requirements_contract?.constraints.find(item => item.kind === 'approval_before')
-      return { title: scenario.title, workflow_id: workflow.workflowId, workflow_version: workflow.version,
+      return { title: activeScenario.title, workflow_id: workflow.workflowId, workflow_version: workflow.version,
         steps: workflow.nodes.map(node => ({ node_id: node.id, description: node.title, goal_ids: ['goal'],
           tools: [], depends_on: node.dependsOn, complexity: 'routine', model_reason: '由受控测试执行者处理' })),
-        deliverables: scenario.steps.map(step => ({ title: step.title, node_id: step.id, goal_ids: ['goal'],
+        deliverables: activeScenario.steps.map(step => ({ title: step.title, node_id: step.id, goal_ids: ['goal'],
           acceptance: { kind: 'chat/text_result' } })),
         risks: [], ...(approval ? { constraint_bindings: [{ constraint_id: approval.id, approval_node_id: 'gate',
-          protected_node_ids: scenario.steps.map(step => step.id) }] } : {}),
+          protected_node_ids: activeScenario.steps.map(step => step.id) }] } : {}),
       }
     }
     const childrenApi = {
@@ -188,7 +189,7 @@ async function scenarioHarness({ projectContext = false } = {}) {
               dispatchPrompts.push(prompt)
               const task = readField<TaskInput>(prompt, '节点输入：')
               const { inputs } = readField<{ inputs: Reference[] }>(prompt, '本次运行的成果与修订上下文：')
-              expect(task.task_goal).toBe(scenario.goal)
+              expect(task.task_goal).toBe(activeScenario.goal)
               const node = String(service.orchestra.db.raw.prepare(
                 'SELECT node_id FROM node_runs WHERE executor_session_id=?').get(options.sessionId)?.node_id)
               children.push(node)
@@ -202,7 +203,7 @@ async function scenarioHarness({ projectContext = false } = {}) {
                   callId: options.sessionId + '-' + ++callNumber } as unknown as ToolExecution) as { text: string }
                 return JSON.parse(result.text) as T
               } }
-              const completion = await scenario.work(worker) ?? { outcome: 'completed' }
+              const completion = await activeScenario.work(worker) ?? { outcome: 'completed' }
               respond({
                 status: completion.outcome === 'completed' ? 'done' : 'failed',
                 output: { summary: completion.reason ?? '已登记结果', completion },
@@ -237,8 +238,9 @@ async function scenarioHarness({ projectContext = false } = {}) {
     parents.add(parent)
     const registry = new ToolRegistry()
     const runner = new ReadOnlyToolRunner(registry, { readonlyAvailable: () => true, run: outsideTool }, workspace)
-    const service = await serveDshOrchestra({
-      dbFile: join(home, id + '.sqlite'), secret, phase: 'S6', tools: { registry, runner },
+    const dbFile = join(home, id + '.sqlite')
+    const openService = () => serveDshOrchestra({
+      dbFile, secret, phase: 'S6', tools: { registry, runner },
       asOfSeq: () => 0, listEvents: () => [], listTasks: () => [], appendLedgerEvent: () => { throw new Error('Unexpected ledger append') },
       scheduler: createExecutionScheduler({ concurrency: 2 }),
       ...(projectContext && { projectContext: { workspaceRoot: workspace, isAuthorized: () => true, read: projectRead, list: projectList } }),
@@ -250,6 +252,7 @@ async function scenarioHarness({ projectContext = false } = {}) {
       recommend: () => ({ complexity: 'routine', reason: '独立核对会话内数据' }) },
       ...(options.hostPlanning ? { dshPlanner: { parent: () => parent, model } } : { planning: { workflowGenerator, propose } }),
     })
+    let service = await openService()
     services.set(id, service)
     createModelRoutingSettingsHost(service.orchestra.db, [modelProfile]).save({
       operation_id: uuidv7(), expected_revision: 0, mapping: { routine: null, standard: null, complex: null },
@@ -274,9 +277,9 @@ async function scenarioHarness({ projectContext = false } = {}) {
       await enter(message)
       return await call({ action: 'start' })
     }
-    async function submit(text = scenario.goal) {
+    async function submit(text = activeScenario.goal) {
       const receipt = await say(text)
-      expect(receipt).toMatchObject({ state: 'started', run_id: expect.any(String), title: scenario.title })
+      expect(receipt).toMatchObject({ state: 'started', run_id: expect.any(String), title: activeScenario.title })
       return String(receipt.run_id)
     }
     async function call(input: object) {
@@ -293,7 +296,17 @@ async function scenarioHarness({ projectContext = false } = {}) {
       return conversation.map(message => ({ id: message.id,
         text: message.content.map(part => part.type === 'text' ? part.text : '').join('\n') }))
     }
-    return { service, db, secret, say, submit, call, children, planningPrompts,
+    return { get service() { return service }, get db() { return service.orchestra.db.raw }, secret, say, submit, call, children, planningPrompts,
+      setScenario(next: Scenario) { activeScenario = next; specs.set(id, next) },
+      cancelRun(runId: string) {
+        return service.orchestra.commands.cancelRun({ runId, cancelResult: 'unknown', graceMs: 30_000, now: new Date().toISOString() })
+      },
+      async restartOnSameDatabase() {
+        await service.close()
+        service = await openService()
+        services.set(id, service)
+        return service
+      },
       nodeStates: (run: string) => db.prepare('SELECT node_id,status FROM node_runs WHERE run_id=? ORDER BY seq').all(run),
       errors: workerErrors,
       readNotices,
@@ -734,6 +747,73 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
     expect(harness.outsideTool).not.toHaveBeenCalled()
   } finally { peerReady.resolve(); sent.resolve(); await harness.close() }
 }, 25_000)
+
+it('T10 closes and reopens the same store, retires a pending inbox request, and runs a fresh task', async () => {
+  const harness = await scenarioHarness()
+  const ready = Promise.withResolvers<void>()
+  const pendingCreated = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  try {
+    const session = await harness.session('T10-restart', {
+      title: 'T10-同库恢复',
+      goal: '让两个执行代理建立一条真实待处理请求，在存储库关闭重开后检查失效处理。不联网，不读写工作区文件。',
+      chatQuote: '检查失效处理',
+      steps: [{ id: 'sender', title: '请求代理' }, { id: 'recipient', title: '接收代理' }],
+      async work(worker) {
+        if (worker.node === 'sender') {
+          await ready.promise
+          const peers = await inbox<Inbox>(worker, { action: 'inbox' })
+          const request = await inbox<CoordinationItem>(worker, { action: 'send', kind: 'request',
+            target_node_run_id: peers.peers[0]!.node_run_id, ttl_seconds: 30, body: '请核对恢复边界。' })
+          expect(request.state).toBe('pending')
+          pendingCreated.resolve()
+        } else ready.resolve()
+        await release.promise
+        return { outcome: 'completed' }
+      },
+    })
+    const oldRun = await session.submit()
+    await pendingCreated.promise
+    const before = session.db.prepare('SELECT id,state,reply FROM run_coordination WHERE run_id=?').all(oldRun)
+    expect(before).toHaveLength(1)
+    expect(before[0]).toMatchObject({ state: 'pending', reply: null })
+    const oldSource = session.db.prepare(`SELECT node_run_id,attempt,action_generation,executor_session_id
+      FROM node_runs WHERE run_id=? AND node_id='sender' ORDER BY seq DESC LIMIT 1`).get(oldRun) as {
+        node_run_id: string; attempt: number; action_generation: number; executor_session_id: string }
+    const oldNodeRuns = session.db.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? ORDER BY seq').all(oldRun)
+    const cancellation = session.cancelRun(oldRun)
+    expect(cancellation.runStatus).toBe('cancelled')
+    const restartPromise = session.restartOnSameDatabase()
+    release.resolve()
+    const restarted = await restartPromise
+    await expect.poll(() => restarted.coordination!.listHuman(oldRun, owner).items.map(item => item.state),
+      { timeout: 8_000 }).toEqual(['unavailable'])
+    await expect.poll(() => session.db.prepare('SELECT id,state,reply FROM run_coordination WHERE run_id=?').all(oldRun),
+      { timeout: 8_000 }).toEqual([{ id: before[0]!.id, state: 'unavailable', reply: null }])
+    expect(() => restarted.coordination!.call(oldSource, { action: 'inbox' })).toThrow()
+
+    await expect.poll(session.noticeText, { timeout: 8_000 }).toContain('已停止')
+    const deliveredNotices = await session.readNotices()
+    const cancellationNotices = deliveredNotices.filter(notice => notice.text.includes('已停止'))
+    expect(cancellationNotices).toHaveLength(1)
+    const receipt = session.db.prepare(`SELECT reported_key FROM chat_task_receipts WHERE plan_id IN
+      (SELECT p.plan_id FROM task_plans p JOIN start_run_operations o ON p.launch_operation_id=o.operation_id WHERE o.run_id=?)`).get(oldRun)
+    expect(receipt?.reported_key).toBe('delivered:terminal:cancelled')
+    expect(session.db.prepare('SELECT node_run_id FROM node_runs WHERE run_id=? ORDER BY seq').all(oldRun)).toEqual(oldNodeRuns)
+    await delay(2_100)
+    const polledAgain = await session.readNotices()
+    expect(polledAgain.filter(notice => notice.text.includes('已停止'))).toEqual(cancellationNotices)
+    session.setScenario({ title: 'T10-恢复后的新任务', goal: '计算 25 × 16 并返回结果。不联网，不读写工作区文件。',
+      chatQuote: '返回结果', steps: [{ id: 'calculate', title: '新计算' }],
+      async work(worker) { await publish(worker, String(25 * 16)) } })
+    const newRun = await session.submit()
+    await expect.poll(() => status(session, newRun), { timeout: 8_000 }).toBe('succeeded')
+    expect(registered(session, newRun)).toEqual(expect.arrayContaining([['calculate', '400']]))
+    expect(acceptance(session, newRun)).toEqual([{ kind: 'chat/text_result', outcome: 'passed' }])
+    expect(session.db.prepare('SELECT id FROM run_coordination WHERE run_id=?').all(oldRun)).toHaveLength(1)
+    expect(harness.workerErrors).toEqual([])
+  } finally { release.resolve(); ready.resolve(); await harness.close() }
+}, 30_000)
 
 it('keeps a no-workspace task away from a configured Desktop project context', async () => {
   const harness = await scenarioHarness({ projectContext: true })

@@ -330,6 +330,35 @@ it('does not retain a successfully admitted request unless the caller reports it
   })
 })
 
+it('held drafts expire after thirty minutes and explicit session clearing removes the old source', async () => {
+  vi.useFakeTimers()
+  const session = createSemanticSession()
+  const request = (text: string, id: string) => ({ identity: 'workspace/session', requestId: id, hash: id,
+    input: input(text, id), signal: new AbortController().signal, assertCurrent() {} })
+  try {
+    await session.admit(request('先别执行月报，禁止联网', 'u1'), async i => task(i, { timing: 'held' }))
+    const beforeExpiry = await session.admit(request('继续月报', 'u2'), async i => {
+      expect(i.draft?.sources).toEqual([{ message_id: 'u1', text: '先别执行月报，禁止联网' }])
+      return task(i, { relation: 'continue', draft_revision: i.draft!.revision, continuation: 'resume' })
+    })
+    expect(beforeExpiry.kind).toBe('ready')
+
+    await session.admit(request('先别执行周报，禁止联网', 'u3'), async i => task(i, { timing: 'held' }))
+    await vi.advanceTimersByTimeAsync(30 * 60_000 + 1)
+    await session.admit(request('继续周报', 'u4'), async i => {
+      expect(i.draft).toBeUndefined()
+      return task(i, { relation: 'continue', draft_revision: 1, continuation: 'resume' })
+    })
+
+    await session.admit(request('先别执行日报，禁止联网', 'u5'), async i => task(i, { timing: 'held' }))
+    session.clear()
+    await session.admit(request('继续日报', 'u6'), async i => {
+      expect(i.draft).toBeUndefined()
+      return task(i, { relation: 'continue', draft_revision: 1, continuation: 'resume' })
+    })
+  } finally { vi.useRealTimers() }
+})
+
 it.each(['held', 'plan_only', 'unclear'] as const)('an explicit %s supplement overrides an unstarted immediate request', async timing => {
   const session = createSemanticSession()
   const request = (text: string, id: string) => ({ identity: 'one', requestId: id, hash: id,

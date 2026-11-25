@@ -57,6 +57,45 @@ it('renders reference text literally, saves into the visible run, and reuses an 
   } finally { view.unmount() }
 })
 
+it('ignores a rapid double submit while the first save is still pending', async () => {
+  let resolvePost!: (response: Response) => void
+  const pending = new Promise<Response>((resolve) => { resolvePost = resolve })
+  let writes = 0
+  const client = createApiClient('http://panel.test', async (_input, init) => {
+    if (init?.method === 'POST') {
+      writes++
+      return pending
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, schema_version: 1, as_of_seq: 1,
+      data: { items: [] } }) } as Response
+  })
+  const view = await renderPanel(<PanelShell activeRoute="tasks" onNavigate={() => undefined} serviceConnected>
+    <RunNotes client={client} runId="same-run" reloadVersion={0} />
+  </PanelShell>)
+  try {
+    await view.flush()
+    const input = view.container.querySelector<HTMLTextAreaElement>('textarea')!
+    const button = view.container.querySelector<HTMLButtonElement>('button[type=submit]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'one note')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => {
+      button.click()
+      button.click()
+    })
+    expect(writes).toBe(1)
+    expect(input.value).toBe('one note')
+    expect(button.disabled).toBe(true)
+    resolvePost({ ok: true, status: 200, json: async () => ({ ok: true, schema_version: 1, as_of_seq: 2,
+      data: { note_id: 'saved-note', seq: 2 } }) } as Response)
+    await view.flush()
+    expect(writes).toBe(1)
+    expect(input.value).toBe('')
+    expect(view.text()).toContain('便条已添加')
+  } finally { view.unmount() }
+})
+
 it('uses the shared A-workbench controls and clears the old draft when the run changes', async () => {
   const writes: string[] = []
   const client = createApiClient('http://panel.test', async (input, init) => {

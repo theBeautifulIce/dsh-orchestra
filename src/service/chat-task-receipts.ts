@@ -45,6 +45,14 @@ export function chatRunByTitle(db: Db, actor: string, title: string): string | u
   return rows[0]?.run_id as string | undefined
 }
 
+/** Older transcripts may have been compacted. Only use an acknowledged terminal receipt. */
+export function latestDeliveredChatRun(db: Db, actor: string): string | undefined {
+  return db.raw.prepare("SELECT o.run_id FROM chat_task_receipts c JOIN task_plans p USING (plan_id)"
+    + " JOIN start_run_operations o ON p.launch_operation_id=o.operation_id"
+    + " WHERE p.created_by=? AND c.reported_key LIKE 'delivered:terminal:%' ORDER BY o.rowid DESC LIMIT 1")
+    .get(actor)?.run_id as string | undefined
+}
+
 export type ChatRunReceipt = { run_id: string; reported_key: string | null; cursor: number }
 
 export function pendingChatReports(db: Db, actor: string, after: number, limit: number): ChatRunReceipt[] {

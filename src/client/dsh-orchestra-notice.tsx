@@ -60,11 +60,14 @@ export const orchestraNoticeDefinition = {
 }
 
 /** The host only mounts turnTail after turn/end. Attention owns a visible node during the active turn. */
-export function OrchestraAttentionNotice({ node, sources, openLocation, openArtifact, downloadArtifact }: {
-  node: { data: Notice }; sources?: DshLocalPanelSources; openLocation?: OpenPanelReceipt
+export function OrchestraAttentionNotice({ node, turnProcess, sources, openLocation, openArtifact, downloadArtifact }: {
+  node: { data: Notice; location?: unknown }; turnProcess?: { foldable?: boolean } | null
+  sources?: DshLocalPanelSources; openLocation?: OpenPanelReceipt
   openArtifact?: OpenChatArtifact; downloadArtifact?: OpenChatArtifact
 }) {
   const notice = node.data
+  const location = node.location as { turn?: { end?: unknown } } | undefined
+  const tailOwnsLinks = Boolean(location?.turn?.end || turnProcess?.foldable)
   if (!notice.final && !notice.attentionLinks?.length) return null
   return <section aria-label={notice.title} role="status" data-orchestra-attention
     style={{ marginBlock: 12, padding: 16, border: `1px solid ${COLOR.line}`, borderRadius: 10,
@@ -76,7 +79,7 @@ export function OrchestraAttentionNotice({ node, sources, openLocation, openArti
       <span style={{ color: COLOR.inkMuted }}>{link.title}</span>
       <ReceiptAction location={link.location} sources={sources} openLocation={openLocation} />
     </div>)}
-    {notice.final && <ArtifactLinks artifacts={notice.artifacts ?? []} openArtifact={openArtifact} downloadArtifact={downloadArtifact} />}
+    {notice.final && !tailOwnsLinks && <ArtifactLinks artifacts={notice.artifacts ?? []} openArtifact={openArtifact} downloadArtifact={downloadArtifact} />}
   </section>
 }
 
@@ -88,8 +91,8 @@ export function OrchestraNoticeTail({ turn, useNotices, openArtifact, downloadAr
   // Attention already owns a visible node; never duplicate it at the completed-turn tail.
   const pending = notices.filter((notice) => !notice.final && !notice.attentionLinks?.length && turn.end && notice.seq > answeredThrough)
   // The final answer may replace a fallback summary. It must never hide the actual deliverables.
-  const artifacts = [...new Map(notices.filter(notice => !notice.final).flatMap(notice => notice.artifacts ?? [])
-    .map(artifact => [artifactVersionKey(artifact.location), artifact])).values()]
+  const artifacts = turn.end ? [...new Map(notices.flatMap(notice => notice.artifacts ?? [])
+    .map(artifact => [artifactVersionKey(artifact.location), artifact])).values()] : []
   // After turn/end the Desktop hides process nodes in a collapsed group. The
   // tail is still visible, and opening an old receipt rechecks its ownership.
   const links = turn.end && sources ? [...new Map(notices.flatMap(notice => notice.attentionLinks ?? [])

@@ -118,6 +118,7 @@ export type ArtifactContentView = ArtifactContentMetadata & (
 
 export function getArtifactContent(
   db: Db, runId: string, artifactId: string, mode: ArtifactContentMode, now: number,
+  acceptedChatText?: { sha256: string; file_name: string },
 ): { item: ArtifactContentView; as_of_seq: number } {
   return withReadTx(db, ({ tx, as_of_seq }) => {
     const row = tx.get<ArtifactRow>('SELECT ' + METADATA_COLUMNS + ARTIFACTS_JOIN
@@ -141,10 +142,12 @@ export function getArtifactContent(
     if (!TEXT_EXTENSION.test(row.file_name)) {
       throw new OrchError('RESOLUTION_NOT_AVAILABLE', '此格式支持下载。预览支持 UTF-8 文本。')
     }
-    const truncated = bytes.byteLength > PREVIEW_MAX_BYTES
+    const previewLimit = acceptedChatText?.sha256 === row.sha256 && acceptedChatText.file_name === row.file_name
+      && bytes.byteLength <= 65536 ? 65536 : PREVIEW_MAX_BYTES
+    const truncated = bytes.byteLength > previewLimit
     let decoded: string
     try {
-      decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, PREVIEW_MAX_BYTES), { stream: truncated })
+      decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, previewLimit), { stream: truncated })
     } catch {
       throw new OrchError('RESOLUTION_NOT_AVAILABLE', '此产物无法按 UTF-8 文本预览')
     }
