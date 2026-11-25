@@ -247,7 +247,7 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
   let loaded = false
   let epoch = 0
   let unstarted: { requestId: string; hash: string; generation: number; draft: SemanticDraft } | undefined
-  const completed = new Map<string, { hash: string; outcome: SemanticOutcome }>()
+  const completed = new Map<string, { hash: string; outcome: SemanticOutcome; stagedRevision?: number }>()
   function reset() {
     epoch++; identity = undefined; draft = undefined; unstarted = undefined; checkpoint = undefined; loaded = false; completed.clear()
   }
@@ -281,8 +281,8 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
       request.signal.throwIfAborted()
       request.assertCurrent()
       const old = completed.get(request.requestId)
-      if (old) return old.hash === request.hash ? structuredClone(old.outcome)
-        : clarification('这条请求的内容已改变，请作为一条新消息提交。')
+      if (old && old.hash !== request.hash) return clarification('这条请求的内容已改变，请作为一条新消息提交。')
+      if (old && old.outcome.kind !== 'ready') return structuredClone(old.outcome)
       if (draft && draft.expires_at <= Date.now()) draft = undefined
       if (!request.input.explicit && isOrdinaryChat(request.input.current.text)) return { kind: 'conversation', ...(draft ? { draft } : {}) }
       const generation = ++epoch
@@ -299,6 +299,15 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
         loaded = true
       }
       const staged = checkpoint?.launchOrigin ? checkpoint : undefined
+      if (old?.outcome.kind === 'ready') {
+        if (old.outcome.launchOrigin && staged?.launchOrigin?.requestKey === old.outcome.launchOrigin.requestKey
+          && staged.revision === old.stagedRevision) return stagedRequest(staged)
+        const sameDraft = old.outcome.draft?.id === draft?.id && old.outcome.draft?.revision === draft?.revision
+        if (!old.outcome.launchOrigin && (sameDraft || unstarted?.requestId === request.requestId && unstarted.generation === generation - 1))
+          return structuredClone(old.outcome)
+        if (draft?.timing === 'held') return { kind: 'held', draft: structuredClone(draft), message: '任务已按后续消息暂缓。请按当前目标和限制重新说明何时开始。' }
+        return clarification('这条旧的执行指令已过期或已被后续消息更新。请按当前目标和限制重新说明何时开始。', draft)
+      }
       if (staged?.launchOrigin && request.launchOrigin && (staged.launchOrigin.requestKey === request.launchOrigin.requestKey
         || staged.launchOrigin.messageKey === request.launchOrigin.messageKey)) {
         if (staged.launchOrigin.inputHash !== request.launchOrigin.inputHash) return clarification('这条请求的内容已改变，请作为一条新消息提交。')
@@ -309,9 +318,11 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
         return { kind: 'held', draft: structuredClone(draft), message: '这条消息已归入暂缓草稿。准备执行时，可直接说明继续哪项任务。' }
       }
       // After a restart a fresh message must explicitly resume. Only human sources and restrictions go to the model.
-      const { launchOrigin: priorLaunch, ...visibleDraft } = draft ?? {}
-      const input: SemanticInput = structuredClone({ ...request.input, ...(draft ? { draft: priorLaunch
-        ? { ...visibleDraft as SemanticDraft, timing: 'held' as const } : visibleDraft as SemanticDraft } : {}) })
+      const input: SemanticInput = structuredClone(request.input)
+      if (draft) {
+        const { launchOrigin, ...visibleDraft } = draft
+        input.draft = structuredClone({ ...visibleDraft, timing: launchOrigin ? 'held' : draft.timing })
+      }
       const alreadyBound = staged?.launchOrigin ? await request.hasPlan?.(staged.launchOrigin) : false
       current()
       let raw: unknown
@@ -337,10 +348,13 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
       const continuesDraft = result.kind === 'ready' && !result.draft && input.draft && input.draft.sources.every(source =>
         result.request.requirements_contract.sources.some(item => item.message_id === source.message_id && item.text === source.text))
       if (alreadyBound && staged && continuesDraft) return stagedRequest(staged)
-      if (alreadyBound && staged && next?.id === staged.id) {
+      if (alreadyBound && staged && (next?.id === staged.id || result.kind === 'discarded')) {
         // A different turn may have committed the plan before the original reply was seen.
         await checkpoints!.write(request.identity, undefined, staged, current)
-        current(); checkpoint = undefined; draft = undefined; next = undefined
+        current()
+        checkpoint = undefined
+        draft = undefined
+        next = undefined
         if (result.kind === 'held' || result.kind === 'clarify' || result.kind === 'discarded')
           return clarification('上一项任务已有正式计划。本轮补充尚未应用，请从原会话的计划回执查看或调整任务。')
         delete result.draft
@@ -367,7 +381,7 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
         }
       }
       draft = next?.launchOrigin ? next : result.draft
-      completed.set(request.requestId, { hash: request.hash, outcome: structuredClone(result) })
+      completed.set(request.requestId, { hash: request.hash, outcome: structuredClone(result), stagedRevision: next?.launchOrigin && next.revision })
       if (completed.size > 128) completed.delete(completed.keys().next().value!)
       return result
     },

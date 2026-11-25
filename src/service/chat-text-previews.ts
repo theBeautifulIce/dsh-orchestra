@@ -21,7 +21,10 @@ export function completedChatTextRefs(db: Db, runId: string, now = Date.now()) {
     const plan = readApprovedTaskPlanForRun(tx, runId)
     if (!plan) return []
     const completed = new Map(tx.all<ReworkBinding & { node_id: string }>(
-      "SELECT node_id,node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND status='done' AND replacement_node_run_id IS NULL ORDER BY attempt,seq", [runId],
+      `SELECT n.node_id,n.node_run_id,n.attempt,n.action_generation FROM node_runs n
+       WHERE n.run_id=? AND n.status='done' AND n.replacement_node_run_id IS NULL AND n.node_run_id=(
+         SELECT latest.node_run_id FROM node_runs latest WHERE latest.run_id=n.run_id AND latest.node_id=n.node_id
+           AND latest.replacement_node_run_id IS NULL ORDER BY latest.attempt DESC,latest.seq DESC LIMIT 1)`, [runId],
     ).map(row => [row.node_id, row]))
     return plan.proposal.deliverables.flatMap((item, index) => {
       const node = completed.get(item.node_id)
@@ -42,8 +45,8 @@ export function previewPublications(db: Db, runId: string, publications: Pick<Ru
   for (const [index, check] of publications.entries()) {
     if (!check.artifact_id || !check.sha256 || !check.file_name) continue
     try {
-      const { item } = getArtifactContent(db, runId, check.artifact_id, 'preview', now)
-      if (item.kind !== 'preview' || item.sha256 !== check.sha256 || item.file_name !== check.file_name) continue
+      const { item } = getArtifactContent(db, runId, check.artifact_id, 'preview', now, { sha256: check.sha256, file_name: check.file_name })
+      if (item.kind !== 'preview' || item.sha256 !== check.sha256 || item.file_name !== check.file_name || !item.text.trim()) continue
       const chars = Array.from(item.text)
       // Reserve a share for every later deliverable. Earlier branch summaries
       // must not exhaust the budget and erase the final joined result.

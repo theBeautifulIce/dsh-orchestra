@@ -42,7 +42,7 @@ type ToolDefinition = Parameters<Context['tools']['register']>[0]
 type ToolExecution = Parameters<ToolDefinition['execute']>[1]
 type Service = Awaited<ReturnType<typeof serveDshOrchestra>>
 type Binding = { identity: string; workspaceId: string; sessionId: string }
-type ManagedTask = { outcome?: ChatOutcome; runId?: string }
+type ManagedTask = { outcome?: ChatOutcome; runId?: string; receiptNote?: string }
 type Turn = { number: number; signal: AbortSignal; human?: Message; noticeRun?: string; managed?: ManagedTask;
   reportOnly?: boolean; autoRoute?: boolean; deferredInput?: boolean; deniedNativeCalls?: number; declined?: Set<string>; lastStatusRun?: string;
   notesOnly?: boolean; brainNotesOnly?: boolean; brainReviewStarted?: boolean; reportReminderSent?: boolean;
@@ -185,9 +185,11 @@ function failedAdmission(turn: Turn | undefined) {
 
 const ADMISSION_FAILED_REMINDER = '本次任务理解失败，尚未启动任何新运行。请直接向用户说明已有通知中的具体原因和下一步。不要调用任何工具、查询不存在的运行或猜测 start 参数。只有新的真人消息才能重试。不要声称已有草稿，除非有实际草稿回执。'
 
-function admissionNotice(outcome: ChatOutcome): Message {
+function admissionNotice(outcome: ChatOutcome, receiptNote?: string): Message {
   // Show a failed admission immediately, even if the source model never finishes.
-  return noticeMessage(uuidv7() as Message['id'], describeChatOutcome(outcome, 'start'), [], [], isAdmissionFailure(outcome)
+  const display = describeChatOutcome(outcome, 'start')
+  if (receiptNote) display.body += '\n' + receiptNote
+  return noticeMessage(uuidv7() as Message['id'], display, [], [], isAdmissionFailure(outcome)
     || (outcome.state === 'plan_ready' && outcome.approval_channel === 'panel'))
 }
 
@@ -665,20 +667,22 @@ export function installNativeChat(host: Context, options: {
     const session = semanticSessions.get(agent) ?? createSemanticSession(options.draftCheckpoints)
     semanticSessions.set(agent, session)
     const acknowledge = async (receipt: ChatTaskOrigin) => {
-      // An accepted plan is authoritative even if a newer draft won the cleanup race.
+      // Cleanup is secondary to a durable plan. An interrupted cleanup can be retried on a later authenticated turn.
       try { await session.acknowledgeLaunch(binding.identity, receipt) }
-      catch (error) { if (!(error instanceof OrchError) || error.code !== 'STALE_GENERATION') throw error }
+      catch (error) {
+        if (!(error instanceof OrchError) || error.code !== 'STALE_GENERATION') return '正式计划已登记，重开会话时会再次核对暂缓草稿。'
+      }
     }
     try {
       const replay = await replayTask(binding, origin, command)
       assertCurrent()
       if (replay) {
-        await acknowledge(origin)
+        const receiptNote = await acknowledge(origin)
         assertCurrent()
         state.managed = { outcome: replay, ...(replay.state === 'started' ? { runId: replay.run_id } : {}) }
         sessions.set(agent, binding)
         reportPump?.schedule(agent)
-        return settle({ ...result, messages: [...result.messages, admissionNotice(replay)] })
+        return settle({ ...result, messages: [...result.messages, admissionNotice(replay, receiptNote)] })
       }
     } catch (error) {
       actionSignal.throwIfAborted()
@@ -795,13 +799,18 @@ export function installNativeChat(host: Context, options: {
       else if (admission.kind === 'ready') {
         try {
           const dispatch = admission.launchOrigin ? { ...origin, ...admission.launchOrigin } : origin
-          const existing = admission.launchOrigin && await replayTask(binding, dispatch, undefined)
+          const existing = dispatch.requestKey !== origin.requestKey ? await replayTask(binding, dispatch, undefined) : undefined
           const outcome = existing ?? await startTask(agent, binding, state, state.human, dispatch, admission.request)
           managed.outcome = outcome
           if (outcome.state === 'started') managed.runId = outcome.run_id
           else session.retainUnstarted(nativeOwnerRequest(state.human)!, fingerprint(state.human))
-          if (admission.launchOrigin) await acknowledge(dispatch)
-          if (existing) { sessions.set(agent, binding); reportPump?.schedule(agent) }
+          if (admission.launchOrigin) managed.receiptNote = await acknowledge(dispatch)
+          assertCurrent()
+          if (existing) {
+            managed.receiptNote = ['已找回此前登记的正式计划。这个回执沿用原计划的目标和限制，后续改动可在原计划中处理。', managed.receiptNote].filter(Boolean).join('\n')
+            sessions.set(agent, binding)
+            reportPump?.schedule(agent)
+          }
         } catch (error) {
           session.retainUnstarted(nativeOwnerRequest(state.human)!, fingerprint(state.human))
           throw error
@@ -814,7 +823,7 @@ export function installNativeChat(host: Context, options: {
       managed.outcome = errorReceipt(error)
     }
     if (!managed.outcome) return settle(result)
-    return settle({ ...result, messages: [...result.messages, admissionNotice(managed.outcome)] })
+    return settle({ ...result, messages: [...result.messages, admissionNotice(managed.outcome, managed.receiptNote)] })
   })
   host.on('session/event', (session, event) => {
     if (event.type !== 'turn/end') return
