@@ -4,6 +4,7 @@ import { gunzipSync } from 'node:zlib'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { sha256Hex } from '../src/core/canonical.ts'
+import { assertClientInject } from '../tools/updater/package-contract.mjs'
 
 const baseFiles = new Set([
   'package/package.json', 'package/lib/index.js', 'package/lib/index.d.ts', 'package/lib/client.js',
@@ -16,24 +17,6 @@ const publicDocs = new Set([
   'package/docs/assets/readme/results.png', 'package/docs/assets/readme/workflow.png',
 ])
 const guideFiles = ['docs/runbook.md', 'docs/trial-circles.md']
-// The pinned G5 predecessor predates the native slash menu. Both builds
-// advertise 0.1.0, so the rehearsal's existing previous role selects this contract.
-const previousClientInject = [
-  '@deepseek-ai/dsh-client-locale',
-  '@deepseek-ai/dsh-client-ui-settings',
-  '@deepseek-ai/dsh-client-ui-renderer',
-  '@deepseek-ai/dsh-client-ui-layout',
-  '@deepseek-ai/dsh-client-ui-sidebar',
-  '@deepseek-ai/dsh-client-ui-workspace',
-]
-const candidateClientInject = [...previousClientInject,
-  '@deepseek-ai/dsh-client-ui-input-trigger',
-  '@deepseek-ai/dsh-client-ui-conversation',
-  '@deepseek-ai/dsh-client-ui-chat',
-  '@deepseek-ai/dsh-client-ui-sidebar-right',
-  '@deepseek-ai/dsh-client-ui-sidebar-browser',
-  '@deepseek-ai/dsh-client-ui-commands',
-]
 
 export function inspectPackage(path: string, options: { expectedSha256?: string; previous?: boolean } = {}) {
   const archive = resolve(path)
@@ -75,12 +58,7 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
     || manifest.dsh?.client?.platform !== 'web' || phase !== 'S2') {
     throw new Error('Package manifest, advertised DSH client or default phase has changed')
   }
-  const expectedInject = options.previous ? previousClientInject : candidateClientInject
-  const inject = manifest.dsh.client.inject
-  if (!Array.isArray(inject) || inject.length !== expectedInject.length
-    || !expectedInject.every((dependency) => inject.includes(dependency))) {
-    throw new Error('DSH client inject must contain exactly: ' + expectedInject.join(', '))
-  }
+  const clientInjectProtocol = assertClientInject(manifest.dsh.client.inject, options.previous ? 'previous' : 'candidate')
   if (!options.previous && !patch.startsWith('[')) throw new Error('DSH bundle patch must contain a top-level sequence')
   if (!read('lib/client.js').toString('utf8').includes('window.__ModuleLoader__.load')
     || !read('lib/index.js').toString('utf8').includes('serveDshOrchestra')) throw new Error('Packaged entries are incomplete')
@@ -94,7 +72,8 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
   }
   if (sha256Hex(readFileSync(archive)) !== sha256) throw new Error('Package changed during inspection')
   return { archive, sha256, bytes: bytes.length, entries, migrations, default_phase: phase,
-    build_version: String(manifest.version), dsh_patch_has_sequence: patch.startsWith('['), config_sha256: sha256Hex(config) }
+    build_version: String(manifest.version), client_inject_protocol: clientInjectProtocol,
+    dsh_patch_has_sequence: patch.startsWith('['), config_sha256: sha256Hex(config) }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

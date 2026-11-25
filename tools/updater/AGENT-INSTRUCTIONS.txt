@@ -1,0 +1,27 @@
+任务：把用户指定版本的 DSH Orchestra 更新到其现有 DSH 安装。
+
+工具版本：1.1.0。入口位于仓库 tools/updater/，或完整解压的工具目录。Update-Orchestra.ps1、update-dsh-orchestra.mjs、inspect-package.mjs、package-contract.mjs 必须保持同目录；不要只替换单个文件。
+只操作用户指定的 profile。保持插件范围，不修改 DSH 宿主源码、二进制、兼容性豁免或用户账本。
+
+1. 明确输入是源码目录还是已经构建的 tgz。用户若未要求拉取远端，不自动 pull/reset/切分支；当前工作树中的修复是源码模式的构建输入。
+2. 确认真实 DSH_HOME 和 profile，默认 desktop。Desktop 使用该安装自带的 resources/runtime/cli/bin/dsh.cmd，不能用 npm 全局dsh。用户的自定义启动器可能设置了不同的 DSH_HOME。
+3. 可先以 --plan --json 做只读核对。实际更新前让目标宿主正常退出；不要强杀用户进行中的任务。已获得的更新授权不用重复请求。
+4. 调用：
+   node update-dsh-orchestra.mjs --repo "<源码绝对路径>" --dsh "<正确的DSH命令>" --dsh-home "<实际DSH_HOME>" --profile desktop --json
+   或：
+   node update-dsh-orchestra.mjs --package "<tgz绝对路径>" --dsh "<正确的DSH命令>" --dsh-home "<实际DSH_HOME>" --profile desktop --json
+   如本次需要完整项目门禁，在源码模式加 --test。工具已经默认执行锁文件依赖安装、typecheck 和 build。
+5. 同时检查进程退出码与 JSON：
+   exit 0 + installed-verified：磁盘安装与全部包文件核验成功，提示用户重新打开宿主。
+   exit 0 + already-current：已装内容与持久来源一致，无须重复安装。
+   exit 1 / failed：读取 stage、error、receipt、operation.log，按实际失败原因处理。
+6. 如果宿主包管理器返回成功但文件核验失败，不得把它改写成成功。保留候选与备份，修复真正的安装问题后再核验。
+7. 不预先 remove 插件，不删除整个node_modules/锁文件/store，不使用 --force 跳过兼容性问题。不得为了安装通过修改包检查白名单，除非项目包协议确有经过审查的变更。
+8. 新版本运行前的包安装失败可用 recovery.json 中的官方命令和旧包恢复；新版本已运行或迁移账本后，先按升级运行手册判断兼容性。不得自动覆盖账本或承诺任意失败均已回滚。
+9. packages/<SHA256>/dsh-orchestra.tgz 是持久file:依赖来源，不是执行结束可删除的临时文件。备份和日志保留给用户。
+10. 先确认回执 updaterVersion 为 1.1.0。当前候选协议为完整12项；旧7/9项提示过时并拒绝，不按长度猜旧版，不删除校验。源码inspect失败时用candidatePackage定位已生成的包。
+11. 最终报告：目标profile/home、安装包版本和SHA256、实际核对文件数、回执路径、是否需重开DSH。安装核验成功不等于已经在真实宿主执行了一条任务；把这两个状态分别报告。
+
+工具本身验证：node --test test/*.test.mjs
+定向验证时必须将 ORCHESTRA_TEST_ARCHIVE 指向本次实际生成的插件tgz，执行实包与进程流程测试；缺实包而跳过的测试不能记为通过。
+Windows PowerShell/cmd及真实Desktop升级应在用户实际环境确认，不引用Linux离线测试冒称已完成Windows实测。

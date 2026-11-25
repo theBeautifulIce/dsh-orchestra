@@ -82,11 +82,32 @@ Starting work and accepting its results are separate decisions. Required approva
 | Build | How to get it |
 | --- | --- |
 | Current `main` | Build from source using the [commands below](#development-and-validation), or install a package supplied with its matching commit and SHA-256. |
-| Published beta snapshot | Download [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz). The [prerelease page](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1) provides `SHA256SUMS.txt`; use the [tagged README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.en.md) for that snapshot's instructions. |
+| Published beta snapshot | Download [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz). The [prerelease page](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1) provides `SHA256SUMS.txt`; use the [tagged README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.en.md) for that snapshot's features and usage. |
 
-1. Install the chosen `.tgz` in the **DSH Desktop plugin manager** and reload the plugin. Orchestra appears in the sidebar.
-2. Open a workspace and a normal conversation within it. In **Orchestra → Settings**, check the connection, planner model, worker models, and automatic task routing. The personal adapter enables routing of explicit work requests by default; the planner follows the conversation model unless you choose another configured model.
-3. Send a task with clear inputs and a deliverable. Use the task card to follow execution and handle any required action.
+### Install into DSH Desktop
+
+**Desktop currently has no plugin-manager file picker for installing a local `.tgz`.** Install local packages with the CLI bundled with that Desktop installation. On first use, open Desktop to initialize its profile, then choose **Quit** from the tray or application menu. Closing the window may only hide it. This follows the [official DSH Desktop instructions](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/desktop/README.md#bundled-command-runtime).
+
+For the current `main`, run `git pull --ff-only origin main` while on your local `main` branch and confirm that it succeeds. With the Node and pnpm versions required by [`package.json`](package.json) available, open PowerShell in the repository root and run:
+
+```powershell
+$DshDesktopCommand = 'D:\aboutAI\deepseekharness-desktop\resources\runtime\cli\bin\dsh.cmd'
+.\tools\updater\Update-Orchestra.ps1 -Repo (Get-Location).Path -Dsh $DshDesktopCommand
+```
+
+Set `$DshDesktopCommand` to the command inside your actual Desktop installation. The updater builds and checks the package, backs up the existing plugin, installs through the official CLI, and compares the installed files with the package. It uses your current local source; it does not pull Git changes. For a custom data directory, add `-DshHome '<absolute path to your DSH_HOME>'`. By default it uses the current `DSH_HOME`, or `.dsh` in your user directory if unset. See the [updater guide](tools/updater/README.md) for other options and the agent entry point.
+
+If you already have a verified `.tgz`, you can install it manually. The following command uses the Desktop CLI selected above. Replace the package path with its actual absolute path and set `$env:DSH_HOME` if your Desktop uses a custom data directory:
+
+```powershell
+$OrchestraPackage = 'D:\packages\dsh-orchestra-0.1.0-beta.1.tgz'
+& $DshDesktopCommand plugin --profile desktop add $OrchestraPackage
+if ($LASTEXITCODE -ne 0) { throw 'Orchestra installation failed. Check the command output.' }
+```
+
+The `desktop` profile belongs to that Desktop installation; an npm-global `dsh` cannot replace its bundled CLI. Keep the local package for later dependency installation or recovery. The updater above checks the current `main` package contract. Install a historical beta snapshot through the official CLI above, and use its tagged README for its features and usage.
+
+After the command succeeds, **reopen Desktop** and select **Orchestra** in the sidebar. If you use the updater, it also checks the installed files. Installation on disk and loading the new code are separate steps. Open a workspace and a normal conversation within it. In **Orchestra → Settings**, check the connection, planner model, worker models, and automatic task routing. The personal adapter enables routing of explicit work requests by default; the planner follows the conversation model unless you choose another configured model. Send a task with clear inputs and a deliverable, then use its task card to follow execution and handle any required action.
 
 The package targets DSH `0.2.2`. Recorded native chat dispatch and approval acceptance used Desktop `0.2.2-rc.5`. Full artifact preview targets its native Browser and compatible hosts. Check the health panel for the capabilities available in your host.
 
@@ -203,7 +224,7 @@ New-Item -ItemType Directory -Force .tmp/packages | Out-Null
 pnpm pack --pack-destination .tmp/packages
 ```
 
-Install the resulting `.tgz` in the intended DSH profile and reload the plugin. Pulling source changes does not update an already installed plugin. For a self-managed web profile, use `dsh plugin --profile web add <absolute-path-to-tgz>` and configure the authenticated host transport and permissions.
+Install the resulting `.tgz` in the intended profile using the [Desktop installation steps above](#install-into-dsh-desktop), then reopen Desktop. Pulling source changes does not update an already installed plugin. For a self-managed web profile, use `dsh plugin --profile web add <absolute-path-to-tgz>` and configure the authenticated host transport and permissions.
 
 | Path | Responsibility |
 | --- | --- |
