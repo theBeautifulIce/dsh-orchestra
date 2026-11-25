@@ -1546,6 +1546,30 @@ it('uses the production semantic transport for previously unseen task wording an
   } finally { await test.close() }
 })
 
+it('keeps a human-named task title inside the approved plan hash and scopes status to its signed source', async () => {
+  const test = await fixture({ interpret: input => ({ kind: 'task', relation: 'new', timing: 'immediate',
+    quote: input.current.text, constraints: [] }) })
+  try {
+    const human = test.session('work', 'semantic-named-title')
+    const title = '周报-定稿'
+    await human.admit(user(`/orchestra 请创建任务「${title}」并整理这批记录`))
+    const accepted = await human.call()
+    expect(accepted).toMatchObject({ state: 'started', title })
+
+    const { db } = test.services.get('semantic-named-title')!.orchestra
+    const taskId = db.raw.prepare('SELECT task_id FROM runs WHERE run_id=?').get(accepted.run_id)?.task_id as string
+    const plan = db.raw.prepare('SELECT proposal_json FROM task_plans WHERE owner_task_id=?').get(taskId) as { proposal_json: string }
+    expect(JSON.parse(plan.proposal_json)).toMatchObject({ title })
+
+    // Simulate an older approved plan whose generated title expanded the human's exact name.
+    db.raw.prepare('UPDATE tasks SET title=? WHERE task_id=?').run('旧版本扩写标题', taskId)
+    await expect(human.call({ action: 'status', task_title: title })).resolves.toMatchObject({ run_id: accepted.run_id })
+    await expect(human.call({ action: 'status', task_title: '另一个任务' })).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+    await expect(human.call({ action: 'status', run_id: taskId })).resolves.toMatchObject({ run_id: accepted.run_id })
+    await expect(human.call({ action: 'status', run_id: 'tsk_unrelated_task' })).resolves.toMatchObject({ state: 'error', code: 'FORBIDDEN' })
+  } finally { await test.close() }
+})
+
 it('replays a durable admission after the live Agent is recreated even when the model becomes unavailable', async () => {
   const test = await fixture()
   try {

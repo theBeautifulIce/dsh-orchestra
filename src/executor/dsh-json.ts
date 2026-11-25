@@ -54,11 +54,15 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
   const runtime = llm
   const admission = purpose === 'admission'
   let active = 0
-  const waiting = new Set<() => void>()
+  const running = new Set<AbortSignal>()
+  const waiting = new Map<() => void, () => void>()
+  // A cancelled caller may still own its provider slot. Queue only while at
+  // least one live operation can realistically finish and hand off that slot.
+  const allDraining = () => active === 2 && running.size === active && [...running].every(signal => signal.aborted)
   const failure = (reason: AdmissionFailure) => admission
     ? new OrchError('SERVICE_UNAVAILABLE', admissionFailures[reason], { reason }) : unavailable()
   function release() {
-    const next = waiting.values().next().value
+    const next = waiting.keys().next().value
     if (next) next()
     else active--
   }
@@ -71,16 +75,17 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
     const deadline = performance.now() + (admission ? SEMANTIC_ADMISSION_TIMEOUT_MS : 8_000)
     if (active < 2) active++
     else {
-      if (!admission || waiting.size >= 2) throw failure('semantic_busy')
+      if (!admission || waiting.size >= 2 || allDraining()) throw failure('semantic_busy')
       // Absorb short bursts without opening another provider stream or extending
       // the original deadline. A caller that disappears cannot be dispatched.
       await new Promise<void>((resolve, reject) => {
         const cleanup = () => { waiting.delete(grant); clearTimeout(timer); signal.removeEventListener('abort', cancel) }
         const grant = () => { cleanup(); resolve() }
         const cancel = () => { cleanup(); reject(unavailable()) }
-        const timer = setTimeout(() => { cleanup(); reject(failure('semantic_busy')) }, 8_000)
+        const busy = () => { cleanup(); reject(failure('semantic_busy')) }
+        const timer = setTimeout(busy, 8_000)
         timer.unref()
-        waiting.add(grant)
+        waiting.set(grant, busy)
         signal.addEventListener('abort', cancel, { once: true })
         if (signal.aborted) cancel()
       })
@@ -92,6 +97,7 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
     const timeout = setTimeout(() => local.abort(timeoutReason), Math.max(1, deadline - performance.now()))
     timeout.unref()
     const lifetime = AbortSignal.any([local.signal, signal])
+    running.add(lifetime)
     const current = () => {
       lifetime.throwIfAborted()
       try { assertCurrent() } catch { throw new JsonFailure('semantic_context_changed') }
@@ -170,10 +176,14 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
       return raw
     })()
     // The two slots cover both attempts and remain occupied until actual work settles.
-    void work.then(release, release)
+    const finished = () => { running.delete(lifetime); release() }
+    void work.then(finished, finished)
     let onAbort: () => void = () => {}
     const aborted = new Promise<never>((_resolve, reject) => {
-      onAbort = () => reject(unavailable())
+      onAbort = () => {
+        if (allDraining()) for (const busy of waiting.values()) busy()
+        reject(unavailable())
+      }
       lifetime.addEventListener('abort', onAbort, { once: true })
       if (lifetime.aborted) onAbort()
     })

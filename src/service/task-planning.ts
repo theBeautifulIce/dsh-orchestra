@@ -1,4 +1,4 @@
-import { explicitApprovalNames, requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
+import { explicitApprovalNames, requestedTaskTitle, requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
 import { canStartAtRequiredGate, requirementIssues } from './task-requirement-checks.ts'
 import { taskAccess } from '../core/task-access.ts'
 import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
@@ -812,7 +812,8 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         selectExecutionModel(profiles, { complexity: step.complexity, reason: step.model_reason,
           preferredModel: step.preferred_model_ref })
       }
-      return { kind: 'proposal', proposal: parsed.data }
+      const title = requestedTaskTitle(brief.requirements_contract)
+      return { kind: 'proposal', proposal: title ? { ...parsed.data, title } : parsed.data }
     }
     const none = noCandidateSchema.safeParse(candidate)
     if (none.success) return { kind: 'no_candidate', reason: none.data.reason }

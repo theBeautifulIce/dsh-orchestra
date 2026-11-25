@@ -91,6 +91,16 @@ export const constraintBindingSchema = z.strictObject({
 
 export type TaskRequirement = z.infer<typeof taskRequirementSchema>
 export type RequirementsContract = z.infer<typeof requirementsContractSchema>
+
+/** Preserve an explicitly named task from the human request before the proposed plan is hashed. */
+export function requestedTaskTitle(contract: RequirementsContract | undefined): string | undefined {
+  if (!contract) return
+  const naming = /(?:^|[。！？；;，,\n])\s*(?:\/[^\s]+\s+)?(?:请(?:帮我)?\s*)?(?:(?:执行|创建|启动|新建)(?:一个|一项)?任务\s*|(?:将|把)?(?:本次)?任务(?:的)?(?:名称|标题|名)\s*(?:改为|设为|定为|为|[：:])\s*|(?:please\s+)?(?:run|start|create)\s+(?:a |the )?task\s+(?:named|called|titled)\s*)[「《“"]([^」》”"\r\n]{1,200})[」》”"]/giu
+  for (let i = contract.sources.length - 1; i >= 0; i--) {
+    const names = new Set([...contract.sources[i]!.text.matchAll(naming)].map(match => match[1]!.trim()).filter(Boolean))
+    if (names.size) return names.size === 1 ? [...names][0] : undefined
+  }
+}
 export type ConstraintBinding = z.infer<typeof constraintBindingSchema>
 
 /** A revision preserves earlier restrictions. Relaxing them requires a separately reviewed task. */

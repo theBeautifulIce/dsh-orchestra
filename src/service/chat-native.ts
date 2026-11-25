@@ -9,6 +9,7 @@ import { sha256Hex } from '../core/canonical.ts'
 import { ORCHESTRA_COMMUNICATION_GUIDE, ORCHESTRA_REPORT_ONLY_REMINDER } from '../core/communication.ts'
 import { formatChatApproval } from '../core/chat-approval-text.ts'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
+import { requestedTaskTitle } from '../core/task-requirements.ts'
 import { OrchError } from '../core/errors.ts'
 import { chatArtifactLink, chatAttentionLink, receiptLocation, type ChatArtifactLink, type ChatAttentionLink } from '../core/receipt-location.ts'
 import { describeDecision, decisionActionLabel } from '../core/decision-display.ts'
@@ -33,7 +34,7 @@ import { listNodes, readRunNodeDisplay } from './queries/nodes.ts'
 import { withReadTx } from './queries/read-tx.ts'
 import { getRun } from './queries/runs.ts'
 import { getTaskSummary } from './queries/tasks.ts'
-import { planInputSchema } from './task-planning.ts'
+import { planInputSchema, readApprovedTaskPlanForRun } from './task-planning.ts'
 
 type Agent = AgentHandle['agent']
 type Message = Parameters<Agent['followup']>[0]
@@ -995,7 +996,8 @@ export function installNativeChat(host: Context, options: {
     }
     const scopedRun = turn.noticeRun ?? turn.managed?.runId ?? turn.artifactRead?.runId
     const requestedRun = 'run_id' in input ? input.run_id : undefined
-    if ((turn.noticeRun || turn.managed) && (!scopedRun || (requestedRun !== undefined && requestedRun !== scopedRun))) {
+    const scopedTaskLookup = Boolean(scopedRun && input.action === 'status' && requestedRun?.startsWith('tsk_'))
+    if ((turn.noticeRun || turn.managed) && (!scopedRun || (requestedRun !== undefined && requestedRun !== scopedRun && !scopedTaskLookup))) {
       throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
     }
     if (!options.hasService(binding)) throw new OrchError('NOT_FOUND', '当前会话还没有编排运行')
@@ -1009,11 +1011,17 @@ export function installNativeChat(host: Context, options: {
       if (input.action !== 'status' && !selectedRun && !taskTitle) throw new OrchError('NOT_FOUND', '请先查看对应任务的状态')
       const runId = taskTitle && !scopedRun ? chatRunByTitle(db, options.operator, taskTitle) : chatRun(db, options.operator, selectedRun)
       if (!runId) throw new OrchError('NOT_FOUND', '当前会话没有对应的编排运行')
-      if (scopedRun && taskTitle && getRun(db, runId).task_title !== taskTitle)
+      if (scopedTaskLookup && getRun(db, runId).task_id !== requestedRun)
         throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
+      if (scopedRun && taskTitle && getRun(db, runId).task_title !== taskTitle) {
+        // Older confirmed plans may have expanded the human's exact task title.
+        // Its own signed request can resolve a status read in this run only.
+        const sourceTitle = input.action === 'status' && withReadTx(db, ({ tx }) =>
+          requestedTaskTitle(readApprovedTaskPlanForRun(tx, runId)?.brief.requirements_contract))
+        if (sourceTitle !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
+      }
       if (input.action === 'status') {
         const run = describeRun(service, runId, options.operator)
-        if (scopedRun && taskTitle && run.title !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
         const artifact_links = describeChatArtifacts(db, run, binding)
         const result = { ...run, nodes: describeNodes(db, runId), artifact_links,
           ...(run.presentation.linksOnly && { original_titles: artifact_links.map(link => link.title) }),

@@ -96,6 +96,37 @@ it('queues two admission bursts FIFO, rejects overflow, and never exceeds two li
   expect(peak).toBeLessThanOrEqual(2)
 })
 
+it('rejects queued admission promptly when both occupied provider slots are cancelled', async () => {
+  const gate = Promise.withResolvers<void>()
+  const started: number[] = []
+  const complete = createDshJsonCompletion({ async prepareCall(config: unknown) {
+    return { config, async *stream() {
+      started.push(started.length)
+      await gate.promise
+      yield { type: 'block-end', block: { type: 'text', text: '{}' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+  } } as unknown as Runtime, 'admission')!
+  const occupiedControllers = [new AbortController(), new AbortController()]
+  const occupied = occupiedControllers.map((controller, index) => complete(route, 'interpret', { index }, controller.signal, current))
+    .map(promise => promise.catch(error => error))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(started).toEqual([0, 1])
+
+  const queued = [0, 1].map(index => complete(route, 'interpret', { queued: index }, new AbortController().signal, current)
+    .then(value => ({ value }), error => ({ error })))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  occupiedControllers.forEach(controller => controller.abort())
+
+  await expect(Promise.all(occupied)).resolves.toHaveLength(2)
+  await expect(Promise.all(queued)).resolves.toEqual([
+    { error: expect.objectContaining({ code: 'SERVICE_UNAVAILABLE', details: { reason: 'semantic_busy' } }) },
+    { error: expect.objectContaining({ code: 'SERVICE_UNAVAILABLE', details: { reason: 'semantic_busy' } }) },
+  ])
+  expect(started).toEqual([0, 1])
+  gate.resolve()
+})
+
 it('times out an admission request while it is still waiting for a provider slot', async () => {
   vi.useFakeTimers()
   try {
