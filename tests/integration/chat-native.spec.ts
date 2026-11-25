@@ -1960,3 +1960,59 @@ it('a failed source notice cannot starve another run in the same conversation', 
     expect(test.notices).toHaveLength(2)
   } finally { await test.close(); vi.useRealTimers() }
 })
+
+it('reports the actual pre-admission failure immediately and bounds tool retries without launching a run', async () => {
+  const test = await fixture({ interpret: () => { throw new Error('SYNTHETIC_PRIVATE_PROVIDER_PAYLOAD') } })
+  try {
+    const human = test.session('work', 'failed-admission')
+    const request = user('/orchestra 整理办公事项并交付报告')
+    const admission = await human.admit(request)
+    expect(admission).toMatchObject({ kind: 'enter', messages: [request, expect.objectContaining({
+      source: { kind: 'plugin:dsh-orchestra', form: 'notice', final: true, summary: expect.stringContaining('响应中断') },
+      content: [{ type: 'text', text: expect.stringContaining('本次未启动新任务') }],
+    })] })
+    const status = await human.invoke({ action: 'status', task_title: '这次任务' })
+    const failed = JSON.parse(status.text)
+    expect(failed).toMatchObject({ state: 'error', code: 'SERVICE_UNAVAILABLE', reason: 'semantic_stream_failed' })
+    expect(failed).not.toHaveProperty('run_id')
+    expect(status.summary).toContain('不要调用任何工具')
+    expect(status.summary).not.toContain('SYNTHETIC_PRIVATE_PROVIDER_PAYLOAD')
+    expect(human.checkTool('read')).toContain('尚未启动任何新运行')
+    const report = await human.admitMany([], false, false)
+    expect(report).toMatchObject({ kind: 'enter', messages: [expect.objectContaining({
+      content: [{ type: 'text', text: expect.stringContaining('只有新的真人消息才能重试') }],
+    })] })
+    // Wrong arguments cannot start a task, query an old run, or obscure the real failure.
+    expect(await human.call({ action: 'start', task_title: '新标题', goal: '不要执行' })).toEqual(failed)
+    expect(await human.call({ action: 'status', run_id: 'unrelated-run' })).toEqual(failed)
+    expect(await human.admitMany([], false, false)).toEqual({ kind: 'reject' })
+    expect(test.interpret).toHaveBeenCalledTimes(1)
+    expect(test.planner).not.toHaveBeenCalled()
+    expect(test.serve).not.toHaveBeenCalled()
+    // A new real human message is still allowed to retry, under the original contract.
+    test.interpret.mockImplementation(chatSemanticFixture)
+    await human.admit(user('/orchestra 整理办公事项并交付报告'))
+    expect(await human.call()).toMatchObject({ state: 'started' })
+    expect(count(test.services.get('failed-admission')!, 'runs')).toBe(1)
+  } finally { await test.close() }
+})
+
+it('a failed-admission tool loop does not discard a new owner message queued in the same turn', async () => {
+  const test = await fixture({ interpret: () => { throw new Error('synthetic unavailable') } })
+  try {
+    const human = test.session('work', 'failure-queue')
+    await human.admit(user('/orchestra 整理一份办公事项报告'))
+    await human.call({ action: 'status' })
+    await human.admitMany([], false, false)
+    await human.call({ action: 'status' })
+    const fresh = user('/orchestra 整理另一份办公事项报告')
+    const deferred = await human.admit(fresh, true, false)
+    expect(deferred).toMatchObject({ kind: 'enter' })
+    expect(human.nextTurn).toContainEqual(fresh)
+    expect(test.planner).not.toHaveBeenCalled()
+    test.interpret.mockImplementation(chatSemanticFixture)
+    await human.admit(fresh, false)
+    expect(await human.call()).toMatchObject({ state: 'started' })
+    expect(count(test.services.get('failure-queue')!, 'runs')).toBe(1)
+  } finally { await test.close() }
+})

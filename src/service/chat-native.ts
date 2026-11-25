@@ -43,7 +43,8 @@ type Binding = { identity: string; workspaceId: string; sessionId: string }
 type ManagedTask = { outcome?: ChatOutcome; runId?: string }
 type Turn = { number: number; signal: AbortSignal; human?: Message; noticeRun?: string; managed?: ManagedTask;
   reportOnly?: boolean; autoRoute?: boolean; deferredInput?: boolean; deniedNativeCalls?: number; declined?: Set<string>; lastStatusRun?: string;
-  notesOnly?: boolean; brainNotesOnly?: boolean; brainReviewStarted?: boolean; reportReminderSent?: boolean }
+  notesOnly?: boolean; brainNotesOnly?: boolean; brainReviewStarted?: boolean; reportReminderSent?: boolean;
+  admissionFailureCalls?: number; admissionFailureReminderSent?: boolean }
 type NativeApproval = {
   request(input: { agent: Agent; toolName: string; callId?: ToolExecution['callId']; reason: string; signal: AbortSignal }): Promise<string>
 }
@@ -53,6 +54,7 @@ const prompt = [
   ORCHESTRA_COMMUNICATION_GUIDE,
   'The host admits explicit tasks before this model step. Use the notices and tool summaries to answer in the operator’s language. Leave execution to Orchestra.',
   'Acknowledge admission once. Do not repeat the request. Routine progress stays in the panel unless requested. Do not execute task work yourself.',
+  'When the notice says task understanding failed and no run started, do not call any tool, including orchestra_task start or status. Report that exact reason and finish. Do not claim a saved draft without a recorded draft receipt. Only a new human message can retry admission.',
   'Only a fresh receipt for this exact request proves admission. Plans, promises, user messages and old receipts do not prove admission. Do not claim a start or schedule without that receipt. Use status for existing tasks. Claim successful delivery only with recorded acceptance.',
   'For planning or startup failure, state the recorded reason and next step. Do not invent missing inputs or request information already supplied. Do not suggest a nonexistent run or a new command as a repair. If automatic routing settings could not be read, relay the notice. If no notice exists for a dispatch request, direct the operator to the configured task command in Orchestra settings. Never assume its name.',
   'Greetings, discussion, explanation, advice, brainstorming and capability questions remain ordinary conversation. Do not create tasks for them.',
@@ -141,8 +143,21 @@ function noticeMessage(id: Message['id'], display: ReturnType<typeof describeCha
   } as unknown as Message
 }
 
+function isAdmissionFailure(outcome: ChatOutcome | undefined): outcome is Extract<ChatOutcome, { state: 'error' }> {
+  return outcome?.state === 'error' && outcome.reason?.startsWith('semantic_') === true
+}
+
+function failedAdmission(turn: Turn | undefined) {
+  const outcome = turn?.managed?.outcome
+  return turn?.human && !turn.noticeRun && !turn.reportOnly && !turn.deferredInput && !turn.managed?.runId
+    && isAdmissionFailure(outcome) ? outcome : undefined
+}
+
+const ADMISSION_FAILED_REMINDER = '本次任务理解失败，尚未启动任何新运行。请直接向用户说明已有通知中的具体原因和下一步。不要调用任何工具、查询不存在的运行或猜测 start 参数。只有新的真人消息才能重试。不要声称已有草稿，除非有实际草稿回执。'
+
 function admissionNotice(outcome: ChatOutcome): Message {
-  return noticeMessage(uuidv7() as Message['id'], describeChatOutcome(outcome, 'start'))
+  // Show a failed admission immediately, even if the source model never finishes.
+  return noticeMessage(uuidv7() as Message['id'], describeChatOutcome(outcome, 'start'), [], [], isAdmissionFailure(outcome))
 }
 
 function describeBlocking(db: Service['orchestra']['db'], runId: string) {
@@ -534,6 +549,19 @@ export function installNativeChat(host: Context, options: {
       if (noticeRuns.length && (previous.human || previousRun) && noticeRuns.some((runId) => runId !== previousRun)) previous.reportOnly = true
       if (previous.managed || previous.noticeRun || previous.reportOnly) {
         if (newInputs.length > 0) return deferInputs(previous)
+      }
+      // The failed admission card is already visible. Give the model one
+      // reporting opportunity, then end a repeated tool loop. Do not discard
+      // fresh human input, a queued turn, or a notice from another run.
+      if (failedAdmission(previous) && !messages.length && !agent.inbox.nextTurn.length && !agent.inbox.nextStep?.length) {
+        if (previous.admissionFailureReminderSent && (previous.admissionFailureCalls ?? 0) >= 2) return { kind: 'reject' }
+        if ((previous.admissionFailureCalls ?? 0) >= 1 && !previous.admissionFailureReminderSent) {
+          previous.admissionFailureReminderSent = true
+          const reminder = { id: uuidv7(), role: 'user',
+            source: { kind: ORCHESTRA_MESSAGE_SOURCE, form: 'report_instruction' },
+            content: [{ type: 'text', text: ADMISSION_FAILED_REMINDER }] } as unknown as Message
+          return { ...result, messages: [...result.messages, reminder] }
+        }
       }
       // A denied execution tool must not erase the final explanation. The old
       // two-denial reject ended notice turns as blocked before any reply.
@@ -1026,6 +1054,10 @@ export function installNativeChat(host: Context, options: {
   host.tools.guard((execution) => {
     const turn = execution.agent && turns.get(execution.agent)
     if (!turn || execution.name === TOOL_NAME) return
+    if (failedAdmission(turn)) {
+      turn.admissionFailureCalls = (turn.admissionFailureCalls ?? 0) + 1
+      return ADMISSION_FAILED_REMINDER
+    }
     if (turn.brainNotesOnly) return '此回合只可定位任务和审阅主脑便条。'
     if (turn.managed || turn.noticeRun || turn.reportOnly) {
       turn.deniedNativeCalls = (turn.deniedNativeCalls ?? 0) + 1
@@ -1087,6 +1119,18 @@ export function installNativeChat(host: Context, options: {
     async execute(input, execution) {
       const action = (input as { action?: ChatAction } | null)?.action
       try {
+        // No command is accepted on a failed-admission turn. Even an invalid
+        // start payload must get the real receipt, not a misleading goal-length
+        // error. No lookup, new run, or access to older runs occurs here.
+        const agent = execution.agent
+        const turn = agent && turns.get(agent)
+        const binding = agent && options.bindingFor(agent)
+        const failed = failedAdmission(turn)
+        if (agent && turn && binding && failed && isCurrent(agent, binding, turn) && !execution.signal.aborted) {
+          turn.admissionFailureCalls = (turn.admissionFailureCalls ?? 0) + 1
+          const receipt = respondOutcome(failed, 'start')
+          return { ...receipt, summary: receipt.summary + '\n' + ADMISSION_FAILED_REMINDER }
+        }
         const result = await execute(input, execution)
         if ('state' in result) return respondOutcome(result, action)
         if ('deliveryReview' in result && result.deliveryReview) {
