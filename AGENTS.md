@@ -1,5 +1,9 @@
 ## Agent skills
 
+### Commit attribution
+
+Preserve the actual human author and committer when maintaining commit history. Do not add an AI assistant as an author, committer, or `Co-Authored-By` entry unless the repository owner explicitly requests that attribution.
+
 ### Issue tracker
 
 GitHub Issues on `theBeautifulIce/dsh-orchestra`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.

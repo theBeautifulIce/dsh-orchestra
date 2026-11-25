@@ -21,6 +21,10 @@ export const G6_REGISTRY_PATH = 'docs/gates/G6-evidence-registry.json'
 export const G6_INDEPENDENT_PATH = 'docs/gates/G6-independent.json'
 export const G6_PUBLICATION_PATH = 'docs/gates/G6-release.json'
 export const G5_SIGNED_COMMIT = '8abbf0f0bc14c0a9e006625528d38e7288ccefba'
+// The attribution-only history repair preserves this snapshot byte for byte.
+// Keep the original SHA for signed evidence; only this exact replacement can
+// anchor new mainline ancestry. Never infer an alias from matching files alone.
+export const G5_REWRITTEN_COMMIT = '7002439e286bad91f43405c468d4f25a646eb88e'
 const oldGatePaths = ['G1','G2','G3','G4','G5'].map((gate) => 'docs/gates/' + gate + '.md')
 const outputs = [G6_GATE_PATH, G6_INDEPENDENT_PATH, G6_PUBLICATION_PATH]
 const hash = z.string().regex(/^[a-f0-9]{64}$/).refine((value) => !/^0+$/.test(value))
@@ -177,7 +181,28 @@ async function resolveTrust(root: string) {
 }
 
 let verifiedHistoryRoot: string | undefined
-export function hasG5History(root: string) { return ancestor(root, G5_SIGNED_COMMIT, 'HEAD') }
+export function g5HistoryAncestor(root: string, target = 'HEAD'): string | undefined {
+  if (ancestor(root, G5_SIGNED_COMMIT, target)) return G5_SIGNED_COMMIT
+  if (!ancestor(root, G5_REWRITTEN_COMMIT, target)) return
+  try {
+    const originalTree = git(root, ['rev-parse', G5_SIGNED_COMMIT + '^{tree}']).toString('utf8').trim()
+    const rewrittenTree = git(root, ['rev-parse', G5_REWRITTEN_COMMIT + '^{tree}']).toString('utf8').trim()
+    if (originalTree === rewrittenTree) return G5_REWRITTEN_COMMIT
+  } catch {
+    // Release tags retain the original evidence objects. A partial checkout
+    // without those objects cannot establish equivalence and must fail closed.
+  }
+}
+export function hasG5History(root: string) { return g5HistoryAncestor(root) !== undefined }
+
+export function g6CommitRange(root: string, candidate: string, evidence: string, audit: string, tip: string) {
+  const base = g5HistoryAncestor(root, candidate)
+  if (!base || new Set([base, candidate, evidence, audit, tip]).size !== 5
+      || ![[base,candidate],[candidate,evidence],[evidence,audit],[audit,tip]].every(([from, to]) => ancestor(root, from!, to!))) {
+    return reject('G6 候选、冻结证据、独审和批准须是依次提交的独立事实')
+  }
+  return { base, paths: changed(root, base, candidate) }
+}
 
 function copyHistoricalDependency(name: string, location: string, modules: string, lock: string, versions: Map<string, string>) {
   let directory = dirname(createRequire(location).resolve(name))
@@ -296,10 +321,7 @@ function loadSignedInput(root: string, trust: G6TrustProvider, readConclusion: A
   const C = packet.candidate_commit
   const E = packet.evidence_commit
   const A = packet.audit_commit
-  if (new Set([G5_SIGNED_COMMIT, C, E, A, tip]).size !== 5
-      || ![[G5_SIGNED_COMMIT,C],[C,E],[E,A],[A,tip]].every(([from, to]) => ancestor(root, from!, to!))) {
-    return reject('G6 候选、冻结证据、独审和批准须是依次提交的独立事实')
-  }
+  const { paths: candidateScope } = g6CommitRange(root, C, E, A, tip)
   if (packet.audit_report !== 'docs/audits/S6-independent-audit-round' + packet.audit_round + '.md') {
     return reject('G6 独审报告路径必须对应本轮')
   }
@@ -331,7 +353,6 @@ function loadSignedInput(root: string, trust: G6TrustProvider, readConclusion: A
   const blob = (file: string) => trackedBlob(root, E, file)
   const manifestBytes = blob(registry.manifest)
   const manifest = normalizeReleaseManifest(json(manifestBytes))
-  const candidateScope = changed(root, G5_SIGNED_COMMIT, C)
   if (manifest.candidate.git_sha !== C || !sameSet(manifest.change_scope.touched_paths, candidateScope)
     || !sameSet(Object.keys(registry.items), manifest.items.map((item) => item.id))
     || !sameSet(Object.keys(registry.invariants), manifest.invariants.map((item) => item.id))) return reject('冻结清单与候选提交或必过范围不符')
