@@ -19,7 +19,7 @@ import type { BridgeClient } from './bridge.ts'
 import { AgentLifecycle, type AgentReportEnvelope } from './agent-lifecycle.ts'
 import { canTransition } from '../core/state-machine.ts'
 import type { ClockProvider } from '../core/clock.ts'
-import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel, type ModelAssignment, type ModelProfile, type ModelRouting } from './model-routing.ts'
+import { MODEL_COMPLEXITIES, supportsSessionFallback, selectExecutionModel, type ModelAssignment, type ModelProfile, type ModelRouting } from './model-routing.ts'
 import { requireTrialFlow } from '../service/trial-circles.ts'
 import type { Tx } from '../infra/sqlite/driver.ts'
 import { getTaskPlanRecommendation } from '../service/task-planning.ts'
@@ -658,8 +658,7 @@ export function resolveModelAssignment(tx: Tx, db: Db, row: NodeRunRow, routing:
   const recommended = !catalog || adequate.some(({ ref }) => ref === proposed.preferredModel) ? proposed.preferredModel : undefined
   const session = effective.find(({ ref }) => ref === catalog?.session_execution_model_ref)
   let assignment: ModelAssignment
-  if (!preferred && adequate.length === 0 && capacity >= 0 && capacity <= MODEL_COMPLEXITIES.indexOf('advanced')
-    && session?.capacity === null && session.provider && session.model && MODEL_REF_RE.test(session.ref)) {
+  if (!preferred && adequate.length === 0 && supportsSessionFallback(session, proposed.complexity)) {
     const reason = typeof proposed.reason === 'string' ? proposed.reason.trim() : ''
     if (reason.length === 0 || reason.length > 240) {
       throw new OrchError('PAYLOAD_SCHEMA_INVALID', '主脑的模型建议缺少合法复杂度或依据')

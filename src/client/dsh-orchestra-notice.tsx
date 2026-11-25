@@ -20,6 +20,8 @@ type TailProps = {
   useNotices(turn: string): readonly Notice[] | undefined
   openArtifact?: OpenChatArtifact
   downloadArtifact?: OpenChatArtifact
+  sources?: DshLocalPanelSources
+  openLocation?: OpenPanelReceipt
 }
 
 function readNotice(event: Event): Notice | undefined {
@@ -79,7 +81,7 @@ export function OrchestraAttentionNotice({ node, sources, openLocation, openArti
 }
 
 /** A closed turn must show its recorded result even when the model never produced a final answer. */
-export function OrchestraNoticeTail({ turn, useNotices, openArtifact, downloadArtifact }: TailProps): ReactElement | null {
+export function OrchestraNoticeTail({ turn, useNotices, openArtifact, downloadArtifact, sources, openLocation }: TailProps): ReactElement | null {
   const notices = useNotices(String(turn.turn)) ?? []
   const tail = turn.data.get('turn-tail') as { closing?: { finalNode?: { seq?: number } } | null } | undefined
   const answeredThrough = turn.end?.data?.reason?.kind === 'completed' ? tail?.closing?.finalNode?.seq ?? -1 : -1
@@ -88,7 +90,11 @@ export function OrchestraNoticeTail({ turn, useNotices, openArtifact, downloadAr
   // The final answer may replace a fallback summary. It must never hide the actual deliverables.
   const artifacts = [...new Map(notices.filter(notice => !notice.final).flatMap(notice => notice.artifacts ?? [])
     .map(artifact => [artifactVersionKey(artifact.location), artifact])).values()]
-  if (pending.length === 0 && (!turn.end || artifacts.length === 0)) return null
+  // After turn/end the Desktop hides process nodes in a collapsed group. The
+  // tail is still visible, and opening an old receipt rechecks its ownership.
+  const links = turn.end && sources ? [...new Map(notices.flatMap(notice => notice.attentionLinks ?? [])
+    .map(link => [JSON.stringify(link.location), link])).values()] : []
+  if (pending.length === 0 && (!turn.end || artifacts.length === 0) && !links.length) return null
   return <div data-orchestra-notice-fallback>
     {pending.map((notice) => <section key={notice.id} aria-label={notice.title} role="status"
       style={{ marginBlock: 12, padding: 16, border: `1px solid ${COLOR.line}`, borderRadius: 10,
@@ -97,6 +103,9 @@ export function OrchestraNoticeTail({ turn, useNotices, openArtifact, downloadAr
       <div style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>{notice.text.startsWith(notice.title + '\n')
         ? notice.text.slice(notice.title.length + 1) : notice.text}</div>
     </section>)}
+    {sources && links.map(link => <div key={JSON.stringify(link.location)}>
+      <span>{link.title}</span><ReceiptAction location={link.location} sources={sources} openLocation={openLocation} />
+    </div>)}
     <ArtifactLinks artifacts={artifacts} openArtifact={openArtifact} downloadArtifact={downloadArtifact} />
   </div>
 }
@@ -148,13 +157,7 @@ export function registerNativeOrchestraNotices(ctx: NativeOrchestraNoticeContext
         const binding = ready.sessions.binding(sessionId)
         if (!binding) throw new Error('Orchestra notice has no session binding')
         const chat = ready.uiConversation.binding(binding).target('chat')
-        return { downloadArtifact: async (artifact: ChatArtifactLink, signal?: AbortSignal) => {
-          if (artifact.location.sessionId !== sessionId) throw new Error('此成果不属于当前会话。')
-          return downloadArtifact(artifact, signal)
-        }, openArtifact: async (artifact: ChatArtifactLink, signal?: AbortSignal) => {
-          if (artifact.location.sessionId !== sessionId) throw new Error('此成果不属于当前会话。')
-          return openArtifact(artifact, signal)
-        }, keyedHooks: { notices(turn) {
+        return { ...attentionProps(sessionId), keyedHooks: { notices(turn) {
           const snapshot = chat.getSnapshot()
           if (!snapshot) throw new Error('Orchestra notice has no chat projection')
           return snapshot.nodes.turnDataSource(Number(turn), noticeKind)

@@ -66,6 +66,7 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
   workflowGenerator?: TaskPlanningOptions['workflowGenerator']
   modelRouting?: ModelRouting
   interpret?: TaskPlanningOptions['interpret']
+  timeoutMs?: number
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'orch-task-plan-'))
   const secret = 'planning-contract-secret'
@@ -81,7 +82,7 @@ async function boot(propose: TaskPlanningOptions['propose'], observeSpawn?: (inp
   const service = await serveOrchestra({
     dbFile: join(directory, 'orchestra.db'), secret, phase: 'S5',
     asOfSeq: () => 0, listTasks: () => [], listEvents: () => [], appendLedgerEvent: () => ({ seq: 0, event_id: 'e' }),
-    planning: { propose, interpret: options.interpret },
+    planning: { propose, interpret: options.interpret, timeoutMs: options.timeoutMs },
     workflowGenerator: options.workflowGenerator,
     executor: { registry, bridge, modelRouting: options.modelRouting, runner: new ReadOnlyToolRunner(registry, {
       readonlyAvailable: () => true,
@@ -980,6 +981,105 @@ ${reportGap}。数量核算独立完成，不等待金额核算。
       expect(host.db.raw.prepare('SELECT count(*) n FROM runs').get()?.n).toBe(0)
     }
   })
+
+it.each(['revised', 'still complex', 'extra tool', 'extra node', 'omission', 'provider refused', 'cancelled', 'timed out',
+  'no reporting requirement', 'configured complex'] as const)(
+  'rechecks an unavailable planning tier once and reads the settings used for dispatch (%s)', async scenario => {
+    const goal = scenario === 'no reporting requirement' ? '分别核对金额和库存数量。' :
+      '商品 B 单价缺失。金额核算发现必要数据缺失时，应如实报告未完成金额和下一步。数量核算独立完成。'
+    const gap = { ...constraintBase('gap', '金额核算发现必要数据缺失时，应如实报告未完成金额和下一步'), kind: 'report_data_gap' as const }
+    const contract: RequirementsContract = { version: 1, start_policy: 'immediate', sources: [{ message_id: 'human-message', text: goal }],
+      constraints: scenario === 'no reporting requirement' ? [] : [gap] }
+    const originalReason = '涉及多处库存数据核验'
+    const revisedReason = '金额分支只汇总已知金额并如实报告缺价'
+    const proposal: TaskPlanProposal = { title: '库存核查', workflow_id: 'inventory', workflow_version: '1',
+      steps: [{ node_id: 'value', description: '库存金额核算', goal_ids: ['goal'], depends_on: [], tools: [],
+        complexity: 'complex', model_reason: originalReason },
+      { node_id: 'quantity', description: '库存数量核算', goal_ids: ['goal'], depends_on: [], tools: [],
+        complexity: 'advanced', model_reason: '独立核对库存数量' }],
+      deliverables: ['value', 'quantity'].map(node_id => ({ node_id, title: node_id, goal_ids: ['goal'], acceptance: { kind: 'chat/text_result' } })),
+      risks: [{ node_id: 'value', severity: 'medium', description: '商品 B 单价缺失', mitigation: '报告缺口及下一步' }],
+    }
+    const revise = { node_id: 'value', complexity: scenario === 'still complex' ? 'complex' : 'standard', model_reason: revisedReason }
+    const startedReview = Promise.withResolvers<void>()
+    const planner = vi.fn<TaskPlanningOptions['propose']>(async (input, signal) => {
+      if (!input.model_calibration) return proposal
+      startedReview.resolve()
+      if (scenario === 'cancelled' || scenario === 'timed out') {
+        return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      }
+      if (scenario === 'provider refused') throw new OrchError('SERVICE_UNAVAILABLE', '当前规划模型服务额度不足', { planning_issue: 'quota' })
+      if (scenario === 'extra tool') return { steps: [{ ...revise, tools: ['ro.check'] }] }
+      if (scenario === 'extra node') return { steps: [revise, { ...revise, node_id: 'quantity' }] }
+      if (scenario === 'omission') return { steps: [] }
+      return { steps: [revise] }
+    })
+    const spawned: SpawnParams[] = []
+    const modelRef = 'fixture/gpt-6.2-sol'
+    const host = await boot(planner, input => spawned.push(input), { empty: true,
+      ...(scenario === 'timed out' && { timeoutMs: 1000 }), modelRouting: {
+      profiles: [], catalog: () => ({ session_execution_model_ref: modelRef,
+        profiles: [{ ref: modelRef, provider: 'fixture', model: 'gpt-6.2-sol', capacity: null }] }),
+      recommend: () => { throw new Error('必须读取已经确认的计划') },
+    } })
+    host.publish('inventory', { name: '库存核查',
+      nodes: [{ node_id: 'start', type: 'trigger', title: '触发', position: { x: 0, y: 0 } },
+        { node_id: 'value', type: 'agent', title: '库存金额核算', position: { x: 100, y: 0 }, config: { side_effect_policy: 'pure' } },
+        { node_id: 'quantity', type: 'agent', title: '库存数量核算', position: { x: 100, y: 100 }, config: { side_effect_policy: 'pure' } }],
+      edges: [{ from: 'start', to: 'value' }, { from: 'start', to: 'quantity' }],
+    })
+    const configured = scenario === 'configured complex'
+    if (configured) await host.client.post('/v1/settings/model-routing', { operation_id: uuidv7(), expected_revision: 0,
+      mapping: { routine: null, standard: null, complex: modelRef }, model_capacities: [{ ref: modelRef, capacity: 'complex' }],
+    })
+    const controller = new AbortController()
+    const pending = host.planning!.propose({ goal, requirements: [], workflow_id: 'inventory', workflow_version: '1',
+      requirements_contract: contract }, 'owner', now, controller.signal)
+    if (scenario === 'cancelled' || scenario === 'timed out') {
+      const cancelled = new DOMException('取消复核', 'AbortError')
+      const failure = expect(pending).rejects.toMatchObject(scenario === 'cancelled' ? { name: cancelled.name, message: cancelled.message }
+        : { code: 'OPERATION_TIMEOUT', details: { boundary: 'maximum' } })
+      if (scenario === 'cancelled') {
+        await startedReview.promise
+        controller.abort(cancelled)
+      }
+      await failure
+      expect(planner).toHaveBeenCalledTimes(2)
+      expect(planner.mock.calls[1]?.[1].aborted).toBe(true)
+      expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM task_plans').get()).toEqual({ n: 0 })
+      expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()).toEqual({ n: 0 })
+      expect(spawned).toEqual([])
+      return
+    }
+    const { view } = await pending
+    const tiers = configured ? ['routine', 'standard', 'advanced', 'complex'] : ['routine', 'standard', 'advanced']
+    expect(planner.mock.calls[0]?.[0].available_model_tiers).toEqual(tiers)
+    const rechecked = !configured && scenario !== 'no reporting requirement'
+    expect(planner).toHaveBeenCalledTimes(rechecked ? 2 : 1)
+    if (rechecked) {
+      expect(planner.mock.calls[1]?.[0]).toMatchObject({ available_model_tiers: tiers,
+        model_calibration: [{ node_id: 'value', complexity: 'complex', model_reason: originalReason }] })
+      expect(planner.mock.calls[1]?.[0].model_calibration).toHaveLength(1)
+      expect(planner.mock.calls[1]?.[1]).toBe(planner.mock.calls[0]?.[1])
+    }
+    expect(view.quality.ready).toBe(true)
+    const revised = scenario === 'revised' || scenario === 'still complex'
+    expect(view.proposal).toEqual(revised ? { ...proposal, steps: [{ ...proposal.steps[0], ...revise }, proposal.steps[1]] } : proposal)
+    const { run_id } = host.planning!.confirm({ plan_id: view.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', now)
+    const spawnFor = (node: string) => spawned.find(({ nodeRunId }) => host.db.raw.prepare('SELECT node_id FROM node_runs WHERE node_run_id=?')
+      .get(nodeRunId)?.node_id === node)
+    await expect.poll(() => spawnFor('quantity'), { timeout: 5_000 }).toMatchObject({ modelRef, toolPolicy: { allow: [] },
+      ...(!configured && { sessionModelFallback: true }) })
+    if (configured || scenario === 'revised') {
+      await expect.poll(() => spawnFor('value'), { timeout: 5_000 }).toMatchObject({ modelRef, toolPolicy: { allow: [] },
+        ...(!configured && { sessionModelFallback: true }) })
+      if (configured) expect(spawnFor('value')?.sessionModelFallback).toBeUndefined()
+    } else {
+      await expect.poll(() => host.db.raw.prepare('SELECT status FROM node_runs WHERE run_id=? AND node_id=?').get(run_id, 'value'),
+        { timeout: 5_000 }).toEqual({ status: 'blocked_pre' })
+      expect(spawnFor('value')).toBeUndefined()
+    }
+  }, 15_000)
 
 it.each(['chat_only', 'no_workspace_files'] as const)('换一种说法仍由结构化 %s 限制文件交付', async (kind) => {
   const host = await boot(async () => valid())

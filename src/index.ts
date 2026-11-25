@@ -863,6 +863,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     if (collaboration) requireCapability(opts.phase, 'panel')
     const taskOptions = opts.planning ? {
       ...opts.planning,
+      ...(modelSettings && { availablePlanningTiers: modelSettings.availablePlanningTiers }),
       workflowGenerator: opts.planning.workflowGenerator ?? opts.workflowGenerator,
       workflowStreamProgress: opts.planning.workflowGenerator ? opts.planning.workflowStreamProgress : opts.workflowGeneratorStreamProgress,
       runtimeNodeTypes: RUNTIME_NODE_TYPES,

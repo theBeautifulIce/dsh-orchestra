@@ -140,11 +140,46 @@ it('publishes a visible pending-decision node before turn/end and keeps its acti
     expect(action).toBeDefined()
     await view.click(action)
     expect(openLocation).toHaveBeenCalledWith(attention.location)
-    await view.rerender(<><OrchestraAttentionNotice node={node} sources={sources} openLocation={openLocation} />
+    await view.rerender(<><div hidden data-turn-process-hidden><OrchestraAttentionNotice node={node} sources={sources} openLocation={openLocation} /></div>
       <OrchestraNoticeTail turn={{ turn: 4, end: { data: { reason: { kind: 'completed' } } },
-        data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }} useNotices={() => [state]} /></>)
-    expect(view.findAll('button').filter(button => button.textContent === '前往审批中心')).toHaveLength(1)
-    expect(view.byRole('status')).toHaveLength(1)
+        data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }} sources={sources}
+        openLocation={openLocation} useNotices={() => [state]} /></>)
+    const visible = view.findAll('button').filter(button => button.textContent === '前往审批中心' && !button.closest('[hidden]'))
+    expect(visible).toHaveLength(1)
+    await view.click(visible[0]!)
+    expect(openLocation).toHaveBeenCalledTimes(2)
+    expect(openLocation).toHaveBeenLastCalledWith(attention.location)
+  } finally { view.unmount() }
+})
+
+it('keeps one named approval at the completed turn tail and suppresses out-of-scope or ordinary messages', async () => {
+  const turn = { turn: 4, end: { data: { reason: { kind: 'completed' } } },
+    data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }
+  const sessionSnapshot = { byId: { 'source-session': { id: 'source-session', retainedBy: { mainView: 1 } } } }
+  const workspaceSnapshot = { items: [{ workspaceId: 'workspace', sessionIds: ['source-session'] }], archivedSessionIds: [] }
+  const sources = { sessions: { list: { getSnapshot: () => sessionSnapshot, subscribe: () => () => {} } },
+    workspaces: { list: { getSnapshot: () => workspaceSnapshot, subscribe: () => () => {} } } }
+  const named = { ...attention, title: '批准预算分析' }
+  const unrelated = { ...named, location: { ...named.location, sessionId: 'different-session' } }
+  const wrongWorkspace = { ...named, location: { ...named.location, workspaceId: 'other-workspace' } }
+  const openLocation = vi.fn(async () => {})
+  const render = (useNotices: () => Array<typeof notice & { attentionLinks?: ChatAttentionLink[] }>) =>
+    <OrchestraNoticeTail turn={turn} sources={sources} openLocation={openLocation} useNotices={useNotices} />
+  const view = await renderPanel(render(() => [
+    { ...notice, attentionLinks: [named, unrelated, wrongWorkspace] },
+    { ...notice, id: 'retry-notice', seq: 76, attentionLinks: [named] },
+  ]))
+  try {
+    const actions = view.findAll('button').filter(button => button.textContent === '前往审批中心')
+    expect(actions).toHaveLength(1)
+    expect(view.text()).toContain(named.title)
+    await view.click(actions[0]!)
+    expect(openLocation).toHaveBeenCalledExactlyOnceWith(named.location)
+    await view.rerender(render(() => [{ ...notice, attentionLinks: [unrelated, wrongWorkspace] }]))
+    expect(view.findAll('button')).toHaveLength(0)
+    await view.rerender(render(() => [notice]))
+    expect(view.findAll('button')).toHaveLength(0)
+    expect(openLocation).toHaveBeenCalledOnce()
   } finally { view.unmount() }
 })
 

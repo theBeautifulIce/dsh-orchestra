@@ -14,7 +14,7 @@ import { uuidv7 } from '../core/ids.ts'
 import { assertApprovalNodeConfig, type WorkflowDefinition } from '../core/workflow-def.ts'
 import { fitGeneratedWorkflowLayout, validatePublishLayer, validateSaveLayer, type PublishContext, type WorkflowDoc } from '../core/workflow-doc.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, selectExecutionModel,
-  type ModelPlanningProfile, type ModelRecommendation, type ModelRoutingContext } from '../executor/model-routing.ts'
+  type ModelComplexity, type ModelPlanningProfile, type ModelRecommendation, type ModelRoutingContext } from '../executor/model-routing.ts'
 import type { ToolRegistry } from '../executor/tools.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
 import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
@@ -44,6 +44,7 @@ const stepSchema = z.strictObject({
   model_reason: z.string().trim().min(1).max(240),
   preferred_model_ref: z.string().regex(MODEL_REF_RE).optional(),
 })
+const modelCalibrationSchema = z.strictObject({ steps: z.array(stepSchema.pick({ node_id: true, complexity: true, model_reason: true })).min(1).max(100) })
 const acceptance = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('artifact'), file_name: z.string().trim().min(1).max(240),
     minimum_bytes: z.number().int().min(1).max(ARTIFACT_MAX_BYTES) }),
@@ -111,7 +112,9 @@ type PublishedChoice = { workflow: WorkflowCandidate; hash: string }
 export type TaskPlanningOptions = {
   /** A tool-free adapter may interpret unstructured panel input before any plan or workflow is persisted. */
   interpret?: (input: TaskPlanInput, signal: AbortSignal, previous?: Pick<PlanInput, 'goal' | 'requirements' | 'requirements_contract' | 'workflow_id' | 'workflow_version'>) => Promise<unknown>
-  propose(input: PlanInput & { workflows: WorkflowCandidate[]; model_profiles?: readonly ModelPlanningProfile[] }, signal: AbortSignal, onProgress?: () => void): Promise<unknown>
+  availablePlanningTiers?: () => readonly ModelComplexity[]
+  propose(input: PlanInput & { workflows: WorkflowCandidate[]; model_profiles?: readonly ModelPlanningProfile[];
+    available_model_tiers?: readonly ModelComplexity[]; model_calibration?: ReadonlyArray<Pick<TaskPlanProposal['steps'][number], 'node_id' | 'description' | 'complexity' | 'model_reason'>> }, signal: AbortSignal, onProgress?: () => void): Promise<unknown>
   timeoutMs?: number
   /** This planner reports nonempty provider output through onProgress. */
   streamProgress?: boolean
@@ -769,9 +772,36 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
     const planner = options?.propose
     if (!planner) throw new OrchError('VERDICT_UNSUPPORTED', 'DSH 宿主尚未装配主脑规划服务')
     const profiles = await planningProfiles?.() ?? []
-    const offered = structuredClone({ ...brief, workflows, ...(profiles.length > 0 ? { model_profiles: profiles } : {}) })
+    const tiers = options?.availablePlanningTiers?.()
+    const offered = structuredClone({ ...brief, workflows, ...(profiles.length > 0 ? { model_profiles: profiles } : {}),
+      ...(tiers && { available_model_tiers: tiers }) })
     const candidate = await callPlanningStage(
-      (signal, onProgress) => onProgress ? planner(offered, signal, onProgress) : planner(offered, signal), caller,
+      async (signal, onProgress) => {
+        const original = onProgress ? await planner(offered, signal, onProgress) : await planner(offered, signal)
+        if (!tiers?.length || !brief.requirements_contract?.constraints.some(c => c.kind === 'report_data_gap')) return original
+        const first = proposalSchema.safeParse(original)
+        if (!first.success) return original
+        const riskNodes = new Set(first.data.risks.map(risk => risk.node_id))
+        const targets = first.data.steps.filter(step => riskNodes.has(step.node_id) && !step.tools.length
+          && step.preferred_model_ref === undefined && !tiers.includes(step.complexity))
+          .map(({ node_id, description, complexity, model_reason }) => ({ node_id, description, complexity, model_reason }))
+        if (!targets.length) return original
+        signal.throwIfAborted()
+        const input = { ...offered, model_calibration: targets }
+        let calibration: unknown
+        try {
+          calibration = onProgress ? await planner(input, signal, onProgress) : await planner(input, signal)
+        } catch {
+          signal.throwIfAborted()
+          // The original plan can still run its independently supported branches.
+          return original
+        }
+        const review = modelCalibrationSchema.safeParse(calibration)
+        if (!review.success) return original
+        const revisions = new Map(review.data.steps.map(step => [step.node_id, step]))
+        if (review.data.steps.length !== targets.length || !targets.every(step => revisions.has(step.node_id))) return original
+        return { ...first.data, steps: first.data.steps.map(step => ({ ...step, ...revisions.get(step.node_id) })) }
+      }, caller,
       { timeout: '主脑没有在时限内生成计划', failure: '主脑暂时未能产出计划' },
       options?.streamProgress ? budget.taskStage : budget.task, options?.streamProgress ? budget.idle : null,
     )

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { OrchError } from '../core/errors.ts'
 import {
-  MODEL_COMPLEXITIES, MODEL_NOTE_MAX_LENGTH, MODEL_REF_RE, selectExecutionModel, validModelEffort,
+  MODEL_COMPLEXITIES, MODEL_NOTE_MAX_LENGTH, MODEL_REF_RE, selectExecutionModel, supportsSessionFallback, validModelEffort,
   type ModelCatalogProfile, type ModelCatalogSnapshot, type ModelComplexity, type ModelProfile,
 } from '../executor/model-routing.ts'
 import { appendEvent } from '../infra/db/ledger.ts'
@@ -93,6 +93,19 @@ export function createModelRoutingSettingsHost(db: Db, source: readonly ModelCat
   return {
     get,
     refresh,
+    availablePlanningTiers() {
+      return withReadTx(db, ({ tx }) => {
+        const settings = readModelRoutingSettings(tx)
+        const catalog = snapshot()
+        const effective = effectiveModelCatalog(catalog.profiles, settings)
+        const session = effective.find(profile => profile.ref === catalog.session_execution_model_ref)
+        return MODEL_COMPLEXITIES.filter((tier, rank) => {
+          const mapped = settings.mapping[tier]
+          return effective.some(profile => profile.capacity !== null && MODEL_COMPLEXITIES.indexOf(profile.capacity) >= rank
+            && (!mapped || profile.ref === mapped)) || (!mapped && supportsSessionFallback(session, tier))
+        })
+      })
+    },
     planningProfiles() {
       return withReadTx(db, ({ tx }) => {
         const settings = readModelRoutingSettings(tx)

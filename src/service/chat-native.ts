@@ -268,7 +268,11 @@ function describeRun(service: Service, runId: string, operator: string) {
   const blocking = blocked.map((node) => ({ ...node, outstanding_files: expected.get(node.node_run_id) }))
   const task = terminal ? getTaskSummary(db, run.task_id) : undefined
   // A mailbox read must not suppress the original task receipt or reveal another owner's data.
-  const coordination = (() => { try { return service.coordination?.attention(runId,operator) ?? [] } catch { return [] } })()
+  const coordination = (() => { try {
+    if (!terminal) return service.coordination?.attention(runId,operator) ?? []
+    return service.coordination?.listHuman(runId,operator).items.filter(item => ['reported','expired','unavailable'].includes(item.state)
+      || (item.kind === 'request' && item.state === 'answered')).slice(-12) ?? []
+  } catch { return [] } })()
   const nativeApprovals = terminal ? [] : withReadTx(db, ({ tx }) => (service.pendingNativeApprovals?.(runId) ?? []).map(approval => {
     const node = tx.get<{ run_id: string; node_id: string }>('SELECT run_id,node_id FROM node_runs WHERE node_run_id=?', [approval.nodeRunId])
     const title = node ? readRunNodeDisplay(tx, node.run_id).nodes.get(node.node_id)?.title : undefined

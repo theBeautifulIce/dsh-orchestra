@@ -11,6 +11,11 @@ export const MODEL_LEVELS = {
   expert: { label: '专家', description: '解决高度不确定的跨领域问题，或作出高代价的关键判断' },
 } satisfies Record<ModelComplexity, { label: string; description: string }>
 export const MODEL_REF_RE = /^[\w./:@+-]{1,128}$/
+export function supportsSessionFallback(profile: ModelCatalogProfile | undefined, tier: ModelComplexity): profile is ModelCatalogProfile {
+  const rank = MODEL_COMPLEXITIES.indexOf(tier)
+  return rank >= 0 && rank <= MODEL_COMPLEXITIES.indexOf('advanced') && profile?.capacity === null
+    && Boolean(profile.provider && profile.model && MODEL_REF_RE.test(profile.ref))
+}
 export const MODEL_NOTE_MAX_LENGTH = 160
 
 export const MODEL_EFFORT_MAX_LENGTH = 128
