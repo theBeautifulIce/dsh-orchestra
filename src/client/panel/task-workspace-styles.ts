@@ -38,6 +38,9 @@ export const TASK_WORKSPACE_CSS = `
 .task-card-type { margin: 3px 0; font-size: ${FONT_PX.helper}px; color: ${COLOR.inkMuted}; }
 .task-card-attention { display: grid; gap: 2px; margin-top: 8px; padding: 5px 6px; border: 1px solid #eee2cc; border-radius: 5px; background: #fff9ee; color: ${COLOR.warning}; font-size: ${FONT_PX.helper}px; }
 .task-card-meta { margin-top: 8px; padding-top: 7px; border-top: 1px solid ${COLOR.line}; }
+.task-card-primary { position: relative; z-index: 1; margin-top: 10px; }
+.ops-panel-viewport .task-primary-button { width: 100%; max-width: 100%; white-space: normal; text-align: left; color: ${COLOR.link}; border-color: #cbd9ee; background: ${COLOR.selected}; }
+.task-primary-button:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
 .task-card-steps { position: relative; z-index: 1; margin-top: 8px; }
 .task-card-steps button:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
 .task-board-step-groups details { border-top: 1px solid ${COLOR.line}; }
@@ -202,6 +205,7 @@ export const TASK_INSPECTOR_CSS = `
 
 // 窄屏：看板单列、任务名可折两行、页头不挤压（T14）。
 export const TASK_META_CSS = `
+.task-card-tech { position: relative; z-index: 1; }
 .task-card-tech summary { cursor: pointer; color: inherit; }
 .task-card-tech summary:focus-visible { outline: 2px solid ${COLOR.link}; outline-offset: 2px; }
 .task-card-tech span { margin-right: 8px; }

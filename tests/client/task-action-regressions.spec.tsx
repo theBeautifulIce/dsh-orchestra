@@ -8,6 +8,22 @@ import { TaskListScreen } from '../../src/client/panel/tasks-screen.tsx'
 import { readStepWindow } from '../../src/client/panel/task-step-overview.tsx'
 import { createFakeService, nodeRunView, renderPanel, runSummary, taskSummary, workflowItem } from './harness.ts'
 
+it('看板待处理入口使用统一按钮，点击保留服务端给出的决定与运行定位', async () => {
+  const action = { kind: 'decision' as const, label: '查看待批准事项', decision_id: 'decision-exact', run_id: 'run-original' }
+  const task = taskSummary({ title: '整理执行结果', lane: 'attention', open_decision_count: 1, next_action: action })
+  const selected: unknown[][] = []
+  const service = createFakeService(({ path }) => ({ ok: true, data: { items: path === '/v1/tasks' ? [task] : [] } }))
+  const api = createResourcesApi(createApiClient('http://panel.test', service.fetcher))
+  const view = await renderPanel(<TaskListScreen api={api} onSelectTask={(...args) => selected.push(args)} />)
+  try {
+    const button = view.findAll('button').find(button => button.textContent === action.label)!
+    expect(button.classList.contains('ops-button')).toBe(true)
+    expect(button.closest('.task-card-primary')).not.toBeNull()
+    await view.click(button)
+    expect(selected).toEqual([[task.task_id, button, action.run_id, action]])
+  } finally { view.unmount() }
+})
+
 it('T05 继续读取后仍保留尚在后页的受阻项，并在读完时去重', async () => {
   const step=(index:number)=>nodeRunView({node_run_id:'node-'+index,node_id:'step-'+index,status:'queued'})
   const attention=nodeRunView({node_run_id:'blocked-last',node_id:'blocked-last',status:'blocked_post'})

@@ -47,9 +47,10 @@ export function usePanelCommandsEnabled(standalone = false): boolean {
 
 export function PanelCommandButton(props: ButtonHTMLAttributes<HTMLButtonElement>) {
   const { enabled, reason } = useContext(CommandsEnabledContext) ?? { enabled: false, reason: COPY.serviceDown }
-  const { disabled, title, type, ...rest } = props
+  const { disabled, title, type, className, ...rest } = props
   return <button
     {...rest}
+    className={['ops-button', className].filter(Boolean).join(' ')}
     type={type ?? 'button'}
     disabled={disabled || !enabled}
     title={!enabled ? reason : title}

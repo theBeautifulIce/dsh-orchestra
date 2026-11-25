@@ -26,9 +26,9 @@ import { fakeAgentBridge, fakeAgentClient, type AgentToolStep } from '../fixture
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
-async function setup(steps: AgentToolStep[] = []) {
+async function setup(steps: AgentToolStep[] = [], phase: 'S2' | 'S6' = 'S2') {
   const dir = mkdtempSync(join(tmpdir(), 'orch-runtime-'))
-  const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 's3cr3t-runtime', phase: 'S2' })
+  const service = await openServiceOrchestra({ dbFile: join(dir, 'orchestra.db'), secret: 's3cr3t-runtime', phase })
   const orchestra = service.orchestra
   withTx(orchestra.db, (tx) => {
     tx.run("INSERT INTO tasks (task_id, title, status, revision, created_at, updated_at) VALUES ('t1','生产路径','running',1,?,?)", [NOW, NOW])
@@ -38,7 +38,7 @@ async function setup(steps: AgentToolStep[] = []) {
   orchestra.catalog.load({
     workflow_version: '7',
     pass_conditions: [{ path: 'evidence.exitCode', op: 'eq', value: 0 }],
-    nodes: [{ node_id: 'check', type: 'agent', tools: { allow: ['ro.echo', 'ro.fail', 'ro.ok'], deny: [] } }],
+    nodes: [{ node_id: 'check', type: 'agent', tools: { allow: phase === 'S6' ? [] : ['ro.echo', 'ro.fail', 'ro.ok'], deny: [] } }],
   })
   withTx(orchestra.db, (tx) => tx.run('UPDATE runs SET workflow_definition_hash = ? WHERE run_id = ?', [definitionHashOf(orchestra.catalog.get('7')), 'r1']))
   const registry = new ToolRegistry()
@@ -110,6 +110,50 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 describe('生产路径跑通单节点', () => {
+  it('原生读取达到动作时限后，真实未完成回报与停止凭据关闭运行及超时待办', async () => {
+    const { dir, orchestra, release, registry, runner, agents } = await setup([], 'S6')
+    let mayUseTools: (() => boolean) | undefined
+    const completion = { outcome: 'blocked', reason: '执行时限已到，部分资料尚未读取。',
+      next_action: '增加本步执行时限后重试。', missing: ['尚未读取的资料'] }
+    const native = fakeAgentBridge({ agentId: 'agent_1', steps: [], at: NOW,
+      report: { status: 'failed', output: { summary: '已停止读取；未完成全部检查。', completion } } })
+    const bridge = new BridgeClient({
+      request: (method, params) => native.request(method, params),
+      fenceAttemptTools(_binding, mayUse) { mayUseTools = mayUse; return true },
+      observeAttempt: () => ({ observedRunning: true, hasToolCall: true }),
+      async *listen(params, signal) {
+        await waitFor(() => nodeRow(orchestra.db).status === 'stopping')
+        expect(mayUseTools?.()).toBe(false)
+        sweepNow(orchestra.runtime, NOW)
+        expect(orchestra.db.raw.prepare("SELECT kind FROM decisions WHERE status='pending'").all())
+          .toEqual([{ kind: 'action_overrun' }])
+        for await (const event of native.listen(params, signal)) yield { ...event, attempt: 1 }
+      },
+    })
+    try {
+      withTx(orchestra.db, (tx) => tx.run("UPDATE node_runs SET side_effect_policy='pure' WHERE node_run_id='nrun_1'"))
+      await expect(runNode({ runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime',
+        registry, runner, agents, bridge }, { nodeRunId: 'nrun_1', nodeId: 'check', attempt: 1, input: {}, outputSchema: {},
+        tools: [], now: NOW, ownerEpoch: orchestra.db.epoch, leaseTtlMs: 600_000, actionTimeoutMs: 25 }))
+        .resolves.toMatchObject({ final_status: 'failed' })
+      sweepNow(orchestra.runtime, NOW)
+      expect(nodeRow(orchestra.db)).toMatchObject({ status: 'failed', lease_id: null, hang_reason: null })
+      expect(orchestra.db.raw.prepare("SELECT status FROM runs WHERE run_id='r1'").get()).toEqual({ status: 'failed' })
+      expect(orchestra.db.raw.prepare("SELECT kind,status,closed_reason FROM decisions").all())
+        .toEqual([{ kind: 'action_overrun', status: 'resolved', closed_reason: 'cancelled' }])
+      expect(native.cancelled).toBe(true)
+      expect(native.disposed).toBe(true)
+      const report = orchestra.db.raw.prepare("SELECT payload FROM node_run_events WHERE type='bridge.turn'").get() as { payload: string }
+      expect(JSON.parse(report.payload)).toMatchObject({ payload: { report: { status: 'failed', output: { completion } } } })
+      const applied = orchestra.db.raw.prepare("SELECT payload FROM node_run_events WHERE type='report_applied'").get() as { payload: string }
+      expect(JSON.parse(applied.payload)).toMatchObject({ attempt: 1, action_generation: nodeRow(orchestra.db).action_generation,
+        report_id: 'rep_nrun_1_1_failed', next_status: 'failed', completion })
+    } finally {
+      await release()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 3_000)
+
   it('节点等待慢目录期间可以取消，交还租约与调度位并且不产生子会话停机回执', async () => {
     const { dir, orchestra, release, registry, runner } = await setup()
     const deps = { runtime: orchestra.runtime, db: orchestra.db, secret: 's3cr3t-runtime' }

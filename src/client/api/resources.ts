@@ -50,8 +50,8 @@ export function createResourcesApi(client: ApiClient) {
       client.get('/v1/task-triggers', compact(params)),
     listRuns: (params: { task_id?: string; workflow_id?: string; limit?: number; cursor?: string } = {}): Promise<ApiResult<{ items: RunSummary[]; next_cursor?: string | null }>> =>
       client.get('/v1/runs', compact(params)),
-    getRun: (run_id: string): Promise<ApiResult<RunSummary>> =>
-      client.get('/v1/runs/get', { run_id }),
+    getRun: (run_id: string, signal?: AbortSignal): Promise<ApiResult<RunSummary>> =>
+      client.get('/v1/runs/get', { run_id }, signal),
     listNodes: (run_id: string, limit?: number, cursor?: string, only?: 'attention'):
     Promise<ApiResult<{ items: NodeRunView[]; has_more?: boolean; next_cursor?: string | null }>> =>
       client.get('/v1/node-runs', { run_id, limit, cursor, only }),
@@ -62,8 +62,8 @@ export function createResourcesApi(client: ApiClient) {
     // 记忆批次只读：面板不写记忆，也不发任何写命令。
     listMemoryBatches: (params: ListMemoryBatchesParams = {}): Promise<ApiResult<Page<MemoryBatchView>>> =>
       client.get('/v1/memory/batches', compact(params)),
-    getDecision: (decision_id: string): Promise<ApiResult<DecisionView>> =>
-      client.get('/v1/decisions/get', { decision_id }),
+    getDecision: (decision_id: string, signal?: AbortSignal): Promise<ApiResult<DecisionView>> =>
+      client.get('/v1/decisions/get', { decision_id }, signal),
     listUnverifiedEffects: (params: { run_id?: string; limit?: number; cursor?: string } = {}): Promise<ApiResult<Page<UnverifiedEffectView>>> =>
       client.get('/v1/effects/unverified', compact(params)),
     getEffectReview: (node_run_id: string): Promise<ApiResult<EffectReview>> => client.get('/v1/effects/review', { node_run_id }),

@@ -529,7 +529,7 @@ function RunDetails({ api, run, task, tab, reloadVersion, onSnapshot, onOpenDeci
       {!failed && nodes && tab === '证据' && <EvidenceList api={api} nodes={nodes} reloadVersion={reloadVersion} onOpenDecision={onOpenDecision} />}
       {run.project_context && <RunProjectContext context={run.project_context} />}
       {!failed && nodes && run.total > nodes.length && (nodeCursor
-        ? <button type="button" disabled={readingMore} onClick={() => {
+        ? <button type="button" className="task-quiet-button" disabled={readingMore} onClick={() => {
           setReadingMore(true)
           void api.listNodes(run.run_id, 200, nodeCursor).then(({ data }) => {
             setNodes((previous) => previous
@@ -682,7 +682,7 @@ function RunResult({ api, run, delivery, verifying, nodes }: {
         </details>
       </details>)}
       {artifacts?.has_more && (artifacts.next_cursor
-        ? <button type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? '正在读取更早的产物…' : '加载更早的产物'}</button>
+        ? <button type="button" className="task-quiet-button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? '正在读取更早的产物…' : '加载更早的产物'}</button>
         : <p style={mutedStyle}>显示最近 50 份产物。</p>)}
     </section>
   </>

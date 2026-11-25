@@ -8,7 +8,9 @@ import { ORCHESTRA_COMMUNICATION_GUIDE, ORCHESTRA_REPORT_ONLY_REMINDER } from '.
 import { formatChatApproval } from '../core/chat-approval-text.ts'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
-import { chatArtifactLink, receiptLocation, type ChatArtifactLink } from '../core/receipt-location.ts'
+import { chatArtifactLink, chatAttentionLink, receiptLocation, type ChatArtifactLink, type ChatAttentionLink } from '../core/receipt-location.ts'
+import { describeDecision, decisionActionLabel } from '../core/decision-display.ts'
+import { executionCompletionSchema } from '../core/execution-completion.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, findChatPlan, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
@@ -57,7 +59,7 @@ const prompt = [
   'For accepted files, read status.artifacts, then use action=artifact with the exact artifact_id. Never invent an identifier. Use file_name only for one matching version. Summarize the retrieved evidence and its recorded acceptance in the original conversation.',
   'When a chat result is truncated, use the status artifact references and their exact read arguments. Read each required result before summarizing it. A preview is not the complete result. Keep the final summary concise and cover every requested item. The host shows full original artifacts as named links. Never ask the operator to supply identifiers already present in these references.',
   'Every terminal or blocking notice needs a final answer. State the result, reason and next step. Report failure, cancellation, missing access and pending verification explicitly. Do not attempt task work to repair the result. After a denied tool call, use the notice or action=status and finish the explanation.',
-  'For a pending decision card, read status and use action=review with its exact decision_title. If evidence or choices are missing, state the requirement and where to open the item. A refusal leaves the decision open unless the human authorizes that exact rejected resolution.',
+  'For a pending decision, report what needs the operator and show the supplied attention link. Read status once when needed. Use action=review with its exact decision_title only when the operator asks to handle that item. If the response is panel_review, explain the reason and finish. Do not retry review with invented resolutions or poll while waiting for the operator. A refusal leaves the decision open unless the human authorizes that exact rejected resolution.',
   'For 待审成果 and 审核标准, use action=review_delivery for the verified run. Use the supplied task, step, artifact and criteria. Do not open an authorization popup or submit a review for the operator. For a direct review request, locate the task with status first.',
   'For a blocker, name affected steps, the reason, missing materials and next step. Separate registered files from passed acceptance. For multiple notices, explain each task separately. Open evidence or approval only after a direct follow-up selects one task.',
   'Use task, step, decision and file names in operator answers. Keep internal argument names, state codes, hashes and raw tool output in the receipt.',
@@ -127,11 +129,12 @@ function errorReceipt(error: unknown): Extract<ChatOutcome, { state: 'error' }> 
     ...(isChatErrorReason(reason) && { reason }) }
 }
 
-function noticeMessage(id: Message['id'], display: ReturnType<typeof describeChatRun>, artifacts: ChatArtifactLink[] = []): Message {
+function noticeMessage(id: Message['id'], display: ReturnType<typeof describeChatRun>, artifacts: ChatArtifactLink[] = [],
+  attentionLinks: ChatAttentionLink[] = [], final = false): Message {
   // The peer types predate producer-defined message sources.
   return {
     id, role: 'user', source: { kind: ORCHESTRA_MESSAGE_SOURCE, form: 'notice', summary: display.heading.slice(0, 120),
-      ...(artifacts.length && { artifacts }) },
+      ...(artifacts.length && { artifacts }), ...(attentionLinks.length && { attentionLinks }), ...(final && { final: true }) },
     content: [{ type: 'text', text: chatText(display) }],
   } as unknown as Message
 }
@@ -199,6 +202,36 @@ function parseMissingEvidence(value: unknown): string[] {
   }
 }
 
+function describeFailedSteps(db: Service['orchestra']['db'], runId: string) {
+  return withReadTx(db, ({ tx }) => {
+    const rows = tx.all<{ node_run_id: string; node_id: string; payload: string }>(`
+      WITH recorded AS (
+        SELECT node_run_id,seq,CASE WHEN json_valid(payload) AND LENGTH(payload)<=65536 THEN payload END AS body
+        FROM node_run_events WHERE type='report_applied'
+      )
+      SELECT n.node_run_id,n.node_id,e.body AS payload FROM node_runs n
+      JOIN recorded e ON e.node_run_id=n.node_run_id
+      JOIN report_registry p ON p.node_run_id=n.node_run_id AND p.attempt=n.attempt
+        AND p.report_id=json_extract(e.body,'$.report_id') AND p.report_seq=json_extract(e.body,'$.report_seq')
+        AND p.state IN ('applied','replayed')
+      WHERE n.run_id=? AND n.status IN ('failed','timeout','failed_with_unverified')
+        AND json_extract(e.body,'$.attempt')=n.attempt
+        AND json_extract(e.body,'$.action_generation')=n.action_generation
+        AND json_extract(e.body,'$.next_status')=n.status
+      ORDER BY e.seq DESC`, [runId])
+    const titles = readRunNodeDisplay(tx, runId).nodes
+    const seen = new Set<string>()
+    return rows.flatMap(row => {
+      if (seen.has(row.node_run_id)) return []
+      seen.add(row.node_run_id)
+      const completion = executionCompletionSchema.safeParse((JSON.parse(row.payload) as { completion?: unknown }).completion)
+      if (!completion.success || completion.data.outcome === 'completed') return []
+      return [{ node_run_id: row.node_run_id, node_id: row.node_id, title: titles.get(row.node_id)?.title ?? '未命名步骤',
+        reason: completion.data.reason, next_action: completion.data.next_action, missing: completion.data.missing }]
+    })
+  })
+}
+
 function describeRun(service: Service, runId: string, operator: string) {
   const { db } = service.orchestra
   const run = getRun(db, runId, { includeAcceptanceArtifactIds: true })
@@ -207,6 +240,7 @@ function describeRun(service: Service, runId: string, operator: string) {
     decision_id: decision.decision_id, revision: decision.current_revision, kind: decision.kind,
     title: decision.target_summary, expires_at: decision.expires_at, choices: decision.allowed_resolutions,
     reason: decision.resolution_unavailable_reason, required_evidence: decision.required_evidence,
+    explanation: describeDecision(decision),
   }))
   const blocked = terminal ? [] : describeBlocking(db, runId)
   const expected = blocked.length ? new Map(readOutstandingFiles(db, runId).map((row) => [row.node_run_id, row.file_names])) : new Map<string, string[]>()
@@ -221,7 +255,8 @@ function describeRun(service: Service, runId: string, operator: string) {
     run_id: runId, task_id: run.task_id, title: run.task_title, status: run.status, terminal,
     counts: run.counts, settling: run.settling, delivery_checks: run.delivery_checks?.items ?? [],
     ...(task?.current_run_id === runId ? { acceptance: task.delivery_acceptance, goal_met: task.goal_met } : {}),
-    ...(terminal && { text_results: readChatTextPreviews(db, runId, run.delivery_checks?.items ?? []) }),
+    ...(terminal && { text_results: readChatTextPreviews(db, runId, run.delivery_checks?.items ?? []),
+      failure_details: describeFailedSteps(db, runId) }),
     decisions, blocking,
     nativeApprovals,
     deliveryReviews: !terminal && service.rework ? listChatDeliveryReviews(db, runId, operator) : [],
@@ -235,6 +270,18 @@ function describeNodes(db: Service['orchestra']['db'], runId: string) {
     node_run_id: node.node_run_id, node_id: node.node_id, title: node.title, status: node.status, attempt: node.attempt,
     execution_state: node.execution_state, depends_on: node.depends_on, waiting_on: node.waiting_on,
   }))
+}
+
+function describeChatAttention(run: ReturnType<typeof describeRun>, binding: Binding): ChatAttentionLink[] {
+  const scope = { workspaceId: binding.workspaceId, sessionId: binding.sessionId, taskId: run.task_id, runId: run.run_id }
+  const links: ChatAttentionLink[] = run.decisions.map(decision => ({
+    title: decision.explanation.title,
+    location: { ...scope, kind: 'decision', decisionId: decision.decision_id },
+  }))
+  if (run.blocking.some(node => node.action_required) || run.nativeApprovals.length || run.deliveryReviews.length || run.rework.length) {
+    links.push({ title: '查看任务与待处理事项', location: { ...scope, kind: 'task' } })
+  }
+  return links
 }
 
 /**
@@ -306,12 +353,13 @@ function artifactFromName(db: Service['orchestra']['db'], runId: string, name: s
   return matches[0]!
 }
 
-function decisionFromTitle(db: Service['orchestra']['db'], runId: string, title: string, resolution: 'approved' | 'rejected'): string {
+function decisionFromTitle(db: Service['orchestra']['db'], runId: string, title: string): string {
   const { items, next_cursor } = listDecisions(db, { run_id: runId, humanInbox: true, limit: 100 })
-  const matches = items.filter((item) => chatDecisionTitle(item.target_summary, item.kind) === title)
+  const matches = items.filter((item) => chatDecisionTitle(item.target_summary, item.kind) === title
+    || describeDecision(item).title === title || item.kind === 'startup_unknown' && title === '启动状态待确认')
   if (next_cursor || matches.length > 1) throw new OrchError('RESOLUTION_NOT_AVAILABLE', '请在面板打开具体的待办')
   const decision = matches[0]
-  if (!decision?.allowed_resolutions?.includes(resolution) || decision.resolution_unavailable_reason || decision.required_evidence?.length) {
+  if (!decision) {
     throw new OrchError('RESOLUTION_NOT_AVAILABLE', '请在面板核对对应待办及可用处理方式')
   }
   return decision.decision_id
@@ -366,15 +414,15 @@ function nextReport(view: ReturnType<typeof describeRun>, previous: string | nul
     .map(({ node_run_id, title, status, attempt, reason }) => ({ node_run_id, title, status, attempt, reason }))
   const active = [...decisions, ...reviews, ...rework, ...blocking, ...nativeApprovals].map((action) => sha256Hex(JSON.stringify(action))).sort()
   if (!active.length) return
-  const prefix = 'actions:'
+  const prefix = 'actions:v2:'
   const key = prefix + active.join(',')
   if (previous?.startsWith(prefix)) {
     const seen = new Set(previous.slice(prefix.length).split(','))
     return { key, notify: active.some((action) => !seen.has(action)) }
   }
-  // Keep previously delivered prompts quiet when upgrading an active conversation.
-  const oldKey = decisions.length ? 'decision:' + sha256Hex(JSON.stringify(decisions)) : 'blocked:' + sha256Hex(JSON.stringify(blocking))
-  return { key, notify: Boolean(nativeApprovals.length || reviews.length || decisions.length && blocking.length) || previous !== oldKey }
+  // Older action notices had no usable navigation. Upgrade an active item once;
+  // completed runs keep their existing terminal key and are not replayed.
+  return { key, notify: true }
 }
 
 export function installNativeChat(host: Context, options: {
@@ -842,6 +890,7 @@ export function installNativeChat(host: Context, options: {
         const run = describeRun(service, runId, options.operator)
         if (scopedRun && taskTitle && run.title !== taskTitle) throw new OrchError('FORBIDDEN', '任务回报仅能访问来源运行')
         const result = { ...run, nodes: describeNodes(db, runId), artifact_links: describeChatArtifacts(db, run, binding),
+          attention_links: describeChatAttention(run, binding),
           artifacts: describeArtifacts(db, runId, acceptedArtifactIds(run.delivery_checks)) }
         turn.lastStatusRun = runId
         return result
@@ -910,13 +959,20 @@ export function installNativeChat(host: Context, options: {
         turn.brainReviewStarted = true
         return { brain_review: await service.reviewBrainNotes(agent, runId, options.operator, signal, assertCurrent) }
       }
-      const decisionId = input.decision_id ?? decisionFromTitle(db, runId, input.decision_title!, input.resolution)
+      const decisionId = input.decision_id ?? decisionFromTitle(db, runId, input.decision_title!)
       const { item: decision } = getDecisionSnapshot(db, decisionId)
-      if (decision.run_id !== runId || !decision.allowed_resolutions?.includes(input.resolution)
-        || (turn.noticeRun && input.resolution !== 'approved')) {
+      if (decision.run_id !== runId || (turn.noticeRun && input.resolution !== 'approved')) {
         throw new OrchError('FORBIDDEN', '该裁决不属于当前会话的待确认运行，或需要原有核验证据')
       }
-      if (decision.kind === 'audit_result') throw new OrchError('RESOLUTION_NOT_AVAILABLE', '请先查看成果，再在对应审核入口提交结论')
+      if (decision.kind === 'audit_result' || !decision.allowed_resolutions?.includes(input.resolution)
+        || decision.resolution_unavailable_reason || decision.required_evidence?.length) {
+        const explanation = describeDecision(decision)
+        return { kind: 'panel_review' as const, title: explanation.title, summary: explanation.summary,
+          reason: explanation.reason, evidence: explanation.evidenceGuidance,
+          choices: (decision.allowed_resolutions ?? []).map(choice => decisionActionLabel(decision, choice)).filter(Boolean),
+          location: { kind: 'decision' as const, workspaceId: binding.workspaceId, sessionId: binding.sessionId,
+            taskId: getRun(db, runId).task_id, runId, decisionId: decision.decision_id } }
+      }
       return await once(decision.decision_id, async () => {
         const title = chatDecisionTitle(decision.target_summary, decision.kind)
         const fields = chatReviewFields(service, runId, decision, title, input.resolution)
@@ -1003,7 +1059,7 @@ export function installNativeChat(host: Context, options: {
     output: {
       schema: { type: 'object', properties: {
         text: { type: 'string' }, summary: { type: 'string' }, preview: { type: 'string' }, references: { type: 'string' },
-        deliveryReview: { type: 'object' }, location: { type: 'object' }, artifactLinks: { type: 'array' },
+        deliveryReview: { type: 'object' }, location: { type: 'object' }, artifactLinks: { type: 'array' }, attentionLinks: { type: 'array' },
       }, required: ['text', 'summary', 'preview'], additionalProperties: false },
       render: (_args, value) => {
         const { summary, preview, references } = value as { summary: string; preview: string; references?: string }
@@ -1015,8 +1071,10 @@ export function installNativeChat(host: Context, options: {
         // 只透传通过 schema 校验的定位对象：元数据只用于导航，打开时仍会重读权限（T16）。
         const target = receiptLocation.safeParse((value as { location?: unknown }).location)
         const artifacts = chatArtifactLink.array().max(50).safeParse((value as { artifactLinks?: unknown }).artifactLinks)
+        const attention = chatAttentionLink.array().max(13).safeParse((value as { attentionLinks?: unknown }).attentionLinks)
         return { summary: typeof summary === 'string' ? summary : '', ...(deliveryReview && { deliveryReview }),
-          ...(target.success && { location: target.data }), ...(artifacts.success && { artifactLinks: artifacts.data }) }
+          ...(target.success && { location: target.data }), ...(artifacts.success && { artifactLinks: artifacts.data }),
+          ...(attention.success && { attentionLinks: attention.data }) }
       },
     },
     async execute(input, execution) {
@@ -1033,7 +1091,11 @@ export function installNativeChat(host: Context, options: {
         if ('blocking' in result) {
           const { deliveryReviews: _, ...status } = result
           return { ...respond(status, chatText(describeChatRun(result))), references: artifactReadReferences(result),
-            artifactLinks: result.artifact_links }
+            artifactLinks: result.artifact_links, attentionLinks: result.attention_links }
+        }
+        if ('kind' in result && result.kind === 'panel_review') return {
+          ...respond(result, `${result.title}\n${result.summary}\n${result.reason}\n请点击「前往审批中心」核对材料并选择操作。此项仍待你处理。`),
+          location: result.location,
         }
         if ('notes' in result) return respond(result, '已读取本次运行的共享便条。便条仅作参考。', JSON.stringify(result.notes))
         if ('brain_review' in result && result.brain_review) {
@@ -1102,7 +1164,10 @@ export function installNativeChat(host: Context, options: {
               ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
               artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
             }, true)
-            agent.followup(noticeMessage(id, display, describeChatArtifacts(service.orchestra.db, view, binding)))
+            // Deliver at the next step, including while the source model is active.
+            // followup waits for another turn and can strand an urgent decision behind a polling loop.
+            agent.steer(noticeMessage(id, display, describeChatArtifacts(service.orchestra.db, view, binding),
+              describeChatAttention(view, binding), view.terminal))
           } finally { pending.delete(id) }
         }
         const consumedAtCheckpoint = agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.id === id)

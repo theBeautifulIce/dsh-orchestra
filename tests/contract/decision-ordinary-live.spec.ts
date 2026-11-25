@@ -216,6 +216,30 @@ it('allows three expired waits on the same acknowledged card and preserves the a
   } finally { await f.close() }
 })
 
+it('extends native observation only when the current host call has a handled signed start', async () => {
+  const f = await fixture()
+  try {
+    f.seed('stop', 'stopping')
+    f.host.hasToolCall = true
+    f.host.lastToolCallId = 'native_read'
+    const card = f.card('action_overrun', 'stop')
+    expect(await f.choices(card.decision_id)).not.toContain('continue_wait')
+    const ledger = new BridgeLedger(f.db, f.secret, { nodeRunId: 'stop', attempt: 2, executorAgentId: 'stop:agent' })
+    ledger.ingest({ seq: 1, type: 'tool.start', at: f.now(), toolStartAt: null, attempt: 2, executorAgentId: 'stop:agent',
+      payload: { kind: 'native_tool', call_id: 'native_read', tool: 'read', arguments_hash: 'a'.repeat(64) } })
+    expect(await f.choices(card.decision_id)).not.toContain('continue_wait')
+    ledger.markHandled(1)
+    f.host.lastToolCallId = 'unconfirmed_call'
+    expect(await f.choices(card.decision_id)).not.toContain('continue_wait')
+    f.host.lastToolCallId = 'native_read'
+    expect(await f.choices(card.decision_id)).toContain('continue_wait')
+    expect((await f.submit(command(card, 'continue_wait'))).body).toMatchObject({ data: { revision: 2 } })
+    expect(f.node('stop')).toMatchObject({ status: 'stopping', action_generation: 1, rearm_generation: 1,
+      action_remaining_ns: 10e9, wait_extensions: 1, hang_reason: null })
+    expect(f.event('stop', 'M-34')).toBeDefined()
+  } finally { await f.close() }
+})
+
 it.each(['pure', 'irreversible'])('restores only observation after abandoning a %s node', async (policy) => {
   const f = await fixture()
   try {
@@ -249,5 +273,45 @@ it.each(['pure', 'irreversible'])('restores only observation after abandoning a 
       expect(result).toMatchObject({ accepted: false, reason: 'evidence_missing' })
       expect(f.node('stop').status).toBe('stopping')
     }
+  } finally { await f.close() }
+})
+
+it.each([
+  { case: 'pure incomplete', policy: 'pure', stopped: true, allowed: true, outcome: 'blocked', altered: false, expected: 'failed' },
+  { case: 'unverified effects', policy: 'irreversible', stopped: true, allowed: true, outcome: 'blocked', altered: false, expected: 'evidence_missing' },
+  { case: 'command evidence required', policy: 'pure', stopped: true, allowed: false, outcome: 'blocked', altered: false, expected: 'evidence_missing' },
+  { case: 'success claimed as failure', policy: 'pure', stopped: true, allowed: true, outcome: 'completed', altered: false, expected: 'evidence_missing' },
+  { case: 'host stop missing', policy: 'pure', stopped: false, allowed: true, outcome: 'blocked', altered: false, expected: 'STALE_GENERATION' },
+  { case: 'final output altered', policy: 'pure', stopped: true, allowed: true, outcome: 'blocked', altered: true, expected: 'STALE_GENERATION' },
+])('settles observed incomplete work only with matching pure-execution facts: $case', async (scenario) => {
+  const f = await fixture()
+  try {
+    f.seed('stop', 'stopping', scenario.policy)
+    f.commands.loadWorkflow({ workflow_version: '1', pass_conditions: [], nodes: [{ node_id: 'stop', type: 'agent', side_effect_policy: 'pure' }] })
+    bindRunVersion(f.db, f.catalog, 1, 'run')
+    const completion = scenario.outcome === 'completed' ? { outcome: 'completed' }
+      : { outcome: 'blocked', reason: '工具授权已结束，剩余检查未执行。', next_action: '调整本步时限后重试。', missing: ['剩余检查'] }
+    const output = { completion, summary: '已保留检查进度。' }
+    const ledger = new BridgeLedger(f.db, f.secret, { nodeRunId: 'stop', attempt: 2, executorAgentId: 'stop:agent' })
+    ledger.ingest({ seq: 1, type: 'turn', at: f.now(), toolStartAt: null, attempt: 2, executorAgentId: 'stop:agent',
+      payload: { kind: 'report', report: { status: 'failed', output } } })
+    ledger.markHandled(1)
+    const apply = () => withTx(f.db, tx => {
+      if (scenario.stopped) recordOrdinaryHostStop(tx, f.secret, {
+        nodeRunId: 'stop', attempt: 2, generation: 1, agentId: 'stop:agent', stoppedAt: f.now(),
+      })
+      return applyObservedReport(tx, f.secret, { nodeRunId: 'stop', attempt: 2, expectedStatus: 'stopping', generation: 1, now: f.now(),
+        report: { report_id: 'rep_stop_2_failed', node_run_id: 'stop', attempt: 2, status: 'failed',
+          output: { ...output, ...(scenario.altered && { summary: 'different output' }), evidence_trace: [] } } }, f.catalog,
+      { executorAgentId: 'stop:agent', executorSessionId: 'stop:session', rearmGeneration: 0, bridgeSeq: 1 }, scenario.allowed)
+    })
+    if (scenario.expected === 'STALE_GENERATION') expect(apply).toThrowError(expect.objectContaining({ code: 'STALE_GENERATION' }))
+    else if (scenario.expected === 'failed') {
+      expect(apply()).toMatchObject({ accepted: true, next_status: 'failed' })
+      expect(f.card('action_overrun', 'stop')).toMatchObject({ status: 'resolved', closed_reason: 'cancelled' })
+      sweepNow(f.runtime, f.now())
+      expect(f.db.raw.prepare("SELECT status FROM runs WHERE run_id='run'").get()).toEqual({ status: 'failed' })
+    } else expect(apply()).toMatchObject({ accepted: false, reason: scenario.expected })
+    expect(f.node('stop').status).toBe(scenario.expected === 'failed' ? 'failed' : 'stopping')
   } finally { await f.close() }
 })

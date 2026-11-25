@@ -6,7 +6,8 @@ import { formatDeliveryReviewNotice, type ChatDeliveryReview } from './chat-deli
 
 type Step = { title?: string | null; status: string; node_id?: string; waiting_on?: string[] }
 type BlockingStep = Step & { action_required: boolean; reason: string | null; missing: string[]; outstanding_files?: string[] }
-type Decision = { title: string | null; kind: string; choices: string[] | null; reason?: string | null; required_evidence: string[] | null }
+type Decision = { title: string | null; kind: string; choices: string[] | null; reason?: string | null; required_evidence: string[] | null
+  explanation?: { title: string; summary: string; reason: string; evidenceGuidance: string } }
 type RunDisplay = {
   title?: string | null
   status: string
@@ -22,6 +23,7 @@ type RunDisplay = {
   rework?: Array<{ run_id?: string; request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string; revision?: number }>
   delivery_checks: RunDeliveryCheck[]
   text_results?: ChatTextPreview[]
+  failure_details?: Array<{ node_id: string; title: string; reason: string; next_action: string; missing: string[] }>
   nodes?: Step[]
   artifacts: Array<{ artifact_id: string; file_name?: string }>
 }
@@ -109,6 +111,10 @@ function decisionDescription(decision: Decision, unique: boolean): string {
   const title = chatDecisionTitle(decision.title, decision.kind)
   const evidence = evidenceNames(decision.required_evidence ?? [])
   const available = decision.kind !== 'audit_result' && decision.choices?.includes('approved')
+  if (decision.explanation) {
+    const view = decision.explanation
+    return `${view.title}：${sentence(view.summary)}${sentence(view.reason)}请点击会话中的「前往审批中心」，核对材料并选择操作。等待你处理期间，无需反复查询任务状态。`
+  }
   const next = unique && !evidence.length && !decision.reason && available
     ? '请在聊天审批卡中查看并选择。'
     : '请在 Orchestra 面板打开待办，查看核验材料和可用的处理方式。'
@@ -144,6 +150,11 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
   const heading = taskHeading(view.title, state)
   const lines: string[] = []
   if (view.terminal) lines.push(ACCEPTANCE.get(view.acceptance ?? '') ?? '现有记录还不足以确认交付验收结果。')
+  for (const failure of view.failure_details ?? []) {
+    lines.push(`步骤「${failure.title}」未完成。原因：${sentence(operatorReason(failure.reason))}`,
+      `下一步：${sentence(operatorReason(failure.next_action))}`)
+    if (failure.missing.length) lines.push(`未完成项：${evidenceNames(failure.missing).join('、')}。`)
+  }
   for (const approval of view.nativeApprovals ?? []) {
     lines.push(`${approval.title ? `步骤「${approval.title}」的` : ''}工具「${approval.tool}」正在等待${approval.mode === 'brain' ? '主脑判断或你的授权' : '你的授权'}。`,
       `执行会话：${approval.executorSessionId}。请打开该会话，处理此工具的宿主审批卡。审批前，此操作保持暂停。`)
@@ -182,7 +193,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
     lines.push(`步骤情况：${counts.join('，')}。`)
   }
   const nodes = view.nodes ?? []
-  const listed = new Set(actions.map((step) => step.node_id))
+  const listed = new Set([...actions.map((step) => step.node_id), ...(view.failure_details ?? []).map(failure => failure.node_id)])
   const highlighted = nodes.filter((node) => ATTENTION_STEP.has(node.status) && !listed.has(node.node_id))
     .filter((node) => !view.terminal || node.status !== 'started' && node.status !== 'verifying' && node.status !== 'waiting')
   for (const node of highlighted.slice(0, 5)) {

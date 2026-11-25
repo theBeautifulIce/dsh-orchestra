@@ -7,6 +7,7 @@ import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
 import { serveOrchestra, type serveDshOrchestra, type TaskPlanProposal } from '../../src/index.ts'
 import { OrchError } from '../../src/core/errors.ts'
+import { sha256Hex } from '../../src/core/canonical.ts'
 import { decisionId, uuidv7 } from '../../src/core/ids.ts'
 import { BridgeClient } from '../../src/executor/bridge.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
@@ -46,7 +47,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   const agents = new Map<string, Agent>()
   const conversations = new Map<string, string[]>()
   const routes: string[] = []
-  const notices: Array<{ sessionId: string; message: Message }> = []
+  const notices: Array<{ sessionId: string; message: Message; target: 'nextTurn' | 'nextStep' }> = []
   let tool: Definition | undefined
   let activation: Activation | undefined
   let guard: Guard | undefined
@@ -172,17 +173,25 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
   function session(workspace: string, sessionId: string, header: Record<string, unknown> = {}) {
     const events: Array<{ type: string; data: unknown }> = []
     const nextTurn: Message[] = []
+    const nextStep: Message[] = []
     const signal = new AbortController()
     let turn = 0
     const agent = {
       id: sessionId, status: 'running', model: { current: () => ({ provider: 'fixture', model: 'model' }) },
-      inbox: { nextTurn },
+      inbox: { nextTurn, nextStep },
       session: { id: sessionId, header: { cwd: directory, ...header }, snapshotEvents: () => [...events] },
       followup(message: Message) {
         const recorded = structuredClone(message)
         nextTurn.push(recorded)
-        events.push({ type: 'agent/inbox/spliced', data: { inserted: [recorded] } })
-        notices.push({ sessionId, message: recorded })
+        events.push({ type: 'agent/inbox/spliced', data: { target: 'nextTurn', inserted: [recorded] } })
+        notices.push({ sessionId, message: recorded, target: 'nextTurn' })
+        agentEvents(ctx, agent).emit('agent/inbox/inserted', { message: recorded })
+      },
+      steer(message: Message) {
+        const recorded = structuredClone(message)
+        nextStep.push(recorded)
+        events.push({ type: 'agent/inbox/spliced', data: { target: 'nextStep', inserted: [recorded] } })
+        notices.push({ sessionId, message: recorded, target: 'nextStep' })
         agentEvents(ctx, agent).emit('agent/inbox/inserted', { message: recorded })
       },
     } as unknown as Agent
@@ -193,8 +202,10 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
       for (const message of messages) {
         if (newInbox) dispatch.emit('agent/inbox/inserted', { message })
         else {
-          const queued = nextTurn.findIndex(({ id }) => id === message.id)
-          if (queued !== -1) nextTurn.splice(queued, 1)
+          for (const queue of [nextTurn, nextStep]) {
+            const queued = queue.findIndex(({ id }) => id === message.id)
+            if (queued !== -1) queue.splice(queued, 1)
+          }
         }
         dispatch.emit('agent/inbox/claimed', { message, turn: advance ? turn + 1 : turn })
       }
@@ -218,7 +229,7 @@ async function fixture(options: { profile?: string; version?: string; enabled?: 
       return tool!.output.render(input, await invoke(input))
     }
     const checkTool = (name: string, parent?: symbol) => guard?.({ agent, name, signal: signal.signal, parent } as Parameters<Guard>[0])
-    return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn, events, dispatch: agentEvents(ctx, agent) }
+    return { agent, admit, admitMany, invoke, call, render, signal, checkTool, nextTurn, nextStep, events, dispatch: agentEvents(ctx, agent) }
   }
   return { session, serve, services, planner, workflowGenerator, routes, approval, notices, spawn, interpret, flush, directory, commandNames,
     registered: () => ({ activation: activation!, prompt: prompt!, tool: tool! }),
@@ -1171,7 +1182,8 @@ it('keeps approval, planning failure and terminal results in the originating DSH
       && part.text.includes('人工核对报告')))
     await expect.poll(findApproval, { timeout: 5_000 }).toMatchObject({ sessionId: 'parent' })
     const notification = findApproval()!.message
-    expect(notification.source).toEqual({ kind: 'plugin:dsh-orchestra', form: 'notice', summary: expect.any(String) })
+    expect(notification.source).toMatchObject({ kind: 'plugin:dsh-orchestra', form: 'notice', summary: expect.any(String),
+      attentionLinks: [{ location: { kind: 'decision', sessionId: 'parent', runId: prepared.run_id, decisionId: decision } }] })
     expect(JSON.stringify(notification.content)).not.toContain(decision)
     await other.admit(notification, false)
     await expect(other.call({ action: 'review', run_id: prepared.run_id, decision_id: decision }))
@@ -1643,11 +1655,12 @@ it.each(['succeeded', 'succeeded_with_unverified', 'failed', 'failed_with_unveri
     await vi.advanceTimersByTimeAsync(2000)
     expect(test.notices).toHaveLength(1)
     const first = test.notices[0]!.message
+    expect(first.source).toMatchObject({ final: true })
     await vi.advanceTimersByTimeAsync(4000)
     expect(test.notices).toHaveLength(1)
     expect(readKey()).toBe('terminal:' + status)
-    human.nextTurn.splice(human.nextTurn.findIndex(message => message.id === first.id), 1)
-    human.events.push({ type: 'agent/inbox/spliced', data: { target: 'nextTurn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' } })
+    human.nextStep.splice(human.nextStep.findIndex(message => message.id === first.id), 1)
+    human.events.push({ type: 'agent/inbox/spliced', data: { target: 'nextStep', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' } })
     human.dispatch.emit('agent/inbox/discarded', { message: first })
     await vi.advanceTimersByTimeAsync(2000)
     expect(test.notices).toHaveLength(2)
@@ -1674,7 +1687,7 @@ it('claimed 后的 pre-step 拒绝会恢复通知，在途 claim 与失败 flush
     await vi.advanceTimersByTimeAsync(2000)
     const first = test.notices[0]!.message
     expect(readKey()).toBeNull()
-    human.nextTurn.splice(human.nextTurn.findIndex(message => message.id === first.id), 1)
+    human.nextStep.splice(human.nextStep.findIndex(message => message.id === first.id), 1)
     human.dispatch.emit('agent/inbox/claimed', { message: first, turn: 50 })
     await vi.advanceTimersByTimeAsync(4000)
     expect(test.notices).toHaveLength(1)
@@ -1689,6 +1702,94 @@ it('claimed 后的 pre-step 拒绝会恢复通知，在途 claim 与失败 flush
     await vi.advanceTimersByTimeAsync(2000)
     expect(readKey()).toBe('delivered:terminal:failed')
     expect(test.notices).toHaveLength(2)
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
+it.each(['applied', 'replayed', 'rejected', 'old-attempt', 'old-generation'] as const)
+('终态会话只显示本次已采纳失败回报的原因与下一步（%s）', async mode => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理办公材料并交付审核报告'))
+    const { run_id: runId } = await human.call()
+    const { db } = test.services.get('parent')!.orchestra
+    const now = new Date().toISOString()
+    const completion = { outcome: 'blocked', reason: '执行时限已到，资料尚未整理完成。',
+      next_action: '缩小整理范围后重试。', missing: ['完整分类清单'] }
+    withTx(db, tx => {
+      const node = tx.get<{ node_run_id: string; attempt: number; action_generation: number }>(
+        "SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_type='agent'", [runId])!
+      tx.run("UPDATE node_runs SET status='failed' WHERE node_run_id=?", [node.node_run_id])
+      tx.run("UPDATE runs SET status='failed',ended_at=? WHERE run_id=?", [now, runId])
+      tx.run('INSERT INTO report_registry(report_id,node_run_id,attempt,report_seq,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+        ['failed-report', node.node_run_id, node.attempt, 1, mode === 'rejected' ? 'rejected' : mode === 'replayed' ? 'replayed' : 'applied', now, now])
+      appendNodeRunEvent(tx, test.secret, node.node_run_id, 'report_applied', { report_id: 'failed-report', report_seq: 1,
+        next_status: 'failed', attempt: node.attempt + (mode === 'old-attempt' ? 1 : 0),
+        action_generation: node.action_generation + (mode === 'old-generation' ? 1 : 0), completion })
+    })
+    const result = await human.invoke({ action: 'status' })
+    const valid = mode === 'applied' || mode === 'replayed'
+    expect(JSON.parse(result.text).failure_details).toHaveLength(valid ? 1 : 0)
+    if (valid) {
+      expect(result.summary).toContain(completion.reason)
+      expect(result.summary).toContain('下一步：' + completion.next_action)
+      expect(result.summary).toContain('完整分类清单')
+    } else expect(result.summary).not.toContain(completion.reason)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(1)
+    const text = test.notices[0]!.message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
+    expect(text.includes(completion.reason)).toBe(valid)
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
+it.each(['new', 'actions', 'decision', 'blocked'] as const)
+('当前回合收到可跳转待办，旧版 %s 通知仅补送一次，不猜测批准或重试参数', async legacy => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture()
+  try {
+    const human = test.session('work', 'parent')
+    await human.admit(user('整理办公材料并交付审核报告'))
+    const { run_id: runId, task_id: taskId } = await human.call()
+    const { db } = test.services.get('parent')!.orchestra
+    const id = decisionId()
+    withTx(db, tx => openDecision(tx, { decisionId: id, runId, nodeRunId: null, kind: 'startup_unknown',
+      approver: 'human', payload: { target_summary: '这次执行的启动状态有待确认。' } }))
+    if (legacy !== 'new') {
+      const before = await human.call({ action: 'status' })
+      const pair = [id, before.decisions[0].revision]
+      const oldKey = legacy === 'actions' ? 'actions:' + sha256Hex(JSON.stringify(pair))
+        : legacy === 'decision' ? 'decision:' + sha256Hex(JSON.stringify([pair]))
+          : 'blocked:' + sha256Hex(JSON.stringify([]))
+      reportChatRun(db, runId, 'delivered:' + oldKey)
+    }
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(test.notices).toHaveLength(1)
+    const notification = test.notices[0]!
+    expect(notification.target).toBe('nextStep')
+    expect(human.nextTurn).toHaveLength(0)
+    expect(human.nextStep).toHaveLength(1)
+    expect(notification.message.source).toMatchObject({ attentionLinks: [{ location: {
+      kind: 'decision', workspaceId: 'work', sessionId: 'parent', taskId, runId, decisionId: id,
+    } }] })
+    // This is another step of the active originating turn, not a follow-up turn.
+    await human.admit(notification.message, false, false)
+    expect(await human.call({ action: 'status' })).toMatchObject({ decisions: [{ kind: 'startup_unknown',
+      explanation: { title: '启动情况待核实' } }], attention_links: [{ location: { decisionId: id } }] })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await human.invoke({ action: 'review', decision_title: '启动状态待确认' })
+      expect(JSON.parse(result.text)).toMatchObject({ kind: 'panel_review', location: { decisionId: id, runId } })
+      expect(result.summary).toContain('前往审批中心')
+      expect(test.registered().tool.output.presentationMeta?.({}, result)).toMatchObject({ location: { decisionId: id } })
+    }
+    expect(test.approval).not.toHaveBeenCalled()
+    expect(db.raw.prepare('SELECT status,resolved_by FROM decisions WHERE decision_id=?').get(id))
+      .toMatchObject({ status: 'pending', resolved_by: null })
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(test.notices).toHaveLength(1)
+    expect(db.raw.prepare('SELECT reported_key FROM chat_task_receipts').get()?.reported_key)
+      .toMatch(/^delivered:actions:v2:/u)
+    expect(count(test.services.get('parent')!, 'runs')).toBe(1)
   } finally { await test.close(); vi.useRealTimers() }
 })
 

@@ -43,7 +43,7 @@ export function MarkdownReading({text}:{text:string}) {
   const [raw,setRaw]=useState(false)
   const content=useMemo(()=>renderText(text),[text])
   return <section aria-label="成果内容">
-    <button type="button" aria-pressed={raw} onClick={()=>setRaw(v=>!v)}>
+    <button className="ops-button" type="button" aria-pressed={raw} onClick={()=>setRaw(v=>!v)}>
       {raw?'切换为阅读视图':'显示原文'}
     </button>
     <div style={{overflowX:'auto',overflowWrap:'anywhere'}}>{raw?<pre>{text}</pre>:content}</div>

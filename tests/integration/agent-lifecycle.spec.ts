@@ -17,6 +17,53 @@ import { freshLedger, seed, TEST_SECRET } from '../fixtures/ledger.ts'
 
 const NOW = '2026-11-13T03:00:00.000Z'
 
+it.each([
+  { observedRunning: true, hasToolCall: true, expected: 'stopping' },
+  { observedRunning: true, hasToolCall: false, expected: 'stopping' },
+  { observedRunning: false, hasToolCall: true, expected: 'stopping' },
+  { observedRunning: false, hasToolCall: false, expected: 'startup_unknown' },
+])('classifies an expired native attempt from host facts: $observedRunning/$hasToolCall', ({ observedRunning, hasToolCall, expected }) => {
+  const { db, dir } = freshLedger()
+  try {
+    seed(db)
+    const lease = withTx(db, (tx) => {
+      tx.run("UPDATE node_runs SET status='queued',attempt=1 WHERE node_run_id='nr1'")
+      const result = acquireLease(tx, TEST_SECRET, { nodeRunId: 'nr1', ownerEpoch: db.epoch, leaseTtlMs: 1000, now: NOW })
+      tx.run("UPDATE node_runs SET status='started',executor_agent_id='agent_1',executor_session_id='sess_1' WHERE node_run_id='nr1'")
+      return result
+    })
+    vi.useFakeTimers({ toFake: ['performance'] })
+    const binding = { nodeRunId: 'nr1', attempt: 1, actionGeneration: lease.actionGeneration,
+      executorAgentId: 'agent_1', executorSessionId: 'sess_1' }
+    const bridge = new BridgeClient({
+      async request() { throw new Error('Observation must not re-dispatch or approve execution') },
+      async *listen() {},
+      fenceAttemptTools: () => true,
+      observeAttempt: () => ({ observedRunning, hasToolCall }),
+    })
+    const supervision = superviseOrdinaryAttempt({ db, secret: TEST_SECRET, bridge, binding,
+      clock: new ScriptedClock('fixture-boot', { wallClockMs: Date.parse(NOW) }),
+      leaseId: lease.leaseId, ownerEpoch: db.epoch, nowAt: () => NOW, timeoutMs: 100, unknownWatchdogMs: 120_000 })
+    bridge.installAttemptMonitor({ binding, budget: supervision.budget, actionTimeoutMs: 100 },
+      supervision.mayUseTools, new AbortController().signal)
+    vi.advanceTimersByTime(101)
+    expect(supervision.poll()).toBe(true)
+    expect(supervision.lateStatus()).toEqual({ status: expected, rearmGeneration: 1 })
+    expect(supervision.mayUseTools()).toBe(false)
+    expect(db.raw.prepare("SELECT lease_id,tool_start_at FROM node_runs WHERE node_run_id='nr1'").get())
+      .toEqual({ lease_id: null, tool_start_at: null })
+    expect(supervision.poll()).toBe(true)
+    const observations = db.raw.prepare("SELECT payload FROM node_run_events WHERE type='executor.observation_only'").all() as { payload: string }[]
+    expect(observations).toHaveLength(1)
+    expect(JSON.parse(observations[0]!.payload)).toMatchObject({ reason: 'action_timeout', timeout_ms: 100,
+      observed_running: observedRunning, has_tool_call: hasToolCall, attempt: 1, rearm_generation: 1 })
+  } finally {
+    vi.useRealTimers()
+    db.raw.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 it.each([true, false])('bounds signed final receipt intake while the resident native agent is idle (in grace: %s)', (inGrace) => {
   const { db, dir } = freshLedger()
   try {

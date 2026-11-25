@@ -52,7 +52,7 @@ describe('待你决定屏的排序', () => {
     const { api } = panelService(() => ({ ok: true, data: page([decisionView({ kind: 'report_contradicted',
       expires_at: '2026-11-21T00:00:00.000Z', expiry_effect: 'auto_resolve', allowed_resolutions: [] })]) }))
     const view = await renderPanel(<DecisionInbox api={api} />)
-    expect(view.text()).toContain('仅由人工处理，系统不会自动收口')
+    expect(view.text()).toContain('仅由人工处理，系统不会自动结束本项')
     expect(view.text()).not.toContain('按已记录的规则自动处理')
     view.unmount()
   })
@@ -85,8 +85,8 @@ describe('待你决定屏的排序', () => {
   })
 })
 
-describe('待你决定屏的四问', () => {
-  it('每张卡给出四问，字段缺失时写明服务端未提供', async () => {
+describe('待你决定屏的处理说明', () => {
+  it('字段缺失时给出核对指引，不编造证据、期限或处理选项', async () => {
     const { api } = panelService(() => ({ ok: true, data: page([decisionView({
       priority_reason: null,
       allowed_resolutions: null,
@@ -96,11 +96,49 @@ describe('待你决定屏的四问', () => {
     const view = await renderPanel(<DecisionInbox api={api} />)
     await view.flush()
     const text = view.text()
-    expect(text).toContain('为什么卡')
-    expect(text).toContain('你能选什么')
-    expect(text).toContain('需要什么证据')
-    expect(text).toContain('过期会怎样')
-    expect(text).toContain('服务端未提供')
+    expect(text).toContain('处理原因')
+    expect(text).toContain('如何核对')
+    expect(text).toContain('处理期限')
+    expect(text).toContain('本项未设置自动处理期限')
+    expect(text).toContain('当前没有可从这里执行的处理选项')
+    expect(text).not.toContain('服务端未提供')
+    expect(view.findAll('.ops-decision-option button')).toHaveLength(0)
+    view.unmount()
+  })
+
+  it('已开始但超时的旧恢复卡说明真实原因、所属任务与按钮后果，仍要求人工明确确认', async () => {
+    const item = decisionView({ kind: 'startup_unknown', task_title: '整理数据清单', step_title: '读取本地记录', attempt: 2,
+      target_summary: '这次执行的启动状态有待确认。', priority_reason: '按常规审批流程处理。',
+      allowed_resolutions: ['confirm_started_attested', 'continue_tracking', 'abandon'], required_evidence: [],
+      execution_observation: { reason: 'action_timeout', timeout_ms: 120_000, observed_running: true, has_tool_call: true } })
+    const { api, commands, posts } = panelService(() => ({ ok: true, data: page([item]) }))
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    try {
+      expect(view.text()).toContain('执行超时，等待处理')
+      expect(view.text()).toContain('120 秒执行时限')
+      expect(view.text()).toContain('记录显示本次执行已开始')
+      expect(view.text()).toContain('整理数据清单')
+      expect(view.text()).toContain('读取本地记录 · 第 2 次尝试')
+      expect(view.text()).toContain('不会重新执行任务，也不会恢复已停止的工具调用')
+      expect(view.text()).toContain('此操作不能证明执行已停止或外部操作未发生')
+      expect(view.text()).not.toContain('启动状态有待确认')
+      expect(view.text()).not.toContain('按常规审批流程处理')
+      expect(view.text()).not.toContain('服务端未提供')
+      expect((view.findAll('button').find(button => button.textContent === '人工确认已启动') as HTMLButtonElement).disabled).toBe(true)
+      expect(posts).toHaveLength(0)
+    } finally { view.unmount() }
+  })
+
+  it('没有启动依据时不宣称未启动或已经启动，也不提供服务端未允许的续等', async () => {
+    const { api, commands } = panelService(() => ({ ok: true, data: page([decisionView({ kind: 'startup_unknown',
+      target_summary: null, required_evidence: [], allowed_resolutions: ['abandon'] })]) }))
+    const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
+    try {
+      expect(view.text()).toContain('现有记录还不能确认这一步是否已启动')
+      expect(view.text()).toContain('无法核实时不要勾选')
+      expect(view.findAll('.ops-decision-option button').map(button => button.textContent)).toEqual(['停止跟踪'])
+      expect(view.text()).not.toContain('记录显示本次执行已开始')
+    } finally { view.unmount() }
   })
 
   it('把审批依据、缺少的资料和处理选项显示为中文，保留追溯编号', async () => {
@@ -255,7 +293,7 @@ describe('待你决定屏的交互', () => {
     view.unmount()
   })
 
-  it('服务端没给可选项时处理按钮禁用，并说明缺哪些字段', async () => {
+  it('服务端没给可选项时不提供处理按钮，并说明缺哪些字段', async () => {
     const { api } = panelService(() => ({ ok: true, data: page([decisionView({
       allowed_resolutions: null,
       projection_missing: ['allowed_resolutions', 'priority'],
@@ -264,9 +302,8 @@ describe('待你决定屏的交互', () => {
     await view.flush()
     expect(view.text()).toContain('当前记录缺少：处理选项、优先级')
     expect(view.text()).not.toContain('allowed_resolutions')
-    const processButton = view.findAll('button').find((button) => button.textContent === '处理')
-    expect(processButton).toBeDefined()
-    expect((processButton as HTMLButtonElement).disabled).toBe(true)
+    expect(view.findAll('.ops-decision-option button')).toHaveLength(0)
+    expect(view.text()).toContain('当前没有可从这里执行的处理选项')
     expect(view.findAll('article button').some((button) => button.textContent === '继续执行')).toBe(false)
   })
 })
@@ -394,20 +431,20 @@ describe('决定命令客户端', () => {
     })
     const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
     const button = (label: string) => view.findAll('button').find(candidate => candidate.textContent === label) as HTMLButtonElement | undefined
-    const checkbox = view.findAll('input[type=checkbox]').find(input => input.parentElement?.textContent?.includes('我亲眼看到'))
-    expect(button('确认已启动')).toBeUndefined()
-    expect(button('继续等待')).toBeUndefined()
-    expect(button('继续跟踪')).toBeDefined()
-    expect(view.text()).toContain('再观察这次执行 120 秒')
-    expect(button('签认已启动')?.disabled).toBe(true)
+    const checkbox = view.findAll('input[type=checkbox]').find(input => input.parentElement?.textContent?.includes('我已核对本次执行'))
+    expect(button('按系统凭据确认已启动')).toBeUndefined()
+    expect(button('延长等待')).toBeUndefined()
+    expect(button('再观察 120 秒')).toBeDefined()
+    expect(view.text()).toContain('再观察原执行 120 秒')
+    expect(button('人工确认已启动')?.disabled).toBe(true)
     await view.click(checkbox!)
-    expect(button('签认已启动')?.disabled).toBe(false)
-    await view.click(button('签认已启动')!)
+    expect(button('人工确认已启动')?.disabled).toBe(false)
+    await view.click(button('人工确认已启动')!)
     await view.flush()
     expect(posts).toEqual([{ path: '/v1/decisions/resolve', body: expect.objectContaining({ decisionId: 'd-start', revision: 4,
       resolution: 'confirm_started_attested', payload: { attestation_id: expect.stringMatching(/^att_/) } }) }])
-    expect(button('签认已启动')).toBeUndefined()
-    expect(button('继续跟踪')).toBeUndefined()
+    expect(button('人工确认已启动')).toBeUndefined()
+    expect(button('再观察 120 秒')).toBeUndefined()
     view.unmount()
   })
 
@@ -418,7 +455,7 @@ describe('决定命令客户端', () => {
       ? { ok: true, data: { decisionId: restored.decision_id, revision: 2 } }
       : { ok: true, data: page([restored, terminal]) })
     const view = await renderPanel(<DecisionInbox api={api} commands={commands} />)
-    const buttons = view.findAll('button').filter(button => button.textContent === '驳回放弃，恢复跟踪')
+    const buttons = view.findAll('button').filter(button => button.textContent === '恢复跟踪')
     expect(buttons).toHaveLength(1)
     await view.click(buttons[0]!)
     expect(posts[0]?.body).toMatchObject({ decisionId: restored.decision_id, resolution: 'rejected' })

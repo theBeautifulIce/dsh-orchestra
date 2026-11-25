@@ -16,7 +16,7 @@ const CLEAR_ACTION = { deadline_at: null, deadline_boot_id: null, deadline_monot
 type Read = Pick<Tx, 'get' | 'all'>
 type Card = OrdinaryRecoveryCard & { status: string }
 type ToolStart = { bootId: string; wallClockMs: number; monotonicNs: number; timeoutMs: number }
-type LiveNode = { node: OrdinaryRecoveryNode; proof: LiveAttemptObservation; leaseId: string; tool?: ToolStart }
+type LiveNode = { node: OrdinaryRecoveryNode; proof: LiveAttemptObservation; leaseId: string; tool?: ToolStart; nativeTool: boolean }
 type LiveResolution = 'confirm_started' | 'confirm_started_attested' | 'continue_tracking' | 'continue_wait' | 'rejected'
 export type OrdinaryLiveRecovery = {
   secret: string
@@ -45,8 +45,23 @@ function observe(tx: Read, node: OrdinaryRecoveryNode, recovery: OrdinaryLiveRec
   if (!proof || !Number.isSafeInteger(proof.actionTimeoutMs) || proof.actionTimeoutMs <= 0
     || !Number.isFinite(proof.observationBudgetMs) || proof.observationBudgetMs <= 0
     || (!proof.hasToolCall && proof.lastToolCallId !== undefined)) return undefined
-  return { node, proof, leaseId: lease.lease_id, tool: proof.lastToolCallId
-    ? readToolStart(tx, node, lease.lease_id, proof.lastToolCallId, recovery.clock) : undefined }
+  return { node, proof, leaseId: lease.lease_id,
+    tool: proof.lastToolCallId ? readToolStart(tx, node, lease.lease_id, proof.lastToolCallId, recovery.clock) : undefined,
+    nativeTool: Boolean(proof.lastToolCallId && readNativeToolStart(tx, node, lease.lease_id, proof.lastToolCallId)),
+  }
+}
+
+function readNativeToolStart(tx: Read, node: OrdinaryRecoveryNode, leaseId: string, callId: string): boolean {
+  return Boolean(tx.get(`SELECT 1 FROM bridge_event_receipts b
+    JOIN node_run_events e ON e.node_run_id=b.node_run_id AND e.seq=b.ledger_seq
+    JOIN bridge_stream_cursors c USING(node_run_id,attempt,executor_agent_id)
+    WHERE b.node_run_id=? AND b.attempt=? AND b.executor_agent_id=? AND c.last_handled_seq>=b.bridge_seq
+    AND b.event_type='bridge.tool.start' AND e.type='bridge.tool.start'
+    AND json_extract(e.payload,'$.attempt')=b.attempt AND json_extract(e.payload,'$.executorAgentId')=b.executor_agent_id
+    AND json_extract(e.payload,'$.payload.kind')='native_tool' AND json_extract(e.payload,'$.payload.call_id')=?
+    AND e.seq>(SELECT MAX(seq) FROM node_run_events WHERE node_run_id=e.node_run_id AND type='lease_acquired'
+      AND json_extract(payload,'$.lease_id')=?) LIMIT 1`,
+  [node.node_run_id, node.attempt, node.executor_agent_id, callId, leaseId]))
 }
 
 function readToolStart(tx: Read, node: OrdinaryRecoveryNode, leaseId: string, callId: string, clock: ClockProvider): ToolStart | undefined {
@@ -68,7 +83,9 @@ function readToolStart(tx: Read, node: OrdinaryRecoveryNode, leaseId: string, ca
 
 function originalWindow(live: LiveNode): number | undefined {
   if (live.tool) return Math.min(live.tool.timeoutMs, live.proof.actionTimeoutMs)
-  return live.proof.hasToolCall ? undefined : live.proof.actionTimeoutMs
+  // A native read has no fixed-command timer. Its signed start can only grant
+  // another bounded observation window; the tool fence stays closed.
+  return !live.proof.hasToolCall || live.nativeTool ? live.proof.actionTimeoutMs : undefined
 }
 
 function healthyClock(clock: ClockProvider): boolean {

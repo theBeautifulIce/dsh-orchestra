@@ -281,10 +281,10 @@ function TaskPlanFormBody({api,commands,onStarted,onOpenRun,workflowRequest,onCl
       {workflowRequest && <button type="button" disabled={busy === 'start'} style={editStyle} onClick={onClearWorkflow}>
         不指定流程，从目标开始
       </button>}
-      {draftReadFailed && <p aria-live="polite">未能读取未启动的计划。 <button type="button"
+      {draftReadFailed && <p aria-live="polite">未能读取未启动的计划。 <button className="ops-button" type="button"
         onClick={() => setDraftRetry(n => n + 1)}>重新读取</button></p>}
       {draftLoading && <p style={descriptionStyle} aria-live="polite">正在读取未启动的计划…</p>}
-      {draftNext && !draftReadFailed && <button type="button" disabled={draftLoading || busy !== null}
+      {draftNext && !draftReadFailed && <button className="ops-button" type="button" disabled={draftLoading || busy !== null}
         onClick={() => setDraftPage(draftNext)}>加载更早的计划</button>}
       {drafts.length > 0 && <details style={detailStyle} open={!plan && drafts.length > 0}>
         <summary>继续未启动的计划（{drafts.length}）</summary>
@@ -304,11 +304,11 @@ function TaskPlanFormBody({api,commands,onStarted,onOpenRun,workflowRequest,onCl
         <p style={descriptionStyle}>需要本地材料时，请先在这里生成计划，再在「为本次任务补充材料」中选择文件和可读取步骤，最后确认启动。</p>
         <form onSubmit={(event) => { void propose(event) }} style={contentStyle} aria-busy={busy === 'propose'}>
           <label style={contentStyle}>要完成什么
-            <textarea required rows={3} maxLength={2000} value={goal} disabled={busy !== null} autoFocus={Boolean(workflowRequest)}
+            <textarea className="ops-field" required rows={3} maxLength={2000} value={goal} disabled={busy !== null} autoFocus={Boolean(workflowRequest)}
               placeholder="例如，复核本周项目交付清单并整理差异" onChange={(event) => setGoal(event.target.value)} />
           </label>
           <label style={contentStyle}>必须满足的要求（可选，每行一项）
-            <textarea rows={2} maxLength={3612} value={criteria} disabled={busy !== null}
+            <textarea className="ops-field" rows={2} maxLength={3612} value={criteria} disabled={busy !== null}
               onChange={(event) => setCriteria(event.target.value)} />
           </label>
           <PanelCommandButton type="submit" disabled={busy !== null || !goal.trim()}>{busy === 'propose' ? '正在规划…' : '生成计划'}</PanelCommandButton>
@@ -371,7 +371,7 @@ function TaskPlanFormBody({api,commands,onStarted,onOpenRun,workflowRequest,onCl
         </div>}
         {plan.launch && <div>
           <p role="status" style={descriptionStyle}>已建立受监督的任务运行。</p>
-          {onOpenRun && <button type="button" onClick={(event) => {
+          {onOpenRun && <button className="ops-button" type="button" onClick={(event) => {
             if (plan.launch) onOpenRun(plan.launch.task_id, event.currentTarget, plan.launch.run_id)
           }}>查看本次运行</button>}
         </div>}

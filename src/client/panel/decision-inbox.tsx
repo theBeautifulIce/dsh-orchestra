@@ -1,6 +1,6 @@
 import { ReworkPanel } from './rework-panel.tsx'
 import type { ReworkApi } from '../api/rework.ts'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ResourcesApi } from '../api/resources.ts'
 import type { DecisionView, MemoryApprovalCard } from '../api/types.ts'
 import { DecisionConfirmationRequired, describeDecisionError, type DecisionCommandsApi, type DecisionResolveInput } from '../api/decision-commands.ts'
@@ -10,31 +10,18 @@ import { COLOR, FONT_PX } from './tokens.ts'
 import { usePanelCommandsEnabled } from './shell.tsx'
 import { priorityRank } from '../../core/decision-priority.ts'
 import { operatorReason, operatorStatus } from '../../core/operator-language.ts'
+import { decisionActionConsequence, decisionActionLabel, describeDecision } from '../../core/decision-display.ts'
 
 export { priorityRank }
 
-const KIND_LABEL: Record<string, string> = {
-  pre_execution: '执行前确认', action_overrun: '执行超时待处理', abandon_ack: '确认放弃跟踪', verify_human: '人工核验',
-  audit_result: '结果复核', rule_ambiguous: '规则待澄清', startup_unknown: '启动状态待确认', report_contradicted: '结果不一致',
-}
-const DECISION_OPTIONS = new Map([
-  ['approved', '批准执行'], ['rejected', '拒绝执行'], ['expired', '按到期处理'],
-  ['continue', '继续执行'], ['abort', '停止执行'],
-  ['confirm_applied', '确认外部操作已发生'], ['confirm_not_applied', '确认外部操作未发生'],
-  ['confirm_started', '确认已启动'], ['confirm_not_started', '确认未启动'],
-  ['confirm_started_attested', '签认已启动'],
-  ['continue_tracking', '继续跟踪'], ['continue_wait', '继续等待'], ['abandon', '停止跟踪'],
-  ['uphold_report', '采纳回报'], ['uphold_decision', '保留原处理决定'],
-])
 const PRIORITY_LABEL = new Map([['critical', '最高'], ['urgent', '紧急'], ['high', '高'], ['normal', '普通'], ['low', '低']])
 const FIELD_LABEL = new Map([
-  ['allowed_resolutions', '处理选项'], ['priority', '优先级'], ['priority_reason', '等待原因'],
+  ['allowed_resolutions', '处理选项'], ['priority', '优先级'], ['priority_reason', '优先级依据'],
   ['required_evidence', '核验材料'], ['target_summary', '事项说明'], ['payload', '事项内容'],
 ])
-const APPROVER_LABEL: Readonly<Record<string, string>> = { human: '人工', either: '人工或授权执行主体', agent: '授权执行主体' }
-const EXPIRY_LABEL: Readonly<Record<string, string>> = { auto_resolve: '按已记录的规则自动处理', escalate_only: '升级给人工', none: '无自动动作' }
+const APPROVER_LABEL: Readonly<Record<string, string>> = { human: '需要你确认', either: '你或已授权的执行者', agent: '已授权的核验智能体' }
 
-// 服务端没给的字段一律写明「服务端未提供」，面板不替它编。
+// Preserve missing protocol details in the developer view; user guidance never invents evidence.
 const NOT_PROVIDED = '服务端未提供'
 
 function optionalReason(reason: string | null | undefined, fallback = NOT_PROVIDED): string {
@@ -320,23 +307,19 @@ function DecisionCard(props: {
   confirmation?: ReactNode
 }) {
   const { decision } = props
+  const actionDescriptionId = useId()
   const [selectedBranch, setSelectedBranch] = useState('')
   const [attestedRevision, setAttestedRevision] = useState<number | null>(null)
   const attest = attestedRevision === decision.current_revision
-  const kind = Object.hasOwn(KIND_LABEL, decision.kind) ? KIND_LABEL[decision.kind] : '待确认事项'
+  const description = describeDecision(decision)
   const agentOnly = decision.approver?.startsWith('agent:') === true
   const status = agentOnly && decision.status !== 'resolved' ? '由授权核验主体处理' : operatorStatus(decision.status)
   const choices = (decision.allowed_resolutions ?? []).flatMap((value) => {
     const verdict = value === 'confirm_applied' ? 'applied' : value === 'confirm_not_applied' ? 'not_applied' : null
     const evidenceId = verdict ? decision.available_effect_evidence?.[verdict] : undefined
     if (verdict && !evidenceId) return []
-    const outcome = value === 'confirm_not_started' || value === 'confirm_not_applied'
-      ? decision.available_recovery_outcomes?.[value] : undefined
-    const baseLabel = decision.kind === 'rule_ambiguous' && value === 'approved' ? '继续所选分支'
-      : decision.kind === 'abandon_ack' && value === 'approved' ? '签字接受未核实的副作用'
-        : decision.kind === 'abandon_ack' && value === 'rejected' ? '驳回放弃，恢复跟踪' : DECISION_OPTIONS.get(value)
-    const suffix = outcome === 'retry' ? '并发起新尝试' : outcome === 'failed' ? '并将此步骤记为失败' : ''
-    return baseLabel ? [{ value, label: baseLabel + suffix, evidenceId }] : []
+    const label = decisionActionLabel(decision, value)
+    return label ? [{ value, label, evidenceId }] : []
   })
   const branches = decision.kind === 'rule_ambiguous' && isRecord(decision.payload) && Array.isArray(decision.payload.edges)
     ? decision.payload.edges.filter((value): value is string => typeof value === 'string') : []
@@ -345,7 +328,7 @@ function DecisionCard(props: {
   const missing = decision.projection_missing ?? []
   const conflict = decision.kind === 'report_contradicted' && isRecord(decision.payload) ? decision.payload : null
   const ordinaryResolution = decision.closed_reason === 'approved' && isRecord(decision.payload) && isRecord(decision.payload.ordinary_recovery)
-    && typeof decision.payload.resolution === 'string' ? DECISION_OPTIONS.get(decision.payload.resolution) : undefined
+    && typeof decision.payload.resolution === 'string' ? decisionActionLabel(decision, decision.payload.resolution) : undefined
   const restored = decision.kind === 'abandon_ack' && decision.closed_reason === 'rejected'
     && isRecord(decision.payload) && Array.isArray(decision.payload.affected)
   // 记忆审批卡：卡上的两个按钮由服务端给的标签与 resolution 组成，前端不猜。
@@ -362,33 +345,33 @@ function DecisionCard(props: {
       confirmation={props.confirmation}
     />
   }
-  return <article style={cardStyle}>
+  return <article className="ops-decision-card" style={cardStyle}>
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 }}>
-      <h2 style={cardTitleStyle}>{kind}</h2>
+      <h2 style={cardTitleStyle}>{description.title}</h2>
       <strong style={{ color: !agentOnly && decision.status === 'blocked_for_human' ? COLOR.warning : COLOR.inkMuted, fontSize: FONT_PX.helper }}>
         {status}
       </strong>
     </div>
-    {priority && <p style={mutedStyle}>优先级：{priority}</p>}
-    <dl style={detailGridStyle}>
-      <dt>说明</dt><dd>{optionalReason(decision.target_summary, '说明暂不可用')}</dd>
-      <dt>为什么卡</dt><dd>{optionalReason(decision.priority_reason)}</dd>
+    {priority && <p style={mutedStyle}>优先级：{priority}{decision.priority_reason && decision.priority_reason !== '按常规审批流程处理。'
+      ? ` · ${operatorReason(decision.priority_reason)}` : ''}</p>}
+    <p className="ops-decision-summary">{description.summary}</p>
+    <dl className="ops-decision-details">
+      {decision.task_title && <><dt>所属任务</dt><dd>{decision.task_title}</dd></>}
+      {decision.step_title && <><dt>涉及步骤</dt><dd>{decision.step_title}{decision.attempt ? ` · 第 ${decision.attempt} 次尝试` : ''}</dd></>}
+      <dt>处理原因</dt><dd>{description.reason}</dd>
       {conflict && typeof conflict.report_id === 'string' && <><dt>回报 ID</dt><dd>{conflict.report_id}</dd></>}
       {conflict && typeof conflict.report_status === 'string' && <><dt>回报结论</dt><dd>{operatorStatus(conflict.report_status)}</dd></>}
       {conflict && typeof conflict.report_attempt === 'number' && <><dt>执行尝试</dt><dd>第 {conflict.report_attempt} 次</dd></>}
-      {decision.approver && <><dt>谁能处理</dt><dd>{agentOnly ? APPROVER_LABEL.agent
+      {decision.approver && <><dt>处理权限</dt><dd>{agentOnly ? APPROVER_LABEL.agent
         : Object.hasOwn(APPROVER_LABEL, decision.approver) ? APPROVER_LABEL[decision.approver] : '处理人待确认'}</dd></>}
-      <dt>你能选什么</dt><dd>{choices.length ? choices.map(({ label }) => label).join(' / ') : NOT_PROVIDED}</dd>
-      <dt>需要什么证据</dt><dd>{evidence.length ? evidence.join('、') : NOT_PROVIDED}</dd>
-      <dt>过期会怎样</dt><dd>{decision.kind === 'report_contradicted' ? '仅由人工处理，系统不会自动收口。'
-        : memoryCard && decision.expires_at ? formatDate(decision.expires_at) + ' · 到期未批准，批次关闭。'
-        : decision.expires_at ? formatDate(decision.expires_at) + ' · ' + (decision.expiry_effect && Object.hasOwn(EXPIRY_LABEL, decision.expiry_effect)
-          ? EXPIRY_LABEL[decision.expiry_effect] : '截止后的处理方式尚未提供') : NOT_PROVIDED}</dd>
+      <dt>如何核对</dt><dd>{description.evidenceGuidance}{evidence.length > 0 && <span className="ops-decision-evidence">需核对的材料：{evidence.join('、')}。</span>}</dd>
+      <dt>处理期限</dt><dd>{memoryCard && decision.expires_at ? formatDate(decision.expires_at) + ' · 到期未批准，批次关闭。'
+        : <>{decision.expires_at && decision.kind !== 'report_contradicted' && `${formatDate(decision.expires_at)} · `}{description.expiry}</>}</dd>
       {decision.status === 'resolved' && <><dt>处理结果</dt><dd>{decision.kind === 'report_contradicted'
         && (decision.closed_reason === 'approved' || decision.closed_reason === 'rejected')
-        ? DECISION_OPTIONS.get(decision.closed_reason === 'approved' ? 'uphold_report' : 'uphold_decision')
+        ? decisionActionLabel(decision, decision.closed_reason === 'approved' ? 'uphold_report' : 'uphold_decision')
         : restored ? '已驳回放弃并恢复跟踪'
-          : ordinaryResolution ?? DECISION_OPTIONS.get(decision.closed_reason ?? '') ?? optionalReason(decision.closed_reason)}</dd></>}
+          : ordinaryResolution ?? decisionActionLabel(decision, decision.closed_reason ?? '') ?? optionalReason(decision.closed_reason)}</dd></>}
       {decision.status === 'resolved' && decision.resolved_by && <><dt>处理人</dt><dd>{agentOnly ? '授权核验主体' : '已记录，见开发者视图'}</dd></>}
       {decision.status === 'resolved' && decision.decided_at && <><dt>处理时间</dt><dd>{formatDate(decision.decided_at)}</dd></>}
     </dl>
@@ -400,11 +383,9 @@ function DecisionCard(props: {
       {missing.length > 0 && <><dt>缺少的字段</dt><dd>{missing.join('、')}</dd></>}
     </dl>}
     {decision.confirm_required && <p style={warningStyle}>处理前需要再次确认。</p>}
-    {choices.some(({ value }) => value === 'continue_tracking') && <p style={mutedStyle}>继续跟踪会再观察这次执行 120 秒。</p>}
-    {choices.some(({ value }) => value === 'continue_wait') && <p style={mutedStyle}>继续等待会延长这次执行的观察时间，最多可延长三次。</p>}
-    {decision.kind === 'abandon_ack' && choices.some(({ value }) => value === 'rejected') && <p style={mutedStyle}>驳回后继续观察原来的执行。</p>}
-    {missing.length > 0 && <p style={mutedStyle}>当前记录缺少：{missingFields(missing)}。</p>}
-    {!agentOnly && decision.status !== 'resolved' && <div style={actionStyle}>
+    {missing.length > 0 && <p style={mutedStyle}>当前记录缺少：{missingFields(missing)}。请先核对已有信息。</p>}
+    {!agentOnly && decision.status !== 'resolved' && <div className="ops-decision-handling">
+      <div className="ops-actions">
       <label style={toggleStyle}>
         <input
           type="checkbox"
@@ -415,10 +396,12 @@ function DecisionCard(props: {
         />
         选择这条决定
       </label>
-      <button type="button" onClick={props.onAcknowledge} disabled={!props.commands || props.busy} style={buttonStyle}>接手</button>
+      <button type="button" className="ops-button" onClick={props.onAcknowledge} disabled={!props.commands || props.busy}>接手</button>
+      <span className="ops-meta">接手仅标记由你处理，不会批准或启动任务。</span>
+      </div>
       {branches.length > 0 && choices.some(({ value }) => value === 'approved') && <label style={toggleStyle}>
         后续分支
-        <select aria-label="后续分支" value={selectedBranch} onChange={event => setSelectedBranch(event.target.value)}>
+        <select className="ops-field" aria-label="后续分支" value={selectedBranch} onChange={event => setSelectedBranch(event.target.value)}>
           <option value="">请选择分支</option>
           {branches.map(id => <option key={id} value={id}>{id}</option>)}
         </select>
@@ -426,18 +409,22 @@ function DecisionCard(props: {
       {choices.some(({ value }) => value === 'confirm_started_attested') && <label style={toggleStyle}>
         <input type="checkbox" checked={attest} disabled={!props.commands || props.busy}
           onChange={(event) => setAttestedRevision(event.target.checked ? decision.current_revision : null)} />
-        我亲眼看到这次执行已启动。签认只记录启动事实。
+        我已核对本次执行的日志或会话，亲自确认它已启动。
       </label>}
-      {choices.length > 0
-        ? choices.map(({ value, label, evidenceId }) => <button
+      <div className="ops-decision-options">
+      {choices.map(({ value, label, evidenceId }) => <div className="ops-decision-option" key={value}>
+        <button
           key={value}
           type="button"
+          className="ops-button"
+          aria-describedby={`${actionDescriptionId}-${value}`}
           onClick={() => props.onResolve(value, label, value === 'approved' && branches.length ? selectedBranch : undefined, evidenceId)}
           disabled={!props.commands || props.busy || (value === 'approved' && branches.length > 0 && !branches.includes(selectedBranch))
             || (value === 'confirm_started_attested' && !attest)}
-          style={buttonStyle}
-        >{label}</button>)
-        : <button type="button" disabled style={buttonStyle}>处理</button>}
+        >{label}</button>
+        <p id={`${actionDescriptionId}-${value}`}>{decisionActionConsequence(decision, value)}</p>
+      </div>)}
+      </div>
     </div>}
     {props.confirmation}
     {decision.status !== 'resolved' && choices.length === 0 && <p style={mutedStyle}>{optionalReason(decision.resolution_unavailable_reason, '当前没有可从这里执行的处理选项。')}</p>}

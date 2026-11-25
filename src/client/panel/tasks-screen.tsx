@@ -410,7 +410,7 @@ function TaskCard({ task, selected, compact, onSelect, expanded, onExpand, steps
     </div>}
     {/* 首屏只给一个能办的动作：直接打开当前这个人该处理的那一份（T01/T02）。 */}
     {task.next_action && <div className="task-card-primary">
-      <button type="button" className="task-primary-button" data-task-primary-action={task.next_action.kind}
+      <button type="button" className="ops-button task-primary-button" data-task-primary-action={task.next_action.kind}
         onClick={(event) => onSelect(event.currentTarget, task.next_action)}>{task.next_action.label}</button>
     </div>}
     <div className="task-card-meta">

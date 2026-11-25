@@ -106,28 +106,28 @@ export function TaskTriggerManager({ api, commands, onChanged }: {
         onClick={() => switchView('event')}>提交触发事件</button>
     </div>
     {view === 'rules' && <form aria-label="新建触发任务" style={formStyle} onSubmit={(event) => { event.preventDefault(); void submitRule() }}>
-      {readError && <p role="alert">无法读取已发布流程。 <button type="button" onClick={() => retryWorkflows((value) => value + 1)}>重试</button></p>}
+      {readError && <p role="alert">无法读取已发布流程。 <button className="ops-button" type="button" onClick={() => retryWorkflows((value) => value + 1)}>重试</button></p>}
       {!readError && !workflows && <p role="status">正在读取已发布流程…</p>}
       {!readError && workflows?.length === 0 && <p>发布一个可复用流程后即可登记触发任务。</p>}
       {Boolean(workflows?.length) && <>
-        <label>任务标题 <input required maxLength={200} value={title} disabled={busy || Boolean(receipt)} onChange={(event) => setTitle(event.target.value)} /></label>
-        <label>已发布流程 <select required value={workflowId} disabled={busy || Boolean(receipt)} onChange={(event) => setWorkflowId(event.target.value)}>
+        <label>任务标题 <input className="ops-field" required maxLength={200} value={title} disabled={busy || Boolean(receipt)} onChange={(event) => setTitle(event.target.value)} /></label>
+        <label>已发布流程 <select className="ops-field" required value={workflowId} disabled={busy || Boolean(receipt)} onChange={(event) => setWorkflowId(event.target.value)}>
           <option value="">选择流程</option>
           {workflows?.map((workflow) => <option key={workflow.workflow_id} value={workflow.workflow_id}>{workflow.name} · v{workflow.current_version}</option>)}
         </select></label>
-        <label>触发方式 <select value={kind} disabled={busy || Boolean(receipt)} onChange={(event) => setKind(event.target.value === 'event' ? 'event' : 'scheduled')}>
+        <label>触发方式 <select className="ops-field" value={kind} disabled={busy || Boolean(receipt)} onChange={(event) => setKind(event.target.value === 'event' ? 'event' : 'scheduled')}>
           <option value="scheduled">每日定时</option><option value="event">接收事件</option>
         </select></label>
         {kind === 'scheduled' ? <>
-          <label>每天 <input type="time" required value={dailyTime} disabled={busy || Boolean(receipt)} onChange={(event) => setDailyTime(event.target.value)} /></label>
-          <label>时区 <input required maxLength={100} placeholder="Asia/Shanghai" value={timeZone} disabled={busy || Boolean(receipt)} onChange={(event) => setTimeZone(event.target.value)} /></label>
-        </> : <label>事件类型 <input required maxLength={128} placeholder="project.ready" value={eventType} disabled={busy || Boolean(receipt)} onChange={(event) => setEventType(event.target.value)} /></label>}
+          <label>每天 <input className="ops-field" type="time" required value={dailyTime} disabled={busy || Boolean(receipt)} onChange={(event) => setDailyTime(event.target.value)} /></label>
+          <label>时区 <input className="ops-field" required maxLength={100} placeholder="Asia/Shanghai" value={timeZone} disabled={busy || Boolean(receipt)} onChange={(event) => setTimeZone(event.target.value)} /></label>
+        </> : <label>事件类型 <input className="ops-field" required maxLength={128} placeholder="project.ready" value={eventType} disabled={busy || Boolean(receipt)} onChange={(event) => setEventType(event.target.value)} /></label>}
         <PanelCommandButton style={buttonStyle} type="submit" disabled={busy}>{receipt ? '查询或重试' : '登记任务'}</PanelCommandButton>
       </>}
     </form>}
     {view === 'event' && <form aria-label="提交触发事件" style={formStyle} onSubmit={(event) => { event.preventDefault(); void submitEvent() }}>
-      <label>事件类型 <input required maxLength={128} placeholder="project.ready" value={eventType} disabled={busy} onChange={(event) => setEventType(event.target.value)} /></label>
-      <label>事件编号 <input required maxLength={128} placeholder="project-ready-001" value={eventId} disabled={busy} onChange={(event) => setEventId(event.target.value)} /></label>
+      <label>事件类型 <input className="ops-field" required maxLength={128} placeholder="project.ready" value={eventType} disabled={busy} onChange={(event) => setEventType(event.target.value)} /></label>
+      <label>事件编号 <input className="ops-field" required maxLength={128} placeholder="project-ready-001" value={eventId} disabled={busy} onChange={(event) => setEventId(event.target.value)} /></label>
       <PanelCommandButton style={buttonStyle} type="submit" disabled={busy}>提交事件</PanelCommandButton>
     </form>}
     {notice && <p role={fault ? 'alert' : 'status'} style={noticeStyle}>{notice}</p>}

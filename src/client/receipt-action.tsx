@@ -7,6 +7,8 @@ import { ArtifactContent } from './panel/artifact-content.tsx'
 import { taskStatusView } from './panel/tasks-screen.tsx'
 import type { ArtifactView } from './api/types.ts'
 import type { ReceiptLocation } from '../core/receipt-location.ts'
+import type { OpenPanelReceipt } from './dsh-panel-navigation.ts'
+import { COLOR, FONT_PX } from './panel/tokens.ts'
 
 type Resources = ReturnType<typeof createResourcesApi>
 type ReceiptPanel = { title: string; body?: string; artifact?: ArtifactView }
@@ -33,32 +35,44 @@ async function readReceiptTarget(api: Resources, ref: ReceiptLocation): Promise<
   return { title: run.task_title || '本次任务', body: '状态　' + (taskStatusView(run.status).label ?? '状态待识别') }
 }
 
-export function ReceiptAction({ location, sources }: { location: ReceiptLocation; sources: DshLocalPanelSources }) {
+export function ReceiptAction({ location, sources, openLocation }: {
+  location: ReceiptLocation; sources: DshLocalPanelSources; openLocation?: OpenPanelReceipt
+}) {
   const sessions = useSyncExternalStore((cb) => sources.sessions.list.subscribe(cb), () => sources.sessions.list.getSnapshot())
   const workspaces = useSyncExternalStore((cb) => sources.workspaces.list.subscribe(cb), () => sources.workspaces.list.getSnapshot())
   // 切换会话/工作区后旧回执不再展示，晚到的结果也不会落到新会话（T16）。
   if (selectedSession(sessions) !== location.sessionId
     || workspaceForSession(location.sessionId, workspaces) !== location.workspaceId) return null
-  return <ScopedReceipt key={JSON.stringify(location)} location={location} sources={sources} />
+  return <ScopedReceipt key={JSON.stringify(location)} location={location} sources={sources} openLocation={openLocation} />
 }
 
-function ScopedReceipt({ location, sources }: { location: ReceiptLocation; sources: DshLocalPanelSources }) {
+function ScopedReceipt({ location, sources, openLocation }: {
+  location: ReceiptLocation; sources: DshLocalPanelSources; openLocation?: OpenPanelReceipt
+}) {
   const api = useMemo(() => createResourcesApi(createApiClient(localPanelBase,
     createLocalSessionFetcher(sources, location.workspaceId, location.sessionId))),
   [sources, location.workspaceId, location.sessionId])
   const [panel, setPanel] = useState<ReceiptPanel>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const label = location.kind === 'artifact' ? '打开这份成果' : location.kind === 'decision' ? '查看这项待办' : '查看任务状态'
+  const navigates = openLocation && location.kind !== 'artifact'
+  const label = location.kind === 'artifact' ? '打开这份成果' : location.kind === 'decision'
+    ? navigates ? '前往审批中心' : '查看这项待办' : '查看任务状态'
   async function show() {
     setBusy(true)
     setError('')
-    try { setPanel(await readReceiptTarget(api, location)) }
-    catch { setError('暂时无法打开。可在当前会话的任务页搜索任务编号：' + location.taskId) }
+    try {
+      if (openLocation && location.kind !== 'artifact') await openLocation(location)
+      else setPanel(await readReceiptTarget(api, location))
+    }
+    catch { setError('暂时无法打开。请在来源会话的 Orchestra 面板中查看此任务：' + location.taskId) }
     finally { setBusy(false) }
   }
   return <section aria-label="回执详情" style={{ marginTop: 6 }}>
-    <button type="button" aria-expanded={panel !== undefined} disabled={busy}
+    <button type="button" aria-expanded={navigates ? undefined : panel !== undefined} disabled={busy}
+      style={{ minHeight: 44, padding: '9px 14px', border: `1px solid ${COLOR.line}`, borderRadius: 8,
+        background: navigates ? COLOR.link : COLOR.surface, color: navigates ? '#ffffff' : COLOR.ink,
+        fontFamily: 'inherit', fontSize: FONT_PX.body, fontWeight: 600, cursor: busy ? 'wait' : 'pointer' }}
       onClick={() => panel ? setPanel(undefined) : void show()}>{panel ? '收起' : busy ? '正在读取…' : label}</button>
     {error && <p role="alert" style={{ margin: '4px 0', color: '#b42318' }}>{error}</p>}
     {panel && <div style={{ marginTop: 4 }}>

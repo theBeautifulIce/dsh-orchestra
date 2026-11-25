@@ -112,7 +112,7 @@ export function openDecision(tx: Tx, draft: DecisionDraft): void {
     || context.side_effect_policy === 'irreversible' || context.node_status === 'blocked_post'
   const workflowApproval = draft.kind === 'pre_execution' && nodeType === 'approval' && draft.expiresAt !== undefined
   const expiry = draft.kind === 'report_contradicted'
-    ? { effect: 'none', reason: '报告冲突只由人工裁决。' }
+    ? { effect: 'none', reason: '报告冲突只由人工处理。' }
       : draft.kind === 'abandon_ack' && draft.expiresAt ? { effect: 'escalate_only', reason: '签字超时后暂停运行并交人工处理。' }
         : expiresByEscalation && !workflowApproval ? { effect: 'escalate_only', reason: '当前执行策略只升级给人工处理。' }
       : { effect: 'auto_resolve', reason: '超时后按已记录的默认规则处理。' }
@@ -141,7 +141,7 @@ function decisionPriority(kind: DecisionKind, sideEffectPolicy: string | null | 
   if (sideEffectPolicy === 'irreversible' && approver === 'human' && ['pre_execution', 'verify_human', 'action_overrun'].includes(kind)) {
     return { level: 'critical', reason: '不可逆操作需要人工审批或核实。' }
   }
-  if (kind === 'report_contradicted') return { level: 'high', reason: '执行报告与已记录裁决冲突，需要人工处理。' }
+  if (kind === 'report_contradicted') return { level: 'high', reason: '执行报告与已记录的处理决定冲突，需要人工核对。' }
   if (confirmRequired) return { level: 'high', reason: '任务升级规则要求二次确认。' }
   return { level: 'normal', reason: '按常规审批流程处理。' }
 }

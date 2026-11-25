@@ -81,9 +81,8 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
     guard: (exec: ToolExecution) => guard(exec),
     run: (exec: ToolExecution, next: () => Promise<ToolExecutionResult>) => around(exec, next),
     finishCall: (exec: ToolExecution, result: ToolExecutionResult = { content: [], isError: false, value: {} }) => resultEvent(exec, result),
-    finish() {
-      events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify({ status: 'done',
-        output: { summary: '已核对公开资讯。', completion: { outcome: 'completed' } } }) }] } } },
+    finish(report: unknown = { status: 'done', output: { summary: '已核对公开资讯。', completion: { outcome: 'completed' } } }) {
+      events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(report) }] } } },
       { type: 'turn/end', data: { reason: { kind: 'completed' } } })
       idle.resolve()
     },
@@ -127,7 +126,7 @@ it('来源工作区撤权或来源Agent被重建后，原生预审、guard与审
       expect((await f.pre(call)).kind).toBe('ask')
       f[revoke]()
       expect((await f.pre(call)).kind).toBe('deny')
-      expect(f.guard(call)).toContain('已停止')
+      expect(f.guard(call)).toMatch(/来源会话.*撤回|主脑会话未在线/)
       const execute = vi.fn()
       await expect(f.run(call, execute)).rejects.toMatchObject({ code: 'FORBIDDEN' })
       expect(execute).not.toHaveBeenCalled()
@@ -187,8 +186,38 @@ it('取消围栏覆盖原生工具与子会话转授权，已关闭的尝试不�
     const call = f.call('read')
     expect(f.guard({ ...call, agent: {} as Agent })).toContain('不能将当前工具授权转交')
     stop.abort()
-    expect(f.guard(call)).toContain('已停止')
+    expect(f.guard(call)).toContain('工具授权已结束')
     await expect(f.run(call, vi.fn())).rejects.toMatchObject({ code: 'FORBIDDEN' })
+  } finally { await f.host.close() }
+})
+
+it.each(['blocked', 'failed', 'completed'] as const)('授权结束后保留%s回报，不能把被拒调用当作完成', async (outcome) => {
+  const f = fixture('full')
+  try {
+    const spawned = await f.host.bridge.spawn({ nodeRunId: 'node', attempt: 1, actionGeneration: 1, input: {}, outputSchema: {},
+      toolPolicy: { allow: [] }, inheritHistory: false, modelRef: 'p/m' })
+    const stop = new AbortController()
+    f.host.bridge.installAttemptMonitor({ binding: { nodeRunId: 'node', attempt: 1, actionGeneration: 1,
+      executorAgentId: spawned.agentId, executorSessionId: spawned.sessionId }, budget: () => 1000, actionTimeoutMs: 1000 },
+    () => !stop.signal.aborted, stop.signal)
+    await f.host.bridge.send({ executorAgentId: spawned.agentId, attempt: 1, attemptId: 'node:1', instruction: '读取公开资料。' })
+    stop.abort()
+    const call = f.call('read')
+    expect(f.guard(call)).toContain('不要重试或切换工具')
+    const execute = vi.fn()
+    await expect(f.run(call, execute)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(execute).not.toHaveBeenCalled()
+    f.finish({ status: outcome === 'completed' ? 'done' : 'failed', output: { completion: outcome === 'completed' ? { outcome }
+      : { outcome, reason: '执行时限已到，剩余资料未读取。', next_action: '增加本步时限后重试。', missing: ['剩余资料'] } } })
+    await f.host.bridge.whenIdle({ executorAgentId: spawned.agentId, timeoutMs: 1000 })
+    const events = f.host.bridge.listen({ executorAgentId: spawned.agentId, attempt: 1, fromSeq: 0 }, new AbortController().signal)
+      [Symbol.asyncIterator]()
+    try {
+      if (outcome === 'completed') await expect(events.next()).rejects.toMatchObject({ code: 'VERDICT_POLICY_UNMET' })
+      else await expect(events.next()).resolves.toMatchObject({ value: { type: 'turn', payload: { report: {
+        status: 'failed', output: { completion: { outcome, missing: ['剩余资料'] } },
+      } } } })
+    } finally { await events.return?.() }
   } finally { await f.host.close() }
 })
 

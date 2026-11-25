@@ -65,11 +65,11 @@ export function ExecutionHistory({ api, taskId, runId, nodeId, reloadVersion }: 
       <strong>智能体报告摘要</strong>
       <p style={{ margin: '5px 0 0', whiteSpace: 'pre-wrap' }}>{summary}</p>
     </div>}
-    {!nodeId && <label>筛选已加载记录 <select value={category} onChange={(event) => setCategory(event.target.value)}>
+    {!nodeId && <label>筛选已加载记录 <select className="ops-field" value={category} onChange={(event) => setCategory(event.target.value)}>
       <option value="">全部</option><option value="tool">工具调用</option><option value="report">执行报告</option><option value="model">模型派发</option>
     </select></label>}
     {loading && <p role="status">正在读取执行日志…</p>}
-    {failed && <p role="alert">执行日志读取失败。 <button type="button" onClick={() => refresh((value) => value + 1)}>重试</button></p>}
+    {failed && <p role="alert">执行日志读取失败。 <button type="button" className="ops-button" onClick={() => refresh((value) => value + 1)}>重试</button></p>}
     {!failed && !loading && items?.length === 0 && <p>此范围内没有已保存的节点日志。</p>}
     {!failed && !loading && items?.length && shown?.length === 0 ? <p>已加载的记录没有符合筛选条件的事件。</p> : null}
     {shown?.length ? <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
@@ -80,7 +80,7 @@ export function ExecutionHistory({ api, taskId, runId, nodeId, reloadVersion }: 
         </details>
       </li>)}
     </ol> : null}
-    {next !== null && !failed && <button type="button" disabled={loading} style={{ justifySelf: 'start' }}
+    {next !== null && !failed && <button type="button" className="ops-button" disabled={loading} style={{ justifySelf: 'start' }}
       onClick={() => { setPageGeneration(reloadVersion); setRequested(next) }}>加载更早的日志</button>}
   </section>
 }

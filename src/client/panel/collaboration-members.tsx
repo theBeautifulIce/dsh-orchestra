@@ -65,8 +65,8 @@ export function CollaborationMembers({ client, selected, onChange, disabled }: {
         {item.task_title || item.workflow_id || '任务'} · {new Date(item.created_at).toLocaleString()} · {item.run_id}
       </option>)}
     </select></label>
-    {next && <button type="button" disabled={loading} onClick={() => setCursor(next!)}>更多运行</button>}
-    {error && <p role="alert">{error} <button type="button" onClick={() => setRetry((value) => value + 1)}>重新读取</button></p>}
+    {next && <button className="ops-button" type="button" disabled={loading} onClick={() => setCursor(next!)}>更多运行</button>}
+    {error && <p role="alert">{error} <button className="ops-button" type="button" onClick={() => setRetry((value) => value + 1)}>重新读取</button></p>}
     {run && !nodes && !error && <p role="status">正在读取本次运行的步骤…</p>}
     {run && nodes && eligible.length === 0 && <p>本页没有可选的智能体步骤。</p>}
     {run && nodes?.length === 200 && <p>当前列出前 200 条中的智能体步骤。后续步骤可通过下方的节点运行 ID 添加。</p>}
@@ -79,8 +79,8 @@ export function CollaborationMembers({ client, selected, onChange, disabled }: {
         }])} /> {name} · 第 {item.attempt} 次 · {item.status_label}</label>
     })}
     <details><summary>通过节点运行 ID 添加其他步骤</summary>
-      <label>节点运行 ID <input value={manual} onChange={(event) => setManual(event.target.value)} /></label>
-      <button type="button" disabled={!manual.trim()} onClick={() => {
+      <label>节点运行 ID <input className="ops-field" value={manual} onChange={(event) => setManual(event.target.value)} /></label>
+      <button className="ops-button" type="button" disabled={!manual.trim()} onClick={() => {
         const ids = [...new Set(manual.trim().split(/[\s,，]+/u))].filter((id) => !selected.some((member) => member.id === id))
         if (selected.length + ids.length > 16) { setError('每个范围最多包含 16 个步骤。'); return }
         onChange([...selected, ...ids.map((id) => ({ id, label: id }))]); setManual(''); setError('')
@@ -88,6 +88,6 @@ export function CollaborationMembers({ client, selected, onChange, disabled }: {
     </details>
     <span>已选 {selected.length} 个步骤，至少选择两个。</span>
     {selected.length > 0 && <ul>{selected.map((member) => <li key={member.id}>{member.label}{' '}
-      <button type="button" aria-label={'移除 ' + member.label} onClick={() => remove(member.id)}>移除</button></li>)}</ul>}
+      <button className="ops-button" type="button" aria-label={'移除 ' + member.label} onClick={() => remove(member.id)}>移除</button></li>)}</ul>}
   </fieldset>
 }

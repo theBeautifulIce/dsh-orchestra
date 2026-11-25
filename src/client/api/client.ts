@@ -46,7 +46,7 @@ export async function unwrap<T>(res: Response): Promise<ApiResult<T>> {
 }
 
 export type ApiClient = {
-  get<T>(path: string, query?: Record<string, string | number | undefined>): Promise<ApiResult<T>>
+  get<T>(path: string, query?: Record<string, string | number | undefined>, signal?: AbortSignal): Promise<ApiResult<T>>
   post<T>(path: string, payload: unknown, signal?: AbortSignal): Promise<ApiResult<T>>
 }
 
@@ -74,7 +74,8 @@ export function createApiClient(baseUrl: string, fetcher: FetchLike = globalThis
     return result
   }
   return {
-    get: <T>(path: string, query?: Record<string, string | number | undefined>) => send<T>(path, { method: 'GET', headers: { accept: 'application/json' } }, query),
+    get: <T>(path: string, query?: Record<string, string | number | undefined>, signal?: AbortSignal) =>
+      send<T>(path, { method: 'GET', headers: { accept: 'application/json' }, ...(signal ? { signal } : {}) }, query),
     post: <T>(path: string, payload: unknown, signal?: AbortSignal) => send<T>(path, {
       method: 'POST',
       headers: { accept: 'application/json', 'content-type': 'application/json' },

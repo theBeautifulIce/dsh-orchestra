@@ -17,7 +17,7 @@ import { privateNoteCaptureMaterial, type createDshPrivateNotes } from './dsh-pr
 import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
 import { ORCHESTRA_COMMUNICATION_GUIDE } from '../core/communication.ts'
-import { validateDshCompletionReport } from '../core/execution-completion.ts'
+import { readExecutionCompletion, validateDshCompletionReport } from '../core/execution-completion.ts'
 import { createDshJsonCompletion } from './dsh-json.ts'
 import { applyDshPermission, captureDshPermission, dshCapabilitySnapshot, hasAihotReadCapability, inheritDshComposition,
   nativeReviewSchema, nativeToolConstraint, nativeToolEffect, NATIVE_REVIEW_INSTRUCTIONS,
@@ -59,6 +59,8 @@ type Child = {
 
 const MAX_EVENT_COUNT = 512
 const MAX_REPORT_BYTES = 256 * 1024
+const TOOL_AUTHORITY_ENDED = '本次执行的工具授权已结束。停止调用工具，不要重试或切换工具。'
+  + '请用已有事实返回 status:"failed" 和 output.completion.outcome:"blocked"，说明原因、下一步及未完成项。'
 const ASSIST_TOOL = 'orchestra_assist'
 const privateCaptureInput = z.strictObject({ action: z.literal('capture_brain') })
 const MAX_ASSIST_BATCH = 8
@@ -504,7 +506,7 @@ export function createDshExecutor(options: {
     }
     if (fence && (fence.signal.aborted || !fence.mayUseTools())) {
       child.fencedToolDenied = true
-      throw new OrchError('FORBIDDEN', '当前执行尝试已停止接受工具调用')
+      throw new OrchError('FORBIDDEN', TOOL_AUTHORITY_ENDED)
     }
     return fence ? AbortSignal.any([signal, fence.signal]) : signal
   }
@@ -614,7 +616,8 @@ export function createDshExecutor(options: {
           }
           ctx.tools.guard((execution) => {
             if (execution.agent !== agent) return '执行节点不能将当前工具授权转交给其他会话。'
-            try { toolSignal(child, agent, execution.signal) } catch { return '当前执行尝试已停止接受工具调用。' }
+            try { toolSignal(child, agent, execution.signal) }
+            catch (error) { return error instanceof Error ? error.message : '当前执行尝试已停止接受工具调用。' }
             return denial(execution.name)
           })
           ctx.on('tools/pre-execute', async (execution, next) => {
@@ -943,7 +946,10 @@ export function createDshExecutor(options: {
       }
       const report = readJsonOutput(agent)
       if (child.nativeMode) validateDshCompletionReport(report)
-      if (child.fencedToolDenied) {
+      const completion = child.nativeMode ? readExecutionCompletion(report) : undefined
+      // A refused post-deadline call cannot justify success. Keep an honest
+      // incomplete report so the stopped pure attempt can report its failure.
+      if (child.fencedToolDenied && (!completion || completion.outcome === 'completed')) {
         throw new OrchError('VERDICT_POLICY_UNMET', '执行授权结束后的工具请求未执行，不能接受完成回报')
       }
       if (typeof report !== 'object' || !report || Array.isArray(report)) {

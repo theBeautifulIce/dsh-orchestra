@@ -116,19 +116,23 @@ export function superviseOrdinaryAttempt(deps: {
       unconfirmedSince ??= performance.now()
       return true
     }
-    const hasToolCall = host?.hasToolCall ?? Boolean(readToolStart.get(binding.nodeRunId, binding.attempt,
-      binding.actionGeneration, row.tool_start_at))
-    const stoppedUsingTools = row.tool_start_at !== null && hasToolCall && leaseCurrent(row)
-    const deadline = deadlineFromSample(clock, stoppedUsingTools ? 0 : deps.unknownWatchdogMs)
+    const hasToolCall = host?.hasToolCall === true || Boolean(row.tool_start_at && readToolStart.get(binding.nodeRunId,
+      binding.attempt, binding.actionGeneration, row.tool_start_at))
+    const observedRunning = host?.observedRunning === true
+    // Native read tools do not create the fixed-command tool_start_at anchor.
+    // A same-attempt host observation still proves that execution has started;
+    // exhausting its action budget must not ask a human to attest startup again.
+    const executionObserved = observedRunning || hasToolCall
+    const deadline = deadlineFromSample(clock, executionObserved ? 0 : deps.unknownWatchdogMs)
     const at = new Date(deadline.wallClockMs).toISOString()
     withTx(db, (tx) => {
       applyTransition(tx, secret, {
-        nodeRunId: binding.nodeRunId, from: ['started'], to: stoppedUsingTools ? 'stopping' : 'startup_unknown',
-        ruleId: stoppedUsingTools ? 'M-27' : 'M-31', attempt: binding.attempt,
+        nodeRunId: binding.nodeRunId, from: ['started'], to: executionObserved ? 'stopping' : 'startup_unknown',
+        ruleId: executionObserved ? 'M-27' : 'M-31', attempt: binding.attempt,
         actionGeneration: binding.actionGeneration, rearmGeneration: row.rearm_generation, bumpRearm: true,
         expectedRevision: row.revision, now: nowAt(),
         context: { hasToolCall, cancelResult: 'unknown', hangReason: null, sideEffectVerifiedNone: false },
-        patch: stoppedUsingTools ? {
+        patch: executionObserved ? {
           deadline_at: at, deadline_boot_id: deadline.bootId, deadline_monotonic_ns: deadline.monotonicNs, action_remaining_ns: 0,
         } : {
           deadline_at: null, deadline_boot_id: null, deadline_monotonic_ns: null, action_remaining_ns: null,
@@ -140,6 +144,8 @@ export function superviseOrdinaryAttempt(deps: {
       appendNodeRunEvent(tx, secret, binding.nodeRunId, 'executor.observation_only', {
         attempt: binding.attempt, action_generation: binding.actionGeneration, executor_agent_id: binding.executorAgentId,
         rearm_generation: row.rearm_generation + 1,
+        reason: performance.now() >= initialDeadline ? 'action_timeout' : 'lease_lost',
+        timeout_ms: deps.timeoutMs, observed_running: observedRunning, has_tool_call: hasToolCall,
       })
     })
     return true

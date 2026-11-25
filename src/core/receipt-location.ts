@@ -22,9 +22,20 @@ export function artifactVersionKey(location: ArtifactReceiptLocation): string {
  * 回执里唯一可信的导航目标（T16）：由服务端从受信绑定与已核验结果生成，
  * 客户端只按它重读对象，不接受模型或元数据自报的标识。
  */
-export const receiptLocation = z.discriminatedUnion('kind', [
+export const panelReceiptLocation = z.discriminatedUnion('kind', [
   z.strictObject({ ...scope, kind: z.literal('task') }),
   z.strictObject({ ...scope, kind: z.literal('decision'), decisionId: id }),
+])
+export type PanelReceiptLocation = z.infer<typeof panelReceiptLocation>
+
+export const receiptLocation = z.discriminatedUnion('kind', [
+  ...panelReceiptLocation.options,
   artifactReceiptLocation,
 ])
 export type ReceiptLocation = z.infer<typeof receiptLocation>
+
+/** A read-only route to an item needing attention. It carries no authorization or resolution. */
+export const chatAttentionLink = z.strictObject({
+  title: z.string().min(1).max(500), location: panelReceiptLocation,
+})
+export type ChatAttentionLink = z.infer<typeof chatAttentionLink>

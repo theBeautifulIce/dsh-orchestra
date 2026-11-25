@@ -127,6 +127,22 @@ export const PANEL_LAYOUT_CSS = `
 .ops-panel-viewport .ops-tabs button { color: ${COLOR.inkMuted}; font: inherit; font-weight: 550; min-height: 44px; border: 0; border-bottom: 2px solid transparent; background: none; padding: 9px 13px; cursor: pointer; }
 .ops-panel-viewport .ops-tabs [aria-pressed=true] { color: ${COLOR.link}; border-bottom-color: ${COLOR.link}; }
 .ops-panel-viewport .ops-stack { display: grid; gap: 16px; min-width: 0; align-content: start; }
+.ops-panel-viewport .ops-decision-card { container: decision-card / inline-size; overflow-wrap: anywhere; }
+.ops-panel-viewport .ops-decision-summary { margin: 14px 0 10px; font-size: ${FONT_PX.body}px; line-height: 1.7; }
+.ops-panel-viewport .ops-decision-details { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 16px; margin: 0; font-size: ${FONT_PX.body}px; line-height: 1.7; }
+.ops-panel-viewport .ops-decision-details dt { color: ${COLOR.inkMuted}; }
+.ops-panel-viewport .ops-decision-details dd { margin: 0; min-width: 0; }
+.ops-panel-viewport .ops-decision-evidence { display: block; margin-top: 4px; }
+.ops-panel-viewport .ops-decision-handling { display: grid; gap: 14px; margin-top: 18px; padding-top: 16px; border-top: 1px solid ${COLOR.line}; }
+.ops-panel-viewport .ops-decision-handling .ops-meta { margin: 0; }
+.ops-panel-viewport .ops-decision-options { display: grid; gap: 12px; }
+.ops-panel-viewport .ops-decision-option { display: grid; gap: 5px; justify-items: start; }
+.ops-panel-viewport .ops-decision-option > .ops-button { max-width: 100%; white-space: normal; text-align: left; }
+.ops-panel-viewport .ops-decision-option p { margin: 0; color: ${COLOR.inkMuted}; font-size: ${FONT_PX.menu}px; line-height: 1.65; }
+@container decision-card (max-width: 360px) {
+  .ops-panel-viewport .ops-decision-details { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .ops-panel-viewport .ops-decision-details dd { margin-bottom: 8px; }
+}
 .ops-panel-viewport .ops-context-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); align-items: start; gap: 20px; }
 .ops-panel-viewport .ops-settings-page { width: 100%; max-width: 1100px; margin-inline: auto; }
 .ops-panel-viewport .ops-settings-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }

@@ -5,6 +5,7 @@ import type { StreamStatus } from './api/sse.ts'
 import { PanelApp } from './panel/app.tsx'
 import type { PanelRoute } from './panel/shell.tsx'
 import type { ClientCommandReservations } from './dsh-command-reservations.ts'
+import type { PanelReceiptLocation } from '../core/receipt-location.ts'
 
 export type PanelHostProps = {
   /** 服务地址，例如 http://127.0.0.1:8787 */
@@ -19,6 +20,7 @@ export type PanelHostProps = {
   panelVersion?: string
   /** 首屏路由；不给就是任务页。 */
   initialRoute?: PanelRoute
+  initialLocation?: PanelReceiptLocation
   /** 宿主要求从已发布流程启动前先确认任务计划。 */
   workflowLaunchRequiresPlan?: boolean
   scopeLabel?: string
@@ -137,6 +139,7 @@ export function PanelHost(props: PanelHostProps): ReactElement {
     serviceConnected={status.serviceConnected ?? false}
     protocolMismatch={status.protocolMismatch ?? false}
     initialRoute={props.initialRoute}
+    initialLocation={props.initialLocation}
     workflowLaunchRequiresPlan={props.workflowLaunchRequiresPlan}
     scopeLabel={props.scopeLabel}
     runNotesEnabled={status.runNotesEnabled}

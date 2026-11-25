@@ -79,7 +79,7 @@ export function PlanningProgressPanel({ api, onResume, disabled = false }: {
   const visible = items.filter(item => item.stage !== 'started')
   const row = (item: PlanningProgress) => <li key={item.request_key}>
     {item.title || '本次任务'} · {labels[item.stage]}
-    {item.plan_id && item.stage !== 'cancelled' && <button type="button" disabled={disabled || reading !== null}
+    {item.plan_id && item.stage !== 'cancelled' && <button className="ops-button" type="button" disabled={disabled || reading !== null}
       onClick={() => { void resume(item.plan_id!) }}>{reading === item.plan_id ? '正在取回计划…' : '核对这份计划'}</button>}
   </li>
   return <section aria-label="会话规划进度">
@@ -91,6 +91,6 @@ export function PlanningProgressPanel({ api, onResume, disabled = false }: {
         <ul>{visible.slice(3).map(row)}</ul>
       </details>}
     </>}
-    {failure && <p>{failure} <button type="button" onClick={() => setRetry(n => n + 1)}>重新读取</button></p>}
+    {failure && <p>{failure} <button className="ops-button" type="button" onClick={() => setRetry(n => n + 1)}>重新读取</button></p>}
   </section>
 }

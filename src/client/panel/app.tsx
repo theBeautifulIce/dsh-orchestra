@@ -32,6 +32,7 @@ import { TaskDetailScreen, type TaskDetailScreenProps } from './task-detail-scre
 import { TaskListScreen, type TaskListScreenProps } from './tasks-screen.tsx'
 import { TaskTriggerManager } from './task-trigger-manager.tsx'
 import { COLOR, FONT_PX } from './tokens.ts'
+import type { PanelReceiptLocation } from '../../core/receipt-location.ts'
 
 export type PanelAppProps = {
   client: ApiClient
@@ -57,6 +58,7 @@ export type PanelAppProps = {
   taskTriggersEnabled?: boolean
   reworkPlannerEnabled?: boolean
   initialRoute?: PanelRoute
+  initialLocation?: PanelReceiptLocation
   workflowLaunchRequiresPlan?: boolean
   scopeLabel?: string
   runNotesEnabled?: boolean
@@ -88,13 +90,13 @@ export function PanelApp(props: PanelAppProps) {
   const taskCommands = useMemo(() => createTaskCommands(client), [client])
   const triggerCommands = useMemo(() => createTaskTriggerCommands(client), [client])
   const writableTriggers = props.taskTriggersEnabled === true ? triggerCommands : undefined
-  const [route, setRoute] = useState<PanelRoute>(props.initialRoute ?? 'tasks')
-  const [taskId, setTaskId] = useState<string | null>(null)
-  const [taskRunId, setTaskRunId] = useState<string>()
+  const [route, setRoute] = useState<PanelRoute>(props.initialLocation?.kind === 'decision' ? 'decisions' : props.initialRoute ?? 'tasks')
+  const [taskId, setTaskId] = useState<string | null>(props.initialLocation?.kind === 'task' ? props.initialLocation.taskId : null)
+  const [taskRunId, setTaskRunId] = useState<string | undefined>(props.initialLocation?.kind === 'task' ? props.initialLocation.runId : undefined)
   const [taskAction, setTaskAction] = useState<TaskDetailScreenProps['initialAction']>()
   const taskTrigger = useRef<HTMLElement | null>(null)
   const [workflowId, setWorkflowId] = useState<string | null>(null)
-  const [decisionId, setDecisionId] = useState<string>()
+  const [decisionId, setDecisionId] = useState<string | undefined>(props.initialLocation?.kind === 'decision' ? props.initialLocation.decisionId : undefined)
   const [reloadVersion, setReloadVersion] = useState(0)
   const [settingsReloadVersion, setSettingsReloadVersion] = useState(0)
   const [plannerHeading, setPlannerHeading] = useState<HTMLHeadingElement | null>(null)

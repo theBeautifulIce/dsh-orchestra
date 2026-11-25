@@ -452,7 +452,7 @@ async function runNodeActions(
     }
 
     if (late && envelope.bridgeSeq !== undefined) {
-      const report = reportFromAgent(p, envelope.report, evidence, trace)
+      const report = reportFromAgent(p, envelope.report, evidence, trace, true)
       const applied = withTx(deps.db, (tx) => applyObservedReport(tx, deps.secret, {
         nodeRunId: p.nodeRunId, attempt: p.attempt, report, expectedStatus: late.status, generation, now: nowAt(),
       }, deps.runtime.catalog, {
@@ -760,22 +760,25 @@ function reportFromAgent(
   raw: unknown,
   evidence: StrongEvidence | null,
   trace: { tool: string; toolSeq: number; executionId: string; exitCode: number; stdoutHash: string; stderrHash: string; commandHash: string }[],
+  allowObservedFailure = false,
 ): Report {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new OrchError('SCHEMA_VERSION_UNSUPPORTED', 'Agent 报告必须是结构化对象', {})
   }
   const report = raw as Record<string, unknown>
   const completion = readExecutionCompletion(report)
-  if (completion && completion.outcome !== 'completed') {
+  const observedFailure = allowObservedFailure && report.status === 'failed'
+    && completion !== undefined && completion.outcome !== 'completed'
+  if (completion && completion.outcome !== 'completed' && !observedFailure) {
     throw new OrchError('VERDICT_POLICY_UNMET', '执行未完成，已保留原因和下一步', { execution_completion: completion })
   }
-  if (report.status !== 'done') {
+  if (report.status !== 'done' && !observedFailure) {
     throw new OrchError('VERDICT_POLICY_UNMET', 'Agent 没有提交 done 报告，节点不收口', { status: report.status })
   }
   const output = report.output !== null && typeof report.output === 'object' && !Array.isArray(report.output)
     ? { ...(report.output as Record<string, unknown>), evidence_trace: trace }
     : { evidence_trace: trace }
-  return reportOf(p, 'done', evidence, output)
+  return reportOf(p, observedFailure ? 'failed' : 'done', evidence, output)
 }
 
 // 执行期时刻：以调用方给的时刻为基准，按单调钟往前推；墙钟跳变不该影响租约与时长判断（规格 3.4 行 171）
@@ -820,9 +823,9 @@ function markBlocked(deps: RunNodeDeps, p: RunNodeParams, reason: string, now: s
   }
 }
 
-function reportOf(p: RunNodeParams, status: 'started' | 'done', evidence?: StrongEvidence | null, output?: unknown): Report {
+function reportOf(p: RunNodeParams, status: 'started' | 'done' | 'failed', evidence?: StrongEvidence | null, output?: unknown): Report {
   return {
-    // 同一次执行里 started/done 两份报告 id 固定可推，重放时也对得上
+    // 同一次执行里各状态报告的 id 固定可推，重放时也对得上
     report_id: 'rep_' + p.nodeRunId + '_' + String(p.attempt) + '_' + status,
     node_run_id: p.nodeRunId,
     attempt: p.attempt,

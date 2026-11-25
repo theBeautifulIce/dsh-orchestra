@@ -58,11 +58,11 @@ function ManifestEditor({value,onChange,sourceId}:{value:ReworkFileManifest;onCh
   return <fieldset style={{border:'1px solid #d5dee8',borderRadius:6,padding:10}}>
     <legend>本轮文件处理方案</legend>
     {value.originals.map(file=><label key={file.artifact_id} style={field}>{file.file_name}
-      <select aria-label={file.file_name+'的处理方式'} disabled={file.artifact_id===sourceId} value={file.action} onChange={event=>onChange({...value,originals:value.originals.map(item=>
+      <select className="ops-field" aria-label={file.file_name+'的处理方式'} disabled={file.artifact_id===sourceId} value={file.action} onChange={event=>onChange({...value,originals:value.originals.map(item=>
         item.artifact_id===file.artifact_id?{...item,action:event.target.value as 'revise'|'keep'|'remove'}:item)})}>
         <option value="revise">修改并交付新版</option><option value="keep">原样保留</option><option value="remove">从本轮交付移除</option>
       </select></label>)}
-    <label style={field}>批准新增的附件（每行一个文件名）<textarea aria-label="批准新增的附件" value={value.attachments.join('\n')}
+    <label style={field}>批准新增的附件（每行一个文件名）<textarea className="ops-field" aria-label="批准新增的附件" value={value.attachments.join('\n')}
       onChange={event=>onChange({...value,attachments:event.target.value.split('\n')})} rows={2}/></label>
     <p>保留文件由插件按原始内容复制到新一轮交付。已确认计划的必交件须选择修改或保留。</p>
   </fieldset>
@@ -99,7 +99,7 @@ export function ReworkPanel({ api, commands, runId, runStatus, reloadVersion = 0
     <h2 style={{ fontSize: FONT_PX.section, margin: '0 0 8px' }}>成果审核与返工</h2>
     {initialTarget?.request_id && !loading && !items.some(item=>item.request_id===initialTarget.request_id) && <p role="status">这条返工待办已变化，请刷新任务后重新打开。</p>}
     {loading && <p role="status">正在读取返工记录…</p>}
-    {failed && <p role="alert">返工记录读取失败。<button type="button" onClick={() => setRetry(n => n + 1)}>重试</button></p>}
+    {failed && <p role="alert">返工记录读取失败。<button className="ops-button" type="button" onClick={() => setRetry(n => n + 1)}>重试</button></p>}
     {!loading && !failed && items.length === 0 && <p>这次运行还没有返工记录。要改稿时可在下方提交具体意见。</p>}
     {items.filter(item => !runId || item.run_id === runId).map(item => compact ? <p key={item.request_id}>{labels[item.status] ?? operatorStatus(item.status)} · 第 {item.round_no} 轮 · {item.reason}</p>
       : <ReworkCard initialTarget={initialTarget?.request_id===item.request_id?initialTarget:undefined} key={item.request_id + ':' + item.revision} api={api} item={item} commands={commands} plannerEnabled={plannerEnabled} onChanged={() => setRetry(n => n + 1)} />)}
@@ -243,7 +243,7 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged, initialTar
     <details open={Boolean(initialTarget)}><summary>修改前后成果与版本</summary>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 12 }}>
         <section><h4>修改前</h4><p>{old?.file_name ?? (revised && frozenManifest ? '新增附件，没有原件' : '原成果记录')}</p>{old && <ArtifactContent api={api} artifact={old} />}</section>
-        <section><h4>修订成果</h4>{(candidates.length > 1 || (candidates.length > 0 && !revised)) && <label>选择修订成果<select value={revised?.artifact_id ?? ''} onChange={e => setSelected(e.target.value)}>
+        <section><h4>修订成果</h4>{(candidates.length > 1 || (candidates.length > 0 && !revised)) && <label>选择修订成果<select className="ops-field" value={revised?.artifact_id ?? ''} onChange={e => setSelected(e.target.value)}>
           {!revised && <option value="" disabled>选择下一份待核对文件</option>}
           {candidates.map((a, index) => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a, index)}</option>)}
         </select></label>}
@@ -258,23 +258,23 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged, initialTar
         <p>原成果编号 <code>{item.source_artifact_id}</code> · SHA-256 <code>{item.source_artifact_hash}</code></p>
         {revised && <p>修订成果编号 <code>{revised.artifact_id}</code> · SHA-256 <code>{revised.sha256}</code></p>}
       </details>
-      <button type="button" disabled={interactionBusy || !left || !right} onClick={() => void compare()}>逐行对比修改</button>
+      <button className="ops-button" type="button" disabled={interactionBusy || !left || !right} onClick={() => void compare()}>逐行对比修改</button>
       {comparison.key === comparisonKey && comparison.notice && <p role="status">{comparison.notice}</p>}
       {left && right && comparison.key === comparisonKey && comparison.result && <>{comparison.result.truncated && <p>仅对比内容预览，完整成果请分别下载核对。</p>}<LineComparison before={comparison.result.before} after={comparison.result.after} /></>}
     </details>
     {history?.impacts && history.impacts.length > 0 && <section><h4>受影响步骤</h4><ul>{history.impacts.map(i => <li key={i.node_run_id}>{i.node_id} · {i.released_at ? '已恢复' : '等待返工或验收'}{i.replacement_node_run_id && ' · 已有后续执行'}</li>)}</ul></section>}
     <details><summary>返工与验收历史</summary>{history ? <><ol>{history.attempts.map(a => <li key={a.attempt_id}>第 {a.round_no} 轮 · {labels[a.status] ?? a.status}<p>{a.feedback}</p><p>{a.source_artifact_id} → {a.result_artifact_id ?? '等待修订成果'}</p><p>{a.created_at}</p></li>)}</ol><ol>{history.reviews.map(r => <li key={r.review_id}>第 {r.round_no} 轮 · {r.reviewer_actor} · {r.action === 'accept' ? '验收通过' : r.action === 'request_changes' ? '要求修改' : r.action === 'authorize' ? '授权返工' : r.action === 'reject' ? '不批准' : '升级处理'}<p>{r.note}</p>{r.artifact_id && <p>验收版本 {r.artifact_id} · {r.artifact_hash}</p>}<p>{r.created_at}</p></li>)}</ol></> : <p>尚未读取历史。</p>}</details>
     {commands && (pending || review || escalated) && <fieldset disabled={!canWrite || interactionBusy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
-      <label style={field}>具体修改意见或处理说明<textarea value={note} onChange={e => setNote(e.target.value)} rows={3} /></label>
+      <label style={field}>具体修改意见或处理说明<textarea className="ops-field" value={note} onChange={e => setNote(e.target.value)} rows={3} /></label>
       {pending && manifest.originals.length>0 && <ManifestEditor sourceId={item.source_artifact_id} value={manifest} onChange={next=>{setChoices(Object.fromEntries(next.originals.map(file=>[file.artifact_id,file.action])));setAttachments(next.attachments.join('\n'))}}/>}
-      {pending && item.suggested_scope==='replan_subgraph' && <button type="button" disabled={!note.trim()} onClick={()=>void act('set_manifest')}>确认文件方案</button>}
-      <div style={actions}>{pending && <button type="button" disabled={!note.trim() || item.suggested_scope === 'replan_subgraph' || !manifest.originals.length} onClick={() => void act('authorize')}>授权返工</button>}
-        {review && <><button type="button" disabled={!canAccept || !note.trim()} onClick={() => void act('accept')}>通过验收</button><button type="button" disabled={!note.trim()} onClick={() => void act('request_changes')}>要求修改</button></>}
-        {!escalated && <button type="button" disabled={!note.trim()} onClick={() => void act('escalate')}>升级处理</button>}{mayDecline && <button type="button" disabled={!note.trim()} onClick={() => void act('reject')}>不批准返工</button>}
-        <button type="button" disabled={!note.trim()} onClick={()=>setTerminationConfirm(true)}>终止本次运行</button></div>
-      {terminationConfirm && <div role="group" aria-label="确认终止运行"><p>此操作终止整个当前运行，并保留全部成果及未确认副作用。确定继续？</p><button type="button" disabled={!note.trim()} onClick={()=>void act('reject_final')}>确认终止运行</button><button type="button" onClick={()=>setTerminationConfirm(false)}>继续审核</button></div>}
+      {pending && item.suggested_scope==='replan_subgraph' && <button className="ops-button" type="button" disabled={!note.trim()} onClick={()=>void act('set_manifest')}>确认文件方案</button>}
+      <div style={actions}>{pending && <button className="ops-button" type="button" disabled={!note.trim() || item.suggested_scope === 'replan_subgraph' || !manifest.originals.length} onClick={() => void act('authorize')}>授权返工</button>}
+        {review && <><button className="ops-button" type="button" disabled={!canAccept || !note.trim()} onClick={() => void act('accept')}>通过验收</button><button className="ops-button" type="button" disabled={!note.trim()} onClick={() => void act('request_changes')}>要求修改</button></>}
+        {!escalated && <button className="ops-button" type="button" disabled={!note.trim()} onClick={() => void act('escalate')}>升级处理</button>}{mayDecline && <button className="ops-button" type="button" disabled={!note.trim()} onClick={() => void act('reject')}>不批准返工</button>}
+        <button className="ops-button" type="button" disabled={!note.trim()} onClick={()=>setTerminationConfirm(true)}>终止本次运行</button></div>
+      {terminationConfirm && <div role="group" aria-label="确认终止运行"><p>此操作终止整个当前运行，并保留全部成果及未确认副作用。确定继续？</p><button className="ops-button" type="button" disabled={!note.trim()} onClick={()=>void act('reject_final')}>确认终止运行</button><button className="ops-button" type="button" onClick={()=>setTerminationConfirm(false)}>继续审核</button></div>}
       {escalated && <p>此反馈等待人工处理。未启动返工可不批准；已执行的返工保留依赖保护，可明确终止当前运行。</p>}
-      {plannerEnabled && pending && <button type="button" onClick={() => void planAction()}>请主脑提出局部方案</button>}
+      {plannerEnabled && pending && <button className="ops-button" type="button" onClick={() => void planAction()}>请主脑提出局部方案</button>}
       {plan && <section>
         <h4>主脑候选方案</h4><p>{plan.proposal.reason}</p>
         <ul>{plan.proposal.changes.map(c => <li key={c.node_id}>{c.node_id}：{c.instruction}</li>)}</ul>
@@ -283,14 +283,14 @@ function ReworkCard({ api, item, commands, plannerEnabled, onChanged, initialTar
           <li key={e.from + '/' + e.to}>{e.from} 完成后执行 {e.to}</li>)}</ul></div>}
         {Boolean(plan.proposal.insert_steps?.length) && <section aria-label="候选新增步骤"><h4>新增步骤（授权后执行）</h4><ul>{plan.proposal.insert_steps?.map(step => <li key={step.node_id}>{step.node_id} · 插入 {step.before_node_id} 之前 · 来源角色：{step.before_node_id}<p>{step.instruction}</p></li>)}</ul></section>}
         <details><summary>查看方案版本记录</summary><code style={hash}>{plan.plan_hash}</code></details>
-        <button type="button" disabled={plan.revision !== item.revision} onClick={() => void planAction(true)}>授权此方案</button>
+        <button className="ops-button" type="button" disabled={plan.revision !== item.revision} onClick={() => void planAction(true)}>授权此方案</button>
       </section>}
     </fieldset>}
     {notice && <p role="status">{notice}</p>}
     <details><summary>查看返工登记明细</summary><p>请求编号 <code>{item.request_id}</code> · 原步骤尝试编号 <code>{item.target_node_run_id}</code> · 提出方 <code>{item.requester_actor}</code></p>
       {unknownOperation && <p>回执编号 <code>{unknownOperation}</code></p>}
     </details>
-    {unknownOperation && commands && <button type="button" disabled={interactionBusy} onClick={async () => { setBusy(true); try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${receiptStatus(data.status)}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } finally { setBusy(false) } }}>查询原操作回执</button>}
+    {unknownOperation && commands && <button className="ops-button" type="button" disabled={interactionBusy} onClick={async () => { setBusy(true); try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${receiptStatus(data.status)}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } finally { setBusy(false) } }}>查询原操作回执</button>}
   </article>
 }
 
@@ -354,30 +354,30 @@ function ReworkRequestForm({ api, commands, runId, onChanged, plannerEnabled, ru
     finally { setBusy(false) }
   }
   return <details open={Boolean(initialTarget)}><summary>审核成果或提出修改</summary><fieldset disabled={busy || Boolean(unknownOperation)} style={{ border: 0, padding: 0 }}>
-    <label style={field}>来源节点<select value={nodeId} onChange={e => { setNodeId(e.target.value); setArtifactId('') }}><option value="">选择节点</option>{nodes.map(n => <option key={n.node_run_id} value={n.node_run_id}>{n.title || n.node_id} · 第 {n.attempt} 次 · {nodeExecutionLabel(n)}</option>)}</select></label>
-    <label style={field}>成果版本<select value={artifactId} onChange={e => setArtifactId(e.target.value)}><option value="">选择成果</option>{artifacts.filter(a => a.source_node_run_id === nodeId).map((a, index) => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a, index)}</option>)}</select></label>
+    <label style={field}>来源节点<select className="ops-field" value={nodeId} onChange={e => { setNodeId(e.target.value); setArtifactId('') }}><option value="">选择节点</option>{nodes.map(n => <option key={n.node_run_id} value={n.node_run_id}>{n.title || n.node_id} · 第 {n.attempt} 次 · {nodeExecutionLabel(n)}</option>)}</select></label>
+    <label style={field}>成果版本<select className="ops-field" value={artifactId} onChange={e => setArtifactId(e.target.value)}><option value="">选择成果</option>{artifacts.filter(a => a.source_node_run_id === nodeId).map((a, index) => <option key={a.artifact_id} value={a.artifact_id}>{artifactVersionLabel(a, index)}</option>)}</select></label>
     {artifact && <ArtifactContent api={api} artifact={artifact} onAcquired={setAcquired} autoPreview={Boolean(initialTarget?.artifact_id)} />}
     {artifact && acquired?.mode==='download' && <label><input type="checkbox" checked={acknowledged} onChange={event=>setAcknowledged(event.target.checked)}/>我已核对下载的这一版</label>}
     {initialTarget?.artifact_id && artifacts.length>0 && !artifact && <p role="status">指定的成果版本已变化，请刷新任务后重新打开。</p>}
     {artifact && <details><summary>查看所选成果版本记录</summary>
       <p>成果编号 <code>{artifact.artifact_id}</code> · SHA-256 <code>{artifact.sha256}</code></p>
     </details>}
-    <div style={actions}><button type="button" disabled={!canWrite || !node || held} onClick={() => void submit('hold')}>等待人工验收后结束</button><button type="button" disabled={!canWrite || !held || !hold?.hold_id || !canAccept} onClick={() => void submit('accept')}>通过成果验收</button><button type="button" disabled={!canWrite || !held} onClick={() => void submit('withdraw')}>撤销留验</button></div>
+    <div style={actions}><button className="ops-button" type="button" disabled={!canWrite || !node || held} onClick={() => void submit('hold')}>等待人工验收后结束</button><button className="ops-button" type="button" disabled={!canWrite || !held || !hold?.hold_id || !canAccept} onClick={() => void submit('accept')}>通过成果验收</button><button className="ops-button" type="button" disabled={!canWrite || !held} onClick={() => void submit('withdraw')}>撤销留验</button></div>
     {held && <p role="status">此节点等待人工验收，运行暂不结束。</p>}
     {plannerEnabled && <section aria-label="主脑成果检查">
-      <label style={field}>主脑检查标准<textarea value={inspectionCriteria} onChange={e=>setInspectionCriteria(e.target.value)} rows={2} maxLength={2500} /></label>
-      <button type="button" disabled={!canWrite || !artifact || !node || node.status !== 'done' || !inspectionCriteria.trim()} onClick={()=>void inspect()}>请主脑检查成果</button>
+      <label style={field}>主脑检查标准<textarea className="ops-field" value={inspectionCriteria} onChange={e=>setInspectionCriteria(e.target.value)} rows={2} maxLength={2500} /></label>
+      <button className="ops-button" type="button" disabled={!canWrite || !artifact || !node || node.status !== 'done' || !inspectionCriteria.trim()} onClick={()=>void inspect()}>请主脑检查成果</button>
       <p>主脑通过意见只留存记录；发现缺陷后按返工策略建立反馈。检查完整 UTF-8 文本，最大 64 KiB。</p>
       {inspections.length > 0 && <details><summary>主脑检查记录</summary>{inspections.map(item=><article key={item.inspection_id}><p>{item.verdict==='pass'?'通过意见':'要求修改'} · {item.created_at} · {item.artifact_id}</p><code style={hash}>{item.artifact_hash}</code><p>{item.summary}</p>{item.request_id&&<p>反馈编号：{item.request_id}</p>}</article>)}</details>}
     </section>}
     {artifact && <ManifestEditor sourceId={artifactId} value={manifest} onChange={next=>{setChoices(Object.fromEntries(next.originals.map(file=>[file.artifact_id,file.action])));setAttachments(next.attachments.join('\n'))}}/>}
-    <label style={field}>具体修改意见<textarea value={reason} onChange={e => setReason(e.target.value)} rows={3} /></label>
-    <label style={field}>期望结果<textarea value={expected} onChange={e => setExpected(e.target.value)} rows={2} /></label>
-    <label style={field}>保留要求（每行一条）<textarea value={preserve} onChange={e => setPreserve(e.target.value)} rows={2} /></label>
-    <label style={field}>修改方式<select value={scope} onChange={e => setScope(e.target.value as ReworkScope)}><option value="targeted_revision">针对性修改</option><option value="rerun_node">重新执行当前节点</option><option value="replan_subgraph">提交局部重规划需求</option></select></label>
-    <button type="button" disabled={!canWrite || runEnded || !artifact || !node || node.status !== 'done' || !reason.trim() || !expected.trim()} onClick={() => void submit('request')}>要求修改</button>
+    <label style={field}>具体修改意见<textarea className="ops-field" value={reason} onChange={e => setReason(e.target.value)} rows={3} /></label>
+    <label style={field}>期望结果<textarea className="ops-field" value={expected} onChange={e => setExpected(e.target.value)} rows={2} /></label>
+    <label style={field}>保留要求（每行一条）<textarea className="ops-field" value={preserve} onChange={e => setPreserve(e.target.value)} rows={2} /></label>
+    <label style={field}>修改方式<select className="ops-field" value={scope} onChange={e => setScope(e.target.value as ReworkScope)}><option value="targeted_revision">针对性修改</option><option value="rerun_node">重新执行当前节点</option><option value="replan_subgraph">提交局部重规划需求</option></select></label>
+    <button className="ops-button" type="button" disabled={!canWrite || runEnded || !artifact || !node || node.status !== 'done' || !reason.trim() || !expected.trim()} onClick={() => void submit('request')}>要求修改</button>
     <p>{runEnded ? '本次运行已经结束，不能再提交修改意见。已交付的文件仍可在结果里打开；需要改稿时请新建一项任务并附上这份成果。' : '意见提交后等待授权，旧成果与执行记录保留。'}</p>
-  </fieldset>{notice && <p role="status">{notice}</p>}{unknownOperation && <button type="button" onClick={async () => { try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${receiptStatus(data.status)}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } }}>查询原操作回执</button>}</details>
+  </fieldset>{notice && <p role="status">{notice}</p>}{unknownOperation && <button className="ops-button" type="button" onClick={async () => { try { const { data } = await commands.getOperation(unknownOperation); setNotice(`回执状态：${receiptStatus(data.status)}`); if (data.status === 'applied') { setUnknownOperation(undefined); onChanged() } } catch (e) { setNotice(errorText(e)) } }}>查询原操作回执</button>}</details>
 }
 export function LineComparison({ before, after }: { before: string; after: string }) {
   const oldLines = before.split('\n'), newLines = after.split('\n')

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { expect, it, vi } from 'vitest'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../../src/core/dsh-message-source.ts'
-import { OrchestraNoticeTail, orchestraNoticeDefinition, registerNativeOrchestraNotices,
+import { OrchestraNoticeTail, OrchestraAttentionNotice, orchestraNoticeDefinition, registerNativeOrchestraNotices,
   type NativeOrchestraNoticeContext } from '../../src/client/dsh-orchestra-notice.tsx'
 import { renderPanel } from './harness.ts'
 import type { ChatArtifactLink } from '../../src/core/receipt-location.ts'
+import type { ChatAttentionLink } from '../../src/core/receipt-location.ts'
 
 const notice = { id: 'notice-1', seq: 75, title: '新闻整理：执行受阻',
   text: '新闻整理：执行受阻\n原因：无法访问新闻来源。\n下一步：启用检索工具后重试。' }
@@ -15,6 +16,9 @@ const event = { type: 'user/message', seq: notice.seq, surfaceOp: 'append', data
 const artifact: ChatArtifactLink = { title: '最终完整简报', fileName: '会话正文-3.md', location: {
   kind: 'artifact', workspaceId: 'workspace', sessionId: 'source-session', taskId: 'task', runId: 'run',
   artifactId: 'artifact', sha256: 'a'.repeat(64),
+} }
+const attention: ChatAttentionLink = { title: '执行超时，等待处理', location: {
+  kind: 'decision', workspaceId: 'workspace', sessionId: 'source-session', taskId: 'task', runId: 'run', decisionId: 'decision',
 } }
 
 it('projects only durable Orchestra notices and keeps recovery instructions out of the result', () => {
@@ -108,10 +112,68 @@ it('uses the rc.5 session-bound turn-tail extension without replacing host rende
   registerNativeOrchestraNotices({ inject } as NativeOrchestraNoticeContext)
   expect(inject.mock.calls[0]![0]).toEqual(['slots', 'sessions', 'uiConversation'])
   expect(ready.uiConversation.events.register).toHaveBeenCalledWith(orchestraNoticeDefinition)
-  const [slot, component] = ready.slots.register.mock.calls[0]!
+  const [slot, component] = ready.slots.register.mock.calls.find(([entry]) => entry.name === 'conversation.chat.turnTail')!
   expect(slot).toMatchObject({ name: 'conversation.chat.turnTail', id: 'orchestra-notice' })
   expect(component).toBe(OrchestraNoticeTail)
   expect(slot.inject('source-session').keyedHooks.notices('4')).toBe(source)
   expect(ready.sessions.binding).toHaveBeenCalledWith('source-session')
   expect(turnDataSource).toHaveBeenCalledWith(4, 'orchestra-notice')
+  expect(ready.slots.register.mock.calls.find(([entry]) => entry.name === 'conversation.chat.node'))
+    .toMatchObject([{ name: 'conversation.chat.node', key: 'orchestra-notice' }, OrchestraAttentionNotice])
+})
+
+it('publishes a visible pending-decision node before turn/end and keeps its action after an assistant answer', async () => {
+  const withAttention = { ...event, data: { ...event.data, source: { ...event.data.source, attentionLinks: [attention] } } }
+  const match = { event: withAttention, location: { kind: 'step', turn: { turn: 4 }, step: { step: 2 } } }
+  const state = orchestraNoticeDefinition.start({ key: 'key', id: notice.id }, match)
+  const node = orchestraNoticeDefinition.buildViewNode({ key: 'key', id: notice.id, start: match, state })!
+  expect(node.visibility).toBe('visible')
+  const sessionSnapshot = { byId: { 'source-session': { id: 'source-session', retainedBy: { mainView: 1 } } } }
+  const workspaceSnapshot = { items: [{ workspaceId: 'workspace', sessionIds: ['source-session'] }], archivedSessionIds: [] }
+  const sources = { sessions: { list: { getSnapshot: () => sessionSnapshot, subscribe: () => () => {} } },
+    workspaces: { list: { getSnapshot: () => workspaceSnapshot, subscribe: () => () => {} } } }
+  const openLocation = vi.fn(async () => {})
+  const view = await renderPanel(<OrchestraAttentionNotice node={node} sources={sources} openLocation={openLocation} />)
+  try {
+    expect(view.byRole('status')).toHaveLength(1)
+    const action = view.findAll('button').find(button => button.textContent === '前往审批中心')!
+    expect(action).toBeDefined()
+    await view.click(action)
+    expect(openLocation).toHaveBeenCalledWith(attention.location)
+    await view.rerender(<><OrchestraAttentionNotice node={node} sources={sources} openLocation={openLocation} />
+      <OrchestraNoticeTail turn={{ turn: 4, end: { data: { reason: { kind: 'completed' } } },
+        data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }} useNotices={() => [state]} /></>)
+    expect(view.findAll('button').filter(button => button.textContent === '前往审批中心')).toHaveLength(1)
+    expect(view.byRole('status')).toHaveLength(1)
+  } finally { view.unmount() }
+})
+
+it('does not restore actions with arbitrary URLs or hide a legacy text-only result', () => {
+  for (const invalid of [{ ...attention, url: 'https://unsafe.invalid' }, { ...attention, location: { ...attention.location, command: 'approve' } }]) {
+    const injected = { ...event, data: { ...event.data, source: { ...event.data.source, attentionLinks: [invalid] } } }
+    const match = { event: injected, location: {} }
+    const state = orchestraNoticeDefinition.start({ key: 'key', id: notice.id }, match)
+    expect(state.attentionLinks).toBeUndefined()
+    expect(state.text).toBe(notice.text)
+    expect(orchestraNoticeDefinition.buildViewNode({ key: 'key', id: notice.id, start: match, state })?.visibility).toBe('hidden')
+  }
+})
+
+it.each([undefined, 'completed', 'cancelled', 'blocked'])('keeps a final result and its original artifact visible once when the source turn is %s', async kind => {
+  const withFinal = { ...event, data: { ...event.data, source: { ...event.data.source, final: true, artifacts: [artifact] } } }
+  const match = { event: withFinal, location: { kind: 'step', turn: { turn: 4 }, step: { step: 2 } } }
+  const state = orchestraNoticeDefinition.start({ key: 'key', id: notice.id }, match)
+  const node = orchestraNoticeDefinition.buildViewNode({ key: 'key', id: notice.id, start: match, state })!
+  expect(node.visibility).toBe('visible')
+  const openArtifact = vi.fn(async () => {})
+  const view = await renderPanel(<><OrchestraAttentionNotice node={node} openArtifact={openArtifact} />
+    <OrchestraNoticeTail turn={{ turn: 4, ...(kind && { end: { data: { reason: { kind } } } }),
+      data: new Map([['turn-tail', { closing: { finalNode: { seq: 100 } } }]]) }} useNotices={() => [state]} openArtifact={openArtifact} /></>)
+  try {
+    expect(view.byRole('status')).toHaveLength(1)
+    expect(view.text()).toContain('下一步：启用检索工具后重试。')
+    expect(view.findAll('a').map(link => link.textContent)).toEqual(['最终完整简报'])
+    await view.click(view.findAll('a')[0]!)
+    expect(openArtifact).toHaveBeenCalledWith(artifact, expect.any(AbortSignal))
+  } finally { view.unmount() }
 })

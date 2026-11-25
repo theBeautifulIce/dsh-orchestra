@@ -1,6 +1,7 @@
 import { resolvePinnedNodeId } from '../rework-extra-steps.ts'
 // src/service/commands/apply-report.ts —— applyReport 六步收口（规格 4.2 行 286-305）
 import { OrchError } from '../../core/errors.ts'
+import { readExecutionCompletion } from '../../core/execution-completion.ts'
 import { canonicalJson, sha256Hex } from '../../core/canonical.ts'
 import { isReportRegistryState, type ApplyResult, type Report } from '../../core/report.ts'
 import type { PassCondition } from '../../core/policy.ts'
@@ -538,8 +539,17 @@ export function applyObservedReport(
     || canonicalJson(finalOutput) !== canonicalJson(payloadOutput)) {
     throw new OrchError('STALE_GENERATION', '原尝试回报的标识或业务输出与签名桥回报不一致')
   }
+  const pureAgentReport = allowArtifactCompletion && node.side_effect_policy === 'pure'
+  const completion = params.report.status === 'failed' ? readExecutionCompletion(params.report) : undefined
+  const evidenceTrace = (payloadOutput as Record<string, unknown>).evidence_trace
+  // Native read-only work has no fixed-command failure evidence. A signed final
+  // incomplete report plus confirmed host stop can close this pure attempt as
+  // failed, but cannot prove success or settle an attempt with possible effects.
+  const pureIncompleteReport = pureAgentReport && !params.report.evidence
+    && Array.isArray(evidenceTrace) && evidenceTrace.length === 0
+    && completion !== undefined && completion.outcome !== 'completed'
   return applyReportInternal(tx, secret, params, catalog,
-    allowArtifactCompletion && node.side_effect_policy === 'pure', undefined, observation.rearmGeneration)
+    pureAgentReport, undefined, observation.rearmGeneration, pureIncompleteReport)
 }
 
 function applyReportInternal(
@@ -550,6 +560,7 @@ function applyReportInternal(
   allowArtifactCompletion: boolean,
   approval?: ConflictApproval,
   observedRearm?: number,
+  observedPureFailure = false,
 ): ApplyResult {
   const report = params.report
   // 第一步：幂等查重
@@ -694,7 +705,7 @@ function applyReportInternal(
   let boundExecutionId: string | undefined
   // 失败/超时终态也要有可核对的服务端证据：证据必须与同 attempt 的工具痕迹与 tool_finished 对齐，
   // 不能凭一条自报的 exitCode 收口（S2 第二十三轮 P1-1、第二十四轮 P1-2）。
-  if (report.status === 'failed' || report.status === 'timeout') {
+  if ((report.status === 'failed' || report.status === 'timeout') && !observedPureFailure) {
     const terminal = traceBindingGate(tx, params, report, {
       allowFailed: true,
       // 失败与超时都必须对一条失败行：超时也要在账本里留下失败/被杀的工具痕迹，
@@ -840,6 +851,8 @@ function applyReportInternal(
     report_seq: reportSeq,
     next_status: report.status,
     evidence_digest: evidenceDigest,
+    ...(observedPureFailure && { attempt: params.attempt, action_generation: params.generation,
+      completion: readExecutionCompletion(report) }),
     ...(approval && { decision_id: approval.decision.decision_id, report_digest: approval.registered.report_digest, execution_id: boundExecutionId }),
     ...(artifactProof ? { artifact_proof: artifactProof.proof } : {}),
   })

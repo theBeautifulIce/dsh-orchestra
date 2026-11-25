@@ -45,13 +45,13 @@ export function MaterialPicker({ recipients, onGrant }: Props) {
     }
   }
   return <fieldset disabled={busy}><legend>本次任务材料</legend>
-    <label>选择文本文件<input ref={input} type="file" multiple accept=".txt,.md,.csv"
+    <label>选择文本文件<input className="ops-field" ref={input} type="file" multiple accept=".txt,.md,.csv"
       onChange={e => { setStatus(''); setFiles(Array.from(e.target.files ?? [])) }} /></label>
     <ul>{files.map((f, i) => <li key={i}>{f.name}（{f.size} 字节）</li>)}</ul>
-    <label>或粘贴文本<textarea value={paste} onChange={e => { setStatus(''); setPaste(e.target.value) }} /></label>
+    <label>或粘贴文本<textarea className="ops-field" value={paste} onChange={e => { setStatus(''); setPaste(e.target.value) }} /></label>
     <p>材料授权有效期为 30 分钟。可读取材料的步骤：{recipients.join('、') || '待确认'}</p>
     {count > 8 && <p>最多选择 8 份材料</p>}
-    <button type="button" disabled={count === 0 || count > 8 || !recipients.length} onClick={submit}>
+    <button className="ops-button" type="button" disabled={count === 0 || count > 8 || !recipients.length} onClick={submit}>
       {busy ? '正在授权…' : '仅这次使用'}
     </button><p role="status">{status}</p>
   </fieldset>

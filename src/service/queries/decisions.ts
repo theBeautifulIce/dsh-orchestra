@@ -6,6 +6,7 @@ import { withReadTx } from './read-tx.ts'
 import { DECISION_CHOICE_COLUMNS, panelDecisionOptions, withOrdinaryRecovery, type DecisionChoiceContext, type MemoryDecisionAccess,
   type RecoveryOutcomes } from '../decision/choices.ts'
 import type { OrdinaryLiveRecovery } from '../decision/ordinary-live-recovery.ts'
+import type { DecisionDisplaySource } from '../../core/decision-display.ts'
 
 const DECISIONS_LIMIT_MAX = 100
 const PRIORITY_ORDER = "CASE priority " + Object.entries(DECISION_PRIORITY_RANK)
@@ -37,6 +38,10 @@ export type DecisionView = {
   available_effect_evidence?: { applied?: string; not_applied?: string }
   available_recovery_outcomes?: RecoveryOutcomes
   target_summary: string | null
+  task_title?: string | null
+  step_title?: string | null
+  attempt?: number | null
+  execution_observation?: DecisionDisplaySource['execution_observation']
   approver?: string | null
   expiry_effect?: string | null
   projection_missing: string[]
@@ -72,6 +77,52 @@ const DECISION_SELECT = 'SELECT decision_id, run_id, node_run_id, kind, status, 
   + 'expires_at, confirm_required, created_at, decided_at, resolved_by, priority, priority_reason, expiry_effect, approver, '
   + DECISION_CHOICE_COLUMNS + ' FROM decisions d'
 
+function displayContext(tx: Parameters<typeof withOrdinaryRecovery>[0], row: DecisionRow,
+  payload: Record<string, unknown>): Pick<DecisionView, 'task_title' | 'step_title' | 'attempt' | 'execution_observation'> {
+  const context = tx.get<{ task_title: string; node_id: string | null; seq: number | null; attempt: number | null;
+    doc_json: string | null }>(`SELECT t.title AS task_title,
+      n.node_id, n.seq, n.attempt, w.doc_json
+    FROM runs r JOIN tasks t ON t.task_id=r.task_id
+    LEFT JOIN node_runs n ON n.run_id=r.run_id AND n.node_run_id=?
+    LEFT JOIN workflow_versions w ON w.workflow_id=r.workflow_id AND w.version=r.workflow_version
+      AND (r.workflow_definition_hash IS NULL OR w.content_hash=r.workflow_definition_hash)
+    WHERE r.run_id=?`, [row.node_run_id, row.run_id])
+  let stepTitle: string | null = null
+  if (context?.doc_json && context.node_id) {
+    try {
+      const doc = JSON.parse(context.doc_json) as { nodes?: { node_id?: unknown; title?: unknown }[] } | null
+      const node = Array.isArray(doc?.nodes) ? doc.nodes.find(node => node?.node_id === context.node_id) : undefined
+      if (typeof node?.title === 'string' && node.title.trim()) stepTitle = node.title.trim().slice(0, 500)
+    } catch { /* A missing or damaged workflow document cannot supply a step title. */ }
+  }
+  const recovery = payload.ordinary_recovery && typeof payload.ordinary_recovery === 'object'
+    ? payload.ordinary_recovery as Record<string, unknown> : undefined
+  const bound = recovery?.node_run_id === row.node_run_id && Number.isSafeInteger(recovery?.attempt)
+    && Number(recovery?.attempt) > 0 && Number.isSafeInteger(recovery?.action_generation) && Number(recovery?.action_generation) >= 0
+  const attempt = bound ? recovery!.attempt as number : Number.isSafeInteger(payload.report_attempt) && Number(payload.report_attempt) > 0
+    ? payload.report_attempt as number : context?.attempt ?? null
+  // A later attempt's observation must not change the explanation of an older, unbound decision.
+  const event = bound && row.node_run_id && context?.node_id
+    ? tx.get<{ payload: string }>(`SELECT payload FROM node_run_events WHERE node_run_id=?
+      AND type='executor.observation_only' AND json_valid(payload)
+      AND json_extract(payload,'$.attempt')=? AND json_extract(payload,'$.action_generation')=?
+      ORDER BY seq DESC LIMIT 1`, [row.node_run_id, attempt, recovery!.action_generation]) : undefined
+  let observation: DecisionDisplaySource['execution_observation']
+  if (event) {
+    const data = JSON.parse(event.payload) as Record<string, unknown>
+    observation = {
+      reason: data.reason === 'action_timeout' || data.reason === 'lease_lost' ? data.reason : null,
+      observed_running: data.observed_running === true,
+      has_tool_call: data.has_tool_call === true,
+      timeout_ms: typeof data.timeout_ms === 'number' && Number.isSafeInteger(data.timeout_ms) && data.timeout_ms > 0 ? data.timeout_ms : null,
+    }
+  }
+  const stepFallback = typeof context?.seq === 'number' && Number.isSafeInteger(context.seq) && context.seq > 0
+    ? `第 ${context.seq} 步（名称未记录）` : null
+  return { task_title: context?.task_title?.trim().slice(0, 500) || null, step_title: stepTitle ?? stepFallback, attempt,
+    ...(observation && { execution_observation: observation }) }
+}
+
 function toDecisionView(tx: Parameters<typeof withOrdinaryRecovery>[0], row: DecisionRow, now: number,
   memoryEnabled: MemoryDecisionAccess, liveRecovery?: OrdinaryLiveRecovery): DecisionView {
   const parsed = parsePayload(row.payload_json)
@@ -99,6 +150,7 @@ function toDecisionView(tx: Parameters<typeof withOrdinaryRecovery>[0], row: Dec
     resolved_by: asText(row.resolved_by),
     priority, priority_reason: priorityReason, allowed_resolutions: choices, resolution_unavailable_reason: unavailableReason,
     required_evidence: required, target_summary: target,
+    ...displayContext(tx, row, payload),
     ...(row.ordinary_effect_evidence && { available_effect_evidence: row.ordinary_effect_evidence }),
     ...(row.ordinary_recovery_outcomes && { available_recovery_outcomes: row.ordinary_recovery_outcomes }),
     approver: asText(row.approver),
@@ -118,7 +170,7 @@ export function getDecisionSnapshot(db: Db, decisionId: string, now = Date.now()
       DECISION_SELECT + ' WHERE decision_id = ?',
       [decisionId],
     )
-    if (!row) throw new OrchError('NOT_FOUND', '没找到这条裁决', { decision_id: decisionId })
+    if (!row) throw new OrchError('NOT_FOUND', '没找到这条决定', { decision_id: decisionId })
     return { item: toDecisionView(ctx.tx, row, now, memoryEnabled, liveRecovery), as_of_seq: ctx.as_of_seq }
   })
 }

@@ -6,6 +6,8 @@ import { createClientCommandReservations, type ClientCommandReservations, type D
 import { registerNativeOrchestraToolView, type NativeOrchestraToolViewContext } from './dsh-orchestra-toolview.tsx'
 import { registerNativeOrchestraNotices, type NativeOrchestraNoticeContext } from './dsh-orchestra-notice.tsx'
 import { createPanelHost, type PanelHostProps } from './panel-host.tsx'
+import { openPanelReceipt, type OpenPanelReceipt, type PanelNavigationHost } from './dsh-panel-navigation.ts'
+import type { PanelReceiptLocation } from '../core/receipt-location.ts'
 
 const panelId = 'dsh-orchestra'
 const registeredRoots = new WeakSet<object>()
@@ -29,6 +31,7 @@ type DshClientContext = DshPanelContext & NativeOrchestraSlashContext & NativeOr
   commandUi: DshCommandUi
   inject(names: string[], callback: (ctx: DshClientContext) => void): unknown
   orchestraPanelTransport: DshOrchestraPanelTransport
+  layout: PanelNavigationHost['layout']
 }
 
 export const inject = ['slots']
@@ -38,8 +41,15 @@ export function apply(ctx: DshClientContext): void {
   let reviewSources: DshLocalPanelSources | undefined
   let clientCommands: ClientCommandReservations | undefined
   let refreshLocal: (() => void) | undefined
-  const { openArtifact, downloadArtifact } = registerNativeOrchestraNotices(ctx as unknown as NativeOrchestraNoticeContext, () => reviewSources)
-  registerNativeOrchestraToolView(ctx, () => reviewSources, openArtifact, downloadArtifact)
+  let navigationHost: PanelNavigationHost | undefined
+  let localLocation: PanelReceiptLocation | undefined
+  const openLocation: OpenPanelReceipt = (location, signal) => openPanelReceipt(location, reviewSources, navigationHost, target => {
+    if (!refreshLocal || explicit) throw new Error('当前面板连接已变化。请从当前会话重新打开 Orchestra。')
+    localLocation = target
+    refreshLocal()
+  }, signal)
+  const { openArtifact, downloadArtifact } = registerNativeOrchestraNotices(ctx as unknown as NativeOrchestraNoticeContext, () => reviewSources, openLocation)
+  registerNativeOrchestraToolView(ctx, () => reviewSources, openArtifact, downloadArtifact, openLocation)
   let explicit: Panel | undefined
   let local: Panel | undefined
   let unmount: (() => unknown) | undefined
@@ -80,6 +90,13 @@ export function apply(ctx: DshClientContext): void {
     }, 'orchestra: provided transport')
   })
 
+  ctx.inject(['layout'], ready => {
+    ready.effect(function* () {
+      navigationHost = ready
+      yield () => { if (navigationHost === ready) navigationHost = undefined }
+    }, 'orchestra: scoped panel navigation')
+  })
+
   if (typeof window === 'undefined' || !window.location?.href || !isDshLocalShell(window.location.href)) return
   ctx.effect(function* () {
     yield formatNativeOrchestraApprovalCards(window.document)
@@ -98,7 +115,7 @@ export function apply(ctx: DshClientContext): void {
       const { sessions, workspaces } = ready
       reviewSources = { sessions, workspaces }
       refreshLocal = () => {
-        local = () => <DshLocalPanel sessions={sessions} workspaces={workspaces} clientCommands={clientCommands} />
+        local = () => <DshLocalPanel sessions={sessions} workspaces={workspaces} clientCommands={clientCommands} initialLocation={localLocation} />
         refresh()
       }
       refreshLocal()
