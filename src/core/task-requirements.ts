@@ -15,10 +15,9 @@ const deniedGapReport = /(?:不(?:要|必|得|用|需)|无需|禁止|勿)\s*(?:�
 // Quotes remain bound to their own message. Numbers and parallelism can be stated
 // in another authenticated message belonging to the same task.
 const rosterClause = /^(?:(?:请)?(?:不(?:要|得|需要|允许)?|禁止|勿)(?:再)?(?:额外|另行|另外)(?:启动|创建|安排|派发|增加|派出|召集)(?:新的?|其他)?(?:业务|子)?(?:代理|智能体)|(?:do not|don't|never) (?:start|spawn|create|add) (?:any )?(?:extra|additional) (?:business )?agents?|no (?:extra|additional) agents?)$/iu
-export function explicitAgentRoster(source: string): { quote: string; count?: number; parallel: boolean; conflicting?: true } | undefined {
-  const clauses = source.split(/[。，,；;！!?？\n]|\.(?:\s|$)/u).map(clause => clause.trim())
+function requestedRoster(source: string) {
+  const clauses = source.split(/[。，,；;！!?？：:\n]|\.(?:\s|$)/u).map(clause => clause.trim())
   const quote = clauses.find(clause => rosterClause.test(clause))
-  if (!quote) return
   const assignment = /^(?:请(?:你|帮我)?|现在|接下来|我希望|我需要)?\s*(?:安排|启动|创建|使用|派出)\s*([1-9]\d?|[一二两三四五六七八九十]{1,3})\s*(?:个|名|位)?(?:同时运行的|并行的?|独立的?|只读|业务|子|执行|协作|\s)*(?:代理|智能体)|^(?:please\s+)?(?:assign|use|start|run)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:concurrent|parallel|independent|read-only|business)\s+)*agents?\b/iu
   const assignments = clauses.map(clause => assignment.exec(clause)).filter(match => match !== null)
   const numbers = assignments.map(match => {
@@ -29,13 +28,19 @@ export function explicitAgentRoster(source: string): { quote: string; count?: nu
     const [tens, ones] = token.split('十')
     return ones === undefined ? digit(tens!) : (tens ? digit(tens) : 1) * 10 + (ones ? digit(ones) : 0)
   })
-  const count = numbers[0]
-  return { quote, parallel: assignments.some(match => /同时运行|并行|concurrent|parallel/iu.test(match[0])),
-    ...(count && (numbers.every(n => n === count) ? { count } : { conflicting: true as const })) }
+  if (!quote && !numbers.length) return
+  const concurrent = numbers.filter((_number, index) => /同时运行|并行|concurrent|parallel/iu.test(assignments[index]![0]))
+  return { quote, count: numbers.length ? Math.max(...numbers) : undefined, parallelCount: concurrent.length ? Math.max(...concurrent) : 0,
+    closed: Boolean(quote), conflicting: Boolean(quote) && new Set(numbers).size > 1 }
+}
+
+export function explicitAgentRoster(source: string) {
+  const roster = requestedRoster(source)
+  return roster?.quote ? { ...roster, quote: roster.quote } : undefined
 }
 
 export function contractAgentRoster(sources: readonly { text: string }[]) {
-  return explicitAgentRoster(sources.map(source => source.text).join('\n'))
+  return requestedRoster(sources.map(source => source.text).join('\n'))
 }
 
 const peerSubject = /协作|信箱|请求|求助|工具回执|代理|对方|执行状态|运行状态|测试场景|\b(?:collaboration|mailbox|requests?|peers?|receipts?|runtime|test scenario)\b/iu

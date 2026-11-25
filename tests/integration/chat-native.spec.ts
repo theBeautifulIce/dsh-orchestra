@@ -2188,6 +2188,71 @@ it('T07: reads each explicitly named result once and leaves ambiguous or missing
   } finally { restoreReadSpy(); await test.close(); vi.useRealTimers() }
 })
 
+it('T07: restores legacy file-artifact titles and order, selects the third deliverable, and rejects a stale evidence hash', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const test = await fixture({ routing: { enabled: true } })
+  const originalPlan = test.planner.getMockImplementation()!
+  const names = ['系统风险检查报告', '执行可靠性检查报告', '用户体验检查报告']
+  const fileNames = ['risk-audit-v1.md', 'reliability-data-v2.txt', 'experience-review-final.csv']
+  const bodies = names.map((name, index) => `正式交付：${name}\n文件内容第 ${index + 1} 份。`)
+  test.planner.mockImplementation(async input => ({ ...await originalPlan(input), deliverables: names.map((title, index) => ({
+    title, node_id: 'draft', goal_ids: ['goal'],
+    acceptance: { kind: 'artifact' as const, file_name: fileNames[index]!, minimum_bytes: 8 },
+  })) }))
+  try {
+    const human = test.session('work', 'legacy-file-results')
+    await human.admit(user('/orchestra 按顺序交付三份文件成果：1.《系统风险检查报告》；2.《执行可靠性检查报告》；3.《用户体验检查报告》。文件名与正式交付名不同。只给简短总结和以正式名称为文字的原件链接，不要贴正文。'))
+    const started = await human.call()
+    expect(started, JSON.stringify(started)).toMatchObject({ state: 'started' })
+    const runId = started.run_id
+    const { db } = test.services.get('legacy-file-results')!.orchestra
+    const node = db.raw.prepare("SELECT node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND node_id='draft'")
+      .get(runId) as { node_run_id: string; attempt: number; action_generation: number }
+    const plan = db.raw.prepare('SELECT plan_id,content_hash FROM task_plans LIMIT 1').get() as { plan_id: string; content_hash: string }
+    const artifacts = bodies.map((body, index) => registerRunArtifact(db, { artifactId: uuidv7(), runId,
+      fileName: fileNames[index]!, bytes: Buffer.from(body), nodeRunId: node.node_run_id }))
+    const now = new Date().toISOString()
+    withTx(db, tx => {
+      tx.run("UPDATE node_runs SET status='done' WHERE run_id=?", [runId])
+      tx.run("UPDATE runs SET status='succeeded',ended_at=? WHERE run_id=?", [now, runId])
+      applyRunAcceptance(tx, runId, now)
+      for (let index = 0; index < names.length; index++) {
+        const key = `draft|${names[index]}`
+        const row = tx.get<{ evidence_json: string }>(`SELECT evidence_json FROM run_acceptance_results
+          WHERE run_id=? AND plan_id=? AND content_hash=? AND deliverable_key=?`, [runId, plan.plan_id, plan.content_hash, key])!
+        const saved = JSON.parse(row.evidence_json) as { evidence: Record<string, unknown>; history: unknown[] }
+        const legacyEvidence = { summary: 'passed', file_name: fileNames[index], minimum_bytes: 8, matches: 1, owned: 1,
+          artifact_id: artifacts[index]!.artifact_id, sha256: index === 0 ? '0'.repeat(64) : artifacts[index]!.sha256,
+          bytes: bodies[index]!.length, node_run_id: node.node_run_id, node_id: 'draft', retain_until: null, expired: false,
+          native_text_format: null, capability_scope: 'artifact_registered_only' }
+        expect(legacyEvidence).not.toHaveProperty('title')
+        expect(legacyEvidence).not.toHaveProperty('item_index')
+        tx.run('UPDATE run_acceptance_results SET evidence_json=? WHERE run_id=? AND plan_id=? AND content_hash=? AND deliverable_key=?',
+          [JSON.stringify({ ...saved, evidence: legacyEvidence }), runId, plan.plan_id, plan.content_hash, key])
+      }
+    })
+    await vi.advanceTimersByTimeAsync(4000)
+    const notice = test.notices[0]!.message
+    const links = (notice.source as unknown as { artifacts: ChatArtifactLink[] }).artifacts
+    expect(links.map(link => link.title)).toEqual(names.slice(1))
+    expect(links.map(link => link.fileName)).toEqual(fileNames.slice(1))
+    expect(links.map(link => link.location.sha256)).toEqual(artifacts.slice(1).map(item => item.sha256))
+    expect(links.some(link => link.location.artifactId === artifacts[0]!.artifact_id)).toBe(false)
+    await human.admit(notice, false)
+
+    const followup = user('请读取刚才第三份报告的完整原件，告诉我里面的正式交付名。')
+    const turn = await human.admit(followup)
+    if (turn.kind !== 'enter') throw new Error('Expected third-file read request to remain in the native chat turn')
+    const instruction = turn.messages.find(message => (message.source as { form?: string }).form === 'report_instruction')
+    expect(instruction).toBeDefined()
+    const instructionText = instruction!.content.find(block => block.type === 'text')!.text
+    const payload = JSON.parse(instructionText.slice(instructionText.indexOf('{'), instructionText.lastIndexOf('}') + 1))
+    expect(payload).toEqual({ action: 'artifact', run_id: runId, artifact_id: artifacts[2]!.artifact_id })
+    const result = await human.call(payload)
+    expect(result.text).toBe(bodies[2])
+  } finally { await test.close(); vi.useRealTimers() }
+})
+
 it.each([false, true])('普通工作区文件读取仍交给宿主；即使有同名历史原件也不误选（历史原件：%s）', async hasPriorArtifact => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   const routing = { enabled: true }

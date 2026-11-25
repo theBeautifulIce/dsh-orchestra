@@ -416,6 +416,7 @@ export function createDshPlanningCallback(options: {
             'no_extra_agents 限定为用户指定的参与者。让列出的代理各自提交正式成果，来源会话负责回报。明确要求同时运行时，各代理共享入口，不在同行之间设置执行依赖。未观察到指定的协作条件时，如实记录覆盖情况即可。',
             '可独立完成的工作在无人回复时继续，说明沟通缺口。只在实际缺少必需条件时安排重试或报告高风险。任务已由宿主强制执行的限制本身不是能力缺口。'] : []),
         ] : []),
+        ...(planning.rosterGuide ? [planning.rosterGuide] : []),
         ...(planning.offline ? ['当前任务只能使用提供的数据和已授权的内部能力。固定工具清单及外部原生工具均不可用于本次执行。'] : []),
         ...(!planning.offline && planning.noWorkspaceRead ? ['任务禁止读取工作区。当前宿主需要读取工作区才能核验技能，因此本次不提供依赖技能发现的外部能力。内部材料与正文交付仍可使用。'] : []),
         ...(capabilities ? [

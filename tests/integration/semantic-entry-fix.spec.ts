@@ -8,6 +8,7 @@ import { createDshJsonCompletion } from '../../src/executor/dsh-json.ts'
 import { createDshSemanticInterpreter } from '../../src/executor/dsh-task-requirements.ts'
 import { fixedRosterIssue, requirementIssues } from '../../src/service/task-requirement-checks.ts'
 import { createSemanticDraftCheckpoints } from '../../src/service/semantic-draft-checkpoints.ts'
+import { requirementsContractSchema, type RequirementsContract } from '../../src/core/task-requirements.ts'
 
 function input(text: string, message_id = 'u1'): SemanticInput { return { current: { message_id, text }, explicit: false } }
 function task(current: SemanticInput, changes: object = {}) {
@@ -81,6 +82,62 @@ it('T09 corrects a bad roster enum once, keeps the exact two-agent boundary, and
   const held = interpretSemanticAdmission(missingInput, { kind: 'clarify', missing: ['materials'] })
   expect(held).toMatchObject({ kind: 'clarify' })
   expect(held).not.toHaveProperty('request.requirements_contract')
+})
+
+it('combines roster facts across a held message and its continuation before accepting the workflow', () => {
+  const first = input('安排两个同时运行的代理，各自核对一项计算。先别启动。', 'roster-first')
+  const held = draftOf(interpretSemanticAdmission(first, task(first, { timing: 'held' })))
+  const next = { ...input('现在开始，不额外启动代理。', 'roster-second'), draft: held }
+  const outcome = interpretSemanticAdmission(next, task(next, { relation: 'continue', draft_revision: held.revision,
+    continuation: 'resume', constraints: [{ id: 'roster', kind: 'no_extra_agents', source_message_id: 'roster-second',
+      quote: '不额外启动代理' }] }))
+  expect(outcome).toMatchObject({ kind: 'ready', request: { requirements_contract: {
+    sources: [{ message_id: 'roster-first' }, { message_id: 'roster-second' }],
+    constraints: [{ kind: 'no_extra_agents', source_message_id: 'roster-second' }],
+  } } })
+  if (outcome.kind !== 'ready') throw new Error('Expected the resumed roster request to be ready')
+  const contract = outcome.request.requirements_contract
+  expect(requirementsContractSchema.safeParse(contract).success).toBe(true)
+  expect(fixedRosterIssue(contract, [{ id: 'a', type: 'agent', dependsOn: [] }, { id: 'b', type: 'agent', dependsOn: [] },
+    { id: 'c', type: 'agent', dependsOn: [] }])).toContain('2 个代理')
+  expect(fixedRosterIssue(contract, [{ id: 'a', type: 'agent', dependsOn: [] }, { id: 'b', type: 'agent', dependsOn: ['a'] }]))
+    .toContain('并行执行')
+  expect(fixedRosterIssue(contract, [{ id: 'a', type: 'agent', dependsOn: [] }, { id: 'b', type: 'agent', dependsOn: [] }])).toBeUndefined()
+
+  // An assigned count is a minimum even when the user never says “no extra agents”.
+  const minimumOnly: RequirementsContract = { version: 1, start_policy: 'immediate',
+    sources: [{ message_id: 'minimum', text: '安排两个同时运行的代理，各自核对一项计算。' }], constraints: [] }
+  expect(fixedRosterIssue(minimumOnly, [{ id: 'a', type: 'agent', dependsOn: [] }])).toContain('至少 2 个代理')
+  expect(fixedRosterIssue(minimumOnly, [{ id: 'a', type: 'agent', dependsOn: [] }, { id: 'b', type: 'agent', dependsOn: ['a'] }]))
+    .toContain('并行执行')
+  expect(fixedRosterIssue(minimumOnly, [{ id: 'a', type: 'agent', dependsOn: [] }, { id: 'b', type: 'agent', dependsOn: [] },
+    { id: 'summary', type: 'agent', dependsOn: ['a', 'b'] }])).toBeUndefined()
+  expect(fixedRosterIssue(minimumOnly, [{ id: 'prepare', type: 'tool', dependsOn: [] },
+    { id: 'a', type: 'agent', dependsOn: ['prepare'] }, { id: 'b', type: 'agent', dependsOn: ['prepare'] }])).toBeUndefined()
+
+  const conflicting = { ...input('现在开始，安排三个代理，不额外启动代理。', 'roster-conflict'), draft: held }
+  expect(interpretSemanticAdmission(conflicting, task(conflicting, { relation: 'continue', draft_revision: held.revision,
+    continuation: 'resume', constraints: [{ id: 'roster', kind: 'no_extra_agents', source_message_id: 'roster-conflict',
+      quote: '不额外启动代理' }] }))).toMatchObject({ kind: 'clarify' })
+})
+
+it.each([
+  ['中文协作未回复', '如果协作请求未完成，请如实说明有没有收到回复。', '如果协作请求未完成，请如实说明有没有收到回复。'],
+  ['英文协作未回复', 'If an unavailable peer does not reply, report whether a reply was received.',
+    'If an unavailable peer does not reply, report whether a reply was received.'],
+  ['裁剪后的协作未回复', '商品 B 单价缺失。如果协作请求未完成，请如实说明有没有收到回复。',
+    '协作请求未完成，请如实说明有没有收到回复'],
+] as const)('does not grant a data-gap permission for %s', (_name, text, quote) => {
+  const source = input(text, 'collaboration-gap')
+  const forged = task(source, { constraints: [{ id: 'gap', kind: 'report_data_gap', source_message_id: 'collaboration-gap', quote }] })
+  const contract = { version: 1 as const, start_policy: 'immediate' as const,
+    sources: [{ message_id: 'collaboration-gap', text }],
+    constraints: [{ id: 'gap', kind: 'report_data_gap' as const, source_message_id: 'collaboration-gap', quote }] }
+  expect(requirementsContractSchema.safeParse(contract).success).toBe(false)
+  const outcome = interpretSemanticAdmission(source, forged)
+  expect(outcome).toMatchObject({ kind: 'ready', request: { goal: text } })
+  if (outcome.kind !== 'ready') throw new Error('A collaboration result should remain ordinary executable task text')
+  expect(outcome.request.requirements_contract.constraints.some(item => item.kind === 'report_data_gap')).toBe(false)
 })
 
 it('T10 keeps collaboration receipts in the task text when the model mislabels them as a data gap, without a correction call', async () => {

@@ -33,29 +33,54 @@ function approvalPrecedes(nodes: Map<string, RequirementNode>, approvalId: strin
 }
 
 type RosterNode = Pick<RequirementNode, 'id' | 'type' | 'dependsOn'>
-export function hasSerialAgentDependency(workflow: readonly RosterNode[]) {
+// Maximum number of mutually independent agent roles in the workflow DAG.
+// By Dilworth's theorem this is the number of roles minus a maximum matching
+// between roles and their transitive predecessors. Common preparation and later
+// aggregation can therefore coexist with the requested parallel group.
+export function concurrentAgentCapacity(workflow: readonly RosterNode[]) {
   const nodes = new Map(workflow.map(node => [node.id, node]))
-  const visited = new Set<string>()
-  const pending = workflow.filter(node => node.type === 'agent').flatMap(node => node.dependsOn)
-  while (pending.length) {
-    const id = pending.pop()!
-    if (visited.has(id)) continue
-    visited.add(id)
-    const node = nodes.get(id)
-    if (node?.type === 'agent') return true
-    if (node) pending.push(...node.dependsOn)
+  const predecessors = new Map<string, string[]>()
+  for (const role of workflow.filter(node => node.type === 'agent')) {
+    const visited = new Set<string>()
+    const pending = [...role.dependsOn]
+    const upstream: string[] = []
+    while (pending.length) {
+      const id = pending.pop()!
+      if (visited.has(id)) continue
+      visited.add(id)
+      const node = nodes.get(id)
+      if (node?.type === 'agent') upstream.push(id)
+      if (node) pending.push(...node.dependsOn)
+    }
+    predecessors.set(role.id, upstream)
   }
-  return false
+  const paired = new Map<string, string>()
+  function match(role: string, seen: Set<string>): boolean {
+    for (const earlier of predecessors.get(role) ?? []) {
+      if (seen.has(earlier)) continue
+      seen.add(earlier)
+      const previous = paired.get(earlier)
+      if (previous === undefined || match(previous, seen)) { paired.set(earlier, role); return true }
+    }
+    return false
+  }
+  for (const role of predecessors.keys()) match(role, new Set())
+  return predecessors.size - paired.size
 }
 
 export function fixedRosterIssue(contract: RequirementsContract, workflow: readonly RosterNode[]): string | undefined {
-  const roster = contractAgentRoster(contract.sources)
+  return rosterWorkflowIssue(contractAgentRoster(contract.sources), workflow)
+}
+
+export function rosterWorkflowIssue(roster: ReturnType<typeof contractAgentRoster>, workflow: readonly RosterNode[]): string | undefined {
   if (!roster) return
   if (roster.conflicting) return '同一任务指定了不同的参与人数，请确认后再开始。'
-  if (workflow.some(node => node.type === 'subworkflow')) return '任务限定了参与代理，当前不能核实子流程的参与者。'
-  if (roster.count && workflow.filter(node => node.type === 'agent').length !== roster.count)
-    return `任务要求由指定的 ${roster.count} 个代理执行，请核对计划人数。`
-  if (roster.parallel && hasSerialAgentDependency(workflow)) return '任务要求代理并行执行，当前流程让一个代理等待另一个代理结束。'
+  if (roster.closed && workflow.some(node => node.type === 'subworkflow')) return '任务限定了参与代理，当前不能核实子流程的参与者。'
+  const count = workflow.filter(node => node.type === 'agent').length
+  if (roster.count && (count < roster.count || roster.closed && count !== roster.count))
+    return `任务要求由${roster.closed ? '指定的' : '至少'} ${roster.count} 个代理执行，请核对计划人数。`
+  if (roster.parallelCount > 1 && concurrentAgentCapacity(workflow) < roster.parallelCount)
+    return `任务要求 ${roster.parallelCount} 个代理并行执行，当前流程让代理互相等待。`
 }
 
 export function requirementIssues(contract: RequirementsContract, proposal: ContractPlan, workflow: readonly RequirementNode[]): string[] {

@@ -1,18 +1,22 @@
-import { requirementsContractSchema } from '../core/task-requirements.ts'
+import { contractAgentRoster, requirementsContractSchema } from '../core/task-requirements.ts'
 import { taskAccess } from '../core/task-access.ts'
 import { chatDeliveryPreference } from '../core/chat-delivery-preference.ts'
 
 /** Keep the execution data on the approved plan. The planning model only needs
  * the operation and constraints when the operator has put that operation on hold. */
-export function dshPlanningInput(input: unknown): { payload: unknown; offline?: boolean; noWorkspaceRead?: boolean; linkedResults?: boolean } {
+export function dshPlanningInput(input: unknown): { payload: unknown; offline?: boolean; noWorkspaceRead?: boolean; linkedResults?: boolean; rosterGuide?: string } {
   if (!input || typeof input !== 'object' || !('requirements_contract' in input)) return { payload: input }
   const parsed = requirementsContractSchema.safeParse(input.requirements_contract)
   if (!parsed.success) return { payload: input }
   const contract = parsed.data
   const { noNetwork: offline, noWorkspaceRead } = taskAccess(contract)
+  const roster = contractAgentRoster(contract.sources)
+  const group = roster?.count ? { rosterGuide: `用户明确安排${roster.closed ? '总共' : '至少'} ${roster.count} 个不同的代理角色。`
+    + (roster.parallelCount > 1 ? `其中 ${roster.parallelCount} 个角色须能同时执行，各自建立独立 agent 步骤。` : '')
+    + '每个角色的工作和结果按原文分配。' } : {}
   if (!contract.constraints.some(c => c.kind === 'approval_before' && c.scope === 'steps')) {
     const preference = chatDeliveryPreference(contract.sources.map(source => source.text))
-    return { payload: input, offline, noWorkspaceRead, ...(preference.linksOnly && { linkedResults: true }) }
+    return { payload: input, offline, noWorkspaceRead, ...group, ...(preference.linksOnly && { linkedResults: true }) }
   }
 
   const material = new Set<string>()
@@ -49,5 +53,5 @@ export function dshPlanningInput(input: unknown): { payload: unknown; offline?: 
       item && typeof item === 'object' && 'text' in item && typeof item.text === 'string' ? { ...item, text: defer(item.text) } : item) }),
     requirements_contract: { version: contract.version, start_policy: contract.start_policy, constraints },
   }
-  return { payload, offline, noWorkspaceRead }
+  return { payload, offline, noWorkspaceRead, ...group }
 }

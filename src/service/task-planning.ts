@@ -1,5 +1,5 @@
-import { authorizesDataGap, explicitApprovalNames, requestedTaskTitle, requirementsContractSchema, storedRequirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
-import { canStartAtRequiredGate, fixedRosterIssue, requirementIssues } from './task-requirement-checks.ts'
+import { authorizesDataGap, contractAgentRoster, explicitApprovalNames, requestedTaskTitle, requirementsContractSchema, storedRequirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
+import { canStartAtRequiredGate, rosterWorkflowIssue, requirementIssues } from './task-requirement-checks.ts'
 import { taskAccess } from '../core/task-access.ts'
 import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
@@ -966,13 +966,14 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
               brief.workflow_version ? [brief.workflow_id, brief.workflow_version] : [brief.workflow_id])
             : tx.all<CandidateRow>(CANDIDATE_SELECT)
           const tokens = goalTokens(brief)
+          const roster = brief.requirements_contract && contractAgentRoster(brief.requirements_contract.sources)
           const approvals = brief.requirements_contract ? brief.requirements_contract.constraints.flatMap(
             c => c.kind === 'approval_before' && c.gate_name ? [c.gate_name] : []) : requestedApprovalSteps(brief)
           const scored = rows.flatMap((row) => {
             const choice = brief.workflow_id ? readChoice(catalog, registry, row, tx, null)
               : readChoiceSafe(catalog, registry, row, tx, null)
             return choice && (brief.workflow_id || (missingApprovalSteps(approvals, choice.workflow).length === 0
-              && (!brief.requirements_contract || !fixedRosterIssue(brief.requirements_contract, choice.workflow.nodes))))
+              && !rosterWorkflowIssue(roster, choice.workflow.nodes)))
               ? [{ choice, score: relevanceScore(tokens, row) }]
               : []
           })

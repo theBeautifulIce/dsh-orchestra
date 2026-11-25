@@ -21,7 +21,7 @@ import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
 import { callDshRework } from '../../src/service/dsh-rework.ts'
 import { createReworkHost } from '../../src/service/rework-coordinator.ts'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
-import { mergeRequirementsContracts, type RequirementsContract, type TaskRequirement } from '../../src/core/task-requirements.ts'
+import { mergeRequirementsContracts, requirementsContractSchema, type RequirementsContract, type TaskRequirement } from '../../src/core/task-requirements.ts'
 import { requirementIssues, type RequirementNode } from '../../src/service/task-requirement-checks.ts'
 import { applySteps, defaultMigrationsDir, loadSteps } from '../../src/infra/db/migrate.ts'
 import { loadNodeRun } from '../../src/service/commands/lease.ts'
@@ -916,6 +916,24 @@ it('结构化约束经真实规划入口持久化，生成器与规划器取得�
   expect(host.db.raw.prepare('SELECT contract_version FROM task_plans WHERE plan_id=?').get(view.plan_id)).toEqual({ contract_version: 2 })
   expect(view.brief.requirements_contract).toEqual(contract)
   expect(view.quality.ready).toBe(true)
+})
+
+it('协作未回复不能作为数据缺口权限放行高风险部分结果', async () => {
+  const quote = '如果协作请求未完成，请如实说明有没有收到回复'
+  const contract: RequirementsContract = { version: 1, start_policy: 'immediate',
+    sources: [{ message_id: 'human-message', text: `核查库存。商品 B 单价缺失。${quote}。数量核算独立完成。` }],
+    constraints: [{ ...constraintBase('gap', quote), kind: 'report_data_gap' }],
+  }
+  const planner = vi.fn(async () => ({ ...valid(), risks: [{ severity: 'high', description: '商品 B 单价缺失',
+    mitigation: '报告金额缺口并先交付独立数量结果', node_id: 'verify',
+    partial_result: { source_message_id: 'human-message', quote } }] }))
+  const host = await boot(planner, undefined, { empty: true })
+  expect(requirementsContractSchema.safeParse(contract).success).toBe(false)
+  await expect(host.planning!.propose({ goal: contract.sources[0]!.text, requirements: [], requirements_contract: contract }, 'owner', now))
+    .rejects.toMatchObject({ code: 'PAYLOAD_SCHEMA_INVALID' })
+  expect(planner).not.toHaveBeenCalled()
+  expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM task_plans').get()?.n).toBe(0)
+  expect(host.db.raw.prepare('SELECT COUNT(*) AS n FROM runs').get()?.n).toBe(0)
 })
 
 it.each(['cited independent branch', 'ordinary high risk', 'forged source', 'unapproved quote', 'fabricated intent',
