@@ -187,7 +187,9 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
       + (item.state === 'unavailable' ? '信箱已按参与方不可用收口。' : item.state === 'expired' ? '信箱已按期限或时钟变化收口。' : ''),
       JSON.stringify({说明:item.body,原因:item.reason}))
   }
-  if (view.coordination?.length) lines.push('可在任务详情的「协作」中查看全部记录；原有执行和验收规则不变。')
+  if (view.coordination?.length) lines.push(view.terminal
+    ? '以上为信箱最终状态。步骤正文记录的是写作时的状态。完整记录见任务详情的「协作」。'
+    : '可在任务详情的「协作」中查看全部记录。')
   if (!view.terminal && view.text_results?.length) lines.push('以下步骤已完成，整项任务仍在处理中。')
   for (const item of view.text_results ?? []) {
     lines.push(item.title)

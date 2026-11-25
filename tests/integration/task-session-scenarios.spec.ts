@@ -773,7 +773,7 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
       { timeout: 6_000 }).toEqual([{ id: items[0]!.id, state: 'unavailable', reply: null }])
     await expect.poll(async () => {
       const text = await session.noticeText()
-      return ['代理 A 合计 120，平均值 30', '代理 B 合计 120，平均值 30', '协作未得到回应']
+      return ['代理 A 合计 120，平均值 30', '代理 B 合计 120，平均值 30', '协作未得到回应', '以上为信箱最终状态']
         .filter(result => !text.includes(result))
     }, { timeout: 6_000 }).toEqual([])
     expect(acceptance(session, run)).toEqual(Array(2).fill({ kind: 'chat/text_result', outcome: 'passed' }))

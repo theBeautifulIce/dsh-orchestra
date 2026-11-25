@@ -14,7 +14,8 @@ import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import { readDshAttemptMetering } from './dsh-attempt-metering.ts'
 import type { RunNoteBinding, RunNotes } from '../service/run-notes.ts'
 import type { CoordinationBinding, RunCoordination } from '../service/run-coordination.ts'
-import { COORDINATION_TOOL, COORDINATION_GUIDE, coordinationMessages } from './coordination-message.ts'
+import { COORDINATION_TOOL, COORDINATION_TOOL_DESCRIPTION, COORDINATION_GUIDE, coordinationMessages,
+  deliveredCoordinationIds, renderCoordinationResult } from './coordination-message.ts'
 import { privateNoteCaptureMaterial, type createDshPrivateNotes } from './dsh-private-notes.ts'
 import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
 import { taskAccess } from '../core/task-access.ts'
@@ -415,7 +416,7 @@ export function createDshPlanningCallback(options: {
           ] : []),
           '规划只描述要执行的操作、依赖和交付形式。对需要审批的工作，步骤、交付标题、风险和说明均不得预填计算结果、代入算式或提前完成该操作。已保留的输入会在批准后的执行步骤提供。',
           ...(options.coordinationAvailable ? ['宿主已为普通 pure 执行节点提供内部协作信箱 orchestra_coordination，除非流程明确禁用。它独立于 native_tools 和固定命令，可在离线、不读写工作区的任务中传递请求、回复或障碍。同行沟通在现有节点内完成，保留并行职责和正式成果依赖。',
-            'no_extra_agents 限定为用户指定的参与者。让列出的代理各自提交正式成果，来源会话负责回报。明确要求同时运行时，各代理共享入口，不在同行之间设置执行依赖。未观察到指定的协作条件时，如实记录覆盖情况即可。',
+            '让各分支直接交付独立结果，来源会话负责转述成果和协作状态。仅为转述无需增派汇总代理。需要跨分支核算、复核或有指定汇总角色时保留该节点。no_extra_agents 限定为用户指定的参与者。明确要求同时运行时，各代理共享入口。未观察到指定协作条件时如实记录。',
             '可独立完成的工作在无人回复时继续，说明沟通缺口。只在实际缺少必需条件时安排重试或报告高风险。任务已由宿主强制执行的限制本身不是能力缺口。'] : []),
         ] : []),
         ...(planning.rosterGuide ? [planning.rosterGuide] : []),
@@ -774,8 +775,16 @@ export function createDshExecutor(options: {
         if (coordination && params.actionGeneration !== undefined) {
           const binding: CoordinationBinding = { node_run_id:params.nodeRunId, attempt:params.attempt,
             action_generation:params.actionGeneration, executor_session_id:agent.session.id }
+          const committedPushIds = new Set<string>()
+          ctx.on('session/event', (session, event) => {
+            if (session.id !== agent.session.id || event.type !== 'user/message') return
+            const source = event.data.source as { kind: string; form?: string }
+            if (source.kind === ORCHESTRA_MESSAGE_SOURCE && source.form === 'coordination') {
+              committedPushIds.add(event.data.id)
+            }
+          })
           ctx.tools.register({
-            name: COORDINATION_TOOL, description: COORDINATION_GUIDE,
+            name: COORDINATION_TOOL, description: COORDINATION_TOOL_DESCRIPTION,
             parameters: { type:'object', properties:{
               action:{type:'string',enum:['inbox','send','reply','withdraw']},
               kind:{type:'string',enum:['request','finding','handoff','blocker']},
@@ -783,7 +792,7 @@ export function createDshExecutor(options: {
               ttl_seconds:{type:'integer',minimum:30,maximum:300}, id:{type:'string'}, revision:{type:'integer',minimum:1},
             }, required:['action'],additionalProperties:false },
             output:{schema:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false},
-              render:(_args,value)=>[{type:'text',text:(value as {text:string}).text}]},
+              render:(_args,value)=>[{type:'text',text:renderCoordinationResult(JSON.parse((value as {text:string}).text))}]},
             async execute(input,execution) {
               execution.signal.throwIfAborted()
               if (execution.agent!==agent || options.context.agents.get(agent.session.id)!==agent)
@@ -800,9 +809,11 @@ export function createDshExecutor(options: {
               || options.context.agents.get(agent.session.id)!==agent) return result
             try {
               // Recheck authority at delivery. Do not create a new turn or keep an attempt alive.
-              const seen=new Set<string>(result.messages.map(message=>String(message.id)))
-              for (const event of agent.session.snapshotEvents()) if (event.type==='user/message') seen.add(String(event.data.id))
-              const messages=coordinationMessages(coordination.updates(binding),seen)
+              const updates = coordination.updates(binding)
+              if (!updates.length) return result
+              const ids = [...committedPushIds, ...result.messages.map(message=>String(message.id))]
+              const seen = deliveredCoordinationIds(agent.session.deriveMessages(), ids, updates)
+              const messages = coordinationMessages(updates, seen)
               if (!messages.length) return result
               type Message=Parameters<DshAgent['followup']>[0]
               return {...result,messages:[...result.messages,...messages.map(({id,text})=>({id,role:'user',

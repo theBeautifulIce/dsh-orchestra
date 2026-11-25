@@ -164,6 +164,7 @@ it('keeps built-in coordination in both planning prompts while offline or worksp
   for (const prompt of prompts) {
     expect(prompt).toMatch(/内部协作信箱 orchestra_coordination[^。\n]*。它独立于 native_tools 和固定命令/u)
     expect(prompt).toMatch(/同行沟通在现有节点内完成，保留并行职责和正式成果依赖/u)
+    expect(prompt).toContain('仅为转述无需增派汇总代理。需要跨分支核算、复核或有指定汇总角色时保留该节点。')
     expect(prompt).toMatch(/可独立完成的工作在无人回复时继续/u)
     expect(prompt).toMatch(/只在实际缺少必需条件时安排重试/u)
     expect(prompt).toMatch(/任务已由宿主强制执行的限制本身不是能力缺口/u)
