@@ -140,6 +140,17 @@ export function makeTx(raw: DatabaseSync): Tx {
   }
 }
 
+// Coalesced wake hints are emitted only after a successful writer commit. They are
+// not durable receipts; consumers must re-read the ledger and keep a fallback scan.
+const ledgerWakeups = new WeakMap<DatabaseSync, Set<() => void>>()
+const changedTransactions = new WeakSet<Tx>()
+export function markLedgerChanged(tx: Tx) { changedTransactions.add(tx) }
+export function onLedgerCommit(db: Db, listener: () => void): () => void {
+  let listeners = ledgerWakeups.get(db.raw)
+  if (!listeners) { listeners = new Set(); ledgerWakeups.set(db.raw, listeners) }
+  listeners.add(listener)
+  return () => { listeners.delete(listener) }
+}
 export function withTx<T>(db: Db, fn: (tx: Tx) => T): T {
   if (db.readonly) throw new OrchError('FORBIDDEN', '只读连接不许写')
   bootstrap(db)
@@ -152,11 +163,17 @@ export function withTx<T>(db: Db, fn: (tx: Tx) => T): T {
     }
     const commits = observedConnections.get(db.raw)?.commits
     const before = commits && ledgerHead(db.raw)
-    const result = fn(makeTx(db.raw))
+    const tx = makeTx(db.raw)
+    const result = fn(tx)
     const after = commits && ledgerHead(db.raw)
     db.raw.exec('COMMIT')
     if (commits && typeof before === 'number' && typeof after === 'number' && after > before) {
       commits.push({ from: before + 1, to: after, atMs: performance.now() })
+    }
+    if (changedTransactions.has(tx)) {
+      for (const listener of ledgerWakeups.get(db.raw) ?? []) {
+        try { listener() } catch { /* a wake hint must never invalidate a committed write */ }
+      }
     }
     return result
   } catch (err) {

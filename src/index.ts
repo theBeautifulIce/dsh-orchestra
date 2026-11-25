@@ -55,7 +55,7 @@ import { resolveRecoveryUncertain } from './service/commands/recovery.ts'
 import { listRecoveryUncertain } from './service/queries/recovery.ts'
 import { listTaskSummaries, getTaskSummarySnapshot, getWorkspaceOverview } from './service/queries/tasks.ts'
 import { listRuns, getRun } from './service/queries/runs.ts'
-import { listNodes, getNodeSnapshot } from './service/queries/nodes.ts'
+import { listNodes, getNodeSnapshot, readRunNodeDisplay } from './service/queries/nodes.ts'
 import { getArtifactContent, getArtifactSnapshot, listRunArtifacts } from './service/queries/artifacts.ts'
 import { getAttestationSnapshot } from './service/queries/attestations.ts'
 import { getDecisionSnapshot, listDecisions } from './service/queries/decisions.ts'
@@ -89,7 +89,9 @@ import { createCollaborationHost, type CollaborationHost } from './service/colla
 import { createRunNotes, type RunNotes } from './service/run-notes.ts'
 import { callDshCollaboration } from './service/dsh-collaboration.ts'
 import { createReworkHost, type ReworkHost } from './service/rework-coordinator.ts'
-import { createDeliveryReviewHost } from './service/delivery-review.ts'
+import { createDeliveryReviewHost, requireReviewOperator } from './service/delivery-review.ts'
+import { createRunCoordination, type RunCoordination } from './service/run-coordination.ts'
+import { createTaskSupervisor } from './service/task-supervisor.ts'
 import { createReworkPlanningHost, type ReworkPlanner } from './service/rework-planning.ts'
 import { createPlanningSettingsHost, type PlanningSettingsHost } from './service/planning-settings.ts'
 import { createExecutionCapacitySettingsHost, type ExecutionCapacitySettingsHost } from './service/execution-capacity-settings.ts'
@@ -124,6 +126,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   let plannerDb: Db | undefined
   let collaboration: CollaborationHost | undefined
   let runNotes: RunNotes | undefined
+  let coordination: RunCoordination | undefined
   let installed: { db: Db; feedback: ReworkHost } | undefined
   type NativeApproval = { requestId: string; nodeRunId: string; executorSessionId: string; tool: string; mode: 'brain' | 'user' }
   const nativeApprovals = new Map<string, NativeApproval>()
@@ -147,6 +150,13 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     ...(serviceOptions.phase === 'S6' ? { runNote(binding, input, requestId, now) {
       if (!runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '运行便条服务尚未就绪')
       return runNotes.callNode(binding, input, requestId, now)
+    } } : {}),
+    ...(serviceOptions.phase === 'S6' ? { coordination: {
+      call(binding, input) {
+        if (!coordination) throw new OrchError('SERVICE_UNAVAILABLE', '任务协作服务尚未就绪')
+        return coordination.call(binding, input)
+      },
+      updates(binding) { return coordination?.updates(binding) ?? [] },
     } } : {}),
     ...(privateNotes ? { privateRunNotes: { model: privateNotes, capture: (...args) => {
       if (!runNotes) throw new OrchError('SERVICE_UNAVAILABLE', '运行便条服务尚未就绪')
@@ -209,6 +219,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
     plannerDb = service.orchestra.db
     collaboration = service.collaboration
     runNotes = service.runNotes
+    coordination = service.coordination
     if (service.rework) installed = { db: service.orchestra.db, feedback: service.rework }
     const reviewBrainNotes = planner && privateNotes ? async (
       agent: NonNullable<ReturnType<typeof planner.parent>>, run: string, actor: string, signal: AbortSignal,
@@ -763,7 +774,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   listTasks: ServerDeps['listTasks']
   listEvents: ServerDeps['listEvents']
   appendLedgerEvent: ServerDeps['appendLedgerEvent']
-}): Promise<{ orchestra: Orchestra; endpoint: string; controlPipe?: string; collaboration?: CollaborationHost; rework?: ReworkHost; runNotes?: RunNotes;
+}): Promise<{ orchestra: Orchestra; endpoint: string; controlPipe?: string; collaboration?: CollaborationHost; rework?: ReworkHost; runNotes?: RunNotes; coordination?: RunCoordination;
     planning: TaskPlanningHost; planningSettings?: PlanningSettingsHost;
     recoverChatModelAssignment?: (input: Parameters<typeof recoverChatModelAssignment>[3]) => Promise<string[]>;
     close: () => Promise<void> }> {
@@ -777,6 +788,12 @@ export async function serveOrchestra(opts: OrchestraOptions & {
   const orchestra = service.orchestra
   const collaboration = opts.collaboration ? createCollaborationHost(orchestra.db, opts.secret) : undefined
   const runNotes = opts.phase === 'S6' ? createRunNotes(orchestra.db, opts.secret) : undefined
+  const coordination = opts.phase === 'S6' ? createRunCoordination(orchestra.db, opts.secret,
+    (tx,actor,run) => { requireReviewOperator(tx,opts.secret,actor,run,true) }, Date.now,
+    (tx,run,node) => {
+      const logical = tx.get<{node_id: string}>('SELECT node_id FROM node_runs WHERE run_id=? AND node_run_id=?',[run,node])?.node_id
+      return logical ? readRunNodeDisplay(tx,run).nodes.get(logical)?.title ?? logical : node
+    }) : undefined
   const humanReviewOnly = opts.phase === 'S6'
   const rework = opts.phase === 'S5' || humanReviewOnly
     ? createReworkHost(orchestra.db, opts.secret, { clock: orchestra.runtime.clock, humanOnly: humanReviewOnly }) : undefined
@@ -811,29 +828,32 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       taskTriggers?.tick(new Date().toISOString(), (error) => {
         log.error('任务触发器推进失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' })
       })
-      triggerDispatch?.tick()
     } catch (error) {
       log.error('任务触发器读扫描失败', { code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' })
     }
   }
   let memory: ReturnType<typeof createMemoryHost> | undefined
   const memoryDecisionAccess = () => !memory ? false : trialAllowsMemoryApply(orchestra.db) ? true : 'proposal_only' as const
-  // 维护扫描：租约过期、围栏宽限到点，2 秒一轮；失败只记日志，下一轮继续
-  const sweepTimer = setInterval(() => {
-    try {
-      withTx(orchestra.db,tx=>expireMaterials(tx,Date.now()))
-      sweepNow(orchestra.runtime, new Date().toISOString())
-      if (opts.phase === 'S6') sweepIntake(orchestra.db, new Date().toISOString())
-      memory?.resume()
-      collaboration?.sweep(new Date().toISOString())
-      rework?.recover(new Date().toISOString())
-      modelEscalation?.tick(new Date().toISOString())
-    } catch (err) {
-      log.error('维护扫描失败', { code: err instanceof OrchError ? err.code : 'INTERNAL_ERROR' })
-    }
-    tickTaskTriggers()
-  }, 2000)
-  sweepTimer.unref?.()
+  // Events wake the existing dispatch pump; the periodic scan remains authoritative
+  // for deadlines, recovery and writers that cannot emit in-process notifications.
+  const supervisor = createTaskSupervisor(orchestra.db, {
+    eventDriven: opts.phase === 'S6',
+    onError: (job,error) => log.error('维护扫描失败', { label: job, code: error instanceof OrchError ? error.code : 'INTERNAL_ERROR' }),
+    eventJobs: [
+      { name: 'coordination', run: () => { coordination?.sweep() } },
+      { name: 'dispatch', run: () => { triggerDispatch?.tick() } },
+    ],
+    periodicJobs: [
+      { name: 'materials', run: () => { withTx(orchestra.db,tx=>expireMaterials(tx,Date.now())) } },
+      { name: 'runtime', run: () => { sweepNow(orchestra.runtime,new Date().toISOString()) } },
+      { name: 'intake', run: () => { if (opts.phase === 'S6') sweepIntake(orchestra.db,new Date().toISOString()) } },
+      { name: 'memory', run: () => { memory?.resume() } },
+      { name: 'verification', run: () => { collaboration?.sweep(new Date().toISOString()) } },
+      { name: 'rework', run: () => { rework?.recover(new Date().toISOString()) } },
+      { name: 'model-escalation', run: () => { modelEscalation?.tick(new Date().toISOString()) } },
+      { name: 'triggers', run: tickTaskTriggers },
+    ],
+  })
   let server: Awaited<ReturnType<typeof startServer>>
   let planning: TaskPlanningHost
   let planningSettings: PlanningSettingsHost | undefined
@@ -867,7 +887,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       secret: opts.secret,
       preferNamedPipe: opts.preferNamedPipe,
       resolveHttpHuman: opts.resolveHttpHuman,
-      runNotes,
+      runNotes, coordination,
       phase: opts.phase,
       epoch: orchestra.db.epoch,
       asOfSeq: opts.asOfSeq,
@@ -923,8 +943,9 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     memory?.resume()
     rework?.recover(new Date().toISOString())
     tickTaskTriggers()
+    supervisor.start()
   } catch (err) {
-    clearInterval(sweepTimer)
+    supervisor.close()
     await service.release()
     throw err
   }
@@ -932,7 +953,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
     orchestra,
     endpoint: server.endpoint,
     controlPipe: server.controlPipe,
-    runNotes,
+    runNotes, coordination,
     planning,
     collaboration,
     rework,
@@ -945,7 +966,7 @@ export async function serveOrchestra(opts: OrchestraOptions & {
       }
       : undefined,
     close: async () => {
-      clearInterval(sweepTimer)
+      supervisor.close()
       const closingTriggerDispatch = triggerDispatch?.close()
       try {
         await server.close()

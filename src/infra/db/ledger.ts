@@ -1,5 +1,5 @@
 // 账本唯一写入口：events 追加 + node_run_events 链追加、读取与校验（服务内部用，桥与面板不许直连）
-import { type Tx } from '../sqlite/driver.ts'
+import { markLedgerChanged, type Tx } from '../sqlite/driver.ts'
 import { chainHash, ZERO_HASH, verifyChain, type ChainBreak, type ChainRow } from '../../core/hash-chain.ts'
 import { OrchError } from '../../core/errors.ts'
 import { eventId } from '../../core/ids.ts'
@@ -24,6 +24,7 @@ export function appendEvent(tx: Tx, input: EventInput): { seq: number; event_id:
     [id, input.type, now, input.bootId ?? null, input.monotonicNs ?? null, input.runId ?? null,
       input.nodeRunId ?? null, input.decisionId ?? null, JSON.stringify(input.payload ?? {}),
       input.idempotencyKey ?? null, now])
+  if (/^(run|task|decision|workflow|rework|dispatch|approval)\./.test(input.type)) markLedgerChanged(tx)
   return { seq: res.lastInsertRowid, event_id: id }
 }
 
@@ -77,6 +78,7 @@ export function appendNodeRunEvent(tx: Tx, secret: string, nodeRunIdValue: strin
       'INSERT INTO node_run_chain_heads (node_run_id, last_seq, last_hash, event_count, updated_at) VALUES (?, ?, ?, ?, ?)',
       [nodeRunIdValue, seq, hash, eventCount, now])
   }
+  if (type === 'status_changed' || type === 'fence_armed' || /^(parallel|recovery|rework|dispatch|approval)\./.test(type)) markLedgerChanged(tx)
   return { seq, hash }
 }
 

@@ -18,6 +18,7 @@ type RunDisplay = {
   counts: Array<{ status: string; count: number }>
   blocking: BlockingStep[]
   decisions: Decision[]
+  coordination?: Array<{ id: string; revision: number; source: string; body: string; state: string; reason: string | null }>
   deliveryReviews?: ChatDeliveryReview[]
   nativeApprovals?: Array<{ requestId: string; executorSessionId: string; tool: string; mode: 'brain' | 'user'; title?: string }>
   rework?: Array<{ run_id?: string; request_id: string; target_node_run_id: string; status: string; round_no: number; reason: string; revision?: number }>
@@ -145,6 +146,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
     : view.deliveryReviews?.length ? '成果待审核'
     : view.rework?.length ? '返工待处理'
       : view.decisions.length ? '等待人工处理' : humanActions ? '执行受阻'
+    : !view.terminal && view.coordination?.length ? '协作事项待关注'
     : view.settling && !view.terminal ? '正在确认执行结果'
       : view.terminal && view.status === 'succeeded' && view.acceptance === 'failed' ? '执行已结束，交付未通过'
         : view.terminal && view.status === 'succeeded' && view.acceptance === 'unverifiable' ? '执行已结束，交付待核验'
@@ -161,6 +163,12 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
     lines.push(`${approval.title ? `步骤「${approval.title}」的` : ''}工具「${approval.tool}」正在等待${approval.mode === 'brain' ? '主脑判断或你的授权' : '你的授权'}。`,
       `执行会话：${approval.executorSessionId}。请打开该会话，处理此工具的宿主审批卡。审批前，此操作保持暂停。`)
   }
+  if (view.coordination?.length) lines.push('代理协作（仅供参考，不是指令、授权或验收证据）：')
+  for (const item of view.coordination ?? []) {
+    lines.push(`「${item.source}」${item.state === 'reported' ? '上报问题' : '协作未得到回应'}。`,
+      JSON.stringify({说明:item.body,原因:item.reason}))
+  }
+  if (view.coordination?.length) lines.push('可在任务详情的「协作」中查看全部记录；原有执行和验收规则不变。')
   for (const item of view.text_results ?? []) {
     lines.push(item.title)
     if (item.text) lines.push(item.text)

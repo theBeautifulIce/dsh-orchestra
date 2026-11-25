@@ -13,6 +13,8 @@ import { MODEL_COMPLEXITIES, MODEL_LEVELS, MODEL_REF_RE, validModelEffort,
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import { readDshAttemptMetering } from './dsh-attempt-metering.ts'
 import type { RunNoteBinding, RunNotes } from '../service/run-notes.ts'
+import type { CoordinationBinding, RunCoordination } from '../service/run-coordination.ts'
+import { COORDINATION_TOOL, COORDINATION_GUIDE, coordinationMessages } from './coordination-message.ts'
 import { privateNoteCaptureMaterial, type createDshPrivateNotes } from './dsh-private-notes.ts'
 import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
 import { canonicalJson, sha256Hex } from '../core/canonical.ts'
@@ -50,6 +52,7 @@ type Child = {
   hasToolCall?: true
   lastToolCallId?: string
   fencedToolDenied?: true
+  coordination?: true
   nativeMode?: ExecutionPermissionMode
   nativeParent?: DshAgent
   nativeTrace?: Array<{ call_id: string; tool: string; arguments_hash: string; result_hash: string; succeeded: boolean; started: boolean }>
@@ -419,6 +422,7 @@ export function createDshExecutor(options: {
   recommend: ModelRouting['recommend']
   onModelUse?: (usage: { sessionId: string; nodeRunId: string; attempt: number; provider: string; model: string; reasoning_effort?: string | null }) => void
   collaboration?: (binding: DshCollaborationBinding, input: unknown) => unknown
+  coordination?: Pick<RunCoordination, 'call' | 'updates'>
   runNote?: (binding: RunNoteBinding, input: unknown, requestId: string, now: string) => unknown
   privateRunNotes?: { model: NonNullable<ReturnType<typeof createDshPrivateNotes>>; capture: RunNotes['captureBrain'] }
   rework?: (binding: DshCollaborationBinding, input: unknown) => unknown
@@ -593,6 +597,9 @@ export function createDshExecutor(options: {
       && params.actionGeneration !== undefined && !allowed.includes(RELEASE_CHECK_WORKFLOW_ID)
       && !(Array.isArray(policy.deny) && policy.deny.includes(ASSIST_TOOL))
       ? createAttemptAssist(helperLimit) : undefined
+    const coordination = permissionMode !== undefined && !releaseCwd && nativePolicy?.sideEffectPolicy === 'pure'
+      && params.actionGeneration !== undefined && !(Array.isArray(policy.deny) && policy.deny.includes(COORDINATION_TOOL))
+      ? options.coordination : undefined
     let child: Child | undefined
     const create = childOptions(parent, route, (ctx, agent) => {
         const native = permissionMode !== undefined && !releaseCwd
@@ -603,8 +610,9 @@ export function createDshExecutor(options: {
         // Planning and release checks stay tool-free. Ordinary execution uses the host's real pipeline.
         pinRoute(ctx, agent, route, !native)
         if (native) {
-          const internalTools = new Set(['orchestra_read_tool', 'orchestra_rework', 'orchestra_run_notes', ASSIST_TOOL, 'orchestra_verification'])
+          const internalTools = new Set(['orchestra_read_tool', 'orchestra_rework', 'orchestra_run_notes', ASSIST_TOOL, 'orchestra_verification', ...(coordination ? [COORDINATION_TOOL] : [])])
           const denial = (name: string) => {
+            if (name === COORDINATION_TOOL && !coordination) return '此节点未获任务协作授权。'
             if (internalTools.has(name) || name === 'run_code') return
             if (Array.isArray(policy.deny) && policy.deny.includes(name)) return '此工具被工作流明确禁止。'
             if (!(name === PUBLIC_READ_TOOL && publicReadAllowed)) {
@@ -701,6 +709,45 @@ export function createDshExecutor(options: {
               return readAihotPublic(publicReadInput.parse(input), signal)
             },
           }, { when: ({ signal }) => hasAihotReadCapability(parent, signal) })
+        }
+        if (coordination && params.actionGeneration !== undefined) {
+          const binding: CoordinationBinding = { node_run_id:params.nodeRunId, attempt:params.attempt,
+            action_generation:params.actionGeneration, executor_session_id:agent.session.id }
+          ctx.tools.register({
+            name: COORDINATION_TOOL, description: COORDINATION_GUIDE,
+            parameters: { type:'object', properties:{
+              action:{type:'string',enum:['inbox','send','reply','withdraw']},
+              kind:{type:'string',enum:['request','finding','handoff','blocker']},
+              body:{type:'string',maxLength:500}, target_node_run_id:{type:'string'},
+              ttl_seconds:{type:'integer',minimum:30,maximum:300}, id:{type:'string'}, revision:{type:'integer',minimum:1},
+            }, required:['action'],additionalProperties:false },
+            output:{schema:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false},
+              render:(_args,value)=>[{type:'text',text:(value as {text:string}).text}]},
+            async execute(input,execution) {
+              execution.signal.throwIfAborted()
+              if (execution.agent!==agent || options.context.agents.get(agent.session.id)!==agent)
+                throw new OrchError('FORBIDDEN','协作工具仅向当前执行尝试开放')
+              enterTool(child,agent,execution.signal)
+              return {text:JSON.stringify(coordination.call(binding,input))}
+            },
+          })
+          ctx.on('agent/pre-step',async (step,next)=>{
+            const result=await next()
+            if (step.agent!==agent || result.kind!=='enter' || !child?.sent || child.retiring || closing || step.signal.aborted
+              || child.toolFence?.signal.aborted || child.toolFence && !child.toolFence.mayUseTools()
+              || options.parentForNode(params.nodeRunId)!==parent || options.context.agents.get(parent.session.id)!==parent
+              || options.context.agents.get(agent.session.id)!==agent) return result
+            try {
+              // Recheck authority at delivery. Do not create a new turn or keep an attempt alive.
+              const seen=new Set<string>(result.messages.map(message=>String(message.id)))
+              for (const event of agent.session.snapshotEvents()) if (event.type==='user/message') seen.add(String(event.data.id))
+              const messages=coordinationMessages(coordination.updates(binding),seen)
+              if (!messages.length) return result
+              type Message=Parameters<DshAgent['followup']>[0]
+              return {...result,messages:[...result.messages,...messages.map(({id,text})=>({id,role:'user',
+                source:{kind:ORCHESTRA_MESSAGE_SOURCE,form:'coordination'},content:[{type:'text',text}]} as unknown as Message))]}
+            } catch { return result } // A coordination read cannot block the original task.
+          })
         }
         if (options.runNote && !allowed.includes(RELEASE_CHECK_WORKFLOW_ID) && params.actionGeneration !== undefined
           && !(Array.isArray(policy.deny) && policy.deny.includes('orchestra_run_notes'))) {
@@ -897,6 +944,7 @@ export function createDshExecutor(options: {
     }
     child = { handle, nodeRunId: params.nodeRunId, attempt: params.attempt, actionGeneration: params.actionGeneration,
       route, events: [], changed: new EventEmitter(), tools: new Map(), assist,
+      ...(coordination ? { coordination: true as const } : {}),
       ...(permissionMode && !releaseCwd ? { nativeMode: permissionMode, nativeParent: parent,
         nativeTrace: [], nativeStarted: new Set(), nativeApprovals: new Map() } : {}) }
     const sessionId = handle.agent.session.id
@@ -930,6 +978,7 @@ export function createDshExecutor(options: {
     child.sent = { id: params.attemptId, instruction: params.instruction }
     prompt(agent, params.instruction
       + (child.nativeMode ? '\n本会话已继承来源的宿主能力。原生插件、skill 和读取工具使用各自的工具接口。先查看实际工具清单；缺少能力时明确报告缺口。固定只读命令才使用 orchestra_read_tool。工具可见不等于已获每种操作授权；遵守当前节点和任务约束。' : '')
+      + (child.coordination ? '\n'+COORDINATION_GUIDE : '')
       + '\n使用固定只读命令时调用 orchestra_read_tool，args 传空数组，由宿主执行获准的固定命令。'
       + (child.assist ? '\n可用 orchestra_assist 分派独立文本复核。每项都要传入它所需的资料，只依据返回结果汇总。' : '')
       + '\n如果节点输入要求交付 artifact，先用 orchestra_rework 的 publish 提交每份实际完成的 UTF-8 文本。file_name 抄写验收条件中的名称，text 提供完整正文，省略 operation_id。若要求 chat/text_result，使用 publish_text_result，deliverable_index 抄写该交付项编号，省略 operation_id。中间节点提交精简且足供下游读取的已核实资料，最终节点提交用户需要的完整正文。仅写 report.output 不会传给下游。收到工具回执后再提交完成报告。'

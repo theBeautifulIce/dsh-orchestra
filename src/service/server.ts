@@ -14,6 +14,7 @@ import { planningSettingsSchema, planningTimeoutDefaults, withPlanningBudget, ty
 import { executionCapacitySettingsSchema, type ExecutionCapacitySettingsHost } from './execution-capacity-settings.ts'
 import { workflowConcurrencySchema, type WorkflowConcurrencyHost } from './workflow-concurrency-settings.ts'
 import { runNoteHumanInput, type RunNotes } from './run-notes.ts'
+import type { RunCoordination } from './run-coordination.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { ATTENTION_ORDER, type Attention } from './queries/attention.ts'
 import type { ListTaskParams, TaskSummary, WorkspaceOverview } from './queries/tasks.ts'
@@ -71,6 +72,7 @@ export type ServerDeps = {
   preferNamedPipe?: boolean
   resolveHttpHuman?: ResolveHttpHuman
   runNotes?: RunNotes
+  coordination?: RunCoordination
   phase: string
   epoch: number
   asOfSeq: () => number
@@ -381,6 +383,21 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     const bound = deps.phase === 'S6' ? await deps.resolveHttpHuman?.(req) : undefined
     const human = () => authenticatedHuman(deps, serviceActor, bound)
     const actor = bound ? human().id : serviceActor
+    if (deps.coordination && deps.resolveHttpHuman && url.pathname === '/v1/run-coordination') {
+      const run = stringParam(url, 'run_id') ?? ''
+      const actorId = human().id
+      if (req.method === 'GET') {
+        const { as_of_seq, ...view } = deps.coordination.listHuman(run,actorId)
+        sendJson(res,200,okEnvelope(as_of_seq,view))
+        return
+      }
+      if (req.method === 'POST') {
+        const input = await readJsonBody(req)
+        const result = await queue.run(() => deps.coordination!.acknowledge(run,actorId,input))
+        sendJson(res,200,okEnvelope(deps.asOfSeq(),result))
+        return
+      }
+    }
     if (deps.runNotes && deps.resolveHttpHuman && url.pathname === '/v1/run-notes') {
       const notes = deps.runNotes
       if (req.method === 'GET') {

@@ -84,7 +84,7 @@ const executionPermissionsPath = '/v1/settings/execution-permissions'
 const responseHeaders = ['content-type', 'content-disposition', 'cache-control', 'x-content-type-options']
 const catalog = {
   GET: new Set([
-    '/v1/run-notes',
+    '/v1/run-notes', '/v1/run-coordination',
     chatRoutingPath,
     taskCommandPath,
     executionPermissionsPath,
@@ -100,7 +100,7 @@ const catalog = {
   POST: new Set([
     artifactBrowserPath,
     artifactDownloadPath,
-    '/v1/run-notes',
+    '/v1/run-notes', '/v1/run-coordination',
     chatRoutingPath,
     taskCommandPath, taskCommandCheckPath,
     executionPermissionsPath,
