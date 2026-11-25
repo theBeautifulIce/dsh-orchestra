@@ -44,6 +44,7 @@ export type TaskSummary = {
   lane?: TaskLane
   current_run_status: string | null
   delivery_acceptance?: DeliveryAcceptance
+  cancelled_without_delivery?: boolean
   goal_met?: boolean
   /** 当前操作者最能推进这件事的那一个动作（T01/T02/T10）。 */
   next_action?: TaskNextAction
@@ -102,6 +103,7 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
   const sideEffectLevels = String(row.side_effect_levels ?? '').split(',').filter(Boolean)
   const taskStatus = String(row.status ?? '')
   const deliveryAcceptance = deliveryAcceptanceOf(row.delivery_acceptance)
+  const cancelledWithoutDelivery = row.cancelled_without_delivery === 1
   // 有已确认计划时，目标达成看验收汇总（必需交付项必须全部 passed），不能只看 run 终态
   const executionSucceeded = taskStatus === 'succeeded' || taskStatus === 'succeeded_with_unverified'
   const goalMet = executionSucceeded && (deliveryAcceptance === 'not_applicable' || deliveryAcceptance === 'passed')
@@ -114,7 +116,7 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     currentRunStatus,
     orphanedNodeCount,
     taskStatus,
-    deliveryAcceptance,
+    ...(!cancelledWithoutDelivery && { deliveryAcceptance }),
   })
 
   return {
@@ -123,7 +125,7 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     workflow_id: nullableString(row.workflow_id),
     workflow_version: nullableNumber(row.workflow_version),
     status: taskStatus,
-    display_status: String(row.display_status ?? taskStatus),
+    display_status: String(cancelledWithoutDelivery && row.display_status === '交付待核验' ? taskStatus : row.display_status ?? taskStatus),
     current_run_id: nullableString(row.current_run_id),
     session_id: nullableString(row.session_id),
     run_count: Number(row.run_count ?? 0),
@@ -147,6 +149,7 @@ function taskSummary(row: TaskRow, now: number): TaskSummary {
     lane: row.lane as TaskLane,
     current_run_status: currentRunStatus,
     delivery_acceptance: deliveryAcceptance,
+    ...(cancelledWithoutDelivery ? { cancelled_without_delivery: true } : {}),
     goal_met: goalMet,
   }
 }
@@ -192,6 +195,9 @@ const CURRENT_RUN_JOINS = `LEFT JOIN runs r ON r.run_id = t.current_run_id
 const TASK_SUMMARY_SELECT = `SELECT t.task_id, t.title, t.workflow_id, t.workflow_version, t.status, t.display_status,
   t.current_run_id, t.session_id, t.updated_at, t.archived_at, t.trigger_kind, t.autonomy,
   tr.next_fire_at AS next_trigger_at, tr.enabled AS trigger_enabled, r.status AS current_run_status, p.lane, p.sort_at, p.sort_weight,
+  CASE WHEN r.status='cancelled' THEN EXISTS (
+    SELECT 1 FROM cancelled_runs_without_delivery c WHERE c.run_id=t.current_run_id
+  ) ELSE 0 END AS cancelled_without_delivery,
   (SELECT COUNT(*) FROM runs r WHERE r.task_id = t.task_id AND r.parent_run_id IS NULL) AS run_count,
   CASE
     WHEN EXISTS (SELECT 1 ${RUN_ACCEPTANCE} AND a.outcome = 'failed') THEN 'failed'

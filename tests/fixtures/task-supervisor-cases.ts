@@ -56,7 +56,7 @@ function finishSender(db: Db, signed = true) {
 }
 
 export const supervisorCases: [string,()=>void|Promise<void>][] = [
- ['migration preserves history and appends only 080',scenario(({db})=>{assert.equal(n(db,'schema_migrations'),80);assert.deepEqual(applySteps(db,loadSteps(defaultMigrationsDir())),[])})],
+ ['supervisor and attention migrations preserve history on replay',scenario(({db})=>{assert.equal(n(db,'schema_migrations'),81);assert.deepEqual(applySteps(db,loadSteps(defaultMigrationsDir())),[])})],
  ['same-run request, nonblocking reply, duplicate retries and reference-only result',scenario(f=>{
    assert.deepEqual(f.inbox('a').peers.map(p=>p.node_run_id),['b','c']);const r=f.send('a','b');assert.equal(r.state,'pending');assert.equal(f.send('a','b').id,r.id);assert.equal(f.coordinator.updates(f.binding('b'))[0]?.id,r.id);assert.equal(f.coordinator.updates(f.binding('c')).length,0)
    const a=f.reply('b',r);assert.equal(a.state,'answered');assert.equal(a.evidence_strength,'none');assert.deepEqual(f.reply('b',r),a)

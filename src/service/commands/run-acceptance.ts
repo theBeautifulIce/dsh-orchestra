@@ -399,6 +399,10 @@ function runFailed(tx: Tx, runId: string): boolean {
 function updateTaskDisplay(tx: Tx, runId: string, outcome: AcceptanceSummary, now: string): void {
   // 执行已经失败时以执行失败为准：别把「运行失败」显示成「交付待核验」
   if (runFailed(tx, runId)) return
+  // Keep the formal assessment in run_acceptance_results. A deliberately stopped
+  // plan with no submitted deliverables has no delivery action for the operator.
+  const cancelledWithoutDelivery = outcome === 'unverifiable'
+    && tx.get('SELECT 1 FROM cancelled_runs_without_delivery WHERE run_id=?', [runId]) !== undefined
   if (outcome === 'failed') {
     tx.run(
       'UPDATE tasks SET display_status = ?, updated_at = ?, revision = revision + 1 WHERE current_run_id = ?',
@@ -406,14 +410,14 @@ function updateTaskDisplay(tx: Tx, runId: string, outcome: AcceptanceSummary, no
     )
     return
   }
-  if (outcome === 'unverifiable') {
+  if (outcome === 'unverifiable' && !cancelledWithoutDelivery) {
     tx.run(
       'UPDATE tasks SET display_status = ?, updated_at = ?, revision = revision + 1 WHERE current_run_id = ?',
       [ACCEPTANCE_DISPLAY_STATUS.unverifiable, now, runId],
     )
     return
   }
-  if (outcome === 'passed') {
+  if (outcome === 'passed' || cancelledWithoutDelivery) {
     // 只清掉验收阶段自己写过的标签，别动别的展示状态
     tx.run(
       'UPDATE tasks SET display_status = NULL, updated_at = ?, revision = revision + 1 '

@@ -26,6 +26,55 @@ function expectRank(db: Db, task: string, attention: Attention) {
   expect(getTaskSummarySnapshot(db, task, now).item.attention).toBe(attention)
 }
 
+it('取消后无交付回执的历史任务离开待办，已有核验、实际问题和原始验收结论保留', () => {
+  const db = openDb(':memory:')
+  const migrations = loadSteps(defaultMigrationsDir())
+  try {
+    applySteps(db, migrations.filter(step => step.version <= 80))
+    withTx(db, tx => {
+      addTask(tx, 'stopped', 'r', 'cancelled')
+      tx.run("UPDATE tasks SET display_status='交付待核验' WHERE task_id='stopped'")
+      tx.run("INSERT INTO task_plans(plan_id,created_by,input_json,proposal_json,quality_json,content_hash,launch_operation_id,created_at) VALUES('p','tester','{}','{}','{}','hash','op',?)", [started])
+      for (const [kind,reason,evidence] of [
+        ['chat/text_result','chat_text_result_not_exported',{ producer_status: 'failed' }],
+        ['artifact','artifact_not_registered',{ matches: 0 }],
+        ['tool_evidence','tool_evidence_missing',{ executions: 0 }],
+      ] as const) {
+        tx.run(`INSERT INTO run_acceptance_results(result_id,run_id,plan_id,content_hash,rule_version,deliverable_key,kind,outcome,reason,evidence_json,evaluated_at)
+          VALUES (?,'r','p','hash','v1',?,?,'unverifiable',?,?,?)`, [kind,kind,kind,reason,JSON.stringify({ evidence }),started])
+      }
+    })
+    expect(storedRank(db,'stopped')).toBe(attentionWeight('unverified'))
+    applySteps(db, migrations)
+    expectRank(db,'stopped','none')
+    const listed = listTaskSummaries(db, { now })
+    expect(listed.lane_counts).toEqual({ finished: 1 })
+    expect(listed.items[0]).toMatchObject({ display_status: 'cancelled', delivery_acceptance: 'unverifiable',
+      cancelled_without_delivery: true, goal_met: false, lane: 'finished' })
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM run_acceptance_results WHERE outcome='unverifiable'").get()).toEqual({ n: 3 })
+
+    // A re-evaluation can change evidence while the verdict itself is unchanged.
+    const evidence = (value: object) => withTx(db, tx => tx.run("UPDATE run_acceptance_results SET evidence_json=? WHERE result_id='artifact'",
+      [JSON.stringify({ evidence: value })]))
+    evidence({})
+    expectRank(db,'stopped','unverified')
+    expect(getTaskSummarySnapshot(db,'stopped',now).item.cancelled_without_delivery).toBeUndefined()
+    evidence({ matches: false })
+    expectRank(db,'stopped','unverified')
+    evidence({ matches: 0 })
+    expectRank(db,'stopped','none')
+    withTx(db, tx => {
+      tx.run("INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,side_effect_policy,created_at,updated_at) VALUES('n','r','effect',1,'agent','failed','irreversible',?,?)", [started,started])
+    })
+    expectRank(db,'stopped','unverified')
+    expect(getTaskSummarySnapshot(db,'stopped',now).item.attention_reason).toContain('外部操作待核验')
+    withTx(db, tx => tx.run("INSERT INTO decisions(decision_id,run_id,node_run_id,kind,approver,status,revision,payload_json,created_at) VALUES('d','r','n','verify_human','human','pending',1,'{}',?)", [started]))
+    expectRank(db,'stopped','decision')
+  } finally {
+    db.raw.close()
+  }
+})
+
 it('迁移已有任务并维护同事务排序，读快照、时间变化和回滚保持旧查询语义', () => {
   const dir = mkdtempSync(join(tmpdir(), 'orchestra-attention-order-'))
   const db = openDb(join(dir, 'orchestra.sqlite'))

@@ -65,6 +65,9 @@ export function taskCardStatus(task: TaskSummary) {
   if (task.lane === 'upcoming' && task.trigger_enabled === true) {
     return { label: task.trigger_kind === 'scheduled' ? '已排期' : '等待事件', tone: COLOR.link }
   }
+  if (task.status === 'cancelled' && task.cancelled_without_delivery) {
+    return { label: '已取消 · 无交付回执', tone: COLOR.inkMuted }
+  }
   // 执行完成不等于目标达成：验收没过时把验收结论接在执行状态后面，别折叠成「已完成」
   const acceptance = task.delivery_acceptance ? ACCEPTANCE_STATUS[task.delivery_acceptance] : undefined
   if (acceptance) {

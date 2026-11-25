@@ -42,6 +42,12 @@ describe('交付验收的界面文案', () => {
     expect(view.label).toContain('交付待核验')
   })
 
+  it('取消时按已登记的交付事实展示，缺少证明时仍显示待核验', () => {
+    const stopped = task({ status: 'cancelled', current_run_status: 'cancelled', display_status: 'cancelled', delivery_acceptance: 'unverifiable' })
+    expect(taskCardStatus({ ...stopped, cancelled_without_delivery: true }).label).toBe('已取消 · 无交付回执')
+    expect(taskCardStatus(stopped).label).toBe('已取消 · 交付待核验')
+  })
+
   it('验收通过或没有计划时沿用执行状态文案', () => {
     expect(taskCardStatus(task({ delivery_acceptance: 'passed' })).label).toBe('已完成')
     expect(taskCardStatus(task({ delivery_acceptance: 'not_applicable' })).label).toBe('已完成')
