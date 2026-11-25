@@ -83,6 +83,104 @@ it('T09 corrects a bad roster enum once, keeps the exact two-agent boundary, and
   expect(held).not.toHaveProperty('request.requirements_contract')
 })
 
+it('T10 keeps collaboration receipts in the task text when the model mislabels them as a data gap, without a correction call', async () => {
+  const text = `执行任务「T06-协作失联与去重测试」。
+
+安排两个独立并行的只读代理：
+
+代理 A 负责计算 12、24、36、48 的合计与平均值。
+
+代理 B 负责计算 15、25、35、45 的合计与平均值。
+
+在双方同时可用时，A 通过真实协作信箱向 B 发出一个参考性核对请求，期限设置为30秒。若对方仍然可用，立即使用完全相同的参数重发一次，检验重复请求是否去重。
+
+B 本次故意不回应这项非必要协作请求，但正常完成自身计算并退出。
+
+A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完成自己的计算。
+
+所有操作必须实际通过插件执行，不要模拟工具回执。结果和发生的协作异常返回本会话。不联网，不读写工作区文件。`
+  const current: SemanticInput = { current: { message_id: 't10-new', text }, explicit: true }
+  let calls = 0
+  const llm = { async prepareCall(config: unknown) {
+    return { config, async *stream({ messages }: { messages: Array<{ content: Array<{ text: string }> }> }) {
+      calls++
+      const wire = JSON.parse(messages[0]!.content[0]!.text) as SemanticInput
+      expect(wire.current).toEqual({ message_id: 'm1', text: current.current.text })
+      const proposal = task(wire, { constraints: [
+        { id: 'network', kind: 'no_network', source_message_id: wire.current.message_id, quote: '不联网' },
+        { id: 'workspace', kind: 'no_workspace_read', source_message_id: wire.current.message_id, quote: '不读写工作区文件' },
+        { id: 'files', kind: 'no_workspace_files', source_message_id: wire.current.message_id, quote: '不读写工作区文件' },
+        { id: 'gap', kind: 'report_data_gap', source_message_id: wire.current.message_id, quote: '结果和发生的协作异常返回本会话' },
+      ] })
+      yield { type: 'block-end', block: { type: 'text', text: JSON.stringify(proposal) } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+  } } as unknown as NonNullable<Parameters<typeof createDshJsonCompletion>[0]>
+  const interpreter = createDshSemanticInterpreter(llm)!
+  const interpret = (semantic: SemanticInput, signal: AbortSignal, assertCurrent: () => void) =>
+    interpreter({ provider: 'fixture', model: 'gpt-6-luna', reasoningEffort: 'high' }, semantic, signal, assertCurrent)
+  const session = createSemanticSession()
+  const result = await session.admit({ identity: 'T10/fresh', requestId: 't10-new', hash: 't10-new', input: current,
+    signal: new AbortController().signal, assertCurrent() {} }, interpret)
+
+  expect(calls).toBe(1)
+  expect(result).toMatchObject({ kind: 'ready', request: { goal: text, requirements_contract: { sources: [current.current],
+    constraints: [
+      { kind: 'no_network', source_message_id: 't10-new', quote: '不联网' },
+      { kind: 'no_workspace_read', source_message_id: 't10-new', quote: '不读写工作区文件' },
+      { kind: 'no_workspace_files', source_message_id: 't10-new', quote: '不读写工作区文件' },
+    ],
+  } } })
+  if (result.kind !== 'ready') throw new Error('Expected the T10 task to remain ready')
+  expect(result.request.requirements_contract.constraints.some(item => item.kind === 'report_data_gap')).toBe(false)
+  expect(result.request.goal).toContain('结果和发生的协作异常返回本会话')
+  expect(result.request.goal).toContain('所有操作必须实际通过插件执行')
+})
+
+it('T10 retains a real held restriction on resume and rejects forged or negated gap reports', () => {
+  const first = input('先不要执行 T10 协作测试。不联网，不读写工作区文件。')
+  const held = draftOf(interpretSemanticAdmission(first, task(first, { timing: 'held', constraints: [
+    { id: 'net', kind: 'no_network', source_message_id: 'u1', quote: '不联网' },
+    { id: 'workspace', kind: 'no_workspace_files', source_message_id: 'u1', quote: '不读写工作区文件' },
+  ] })))
+  const continuationText = '现在继续。结果和发生的协作异常返回本会话。'
+  const next = { ...input(continuationText, 'u2'), draft: held }
+  const resumed = interpretSemanticAdmission(next, task(next, { relation: 'continue', draft_revision: held.revision,
+    continuation: 'resume', constraints: [{ id: 'misread', kind: 'report_data_gap', source_message_id: 'u2',
+      quote: '结果和发生的协作异常返回本会话' }] }))
+  expect(resumed).toMatchObject({ kind: 'ready', request: { goal: first.current.text + '\n' + continuationText,
+    requirements_contract: { constraints: [
+      { kind: 'no_network', source_message_id: 'u1', quote: '不联网' },
+      { kind: 'no_workspace_files', source_message_id: 'u1', quote: '不读写工作区文件' },
+    ] },
+  } })
+  if (resumed.kind !== 'ready') throw new Error('Expected the continued T10 task to be ready')
+  expect(resumed.request.requirements_contract.constraints.some(item => item.kind === 'report_data_gap')).toBe(false)
+
+  const trueGap = input('若缺少材料，请报告缺失项，并完成其余能做的部分。', 'gap')
+  const validGap = interpretSemanticAdmission(trueGap, task(trueGap, { constraints: [{ id: 'gap', kind: 'report_data_gap',
+    source_message_id: 'gap', quote: '若缺少材料，请报告缺失项' }] }))
+  expect(validGap).toMatchObject({ kind: 'ready', request: { requirements_contract: { constraints: [{ kind: 'report_data_gap' }] } } })
+
+  const invalid = [
+    { text: trueGap.current.text, source: 'other', quote: '若缺少材料，请报告缺失项' },
+    { text: trueGap.current.text, source: 'gap', quote: '请报告全部虚构的缺失数据' },
+    { text: '不要报告缺失材料，直接完成已有部分。', source: 'negated', quote: '报告缺失材料' },
+  ]
+  for (const [index, item] of invalid.entries()) {
+    const source = input(item.text, item.source === 'negated' ? 'negated' : 'gap')
+    const outcome = interpretSemanticAdmission(source, task(source, { constraints: [{ id: `bad-${index}`, kind: 'report_data_gap',
+      source_message_id: item.source, quote: item.quote }] }))
+    expect(outcome.kind, `invalid report_data_gap case ${index}`).toBe('clarify')
+  }
+
+  const ordinaryPermission = input('所有操作必须实际通过插件执行，不要模拟工具回执。', 'permission')
+  const falseApproval = interpretSemanticAdmission(ordinaryPermission, task(ordinaryPermission, { constraints: [{ id: 'approval',
+    kind: 'approval_before', scope: 'steps', action: '计算', reviewer: { kind: 'operator' }, source_message_id: 'permission',
+    quote: '所有操作必须实际通过插件执行' }] }))
+  expect(falseApproval).toMatchObject({ kind: 'clarify', invalidReply: true })
+})
+
 it('retains held timing, preserves previous constraints and pin, and allows a clear ordinary continuation without exposing draft IDs', () => {
   const first = input('先不要执行月报，别改原件，用流程月报第 2 版')
   const held = draftOf(interpretSemanticAdmission(first, task(first, { timing: 'held', constraints: [

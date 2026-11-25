@@ -80,8 +80,13 @@ it('拒绝模型编造审批名称或用来源中另一段普通文字替代明�
   for (const forged of ['人工确认预算', 'T03-人工审批测试']) {
     const admission = interpretSemanticAdmission(namedGateInput, { ...namedGateReply,
       constraints: [{ ...namedGateConstraint, gate_name: forged }] })
-    expect(admission).toMatchObject({ kind: 'clarify', draft: { requires_restatement: true } })
+    expect(admission).toMatchObject({ kind: 'clarify', invalidReply: true,
+      validationIssue: expect.stringContaining('不匹配') })
+    expect(admission).not.toHaveProperty('draft')
+    expect(admission).not.toHaveProperty('request')
   }
+  // The invalid model reply does not create a launchable draft; resubmitting the authenticated
+  // original source lets the interpreter retain only the approval name actually present there.
   expect(interpretSemanticAdmission(namedGateInput, { ...namedGateReply,
     constraints: [{ ...namedGateConstraint, gate_name: gateName }] })).toMatchObject({ kind: 'ready' })
 })
