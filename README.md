@@ -84,9 +84,30 @@ flowchart TD
 | 当前 `main` | 按[源码构建命令](#开发与验证)生成安装包，或使用同时提供对应提交和 SHA-256 的构建包。 |
 | 已发布 Beta 快照 | 下载 [`dsh-orchestra-0.1.0-beta.1.tgz`](https://github.com/theBeautifulIce/dsh-orchestra/releases/download/v0.1.0-beta.1/dsh-orchestra-0.1.0-beta.1.tgz)。[预发行页](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.1)提供 `SHA256SUMS.txt`；该快照的用法见[对应标签的 README](https://github.com/theBeautifulIce/dsh-orchestra/blob/v0.1.0-beta.1/README.md)。 |
 
-1. 在 **DSH Desktop 插件管理**中安装选定的 `.tgz`，按提示重新加载。侧栏将出现 **Orchestra**。
-2. 打开工作区及其中的普通会话。在 **Orchestra → 设置**检查连接、主脑模型、子智能体模型和聊天任务自动接管。个人适配器默认接管明确任务；主脑默认跟随会话模型，也可指定已配置的模型。
-3. 发送输入明确、交付要求具体的任务，从任务卡跟进执行并处理必要事项。
+### 安装到 DSH Desktop
+
+**当前 Desktop 没有从插件管理页面选择本地 `.tgz` 安装的入口。** 本地安装包通过该 Desktop 自带的 CLI 安装。首次使用时先打开 Desktop 完成初始化，然后从托盘或应用菜单选择**退出**；窗口右上角的 × 可能只是隐藏窗口。安装方式依据 [DSH Desktop 官方说明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/desktop/README.md#bundled-command-runtime)。
+
+使用当前 `main` 时，先在本地 `main` 执行 `git pull --ff-only origin main`，确认拉取成功。准备好 [`package.json`](package.json) 要求的 Node 和 pnpm 后，在仓库根目录打开 PowerShell，执行：
+
+```powershell
+$DshDesktopCommand = 'D:\aboutAI\deepseekharness-desktop\resources\runtime\cli\bin\dsh.cmd'
+.\tools\updater\Update-Orchestra.ps1 -Repo (Get-Location).Path -Dsh $DshDesktopCommand
+```
+
+将 `$DshDesktopCommand` 改为实际 Desktop 安装下的命令路径。工具会构建、打包、校验安装包、备份现有插件，并通过官方 CLI 安装后逐文件核对。它更新的是当前本地源码，不会替你拉取 Git。使用自定义数据目录时，另传 `-DshHome '<实际 DSH_HOME 绝对路径>'`；默认使用当前 `DSH_HOME`，未设置时为用户目录下的 `.dsh`。其他参数及智能体入口见[更新工具说明](tools/updater/README.md)。
+
+已经取得并核对过 `.tgz` 时，也可以手动安装。以下命令使用上面指定的 Desktop CLI；将包路径改为实际绝对路径，并在自定义数据目录下设置对应的 `$env:DSH_HOME`：
+
+```powershell
+$OrchestraPackage = 'D:\packages\dsh-orchestra-0.1.0-beta.1.tgz'
+& $DshDesktopCommand plugin --profile desktop add $OrchestraPackage
+if ($LASTEXITCODE -ne 0) { throw 'Orchestra 安装失败，请查看命令输出。' }
+```
+
+Desktop 的 `desktop` 配置由该安装管理，不能用 npm 全局 `dsh` 代替它自带的 CLI。保留本地安装包，供后续依赖安装和恢复使用。上面的更新工具面向当前 `main` 的包契约；历史 Beta 快照请通过上述官方 CLI 安装，功能与用法以对应标签说明为准。
+
+命令成功后，**重新打开 Desktop**，从侧栏进入 **Orchestra**；使用更新工具时，它还会核对实际安装文件。磁盘安装完成与宿主加载新代码是两个步骤。打开工作区及其中的普通会话，在 **Orchestra → 设置**检查连接、主脑模型、子智能体模型和聊天任务自动接管。个人适配器默认接管明确任务；主脑默认跟随会话模型，也可指定已配置的模型。随后发送输入明确、交付要求具体的任务，从任务卡跟进执行并处理必要事项。
 
 插件面向 DSH `0.2.2` 系列。已记录的原生会话派单与审批验收使用 Desktop `0.2.2-rc.5`；完整成果预览面向该版本的原生 Browser 及兼容宿主。本机可用能力以健康页显示为准。
 
@@ -203,7 +224,7 @@ New-Item -ItemType Directory -Force .tmp/packages | Out-Null
 pnpm pack --pack-destination .tmp/packages
 ```
 
-将生成的 `.tgz` 安装到目标 DSH 用户配置并重新加载。拉取源码不会自动更新已经安装的插件。自建 Web 宿主可使用 `dsh plugin --profile web add <安装包绝对路径>`，并配置经过认证的宿主传输和权限。
+将生成的 `.tgz` 按上方[Desktop 安装步骤](#安装到-dsh-desktop)安装到目标用户配置，并重新打开 Desktop。拉取源码不会自动更新已经安装的插件。自建 Web 宿主可使用 `dsh plugin --profile web add <安装包绝对路径>`，并配置经过认证的宿主传输和权限。
 
 | 目录 | 职责 |
 | --- | --- |

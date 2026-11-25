@@ -10,6 +10,7 @@ import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { createElement, type ComponentType } from 'react'
 import { expect, it } from 'vitest'
 import { inspectPackage } from '../../scripts/package-acceptance.ts'
+import { assertClientInject, CLIENT_INJECT_PROTOCOLS, CLIENT_INJECT_ROLES } from '../../tools/updater/package-contract.mjs'
 import { renderPanel } from '../client/harness.ts'
 import type { DshPanelContext } from '../../src/client/dsh-sidebar.tsx'
 import type { NativeOrchestraToolViewContext } from '../../src/client/dsh-orchestra-toolview.tsx'
@@ -21,10 +22,9 @@ const sha = process.env.ORCHESTRA_PACKAGE_TEST_SHA256
 it('包声明保留私有发布、默认阶段和显式宿主注入', () => {
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
   expect(manifest).toMatchObject({ private: true, exports: { '.': { default: './lib/index.js' }, './client': './lib/client.js' },
-    dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web', inject: expect.arrayContaining([
-      '@deepseek-ai/dsh-client-ui-sidebar', '@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-input-trigger',
-      '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-chat',
-    ]) } } })
+    dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } })
+  expect([...manifest.dsh.client.inject].sort()).toEqual([...CLIENT_INJECT_PROTOCOLS[CLIENT_INJECT_ROLES.candidate]].sort())
+  expect(assertClientInject(manifest.dsh.client.inject)).toBe(CLIENT_INJECT_ROLES.candidate)
   expect(JSON.parse(readFileSync('orchestra.config.json', 'utf8')).phase).toBe('S2')
   expect(readFileSync('cordis.patch.yml', 'utf8')).toMatch(/id: dsh-orchestra, name: dsh-orchestra/)
 })
@@ -42,14 +42,11 @@ it('安装指南指向同一份带版本的预发行工件，也给出摘要文�
   expect(assets[0]).toBe(assets[1])
 })
 
-it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版清单', () => {
+it('验包要求共享协议的精确集合，只有显式 previous 角色接受已签 G5 清单', () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-package-inject-'))
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
   const candidate = manifest.dsh.client.inject as string[]
-  const addedClients = ['@deepseek-ai/dsh-client-ui-input-trigger',
-    '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-chat',
-    '@deepseek-ai/dsh-client-ui-sidebar-right', '@deepseek-ai/dsh-client-ui-sidebar-browser', '@deepseek-ai/dsh-client-ui-commands']
-  const previous = candidate.filter((dependency) => !addedClients.includes(dependency))
+  const previous = CLIENT_INJECT_PROTOCOLS[CLIENT_INJECT_ROLES.previous]
   const files: Record<string, string> = {
     'package/package.json': '',
     'package/lib/index.js': 'export function serveDshOrchestra() {}',
@@ -64,7 +61,7 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
   for (let version = 1; version <= 57; version++) {
     files['package/lib/infra/sqlite/migrations/' + String(version).padStart(3, '0') + '_fixture.sql'] = 'SELECT 1;'
   }
-  function pack(name: string, inject: string[]) {
+  function pack(name: string, inject: unknown) {
     const archive = join(root, name + '.tgz')
     writeFileSync(join(root, 'package/package.json'), JSON.stringify({
       ...manifest, dsh: { ...manifest.dsh, client: { ...manifest.dsh.client, inject } },
@@ -80,6 +77,8 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
     const valid = pack('candidate', [...candidate].reverse())
     expect(candidate).toHaveLength(12)
     expect(new Set(candidate).size).toBe(12)
+    expect(previous).toHaveLength(6)
+    expect(inspectPackage(valid).client_inject_protocol).toBe(CLIENT_INJECT_ROLES.candidate)
     expect(inspectPackage(valid).migrations).toHaveLength(57)
     expect(() => inspectPackage(valid, { previous: true })).toThrow('DSH client inject must contain exactly')
     files['package/docs/assets/readme/extra.txt'] = 'extra'
@@ -89,15 +88,25 @@ it('验包要求完整且唯一的客户端依赖，并继续接受已签旧版�
     delete files['package/docs/assets/readme/extra.txt']
     const legacy = pack('previous', previous)
     expect(inspectPackage(legacy, { previous: true }).migrations).toHaveLength(57)
+    expect(inspectPackage(legacy, { previous: true }).client_inject_protocol).toBe(CLIENT_INJECT_ROLES.previous)
     expect(() => inspectPackage(legacy)).toThrow('DSH client inject must contain exactly')
-    for (const dependency of addedClients) {
+    for (const dependency of candidate) {
       expect(() => inspectPackage(pack('missing-client', candidate.filter(item => item !== dependency))))
-        .toThrow('DSH client inject must contain exactly')
+        .toThrow('Missing entries: ' + dependency)
+    }
+    for (const protocol of ['dsh-orchestra/client-inject/slash/v1', 'dsh-orchestra/client-inject/conversation/v1'] as const) {
+      const outdated = pack('outdated', CLIENT_INJECT_PROTOCOLS[protocol])
+      expect(() => inspectPackage(outdated)).toThrow('Manifest matches "' + protocol + '"')
+      expect(() => inspectPackage(outdated, { previous: true })).toThrow('role "previous"')
     }
     expect(() => inspectPackage(pack('wrong-dependency', [...candidate.slice(0, -1), '@deepseek-ai/dsh-client-ui-unknown'])))
-      .toThrow('DSH client inject must contain exactly')
+      .toThrow('Unknown entries')
     expect(() => inspectPackage(pack('duplicate-dependency', [...candidate.slice(0, -1), candidate[0]!])))
-      .toThrow('DSH client inject must contain exactly')
+      .toThrow('Duplicate entries')
+    expect(() => inspectPackage(pack('non-string-dependency', [...candidate.slice(0, -1), 42])))
+      .toThrow('Non-string entries at indexes: 11')
+    expect(() => inspectPackage(pack('invalid-dependencies', null)))
+      .toThrow('client.inject must be an array of strings')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
