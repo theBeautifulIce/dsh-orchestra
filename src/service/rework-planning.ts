@@ -10,6 +10,8 @@ import { previewReworkImpact } from './rework-runtime.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { insertExtraSteps } from './rework-extra-steps.ts'
 import { requireReviewOperator } from './delivery-review.ts'
+import { explicitAgentRoster } from '../core/task-requirements.ts'
+import { readApprovedTaskPlanForRun } from './task-planning.ts'
 
 const key = z.string().min(1).max(128)
 export const localPlanInput = z.strictObject({ operation_id: z.uuidv7(), request_id: key, expected_revision: z.number().int().positive() })
@@ -53,11 +55,13 @@ function snapshot(tx: ReadTx, requestId: string, actor: string, revision: number
   const pinned = JSON.parse(definition.definition_json) as { nodes: {node_id:string}[]; edges?: {from:string;to:string}[] }
   const edges = runtimeEdges(tx, request.run_id, pinned.edges ?? [])
   const reviewer = nodes.find(n => n.node_run_id === request.requester_node_run_id)?.node_id ?? null
-  return { request_id: requestId, revision, original_hash: request.source_artifact_hash, reason: request.reason,
+  const fixedRoster = readApprovedTaskPlanForRun(tx, request.run_id)?.brief.requirements_contract?.sources.some(source => explicitAgentRoster(source.text))
+  return { request_id: requestId, revision, original_hash: request.source_artifact_hash, reason: request.reason, ...(fixedRoster && { fixed_agent_roster: true }),
     expected_result: request.expected_result, preserve: JSON.parse(request.preserve_requirements_json) as string[],
     budget: request.budget_remaining, target: target.node_id, allowed, nodes, edges, reviewer, pinned_node_ids: pinned.nodes.map(n => n.node_id) }
 }
 function approvedEdges(proposal: Proposal, state: ReturnType<typeof snapshot>) {
+  if (state.fixed_agent_roster && proposal.insert_steps.length) throw new OrchError('FORBIDDEN', '原任务限定了参与代理，返工只能使用现有角色。')
   const edges = [...state.edges]
   for (const edge of proposal.additional_edges) {
     const target = state.nodes.find(n => n.node_id === edge.to)

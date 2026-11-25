@@ -12,6 +12,26 @@ const reviewer = z.discriminatedUnion('kind', [
 ])
 const deniedGapReport = /(?:不(?:要|必|得|用|需)|无需|禁止|勿)\s*(?:再|主动|如实)?\s*(?:上报|汇报|报告|说明|指出|列出|注明|标注)|\b(?:do not|don't|never)\s+(?:report|explain|identify|list)\b/iu
 
+// Match an operative prohibition, and count only explicitly assigned agents in the same source.
+const rosterClause = /^(?:(?:请)?(?:不(?:要|得|允许)?|禁止|勿)(?:再)?(?:额外|另行|另外)(?:启动|创建|安排|派发|增加|派出|召集)(?:新的?|其他)?(?:业务|子)?(?:代理|智能体)|(?:do not|don't|never) (?:start|spawn|create|add) (?:any )?(?:extra|additional) (?:business )?agents?|no (?:extra|additional) agents?)$/iu
+export function explicitAgentRoster(source: string): { quote: string; count?: number; parallel: boolean } | undefined {
+  const clauses = source.split(/[。，,；;！!?？\n]|\.(?:\s|$)/u).map(clause => clause.trim())
+  const quote = clauses.find(clause => rosterClause.test(clause))
+  if (!quote) return
+  const assignments = [...source.matchAll(/(?:安排|启动|创建|使用|派出)\s*([1-9]\d?|[一二两三四五六七八九十]{1,3})\s*(?:个|名|位)?(?:同时运行的|并行的?|独立的?|业务|子|执行|协作|\s)*(?:代理|智能体)|\b(?:assign|use|start|run)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:concurrent|parallel|independent|business)\s+)*agents?\b/giu)]
+  const numbers = assignments.map(match => {
+    const token = (match[1] ?? match[2]!).toLowerCase().replace('两', '二')
+    if (/^\d+$/u.test(token)) return Number(token)
+    if (/^[a-z]/u.test(token)) return ['one','two','three','four','five','six','seven','eight','nine','ten'].indexOf(token) + 1
+    const digit = (x: string) => '一二三四五六七八九'.indexOf(x) + 1
+    const [tens, ones] = token.split('十')
+    return ones === undefined ? digit(tens!) : (tens ? digit(tens) : 1) * 10 + (ones ? digit(ones) : 0)
+  })
+  const count = numbers[0]
+  return { quote, parallel: assignments.some(match => /同时运行|并行|concurrent|parallel/iu.test(match[0])),
+    ...(count && numbers.every(n => n === count) && { count }) }
+}
+
 export const taskRequirementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...common, kind: z.literal('chat_only') }),
   // Retain the v1 meaning of no_workspace_files: no creation or modification.
@@ -22,6 +42,7 @@ export const taskRequirementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...common, kind: z.literal('no_external_send') }),
   z.strictObject({ ...common, kind: z.literal('preserve_input'), target: z.string().trim().min(1).max(500) }),
   z.strictObject({ ...common, kind: z.literal('report_data_gap') }),
+  z.strictObject({ ...common, kind: z.literal('no_extra_agents') }),
   z.strictObject({ ...common, kind: z.literal('approval_before'), scope: z.enum(['task', 'steps']),
     action: z.string().trim().min(1).max(500).optional(), gate_name: z.string().trim().min(1).max(80).optional(), reviewer }),
 ]).superRefine((constraint, ctx) => {
@@ -67,6 +88,10 @@ export const requirementsContractSchema = z.strictObject({
     const source = sources.get(constraint.source_message_id)
     if (!source?.includes(constraint.quote)) {
       ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '约束引用不在对应来源消息中' })
+    }
+    if (constraint.kind === 'no_extra_agents' && (!explicitAgentRoster(constraint.quote)
+      || explicitAgentRoster(source ?? '')?.quote !== explicitAgentRoster(constraint.quote)?.quote)) {
+      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '须逐字引用限制新增代理的原句' })
     }
     if (source && constraint.kind === 'report_data_gap') {
       const before = source.slice(0, source.indexOf(constraint.quote)).split(/[，,。！？；;\n]/u).at(-1) ?? ''

@@ -275,7 +275,7 @@ export type ChatOutcome =
   | { state: 'launch_declined'; plan_id: string; title: string }
   | { state: 'stop_requested'; run_id: string; status: string; skipped_irreversible: number; pending_decisions: number }
   | { state: 'approved' | 'rejected'; run_id: string; decision_id: string; title: string }
-  | { state: 'clarification_required' | 'task_held' | 'command_unavailable' | 'queued' | 'draft_discarded'; message: string }
+  | { state: 'clarification_required' | 'task_held' | 'command_unavailable' | 'queued' | 'draft_discarded'; message: string; validation_failed?: true }
   | { state: 'usage'; command?: string; message: string }
   | { state: 'error'; code: AnyOrchErrorCode; retryable: boolean; planning_issue?: PlanningIssue; reason?: ChatErrorReason }
 
@@ -386,7 +386,7 @@ export function describeChatOutcome(outcome: ChatOutcome, action?: 'start' | 'st
       return { heading: taskHeading(outcome.title, outcome.state === 'approved' ? '已登记批准' : '已登记拒绝'),
         body: '后续执行状态可在 Orchestra 面板查看。' }
     case 'clarification_required':
-      return { heading: 'Orchestra 需要明确的交付目标', body: outcome.message }
+      return { heading: outcome.validation_failed ? 'Orchestra 未能核对任务说明' : 'Orchestra 需要明确的交付目标', body: outcome.message }
     case 'task_held':
       return { heading: 'Orchestra 已暂缓任务', body: outcome.message }
     case 'draft_discarded': return { heading: 'Orchestra 已放弃草稿', body: outcome.message }

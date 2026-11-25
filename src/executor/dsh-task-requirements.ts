@@ -2,7 +2,7 @@ import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { requirementsContractSchema, type RequirementsContract } from '../core/task-requirements.ts'
 import type { TaskPlanInput } from '../service/task-planning.ts'
-import { interpretSemanticAdmission, semanticResponseNeedsCorrection, SEMANTIC_INSTRUCTIONS, type SemanticInput, type SemanticWorkflow } from '../service/semantic-admission.ts'
+import { interpretSemanticAdmission, semanticCorrectionHint, SEMANTIC_INSTRUCTIONS, type SemanticInput, type SemanticWorkflow } from '../service/semantic-admission.ts'
 import { createDshJsonCompletion, type JsonModelRoute } from './dsh-json.ts'
 import type { createDshPlanningCallback } from './dsh-host.ts'
 
@@ -27,7 +27,7 @@ export function createDshSemanticInterpreter(llm: Parameters<typeof createDshJso
     const aliases = new Map(sources.map((id, index) => [id, 'm' + (index + 1)]))
     const wire = mapSources(input, aliases) as SemanticInput
     const raw = await complete(route, SEMANTIC_INSTRUCTIONS, wire, signal, current,
-      value => semanticResponseNeedsCorrection(value, wire))
+      value => semanticCorrectionHint(value, wire))
     return mapSources(raw, new Map([...aliases].map(([id, alias]) => [alias, id])))
   }
 }

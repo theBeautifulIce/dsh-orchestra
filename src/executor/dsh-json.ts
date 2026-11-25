@@ -69,7 +69,7 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
     else active--
   }
   return async (route: JsonModelRoute | undefined, instructions: string, input: unknown,
-    signal: AbortSignal, assertCurrent: () => void, needsCorrection?: (raw: unknown) => boolean): Promise<unknown> => {
+    signal: AbortSignal, assertCurrent: () => void, needsCorrection?: (raw: unknown) => boolean | string | undefined): Promise<unknown> => {
     if (signal.aborted) throw unavailable()
     if (!route) throw failure('semantic_model_missing')
     const body = JSON.stringify(input)
@@ -113,7 +113,7 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
       try { assertCurrent() } catch { throw new JsonFailure('semantic_context_changed') }
     }
     const { provider, model, reasoningEffort } = route
-    const attempt = async (requestedTokens: number, correction: boolean) => {
+    const attempt = async (requestedTokens: number, correction: boolean | string) => {
       current()
       const prepared = await (async () => {
         try {
@@ -140,7 +140,7 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
       let finish: string | undefined
       try {
         const stream = prepared.stream({ provider, model, maxTokens: effectiveTokens,
-          system: `${ORCHESTRA_STRUCTURED_COMMUNICATION_GUIDE}\n${instructions}${correction ? '\n' + CORRECTION : ''}`, messages, tools: [], signal: lifetime,
+          system: `${ORCHESTRA_STRUCTURED_COMMUNICATION_GUIDE}\n${instructions}${correction ? '\n' + CORRECTION : ''}${typeof correction === 'string' ? '\n' + correction : ''}`, messages, tools: [], signal: lifetime,
           ...(prepared.config.reasoningEffort === undefined ? {} : { reasoningEffort: prepared.config.reasoningEffort }) })
         for await (const chunk of stream) {
           current()
@@ -185,7 +185,8 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
       }
       // Spend the same single retry on a malformed contract or uncited restriction.
       // A second answer still goes through the ordinary source and authority checks.
-      if (admission && needsCorrection?.(raw)) return attempt(ADMISSION_TOKENS, true)
+      const correction = admission && needsCorrection?.(raw)
+      if (correction) return attempt(ADMISSION_TOKENS, correction)
       return raw
     })()
     // The two slots cover both attempts and remain occupied until actual work settles.

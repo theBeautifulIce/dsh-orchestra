@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { uuidv7 } from '../core/ids.ts'
-import { explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
+import { explicitAgentRoster, explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
 import { isOrdinaryChat, explicitNotesRequest } from './chat-task-intent.ts'
 import type { ChatTaskOrigin } from './chat-task-receipts.ts'
 
@@ -39,7 +39,7 @@ export type SemanticDraftCheckpoints = {
 export type SemanticRequest = { goal: string; requirements: string[]; requirements_contract: RequirementsContract; workflow?: SemanticWorkflow }
 export type SemanticOutcome =
   | { kind: 'ready'; request: SemanticRequest; draft?: SemanticDraft; launchOrigin?: SemanticLaunchOrigin }
-  | { kind: 'held' | 'clarify'; message: string; draft?: SemanticDraft; invalidReply?: true }
+  | { kind: 'held' | 'clarify'; message: string; draft?: SemanticDraft; invalidReply?: true; validationIssue?: string }
   | { kind: 'conversation' | 'notes' | 'brain_notes' | 'discarded'; draft?: SemanticDraft }
 export type SemanticInterpreter = (input: SemanticInput, signal: AbortSignal, assertCurrent: () => void) => Promise<unknown>
 
@@ -56,12 +56,13 @@ export const SEMANTIC_INSTRUCTIONS = [
   'Typed constraints cover execution, storage, human approval and external delivery boundaries. Ordinary style, length, factual requirements and acceptance details stay in the verbatim goal and do not require a special constraint kind.',
   'The configured model transport and Orchestra internal ledger, artifact registration, collaboration and approvals are infrastructure, not task network or workspace tools. Ordinary 不联网 / offline task means no_network (no task-tool network access); 不读取工作区文件 means no_workspace_read; 不写工作区文件 means no_workspace_files; 不读写工作区文件 means BOTH no_workspace_read and no_workspace_files. These are supported restrictions, not missing constraints. An explicit prohibition of remote model transport or ALL persistence is still unsupported and must be clarified, never weakened.',
   'no_external_send means no external delivery or external-write tools, not a prohibition on ordinary read-only retrieval. Scope negative clauses correctly. A request to use only supplied data and return results in chat is executable without external tools.',
-  'Each constraint has id, kind, source_message_id, quote. kind can be chat_only, no_workspace_files, no_workspace_read, no_network, read_only, no_external_send, preserve_input, approval_before, report_data_gap. Include every operative restriction. If a restriction cannot be expressed, set missing:["constraints"] and unresolved:[{source_message_id,quote}] for the exact unresolved restriction. An unresolved boundary remains pending in this draft. The model cannot resolve it by relabeling the old quote. To replace such a boundary the operator must discard the draft and submit a complete new request.',
+  'Each constraint has id, kind, source_message_id, quote. kind can be chat_only, no_workspace_files, no_workspace_read, no_network, read_only, no_external_send, preserve_input, approval_before, report_data_gap, no_extra_agents. Include every operative restriction. If a restriction cannot be expressed, set missing:["constraints"] and unresolved:[{source_message_id,quote}] for the exact unresolved restriction. An unresolved boundary remains pending in this draft. The model cannot resolve it by relabeling the old quote. To replace such a boundary the operator must discard the draft and submit a complete new request.',
   'preserve_input additionally has target copied from its quote. It protects the specific input, while read_only covers all operations. no_workspace_files prohibits creating or modifying workspace files; it does not prohibit reading. no_workspace_read prohibits workspace reads. no_network prohibits task-tool network access. chat_only chooses chat delivery.',
   'Example: for 不联网，不读写工作区文件。结果返回本会话。 with current.message_id=m1, constraints=[{"id":"c1","kind":"no_network","source_message_id":"m1","quote":"不联网"},{"id":"c2","kind":"no_workspace_read","source_message_id":"m1","quote":"不读写工作区文件"},{"id":"c3","kind":"no_workspace_files","source_message_id":"m1","quote":"不读写工作区文件"},{"id":"c4","kind":"chat_only","source_message_id":"m1","quote":"结果返回本会话"}]. Use the actual current.message_id. All four constraints are supported; missing=[].',
   'approval_before additionally has scope:"task"|"steps", reviewer:{kind:"operator"} or {kind:"named",name:"exact quoted role"}. For steps, action must copy the protected action from the same quote. Pre-start review and in-workflow review are distinct. A request to wait for the operator before a specific calculation is scope steps with reviewer operator, not whole-task deferral. Host tool approval policy is not part of the meaning of the user request. Do not infer a policy conflict or mark constraints missing because the task includes workflow approval.',
   'If the human explicitly names the approval step, include gate_name copied exactly from the same source message. A card name is distinct from its reviewer and the protected action.',
   'Use report_data_gap when the human explicitly asks the task to handle or report missing data and deliver independent work or partial results. Its quote must be their exact instruction to report the missing input or incomplete work. This is an executable outcome and does not excuse unsupported permissions or missing approvals.',
+  'A fixed participant roster is supported. Use kind:"no_extra_agents" and quote only the exact clause such as 不额外启动代理. Peer requests, one permitted attempt, no repeated attempts, keeping the rejection receipt and stating when a test condition was not observed are workflow and reporting instructions: preserve them in the original goal. An unobserved test condition is not a missing input or report_data_gap. Do not invent constraint kinds for these steps.',
   'If a workflow is explicitly requested add workflow:{name,version?,quote,source_message_id}. Copy the name and digits exactly. Preserve an explicit historical version. Ambiguous or unsupported references require missing:["workflow"].',
   'For an actual answer to the supplied draft use relation:"continue", draft_revision equal to the supplied revision, continuation:"supply", and answer:{slot:"materials"|"result",value:"concrete quoted value",quote:"current wording"} when it fills that missing slot.',
   'A draft with missing:[] can be a complete request whose planning or startup did not succeed. Preserve its goal and restrictions when the human supplies details. Use continuation:"supply" without answer for such details; use continuation:"resume" for an explicit instruction to retry or proceed. A planning failure does not revoke the original requested timing.',
@@ -110,22 +111,36 @@ const requested = new Set<Missing>(['goal', 'result', 'materials'])
 
 /** A well-formed clarification or an actual unresolved restriction needs no model retry. */
 export function semanticResponseNeedsCorrection(raw: unknown, input?: SemanticInput): boolean {
+  return semanticCorrectionHint(raw, input) !== undefined
+}
+
+function schemaLocation(error: z.ZodError): string {
+  // Use validator-owned field names and indexes only. Never put model content into correction instructions.
+  return error.issues.slice(0, 3).map(issue => (issue.path.filter(part => typeof part === 'number'
+    || typeof part === 'string' && /^[a-z_]{1,36}$/u.test(part)).join('.') || 'reply') + ' (' + issue.code + ')').join(', ')
+}
+
+export function semanticCorrectionHint(raw: unknown, input?: SemanticInput): string | undefined {
   const result = replySchema.safeParse(raw)
-  if (!result.success) return true
+  if (!result.success) return '请核对任务理解返回的字段 ' + schemaLocation(result.error) + '。只用列出的 kind 和字段。report_data_gap 须逐字引用要求报告缺失材料的原句。'
   const reply = result.data
-  if (reply.kind === 'task' && reply.missing.includes('constraints') && !reply.unresolved.length) return true
-  if (!input) return false
+  if (reply.kind === 'task' && reply.missing.includes('constraints') && !reply.unresolved.length) return 'missing.constraints 缺少对应的 unresolved 原句。支持的限制应使用其类型，实际未支持的边界须逐字引用。'
+  if (!input) return
   const outcome = interpretSemanticAdmission(input, reply)
-  return outcome.kind === 'clarify' && outcome.invalidReply === true
+  if (outcome.kind === 'clarify' && outcome.invalidReply) return outcome.validationIssue
 }
 
 /** Validates a proposal against actual user sources. No writes or launch happen here. */
 export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, now = Date.now()): SemanticOutcome {
   const pending = input.draft && input.draft.expires_at > now ? input.draft : undefined
-  const invalid = () => ({ ...retainUnclear(input, pending, ['constraints'],
-    '任务理解结果未通过结构或原文引用校验，并不表示用户的限制无法执行。原消息仍保留；请先放弃该草稿，再发送完整原要求重试。', now, true), invalidReply: true as const })
+  const invalid = (validationIssue = '任务理解返回的草稿版本、执行时机或原文引用不匹配。') => {
+    const message = `Orchestra 未能核对模型返回的任务说明。${validationIssue}完整原文仍在会话中。`
+    const result = pending ? retainUnclear(input, pending, ['constraints'], message + '如需重新立项，请先放弃旧草稿，再发送完整要求。', now, true)
+      : clarification(message + '可以直接重新发送原要求。')
+    return { ...result, invalidReply: true as const, validationIssue }
+  }
   const parsed = replySchema.safeParse(raw)
-  if (!parsed.success) return invalid()
+  if (!parsed.success) return invalid('模型返回的字段没有通过校验：' + schemaLocation(parsed.error) + '。')
   const reply = parsed.data
   if (reply.kind === 'conversation' || reply.kind === 'notes' || reply.kind === 'brain_notes') {
     if (reply.kind !== 'conversation' && (!input.current.text.includes(reply.quote) || explicitNotesRequest(input.current.text) !== reply.kind)) return { kind: 'conversation', ...(pending ? { draft: pending } : {}) }
@@ -143,7 +158,7 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
         : '请补充希望拿到的结果，以及本次可用的材料或执行时机。', now)
   }
   if (reply.kind !== 'task') return invalid()
-  if (!input.current.text.includes(reply.quote)) return invalid()
+  if (!input.current.text.includes(reply.quote)) return invalid('执行时机 quote 需要逐字引用当前消息中连续的一段原文。')
   const continued = reply.relation === 'continue'
   if (continued && (!pending || reply.draft_revision !== pending.revision || !reply.continuation)) return invalid()
   if (!continued && (reply.draft_revision !== undefined || reply.continuation !== undefined || reply.answer !== undefined)) return invalid()
@@ -157,7 +172,7 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
       '补充内容较长，已暂缓这项草稿。请先放弃该草稿，再将目标与限制整理成一条完整请求。', now, true)
   }
   for (const constraint of reply.constraints) {
-    if (!cited(sources, constraint.source_message_id, constraint.quote)) return invalid()
+    if (!cited(sources, constraint.source_message_id, constraint.quote)) return invalid('约束 ' + constraint.kind + ' 的 source_message_id 与 quote 未共同指向连续原文。')
     if (constraint.kind === 'preserve_input' && !constraint.quote.includes(constraint.target)) return invalid()
     if (constraint.kind === 'approval_before' && ((constraint.action && !constraint.quote.includes(constraint.action))
       || (constraint.reviewer.kind === 'named' && !constraint.quote.includes(constraint.reviewer.name)))) return invalid()
@@ -190,7 +205,12 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
   if (answer && (!old || (old.missing.length > 0 && !old.missing.includes(answer.slot))
     || !input.current.text.includes(answer.quote) || !answer.quote.includes(answer.value) || isOrdinaryChat(answer.value))) return invalid()
   // A model omission cannot relax a prior restriction or silently replace a pinned workflow.
-  const constraints = [...new Map([...old?.constraints ?? [], ...reply.constraints].map(constraint => {
+  const rosterConstraints: TaskRequirement[] = sources.flatMap(source => {
+    const roster = explicitAgentRoster(source.text)
+    return roster && !reply.constraints.some(item => item.kind === 'no_extra_agents' && item.source_message_id === source.message_id)
+      ? [{ id: 'roster', kind: 'no_extra_agents', source_message_id: source.message_id, quote: roster.quote }] : []
+  })
+  const constraints = [...new Map([...old?.constraints ?? [], ...reply.constraints, ...rosterConstraints].map(constraint => {
     const { id: _id, ...meaning } = constraint
     return [JSON.stringify(meaning), meaning] as const
   })).values()].map((constraint, index) => ({ id: 'c' + (index + 1), ...constraint }))
@@ -226,7 +246,7 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
   if (timing === 'unclear' || missing.length) return clarification(
     missing.includes('constraints') ? '任务理解仍有未能映射到可执行约束的原始要求。执行尚未开始。如需调整这些限制，请先说明放弃该草稿，再完整重述任务与限制。' + unresolvedExplanation(unresolved) : '请补充尚缺的交付目标、材料或执行时机。', draft)
   const contract = requirementsContractSchema.safeParse({ version: 1, start_policy: timing, sources, constraints, timing: timingSource })
-  if (!contract.success) return invalid()
+  if (!contract.success) return invalid('原文约束合同没有通过校验：' + schemaLocation(contract.error) + '。')
   return { kind: 'ready', request: { goal: sources.map(source => source.text).join('\n'), requirements: [],
     requirements_contract: contract.data, ...(workflow ? { workflow } : {}) },
     ...(!continued && pending ? { draft: pending } : {}) }

@@ -1,5 +1,5 @@
 import { explicitApprovalNames, requestedTaskTitle, requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
-import { canStartAtRequiredGate, requirementIssues } from './task-requirement-checks.ts'
+import { canStartAtRequiredGate, fixedRosterIssue, requirementIssues } from './task-requirement-checks.ts'
 import { taskAccess } from '../core/task-access.ts'
 import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
@@ -970,7 +970,8 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
           const scored = rows.flatMap((row) => {
             const choice = brief.workflow_id ? readChoice(catalog, registry, row, tx, null)
               : readChoiceSafe(catalog, registry, row, tx, null)
-            return choice && (brief.workflow_id || missingApprovalSteps(approvals, choice.workflow).length === 0)
+            return choice && (brief.workflow_id || (missingApprovalSteps(approvals, choice.workflow).length === 0
+              && (!brief.requirements_contract || !fixedRosterIssue(brief.requirements_contract, choice.workflow.nodes))))
               ? [{ choice, score: relevanceScore(tokens, row) }]
               : []
           })

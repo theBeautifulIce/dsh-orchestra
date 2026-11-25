@@ -1,4 +1,4 @@
-import type { ConstraintBinding, RequirementsContract } from '../core/task-requirements.ts'
+import { explicitAgentRoster, type ConstraintBinding, type RequirementsContract } from '../core/task-requirements.ts'
 import { taskAccess } from '../core/task-access.ts'
 
 export type RequirementNode = {
@@ -32,6 +32,28 @@ function approvalPrecedes(nodes: Map<string, RequirementNode>, approvalId: strin
   return visited.has(approvalId)
 }
 
+export function fixedRosterIssue(contract: RequirementsContract, workflow: readonly Pick<RequirementNode, 'id' | 'type' | 'dependsOn'>[]): string | undefined {
+  const rosters = contract.sources.flatMap(source => explicitAgentRoster(source.text) ?? [])
+  if (!rosters.length) return
+  if (workflow.some(node => node.type === 'subworkflow')) return '任务限定了参与代理，当前不能核实子流程的参与者。'
+  const agents = workflow.filter(node => node.type === 'agent')
+  const incompatible = rosters.find(roster => roster.count && agents.length !== roster.count)
+  if (incompatible) return `任务要求由指定的 ${incompatible.count} 个代理执行，请核对计划人数。`
+  if (rosters.some(roster => roster.parallel)) {
+    const nodes = new Map(workflow.map(node => [node.id, node]))
+    const visited = new Set<string>()
+    const pending = agents.flatMap(node => node.dependsOn)
+    while (pending.length) {
+      const id = pending.pop()!
+      if (visited.has(id)) continue
+      visited.add(id)
+      const node = nodes.get(id)
+      if (node?.type === 'agent') return '任务要求代理并行执行，当前流程让一个代理等待另一个代理结束。'
+      if (node) pending.push(...node.dependsOn)
+    }
+  }
+}
+
 export function requirementIssues(contract: RequirementsContract, proposal: ContractPlan, workflow: readonly RequirementNode[]): string[] {
   const issues: string[] = []
   const nodes = new Map(workflow.map(node => [node.id, node]))
@@ -45,6 +67,8 @@ export function requirementIssues(contract: RequirementsContract, proposal: Cont
     bindings.set(binding.constraint_id, binding)
   }
   const access = taskAccess(contract)
+  const rosterIssue = fixedRosterIssue(contract, workflow)
+  if (rosterIssue) issues.push(rosterIssue)
   if (access.restricted && (proposal.steps.some(step => step.tools.length > 0)
     || workflow.some(node => node.declaredTools.length > 0 || node.type === 'tool' || node.type === 'subworkflow'))) {
     issues.push('任务禁止网络访问或工作区读取。固定命令、工具节点及子流程尚无可信的访问能力证明；请使用受控文本代理和已授权的内部材料。')

@@ -794,7 +794,8 @@ export function installNativeChat(host: Context, options: {
       }
       state.managed = managed
       if (admission.kind === 'held') managed.outcome = { state: 'task_held', message: admission.message }
-      else if (admission.kind === 'clarify') managed.outcome = { state: 'clarification_required', message: admission.message }
+      else if (admission.kind === 'clarify') managed.outcome = { state: 'clarification_required', message: admission.message,
+        ...(admission.invalidReply && { validation_failed: true }) }
       else if (admission.kind === 'discarded') managed.outcome = { state: 'draft_discarded', message: '已放弃这项草稿。' }
       else if (admission.kind === 'ready') {
         try {

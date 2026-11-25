@@ -24,6 +24,7 @@ function requirementLabel(constraint: TaskRequirement): string {
     case 'no_network': return '执行工具不访问网络（模型服务连接不变）'
     case 'read_only': return '仅执行只读操作'
     case 'no_external_send': return '不通过执行工具向外发送内容'
+    case 'no_extra_agents': return '由任务指定的代理执行，返工沿用原有角色'
     case 'report_data_gap': return '如实报告材料缺口，并完成可独立处理的工作'
     case 'preserve_input': return `保持输入材料不变：${constraint.target}`
     case 'approval_before': {
