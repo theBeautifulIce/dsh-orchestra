@@ -61,7 +61,7 @@ export const SEMANTIC_INSTRUCTIONS = [
   'Example: for 不联网，不读写工作区文件。结果返回本会话。 with current.message_id=m1, constraints=[{"id":"c1","kind":"no_network","source_message_id":"m1","quote":"不联网"},{"id":"c2","kind":"no_workspace_read","source_message_id":"m1","quote":"不读写工作区文件"},{"id":"c3","kind":"no_workspace_files","source_message_id":"m1","quote":"不读写工作区文件"},{"id":"c4","kind":"chat_only","source_message_id":"m1","quote":"结果返回本会话"}]. Use the actual current.message_id. All four constraints are supported; missing=[].',
   'approval_before additionally has scope:"task"|"steps", reviewer:{kind:"operator"} or {kind:"named",name:"exact quoted role"}. For steps, action must copy the protected action from the same quote. Pre-start review and in-workflow review are distinct. A request to wait for the operator before a specific calculation is scope steps with reviewer operator, not whole-task deferral. Host tool approval policy is not part of the meaning of the user request. Do not infer a policy conflict or mark constraints missing because the task includes workflow approval.',
   'If the human explicitly names the approval step, include gate_name copied exactly from the same source message. A card name is distinct from its reviewer and the protected action.',
-  'Use report_data_gap when the human explicitly asks the task to handle or report missing data and deliver independent work or partial results. Its quote must be their exact instruction to report the missing input or incomplete work. This is an executable outcome and does not excuse unsupported permissions or missing approvals.',
+  'Use report_data_gap only for a cited instruction to report missing inputs or incomplete work. Expected timeouts, unanswered peer requests, rejection receipts and collaboration errors are ordinary execution results. Keep the reporting instruction in the verbatim goal. For example, 结果和发生的协作异常返回本会话 specifies where to deliver those results. It grants no permission to proceed with missing inputs.',
   'A fixed participant roster is supported. Use kind:"no_extra_agents" and quote only the exact clause such as 不额外启动代理. Peer requests, one permitted attempt, no repeated attempts, keeping the rejection receipt and stating when a test condition was not observed are workflow and reporting instructions: preserve them in the original goal. An unobserved test condition is not a missing input or report_data_gap. Do not invent constraint kinds for these steps.',
   'If a workflow is explicitly requested add workflow:{name,version?,quote,source_message_id}. Copy the name and digits exactly. Preserve an explicit historical version. Ambiguous or unsupported references require missing:["workflow"].',
   'For an actual answer to the supplied draft use relation:"continue", draft_revision equal to the supplied revision, continuation:"supply", and answer:{slot:"materials"|"result",value:"concrete quoted value",quote:"current wording"} when it fills that missing slot.',
@@ -120,9 +120,42 @@ function schemaLocation(error: z.ZodError): string {
     || typeof part === 'string' && /^[a-z_]{1,36}$/u.test(part)).join('.') || 'reply') + ' (' + issue.code + ')').join(', ')
 }
 
+// Reporting a runtime observation is part of the verbatim task. It cannot grant
+// the separate permission to proceed with missing inputs. Keep other validation
+// errors, including untrusted quotes and access boundaries, on the normal path.
+function parseSemanticReply(raw: unknown, input?: SemanticInput) {
+  const parsed = replySchema.safeParse(raw)
+  if (parsed.success || !input || !raw || typeof raw !== 'object'
+    || !('kind' in raw) || raw.kind !== 'task' || !('constraints' in raw) || !Array.isArray(raw.constraints)) return parsed
+  const sources = [input.current, ...('relation' in raw && raw.relation === 'continue' ? input.draft?.sources ?? [] : [])]
+  const observations = new Set<number>()
+  for (const issue of parsed.error.issues) {
+    const [field, index, member] = issue.path
+    if (issue.code !== 'custom' || issue.path.length !== 3 || field !== 'constraints' || typeof index !== 'number' || member !== 'quote') return parsed
+    const entry: unknown = raw.constraints[index]
+    if (!entry || typeof entry !== 'object' || !('kind' in entry) || entry.kind !== 'report_data_gap'
+      || !('quote' in entry) || typeof entry.quote !== 'string' || !entry.quote.trim() || !('source_message_id' in entry)) return parsed
+    const quote = entry.quote.trim()
+    const source = sources.find(item => item.message_id === entry.source_message_id)
+    if (!source?.text.includes(quote)) return parsed
+    const sentences = source.text.match(/[^。！？；;.!?\r\n]+[。！？；;.!?]?/gu) ?? []
+    const matching = sentences.filter(sentence => sentence.includes(quote))
+    if (!matching.length || !matching.every(isExecutionObservation)) return parsed
+    observations.add(index)
+  }
+  return replySchema.safeParse({ ...raw, constraints: raw.constraints.filter((_item, index) => !observations.has(index)) })
+}
+
+function isExecutionObservation(sentence: string) {
+  const subject = /协作|信箱|请求|求助|工具回执|代理|对方|执行状态|运行状态|测试场景|\b(?:collaboration|mailbox|requests?|peers?|receipts?|runtime|test scenario)\b/iu
+  const observation = /异常|超时|拒绝|回应|答复|回复|回执|观察|覆盖|窗口|去重|\b(?:timeout|timed out|reply|response|unanswered|reject\w*|error|observ\w*|receipt|coverage|window)\b/iu
+  const protectedSubject = /材料|输入|数据|缺失|缺少|缺价|缺口|不完整|未完成|无法完成|单价|审批|批准|授权|只读|工作区|文件|联网|网络|外部|凭据|\b(?:data|inputs?|missing|incomplete|price|approv\w*|permissions?|read.only|workspace|files?|network|external|credentials?)\b/iu
+  return subject.test(sentence) && observation.test(sentence) && !protectedSubject.test(sentence)
+}
+
 export function semanticCorrectionHint(raw: unknown, input?: SemanticInput): string | undefined {
-  const result = replySchema.safeParse(raw)
-  if (!result.success) return '请核对任务理解返回的字段 ' + schemaLocation(result.error) + '。只用列出的 kind 和字段。report_data_gap 须逐字引用要求报告缺失材料的原句。'
+  const result = parseSemanticReply(raw, input)
+  if (!result.success) return '请核对任务理解返回的字段 ' + schemaLocation(result.error) + '。report_data_gap 只能引用要求报告缺失材料的原句。若引文是运行状态、协作异常或工具回执，请移除该项分类，将指令留在原文，并保留其他限制。'
   const reply = result.data
   if (reply.kind === 'task' && reply.missing.includes('constraints') && !reply.unresolved.length) return 'missing.constraints 缺少对应的 unresolved 原句。支持的限制应使用其类型，实际未支持的边界须逐字引用。'
   if (!input) return
@@ -139,7 +172,7 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
       : clarification(message + '可以直接重新发送原要求。')
     return { ...result, invalidReply: true as const, validationIssue }
   }
-  const parsed = replySchema.safeParse(raw)
+  const parsed = parseSemanticReply(raw, input)
   if (!parsed.success) return invalid('模型返回的字段没有通过校验：' + schemaLocation(parsed.error) + '。')
   const reply = parsed.data
   if (reply.kind === 'conversation' || reply.kind === 'notes' || reply.kind === 'brain_notes') {
