@@ -15,7 +15,7 @@ export function textTarget(planId: string, contentHash: string, index: number, b
 }
 
 /** Resolve the current producing attempt and recheck its exact bytes. Filenames alone carry no authority. */
-export function readBoundText(tx: Tx, runId: string, nodeId: string, planId: string, hash: string, index: number, now: string) {
+export function readBoundText(tx: Pick<Tx, 'get'>, runId: string, nodeId: string, planId: string, hash: string, index: number, now: string) {
   const node = tx.get<ReworkBinding>(`SELECT node_run_id,attempt,action_generation FROM node_runs
     WHERE run_id=? AND node_id=? AND replacement_node_run_id IS NULL ORDER BY attempt DESC,seq DESC LIMIT 1`, [runId,nodeId])
   if (!node) return null

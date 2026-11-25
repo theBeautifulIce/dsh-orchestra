@@ -1,5 +1,6 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { createDshJsonCompletion } from '../../src/executor/dsh-json.ts'
+import { semanticResponseNeedsCorrection } from '../../src/service/semantic-admission.ts'
 
 type Runtime = NonNullable<Parameters<typeof createDshJsonCompletion>[0]>
 const route = { provider: 'fixture', model: 'selected', reasoningEffort: 'low' }
@@ -58,4 +59,48 @@ it('keeps real provider slots occupied after cancellation and recovers when they
   blocked.resolve()
   await new Promise<void>(resolve => setImmediate(resolve))
   await expect(complete(route, 'interpret', {}, new AbortController().signal, current)).resolves.toEqual({})
+})
+
+function responseQueue(texts: string[]) {
+  const systems: string[] = []
+  const prepareCall = vi.fn(async (config: unknown) => ({ config, async *stream({ system }: { system: string }) {
+    const text = texts[systems.length]
+    systems.push(system)
+    if (text === undefined) throw new Error('unexpected model retry')
+    yield { type: 'block-end', block: { type: 'text', text } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  } }))
+  return { llm: { prepareCall } as unknown as Runtime, prepareCall, systems }
+}
+
+const badContract = '{"kind":"task","relation":"new","timing":"held","quote":"先不要执行","constraints":[],"missing":["materials","constraints"]}'
+const malformedJson = '{"kind":'
+
+it.each([
+  { first: malformedJson, second: badContract, final: 'contract' },
+  { first: badContract, second: malformedJson, final: 'syntax' },
+])('shares a single admission retry across JSON and contract correction (last error: $final)', async ({ first, second, final }) => {
+  const model = responseQueue([first, second, '{"kind":"conversation"}'])
+  const complete = createDshJsonCompletion(model.llm, 'admission')!
+  const result = complete(route, 'interpret', { text: '先不要执行' }, new AbortController().signal, current, semanticResponseNeedsCorrection)
+  if (final === 'syntax') {
+    await expect(result).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE', details: { reason: 'semantic_output_invalid' } })
+  } else {
+    expect(semanticResponseNeedsCorrection(await result)).toBe(true)
+  }
+  expect(model.prepareCall).toHaveBeenCalledTimes(2)
+  expect(model.systems[0]).not.toContain('Return exactly one complete JSON object')
+  expect(model.systems[1]).toContain('Return exactly one complete JSON object')
+})
+
+it.each([malformedJson, badContract])('never retries permission transport or invokes admission correction (%s)', async first => {
+  const model = responseQueue([first, '{"kind":"conversation"}'])
+  const complete = createDshJsonCompletion(model.llm, 'permission')!
+  const needsCorrection = vi.fn(() => true)
+  const result = complete(route, 'review permission', {}, new AbortController().signal, current, needsCorrection)
+  if (first === malformedJson) await expect(result).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' })
+  else await expect(result).resolves.toEqual(JSON.parse(first))
+  expect(model.prepareCall).toHaveBeenCalledOnce()
+  expect(needsCorrection).not.toHaveBeenCalled()
+  expect(model.systems[0]).not.toContain('Return exactly one complete JSON object')
 })

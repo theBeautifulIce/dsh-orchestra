@@ -65,6 +65,23 @@ it('a claimed constraint must cite the original form and ambiguity produces no w
   await expect(held.read({ goal: '先别启动这项任务', requirements: [] }, signal())).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
 })
 
+it('rejects two consecutive bad interpretations without looking up a workflow or trying a third model call', async () => {
+  let attempts = 0
+  const f = setup(input => {
+    attempts++
+    if (attempts === 1) return { ...task(input), missing: ['constraints'], unresolved: [] }
+    return { ...task(input),
+      constraints: [{ id: 'x', kind: 'read_only', source_message_id: input.current.message_id, quote: '不存在的授权' }],
+      workflow: { name: '月报', quote: '用月报流程', source_message_id: input.current.message_id },
+    }
+  })
+  await expect(f.read({ goal: '用月报流程整理报告', requirements: [] }, signal()))
+    .rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' })
+  expect(f.stream).toHaveBeenCalledTimes(2)
+  expect(f.model).toHaveBeenCalledOnce()
+  expect(f.resolveWorkflow).not.toHaveBeenCalled()
+})
+
 it('resolves textual pins exactly and preserves a selected historical version when the text names only the workflow', async () => {
   const f = setup(input => ({ ...task(input), workflow: { name: '月报', quote: '用月报流程', source_message_id: input.current.message_id } }))
   const value = await f.read({ goal: '用月报流程整理数据', requirements: [], workflow_id: 'wf-report', workflow_version: '2' }, signal())

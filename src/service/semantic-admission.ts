@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { uuidv7 } from '../core/ids.ts'
-import { requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
+import { explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
 import { isOrdinaryChat, explicitNotesRequest } from './chat-task-intent.ts'
 
 const quote = z.string().trim().min(1).max(2000)
@@ -46,13 +46,16 @@ export const SEMANTIC_INSTRUCTIONS = [
   'Ask only for information essential to a correct result that cannot be obtained during execution. Named public sources in a research request are materials to retrieve, not a missing upload. Do not label the result missing when the request already names the wanted answer or output. Missing tool access is an execution capability issue, not a missing user goal.',
   'Task goals missing only a material or output are still task proposals with missing ["materials"] or ["result"]. Other missing values are goal, timing, constraints, workflow. If no reliable task can be established use {"kind":"clarify","missing":[...]}.',
   'Whole-task deferral is held. Asking only for a plan is plan_only. A contradiction not explicitly resolved is unclear. Scope every negative clause to its actual subject. Protecting an input does not cancel a separate deferral.',
+  '“Wait for me to supply data and requirements later” is a held task. Future details the human has not stated are not an unresolved restriction. Reserve missing:["constraints"] for an actual operative boundary, and cite it in unresolved. A supply turn can fill one of several missing slots while the task stays held.',
   'Typed constraints cover execution, storage, human approval and external delivery boundaries. Ordinary style, length, factual requirements and acceptance details stay in the verbatim goal and do not require a special constraint kind.',
   'The configured model transport and Orchestra internal ledger, artifact registration, collaboration and approvals are infrastructure, not task network or workspace tools. Ordinary 不联网 / offline task means no_network (no task-tool network access); 不读取工作区文件 means no_workspace_read; 不写工作区文件 means no_workspace_files; 不读写工作区文件 means BOTH no_workspace_read and no_workspace_files. These are supported restrictions, not missing constraints. An explicit prohibition of remote model transport or ALL persistence is still unsupported and must be clarified, never weakened.',
   'no_external_send means no external delivery or external-write tools, not a prohibition on ordinary read-only retrieval. Scope negative clauses correctly. A request to use only supplied data and return results in chat is executable without external tools.',
-  'Each constraint has id, kind, source_message_id, quote. kind can be chat_only, no_workspace_files, no_workspace_read, no_network, read_only, no_external_send, preserve_input, approval_before. Include every operative restriction. If a restriction cannot be expressed, set missing:["constraints"] and unresolved:[{source_message_id,quote}] for the exact unresolved restriction. An unresolved boundary remains pending in this draft. The model cannot resolve it by relabeling the old quote. To replace such a boundary the operator must discard the draft and submit a complete new request.',
+  'Each constraint has id, kind, source_message_id, quote. kind can be chat_only, no_workspace_files, no_workspace_read, no_network, read_only, no_external_send, preserve_input, approval_before, report_data_gap. Include every operative restriction. If a restriction cannot be expressed, set missing:["constraints"] and unresolved:[{source_message_id,quote}] for the exact unresolved restriction. An unresolved boundary remains pending in this draft. The model cannot resolve it by relabeling the old quote. To replace such a boundary the operator must discard the draft and submit a complete new request.',
   'preserve_input additionally has target copied from its quote. It protects the specific input, while read_only covers all operations. no_workspace_files prohibits creating or modifying workspace files; it does not prohibit reading. no_workspace_read prohibits workspace reads. no_network prohibits task-tool network access. chat_only chooses chat delivery.',
   'Example: for 不联网，不读写工作区文件。结果返回本会话。 with current.message_id=m1, constraints=[{"id":"c1","kind":"no_network","source_message_id":"m1","quote":"不联网"},{"id":"c2","kind":"no_workspace_read","source_message_id":"m1","quote":"不读写工作区文件"},{"id":"c3","kind":"no_workspace_files","source_message_id":"m1","quote":"不读写工作区文件"},{"id":"c4","kind":"chat_only","source_message_id":"m1","quote":"结果返回本会话"}]. Use the actual current.message_id. All four constraints are supported; missing=[].',
   'approval_before additionally has scope:"task"|"steps", reviewer:{kind:"operator"} or {kind:"named",name:"exact quoted role"}. For steps, action must copy the protected action from the same quote. Pre-start review and in-workflow review are distinct. A request to wait for the operator before a specific calculation is scope steps with reviewer operator, not whole-task deferral. Host tool approval policy is not part of the meaning of the user request. Do not infer a policy conflict or mark constraints missing because the task includes workflow approval.',
+  'If the human explicitly names the approval step, include gate_name copied exactly from the same source message. A card name is distinct from its reviewer and the protected action.',
+  'Use report_data_gap when the human explicitly asks the task to handle or report missing data and deliver independent work or partial results. Its quote must be their exact instruction to report the missing input or incomplete work. This is an executable outcome and does not excuse unsupported permissions or missing approvals.',
   'If a workflow is explicitly requested add workflow:{name,version?,quote,source_message_id}. Copy the name and digits exactly. Preserve an explicit historical version. Ambiguous or unsupported references require missing:["workflow"].',
   'For an actual answer to the supplied draft use relation:"continue", draft_revision equal to the supplied revision, continuation:"supply", and answer:{slot:"materials"|"result",value:"concrete quoted value",quote:"current wording"} when it fills that missing slot.',
   'A draft with missing:[] can be a complete request whose planning or startup did not succeed. Preserve its goal and restrictions when the human supplies details. Use continuation:"supply" without answer for such details; use continuation:"resume" for an explicit instruction to retry or proceed. A planning failure does not revoke the original requested timing.',
@@ -99,6 +102,14 @@ function separated(text: string, a: string, b: string): boolean {
 }
 const requested = new Set<Missing>(['goal', 'result', 'materials'])
 
+/** A well-formed clarification or an actual unresolved restriction needs no model retry. */
+export function semanticResponseNeedsCorrection(raw: unknown): boolean {
+  const result = replySchema.safeParse(raw)
+  if (!result.success) return true
+  const reply = result.data
+  return reply.kind === 'task' && reply.missing.includes('constraints') && !reply.unresolved.length
+}
+
 /** Validates a proposal against actual user sources. No writes or launch happen here. */
 export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, now = Date.now()): SemanticOutcome {
   const pending = input.draft && input.draft.expires_at > now ? input.draft : undefined
@@ -141,6 +152,15 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
     if (constraint.kind === 'preserve_input' && !constraint.quote.includes(constraint.target)) return invalid()
     if (constraint.kind === 'approval_before' && ((constraint.action && !constraint.quote.includes(constraint.action))
       || (constraint.reviewer.kind === 'named' && !constraint.quote.includes(constraint.reviewer.name)))) return invalid()
+    if (constraint.kind === 'approval_before' && constraint.scope === 'steps') {
+      const source = sources.find(item => item.message_id === constraint.source_message_id)!
+      const singleGate = reply.constraints.filter(c => c.kind === 'approval_before' && c.scope === 'steps'
+        && c.source_message_id === source.message_id).length === 1
+      const names = explicitApprovalNames(singleGate ? source.text : constraint.quote)
+      if (constraint.gate_name && (!source.text.includes(constraint.gate_name)
+        || (names.length > 0 && !names.includes(constraint.gate_name)))) return invalid()
+      if (names.length === 1) constraint.gate_name = names[0]!
+    }
   }
   if (reply.unresolved.some(item => !cited(sources, item.source_message_id, item.quote))) return invalid()
   const pin = reply.workflow
@@ -158,7 +178,7 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
     }
   }
   const answer = reply.answer
-  if (answer && (!old || (old.missing.length > 0 && (old.missing.length !== 1 || old.missing[0] !== answer.slot))
+  if (answer && (!old || (old.missing.length > 0 && !old.missing.includes(answer.slot))
     || !input.current.text.includes(answer.quote) || !answer.quote.includes(answer.value) || isOrdinaryChat(answer.value))) return invalid()
   // A model omission cannot relax a prior restriction or silently replace a pinned workflow.
   const constraints = [...new Map([...old?.constraints ?? [], ...reply.constraints].map(constraint => {
@@ -184,7 +204,9 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
     if (timing === 'immediate' && old.missing.length > 0
       && (!answer || !old.missing.every(slot => requested.has(slot)))) timing = 'unclear'
   }
-  const missing = [...new Set([...reply.missing, ...(unresolved.length ? ['constraints' as const] : [])])]
+  // A supply can fill one slot. It cannot silently clear the others or lift a hold.
+  const unanswered = old && reply.continuation === 'supply' && answer ? old.missing.filter(slot => slot !== answer.slot) : []
+  const missing = [...new Set([...unanswered, ...reply.missing, ...(unresolved.length ? ['constraints' as const] : [])])]
   if (!continued && pending && (timing === 'held' || timing === 'unclear' || missing.length)) {
     return clarification('当前保留着上一项待补充或暂缓的任务。请先说明继续或放弃上一项，再建立另一项待补任务。', pending)
   }

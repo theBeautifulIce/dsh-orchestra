@@ -16,7 +16,7 @@ import { executionCompletionSchema } from '../core/execution-completion.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, findChatPlan, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
-import { readChatArtifactContent, readChatTextPreviews } from './chat-text-previews.ts'
+import { readChatArtifactContent, readChatTextPreviews, readCompletedChatTextPreviews } from './chat-text-previews.ts'
 import { orchestraCommand, explicitNotesRequest } from './chat-task-intent.ts'
 import { createSemanticSession, type SemanticInput, type SemanticRequest } from './semantic-admission.ts'
 import { resolveSemanticWorkflow } from './semantic-workflow.ts'
@@ -278,8 +278,9 @@ function describeRun(service: Service, runId: string, operator: string) {
     run_id: runId, task_id: run.task_id, title: run.task_title, status: run.status, terminal,
     counts: run.counts, settling: run.settling, delivery_checks: run.delivery_checks?.items ?? [],
     ...(task?.current_run_id === runId ? { acceptance: task.delivery_acceptance, goal_met: task.goal_met } : {}),
-    ...(terminal && { text_results: readChatTextPreviews(db, runId, run.delivery_checks?.items ?? []),
-      failure_details: describeFailedSteps(db, runId) }),
+    text_results: terminal ? readChatTextPreviews(db, runId, run.delivery_checks?.items ?? [])
+      : coordination.length || blocking.some(node => node.action_required) ? readCompletedChatTextPreviews(db, runId) : [],
+    ...(terminal && { failure_details: describeFailedSteps(db, runId) }),
     decisions, blocking,
     nativeApprovals, coordination,
     deliveryReviews: !terminal && service.rework ? listChatDeliveryReviews(db, runId, operator) : [],
@@ -436,8 +437,10 @@ function nextReport(view: ReturnType<typeof describeRun>, previous: string | nul
   const blocking = view.blocking.filter((node) => node.action_required)
     .map(({ node_run_id, title, status, attempt, reason }) => ({ node_run_id, title, status, attempt, reason }))
   const coordination = view.coordination.map(item => ['coordination',item.id,item.state])
-  const active = [...decisions, ...reviews, ...rework, ...blocking, ...nativeApprovals, ...coordination].map((action) => sha256Hex(JSON.stringify(action))).sort()
-  if (!active.length) return
+  const actions = [...decisions, ...reviews, ...rework, ...blocking, ...nativeApprovals, ...coordination]
+  if (!actions.length) return
+  const publications = view.text_results.map(item => ['completed_text', item.artifact_id, item.sha256])
+  const active = [...actions, ...publications].map(action => sha256Hex(JSON.stringify(action))).sort()
   const prefix = 'actions:v2:'
   const key = prefix + active.join(',')
   if (previous?.startsWith(prefix)) {

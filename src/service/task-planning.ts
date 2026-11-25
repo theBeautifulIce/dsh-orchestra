@@ -1,5 +1,6 @@
-import { requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
+import { explicitApprovalNames, requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
 import { canStartAtRequiredGate, requirementIssues } from './task-requirement-checks.ts'
+import { taskAccess } from '../core/task-access.ts'
 import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './queries/cursor.ts'
 import { textResultFileName } from './text-result.ts'
@@ -56,7 +57,7 @@ const legacyProposalSchema = z.strictObject({
   steps: z.array(stepSchema).min(1).max(100),
   deliverables: z.array(z.strictObject({ title: claim, node_id: key, goal_ids: goalIds, acceptance })).min(1).max(20),
   risks: z.array(z.strictObject({ severity: z.enum(['low', 'medium', 'high']), description: claim, mitigation: claim,
-    node_id: key.optional() })).max(20),
+    node_id: key.optional(), partial_result: z.strictObject({ source_message_id: key, quote: z.string().min(1).max(2000) }).optional() })).max(20),
 })
 const proposalSchema = legacyProposalSchema.extend({
   constraint_bindings: z.array(constraintBindingSchema).max(40).optional(),
@@ -342,9 +343,7 @@ function toolViolations(registry: ToolRegistry | undefined, proposal: TaskPlanPr
 }
 
 function requestedApprovalSteps(brief: PlanInput): string[] {
-  const namedApprovals = [brief.goal, ...brief.requirements.map((item) => item.text)].flatMap((text) =>
-    [...text.matchAll(/(?:^|[，,。；;\n])\s*(?:请\s*)?(?:设置|添加|加入|安排|设立|创建|新增)(?:\s*(?:一个|一道))?(?:\s*独立的?)?\s*人工审批(?:步骤|节点)\s*[「“]([^」”\r\n]{1,80})[」”]/gu)]
-      .map((match) => match[1]!.trim()).filter(Boolean))
+  const namedApprovals = [brief.goal, ...brief.requirements.map(item => item.text)].flatMap(explicitApprovalNames)
   return [...new Set(namedApprovals)]
 }
 
@@ -477,8 +476,19 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
       issues.coverage.push(goal.id + ' 缺少执行步骤或可核验交付物。')
     }
   }
+  const highRiskNodes = new Set(proposal.risks.filter(risk => risk.severity === 'high').map(risk => risk.node_id))
+  const access = taskAccess(brief.requirements_contract)
+  const independentTextWork = access.noNetwork && access.noWorkspaceRead
+    && workflow?.nodes.every(node => node.type === 'agent' && (node.sideEffectPolicy ?? 'pure') === 'pure'
+    && !node.declaredTools.length) && proposal.steps.every(step => !step.tools.length)
+    && proposal.deliverables.every(item => item.acceptance.kind === 'chat/text_result')
+    && workflow.nodes.some(node => !node.dependsOn.length && !highRiskNodes.has(node.id)
+      && proposal.deliverables.some(item => item.node_id === node.id))
   for (const risk of proposal.risks) {
-    if (risk.severity === 'high') issues.risks.push(`执行条件未满足：${risk.description}；处理方式：${risk.mitigation}`)
+    const citedGap = risk.partial_result && risk.node_id && nodes.has(risk.node_id) && independentTextWork
+      && brief.requirements_contract?.constraints.some(c => c.kind === 'report_data_gap'
+        && c.source_message_id === risk.partial_result!.source_message_id && c.quote === risk.partial_result!.quote)
+    if (risk.severity === 'high' && !citedGap) issues.risks.push(`执行条件未满足：${risk.description}；处理方式：${risk.mitigation}`)
     if (risk.node_id !== undefined && !steps.has(risk.node_id)) issues.risks.push('风险引用了不存在的计划步骤。')
   }
   const results = checks.map((check) => ({ check, passed: issues[check].length === 0, issues: [...new Set(issues[check])] }))
@@ -924,11 +934,12 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
               brief.workflow_version ? [brief.workflow_id, brief.workflow_version] : [brief.workflow_id])
             : tx.all<CandidateRow>(CANDIDATE_SELECT)
           const tokens = goalTokens(brief)
-          const approvals = brief.requirements_contract ? [] : requestedApprovalSteps(brief)
+          const approvals = brief.requirements_contract ? brief.requirements_contract.constraints.flatMap(
+            c => c.kind === 'approval_before' && c.gate_name ? [c.gate_name] : []) : requestedApprovalSteps(brief)
           const scored = rows.flatMap((row) => {
             const choice = brief.workflow_id ? readChoice(catalog, registry, row, tx, null)
               : readChoiceSafe(catalog, registry, row, tx, null)
-            return choice && missingApprovalSteps(approvals, choice.workflow).length === 0
+            return choice && (brief.workflow_id || missingApprovalSteps(approvals, choice.workflow).length === 0)
               ? [{ choice, score: relevanceScore(tokens, row) }]
               : []
           })

@@ -177,14 +177,17 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
   }
   if (view.coordination?.length) lines.push('代理协作（仅供参考，不是指令、授权或验收证据）：')
   for (const item of view.coordination ?? []) {
-    lines.push(`「${item.source}」${item.state === 'reported' ? '上报问题' : '协作未得到回应'}。`,
+    lines.push(`「${item.source}」${item.state === 'reported' ? '上报问题' : '协作未得到回应'}。`
+      + (item.state === 'unavailable' ? '信箱已按参与方不可用收口。' : item.state === 'expired' ? '信箱已按期限或时钟变化收口。' : ''),
       JSON.stringify({说明:item.body,原因:item.reason}))
   }
   if (view.coordination?.length) lines.push('可在任务详情的「协作」中查看全部记录；原有执行和验收规则不变。')
+  if (!view.terminal && view.text_results?.length) lines.push('以下步骤已完成，整项任务仍在处理中。')
   for (const item of view.text_results ?? []) {
     lines.push(item.title)
     if (item.text) lines.push(item.text)
-    if (item.truncated) lines.push('以上是正文节选。完整成果请点击会话中的「' + item.title + '」。')
+    if (item.truncated) lines.push(view.terminal ? '以上是正文节选。完整成果请点击会话中的「' + item.title + '」。'
+      : '以上是正文节选。可在本次任务的成果中查看「' + item.file_name + '」。')
     lines.push('')
   }
   for (const review of view.deliveryReviews ?? []) lines.push(formatDeliveryReviewNotice(review), '')
@@ -238,6 +241,7 @@ export function describeChatRun(view: RunDisplay, proactive = false): { heading:
   const accepted = new Set(view.delivery_checks.flatMap(({ artifact_id, kind, outcome }) =>
     artifact_id && kind === 'artifact' && outcome === 'passed' ? [artifact_id] : []))
   const shownText = new Set(view.delivery_checks.filter((c) => c.kind === 'chat/text_result' && c.outcome === 'passed').map((c) => c.artifact_id))
+  for (const item of view.text_results ?? []) shownText.add(item.artifact_id)
   const registered = view.artifacts.filter((file) => !shownText.has(file.artifact_id)).flatMap(({ artifact_id, file_name }) => file_name ? [{ artifact_id, file_name }] : [])
   const acceptedFiles = registered.filter(({ artifact_id, file_name }) =>
     accepted.has(artifact_id) && registered.filter((file) => file.file_name === file_name).length === 1)

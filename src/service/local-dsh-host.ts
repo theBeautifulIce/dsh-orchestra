@@ -14,7 +14,7 @@ import { artifactReceiptLocation, type ArtifactReceiptLocation } from '../core/r
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type ToolDescriptor } from '../executor/tools.ts'
 import { createDshJsonCompletion } from '../executor/dsh-json.ts'
-import { SEMANTIC_INSTRUCTIONS } from './semantic-admission.ts'
+import { SEMANTIC_INSTRUCTIONS, semanticResponseNeedsCorrection } from './semantic-admission.ts'
 import { createWindowsReadOnlyHost } from '../executor/windows-readonly-host.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
@@ -462,7 +462,7 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           if (!complete) throw new OrchError('SERVICE_UNAVAILABLE', '当前模型服务没有可用的任务理解接口，请检查服务后重试', { reason: 'semantic_unavailable' })
           const fallback = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined
           const selection = agent.model.current() ?? fallback?.currentSelection()
-          return complete(selection, SEMANTIC_INSTRUCTIONS, input, signal, assertCurrent)
+          return complete(selection, SEMANTIC_INSTRUCTIONS, input, signal, assertCurrent, semanticResponseNeedsCorrection)
         },
         autoRouteEnabled() {
           if (!settings) throw new OrchError('SERVICE_UNAVAILABLE', '无法读取此 Desktop 用户的自动接管设置')

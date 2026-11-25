@@ -49,6 +49,9 @@ const STATUS: Readonly<Record<string, string>> = {
 }
 
 const REASON: Readonly<Record<Lowercase<AnyOrchErrorCode>, string> & Record<string, string>> = {
+  agent_spawn_rejected: '宿主拒绝了这一步的执行会话。请核对来源会话、节点工具权限和执行模型后重试。',
+  execution_report_invalid: '执行会话返回了正文，但缺少可核验的完成报告。可在成果中查看已登记内容。',
+  execution_preset_unavailable: '当前 DSH 没有插件所选的全权限预设。可在 Orchestra 设置中选择「跟随来源会话」后重试。',
   evidence_missing: '现有记录缺少完成核验所需的执行证据。',
   model_assignment_unavailable: '暂时没有可用于这一步的模型。请在模型设置中核对可用模型和这一步要求的能力。',
   model_assignment_unconfirmed: '执行端尚未确认使用了指定模型。请在步骤详情中核对实际使用的模型。',
@@ -245,7 +248,9 @@ export function operatorReason(value: unknown): string {
     const status = lookup(STATUS, key.slice('final_status_'.length))
     return status ? `步骤结束时的状态为「${status}」。` : UNKNOWN_REASON
   }
-  return isPlainReason(text) ? text : UNKNOWN_REASON
+  if (isPlainReason(text)) return text
+  if (text.startsWith('执行条件未满足：')) return '计划列出了一项尚未满足的执行条件。请在计划的「确认前要了解的风险」查看该项及处理方式。'
+  return UNKNOWN_REASON
 }
 
 export function operatorStatus(value: unknown): string {

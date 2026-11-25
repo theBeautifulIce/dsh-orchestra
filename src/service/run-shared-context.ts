@@ -2,6 +2,8 @@ import { makeTx, type Db } from '../infra/sqlite/driver.ts'
 import { createProjectContextStore, projectPromptContext, type ProjectContextSource } from './project-shared-context.ts'
 import type { ArtifactInput } from './rework-runtime.ts'
 import { readApprovedTaskPlanForRun, type TaskPlanView } from './task-planning.ts'
+import { readRunRequirementsContract } from './native-execution-policy.ts'
+import { taskAccess } from '../core/task-access.ts'
 
 export const TASK_CONTEXT_BYTES = 4096
 
@@ -45,7 +47,8 @@ export function createRunSharedContext(db: Db, source: ProjectContextSource) {
     const tx = makeTx(db.raw)
     const node = tx.get<{ run_id: string }>('SELECT run_id FROM node_runs WHERE node_run_id=?', [nodeRunId])
     if (!node) return
-    const project = projectPromptContext(await projects.forRun(node.run_id))
+    const contract = readRunRequirementsContract(tx, node.run_id)
+    const project = taskAccess(contract).noWorkspaceRead ? undefined : projectPromptContext(await projects.forRun(node.run_id))
     if (!source.isAuthorized()) return
     if (!plans.has(node.run_id)) {
       if (plans.size >= 64) plans.delete(plans.keys().next().value!)

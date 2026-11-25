@@ -1,25 +1,41 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution, ToolExecutionResult, PreToolDecision } from '@deepseek-ai/dsh-tools'
+import { rmSync } from 'node:fs'
 import { expect, it, vi } from 'vitest'
 import { createDshExecutor } from '../../src/executor/dsh-host.ts'
 import { dshCapabilitySnapshot, nativeToolConstraint } from '../../src/executor/dsh-execution-capabilities.ts'
+import { PUBLIC_READ_TOOL } from '../../src/executor/public-read.ts'
 import type { ExecutionPermissionMode } from '../../src/core/execution-permissions.ts'
 import type { RequirementsContract } from '../../src/core/task-requirements.ts'
+import { withTx } from '../../src/infra/sqlite/driver.ts'
+import { registerRunArtifact } from '../../src/service/artifact-store.ts'
+import { callDshRework } from '../../src/service/dsh-rework.ts'
+import { createReworkHost } from '../../src/service/rework-coordinator.ts'
+import { snapshotArtifactInputs } from '../../src/service/rework-runtime.ts'
+import { freshLedger, TEST_SECRET } from '../fixtures/ledger.ts'
 
 type Options = Parameters<typeof createDshExecutor>[0]
+type Definition = Parameters<Context['tools']['register']>[0]
 type Agent = NonNullable<ReturnType<Options['parentForNode']>>
 type Pre = (exec: ToolExecution, next: () => Promise<PreToolDecision>) => Promise<PreToolDecision>
 type Around = (exec: ToolExecution, next: () => Promise<ToolExecutionResult>) => Promise<ToolExecutionResult>
 
-function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'allow', effect: 'read', reason: '任务要求读取公开资讯。' }, requirementsContract?: RequirementsContract) {
+function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'allow', effect: 'read', reason: '任务要求读取公开资讯。' },
+  requirementsContract?: RequirementsContract, rework?: Options['rework']) {
   const route = { provider: 'p', model: 'm' }
   const live = new Map<string, unknown>()
   const presetWrites: string[] = []
   const events: Array<{ type: string; data: any }> = []
+  const prompts: string[] = []
   const tools = new Set(['skill', 'bili_hot', 'read', 'write', 'pwsh', 'memory_write'])
   const definitions = new Map([...tools].map(name => [name, { name }]))
+  const local = new Map<string, Definition>()
   const pending = vi.fn(() => vi.fn())
-  const idle = Promise.withResolvers<void>()
+  let idle = Promise.withResolvers<void>()
+  let markIdle = () => {}
+  let publicSkill = false
+  const listSkills = vi.fn(async () => publicSkill
+    ? [{ name: 'aihot', description: '读取公开资讯', invocation: { modelInvocable: true } }] : [])
   let authorized = true
   let agent!: Agent
   let pre!: Pre
@@ -31,23 +47,30 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
     set: (_session: unknown, name: string) => { presetWrites.push(name) } }
   const get = (name: string): unknown => name === 'tools' ? toolRegistry : name === 'permissionPresets' ? preset
     : name === 'sandboxPolicy' ? { overrideOf: () => 'workspace-write' }
-      : name === 'approval' ? { overrideOf: () => 'ask', config: { policy: 'ask' } } : undefined
+      : name === 'approval' ? { overrideOf: () => 'ask', config: { policy: 'ask' } }
+        : name === 'skills' ? { list: listSkills } : undefined
   const toolRegistry = { get: (name: string) => tools.has(name) ? definitions.get(name) : undefined,
     schemas: () => [...tools].map(name => ({ name, description: name })),
-    restrict, register() {}, guard: (fn: typeof guard) => { guard = fn } }
+    restrict, register(definition: Definition) { local.set(definition.name, definition) }, guard: (fn: typeof guard) => { guard = fn } }
   const parent = { session: { id: 'source', header: { cwd: process.cwd() } }, model: { current: () => route },
     ctx: { get, tools: toolRegistry, agents: { async create(options: { sessionId: string; setup: (ctx: unknown, child: Agent) => void }) {
-      const child = { session: { id: options.sessionId, header: { cwd: process.cwd() }, snapshotEvents: () => events,
-        append: (type: string, data: unknown) => { events.push({ type, data }) } },
-      status: 'idle', model: { current: () => route, select() {} },
-      followup() { child.status = 'running'; events.push({ type: 'request/header', data: { header: { config: route } } }) },
-      whenIdle: () => idle.promise, cancel() { child.status = 'idle'; idle.resolve() },
-      }
       const ctx = { get, tools: toolRegistry, on(name: string, fn: any) {
         if (name === 'tools/pre-execute') pre = fn
         if (name === 'tools/execute') around = fn
         if (name === 'tools/result') resultEvent = fn
       } }
+      const child = { session: { id: options.sessionId, header: { cwd: process.cwd() }, snapshotEvents: () => events,
+        append: (type: string, data: unknown) => { events.push({ type, data }) } },
+      ctx, status: 'idle', model: { current: () => route, select() {} },
+      followup(message: { content: Array<{ text: string }> }) {
+        prompts.push(message.content[0]!.text)
+        idle = Promise.withResolvers<void>()
+        child.status = 'running'
+        events.push({ type: 'request/header', data: { header: { config: route } } })
+      },
+      whenIdle: () => idle.promise, cancel() { child.status = 'idle'; idle.resolve() },
+      }
+      markIdle = () => { child.status = 'idle' }
       agent = child as unknown as Agent
       options.setup(ctx, agent)
       live.set(options.sessionId, agent)
@@ -63,7 +86,7 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
   } } as unknown as Context
   const host = createDshExecutor({ context, parentForNode: () => authorized ? parent as unknown as Agent : undefined,
     models: [{ ...route, ref: 'p/m', capacity: 'routine' }], recommend: () => ({ complexity: 'routine', reason: 'test' }),
-    executionPermissionMode: () => mode, onNativeApprovalPending: pending,
+    executionPermissionMode: () => mode, onNativeApprovalPending: pending, rework,
     nativeToolPolicyForNode: () => ({ sideEffectPolicy: 'pure', ...(requirementsContract ? { requirementsContract } : {}) }),
   })
   async function start() {
@@ -74,18 +97,39 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
   }
   const call = (name: string, id = name): ToolExecution => ({ agent, name, arguments: {}, callId: id, rootCallId: id,
     token: Symbol(id), signal: new AbortController().signal }) as unknown as ToolExecution
-  return { host, start, tools, pending, presetWrites, restrict, events, call,
+  function finishText(text: string) {
+    events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } },
+      { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    markIdle()
+    idle.resolve()
+  }
+  return { host, start, tools, pending, presetWrites, restrict, events, prompts, call, listSkills,
+    enablePublicSkill: () => { publicSkill = true },
+    hasLocalTool: (name: string) => local.has(name),
     revokeSource: () => { authorized = false },
     replaceSource: () => { live.set('source', {}) },
     parent: parent as unknown as Agent,
     pre: (exec: ToolExecution, next: PreToolDecision = { kind: 'allow' }) => pre(exec, async () => next),
     guard: (exec: ToolExecution) => guard(exec),
     run: (exec: ToolExecution, next: () => Promise<ToolExecutionResult>) => around(exec, next),
+    async executeLocal(name: string, input: object, id: string) {
+      const execution = { ...call(name, id), arguments: input }
+      const decision = await pre(execution, async () => ({ kind: 'allow' }))
+      expect(decision).toEqual({ kind: 'allow' })
+      expect(guard(execution)).toBeUndefined()
+      const result = await around(execution, async () => {
+        const value = await local.get(name)!.execute(input, { ...execution, deferContext() {}, concludeTurn() {} })
+        if (typeof value !== 'object' || value === null || !('text' in value) || typeof value.text !== 'string') {
+          throw new Error('Expected an internal tool text receipt')
+        }
+        return { content: [], isError: false, value: { text: value.text } }
+      })
+      return JSON.parse((result.value as { text: string }).text)
+    },
     finishCall: (exec: ToolExecution, result: ToolExecutionResult = { content: [], isError: false, value: {} }) => resultEvent(exec, result),
+    finishText,
     finish(report: unknown = { status: 'done', output: { summary: '已核对公开资讯。', completion: { outcome: 'completed' } } }) {
-      events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: JSON.stringify(report) }] } } },
-      { type: 'turn/end', data: { reason: { kind: 'completed' } } })
-      idle.resolve()
+      finishText(JSON.stringify(report))
     },
   }
 }
@@ -222,6 +266,94 @@ it.each(['blocked', 'failed', 'completed'] as const)('授权结束后保留%s回
   } finally { await f.host.close() }
 })
 
+it.each(['valid', 'repair', 'still malformed', 'expired'] as const)(
+'成果读取范围和一次无工具补报在真实执行宿主保持有效（%s）', async scenario => {
+  const { db, dir } = freshLedger()
+  const host = createReworkHost(db, TEST_SECRET)
+  const rework = vi.fn<NonNullable<Options['rework']>>((binding, input) => callDshRework(db, host, binding, input))
+  const source = { message_id: 'm', text: '不联网，不读写工作区文件' }
+  const f = fixture('inherit', undefined, { version: 1, start_policy: 'immediate', sources: [source], constraints: [
+    { id: 'net', kind: 'no_network', source_message_id: source.message_id, quote: '不联网' },
+    { id: 'read', kind: 'no_workspace_read', source_message_id: source.message_id, quote: '不读写工作区文件' },
+    { id: 'write', kind: 'no_workspace_files', source_message_id: source.message_id, quote: '不读写工作区文件' },
+  ] }, rework)
+  try {
+    const now = new Date().toISOString()
+    withTx(db, tx => {
+      tx.run("INSERT INTO tasks (task_id,title,status,created_at,updated_at) VALUES ('task','核算','running',?,?)", [now, now])
+      tx.run("INSERT INTO runs (run_id,task_id,status,created_at,updated_at) VALUES ('run','task','running',?,?)", [now, now])
+      tx.run(`INSERT INTO node_runs (node_run_id,run_id,node_id,seq,node_type,status,attempt,action_generation,side_effect_policy,created_at,updated_at)
+        VALUES ('upstream','run','upstream',1,'agent','done',1,1,'pure',?,?),('node','run','review',2,'agent','started',1,1,'pure',?,?)`,
+      [now, now, now, now])
+    })
+    const upstream = registerRunArtifact(db, { artifactId: 'approved-input', nodeRunId: 'upstream',
+      runId: 'run', fileName: 'input.md', bytes: Buffer.from('已登记上游结果') }, now)
+    withTx(db, tx => snapshotArtifactInputs(tx, 'node', ['upstream'], now))
+    const spawned = await f.host.bridge.spawn({ nodeRunId: 'node', attempt: 1, actionGeneration: 1, input: {},
+      outputSchema: {}, toolPolicy: { allow: [] }, inheritHistory: false, modelRef: 'p/m' })
+    const fence = new AbortController()
+    expect(f.host.bridge.installAttemptMonitor({ binding: { nodeRunId: 'node', attempt: 1, actionGeneration: 1,
+      executorAgentId: spawned.agentId, executorSessionId: spawned.sessionId }, budget: () => 1000, actionTimeoutMs: 1000 },
+    () => !fence.signal.aborted, fence.signal)).toBeTypeOf('function')
+    await f.host.bridge.send({ executorAgentId: spawned.agentId, attempt: 1, attemptId: 'node:1', instruction: '核对已登记的内部成果。' })
+    expect(f.prompts).toHaveLength(1)
+    expect(f.prompts[0]).toContain('orchestra_rework({action:"read",artifact_id,artifact_hash})')
+    expect(f.prompts[0]).toContain('publish_text_result 的成功回执已证明登记，无须再读自己的交付')
+    const tool = 'orchestra_rework'
+    const published = await f.executeLocal(tool, { action: 'publish', file_name: 'result.md', text: '退款 2 笔，合计 100 元。' }, 'publish')
+    expect(published).toMatchObject({ artifact_id: expect.any(String), sha256: expect.any(String) })
+    await expect(f.executeLocal(tool, { action: 'read', run_id: 'run' }, 'invalid-read'))
+      .rejects.toMatchObject({ issues: expect.arrayContaining([
+        expect.objectContaining({ path: ['artifact_id'] }), expect.objectContaining({ path: ['artifact_hash'] }),
+      ]) })
+    await expect(f.executeLocal(tool, { action: 'read', artifact_id: published.artifact_id,
+      artifact_hash: published.sha256 }, 'own-read')).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    await expect(f.executeLocal(tool, { action: 'read', artifact_id: upstream.artifact_id,
+      artifact_hash: upstream.sha256 }, 'bound-read')).resolves.toMatchObject({ text: '已登记上游结果' })
+    expect(f.guard(f.call('read'))).toBeTruthy()
+    expect(f.guard(f.call('bili_hot'))).toBeTruthy()
+    const report = { status: 'done', output: { summary: '退款核对完成。', completion: { outcome: 'completed' },
+      facts: { refund_count: 2, refund_total_yuan: 100 } } }
+    if (scenario === 'valid') f.finish(report)
+    else {
+      if (scenario === 'expired') fence.abort()
+      f.finishText('## 已完成\n退款 2 笔，共 100 元。')
+      if (scenario !== 'expired') {
+        await expect.poll(() => f.prompts.length, { timeout: 1_000 }).toBe(2)
+        expect(f.prompts[1]).toContain('JSON')
+        expect(f.restrict).toHaveBeenCalledWith({ allow: [] })
+        for (const toolName of ['orchestra_rework', 'read', 'bili_hot', 'run_code']) {
+          const call = f.call(toolName, 'repair-attempt-' + toolName)
+          expect(f.guard(call)).toBeTruthy()
+          expect((await f.pre(call)).kind).toBe('deny')
+          const execute = vi.fn()
+          await expect(f.run(call, execute)).rejects.toThrow()
+          expect(execute).not.toHaveBeenCalled()
+        }
+        if (scenario === 'repair') f.finish(report)
+        else f.finishText('## 我仍然只返回 Markdown')
+      }
+    }
+    await f.host.bridge.whenIdle({ executorAgentId: spawned.agentId, timeoutMs: 1000 })
+    const events = f.host.bridge.listen({ executorAgentId: spawned.agentId, attempt: 1, fromSeq: 0 }, new AbortController().signal)
+      [Symbol.asyncIterator]()
+    try {
+      if (scenario === 'valid' || scenario === 'repair') {
+        await expect(events.next()).resolves.toMatchObject({ value: { type: 'turn', attempt: 1, executorAgentId: spawned.agentId,
+          payload: { report } } })
+      } else await expect(events.next()).rejects.toThrow()
+    } finally { await events.return?.() }
+    expect(f.prompts).toHaveLength(scenario === 'repair' || scenario === 'still malformed' ? 2 : 1)
+    expect(rework).toHaveBeenCalledTimes(4)
+    expect(db.raw.prepare('SELECT node_run_id FROM artifact_contents WHERE artifact_id=?').get(published.artifact_id))
+      .toMatchObject({ node_run_id: 'node' })
+  } finally {
+    await f.host.close()
+    db.raw.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 it('规划快照单独提供实际只读工具，未知命令不伪装成可用能力', async () => {
   const f = fixture('inherit')
   const snapshot = await dshCapabilitySnapshot(f.parent, 'inherit', new AbortController().signal)
@@ -231,6 +363,29 @@ it('规划快照单独提供实际只读工具，未知命令不伪装成可用�
   expect(nativeToolConstraint('read', 'read', { sideEffectPolicy: 'pure' })).toBeUndefined()
   expect(nativeToolConstraint('unknown', 'unknown', { sideEffectPolicy: 'pure' })).toContain('副作用未获节点授权')
   await f.host.close()
+})
+
+it('禁止工作区读取时派发不发现目录技能，普通任务仍可用已授权的公开读取工具', async () => {
+  const source = { message_id: 'm', text: '查询公开资讯，不读取工作区文件' }
+  const restricted = fixture('inherit', undefined, { version: 1, start_policy: 'immediate', sources: [source], constraints: [
+    { id: 'read', kind: 'no_workspace_read', source_message_id: source.message_id, quote: '不读取工作区文件' },
+  ] })
+  const normal = fixture('inherit')
+  restricted.enablePublicSkill()
+  normal.enablePublicSkill()
+  try {
+    await restricted.start()
+    expect(restricted.listSkills).not.toHaveBeenCalled()
+    expect(restricted.hasLocalTool(PUBLIC_READ_TOOL)).toBe(false)
+    expect(restricted.guard(restricted.call('read'))).toContain('禁止读取工作区')
+    await normal.start()
+    expect(normal.listSkills).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ cwd: process.cwd() }))
+    expect(normal.hasLocalTool(PUBLIC_READ_TOOL)).toBe(true)
+    expect(normal.guard(normal.call(PUBLIC_READ_TOOL))).toBeUndefined()
+    expect(await normal.pre(normal.call(PUBLIC_READ_TOOL))).toEqual({ kind: 'allow' })
+  } finally {
+    await Promise.all([restricted.host.close(), normal.host.close()])
+  }
 })
 
 it.each(['full', 'inherit', 'user', 'brain'] as const)('offline/read boundary also blocks the actual native execution hook in %s mode', async mode => {

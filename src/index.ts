@@ -182,6 +182,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
   } : {}) })
   try {
     const planner = dshPlanner && { context: dsh.context, parent: dshPlanner.parent, model: dshPlanner.model,
+      coordinationAvailable: serviceOptions.phase === 'S6' && Boolean(dsh.executionPermissionMode),
       executionPermissionMode: dshPlanner.executionPermissionMode ?? dsh.executionPermissionMode }
     if (planner && dshPlanner.useModelRoutingSettings) {
       const fallback = planner.model

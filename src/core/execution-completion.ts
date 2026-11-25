@@ -2,10 +2,11 @@ import { z } from 'zod'
 import { OrchError } from './errors.ts'
 
 const sentence = z.string().trim().min(1).max(600)
+const optionalNote = z.string().trim().max(600).transform(value => value || undefined).optional()
 
 /** Execution facts, not a prose classifier. Empty search results may still be completed. */
 export const executionCompletionSchema = z.discriminatedUnion('outcome', [
-  z.strictObject({ outcome: z.literal('completed'), reason: sentence.optional(), next_action: sentence.optional(),
+  z.strictObject({ outcome: z.literal('completed'), reason: optionalNote, next_action: optionalNote,
     missing: z.array(sentence).max(0).optional() }),
   z.strictObject({ outcome: z.enum(['blocked', 'failed']), reason: sentence, next_action: sentence,
     missing: z.array(sentence).max(12).default([]) }),

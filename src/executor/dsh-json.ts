@@ -47,7 +47,7 @@ function parseAdmissionObject(output: string): unknown {
   } catch { throw new JsonFailure('semantic_output_invalid') }
 }
 
-/** Bounded tool-free calls. Admission alone permits a single format/length retry.
+/** Bounded tool-free calls. Admission alone permits a single correction.
  * The original permission path remains strict, with its original 8-second budget. */
 export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admission' | 'permission' = 'permission') {
   if (typeof llm?.prepareCall !== 'function') return
@@ -57,7 +57,7 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
   const failure = (reason: AdmissionFailure) => admission
     ? new OrchError('SERVICE_UNAVAILABLE', admissionFailures[reason], { reason }) : unavailable()
   return async (route: JsonModelRoute | undefined, instructions: string, input: unknown,
-    signal: AbortSignal, assertCurrent: () => void): Promise<unknown> => {
+    signal: AbortSignal, assertCurrent: () => void, needsCorrection?: (raw: unknown) => boolean): Promise<unknown> => {
     if (signal.aborted) throw unavailable()
     if (!route) throw failure('semantic_model_missing')
     if (active >= 2) throw failure('semantic_busy')
@@ -135,13 +135,18 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
       return admission ? parseAdmissionObject(output) : JSON.parse(output) as unknown
     }
     const work = (async () => {
-      try { return await attempt(admission ? ADMISSION_TOKENS : 3072, false) }
+      let raw: unknown
+      try { raw = await attempt(admission ? ADMISSION_TOKENS : 3072, false) }
       catch (error) {
         if (!admission || !(error instanceof JsonFailure)
           || (error.reason !== 'semantic_output_invalid' && error.reason !== 'semantic_output_truncated')) throw error
         current()
         return attempt(error.reason === 'semantic_output_truncated' ? ADMISSION_RETRY_TOKENS : ADMISSION_TOKENS, true)
       }
+      // Spend the same single retry on a malformed contract or uncited restriction.
+      // A second answer still goes through the ordinary source and authority checks.
+      if (admission && needsCorrection?.(raw)) return attempt(ADMISSION_TOKENS, true)
+      return raw
     })()
     // The two slots cover both attempts and remain occupied until actual work settles.
     void work.then(() => { active-- }, () => { active-- })

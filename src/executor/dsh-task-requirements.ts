@@ -2,7 +2,7 @@ import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
 import { requirementsContractSchema, type RequirementsContract } from '../core/task-requirements.ts'
 import type { TaskPlanInput } from '../service/task-planning.ts'
-import { interpretSemanticAdmission, SEMANTIC_INSTRUCTIONS, type SemanticInput, type SemanticWorkflow } from '../service/semantic-admission.ts'
+import { interpretSemanticAdmission, semanticResponseNeedsCorrection, SEMANTIC_INSTRUCTIONS, type SemanticInput, type SemanticWorkflow } from '../service/semantic-admission.ts'
 import { createDshJsonCompletion } from './dsh-json.ts'
 import type { createDshPlanningCallback } from './dsh-host.ts'
 
@@ -37,7 +37,7 @@ export function createDshTaskRequirements(options: PlanningContext & {
     const semantic: SemanticInput = {
       current: { message_id: 'task-form-' + sha256Hex(text), text }, explicit: true, surface: 'task_form',
     }
-    const raw = await complete(selected, SEMANTIC_INSTRUCTIONS, semantic, signal, assertCurrent)
+    const raw = await complete(selected, SEMANTIC_INSTRUCTIONS, semantic, signal, assertCurrent, semanticResponseNeedsCorrection)
     assertCurrent()
     const interpreted = interpretSemanticAdmission(semantic, raw)
     if (interpreted.kind !== 'ready') {

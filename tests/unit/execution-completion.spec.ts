@@ -15,6 +15,12 @@ describe('structured execution completion', () => {
     } })).not.toThrow()
   })
 
+  it.each(['', '  '])('omits an empty optional next action for completed work (%j)', next_action => {
+    const report = { status: 'done', output: { completion: { outcome: 'completed', next_action } } }
+    expect(() => validateDshCompletionReport(report)).not.toThrow()
+    expect(readExecutionCompletion(report)).toEqual({ outcome: 'completed' })
+  })
+
   it('preserves the reason, next action and missing inputs of blocked work', () => {
     const report = { status: 'failed', output: { completion: {
       outcome: 'blocked', reason: '无法访问新闻来源', next_action: '启用来源会话的检索工具后重试', missing: ['AIHOT 访问工具'],
@@ -30,6 +36,8 @@ describe('structured execution completion', () => {
     { status: 'done', output: { completion: { outcome: 'blocked', reason: '无访问权限', next_action: '处理授权' } } },
     { status: 'failed', output: { completion: { outcome: 'completed' } } },
     { status: 'failed', output: { completion: { outcome: 'blocked', reason: '无访问权限' } } },
+    { status: 'failed', output: { completion: { outcome: 'blocked', reason: '无访问权限', next_action: '' } } },
+    { status: 'failed', output: { completion: { outcome: 'failed', reason: '无访问权限', next_action: '  ' } } },
     { status: 'done', output: { completion: { outcome: 'completed', missing: ['未执行检索'] } } },
   ])('rejects inconsistent or incomplete facts: %j', report => {
     expect(() => validateDshCompletionReport(report)).toThrow()

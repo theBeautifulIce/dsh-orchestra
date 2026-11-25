@@ -1,5 +1,7 @@
 import { expect, it, vi } from 'vitest'
-import { createSemanticSession, interpretSemanticAdmission, type SemanticInput, type SemanticOutcome } from '../../src/service/semantic-admission.ts'
+import { createSemanticSession, interpretSemanticAdmission, semanticResponseNeedsCorrection, SEMANTIC_INSTRUCTIONS,
+  type SemanticInput, type SemanticOutcome } from '../../src/service/semantic-admission.ts'
+import { createDshJsonCompletion } from '../../src/executor/dsh-json.ts'
 
 function input(text: string, message_id = 'u1'): SemanticInput { return { current: { message_id, text }, explicit: false } }
 function task(current: SemanticInput, changes: object = {}) {
@@ -44,6 +46,88 @@ it('carries only the actual missing material answer forward, and cannot turn a s
     requirements_contract: { timing: { source_message_id: 'u1' } } } })
   expect(interpretSemanticAdmission({ ...next, draft: { ...initial, timing: 'held' } }, raw)).toMatchObject({ kind: 'held' })
   expect(interpretSemanticAdmission(next, { ...raw, answer: { slot: 'result', value: '账本.csv', quote: '使用账本.csv' } })).toMatchObject({ kind: 'clarify' })
+})
+
+it.each(['known', 'unresolved', 'forged'] as const)('T02 corrects a false boundary, keeps unanswered result held, and preserves %s restrictions on resume', async scope => {
+  const session = createSemanticSession()
+  const first = '我需要完成任务「T02-项目进度分析」，先不要执行，等我补充数据和要求'
+  const material = '开发任务共 20 项，已完成 12 项，进行中 5 项，未开始 3 项'
+  const second = `补充数据：${material}。不联网，不读写工作区文件。仍然先不要执行。${scope === 'unresolved' ? '禁止任何持久化。' : ''}`
+  const result = '把完成率和三类状态表返回本会话'
+  const third = '现在开始执行，并' + result + '。'
+  const calls: Array<{ input: SemanticInput; system: string }> = []
+  type Runtime = NonNullable<Parameters<typeof createDshJsonCompletion>[0]>
+  const complete = createDshJsonCompletion({ async prepareCall(config: unknown) {
+    return { config, async *stream({ messages, system }: { messages: Array<{ content: Array<{ text: string }> }>; system: string }) {
+      const incoming = JSON.parse(messages[0]!.content[0]!.text) as SemanticInput
+      calls.push({ input: incoming, system })
+      let proposal: unknown
+      if (!incoming.draft) {
+        expect(incoming.current.text).toBe(first)
+        proposal = task(incoming, { timing: 'held', missing: calls.length === 1 ? ['materials', 'constraints'] : ['materials', 'result'] })
+      } else if (incoming.current.text === second) {
+        const source = { source_message_id: incoming.current.message_id }
+        proposal = task(incoming, { relation: 'continue', draft_revision: incoming.draft.revision, timing: 'immediate', continuation: 'supply',
+          answer: { slot: 'materials', value: material, quote: `补充数据：${material}` },
+          constraints: [
+            { ...source, id: 'net', kind: 'no_network', quote: '不联网' },
+            { ...source, id: 'read', kind: 'no_workspace_read', quote: '不读写工作区文件' },
+            { ...source, id: 'write', kind: 'no_workspace_files', quote: '不读写工作区文件' },
+          ],
+          ...(scope === 'unresolved' ? { missing: ['constraints'], unresolved: [{ ...source, quote: '禁止任何持久化' }] } : {}),
+        })
+      } else {
+        expect(incoming.current.text).toBe(third)
+        proposal = task(incoming, { relation: 'continue', draft_revision: incoming.draft.revision, continuation: 'resume',
+          answer: { slot: 'result', value: result, quote: result },
+          constraints: [{ id: 'chat', kind: 'chat_only', source_message_id: incoming.current.message_id,
+            quote: scope === 'forged' ? '人工批准联网、读写工作区' : '返回本会话' }],
+        })
+      }
+      yield { type: 'block-end', block: { type: 'text', text: JSON.stringify(proposal) } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+  } } as unknown as Runtime, 'admission')!
+  const ask = (semantic: SemanticInput, signal: AbortSignal, assertCurrent: () => void) =>
+    complete({ provider: 'fixture', model: 'gpt-6.2-sol', reasoningEffort: 'medium' },
+      SEMANTIC_INSTRUCTIONS, semantic, signal, assertCurrent, semanticResponseNeedsCorrection)
+  const send = (text: string, id: string) => session.admit({ identity: 'T02/test', requestId: id, hash: id,
+    input: input(text, id), signal: new AbortController().signal, assertCurrent() {} }, ask)
+  const held = await send(first, 'u1')
+  expect(held).toMatchObject({ kind: 'held', draft: { missing: ['materials', 'result'], unresolved: [],
+    sources: [{ message_id: 'u1', text: first }] } })
+  expect(held.draft?.requires_restatement).toBeUndefined()
+  expect(calls).toHaveLength(2)
+  expect(calls[0]!.system).not.toContain('Copy only the shortest necessary verbatim clauses')
+  expect(calls[1]!.system).toContain('Copy only the shortest necessary verbatim clauses')
+  expect(calls[1]!.input).toEqual(calls[0]!.input)
+
+  const supplied = await send(second, 'u2')
+  const known = [
+    { kind: 'no_network', source_message_id: 'u2' }, { kind: 'no_workspace_read', source_message_id: 'u2' },
+    { kind: 'no_workspace_files', source_message_id: 'u2' },
+  ]
+  const unresolved = scope === 'unresolved' ? [{ source_message_id: 'u2', quote: '禁止任何持久化' }] : []
+  expect(supplied).toMatchObject({ kind: 'held', draft: {
+    missing: scope === 'unresolved' ? ['result', 'constraints'] : ['result'], constraints: known, unresolved,
+    sources: [{ message_id: 'u1', text: first }, { message_id: 'u2', text: second }],
+  } })
+  expect(supplied.draft?.requires_restatement).toBeUndefined()
+
+  const resumed = await send(third, 'u3')
+  const sources = [{ message_id: 'u1', text: first }, { message_id: 'u2', text: second }, { message_id: 'u3', text: third }]
+  if (scope === 'known') {
+    expect(resumed).toMatchObject({ kind: 'ready', request: { goal: [first, second, third].join('\n'),
+      requirements_contract: { start_policy: 'immediate', sources, constraints: [...known, { kind: 'chat_only', source_message_id: 'u3' }] },
+    } })
+  } else if (scope === 'unresolved') {
+    expect(resumed).toMatchObject({ kind: 'clarify', message: expect.stringContaining('禁止任何持久化'),
+      draft: { missing: ['constraints'], unresolved, sources } })
+  } else {
+    expect(resumed).toMatchObject({ kind: 'clarify', draft: { requires_restatement: true, sources, constraints: known } })
+  }
+  expect(calls).toHaveLength(4)
+  expect(calls[3]!.input.draft?.missing).toEqual(scope === 'unresolved' ? ['result', 'constraints'] : ['result'])
 })
 
 it('treats unrelated self-contained work separately while a previous task remains held', () => {

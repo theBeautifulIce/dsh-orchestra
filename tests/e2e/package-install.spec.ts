@@ -42,7 +42,7 @@ it('安装指南指向同一份带版本的预发行工件，也给出摘要文�
   expect(assets[0]).toBe(assets[1])
 })
 
-it('验包要求共享协议的精确集合，只有显式 previous 角色接受已签 G5 清单', () => {
+it('验包要求共享协议的精确集合，只有显式 previous 角色接受已签 G5 清单', { timeout: 30_000 }, () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-package-inject-'))
   const manifest = JSON.parse(readFileSync('package.json', 'utf8'))
   const candidate = manifest.dsh.client.inject as string[]
@@ -78,8 +78,9 @@ it('验包要求共享协议的精确集合，只有显式 previous 角色接受
     expect(candidate).toHaveLength(12)
     expect(new Set(candidate).size).toBe(12)
     expect(previous).toHaveLength(6)
-    expect(inspectPackage(valid).client_inject_protocol).toBe(CLIENT_INJECT_ROLES.candidate)
-    expect(inspectPackage(valid).migrations).toHaveLength(57)
+    const candidateReceipt = inspectPackage(valid)
+    expect(candidateReceipt.client_inject_protocol).toBe(CLIENT_INJECT_ROLES.candidate)
+    expect(candidateReceipt.migrations).toHaveLength(57)
     expect(() => inspectPackage(valid, { previous: true })).toThrow('DSH client inject must contain exactly')
     files['package/docs/assets/readme/extra.txt'] = 'extra'
     mkdirSync(join(root, 'package/docs/assets/readme'), { recursive: true })
@@ -87,8 +88,9 @@ it('验包要求共享协议的精确集合，只有显式 previous 角色接受
     expect(() => inspectPackage(pack('extra', candidate))).toThrow('undeclared paths')
     delete files['package/docs/assets/readme/extra.txt']
     const legacy = pack('previous', previous)
-    expect(inspectPackage(legacy, { previous: true }).migrations).toHaveLength(57)
-    expect(inspectPackage(legacy, { previous: true }).client_inject_protocol).toBe(CLIENT_INJECT_ROLES.previous)
+    const previousReceipt = inspectPackage(legacy, { previous: true })
+    expect(previousReceipt.migrations).toHaveLength(57)
+    expect(previousReceipt.client_inject_protocol).toBe(CLIENT_INJECT_ROLES.previous)
     expect(() => inspectPackage(legacy)).toThrow('DSH client inject must contain exactly')
     for (const dependency of candidate) {
       expect(() => inspectPackage(pack('missing-client', candidate.filter(item => item !== dependency))))

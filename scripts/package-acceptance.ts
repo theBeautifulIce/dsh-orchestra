@@ -48,17 +48,18 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
       }
     }
   }
-  const config = read('orchestra.config.json')
-  const phase = JSON.parse(config.toString('utf8')).phase
-  const patch = read('cordis.patch.yml').toString('utf8').replace(/^\s*#.*$/gm, '').trim()
   if (manifest.name !== 'dsh-orchestra' || manifest.private !== true || manifest.type !== 'module'
     || manifest.main !== 'lib/index.js' || manifest.types !== 'lib/index.d.ts'
     || manifest.exports?.['.']?.default !== './lib/index.js' || manifest.exports?.['./client'] !== './lib/client.js'
     || manifest.dsh?.bundle?.patch !== './cordis.patch.yml' || manifest.dsh?.manifestVersion !== 1
-    || manifest.dsh?.client?.platform !== 'web' || phase !== 'S2') {
+    || manifest.dsh?.client?.platform !== 'web') {
     throw new Error('Package manifest, advertised DSH client or default phase has changed')
   }
   const clientInjectProtocol = assertClientInject(manifest.dsh.client.inject, options.previous ? 'previous' : 'candidate')
+  const config = read('orchestra.config.json')
+  const phase = JSON.parse(config.toString('utf8')).phase
+  if (phase !== 'S2') throw new Error('Package manifest, advertised DSH client or default phase has changed')
+  const patch = read('cordis.patch.yml').toString('utf8').replace(/^\s*#.*$/gm, '').trim()
   if (!options.previous && !patch.startsWith('[')) throw new Error('DSH bundle patch must contain a top-level sequence')
   if (!read('lib/client.js').toString('utf8').includes('window.__ModuleLoader__.load')
     || !read('lib/index.js').toString('utf8').includes('serveDshOrchestra')) throw new Error('Packaged entries are incomplete')

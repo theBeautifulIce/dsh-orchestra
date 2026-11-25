@@ -84,7 +84,7 @@ export function applyDshPermission(ctx: Context, agent: Agent, mode: ExecutionPe
   const presets = ctx.get?.('permissionPresets') as Context['permissionPresets'] | undefined
   if (mode === 'full') {
     if (!presets?.names.includes('danger-full-access')) {
-      throw new OrchError('FORBIDDEN', '宿主没有提供全权限预设。请改为跟随来源会话，或启用宿主支持的权限预设。')
+      throw new OrchError('FORBIDDEN', '宿主没有提供全权限预设。请改为跟随来源会话，或启用宿主支持的权限预设。', { reason: 'execution_preset_unavailable' })
     }
     presets.set(agent.session, 'danger-full-access')
     return

@@ -116,12 +116,32 @@ export function createRunCoordination(db: Db, secret: string, authorize: (tx: Re
     if (!row || !authentic(tx,row)) forbidden('协作事项不存在或记录未通过核验')
     return row
   }
+  // A live recipient may record the answer to an existing request after its
+  // sender completed normally. This never makes the sender a live peer again.
+  function sourceCanReceive(tx: ReadTx, row: Row, now: number): boolean {
+    const binding = sourceBinding(row)
+    if (current(tx, binding, now)) return true
+    const finished = tx.get<Node>(`SELECT n.* FROM node_runs n JOIN runs r USING(run_id)
+      WHERE n.node_run_id=? AND n.run_id=? AND n.status='done' AND n.node_type='agent' AND n.side_effect_policy='pure'
+        AND n.owner_epoch=? AND n.replacement_node_run_id IS NULL AND n.fence_state IS NULL
+        AND r.status='running' AND r.cancel_requested_at IS NULL
+        AND n.node_run_id=(SELECT latest.node_run_id FROM node_runs latest WHERE latest.run_id=n.run_id AND latest.node_id=n.node_id
+          ORDER BY latest.attempt DESC,latest.seq DESC LIMIT 1)`, [binding.node_run_id, row.run_id, db.epoch])
+    if (!finished || !matches(finished, binding) || !signed(tx, finished)) return false
+    return Boolean(tx.get(`SELECT 1 FROM node_run_events e JOIN report_registry p ON p.node_run_id=e.node_run_id
+      AND p.report_id=json_extract(e.payload,'$.report_id') AND p.report_seq=json_extract(e.payload,'$.report_seq')
+      WHERE e.node_run_id=? AND e.type='report_applied' AND p.attempt=? AND p.state IN ('applied','replayed')
+        AND json_extract(e.payload,'$.next_status')='done'
+        AND e.seq>(SELECT MAX(c.seq) FROM node_run_events c WHERE c.node_run_id=e.node_run_id AND c.type='executor.model_confirmed'
+          AND json_extract(c.payload,'$.attempt')=? AND json_extract(c.payload,'$.action_generation')=?)`,
+      [finished.node_run_id, finished.attempt, finished.attempt, finished.action_generation]))
+  }
   function pendingState(tx: ReadTx, row: Row, now: number): { state: 'expired' | 'unavailable'; reason: string } | undefined {
     if (row.state !== 'pending') return
     if (now >= row.expires_ms || now < row.created_ms) return { state: 'expired', reason: '等待期限已到或时钟变化' }
     const target = targetBinding(row)
-    const from=lookup(tx,row.source_node,now), to=target && lookup(tx,target.node_run_id,now)
-    if (!peerAllowed(tx, row.run_id) || !target || !from || !to || !matches(from,sourceBinding(row)) || !matches(to,target))
+    const to=target && lookup(tx,target.node_run_id,now)
+    if (!peerAllowed(tx, row.run_id) || !target || !to || !matches(to,target) || !sourceCanReceive(tx,row,now))
       return { state: 'unavailable', reason: '发起方或接收方已结束、失联或不再有协作权限' }
   }
   function reachable(edges: Row[], start: string, target: string) {
@@ -139,7 +159,7 @@ export function createRunCoordination(db: Db, secret: string, authorize: (tx: Re
     const peersAllowed = peerAllowed(tx, node.run_id)
     return rows(tx, node.run_id).filter(row => {
       if (row.target_node && !peersAllowed) return false
-      if (row.state === 'pending' && (pendingState(tx,row,now) || !current(tx,sourceBinding(row),now))) return false
+      if (row.state === 'pending' && pendingState(tx,row,now)) return false
       if (row.source_node === node.node_run_id && matches(node, sourceBinding(row))) return true
       const target = targetBinding(row)
       return !!target && matches(node, target) && row.state === 'pending'
@@ -205,7 +225,6 @@ export function createRunCoordination(db: Db, secret: string, authorize: (tx: Re
         if (row.revision !== rev || (isReply ? row.state !== 'pending' : !['pending','reported'].includes(row.state)))
           throw new OrchError('OPERATION_ID_CONFLICT', '协作事项已变化，请重新读取')
         const unavailable = pendingState(tx,row,now)
-        if (isReply && !unavailable && !current(tx,sourceBinding(row),now)) return item(tx,update(tx,row,'unavailable',now,'发起方证据已失效'))
         if (isReply && unavailable) return item(tx,update(tx,row,unavailable.state,now,unavailable.reason))
         return item(tx,update(tx,row,isReply ? 'answered' : 'withdrawn',now,null,body))
       })

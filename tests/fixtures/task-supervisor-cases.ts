@@ -7,6 +7,7 @@ import { createRunCoordination, type CoordinationBinding, type CoordinationItem 
 import { createTaskSupervisor } from '../../src/service/task-supervisor.ts'
 import { createChatReportPump } from '../../src/service/chat-report-pump.ts'
 import { coordinationMessages } from '../../src/executor/coordination-message.ts'
+import { uuidv7 } from '../../src/core/ids.ts'
 const SECRET='fixture-secret', OWNER='human:owner'
 const initial=Date.parse('2026-11-25T10:00:00.000Z')
 function setup() {
@@ -39,6 +40,21 @@ function setup() {
 function scenario(fn:(f:ReturnType<typeof setup>)=>void|Promise<void>) { return async()=>{const f=setup();try{await fn(f)}finally{f.close()}} }
 function code(expected:string){return (error:unknown)=>typeof error==='object'&&error!==null&&'code' in error&&error.code===expected}
 function n(db:Db,table:string){return Number(db.raw.prepare('SELECT count(*) n FROM '+table).get()?.n)}
+
+function finishSender(db: Db, signed = true) {
+  const finished = new Date(initial + 1_000).toISOString()
+  withTx(db, tx => {
+    tx.run("UPDATE node_runs SET status='done',lease_expires_at=NULL,updated_at=? WHERE node_run_id='a'", [finished])
+    if (!signed) return
+    const reportId = uuidv7()
+    tx.run(`INSERT INTO report_registry (report_id,node_run_id,attempt,report_seq,state,created_at,updated_at)
+      VALUES (?,'a',1,1,'applied',?,?)`, [reportId, finished, finished])
+    appendNodeRunEvent(tx, SECRET, 'a', 'report_applied', {
+      report_id: reportId, report_seq: 1, next_status: 'done', attempt: 1, action_generation: 1, evidence_digest: null,
+    })
+  })
+}
+
 export const supervisorCases: [string,()=>void|Promise<void>][] = [
  ['migration preserves history and appends only 080',scenario(({db})=>{assert.equal(n(db,'schema_migrations'),80);assert.deepEqual(applySteps(db,loadSteps(defaultMigrationsDir())),[])})],
  ['same-run request, nonblocking reply, duplicate retries and reference-only result',scenario(f=>{
@@ -78,6 +94,54 @@ export const supervisorCases: [string,()=>void|Promise<void>][] = [
  ['recipient termination or replacement settles request without redispatch',scenario(f=>{
    const r=f.send('a','b');f.db.raw.prepare("UPDATE node_runs SET status='done' WHERE node_run_id='b'").run();assert.equal(f.coordinator.sweep(),1);assert.equal(f.list()[0]?.state,'unavailable');assert.equal(f.coordinator.updates(f.binding('a'))[0]?.id,r.id);assert.throws(()=>f.reply('b',r),code('FORBIDDEN'))
  })],
+ ['the active recipient can answer once after a signed sender completion without reopening the sender', scenario(f => {
+   const request = f.send('a', 'b')
+   finishSender(f.db)
+   f.time(5_000)
+   const nodeStates = () => f.db.raw.prepare("SELECT node_run_id,status,attempt,action_generation FROM node_runs WHERE run_id='run1' ORDER BY seq").all()
+   const before = nodeStates()
+   assert.equal(f.coordinator.sweep(), 0)
+   assert.deepEqual(f.inbox('b').peers.map(peer => peer.node_run_id), ['c'])
+   assert.equal(f.inbox('b').items[0]?.id, request.id)
+   assert.throws(() => f.inbox('a'), code('FORBIDDEN'))
+   assert.throws(() => f.send('c', 'a'), code('FORBIDDEN'))
+   const answered = f.reply('b', request)
+   assert.equal(answered.state, 'answered')
+   assert.equal(answered.revision, request.revision + 1)
+   assert.equal(answered.evidence_strength, 'none')
+   assert.deepEqual(f.reply('b', request), answered)
+   assert.throws(() => f.reply('b', request, '另一份答复'), code('OPERATION_ID_CONFLICT'))
+   assert.equal(f.list().find(item => item.id === request.id)?.reply, '已核对')
+   assert.deepEqual(nodeStates(), before)
+ })],
+ ['terminal-sender allowance preserves expiry, withdrawal, cancellation and fenced attempts', scenario(f => {
+   const expires = f.call('a', { action: 'send', kind: 'request', target_node_run_id: 'b', ttl_seconds: 30,
+     body: '到期的核对' }) as CoordinationItem
+   const withdrawn = f.send('a', 'b', '先撤回')
+   f.call('a', { action: 'withdraw', id: withdrawn.id, revision: withdrawn.revision })
+   const cancelled = f.send('a', 'b', '取消的核对')
+   finishSender(f.db)
+   f.time(30_001)
+   assert.equal(f.reply('b', expires).state, 'expired')
+   assert.throws(() => f.reply('b', withdrawn), code('OPERATION_ID_CONFLICT'))
+   f.db.raw.prepare("UPDATE runs SET cancel_requested_at=? WHERE run_id='run1'").run(new Date(initial + 30_001).toISOString())
+   assert.throws(() => f.reply('b', cancelled), code('FORBIDDEN'))
+   assert.equal(f.list().find(item => item.id === cancelled.id)?.state, 'unavailable')
+ })],
+ ...(['unsigned', 'changed generation', 'replaced', 'fenced'] as const).map<[string, () => void | Promise<void>]>(condition => [
+   'terminal-sender allowance cannot use a ' + condition + ' attempt',
+   scenario(f => {
+     const request = f.send('a', 'b')
+     finishSender(f.db, condition !== 'unsigned')
+     if (condition === 'changed generation') f.db.raw.prepare("UPDATE node_runs SET action_generation=2 WHERE node_run_id='a'").run()
+     if (condition === 'replaced') f.db.raw.prepare("UPDATE node_runs SET replacement_node_run_id='c' WHERE node_run_id='a'").run()
+     if (condition === 'fenced') f.db.raw.prepare("UPDATE node_runs SET fence_state='armed' WHERE node_run_id='a'").run()
+     f.time(5_000)
+     assert.equal(f.inbox('b').items.length, 0)
+     assert.equal(f.reply('b', request).state, 'unavailable')
+     assert.equal(f.list()[0]?.reply, null)
+   }),
+ ]),
  ['stale generation, expired lease, cancel and fence reject tool calls',scenario(f=>{
    const r=f.send('a','b');f.db.raw.prepare("UPDATE node_runs SET action_generation=2 WHERE node_run_id='b'").run();assert.throws(()=>f.reply('b',r),code('FORBIDDEN'));assert.equal(f.coordinator.sweep(),1)
    f.db.raw.prepare("UPDATE node_runs SET fence_state='armed' WHERE node_run_id='a'").run();assert.throws(()=>f.report('a'),code('FORBIDDEN'))

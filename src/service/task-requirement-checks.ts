@@ -5,6 +5,7 @@ export type RequirementNode = {
   id: string
   type: string
   dependsOn: string[]
+  approvalPrompt?: string
   sideEffectPolicy?: string
   declaredTools: string[]
 }
@@ -66,6 +67,10 @@ export function requirementIssues(contract: RequirementsContract, proposal: Cont
       if (!binding || new Set(binding.protected_node_ids).size !== binding.protected_node_ids.length) {
         issues.push(`约束 ${constraint.id} 缺少唯一、准确的受控步骤和审批绑定。`)
         continue
+      }
+      const gate = nodes.get(binding.approval_node_id)
+      if (constraint.gate_name && gate?.type === 'approval' && gate.approvalPrompt !== constraint.gate_name) {
+        issues.push(`约束 ${constraint.id} 需要名为「${constraint.gate_name}」的审批卡，请核对绑定的审批步骤。`)
       }
       // The model's description cannot establish which execution performs an action.
       // Until the catalog binds action capabilities, a scoped gate must cover every executable node.

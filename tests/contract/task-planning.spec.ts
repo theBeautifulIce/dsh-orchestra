@@ -917,6 +917,69 @@ it('结构化约束经真实规划入口持久化，生成器与规划器取得�
   expect(view.quality.ready).toBe(true)
 })
 
+it.each(['cited independent branch', 'ordinary high risk', 'forged source', 'unapproved quote', 'fabricated intent',
+  'dependent branch', 'uses external tool', 'violates chat restriction'] as const)(
+  'only admits a verified partial outcome with an independently runnable text branch (%s)', async scenario => {
+    const missingPrice = '商品 B 单价缺失'
+    const reportGap = '金额核算发现必要数据缺失时，应如实报告未完成金额和下一步'
+    const text = `核查库存。商品 A 数量 10，单价 20 元；商品 B 数量 5，${missingPrice}；商品 C 数量 3，单价 30 元。
+${reportGap}。数量核算独立完成，不等待金额核算。
+只在本会话交付，不联网，不读写工作区文件。`
+    const contract: RequirementsContract = { version: 1, start_policy: 'immediate',
+      sources: [{ message_id: 'human-message', text }], constraints: [
+        { ...constraintBase('chat', '只在本会话交付'), kind: 'chat_only' },
+        { ...constraintBase('network', '不联网'), kind: 'no_network' },
+        { ...constraintBase('read', '不读写工作区文件'), kind: 'no_workspace_read' },
+        { ...constraintBase('write', '不读写工作区文件'), kind: 'no_workspace_files' },
+        { ...constraintBase('gap', scenario === 'fabricated intent' ? '不联网' : reportGap), kind: 'report_data_gap' },
+      ],
+    }
+    const host = await boot(async ({ workflows }) => {
+      const workflow = workflows[0]!
+      const partial = { source_message_id: scenario === 'forged source' ? 'invented-source' : 'human-message',
+        quote: scenario === 'unapproved quote' ? missingPrice : reportGap }
+      const risk = { severity: 'high' as const, description: missingPrice, mitigation: '保留已知小计，报告缺价及补齐后复核的步骤',
+        node_id: 'value', ...(scenario === 'ordinary high risk' ? {} : { partial_result: partial }) }
+      return { title: '库存核查', workflow_id: workflow.workflowId, workflow_version: workflow.version,
+        steps: workflow.nodes.map(node => ({ node_id: node.id, description: node.title ?? node.id, goal_ids: ['goal'],
+          depends_on: node.dependsOn, tools: node.toolAllow, complexity: 'routine', model_reason: '只核对已提供的库存数据' })),
+        deliverables: [
+          { title: '库存金额', node_id: 'value', goal_ids: ['goal'], acceptance: { kind: 'chat/text_result' } },
+          { title: '库存数量', node_id: 'quantity', goal_ids: ['goal'], acceptance: scenario === 'violates chat restriction'
+            ? { kind: 'artifact', file_name: 'quantity.md', minimum_bytes: 1 } : { kind: 'chat/text_result' } },
+        ],
+        risks: [risk],
+      }
+    }, undefined, { empty: true })
+    const value = { node_id: 'value', type: 'agent' as const, title: '库存金额', position: { x: 100, y: 0 },
+      config: { side_effect_policy: 'pure' } }
+    const quantity = { node_id: 'quantity', type: 'agent' as const, title: '库存数量', position: { x: 100, y: 100 },
+      config: { side_effect_policy: 'pure', ...(scenario === 'uses external tool' ? { tools: { allow: ['ro.check'] } } : {}) } }
+    host.publish('inventory', { name: '库存核查',
+      nodes: [{ node_id: 'start', type: 'trigger', title: '触发', position: { x: 0, y: 0 } }, value, quantity],
+      edges: [{ from: 'start', to: 'value' }, { from: scenario === 'dependent branch' ? 'value' : 'start', to: 'quantity' }],
+    })
+    const plan = host.planning!.propose({
+      goal: text, requirements: [], workflow_id: 'inventory', workflow_version: '1', requirements_contract: contract,
+    }, 'owner', now)
+    if (scenario === 'fabricated intent') {
+      await expect(plan).rejects.toMatchObject({ code: 'PAYLOAD_SCHEMA_INVALID' })
+      expect(host.db.raw.prepare('SELECT count(*) n FROM task_plans').get()?.n).toBe(0)
+      return
+    }
+    const { view } = await plan
+    const confirm = () => host.planning!.confirm({ plan_id: view.plan_id, content_hash: view.content_hash, confirmed: true }, 'owner', now)
+    if (scenario === 'cited independent branch') {
+      expect(view.quality.ready).toBe(true)
+      expect(view.proposal.risks).toMatchObject([{ severity: 'high', partial_result: { source_message_id: 'human-message', quote: reportGap } }])
+      expect(confirm()).toMatchObject({ run_id: expect.any(String) })
+    } else {
+      expect(view.quality.ready).toBe(false)
+      expect(() => confirm()).toThrow(expect.objectContaining({ code: 'VERDICT_POLICY_UNMET' }))
+      expect(host.db.raw.prepare('SELECT count(*) n FROM runs').get()?.n).toBe(0)
+    }
+  })
+
 it.each(['chat_only', 'no_workspace_files'] as const)('换一种说法仍由结构化 %s 限制文件交付', async (kind) => {
   const host = await boot(async () => valid())
   const contract = requirementsContract([{ ...constraintBase('c1', '不要新建文件'), kind }])

@@ -2,6 +2,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { expect, it, vi } from 'vitest'
 import { createDshExecutor, createDshPlanningCallback, MODEL_CATALOG_TIMEOUT_MS } from '../../src/executor/dsh-host.ts'
 import type { ModelReasoning } from '../../src/executor/model-routing.ts'
+import type { RequirementsContract } from '../../src/core/task-requirements.ts'
+import { PUBLIC_READ_TOOL } from '../../src/executor/public-read.ts'
 
 it('目录刷新可单飞、有界重试，关闭或超时的迟到结果不得替换目录', async () => {
   const snapshot = (model: string) => ({ profiles: [{ ref: 'p/' + model, provider: 'p', model, capacity: 'standard' as const }] })
@@ -79,6 +81,76 @@ it('每个主脑阶段固定该次选择，旧供应商额度错误可安全回�
   expect(routes.map(({ provider, model: id, reasoningEffort }) => [provider, id, reasoningEffort ?? null])).toEqual([
     ['old', 'same', null], ['new', 'same', 'deep'], ['new', 'same', 'deep'], ['new', 'same', 'deep'], ['old', 'same', null],
   ])
+})
+
+it('keeps built-in coordination in both planning prompts while offline or workspace-read restrictions suppress skill discovery', async () => {
+  type Options = Parameters<typeof createDshPlanningCallback>[0]
+  const route = { provider: 'fixture', model: 'gpt-6.2-sol', reasoningEffort: 'medium' }
+  const prompts: string[] = []
+  const toolSchemas = vi.fn(() => [{ name: 'read', description: '外部能力快照示例' }, { name: 'skill', description: '读取技能' }])
+  const listSkills = vi.fn(async () => [{ name: 'aihot', description: '读取公开资讯', invocation: { modelInvocable: true } }])
+  const parent = { session: { id: 'fixture', header: { cwd: process.cwd() } }, ctx: {
+    get(name: string) { return name === 'tools' ? { schemas: toolSchemas } : name === 'skills' ? { list: listSkills } : undefined },
+    agents: { async create(options: { setup(ctx: unknown, agent: unknown): void }) {
+      const events: unknown[] = []
+      const child = { model: { select() {} }, session: { snapshotEvents: () => events },
+        followup(message: { content: Array<{ text: string }> }) {
+          prompts.push(message.content[0]!.text)
+          events.push({ type: 'request/header', data: { header: { config: route } } },
+            { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '{}' }] } } },
+            { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+        }, whenIdle: async () => {},
+      }
+      options.setup({ tools: { restrict() {} }, on() {} }, child)
+      return { agent: child, async dispose() {} }
+    } },
+  } } as unknown as NonNullable<ReturnType<Options['parent']>>
+  const context = { agents: { get: () => parent }, llm: { listModels: async () => [{ id: route.model }],
+    resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: route.reasoningEffort }] } }) } } as unknown as Context
+  const options = { context, parent: () => parent, model: route, coordinationAvailable: true,
+    executionPermissionMode: () => 'inherit' as const }
+  const goal = 'T06：两个只读代理独立计算。A 向 B 发一次 30 秒核对请求，立即按原参数重发一次检验去重。B 故意不回应。不要轮询、不联网。'
+  const contract: RequirementsContract = { version: 1, start_policy: 'immediate', sources: [{ message_id: 'm', text: goal }],
+    constraints: [{ id: 'network', kind: 'no_network', quote: '不联网', source_message_id: 'm' }] }
+  const input = { goal, requirements_contract: contract }
+  await createDshPlanningCallback(options, 'workflow')(input)
+  await createDshPlanningCallback(options, 'plan')({ ...input, workflows: [] })
+  expect(toolSchemas).not.toHaveBeenCalled()
+  expect(listSkills).not.toHaveBeenCalled()
+  expect(prompts).toHaveLength(2)
+  for (const prompt of prompts) {
+    expect(prompt).toMatch(/内部协作信箱 orchestra_coordination[^。\n]*。它独立于 native_tools 和固定命令/u)
+    expect(prompt).toMatch(/同行沟通在现有节点内完成，保留并行职责和正式成果依赖/u)
+    expect(prompt).toMatch(/可独立完成的工作在无人回复时继续/u)
+    expect(prompt).toMatch(/只在实际缺少必需条件时安排重试/u)
+    expect(prompt).toMatch(/任务已由宿主强制执行的限制本身不是能力缺口/u)
+    expect(prompt).not.toContain('host_capabilities=')
+    expect(prompt).toContain('按原参数重发一次检验去重')
+  }
+
+  const noWorkspace = '核对公开资讯，不读取工作区文件'
+  const workspaceContract: RequirementsContract = { version: 1, start_policy: 'immediate',
+    sources: [{ message_id: 'm', text: noWorkspace }],
+    constraints: [{ id: 'read', kind: 'no_workspace_read', source_message_id: 'm', quote: '不读取工作区文件' }] }
+  const restricted = { goal: noWorkspace, requirements_contract: workspaceContract }
+  await createDshPlanningCallback(options, 'workflow')(restricted)
+  await createDshPlanningCallback(options, 'plan')({ ...restricted, workflows: [] })
+  expect(toolSchemas).not.toHaveBeenCalled()
+  expect(listSkills).not.toHaveBeenCalled()
+  for (const prompt of prompts.slice(2)) {
+    expect(prompt).toContain('禁止读取工作区')
+    expect(prompt).not.toContain('host_capabilities=')
+    expect(prompt).not.toContain(PUBLIC_READ_TOOL)
+  }
+
+  const unavailable = { ...options, coordinationAvailable: false }
+  await createDshPlanningCallback(unavailable)({ goal: '核对普通资料' })
+  expect(toolSchemas).toHaveBeenCalledOnce()
+  expect(listSkills).toHaveBeenCalledOnce()
+  expect(prompts.at(-1)).toContain('host_capabilities=')
+  expect(prompts.at(-1)).toContain('外部能力快照示例')
+  expect(prompts.at(-1)).toContain(PUBLIC_READ_TOOL)
+  expect(prompts.at(-1)).not.toMatch(/(?:内置|内部)协作信箱/u)
 })
 
 it('显式主脑可选未评级模型，模型或档位失效时按正式目录拒绝且不用旧缓存', async () => {

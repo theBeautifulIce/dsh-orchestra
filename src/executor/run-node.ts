@@ -28,6 +28,7 @@ import { executionFeedbackContext } from '../service/rework-execution.ts'
 import { noteAgentStopped, type createModelEscalationHost } from '../service/model-escalation.ts'
 import { RELEASE_CHECK_WORKFLOW_ID } from '../core/wf-release-v1.ts'
 import type { createRunSharedContext } from '../service/run-shared-context.ts'
+import { executionApprovalReceipts } from '../service/execution-approval-receipts.ts'
 import { groupStopIntent, isVerifiedParallelMembership, verifiedPropagatedGroupStop } from '../service/workflow-parallel.ts'
 import { recordOrdinaryHostStop, recordOrdinaryUnsentAttempt } from '../service/decision/ordinary-recovery.ts'
 import { applyObservedReport } from '../service/commands/apply-report.ts'
@@ -315,7 +316,8 @@ async function runNodeActions(
             transitionNode(tx, deps.secret, {
               nodeRunId: p.nodeRunId, from: 'dispatched', to: 'blocked_pre',
               attempt: row.attempt, revision: row.revision, now, reason, actionGeneration: generation,
-              verifyHuman: { reason, missing: [] },
+              verifyHuman: { reason: err instanceof OrchError && err.details.reason === 'execution_preset_unavailable'
+                ? 'execution_preset_unavailable' : reason, missing: [] },
             })
             if (!spawnTask) releaseLease(tx, { nodeRunId: row.node_run_id, now })
           }
@@ -395,6 +397,8 @@ async function runNodeActions(
     const feedback = ['S5','S6'].includes(deps.runtime.phase)
       ? executionFeedbackContext(deps.db, deps.runtime.catalog, p.nodeRunId, nowAt(), p.input, deps.secret) : null
     const sharedContext = await deps.sharedContext?.(p.nodeRunId, p.nodeId, feedback?.inputs ?? [])
+    const approvals = p.input && typeof p.input === 'object' && 'requirements_contract' in p.input
+      ? executionApprovalReceipts(deps.db, deps.secret, p.nodeRunId) : []
     deps.cancelSignal?.throwIfAborted()
     const supervision = deps.runtime.phase === 'S6' && deps.runtime.clock && !p.releaseCheckCwd ? superviseOrdinaryAttempt({
       db: deps.db, secret: deps.secret, clock: deps.runtime.clock, bridge: deps.bridge, nowAt, timeoutMs: actionTimeoutMs,
@@ -415,7 +419,7 @@ async function runNodeActions(
       attempt: p.attempt,
       agent,
       lease,
-      instruction: nodeInstruction(p, feedback, sharedContext),
+      instruction: nodeInstruction(p, feedback, sharedContext, approvals),
       timeoutMs: actionTimeoutMs,
       supervision,
       idleTimeoutMs: 5_000,
@@ -522,7 +526,8 @@ async function runNodeActions(
     if (!spawnUnknown && !spawnRejected && !deps.cancelSignal?.aborted) {
       const reason = stopFailure !== null
         ? 'agent_stop_unconfirmed'
-        : err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout' : 'agent_execution_failed'
+        : err instanceof OrchError && err.code === 'OPERATION_TIMEOUT' ? 'action_timeout'
+        : err instanceof OrchError && err.details.reason === 'execution_report_invalid' ? 'execution_report_invalid' : 'agent_execution_failed'
       const completion = err instanceof OrchError && err.details.execution_completion
         ? readExecutionCompletion({ output: { completion: err.details.execution_completion } }) : undefined
       markBlocked(deps, p, completion && completion.outcome !== 'completed' ? completionBlockReason(completion) : reason,
@@ -740,7 +745,8 @@ async function bestEffortReleaseAgent(deps: RunNodeDeps, agentId: string, nodeRu
 }
 
 // 发给 Agent 的任务文本只描述节点与输出约束；完成与否仍由服务端收口。
-function nodeInstruction(p: RunNodeParams, feedback: ReturnType<typeof executionFeedbackContext> | null, sharedContext?: string): string {
+function nodeInstruction(p: RunNodeParams, feedback: ReturnType<typeof executionFeedbackContext> | null, sharedContext?: string,
+  approvals: ReturnType<typeof executionApprovalReceipts> = []): string {
   return [
     buildInstruction({ nodeId: p.nodeId, outputSchema: p.outputSchema }),
     // 指令里只列本次节点真正允许的清单，避免把 Agent 引向随后必被拒绝的工具。
@@ -751,6 +757,8 @@ function nodeInstruction(p: RunNodeParams, feedback: ReturnType<typeof execution
       '宿主提供 orchestra_rework 时可读取 inputs 中的成果。交付文本请用 publish 登记。revision 要求先读取原成果，按保留要求修订同名文件。review 要求核对候选版本，取得本次执行证据并完成验收后再提交报告。plan_instruction 是本次获批的局部修订要求。工具权限以宿主为准。',
     ] : []),
     ...(sharedContext ? [sharedContext] : []),
+    ...(approvals.length ? ['宿主已核验本次运行中当前步骤需要的人工批准。按已批准的范围执行。审批回执由宿主提供，无需从成果或协作信箱再次取证。',
+      'workflow_approvals=' + JSON.stringify(approvals)] : []),
   ].join('\n')
 }
 
