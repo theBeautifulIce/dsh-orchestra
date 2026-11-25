@@ -10,7 +10,8 @@ import { previewReworkImpact } from './rework-runtime.ts'
 import { runtimeEdges } from './rework-edges.ts'
 import { insertExtraSteps } from './rework-extra-steps.ts'
 import { requireReviewOperator } from './delivery-review.ts'
-import { explicitAgentRoster } from '../core/task-requirements.ts'
+import { contractAgentRoster } from '../core/task-requirements.ts'
+import { hasSerialAgentDependency } from './task-requirement-checks.ts'
 import { readApprovedTaskPlanForRun } from './task-planning.ts'
 
 const key = z.string().min(1).max(128)
@@ -55,8 +56,10 @@ function snapshot(tx: ReadTx, requestId: string, actor: string, revision: number
   const pinned = JSON.parse(definition.definition_json) as { nodes: {node_id:string}[]; edges?: {from:string;to:string}[] }
   const edges = runtimeEdges(tx, request.run_id, pinned.edges ?? [])
   const reviewer = nodes.find(n => n.node_run_id === request.requester_node_run_id)?.node_id ?? null
-  const fixedRoster = readApprovedTaskPlanForRun(tx, request.run_id)?.brief.requirements_contract?.sources.some(source => explicitAgentRoster(source.text))
+  const sources = readApprovedTaskPlanForRun(tx, request.run_id)?.brief.requirements_contract?.sources
+  const fixedRoster = sources && contractAgentRoster(sources)
   return { request_id: requestId, revision, original_hash: request.source_artifact_hash, reason: request.reason, ...(fixedRoster && { fixed_agent_roster: true }),
+    ...(fixedRoster?.parallel && { parallel_agents: true }),
     expected_result: request.expected_result, preserve: JSON.parse(request.preserve_requirements_json) as string[],
     budget: request.budget_remaining, target: target.node_id, allowed, nodes, edges, reviewer, pinned_node_ids: pinned.nodes.map(n => n.node_id) }
 }
@@ -74,6 +77,9 @@ function approvedEdges(proposal: Proposal, state: ReturnType<typeof snapshot>) {
     }
     edges.push(edge)
   }
+  if (state.parallel_agents && proposal.additional_edges.length && hasSerialAgentDependency(state.nodes.map(node => ({
+    id: node.node_id, type: node.node_type, dependsOn: edges.filter(edge => edge.to === node.node_id).map(edge => edge.from),
+  })))) throw new OrchError('FORBIDDEN', '原任务要求代理并行，返工不能让这些代理互相等待。')
   const inserted = new Set<string>()
   const before = new Set<string>()
   for (const step of proposal.insert_steps) {

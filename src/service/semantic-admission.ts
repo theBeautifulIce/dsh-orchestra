@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { uuidv7 } from '../core/ids.ts'
-import { explicitAgentRoster, explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
+import { citedExecutionObservation, contractAgentRoster, explicitAgentRoster, explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
 import { isOrdinaryChat, explicitNotesRequest } from './chat-task-intent.ts'
 import type { ChatTaskOrigin } from './chat-task-receipts.ts'
 
@@ -125,32 +125,22 @@ function schemaLocation(error: z.ZodError): string {
 // errors, including untrusted quotes and access boundaries, on the normal path.
 function parseSemanticReply(raw: unknown, input?: SemanticInput) {
   const parsed = replySchema.safeParse(raw)
-  if (parsed.success || !input || !raw || typeof raw !== 'object'
+  if (!input || !raw || typeof raw !== 'object'
     || !('kind' in raw) || raw.kind !== 'task' || !('constraints' in raw) || !Array.isArray(raw.constraints)) return parsed
   const sources = [input.current, ...('relation' in raw && raw.relation === 'continue' ? input.draft?.sources ?? [] : [])]
   const observations = new Set<number>()
-  for (const issue of parsed.error.issues) {
-    const [field, index, member] = issue.path
-    if (issue.code !== 'custom' || issue.path.length !== 3 || field !== 'constraints' || typeof index !== 'number' || member !== 'quote') return parsed
-    const entry: unknown = raw.constraints[index]
-    if (!entry || typeof entry !== 'object' || !('kind' in entry) || entry.kind !== 'report_data_gap'
-      || !('quote' in entry) || typeof entry.quote !== 'string' || !entry.quote.trim() || !('source_message_id' in entry)) return parsed
-    const quote = entry.quote.trim()
+  for (const [index, entry] of raw.constraints.entries()) {
+    if (!entry || entry.kind !== 'report_data_gap' || typeof entry.quote !== 'string') continue
     const source = sources.find(item => item.message_id === entry.source_message_id)
-    if (!source?.text.includes(quote)) return parsed
-    const sentences = source.text.match(/[^。！？；;.!?\r\n]+[。！？；;.!?]?/gu) ?? []
-    const matching = sentences.filter(sentence => sentence.includes(quote))
-    if (!matching.length || !matching.every(isExecutionObservation)) return parsed
-    observations.add(index)
+    if (source && citedExecutionObservation(source.text, entry.quote.trim())) observations.add(index)
+  }
+  if (!observations.size) return parsed
+  for (const issue of parsed.success ? [] : parsed.error.issues) {
+    const [field, index, member] = issue.path
+    if (issue.code !== 'custom' || issue.path.length !== 3 || field !== 'constraints' || typeof index !== 'number'
+      || member !== 'quote' || !observations.has(index)) return parsed
   }
   return replySchema.safeParse({ ...raw, constraints: raw.constraints.filter((_item, index) => !observations.has(index)) })
-}
-
-function isExecutionObservation(sentence: string) {
-  const subject = /协作|信箱|请求|求助|工具回执|代理|对方|执行状态|运行状态|测试场景|\b(?:collaboration|mailbox|requests?|peers?|receipts?|runtime|test scenario)\b/iu
-  const observation = /异常|超时|拒绝|回应|答复|回复|回执|观察|覆盖|窗口|去重|\b(?:timeout|timed out|reply|response|unanswered|reject\w*|error|observ\w*|receipt|coverage|window)\b/iu
-  const protectedSubject = /材料|输入|数据|缺失|缺少|缺价|缺口|不完整|未完成|无法完成|单价|审批|批准|授权|只读|工作区|文件|联网|网络|外部|凭据|\b(?:data|inputs?|missing|incomplete|price|approv\w*|permissions?|read.only|workspace|files?|network|external|credentials?)\b/iu
-  return subject.test(sentence) && observation.test(sentence) && !protectedSubject.test(sentence)
 }
 
 export function semanticCorrectionHint(raw: unknown, input?: SemanticInput): string | undefined {
@@ -199,6 +189,8 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
   if (old?.requires_restatement) return retainUnclear(input, old, ['constraints'],
     '这份草稿包含尚未可靠解释的消息。请先放弃该草稿，再完整重述目标与限制。', now, true)
   const sources = [...old?.sources ?? [], input.current]
+  if (contractAgentRoster(sources)?.conflicting) return retainUnclear(input, pending, ['constraints'],
+    '同一任务指定了不同的代理人数。请完整重述需要多少个代理，以及哪些应当并行。', now, true)
   if (sources.length > 12 || new Set(sources.map(source => source.message_id)).size !== sources.length
     || sources.map(source => source.text).join('\n').length > (input.surface === 'task_form' ? 8000 : 2000)) {
     return retainUnclear(input, pending, ['constraints'],

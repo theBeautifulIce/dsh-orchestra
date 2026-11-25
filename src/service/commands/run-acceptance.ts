@@ -108,7 +108,7 @@ function rank(outcome: AcceptanceOutcome): number {
 }
 
 /** 交付项主键：node_id + 标题，同名重复时补序号，保证稳定可重放且不撞唯一键。 */
-function deliverableKeys(items: ParsedDeliverable[]): string[] {
+export function deliverableKeys(items: readonly { node_id: string; title: string }[]): string[] {
   const counts = new Map<string, number>()
   const assigned = new Set<string>()
   return items.map((item) => {

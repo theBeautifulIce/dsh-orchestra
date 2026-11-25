@@ -1,10 +1,12 @@
 import { OrchError } from '../../core/errors.ts'
+import { ZodError } from 'zod'
 import { TASK_ORIGINS, type TaskOrigin } from '../../core/task-workspace.ts'
 import type { Db } from '../../infra/sqlite/driver.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx, type ReadCtx } from './read-tx.ts'
 import { readProjectContextMetadata, type ProjectContextMetadata } from '../project-shared-context.ts'
-import type { AcceptanceKind, AcceptanceOutcome } from '../commands/run-acceptance.ts'
+import { deliverableKeys, type AcceptanceKind, type AcceptanceOutcome } from '../commands/run-acceptance.ts'
+import { readApprovedTaskPlanForRun } from '../task-planning.ts'
 import { isReleaseWorkflow } from '../../core/release-workflow-ids.ts'
 import { MEMORY_WORKFLOW_ID } from '../commands/memory.ts'
 import { operatorStopState } from '../operator-run-stop.ts'
@@ -171,11 +173,28 @@ export function readDeliveryChecks({ tx }: ReadCtx, runId: string, includeArtifa
     SELECT p.plan_id, p.content_hash FROM task_plans p JOIN start_run_operations o ON o.operation_id = p.launch_operation_id
     WHERE o.run_id = ? ORDER BY p.created_at, p.plan_id LIMIT 1`, [runId])
   if (!bound) return { has_more: false, items: [] }
-  const rows = tx.all<Pick<RunDeliveryCheck, 'result_id' | 'kind' | 'outcome' | 'reason' | 'evaluated_at' | 'rule_version'> & { evidence_json: string }>(`
-    SELECT result_id, kind, outcome, reason, evaluated_at, rule_version, evidence_json
+  const rows = tx.all<Pick<RunDeliveryCheck, 'result_id' | 'kind' | 'outcome' | 'reason' | 'evaluated_at' | 'rule_version'> & { evidence_json: string; deliverable_key: string }>(`
+    SELECT result_id, kind, outcome, reason, evaluated_at, rule_version, evidence_json, deliverable_key
     FROM run_acceptance_results WHERE run_id = ? AND plan_id = ? AND content_hash = ?
     ORDER BY deliverable_key LIMIT 51`, [runId, bound.plan_id, bound.content_hash])
-  return { has_more: rows.length > 50, items: rows.slice(0, 50).map(({ evidence_json, ...row }) => {
+  const files = new Map<string, { title: string; name: string; index: number }>()
+  if (rows.some(row => row.kind === 'artifact' && row.outcome === 'passed')) {
+    try {
+      const plan = readApprovedTaskPlanForRun(tx, runId)
+      if (plan?.plan_id === bound.plan_id && plan.content_hash === bound.content_hash) {
+        const items = plan.proposal.deliverables
+        const keys = deliverableKeys(items)
+        items.forEach((item, index) => {
+          if (item.acceptance.kind === 'artifact') files.set(keys[index]!, { title: item.title, name: item.acceptance.file_name, index })
+        })
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError || error instanceof ZodError || error instanceof OrchError
+        && ['CONFIRMATION_MISMATCH', 'SCHEMA_VERSION_UNSUPPORTED'].includes(error.code))) throw error
+      // A stale plan cannot give an artifact a business title. Keep its recorded filename and audit status.
+    }
+  }
+  return { has_more: rows.length > 50, items: rows.slice(0, 50).map(({ evidence_json, deliverable_key, ...row }) => {
     const value = (JSON.parse(evidence_json) as { evidence?: unknown } | null)?.evidence
     const evidence = value && typeof value === 'object' ? value as Record<string, unknown> : {}
     if (row.kind === 'chat/text_result') {
@@ -189,11 +208,16 @@ export function readDeliveryChecks({ tx }: ReadCtx, runId: string, includeArtifa
         ...(includeArtifactIds && typeof evidence.artifact_id === 'string' && typeof evidence.sha256 === 'string'
           && { artifact_id: evidence.artifact_id, sha256: evidence.sha256 }) }
     }
-    if (row.kind === 'artifact') return { ...row,
-      ...(includeArtifactIds && typeof evidence.artifact_id === 'string' && { artifact_id: evidence.artifact_id }),
-      ...(typeof evidence.file_name === 'string' && { file_name: evidence.file_name }),
-      ...(isCount(evidence.minimum_bytes) && { minimum_bytes: evidence.minimum_bytes }),
-      ...(isCount(evidence.bytes) && { bytes: evidence.bytes }) }
+    if (row.kind === 'artifact') {
+      const file = files.get(deliverable_key)
+      return { ...row,
+        ...(file && file.name === evidence.file_name && { title: file.title, item_index: file.index }),
+        ...(includeArtifactIds && typeof evidence.artifact_id === 'string' && typeof evidence.sha256 === 'string'
+          && /^[0-9a-f]{64}$/u.test(evidence.sha256) && { artifact_id: evidence.artifact_id, sha256: evidence.sha256 }),
+        ...(typeof evidence.file_name === 'string' && { file_name: evidence.file_name }),
+        ...(isCount(evidence.minimum_bytes) && { minimum_bytes: evidence.minimum_bytes }),
+        ...(isCount(evidence.bytes) && { bytes: evidence.bytes }) }
+    }
     return { ...row,
       ...(typeof evidence.tool === 'string' && { tool: evidence.tool }),
       ...(isInteger(evidence.expected_exit_code) && { expected_exit_code: evidence.expected_exit_code }),

@@ -12,13 +12,15 @@ const reviewer = z.discriminatedUnion('kind', [
 ])
 const deniedGapReport = /(?:不(?:要|必|得|用|需)|无需|禁止|勿)\s*(?:再|主动|如实)?\s*(?:上报|汇报|报告|说明|指出|列出|注明|标注)|\b(?:do not|don't|never)\s+(?:report|explain|identify|list)\b/iu
 
-// Match an operative prohibition, and count only explicitly assigned agents in the same source.
-const rosterClause = /^(?:(?:请)?(?:不(?:要|得|允许)?|禁止|勿)(?:再)?(?:额外|另行|另外)(?:启动|创建|安排|派发|增加|派出|召集)(?:新的?|其他)?(?:业务|子)?(?:代理|智能体)|(?:do not|don't|never) (?:start|spawn|create|add) (?:any )?(?:extra|additional) (?:business )?agents?|no (?:extra|additional) agents?)$/iu
-export function explicitAgentRoster(source: string): { quote: string; count?: number; parallel: boolean } | undefined {
+// Quotes remain bound to their own message. Numbers and parallelism can be stated
+// in another authenticated message belonging to the same task.
+const rosterClause = /^(?:(?:请)?(?:不(?:要|得|需要|允许)?|禁止|勿)(?:再)?(?:额外|另行|另外)(?:启动|创建|安排|派发|增加|派出|召集)(?:新的?|其他)?(?:业务|子)?(?:代理|智能体)|(?:do not|don't|never) (?:start|spawn|create|add) (?:any )?(?:extra|additional) (?:business )?agents?|no (?:extra|additional) agents?)$/iu
+export function explicitAgentRoster(source: string): { quote: string; count?: number; parallel: boolean; conflicting?: true } | undefined {
   const clauses = source.split(/[。，,；;！!?？\n]|\.(?:\s|$)/u).map(clause => clause.trim())
   const quote = clauses.find(clause => rosterClause.test(clause))
   if (!quote) return
-  const assignments = [...source.matchAll(/(?:安排|启动|创建|使用|派出)\s*([1-9]\d?|[一二两三四五六七八九十]{1,3})\s*(?:个|名|位)?(?:同时运行的|并行的?|独立的?|业务|子|执行|协作|\s)*(?:代理|智能体)|\b(?:assign|use|start|run)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:concurrent|parallel|independent|business)\s+)*agents?\b/giu)]
+  const assignment = /^(?:请(?:你|帮我)?|现在|接下来|我希望|我需要)?\s*(?:安排|启动|创建|使用|派出)\s*([1-9]\d?|[一二两三四五六七八九十]{1,3})\s*(?:个|名|位)?(?:同时运行的|并行的?|独立的?|只读|业务|子|执行|协作|\s)*(?:代理|智能体)|^(?:please\s+)?(?:assign|use|start|run)\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:concurrent|parallel|independent|read-only|business)\s+)*agents?\b/iu
+  const assignments = clauses.map(clause => assignment.exec(clause)).filter(match => match !== null)
   const numbers = assignments.map(match => {
     const token = (match[1] ?? match[2]!).toLowerCase().replace('两', '二')
     if (/^\d+$/u.test(token)) return Number(token)
@@ -29,7 +31,40 @@ export function explicitAgentRoster(source: string): { quote: string; count?: nu
   })
   const count = numbers[0]
   return { quote, parallel: assignments.some(match => /同时运行|并行|concurrent|parallel/iu.test(match[0])),
-    ...(count && numbers.every(n => n === count) && { count }) }
+    ...(count && (numbers.every(n => n === count) ? { count } : { conflicting: true as const })) }
+}
+
+export function contractAgentRoster(sources: readonly { text: string }[]) {
+  return explicitAgentRoster(sources.map(source => source.text).join('\n'))
+}
+
+const peerSubject = /协作|信箱|请求|求助|工具回执|代理|对方|执行状态|运行状态|测试场景|\b(?:collaboration|mailbox|requests?|peers?|receipts?|runtime|test scenario)\b/iu
+const executionEvent = /异常|超时|拒绝|回应|答复|回复|回执|观察|覆盖|窗口|去重|未完成|不完整|无法完成|失联|不可用|\b(?:timeout|timed out|repl(?:y|ies)|response|unanswered|reject\w*|errors?|observ\w*|receipts?|coverage|window|unavailable|incomplete|missing)\b/iu
+const permissionSubject = /审批|批准|授权|只读|工作区|文件|联网|网络|外部|凭据|\b(?:approv\w*|permissions?|read.only|workspace|files?|network|external|credentials?)\b/iu
+const missingMaterial = /(?:数据|材料|资料|字段|输入|单价|金额|价格|数量|清单|交付物)(?:仍然?|尚且?|严重|部分|仍|已|尚|有)?(?:缺失|缺少|缺口|不全|不完整|不足|未知|未提供|未完成)|(?:缺少|缺失|未提供|不完整的)(?:必要的?|所需的?|部分|的)?(?:数据|材料|资料|字段|输入|单价|金额|价格|数量|清单|交付物)|\b(?:missing|unavailable|incomplete)\s+(?:(?:required|necessary|input)\s+)?(?:data|inputs?|materials?|prices?|fields?|deliverables?)\b/iu
+const gapReportVerb = /上报|汇报|报告|说明|指出|列出|注明|标注|\b(?:report|explain|identify|list)\b/iu
+const gapMarker = /缺失|缺口|缺少|缺价|未完成|无法完成|不能完成|不完整|\b(?:missing|incomplete|unavailable)\b/iu
+function mentionsPeerOutcome(sentence: string) {
+  return peerSubject.test(sentence) && executionEvent.test(sentence)
+}
+
+function citationContexts(source: string, quote: string): string[] {
+  if (!quote || !source.includes(quote)) return []
+  const sentences = source.match(/[^。！？；;.!?\r\n]+[。！？；;.!?]?/gu) ?? []
+  return sentences.filter(sentence => sentence.includes(quote))
+}
+
+export function citedExecutionObservation(source: string, quote: string) {
+  const contexts = citationContexts(source, quote)
+  return contexts.length > 0 && contexts.every(sentence => mentionsPeerOutcome(sentence)
+    && !permissionSubject.test(sentence) && !missingMaterial.test(sentence))
+}
+
+export function authorizesDataGap(source: string, quote: string) {
+  if (!quote || !source.includes(quote) || !gapReportVerb.test(quote) || !gapMarker.test(quote) || deniedGapReport.test(quote)) return false
+  // When observations and real missing inputs share a sentence, the citation
+  // itself must identify the missing material. A peer's status cannot authorize a partial delivery.
+  return missingMaterial.test(quote) || ![quote, ...citationContexts(source, quote)].some(mentionsPeerOutcome)
 }
 
 export const taskRequirementSchema = z.discriminatedUnion('kind', [
@@ -48,9 +83,7 @@ export const taskRequirementSchema = z.discriminatedUnion('kind', [
 ]).superRefine((constraint, ctx) => {
   if (constraint.kind === 'report_data_gap') {
     const quote = constraint.quote
-    const report = /上报|汇报|报告|说明|指出|列出|注明|标注|\b(?:report|explain|identify|list)\b/iu
-    const gap = /缺失|缺口|缺少|缺价|未完成|无法完成|不能完成|不完整|\b(?:missing|incomplete|unavailable)\b/iu
-    if (!report.test(quote) || !gap.test(quote) || deniedGapReport.test(quote)) {
+    if (!gapReportVerb.test(quote) || !gapMarker.test(quote) || deniedGapReport.test(quote)) {
       ctx.addIssue({ code: 'custom', path: ['quote'], message: '须引用用户要求报告缺失或未完成项的原句' })
     }
   }
@@ -69,7 +102,7 @@ export function explicitApprovalNames(text: string): string[] {
 }
 
 /** Sources are supplied by an authenticated entry point. Quotes carry meaning, never authorization. */
-export const requirementsContractSchema = z.strictObject({
+export const storedRequirementsContractSchema = z.strictObject({
   version: z.literal(1),
   start_policy: z.enum(['immediate', 'plan_only']),
   sources: z.array(z.strictObject({ message_id: identifier, text: z.string().min(1).max(8000) })).min(1).max(20),
@@ -105,6 +138,20 @@ export const requirementsContractSchema = z.strictObject({
   }
   if (contract.timing && !sources.get(contract.timing.source_message_id)?.includes(contract.timing.quote)) {
     ctx.addIssue({ code: 'custom', path: ['timing', 'quote'], message: '执行时机引用不在对应来源消息中' })
+  }
+})
+
+// Already-launched plans keep their historical shape and hash for display.
+// New grants and previously unstarted plans pass today's authority checks.
+export const requirementsContractSchema = storedRequirementsContractSchema.superRefine((contract, ctx) => {
+  const sources = new Map(contract.sources.map(source => [source.message_id, source.text]))
+  for (const [index, constraint] of contract.constraints.entries()) {
+    if (constraint.kind === 'report_data_gap' && !authorizesDataGap(sources.get(constraint.source_message_id) ?? '', constraint.quote)) {
+      ctx.addIssue({ code: 'custom', path: ['constraints', index, 'quote'], message: '协作或运行状态不能作为缺少输入时部分执行的依据' })
+    }
+  }
+  if (contractAgentRoster(contract.sources)?.conflicting) {
+    ctx.addIssue({ code: 'custom', path: ['sources'], message: '同一任务指定了不同的参与代理人数，请确认人数' })
   }
 })
 

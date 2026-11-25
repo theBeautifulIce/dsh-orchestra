@@ -1,4 +1,4 @@
-import { explicitApprovalNames, requestedTaskTitle, requirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
+import { authorizesDataGap, explicitApprovalNames, requestedTaskTitle, requirementsContractSchema, storedRequirementsContractSchema, constraintBindingSchema, mergeRequirementsContracts, type RequirementsContract } from '../core/task-requirements.ts'
 import { canStartAtRequiredGate, fixedRosterIssue, requirementIssues } from './task-requirement-checks.ts'
 import { taskAccess } from '../core/task-access.ts'
 import { assertDraftActive, discardDraft, draftReferenceSchema, finishDraftRevision, readDraftEnding, type DraftRevision } from './task-plan-drafts.ts'
@@ -166,7 +166,7 @@ function toPlanView(row: PlanRow): TaskPlanView {
   if ((row.contract_version === 2) !== (brief.requirements_contract !== undefined)) {
     throw new OrchError('CONFIRMATION_MISMATCH', '计划的需求契约与版本不一致')
   }
-  if (row.contract_version === 2 && !requirementsContractSchema.safeParse(brief.requirements_contract).success) {
+  if (row.contract_version === 2 && !storedRequirementsContractSchema.safeParse(brief.requirements_contract).success) {
     throw new OrchError('CONFIRMATION_MISMATCH', '计划的结构化需求无法校验')
   }
   const proposal = (row.contract_version === 1 ? legacyProposalSchema : proposalSchema).parse(JSON.parse(row.proposal_json))
@@ -490,7 +490,8 @@ function evaluate(brief: PlanInput, proposal: TaskPlanProposal, workflow: Workfl
   for (const risk of proposal.risks) {
     const citedGap = risk.partial_result && risk.node_id && nodes.has(risk.node_id) && independentTextWork
       && brief.requirements_contract?.constraints.some(c => c.kind === 'report_data_gap'
-        && c.source_message_id === risk.partial_result!.source_message_id && c.quote === risk.partial_result!.quote)
+        && c.source_message_id === risk.partial_result!.source_message_id && c.quote === risk.partial_result!.quote
+        && brief.requirements_contract!.sources.some(s => s.message_id === c.source_message_id && authorizesDataGap(s.text, c.quote)))
     if (risk.severity === 'high' && !citedGap) issues.risks.push(`执行条件未满足：${risk.description}；处理方式：${risk.mitigation}`)
     if (risk.node_id !== undefined && !steps.has(risk.node_id)) issues.risks.push('风险引用了不存在的计划步骤。')
   }
@@ -1033,6 +1034,9 @@ export function createTaskPlanningHost(db: Db, catalog: WorkflowCatalog, registr
         throw new OrchError('CONFIRMATION_MISMATCH', '待确认计划的内容已发生变化')
       }
       if (view.launch) return { ...view.launch, replayed: true }
+      if (brief.requirements_contract && !requirementsContractSchema.safeParse(brief.requirements_contract).success) {
+        throw new OrchError('CONFIRMATION_REQUIRED', '原计划的执行范围需要重新核对，请在来源会话重新规划。')
+      }
       if (row.contract_version === 1 && options?.interpret) {
         throw new OrchError('CONFIRMATION_REQUIRED', '旧计划未保存结构化需求，请重新规划并确认执行范围')
       }
