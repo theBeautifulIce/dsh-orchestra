@@ -88,8 +88,8 @@ it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但�
           if (textPlan) {
             const obligations = (input.input as { deliverables: { deliverable_index: number }[] }).deliverables
             expect(obligations.map((x) => x.deliverable_index)).toEqual([10, 11])
-            const send = (index: number, text: string, operation_id = uuidv7()) => callDshRework(db, service.rework!, binding, {
-              action: 'publish_text_result', deliverable_index: index, operation_id, text,
+            const send = (index: number, text: string, operation_id = uuidv7(), file_name?: string) => callDshRework(db, service.rework!, binding, {
+              action: 'publish_text_result', deliverable_index: index, operation_id, text, ...(file_name === undefined ? {} : { file_name }),
             }, undefined, secret)
             expect(() => send(0, '本步骤无权提交')).toThrow()
             expect(() => send(10, '   ')).toThrow()
@@ -99,8 +99,14 @@ it.each(['完成', '纯成果', '固定会话正文', '合流有工具权限但�
               .filter((r) => r.kind === 'chat/text_result').map((r) => r.outcome))
             expect(states()).toEqual(['passed','unverifiable','unverifiable'])
             const operationId = uuidv7()
-            const first = send(10, '已核对十项，需补交两份附件。', operationId)
-            expect(send(10, '已核对十项，需补交两份附件。', operationId)).toEqual(first)
+            const report = '已核对十项，需补交两份附件。'
+            expect(() => send(10, report, operationId, names[0])).toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
+            expect(() => send(0, report, operationId, names[0])).toThrow(expect.objectContaining({ code: 'FORBIDDEN' }))
+            expect(() => send(10, report, operationId, '../汇总审核')).toThrow()
+            const first = send(10, report, operationId, '汇总审核')
+            expect(send(10, report, operationId)).toEqual(first)
+            expect(send(10, report, operationId, '会话正文-11.md')).toEqual(first)
+            expect(() => send(10, report, operationId, '会话正文-12.md')).toThrow(expect.objectContaining({ code: 'CONFIRMATION_MISMATCH' }))
             expect(() => send(10, '更换了内容', operationId)).toThrow()
             expect(states()).toEqual(['passed','unverifiable','unverifiable'])
             send(11, '第二项交付的正文。')

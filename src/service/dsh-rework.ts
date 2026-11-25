@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { materialGrant, readMaterial } from './plan-materials.ts'
 import { sha256Hex } from '../core/canonical.ts'
 import { OrchError } from '../core/errors.ts'
-import { withTx, type Db } from '../infra/sqlite/driver.ts'
+import { withTx, type Db, type Tx } from '../infra/sqlite/driver.ts'
 import { registerRunArtifactInTx, isArtifactFileName } from './artifact-store.ts'
 import { assertReworkPublication, materializeReworkPreserved } from './rework-manifest.ts'
 import { nativeTextBytes, nativeTextLimits } from './native-text-capability.ts'
@@ -16,11 +16,34 @@ import { textTarget, TEXT_PUBLICATION } from './text-result.ts'
 
 const key = z.string().min(1).max(256)
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
-const publish = z.strictObject({ operation_id: z.uuidv7(), file_name: key.refine(isArtifactFileName),
+const fileName = key.refine(isArtifactFileName)
+const publish = z.strictObject({ operation_id: z.uuidv7(), file_name: fileName,
   text: z.string().min(1).max(65536) })
 const publishText = z.strictObject({ operation_id: z.uuidv7(), deliverable_index: z.number().int().min(0).max(19),
+  file_name: fileName.optional(),
   text: z.string().min(1).max(65536).refine((text) => Boolean(text.trim()) && !text.includes('\0') && Buffer.from(text, 'utf8').toString('utf8') === text, '请提交完整的 UTF-8 会话正文') })
 const read = z.strictObject({ artifact_id: key, artifact_hash: hash, offset: z.number().int().nonnegative().default(0) })
+
+function bindPublication(tx: Tx, binding: ReworkBinding, runId: string, nodeId: string,
+  action: 'publish' | 'publish_text_result', body: unknown) {
+  if (action === 'publish') {
+    const data = publish.parse(body)
+    const artifactId = 'out_' + sha256Hex(JSON.stringify([binding.node_run_id, data.file_name]))
+    return { data, target: { artifactId, fileName: data.file_name } }
+  }
+  const { file_name: suppliedName, ...data } = publishText.parse(body)
+  const plan = readApprovedTaskPlanForRun(tx, runId)
+  const item = plan?.proposal.deliverables[data.deliverable_index]
+  if (!plan || item?.acceptance.kind !== 'chat/text_result' || item.node_id !== nodeId) {
+    throw new OrchError('FORBIDDEN', '当前步骤没有这项已批准的会话交付')
+  }
+  const target = textTarget(plan.plan_id, plan.content_hash, data.deliverable_index, binding)
+  // An optional name confirms the approved slot. Its presence must not change the receipt on replay.
+  if (suppliedName !== undefined && suppliedName !== item.title && suppliedName !== target.fileName) {
+    throw new OrchError('CONFIRMATION_MISMATCH', '正文名称与该交付项编号不一致，请核对本步骤的交付清单')
+  }
+  return { data, target }
+}
 
 /** The host owns the session binding. No run, producer, evidence or filename comes from an agent-supplied path. */
 export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, input: unknown, now = new Date().toISOString(), secret?: string) {
@@ -56,31 +79,20 @@ export function callDshRework(db: Db, host: ReworkHost, binding: ReworkBinding, 
   return withTx(db, (tx) => {
     assertReworkRunActive(tx, runId)
     if (action === 'publish' || action === 'publish_text_result') {
-      const data = action === 'publish' ? publish.parse(body) : publishText.parse(body)
+      const producer = tx.get<{ run_id: string; node_id: string; lease_id: string | null; lease_expires_at: string | null }>(
+        `SELECT run_id,node_id,lease_id,lease_expires_at FROM node_runs WHERE node_run_id=? AND attempt=? AND action_generation=?
+          AND status IN ('started','verifying') AND replacement_node_run_id IS NULL`,
+        [binding.node_run_id, binding.attempt, binding.action_generation],
+      )
+      if (!producer || producer.run_id !== runId) throw new OrchError('STALE_GENERATION', '成果提交对应的执行尝试已失效')
+      const { data, target } = bindPublication(tx, binding, runId, producer.node_id, action, body)
       return runIdempotentCommand(tx, { kind: 'rework.artifact', operationId: data.operation_id,
         requestHash: requestHashOf('rework.artifact', { binding, ...data }), now }, () => {
-        const producer = tx.get<{ run_id: string; node_id: string; lease_id: string | null; lease_expires_at: string | null }>(
-          `SELECT run_id,node_id,lease_id,lease_expires_at FROM node_runs WHERE node_run_id=? AND attempt=? AND action_generation=?
-            AND status IN ('started','verifying') AND replacement_node_run_id IS NULL`,
-          [binding.node_run_id, binding.attempt, binding.action_generation],
-        )
-        if (!producer || producer.run_id !== runId) throw new OrchError('STALE_GENERATION', '成果提交对应的执行尝试已失效')
-        // 普通文本交付按同一份能力声明校验格式与 UTF-8 边界；正文交付另有自己的正文规则（D01）。
         const bytes = 'deliverable_index' in data ? Buffer.from(data.text) : nativeTextBytes(data.file_name, data.text)
         if (bytes.length > 65536) throw new OrchError('RANGE_TOO_LARGE', '每份文本成果最多 64 KiB')
-        let target: { artifactId: string; fileName: string; evidenceIndex?: unknown }
-        if ('deliverable_index' in data) {
-          if (!producer.lease_id || !producer.lease_expires_at || !(Date.parse(producer.lease_expires_at) > Date.parse(now))) {
-            throw new OrchError('STALE_GENERATION', '正文提交租约已失效')
-          }
-          const plan = readApprovedTaskPlanForRun(tx, runId)
-          const item = plan?.proposal.deliverables[data.deliverable_index]
-          if (!plan || item?.acceptance.kind !== 'chat/text_result' || item.node_id !== producer.node_id) {
-            throw new OrchError('FORBIDDEN', '当前步骤没有这项已批准的会话交付')
-          }
-          target = textTarget(plan.plan_id, plan.content_hash, data.deliverable_index, binding)
-        } else {
-          target = { artifactId: 'out_' + sha256Hex(JSON.stringify([binding.node_run_id, data.file_name])), fileName: data.file_name }
+        if ('deliverable_index' in data && (!producer.lease_id || !producer.lease_expires_at
+          || !(Date.parse(producer.lease_expires_at) > Date.parse(now)))) {
+          throw new OrchError('STALE_GENERATION', '正文提交租约已失效')
         }
         assertReworkPublication(tx, binding.node_run_id, target.fileName)
         materializeReworkPreserved(tx, {...binding,...producer}, now, (name, receipt) => {
