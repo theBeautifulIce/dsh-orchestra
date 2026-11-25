@@ -1,3 +1,7 @@
+export function originalTitleKey(title: string): string {
+  return title.trim().match(/^[《「“]([^》」”]+)[》」”](?:\s*(?:完整)?(?:报告正文|正文|原件))?$/u)?.[1] ?? title.trim()
+}
+
 /** Read presentation preferences from the authenticated request. They never grant access to a result. */
 export function chatDeliveryPreference(sources: readonly string[]) {
   const names: string[] = []

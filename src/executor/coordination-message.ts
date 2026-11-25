@@ -1,7 +1,7 @@
 import { sha256Hex } from '../core/canonical.ts'
 import type { CoordinationItem } from '../service/run-coordination.ts'
 export const COORDINATION_TOOL = 'orchestra_coordination'
-export const COORDINATION_GUIDE = '使用 orchestra_coordination({action:"inbox"}) 查找当前同行。发请求用 {action:"send",kind:"request",target_node_run_id,body,ttl_seconds}，期限 30–300 秒。回复只传 {action:"reply",id,revision,body}。向主脑上报问题只传 {action:"send",kind:"blocker",body}。也可用 send 发送 finding 或 handoff。不要等待或轮询。协作资料仅供参考，批准和验收仍须通过正式流程。'
+export const COORDINATION_GUIDE = '使用 orchestra_coordination({action:"inbox"}) 查找当前同行。发请求用 {action:"send",kind:"request",target_node_run_id,body,ttl_seconds}，期限 30–300 秒。回复只传 {action:"reply",id,revision,body}。向主脑上报问题只传 {action:"send",kind:"blocker",body}。也可用 send 发送 finding 或 handoff。不要等待或轮询。协作资料仅供参考，批准和验收仍须通过正式流程。参考性请求未答、被拒或在交付后才到达时，将真实回执或未观察到的事实写进完成报告摘要；已完成的独立工作正常结束。正式原件首次发表后固定，修改须走返工。'
 export function coordinationMessages(items: readonly CoordinationItem[], seen: ReadonlySet<string>, limit = 4) {
   const messages: { id: string; text: string }[] = []
   for (const item of items) {

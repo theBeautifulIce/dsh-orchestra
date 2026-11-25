@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { uuidv7 } from '../core/ids.ts'
 import { explicitApprovalNames, requirementsContractSchema, taskRequirementSchema, type RequirementsContract, type TaskRequirement } from '../core/task-requirements.ts'
 import { isOrdinaryChat, explicitNotesRequest } from './chat-task-intent.ts'
+import type { ChatTaskOrigin } from './chat-task-receipts.ts'
 
 const quote = z.string().trim().min(1).max(2000)
 const missingSchema = z.enum(['goal', 'result', 'materials', 'timing', 'constraints', 'workflow'])
@@ -26,9 +27,10 @@ const replySchema = z.discriminatedUnion('kind', [
 export type SemanticWorkflow = z.infer<typeof workflowSchema>
 type Source = { message_id: string; text: string }
 type Timing = { source_message_id: string; quote: string }
+export type SemanticLaunchOrigin = Pick<ChatTaskOrigin, 'messageKey' | 'requestKey' | 'inputHash'>
 export type SemanticDraft = { id: string; revision: number; sources: Source[]; constraints: TaskRequirement[];
   workflow?: SemanticWorkflow; unresolved: z.infer<typeof sourceQuote>[]; timing: 'immediate' | 'plan_only' | 'held' | 'unclear'; timing_source: Timing;
-  missing: Missing[]; expires_at: number; requires_restatement?: boolean }
+  missing: Missing[]; expires_at: number; requires_restatement?: boolean; launchOrigin?: SemanticLaunchOrigin }
 export type SemanticInput = { current: Source; explicit: boolean; surface?: 'task_form'; draft?: SemanticDraft }
 export type SemanticDraftCheckpoints = {
   read(identity: string): SemanticDraft | undefined | Promise<SemanticDraft | undefined>
@@ -36,8 +38,8 @@ export type SemanticDraftCheckpoints = {
 }
 export type SemanticRequest = { goal: string; requirements: string[]; requirements_contract: RequirementsContract; workflow?: SemanticWorkflow }
 export type SemanticOutcome =
-  | { kind: 'ready'; request: SemanticRequest; draft?: SemanticDraft }
-  | { kind: 'held' | 'clarify'; message: string; draft?: SemanticDraft }
+  | { kind: 'ready'; request: SemanticRequest; draft?: SemanticDraft; launchOrigin?: SemanticLaunchOrigin }
+  | { kind: 'held' | 'clarify'; message: string; draft?: SemanticDraft; invalidReply?: true }
   | { kind: 'conversation' | 'notes' | 'brain_notes' | 'discarded'; draft?: SemanticDraft }
 export type SemanticInterpreter = (input: SemanticInput, signal: AbortSignal, assertCurrent: () => void) => Promise<unknown>
 
@@ -74,11 +76,11 @@ function unresolvedExplanation(items: readonly { quote: string }[]): string {
   return excerpts.length ? '\n待核对的原始要求（节选）：' + excerpts.map(text => '「' + text.slice(0, 240) + (text.length > 240 ? '…' : '') + '」').join('；') : ''
 }
 
-function clarification(message: string, draft?: SemanticDraft): SemanticOutcome {
+function clarification(message: string, draft?: SemanticDraft): Extract<SemanticOutcome, { kind: 'held' | 'clarify' }> {
   return { kind: 'clarify', message, ...(draft ? { draft } : {}) }
 }
 function retainUnclear(input: SemanticInput, pending: SemanticDraft | undefined, missing: Missing[],
-  message: string, now: number, requiresRestatement = false): SemanticOutcome {
+  message: string, now: number, requiresRestatement = false): ReturnType<typeof clarification> {
   const sources = [...pending?.sources ?? []]
   const canAppend = sources.length < 12 && sources.reduce((length, source) => length + source.text.length, 0) + input.current.text.length <= 8000
   if (canAppend && !sources.some(source => source.message_id === input.current.message_id)) sources.push(input.current)
@@ -107,18 +109,21 @@ function separated(text: string, a: string, b: string): boolean {
 const requested = new Set<Missing>(['goal', 'result', 'materials'])
 
 /** A well-formed clarification or an actual unresolved restriction needs no model retry. */
-export function semanticResponseNeedsCorrection(raw: unknown): boolean {
+export function semanticResponseNeedsCorrection(raw: unknown, input?: SemanticInput): boolean {
   const result = replySchema.safeParse(raw)
   if (!result.success) return true
   const reply = result.data
-  return reply.kind === 'task' && reply.missing.includes('constraints') && !reply.unresolved.length
+  if (reply.kind === 'task' && reply.missing.includes('constraints') && !reply.unresolved.length) return true
+  if (!input) return false
+  const outcome = interpretSemanticAdmission(input, reply)
+  return outcome.kind === 'clarify' && outcome.invalidReply === true
 }
 
 /** Validates a proposal against actual user sources. No writes or launch happen here. */
 export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, now = Date.now()): SemanticOutcome {
   const pending = input.draft && input.draft.expires_at > now ? input.draft : undefined
-  const invalid = () => retainUnclear(input, pending, ['constraints'],
-    '任务理解结果未通过结构或原文引用校验，并不表示用户的限制无法执行。原消息仍保留；请先放弃该草稿，再发送完整原要求重试。', now, true)
+  const invalid = () => ({ ...retainUnclear(input, pending, ['constraints'],
+    '任务理解结果未通过结构或原文引用校验，并不表示用户的限制无法执行。原消息仍保留；请先放弃该草稿，再发送完整原要求重试。', now, true), invalidReply: true as const })
   const parsed = replySchema.safeParse(raw)
   if (!parsed.success) return invalid()
   const reply = parsed.data
@@ -227,6 +232,13 @@ export function interpretSemanticAdmission(input: SemanticInput, raw: unknown, n
     ...(!continued && pending ? { draft: pending } : {}) }
 }
 
+function stagedRequest(draft: SemanticDraft): Extract<SemanticOutcome, { kind: 'ready' }> {
+  const contract = requirementsContractSchema.parse({ version: 1, start_policy: draft.timing, timing: draft.timing_source,
+    sources: draft.sources, constraints: draft.constraints })
+  return { kind: 'ready', launchOrigin: draft.launchOrigin, request: { goal: contract.sources.map(item => item.text).join('\n'),
+    requirements: [], requirements_contract: contract, ...(draft.workflow && { workflow: draft.workflow }) } }
+}
+
 /** Drafts belong to an authenticated workspace session, never to a model-produced identity. */
 export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
   let identity: string | undefined
@@ -246,12 +258,24 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
       reset()
       if (scope && old) return checkpoints?.write(scope, undefined, old)
     },
+    /** The planning database has durably bound this exact human request to a plan. */
+    async acknowledgeLaunch(scope: string, origin: SemanticLaunchOrigin) {
+      if (!checkpoints) return
+      const saved = await checkpoints.read(scope)
+      if (!saved?.launchOrigin || saved.launchOrigin.requestKey !== origin.requestKey || saved.launchOrigin.inputHash !== origin.inputHash) return
+      await checkpoints.write(scope, undefined, saved)
+      if (identity === scope && checkpoint?.id === saved.id && checkpoint.revision === saved.revision) {
+        checkpoint = undefined
+        if (draft?.id === saved.id && draft.revision === saved.revision) draft = undefined
+      }
+    },
     /** Keep the exact human sources until a run is accepted. Late failures cannot replace a newer draft. */
     retainUnstarted(requestId: string, hash: string): void {
       if (unstarted?.requestId !== requestId || unstarted.hash !== hash || unstarted.generation !== epoch) return
       draft = structuredClone(unstarted.draft)
     },
     async admit(request: { identity: string; requestId: string; hash: string; input: Omit<SemanticInput, 'draft'>;
+      launchOrigin?: SemanticLaunchOrigin; hasPlan?(origin: SemanticLaunchOrigin): Promise<boolean>;
       signal: AbortSignal; assertCurrent(): void }, interpret: SemanticInterpreter): Promise<SemanticOutcome> {
       if (identity !== request.identity) { reset(); identity = request.identity }
       request.signal.throwIfAborted()
@@ -274,11 +298,22 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
         draft = checkpoint && structuredClone(checkpoint)
         loaded = true
       }
+      const staged = checkpoint?.launchOrigin ? checkpoint : undefined
+      if (staged?.launchOrigin && request.launchOrigin && (staged.launchOrigin.requestKey === request.launchOrigin.requestKey
+        || staged.launchOrigin.messageKey === request.launchOrigin.messageKey)) {
+        if (staged.launchOrigin.inputHash !== request.launchOrigin.inputHash) return clarification('这条请求的内容已改变，请作为一条新消息提交。')
+        return stagedRequest(staged)
+      }
       if (draft?.timing === 'held' && draft.sources.some(source => source.message_id === request.input.current.message_id
         && source.text === request.input.current.text)) {
         return { kind: 'held', draft: structuredClone(draft), message: '这条消息已归入暂缓草稿。准备执行时，可直接说明继续哪项任务。' }
       }
-      const input = structuredClone({ ...request.input, ...(draft ? { draft } : {}) })
+      // After a restart a fresh message must explicitly resume. Only human sources and restrictions go to the model.
+      const { launchOrigin: priorLaunch, ...visibleDraft } = draft ?? {}
+      const input: SemanticInput = structuredClone({ ...request.input, ...(draft ? { draft: priorLaunch
+        ? { ...visibleDraft as SemanticDraft, timing: 'held' as const } : visibleDraft as SemanticDraft } : {}) })
+      const alreadyBound = staged?.launchOrigin ? await request.hasPlan?.(staged.launchOrigin) : false
+      current()
       let raw: unknown
       try { raw = await interpret(structuredClone(input), request.signal, request.assertCurrent) }
       catch (error) {
@@ -298,31 +333,40 @@ export function createSemanticSession(checkpoints?: SemanticDraftCheckpoints) {
       request.assertCurrent()
       if (generation !== epoch) throw new Error('Semantic admission superseded')
       const result = interpretSemanticAdmission(input, raw)
+      let next = result.draft
+      const continuesDraft = result.kind === 'ready' && !result.draft && input.draft && input.draft.sources.every(source =>
+        result.request.requirements_contract.sources.some(item => item.message_id === source.message_id && item.text === source.text))
+      if (alreadyBound && staged && continuesDraft) return stagedRequest(staged)
+      if (alreadyBound && staged && next?.id === staged.id) {
+        // A different turn may have committed the plan before the original reply was seen.
+        await checkpoints!.write(request.identity, undefined, staged, current)
+        current(); checkpoint = undefined; draft = undefined; next = undefined
+        if (result.kind === 'held' || result.kind === 'clarify' || result.kind === 'discarded')
+          return clarification('上一项任务已有正式计划。本轮补充尚未应用，请从原会话的计划回执查看或调整任务。')
+        delete result.draft
+      }
+      unstarted = undefined
+      if (result.kind === 'ready' && !result.draft) {
+        const contract = result.request.requirements_contract
+        const launchOrigin = checkpoints && continuesDraft && (staged?.launchOrigin ?? request.launchOrigin)
+        const recoverable: SemanticDraft = { id: continuesDraft ? input.draft!.id : uuidv7(), revision: continuesDraft ? input.draft!.revision + 1 : 1,
+          sources: structuredClone(contract.sources), constraints: structuredClone(contract.constraints), unresolved: [],
+          timing: contract.start_policy, timing_source: structuredClone(contract.timing!), missing: [], expires_at: Date.now() + 30 * 60_000,
+          ...(result.request.workflow && { workflow: structuredClone(result.request.workflow) }), ...(launchOrigin && { launchOrigin }) }
+        unstarted = { requestId: request.requestId, hash: request.hash, generation, draft: recoverable }
+        if (launchOrigin) { result.launchOrigin = launchOrigin; next = recoverable }
+      }
       if (checkpoints) {
-        // Only explicitly held drafts with known restrictions survive disposal. An
-        // unresolved new restriction invalidates the older resumable checkpoint.
-        const retained = result.draft
-        const next = retained?.timing === 'held' && !retained.requires_restatement && !retained.unresolved.length ? retained : undefined
+        // Keep the prior signed handoff during an unrelated conversation. Never persist an unresolved restriction as resumable.
+        if (next && staged && next.id === staged.id && next.revision === staged.revision) next = staged
+        if (next && ((!next.launchOrigin && next.timing !== 'held') || next.requires_restatement || next.unresolved.length)) next = undefined
         if (next?.id !== checkpoint?.id || next?.revision !== checkpoint?.revision) {
           await checkpoints.write(request.identity, next, checkpoint, current)
           current()
           checkpoint = next
         }
       }
-      draft = result.draft
-      unstarted = undefined
-      if (result.kind === 'ready' && !result.draft) {
-        const contract = result.request.requirements_contract
-        const continued = input.draft && input.draft.sources.every(source =>
-          contract.sources.some(current => current.message_id === source.message_id && current.text === source.text))
-        unstarted = { requestId: request.requestId, hash: request.hash, generation,
-          draft: { id: continued ? input.draft!.id : uuidv7(), revision: continued ? input.draft!.revision + 1 : 1,
-            sources: structuredClone(contract.sources), constraints: structuredClone(contract.constraints), unresolved: [],
-            // interpretSemanticAdmission always supplies the validated timing citation.
-            timing: contract.start_policy, timing_source: structuredClone(contract.timing!), missing: [],
-            expires_at: Date.now() + 30 * 60_000,
-            ...(result.request.workflow ? { workflow: structuredClone(result.request.workflow) } : {}) } }
-      }
+      draft = next?.launchOrigin ? next : result.draft
       completed.set(request.requestId, { hash: request.hash, outcome: structuredClone(result) })
       if (completed.size > 128) completed.delete(completed.keys().next().value!)
       return result

@@ -17,8 +17,8 @@ import { executionCompletionSchema } from '../core/execution-completion.ts'
 import { uuidv7 } from '../core/ids.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { chatRun, chatRunByTitle, findChatPlan, latestDeliveredChatRun, pendingChatReports, reportChatRun, type ChatTaskOrigin } from './chat-task-receipts.ts'
-import { readChatArtifactContent, readChatTextPreviews, readCompletedChatTextPreviews } from './chat-text-previews.ts'
-import { acceptedChatResults, chatResultPresentation, previousResultRequest, selectChatResults } from './chat-result-selection.ts'
+import { completedChatTextRefs, previewPublications, readChatArtifactContent, readChatTextPreviews } from './chat-text-previews.ts'
+import { acceptedChatResults, chatResultPresentation, isHostResourceRead, previousResultRequest, selectChatResults } from './chat-result-selection.ts'
 import { orchestraCommand, explicitNotesRequest } from './chat-task-intent.ts'
 import { createSemanticSession, type SemanticDraftCheckpoints, type SemanticInput, type SemanticRequest } from './semantic-admission.ts'
 import { resolveSemanticWorkflow } from './semantic-workflow.ts'
@@ -132,7 +132,7 @@ function lastDeliveredRun(agent: Agent, binding: Binding, db: Service['orchestra
     const run = getRun(db, loc.runId)
     if (isRunTerminal(run.status) && event.data.id === reportMessageId(binding.identity, loc.runId, 'terminal:' + run.status)) return loc.runId
   }
-  return latestDeliveredChatRun(db, operator)
+  return latestDeliveredChatRun(db, operator, binding.identity)
 }
 
 function taskText(message: Message): string {
@@ -280,7 +280,7 @@ function describeFailedSteps(db: Service['orchestra']['db'], runId: string) {
   })
 }
 
-function describeRun(service: Service, runId: string, operator: string) {
+function describeRun(service: Service, runId: string, operator: string, includeText = true) {
   const { db } = service.orchestra
   const run = getRun(db, runId, { includeAcceptanceArtifactIds: true })
   const terminal = isRunTerminal(run.status)
@@ -304,6 +304,7 @@ function describeRun(service: Service, runId: string, operator: string) {
   const partial = !terminal && (coordination.length > 0 || blocking.some(node => node.action_required))
   const presentation = partial || (terminal && delivery_checks.some(check => check.outcome === 'passed' && check.artifact_id))
     ? chatResultPresentation(db, runId) : { names: [], linksOnly: false }
+  const completedRefs = partial && !presentation.linksOnly ? completedChatTextRefs(db, runId) : []
   const nativeApprovals = terminal ? [] : withReadTx(db, ({ tx }) => (service.pendingNativeApprovals?.(runId) ?? []).map(approval => {
     const node = tx.get<{ run_id: string; node_id: string }>('SELECT run_id,node_id FROM node_runs WHERE node_run_id=?', [approval.nodeRunId])
     const title = node ? readRunNodeDisplay(tx, node.run_id).nodes.get(node.node_id)?.title : undefined
@@ -313,8 +314,8 @@ function describeRun(service: Service, runId: string, operator: string) {
     run_id: runId, task_id: run.task_id, title: run.task_title, status: run.status, terminal,
     counts: run.counts, settling: run.settling, delivery_checks, presentation,
     ...(task?.current_run_id === runId ? { acceptance: task.delivery_acceptance, goal_met: task.goal_met } : {}),
-    text_results: presentation.linksOnly ? [] : terminal ? readChatTextPreviews(db, runId, delivery_checks)
-      : partial ? readCompletedChatTextPreviews(db, runId) : [],
+    completedRefs, text_results: !includeText || presentation.linksOnly ? [] : terminal ? readChatTextPreviews(db, runId, delivery_checks)
+      : previewPublications(db, runId, completedRefs),
     ...(terminal && { failure_details: describeFailedSteps(db, runId) }),
     decisions, blocking,
     nativeApprovals, coordination,
@@ -462,7 +463,7 @@ function nextReport(view: ReturnType<typeof describeRun>, previous: string | nul
   const coordination = view.coordination.map(item => ['coordination',item.id,item.state])
   const actions = [...decisions, ...reviews, ...rework, ...blocking, ...nativeApprovals, ...coordination]
   if (!actions.length) return
-  const publications = view.text_results.map(item => ['completed_text', item.artifact_id, item.sha256])
+  const publications = view.completedRefs.map(item => ['completed_text', item.artifact_id, item.sha256])
   const active = [...actions, ...publications].map(action => sha256Hex(JSON.stringify(action))).sort()
   const prefix = 'actions:v2:'
   const key = prefix + active.join(',')
@@ -661,10 +662,19 @@ export function installNativeChat(host: Context, options: {
       requestKey: sha256Hex(JSON.stringify([binding.identity, nativeOwnerRequest(state.human)])),
       inputHash: sha256Hex(JSON.stringify(state.human.content)), signal: actionSignal, assertCurrent,
     }
+    const session = semanticSessions.get(agent) ?? createSemanticSession(options.draftCheckpoints)
+    semanticSessions.set(agent, session)
+    const acknowledge = async (receipt: ChatTaskOrigin) => {
+      // An accepted plan is authoritative even if a newer draft won the cleanup race.
+      try { await session.acknowledgeLaunch(binding.identity, receipt) }
+      catch (error) { if (!(error instanceof OrchError) || error.code !== 'STALE_GENERATION') throw error }
+    }
     try {
       const replay = await replayTask(binding, origin, command)
       assertCurrent()
       if (replay) {
+        await acknowledge(origin)
+        assertCurrent()
         state.managed = { outcome: replay, ...(replay.state === 'started' ? { runId: replay.run_id } : {}) }
         sessions.set(agent, binding)
         reportPump?.schedule(agent)
@@ -688,6 +698,7 @@ export function installNativeChat(host: Context, options: {
       return settle({ ...result, messages: [...result.messages, admissionNotice(outcome)] })
     }
     const readRouting = async () => await options.autoRouteEnabled?.(binding, agent) !== false
+    if (command === undefined && isHostResourceRead(text)) return settle(result)
     const selector = command === undefined && text.length <= 2000 && state.human.content.every(block => block.type === 'text')
       && previousResultRequest(text)
     if (command === undefined && !selector) {
@@ -757,10 +768,10 @@ export function installNativeChat(host: Context, options: {
       if (state.human.content.some(block => block.type !== 'text')) {
         throw new OrchError('PAYLOAD_SCHEMA_INVALID', '附件没有纳入本次任务', { reason: 'attachments_unsupported' })
       }
-      const session = semanticSessions.get(agent) ?? createSemanticSession(options.draftCheckpoints)
-      semanticSessions.set(agent, session)
       const admission = await session.admit({ identity: binding.identity, requestId: nativeOwnerRequest(state.human)!,
         hash: fingerprint(state.human), input: { current: { message_id: state.human.id, text: goal }, explicit: command !== undefined },
+        launchOrigin: { messageKey: origin.messageKey, requestKey: origin.requestKey, inputHash: origin.inputHash },
+        hasPlan: async saved => Boolean(await replayTask(binding, { ...origin, ...saved }, undefined)),
         signal: actionSignal, assertCurrent }, async (input, lifetime, current) => {
         if (!options.interpret) throw new OrchError('SERVICE_UNAVAILABLE', '此会话暂时无法解释任务，请检查当前模型后重试')
         return options.interpret(input, agent, lifetime, current)
@@ -783,10 +794,14 @@ export function installNativeChat(host: Context, options: {
       else if (admission.kind === 'discarded') managed.outcome = { state: 'draft_discarded', message: '已放弃这项草稿。' }
       else if (admission.kind === 'ready') {
         try {
-          const outcome = await startTask(agent, binding, state, state.human, origin, admission.request)
+          const dispatch = admission.launchOrigin ? { ...origin, ...admission.launchOrigin } : origin
+          const existing = admission.launchOrigin && await replayTask(binding, dispatch, undefined)
+          const outcome = existing ?? await startTask(agent, binding, state, state.human, dispatch, admission.request)
           managed.outcome = outcome
           if (outcome.state === 'started') managed.runId = outcome.run_id
           else session.retainUnstarted(nativeOwnerRequest(state.human)!, fingerprint(state.human))
+          if (admission.launchOrigin) await acknowledge(dispatch)
+          if (existing) { sessions.set(agent, binding); reportPump?.schedule(agent) }
         } catch (error) {
           session.retainUnstarted(nativeOwnerRequest(state.human)!, fingerprint(state.human))
           throw error
@@ -1248,7 +1263,7 @@ export function installNativeChat(host: Context, options: {
             : '当前任务没有可处理的成果审核。'), deliveryReview: result.deliveryReview }
         }
         if ('blocking' in result) {
-          const { deliveryReviews: _, ...status } = result
+          const { deliveryReviews: _, completedRefs: _refs, ...status } = result
           return { ...respond(status, chatText(describeChatRun(result))), references: artifactReadReferences(result),
             artifactLinks: result.artifact_links, attentionLinks: result.attention_links }
         }
@@ -1288,7 +1303,7 @@ export function installNativeChat(host: Context, options: {
         const retrying = await service.recoverChatModelAssignment?.({ actor: options.operator, runId: receipt.run_id, signal: options.signal,
           checked, isCurrent }).catch(() => undefined)
         if (options.signal.aborted || !isCurrent()) return 'stop'
-        const facts = describeRun(service, receipt.run_id, options.operator)
+        const facts = describeRun(service, receipt.run_id, options.operator, false)
         const view = retrying?.length ? { ...facts,
           blocking: facts.blocking.filter(({ node_run_id }) => !retrying.includes(node_run_id)) } : facts
         const priorKey = receipt.reported_key?.startsWith('delivered:') ? receipt.reported_key.slice('delivered:'.length) : null
@@ -1321,7 +1336,10 @@ export function installNativeChat(host: Context, options: {
           try {
             const links = describeChatArtifacts(service.orchestra.db, view, binding)
             const display = describeChatRun({
-              ...view, ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
+              ...view, text_results: view.presentation.linksOnly ? [] : view.terminal
+                ? readChatTextPreviews(service.orchestra.db, receipt.run_id, view.delivery_checks)
+                : previewPublications(service.orchestra.db, receipt.run_id, view.completedRefs),
+              ...(view.terminal ? { nodes: describeNodes(service.orchestra.db, receipt.run_id) } : {}),
               ...(view.presentation.linksOnly && { original_titles: links.map(link => link.title) }),
               artifacts: describeArtifacts(service.orchestra.db, receipt.run_id, acceptedArtifactIds(view.delivery_checks)),
             }, true)
@@ -1331,14 +1349,23 @@ export function installNativeChat(host: Context, options: {
               describeChatAttention(view, binding), view.terminal))
           } finally { pending.delete(id) }
         }
-        const consumedAtCheckpoint = agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.id === id)
+        const consumedAtCheckpoint = agent.session.snapshotEvents().find(event => event.type === 'user/message' && event.data.id === id)
         if (!await host.sessions.flush(agent.session) || options.signal.aborted || !isCurrent()) return 'stop'
         // Inbox persistence is not delivery. A queued or claimed message can be
         // discarded before user/message commits. Acknowledge the visible source
         // event only; retry the same ID when an unconsumed notice is lost.
         if (consumedAtCheckpoint) {
           claimedNotices.get(agent)?.delete(id)
-          reportChatRun(service.orchestra.db, receipt.run_id, 'delivered:' + key)
+          const source = consumedAtCheckpoint.type === 'user/message'
+            ? consumedAtCheckpoint.data.source as { kind?: string; form?: string; artifacts?: unknown[] } | undefined : undefined
+          const hasOriginals = view.terminal && source?.kind === ORCHESTRA_MESSAGE_SOURCE && source.form === 'notice'
+            && source.artifacts?.some(item => {
+              const parsed = chatArtifactLink.safeParse(item)
+              return parsed.success && parsed.data.location.runId === receipt.run_id && parsed.data.location.sessionId === binding.sessionId
+                && parsed.data.location.workspaceId === binding.workspaceId
+            })
+          reportChatRun(service.orchestra.db, receipt.run_id, 'delivered:' + key,
+            hasOriginals ? { identity: binding.identity, seq: consumedAtCheckpoint.seq } : undefined)
         }
       })
     } finally { lease.release() }

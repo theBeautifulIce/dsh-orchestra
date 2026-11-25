@@ -45,6 +45,7 @@ export function sortDecisions(items: DecisionView[]): DecisionView[] {
 }
 
 export type DecisionInboxProps = {
+  scopeLabel?: string
   api: ResourcesApi
   rework?: ReworkApi
   reworkPlannerEnabled?: boolean
@@ -58,7 +59,7 @@ export type DecisionInboxProps = {
 type Notice = { text: string; tone: 'ok' | 'error' }
 const DECISION_VIEWS = { inbox: '待处理', active: '全部进行中', history: '已处理' } as const
 
-export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, reloadVersion = 0, onSnapshot, decisionId, onShowAll }: DecisionInboxProps) {
+export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, reloadVersion = 0, onSnapshot, decisionId, onShowAll, scopeLabel }: DecisionInboxProps) {
   const canWrite = usePanelCommandsEnabled(true)
   const [items, setItems] = useState<DecisionView[]>([])
   const [cursor, setCursor] = useState<string | undefined>()
@@ -186,7 +187,7 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
 
   return <section aria-labelledby="decision-inbox-title" className="ops-page">
     <header className="ops-page-header">
-      <div><h1 id="decision-inbox-title">审批中心</h1><p className="ops-meta">先核对上下文与证据，再处理需要你决定的事项。</p></div>
+      <div><h1 id="decision-inbox-title">审批中心</h1><p className="ops-meta">{scopeLabel ? `这里显示${scopeLabel}的审批事项。` : '先核对上下文与证据，再处理需要你决定的事项。'}</p></div>
       {decisionId && onShowAll && <button type="button" className="ops-button" onClick={onShowAll}>查看全部决定</button>}
       <button type="button" onClick={refresh} disabled={loading} className="ops-button">{loading ? '正在更新…' : '刷新'}</button>
     </header>
@@ -218,7 +219,8 @@ export function DecisionInbox({ api, commands, rework, reworkPlannerEnabled, rel
     {notice && <p role={notice.tone === 'error' ? 'alert' : 'status'} style={notice.tone === 'error' ? errorTextStyle : mutedStyle}>{notice.text}</p>}
     {failed && <div role="alert" style={errorStyle}><span>{COPY.queryFailed}</span><button type="button" onClick={refresh} style={buttonStyle}>{COPY.retry}</button></div>}
     {loading && <p role="status" style={mutedStyle}>正在读取决定事项…</p>}
-    {!loading && !failed && items.length === 0 && <p className="ops-surface ops-empty">{history ? '还没有已处理的决定。' : COPY.emptyDecisions}</p>}
+    {!loading && !failed && items.length === 0 && <p className="ops-surface ops-empty">{scopeLabel}{history
+      ? '还没有已处理的决定。' : COPY.emptyDecisions}{scopeLabel && !history && ' 可从任务所在会话的审批通知打开对应待办。'}</p>}
     <div className="ops-card-grid">
     {sorted.map((decision) => <DecisionCard
       key={decision.decision_id}

@@ -237,7 +237,7 @@ export function PanelApp(props: PanelAppProps) {
       reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
     </div>
   } else if (route === 'decisions') {
-    screen = <DecisionInbox key={decisionId ?? 'all'} decisionId={decisionId} onShowAll={() => setDecisionId(undefined)}
+    screen = <DecisionInbox key={decisionId ?? 'all'} decisionId={decisionId} scopeLabel={props.scopeLabel} onShowAll={() => setDecisionId(undefined)}
       rework={rework} reworkPlannerEnabled={props.reworkPlannerEnabled} api={api} commands={decisionCommands} reloadVersion={reloadVersion} onSnapshot={onSnapshot} />
   } else if (route === 'effects') {
     screen = <UnverifiedEffects api={api} client={client} reloadVersion={reloadVersion} onSnapshot={onSnapshot} onOpenDecision={openDecision} />

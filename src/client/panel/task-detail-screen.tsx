@@ -673,13 +673,14 @@ function RunResult({ api, run, delivery, verifying, nodes }: {
       {!failed && !artifacts && <p role="status" style={mutedStyle}>正在读取产物…</p>}
       {artifacts?.items.length === 0 && <p style={mutedStyle}>这次运行尚无产物记录。</p>}
       {artifacts?.items.map((artifact) => <details key={artifact.artifact_id} style={cardStyle}>
-        <summary>{artifact.file_name || '未命名产物'}{artifact.expired ? ' · 已超过保留期限' : ''}</summary>
+        <summary>{artifact.title || artifact.file_name || '未命名产物'}{artifact.expired ? ' · 已超过保留期限' : ''}</summary>
         {artifact.source_node_run_id && <p style={mutedStyle}>提交步骤 · {sources.get(artifact.source_node_run_id) || '步骤名称暂不可用'}</p>}
         <p style={mutedStyle}>记录于 {formatDate(artifact.created_at)}</p>
         {artifact.retain_until && <p style={mutedStyle}>保留至 {formatDate(artifact.retain_until)}</p>}
         <ArtifactContent api={api} artifact={artifact} />
         <details>
           <summary>查看产物登记明细</summary>
+          {artifact.title && artifact.file_name && <p style={mutedStyle}>下载文件名 {artifact.file_name}</p>}
           <p style={mutedStyle}>产物编号 <code>{artifact.artifact_id}</code> · SHA-256 <code>{artifact.sha256}</code></p>
           {artifact.source_node_run_id && <p style={mutedStyle}>提交步骤编号 <code>{artifact.source_node_run_id}</code></p>}
         </details>

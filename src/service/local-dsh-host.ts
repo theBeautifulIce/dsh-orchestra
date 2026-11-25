@@ -13,14 +13,13 @@ import { MEMORY_TOOL_PREFIX } from '../core/memory-graph.ts'
 import { artifactReceiptLocation, type ArtifactReceiptLocation } from '../core/receipt-location.ts'
 import { MODEL_COMPLEXITIES, MODEL_REF_RE, validModelEffort, type ModelReasoning } from '../executor/model-routing.ts'
 import { ReadOnlyToolRunner, ToolRegistry, type ToolDescriptor } from '../executor/tools.ts'
-import { createDshJsonCompletion } from '../executor/dsh-json.ts'
-import { SEMANTIC_INSTRUCTIONS, semanticResponseNeedsCorrection } from './semantic-admission.ts'
+import { createDshSemanticInterpreter } from '../executor/dsh-task-requirements.ts'
 import { createWindowsReadOnlyHost } from '../executor/windows-readonly-host.ts'
 import type { serveDshOrchestra } from '../index.ts'
 import { installNativeChat } from './chat-native.ts'
 import { createSemanticDraftCheckpoints } from './semantic-draft-checkpoints.ts'
 import { artifactBrowserPath, artifactDownloadPath, createArtifactBrowserReader } from './artifact-browser.ts'
-import { getArtifactContent } from './queries/artifacts.ts'
+import { acceptedArtifactTitle, getArtifactContent } from './queries/artifacts.ts'
 import { getRun } from './queries/runs.ts'
 import { RUN_TERMINAL } from './commands/run-close.ts'
 import { createNativeChatRoutingSettings, nativeChatRoutingUpdate } from './native-chat-routing-settings.ts'
@@ -418,12 +417,13 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
       try {
         const { service } = await lease.startup
         authorized()
-        const run = getRun(service.orchestra.db, location.runId)
+        const run = getRun(service.orchestra.db, location.runId, { includeAcceptanceArtifactIds: true })
         if (run.task_id !== location.taskId) throw new OrchError('FORBIDDEN', '成果不属于此任务。请从原会话打开。')
         const item = getArtifactContent(service.orchestra.db, location.runId, location.artifactId, 'download', Date.now()).item
         if (item.kind !== 'download' || item.sha256 !== location.sha256)
           throw new OrchError('CONFIRMATION_MISMATCH', '成果版本已改变。请从原会话重新核对成果。')
-        return { fileName: item.file_name, bytes: Buffer.from(item.base64, 'base64'), sha256: item.sha256 }
+        const title = acceptedArtifactTitle(run.delivery_checks?.items ?? [], location.artifactId, item.sha256)
+        return { fileName: item.file_name, title, bytes: Buffer.from(item.base64, 'base64'), sha256: item.sha256 }
       } finally {
         lease.inflight -= 1
         lease.lastUsed = Date.now()
@@ -455,7 +455,7 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
     }, 'Orchestra personal services')
     if (nativeChat) host.inject(['systemPrompt', 'sessions', 'webServer'], (chatCtx) => {
       const settings = profileDir && isAbsolute(profileDir) ? createNativeChatRoutingSettings(profileDir) : undefined
-      const complete = createDshJsonCompletion(host.llm, 'admission')
+      const complete = createDshSemanticInterpreter(host.llm)
       installNativeChat(chatCtx, {
         operator: human,
         signal: stop.signal,
@@ -465,7 +465,7 @@ export function installLocalDshHost(ctx: Context, options: LocalOptions, serve: 
           if (!complete) throw new OrchError('SERVICE_UNAVAILABLE', '当前模型服务没有可用的任务理解接口，请检查服务后重试', { reason: 'semantic_unavailable' })
           const fallback = host.get('agentDefaultModel') as { currentSelection(): Model | undefined } | undefined
           const selection = agent.model.current() ?? fallback?.currentSelection()
-          return complete(selection, SEMANTIC_INSTRUCTIONS, input, signal, assertCurrent, semanticResponseNeedsCorrection)
+          return complete(selection, input, signal, assertCurrent)
         },
         autoRouteEnabled() {
           if (!settings) throw new OrchError('SERVICE_UNAVAILABLE', '无法读取此 Desktop 用户的自动接管设置')

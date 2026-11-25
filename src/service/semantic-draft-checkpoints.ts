@@ -28,7 +28,10 @@ export function createSemanticDraftCheckpoints(profileDir: string, keyFor: (iden
     if (!row) return
     try {
       const { draft, mac } = JSON.parse(row.value) as { draft: SemanticDraft; mac: string }
-      if (seal(secret, identity, draft) !== mac || draft.timing !== 'held') throw new Error()
+      if (seal(secret, identity, draft) !== mac) throw new Error()
+      if (draft.timing !== 'held' && (!(draft.timing === 'immediate' || draft.timing === 'plan_only')
+        || !draft.launchOrigin || ![draft.launchOrigin.messageKey, draft.launchOrigin.requestKey, draft.launchOrigin.inputHash]
+          .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)))) throw new Error()
       const now = Date.now()
       if (draft.expires_at > now && draft.expires_at <= now + lifetime) return draft
     } catch { throw new OrchError('CONFIRMATION_MISMATCH', '暂缓草稿未通过来源核对，请完整重述任务及限制。') }

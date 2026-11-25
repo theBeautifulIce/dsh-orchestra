@@ -4,6 +4,8 @@ import type { Db } from '../../infra/sqlite/driver.ts'
 import { ARTIFACT_MAX_BYTES } from '../artifact-store.ts'
 import { decodeCursor, encodeCursor, makeCursor } from './cursor.ts'
 import { withReadTx } from './read-tx.ts'
+import { readDeliveryChecks, type RunDeliveryCheck } from './runs.ts'
+import { originalTitleKey } from '../../core/chat-delivery-preference.ts'
 
 export type ArtifactView = {
   artifact_id: string
@@ -17,7 +19,12 @@ export type ArtifactView = {
   source_node_run_id?: string | null
 }
 
-export type RunArtifact = Omit<ArtifactView, 'evidence_index'> & { created_at: string }
+export type RunArtifact = Omit<ArtifactView, 'evidence_index'> & { created_at: string; title?: string }
+
+export function acceptedArtifactTitle(checks: readonly RunDeliveryCheck[], id: string, sha: string): string | undefined {
+  const accepted = checks.find(check => check.outcome === 'passed' && check.artifact_id === id && check.sha256 === sha && check.title)
+  return accepted?.title ? originalTitleKey(accepted.title) : undefined
+}
 
 type ArtifactRow = Pick<RunArtifact, 'artifact_id' | 'run_id' | 'sha256' | 'retain_until'> & {
   file_name: string | null; node_run_id: string | null; size_bytes: number | null
@@ -61,11 +68,15 @@ export function listRunArtifacts(db: Db, runId: string, now = Date.now(), option
     )
     const page = rows.slice(0, 50)
     const last = page[page.length - 1]
+    const checks = page.length ? readDeliveryChecks(ctx, runId, true).items : []
     const next_cursor = rows.length > 50 && last
       ? encodeCursor(makeCursor('artifacts', filter, 'positions\t' + last.created_at, last.artifact_id, ctx.as_of_seq, now))
       : null
     return {
-      items: page.map((row): RunArtifact => ({ ...artifactMetadata(row, now), created_at: row.created_at })),
+      items: page.map((row): RunArtifact => {
+        const title = acceptedArtifactTitle(checks, row.artifact_id, row.sha256)
+        return { ...artifactMetadata(row, now), created_at: row.created_at, ...(title && { title }) }
+      }),
       has_more: rows.length > 50, next_cursor, as_of_seq: ctx.as_of_seq,
     }
   })

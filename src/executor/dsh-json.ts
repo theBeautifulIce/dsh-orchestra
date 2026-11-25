@@ -9,6 +9,8 @@ export type JsonModelRoute = { provider: string; model: string; reasoningEffort?
 const unavailable = () => new OrchError('SERVICE_UNAVAILABLE', '暂时无法确认任务含义，请稍后重试', { reason: 'semantic_unavailable' })
 
 export const SEMANTIC_ADMISSION_TIMEOUT_MS = 60_000
+const ACTIVE_STREAM_GRACE_MS = 15_000
+const MAX_ADMISSION_EXTENSION_MS = 30_000
 const ADMISSION_TOKENS = 8192
 const ADMISSION_RETRY_TOKENS = 12288
 const CORRECTION = 'Return exactly one complete JSON object, without prose or Markdown. Copy only the shortest necessary verbatim clauses. Preserve all operative user restrictions. Do not solve the task or grant permission.'
@@ -94,7 +96,15 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
     const timeoutReason = admission
       ? new OrchError('OPERATION_TIMEOUT', '任务理解超时，尚未开始执行', { reason: 'semantic_timeout' })
       : unavailable()
-    const timeout = setTimeout(() => local.abort(timeoutReason), Math.max(1, deadline - performance.now()))
+    // Long reasoning turns can still be making progress at the normal deadline. Count actual provider text only.
+    let lastContent = -Infinity
+    const onDeadline = () => {
+      const now = performance.now()
+      const remaining = admission ? Math.min(lastContent + ACTIVE_STREAM_GRACE_MS, deadline + MAX_ADMISSION_EXTENSION_MS) - now : 0
+      if (remaining > 0) { timeout = setTimeout(onDeadline, Math.ceil(remaining)); timeout.unref() }
+      else local.abort(timeoutReason)
+    }
+    let timeout = setTimeout(onDeadline, Math.max(1, deadline - performance.now()))
     timeout.unref()
     const lifetime = AbortSignal.any([local.signal, signal])
     running.add(lifetime)
@@ -137,7 +147,10 @@ export function createDshJsonCompletion(llm: Llm | undefined, purpose: 'admissio
           if (++chunks > (admission ? 16_384 : 4096)) throw new JsonFailure('semantic_output_limit')
           if (finish !== undefined) throw new JsonFailure('semantic_stream_incomplete')
           if (chunk.type === 'tool-call-delta') throw new JsonFailure('semantic_tool_output')
-          if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') length += chunk.text.length
+          if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+            length += chunk.text.length
+            if (chunk.text.length) lastContent = performance.now()
+          }
           if (chunk.type === 'block-end') {
             if (chunk.block.type === 'text') output += chunk.block.text
             else if (chunk.block.type !== 'reasoning') throw new JsonFailure('semantic_tool_output')

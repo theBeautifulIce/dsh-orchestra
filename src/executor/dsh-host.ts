@@ -1033,7 +1033,10 @@ export function createDshExecutor(options: {
       + '\n最后回复单个 JSON，包含 status 与 output。output.completion 必须为 {outcome:"completed"|"blocked"|"failed",reason?,next_action?,missing?:string[]}。真实完成才用 completed 和 status:"done"，missing 必须为空或省略。缺工具、无权限、缺材料、未执行时用 blocked 和 status:"failed"；执行失败用 failed 和 status:"failed"。reason 写具体原因，next_action 写下一步。已实际检查且没有符合条件的数据可以 completed。不得把未执行说明当作成果或声称采集完成。用 output.summary 简述事实。')
     child.activity = agent.whenIdle().then(async () => {
       let report: unknown
-      try { report = readJsonOutput(agent) } catch (error) {
+      try {
+        report = readJsonOutput(agent)
+        if (child.nativeMode) validateDshCompletionReport(report)
+      } catch (error) {
         if (!(error instanceof OrchError) || error.details.reason !== 'execution_report_invalid' || !child.nativeMode
           || closing || child.retiring || child.fencedToolDenied || child.toolFence?.signal.aborted
           || (child.toolFence && !child.toolFence.mayUseTools()) || !child.nativeParent
@@ -1046,7 +1049,16 @@ export function createDshExecutor(options: {
         agent.ctx.tools.restrict({ allow: [] })
         prompt(agent, '此前执行已结束。只根据本次实际工作及已收到的登记回执补交一个 JSON 对象，不再执行任务。已完成用 {"status":"done","output":{"completion":{"outcome":"completed"},"summary":"实际完成项"}}。未完成用 status:"failed" 并在 output.completion 填写 outcome:"blocked" 或 "failed"、实际 reason、next_action 和 missing。不得把未执行的工作写成完成。')
         await agent.whenIdle()
-        report = readJsonOutput(agent)
+        const corrected = readJsonOutput(agent)
+        validateDshCompletionReport(corrected)
+        // A format correction cannot override a previous report of a failure or missing work.
+        if (report && typeof report === 'object') {
+          const prior = report as { status?: unknown; output?: { completion?: { outcome?: unknown; missing?: unknown } } }
+          const facts = prior.output?.completion
+          if ((prior.status === 'failed' || facts?.outcome === 'blocked' || facts?.outcome === 'failed'
+            || (Array.isArray(facts?.missing) && facts.missing.length)) && readExecutionCompletion(corrected)?.outcome === 'completed') throw error
+        }
+        report = corrected
       }
       const events = agent.session.snapshotEvents()
       const requests = observedModel(events, child.route)
@@ -1055,7 +1067,6 @@ export function createDshExecutor(options: {
           attempt: child.attempt, provider: request.provider, model: request.model,
           ...(request.reasoningEffort === undefined ? {} : { reasoning_effort: request.reasoningEffort }) })
       }
-      if (child.nativeMode) validateDshCompletionReport(report)
       const completion = child.nativeMode ? readExecutionCompletion(report) : undefined
       // A refused post-deadline call cannot justify success. Keep an honest
       // incomplete report so the stopped pure attempt can report its failure.

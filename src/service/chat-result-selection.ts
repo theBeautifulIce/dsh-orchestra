@@ -1,5 +1,5 @@
 import { chatArtifactLink, type ArtifactReceiptLocation, type ChatArtifactLink } from '../core/receipt-location.ts'
-import { chatDeliveryPreference } from '../core/chat-delivery-preference.ts'
+import { chatDeliveryPreference, originalTitleKey as titleKey } from '../core/chat-delivery-preference.ts'
 import type { Db } from '../infra/sqlite/driver.ts'
 import { getArtifact } from './queries/artifacts.ts'
 import { withReadTx } from './queries/read-tx.ts'
@@ -16,8 +16,6 @@ export function chatResultPresentation(db: Db, runId: string) {
   const sources = brief?.requirements_contract?.sources.map(source => source.text) ?? (brief ? [brief.goal] : [])
   return chatDeliveryPreference(sources)
 }
-
-function titleKey(title: string): string { return title.trim().match(/^[《「“]([^》」”]+)[》」”](?:\s*(?:完整)?(?:报告正文|正文|原件))?$/u)?.[1] ?? title.trim() }
 
 /** This manifest is shared by the conversation links and subsequent ordinal reads. */
 export function acceptedChatResults(db: Db, run: { run_id: string; task_id: string; delivery_checks: RunDeliveryCheck[] },
@@ -54,13 +52,30 @@ function ordinal(text: string): number {
   return parts.length === 1 ? digits.indexOf(parts[0]!) : (parts[0] ? digits.indexOf(parts[0]) : 1) * 10 + (parts[1] ? digits.indexOf(parts[1]) : 0)
 }
 
+const readVerb = /^(?:(?:请|帮我|麻烦)(?:帮我)?\s*)?(?:读取|读一下|查看|查阅|打开)|^(?:please\s+)?(?:read|show|open)\b/iu
+const hostLocation = /工作区|本地|目录|文件夹|网页|网址|https?:\/\/|file:\/\/|[a-z]:[\\/]|(?:^|\s)\.{1,2}[\\/]|\b(?:workspace|local file|folder|website)\b/iu
+function readSubject(text: string) {
+  return text.trim().split(/[。！？\n!?]|\.\s|[,，；;]\s*(?:请|告诉|说明|并|再|不要|不用|无需|then\b|tell\b|and tell\b)/iu, 1)[0] ?? ''
+}
+
+/** A direct host-resource read remains available even when automatic dispatch is enabled. */
+export function isHostResourceRead(text: string): boolean {
+  const subject = readSubject(text)
+  return readVerb.test(subject) && hostLocation.test(subject)
+    && !/(?:执行|创建|启动|安排|派发|编排)(?:.{0,6})(?:任务|代理)|\b(?:start|create|run) (?:a |an )?(?:task|agent|workflow)\b/iu.test(text)
+}
+
 /** Route an explicit read of one previously delivered original before task admission. */
 export function previousResultRequest(text: string): ResultRequest | undefined {
-  const clause = text.trim().split(/[。！？\n.!?]/u, 1)[0] ?? ''
-  if (!/^(?:请(?:帮我)?\s*)?(?:读取|读一下|查看|查阅|打开)|^(?:please\s+)?(?:read|show|open)\b/iu.test(clause)
+  const clause = readSubject(text)
+  if (!readVerb.test(clause)
     || !/(?:刚才|刚刚|之前|此前|上次|上一|刚交付|已交付|已登记|原件|原文)|\b(?:previous|last|original|delivered)\b/iu.test(clause)) return
   if (!/[《「“]|(?:报告|成果|产物|原件|原文|正文|文档|文件|第.{1,4}[份篇])|\b(?:reports?|artifacts?|results?|originals?|documents?|files?)\b/iu.test(clause)) return
-  const subject = clause.split(/[,，；;]\s*(?:请|告诉|说明|并|再|不要|不用|无需|then\b|tell\b|and tell\b)/iu, 1)[0]!
+  const subject = clause
+  if (hostLocation.test(subject)) return
+  // A previously mentioned host file is not necessarily an Orchestra artifact.
+  // Claim the request only when the operator refers to delivery or identifies a report.
+  if (!/成果|产物|原件|交付|登记|第.{1,6}[份篇].{0,4}报告|[《「“][^》」”]+[》」”].{0,3}报告|\b(?:artifact|artifacts|delivered|originals?|(?:first|second|third|last) report)\b/iu.test(subject)) return
   const named = [...subject.matchAll(/[《「“]([^》」”\r\n]{1,200})[》」”]/gu)]
   if (named.length) return named.map(match => ({ title: match[1]! }))
   // With an abbreviated range, ask for names rather than selecting the wrong end.

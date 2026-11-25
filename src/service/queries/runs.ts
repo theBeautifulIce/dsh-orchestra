@@ -157,7 +157,7 @@ export function getRun(db: Db, runId: string, options?: { includeAcceptanceArtif
   })
 }
 
-function readDeliveryChecks({ tx }: ReadCtx, runId: string, includeArtifactIds: boolean): NonNullable<RunSummary['delivery_checks']> {
+export function readDeliveryChecks({ tx }: ReadCtx, runId: string, includeArtifactIds: boolean): NonNullable<RunSummary['delivery_checks']> {
   // Match the same confirmed plan and content hash that the acceptance writer uses.
   const bound = tx.get<{ plan_id: string; content_hash: string }>(`
     SELECT p.plan_id, p.content_hash FROM task_plans p JOIN start_run_operations o ON o.operation_id = p.launch_operation_id

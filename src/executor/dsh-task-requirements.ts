@@ -3,19 +3,41 @@ import { OrchError } from '../core/errors.ts'
 import { requirementsContractSchema, type RequirementsContract } from '../core/task-requirements.ts'
 import type { TaskPlanInput } from '../service/task-planning.ts'
 import { interpretSemanticAdmission, semanticResponseNeedsCorrection, SEMANTIC_INSTRUCTIONS, type SemanticInput, type SemanticWorkflow } from '../service/semantic-admission.ts'
-import { createDshJsonCompletion } from './dsh-json.ts'
+import { createDshJsonCompletion, type JsonModelRoute } from './dsh-json.ts'
 import type { createDshPlanningCallback } from './dsh-host.ts'
 
 type PlanningContext = Parameters<typeof createDshPlanningCallback>[0]
 type WorkflowSelection = { workflow_id: string; workflow_version: string }
 type Input = TaskPlanInput & { requirements_contract?: RequirementsContract }
 
+/** Only reference fields are shortened on the wire. Human quotes and the stored contract keep their original values. */
+function mapSources(value: unknown, ids: ReadonlyMap<string, string>): unknown {
+  if (Array.isArray(value)) return value.map(item => mapSources(item, ids))
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([key, child]) =>
+    [key, (key === 'message_id' || key === 'source_message_id') && typeof child === 'string'
+      ? ids.get(child) ?? child : mapSources(child, ids)]))
+}
+
+export function createDshSemanticInterpreter(llm: Parameters<typeof createDshJsonCompletion>[0]) {
+  const complete = createDshJsonCompletion(llm, 'admission')
+  if (!complete) return
+  return async (route: JsonModelRoute | undefined, input: SemanticInput, signal: AbortSignal, current: () => void) => {
+    const sources = [...new Set([...(input.draft?.sources ?? []).map(source => source.message_id), input.current.message_id])]
+    const aliases = new Map(sources.map((id, index) => [id, 'm' + (index + 1)]))
+    const wire = mapSources(input, aliases) as SemanticInput
+    const raw = await complete(route, SEMANTIC_INSTRUCTIONS, wire, signal, current,
+      value => semanticResponseNeedsCorrection(value, wire))
+    return mapSources(raw, new Map([...aliases].map(([id, alias]) => [alias, id])))
+  }
+}
+
 /** The form and HTTP planner use the same cited contract as chat before workflow retrieval. */
 export function createDshTaskRequirements(options: PlanningContext & {
   isAuthorized?: () => boolean
   resolveWorkflow: (hint: SemanticWorkflow) => WorkflowSelection
 }) {
-  const complete = createDshJsonCompletion(options.context.llm, 'admission')
+  const complete = createDshSemanticInterpreter(options.context.llm)
   return async (input: Input, signal: AbortSignal): Promise<Input> => {
     signal.throwIfAborted()
     if (input.requirements_contract) {
@@ -37,7 +59,7 @@ export function createDshTaskRequirements(options: PlanningContext & {
     const semantic: SemanticInput = {
       current: { message_id: 'task-form-' + sha256Hex(text), text }, explicit: true, surface: 'task_form',
     }
-    const raw = await complete(selected, SEMANTIC_INSTRUCTIONS, semantic, signal, assertCurrent, semanticResponseNeedsCorrection)
+    const raw = await complete(selected, semantic, signal, assertCurrent)
     assertCurrent()
     const interpreted = interpretSemanticAdmission(semantic, raw)
     if (interpreted.kind !== 'ready') {

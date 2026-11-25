@@ -8,7 +8,7 @@ import { ARTIFACT_MAX_BYTES } from './artifact-store.ts'
 
 export const artifactBrowserPath = '/v1/artifacts/open-browser'
 export const artifactDownloadPath = '/v1/artifacts/download'
-type ArtifactBytes = { fileName: string; bytes: Uint8Array; sha256: string }
+type ArtifactBytes = { fileName: string; title?: string; bytes: Uint8Array; sha256: string }
 type Grant = { location: ArtifactReceiptLocation; identity: string; expiresAt: number }
 
 const escape = (text: string) => text.replace(/[&<>"']/gu, value => ({
@@ -53,7 +53,8 @@ function imageType(item: ArtifactBytes): string | undefined {
 }
 
 function renderArtifact(item: ArtifactBytes, imagePath: string): string {
-  if (imageType(item)) return page(item.fileName,
+  const title = item.title || item.fileName
+  if (imageType(item)) return page(title,
     `<main><img src="${escape(imagePath)}" alt="${escape(item.fileName)}" style="max-width:100%;height:auto"></main>`)
   let text: string
   try {
@@ -61,12 +62,12 @@ function renderArtifact(item: ArtifactBytes, imagePath: string): string {
     text = new TextDecoder('utf-8', { fatal: true }).decode(item.bytes)
     if (text.includes('\0')) throw new Error('binary')
   } catch {
-    return page(item.fileName, '<p>此格式不支持安全的浏览器预览。请回到原会话，在此成果旁点击“下载原件”。下载保留完整的原始文件。</p>')
+    return page(title, '<p>此格式不支持安全的浏览器预览。请回到原会话，在此成果旁点击“下载原件”。下载保留完整的原始文件。</p>')
   }
   // Large documents remain complete, with linear plain-text rendering instead of a Markdown parse.
   const body = /\.(?:md|markdown)$/iu.test(item.fileName) && item.bytes.byteLength <= 256 * 1024
     ? markdown.render(text) : `<pre>${escape(text)}</pre>`
-  return page(item.fileName, `<main>${body}</main>`)
+  return page(title, `<main>${body}</main>`)
 }
 
 /** A separate loopback origin is required: DSH Browser rejects the application origin.

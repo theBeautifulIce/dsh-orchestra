@@ -3,7 +3,9 @@ import { getArtifactContent } from './queries/artifacts.ts'
 import type { RunDeliveryCheck } from './queries/runs.ts'
 import { withReadTx } from './queries/read-tx.ts'
 import { readApprovedTaskPlanForRun } from './task-planning.ts'
-import { readBoundText } from './text-result.ts'
+import { textTarget } from './text-result.ts'
+import { canonicalJson } from '../core/canonical.ts'
+import type { ReworkBinding } from './rework-coordinator.ts'
 
 export type ChatTextPreview = { title: string; text: string; file_name: string; truncated: boolean; artifact_id: string; sha256: string }
 
@@ -14,24 +16,27 @@ export function readChatTextPreviews(db: Db, runId: string, checks: readonly Run
 }
 
 /** A blocked run may already have finished siblings. Only show their current, plan-bound publications. */
-export function readCompletedChatTextPreviews(db: Db, runId: string, now = Date.now()) {
-  const publications = withReadTx(db, ({ tx }) => {
+export function completedChatTextRefs(db: Db, runId: string, now = Date.now()) {
+  return withReadTx(db, ({ tx }) => {
     const plan = readApprovedTaskPlanForRun(tx, runId)
     if (!plan) return []
-    const completed = new Set(tx.all<{ node_run_id: string }>(
-      "SELECT node_run_id FROM node_runs WHERE run_id=? AND status='done' AND replacement_node_run_id IS NULL", [runId],
-    ).map(row => row.node_run_id))
-    const at = new Date(now).toISOString()
+    const completed = new Map(tx.all<ReworkBinding & { node_id: string }>(
+      "SELECT node_id,node_run_id,attempt,action_generation FROM node_runs WHERE run_id=? AND status='done' AND replacement_node_run_id IS NULL ORDER BY attempt,seq", [runId],
+    ).map(row => [row.node_id, row]))
     return plan.proposal.deliverables.flatMap((item, index) => {
-      if (item.acceptance.kind !== 'chat/text_result') return []
-      const file = readBoundText(tx, runId, item.node_id, plan.plan_id, plan.content_hash, index, at)
-      return file && completed.has(file.node_run_id) ? [{ title: item.title, ...file }] : []
+      const node = completed.get(item.node_id)
+      if (!node || item.acceptance.kind !== 'chat/text_result') return []
+      const target = textTarget(plan.plan_id, plan.content_hash, index, node)
+      const file = tx.get<{ sha256: string }>(`SELECT a.sha256 FROM artifacts a JOIN artifact_contents c USING(artifact_id)
+        WHERE a.run_id=? AND c.node_run_id=? AND a.artifact_id=? AND a.evidence_index=? AND c.file_name=?
+          AND length(c.bytes) BETWEEN 1 AND 65536 AND (a.retain_until IS NULL OR julianday(a.retain_until)>julianday(?))`,
+      [runId, node.node_run_id, target.artifactId, canonicalJson(target.evidenceIndex), target.fileName, new Date(now).toISOString()])
+      return file ? [{ title: item.title, artifact_id: target.artifactId, file_name: target.fileName, sha256: file.sha256 }] : []
     })
   })
-  return previewPublications(db, runId, publications, now)
 }
 
-function previewPublications(db: Db, runId: string, publications: Pick<RunDeliveryCheck, 'title' | 'artifact_id' | 'sha256' | 'file_name'>[], now: number) {
+export function previewPublications(db: Db, runId: string, publications: Pick<RunDeliveryCheck, 'title' | 'artifact_id' | 'sha256' | 'file_name'>[], now = Date.now()) {
   let remaining = 2400
   const previews: ChatTextPreview[] = []
   for (const [index, check] of publications.entries()) {
