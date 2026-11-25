@@ -153,11 +153,36 @@ describe('任务工作台与排期详情', () => {
       pending.resolve({ state: 'stop_requested', run_id: 'r2', status: 'running', terminal: false,
         skipped_irreversible: 1, pending_decisions: 0 })
       await view.flush()
-      expect(view.text()).toContain('已收到停止请求，正在等待执行器确认')
+      expect(view.text()).toContain('已收到停止请求，正在核对执行结果')
       expect(view.text()).toContain('仍有 1 个不可逆步骤需核实')
       stopState = 'requested'
       await view.flush()
       expect(view.text()).not.toContain('确认停止')
+    } finally { view.unmount() }
+  })
+
+  it.each([['r2', true], ['other-run', false]] as const)('重开详情后只展示所选运行自己的待核验决定 %s', async (decisionRun, matches) => {
+    const stopped = runSummary({ run_id: 'r2', status: 'running', display_status: 'running', operator_stop_state: 'requested' })
+    const { api } = apiFrom(({ path }) => {
+      if (path === '/v1/tasks/get') return { ok: true, data: { ...task,
+        next_action: { kind: 'decision', run_id: decisionRun, decision_id: 'review-stop', label: '查看待批准事项' } } }
+      if (path === '/v1/runs') return { ok: true, data: { items: [stopped] } }
+      if (path === '/v1/runs/get') return { ok: true, data: stopped }
+      if (path === '/v1/node-runs') return { ok: true, data: { items: [] } }
+      return missing
+    })
+    const onOpenDecision = vi.fn()
+    const view = await renderPanel(<PanelShell activeRoute="tasks" onNavigate={() => {}} serviceConnected>
+      <TaskDetailScreen api={api} taskId={task.task_id} initialRunId="r2" stopRun={vi.fn()} onBack={() => {}} onOpenDecision={onOpenDecision} />
+    </PanelShell>)
+    try {
+      await view.flush()
+      const button = view.findAll('button').find(item => item.textContent === '查看待处理决定')
+      expect(Boolean(button)).toBe(matches)
+      if (button) {
+        await view.click(button)
+        expect(onOpenDecision).toHaveBeenCalledWith('review-stop')
+      }
     } finally { view.unmount() }
   })
 

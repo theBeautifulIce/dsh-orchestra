@@ -157,7 +157,9 @@ export function TaskDetailScreen({
         {task.archived_at && <span className="task-type-badge">已归档</span>}
       </div>}
       {task && stopRun && stopTarget?.operator_stop_state && stopTarget.task_id === taskId && <RunStopAction
-        key={stopTarget.run_id} run={stopTarget} title={task.title} stopRun={stopRun} onRefresh={() => setReload((n) => n + 1)} />}
+        key={stopTarget.run_id} run={stopTarget} title={task.title} stopRun={stopRun}
+        decisionId={task.next_action?.kind === 'decision' && task.next_action.run_id === stopTarget.run_id ? task.next_action.decision_id ?? undefined : undefined}
+        onOpenDecision={onOpenDecision} onRefresh={() => setReload((n) => n + 1)} />}
       {showRun ? <div className="task-inspector-tabs" role="group" aria-label="运行详情视图">
         {RUN_TABS.filter((label) => (label !== '便条' && label !== '协作') || notesClient).map((label) => <button key={label} type="button" aria-pressed={runTab === label} onClick={() => {
           if (label === '结果') setReviewRunId(selectedRunId)
@@ -208,8 +210,9 @@ export function TaskDetailScreen({
   </dialog>
 }
 
-function RunStopAction({ run, title, stopRun, onRefresh }: {
-  run: RunSummary; title: string; stopRun: TaskCommands['stopRun']; onRefresh: () => void
+function RunStopAction({ run, title, stopRun, decisionId, onOpenDecision, onRefresh }: {
+  run: RunSummary; title: string; stopRun: TaskCommands['stopRun']; decisionId?: string
+  onOpenDecision?: (id: string) => void; onRefresh: () => void
 }) {
   const writable = usePanelCommandsEnabled()
   const submitting = useRef(false)
@@ -236,11 +239,14 @@ function RunStopAction({ run, title, stopRun, onRefresh }: {
   if (run.operator_stop_state === 'closed' && !receipt) return null
   if (receipt || run.operator_stop_state === 'requested') {
     const closedStatus = run.operator_stop_state === 'closed' ? run.status : receipt?.terminal ? receipt.status : undefined
+    if (closedStatus) return <div role="status" className="task-stop-action">
+      这次运行已结束 · <RunStatusLabel status={closedStatus} displayStatus={closedStatus} />
+    </div>
     return <div role="status" className="task-stop-action">
-      {closedStatus ? <>这次运行已结束 · <RunStatusLabel status={closedStatus} displayStatus={closedStatus} /></>
-        : '已收到停止请求，正在等待执行器确认。'}
+      {decisionId ? '已收到停止请求。这次运行还有待处理的人工决定。' : '已收到停止请求，正在核对执行结果。'}
+      {decisionId && onOpenDecision && <button type="button" className="task-quiet-button" onClick={() => onOpenDecision(decisionId)}>查看待处理决定</button>}
       {Boolean(receipt?.skipped_irreversible) && <span>仍有 {receipt?.skipped_irreversible} 个不可逆步骤需核实。</span>}
-      {Boolean(receipt?.pending_decisions) && <span>还有 {receipt?.pending_decisions} 项人工决定。</span>}
+      {!decisionId && Boolean(receipt?.pending_decisions) && <span>收到请求时有 {receipt?.pending_decisions} 项人工决定。</span>}
     </div>
   }
   return <div className="task-stop-action">

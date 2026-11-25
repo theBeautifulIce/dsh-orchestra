@@ -12,7 +12,7 @@ import { sweepWaitTimeouts } from './commands/wait.ts'
 import { finishSubworkflowChild } from './commands/subworkflow.ts'
 import { closeRun } from './commands/run-close.ts'
 import { activeDecision, openDecision, sweepDecisions } from './commands/decisions.ts'
-import { openOrdinaryRecoveryDecision, ordinaryRecoveryTarget, retireOrdinaryStartupDecision, type OrdinaryRecoveryCard } from './decision/ordinary-recovery.ts'
+import { openOrdinaryRecoveryDecision, ordinaryRecoveryTarget, reconcileCancelledPostBlock, retireOrdinaryStartupDecision, type OrdinaryRecoveryCard } from './decision/ordinary-recovery.ts'
 import { IN_FLIGHT_COMMAND_STATUSES } from './commands/idempotency.ts'
 import { receiptRetention } from './receipt-retention.ts'
 import type { WorkflowCatalog } from './workflows.ts'
@@ -433,6 +433,12 @@ export function sweep(db: Db, secret: string, params: SweepParams): SweepResult 
 
     const receipts = sweepInboxReceipts(tx, params.now)
     if (params.ordinaryRecovery) {
+      const stoppedBlocks = tx.all<{ node_run_id: string }>(`SELECT n.node_run_id FROM node_runs n JOIN runs r USING(run_id)
+        WHERE n.status='blocked_post' AND n.node_type='agent' AND r.status IN ('running','paused') AND r.cancel_requested_at IS NOT NULL
+          AND n.blocked_decision_id IS NULL AND n.hang_reason IS NULL AND n.replacement_node_run_id IS NULL`)
+      for (const { node_run_id } of stoppedBlocks) {
+        if (!skipNodes.has(node_run_id)) reconcileCancelledPostBlock(tx, secret, node_run_id, params.now)
+      }
       for (const row of tx.all<{ node_run_id: string }>("SELECT node_run_id FROM node_runs WHERE status='indeterminate_side_effect' AND node_type='agent' AND hang_reason IS NULL")) {
         if (!skipNodes.has(row.node_run_id)) openOrdinaryRecoveryDecision(tx, secret, row.node_run_id, 'verify_human', params.now)
       }

@@ -5,9 +5,58 @@ import { expect, it } from 'vitest'
 import { serveOrchestra, sweepNow } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
 import { withTx } from '../../src/infra/sqlite/driver.ts'
+import { appendNodeRunEvent } from '../../src/infra/db/ledger.ts'
+import { openDecision } from '../../src/service/commands/decisions.ts'
 import { recordOrdinaryHostStop } from '../../src/service/decision/ordinary-recovery.ts'
 import { EvidenceCollector } from '../../src/executor/evidence-collector.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
+
+it('recovers cancelled post-execution blockers on reopen and keeps uncertain effects actionable', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'orchestra-stopped-blocker-'))
+  const secret = 'stopped-blocker-ledger'
+  const options = { dbFile: join(directory, 'service.db'), secret, phase: 'S6' as const,
+    resolveHttpHuman: () => ({ id: 'fixture:operator' }), asOfSeq: () => 0, listTasks: () => [], listEvents: () => [],
+    appendLedgerEvent: () => ({ seq: 0, event_id: 'fixture' }) }
+  let service = await serveOrchestra(options)
+  const at = new Date().toISOString()
+  try {
+    withTx(service.orchestra.db, tx => {
+      for (const id of ['stopped', 'tool', 'unconfirmed', 'has-card', 'active']) {
+        tx.run("INSERT INTO tasks(task_id,title,status,created_at,updated_at) VALUES (?,?,'running',?,?)", [id,id,at,at])
+        tx.run("INSERT INTO runs(run_id,task_id,status,cancel_requested_at,created_at,updated_at) VALUES (?,?,'running',?,?,?)",
+          [id,id,id === 'active' ? null : at,at,at])
+        tx.run(`INSERT INTO node_runs(node_run_id,run_id,node_id,seq,node_type,status,attempt,action_generation,rearm_generation,
+          side_effect_policy,executor_agent_id,created_at,updated_at) VALUES (?,?,?,1,'agent','blocked_post',1,2,1,'pure',?,?,?)`,
+        [id,id,id,id,at,at])
+        appendNodeRunEvent(tx, secret, id, 'verify_human', { reason: '缺少核算材料', missing: ['单价'], status: 'blocked_post' })
+        if (id === 'tool') appendNodeRunEvent(tx, secret, id, 'bridge.tool.start', { attempt: 1, tool: 'worker_tool' })
+        recordOrdinaryHostStop(tx, secret, { nodeRunId: id, attempt: id === 'unconfirmed' ? 0 : 1,
+          generation: 2, agentId: id, stoppedAt: at })
+      }
+      openDecision(tx, { decisionId: 'existing-card', runId: 'has-card', nodeRunId: 'has-card', kind: 'audit_result', createdAt: at })
+    })
+    await service.close()
+    service = await serveOrchestra(options)
+    for (let i = 0; i < 2; i++) sweepNow(service.orchestra.runtime, new Date().toISOString())
+    const db = service.orchestra.db.raw
+    expect(db.prepare('SELECT node_run_id,status FROM node_runs ORDER BY node_run_id').all()).toEqual([
+      { node_run_id: 'active', status: 'blocked_post' }, { node_run_id: 'has-card', status: 'blocked_post' },
+      { node_run_id: 'stopped', status: 'failed' }, { node_run_id: 'tool', status: 'indeterminate_side_effect' },
+      { node_run_id: 'unconfirmed', status: 'indeterminate_side_effect' },
+    ])
+    expect(db.prepare("SELECT status FROM runs WHERE run_id='stopped'").get()).toEqual({ status: 'cancelled' })
+    const cards = db.prepare("SELECT decision_id,node_run_id FROM decisions WHERE kind='verify_human' ORDER BY node_run_id").all()
+    expect(cards.map(card => card.node_run_id)).toEqual(['tool','unconfirmed'])
+    for (const card of cards) {
+      const response = await fetch(service.endpoint + '/v1/decisions/get?decision_id=' + card.decision_id, { headers: { 'x-orchestra-secret': secret } })
+      expect(await response.json()).toMatchObject({ data: { allowed_resolutions: ['abandon'] } })
+    }
+    expect(db.prepare('SELECT COUNT(*) AS n FROM unverified_resolutions').get()).toEqual({ n: 0 })
+  } finally {
+    await service.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 it.each(['signed', 'expired'] as const)('opens ordinary recovery cards from maintenance and handles an aggregated abandonment when %s', async (mode) => {
   const directory = mkdtempSync(join(tmpdir(), 'orchestra-ordinary-abandon-'))

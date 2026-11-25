@@ -274,6 +274,32 @@ export function ordinaryHostStop(tx: RecoveryRead, secret: string, node: Pick<No
   return stopped.stopped_at
 }
 
+// A worker can report a blocker without creating a decision (for example, missing
+// input). Once its run is stopped, there must still be a way out after a restart.
+export function reconcileCancelledPostBlock(tx: Tx, secret: string, nodeId: string, now: string): void {
+  const node = ordinaryNode(tx, nodeId)
+  if (!node || node.status !== 'blocked_post' || !node.run_cancel_requested_at || node.hang_reason || node.replacement_node_run_id) return
+  const protectedState = tx.get(`SELECT 1 FROM node_runs n WHERE n.node_run_id=? AND (
+    n.blocked_decision_id IS NOT NULL OR n.recovery_uncertain IS NOT NULL OR n.fence_state='armed'
+    OR EXISTS (SELECT 1 FROM decisions d WHERE d.node_run_id=n.node_run_id AND d.status IN ${active}))`, [nodeId])
+  if (protectedState) return
+  const stoppedAt = ordinaryHostStop(tx, secret, node)
+  const pureAndStopped = node.side_effect_policy === 'pure' && stoppedAt !== undefined && Date.parse(stoppedAt) <= Date.parse(now)
+    && !tx.get(`SELECT 1 FROM tool_executions WHERE node_run_id=? AND attempt=?
+      UNION ALL SELECT 1 FROM bridge_tool_outbox WHERE node_run_id=? AND attempt=?
+      UNION ALL SELECT 1 FROM node_run_events WHERE node_run_id=? AND type IN ('tool_started','bridge.tool.start','bridge.tool.result')
+      LIMIT 1`, [nodeId, node.attempt, nodeId, node.attempt, nodeId])
+  applyTransition(tx, secret, { nodeRunId: nodeId, from: ['blocked_post'], to: pureAndStopped ? 'failed' : 'indeterminate_side_effect',
+    ruleId: pureAndStopped ? 'M-48' : 'M-50', attempt: node.attempt, expectedRevision: node.revision,
+    actionGeneration: node.action_generation, rearmGeneration: node.rearm_generation, bumpRearm: true, now })
+  appendNodeRunEvent(tx, secret, nodeId, 'cancel.post_block_reconciled', {
+    attempt: node.attempt, action_generation: node.action_generation, run_cancel_requested_at: node.run_cancel_requested_at,
+    host_stopped_at: stoppedAt ?? null, disposition: pureAndStopped ? 'stopped_without_delivery' : 'human_verification',
+  })
+  if (pureAndStopped) releaseLease(tx, { nodeRunId: nodeId, now })
+  else openOrdinaryRecoveryDecision(tx, secret, nodeId, 'verify_human', now)
+}
+
 export type OrdinaryEffectEvidence = { applied?: string; not_applied?: string }
 
 export function ordinaryEffectEvidence(tx: RecoveryRead, node: Node): OrdinaryEffectEvidence {
