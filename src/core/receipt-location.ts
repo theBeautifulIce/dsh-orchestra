@@ -13,6 +13,12 @@ export const chatArtifactLink = z.strictObject({
 })
 export type ChatArtifactLink = z.infer<typeof chatArtifactLink>
 
+/** A bounded quotation for the operator. It cannot supply a mailbox state or authorize a read. */
+export const chatResultExcerpts = z.array(z.strictObject({
+  title: z.string().min(1).max(500), text: z.string().max(4800), truncated: z.boolean(),
+})).max(20)
+export type ChatResultExcerpt = z.infer<typeof chatResultExcerpts>[number]
+
 export function artifactVersionKey(location: ArtifactReceiptLocation): string {
   return JSON.stringify([location.workspaceId, location.sessionId, location.taskId,
     location.runId, location.artifactId, location.sha256])

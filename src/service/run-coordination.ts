@@ -12,6 +12,12 @@ export type CoordinationItem = {
   reply: string | null; reason: string | null; revision: number; created_ms: number; expires_ms: number;
   evidence_strength: 'none';
 }
+
+/** These dispositions describe a specific peer exchange, independently of the participants' reports. */
+export function isSettledPeerExchange(item: Pick<CoordinationItem, 'kind' | 'state'>) {
+  return (item.kind === 'request' || item.kind === 'handoff')
+    && ['answered', 'expired', 'unavailable', 'withdrawn', 'acknowledged'].includes(item.state)
+}
 // All text is untrusted reference data. These records are deliberately not acceptance evidence.
 type Row = Omit<CoordinationItem, 'source' | 'target' | 'evidence_strength'> & {
   run_id: string; source_node: string; source_attempt: number; source_generation: number; source_session: string;
@@ -138,7 +144,8 @@ export function createRunCoordination(db: Db, secret: string, authorize: (tx: Re
   }
   function pendingState(tx: ReadTx, row: Row, now: number): { state: 'expired' | 'unavailable'; reason: string } | undefined {
     if (row.state !== 'pending') return
-    if (now >= row.expires_ms || now < row.created_ms) return { state: 'expired', reason: '等待期限已到或时钟变化' }
+    if (now < row.created_ms) return { state: 'expired', reason: '时钟已回拨，无法继续按原期限等待' }
+    if (now >= row.expires_ms) return { state: 'expired', reason: '等待期限已到' }
     const target = targetBinding(row)
     const to=target && lookup(tx,target.node_run_id,now)
     if (!peerAllowed(tx, row.run_id) || !target || !to || !matches(to,target) || !sourceCanReceive(tx,row,now))
@@ -264,7 +271,13 @@ export function createRunCoordination(db: Db, secret: string, authorize: (tx: Re
       return withReadTx(db,({tx,as_of_seq})=>{
         authorize(tx,actor,run)
         const now=clock()
-        return { as_of_seq, items: rows(tx,run).map(row=>{const p=pendingState(tx,row,now);return item(tx,p?{...row,...p}:row)}) }
+        return { as_of_seq, items: rows(tx,run).map(row => {
+          const projected = pendingState(tx, row, now)
+          const result = item(tx, projected ? { ...row, ...projected } : row)
+          // A read can detect closure before the sweep. Only a committed transition has a recorded time.
+          const settled = row.state === 'answered' || row.state === 'expired' || row.state === 'unavailable' || row.state === 'withdrawn'
+          return { ...result, ...(projected && { projected: true as const }), ...(settled && { settled_ms: row.updated_ms }) }
+        }) }
       })
     },
     attention(run: string, actor: string) {

@@ -218,3 +218,59 @@ it.each([undefined, 'completed', 'cancelled', 'blocked'])('keeps a T07 final res
     expect(openArtifact).toHaveBeenCalledExactlyOnceWith(artifacts[2], expect.any(AbortSignal))
   } finally { view.unmount() }
 })
+
+it('keeps the canonical mailbox cause, business excerpt, and original link in active and ended layouts', async () => {
+  const title = '合成协作回执'
+  const fullArtifact = { ...artifact, title: '会话正文·退款核对原件', fileName: 'refund-check.md' }
+  const body = `${title}\n代理 B 未能回应。信箱已按参与方不可用收口。从发出到信箱登记关闭经过 12.865 秒，设置的等待上限为 30 秒。`
+  const withReceipt = { ...event, data: { ...event.data, source: { ...event.data.source, summary: title,
+    final: true, mailboxReceipt: true, artifacts: [fullArtifact],
+    stepExcerpts: [{ title: '退款金额核对', text: '业务节选：账目中可见退款 128.65 元，尚未收到代理 B 的独立核对。', truncated: true }] },
+    content: [{ type: 'text', text: body }] } }
+  const activeMatch = { event: withReceipt, location: { kind: 'step', turn: { turn: 4 }, step: { step: 2 } } }
+  const state = orchestraNoticeDefinition.start({ key: 'notice', id: notice.id }, activeMatch)
+  const activeNode = orchestraNoticeDefinition.buildViewNode({ key: 'notice', id: notice.id, start: activeMatch, state })!
+  const openArtifact = vi.fn(async () => {})
+  const active = await renderPanel(<OrchestraAttentionNotice node={activeNode} openArtifact={openArtifact} />)
+  try {
+    expect(active.byRole('status')).toHaveLength(1)
+    expect(active.text()).toContain('信箱已按参与方不可用收口。')
+    expect(active.text()).toContain('经过 12.865 秒，设置的等待上限为 30 秒。')
+    expect(active.text()).toContain('退款金额核对 · 步骤原文')
+    expect(active.text()).toContain('账目中可见退款 128.65 元')
+    expect(active.findAll('a').map(link => link.textContent)).toContain(fullArtifact.title)
+    await active.click(active.findAll('a').find(link => link.textContent === fullArtifact.title)!)
+    expect(openArtifact).toHaveBeenCalledExactlyOnceWith(fullArtifact, expect.any(AbortSignal))
+  } finally { active.unmount() }
+
+  const folded = await renderPanel(<OrchestraAttentionNotice node={activeNode} turnProcess={{ foldable: true }} openArtifact={openArtifact} />)
+  try {
+    expect(folded.byRole('status')).toHaveLength(1)
+    expect(folded.text()).toContain('退款金额核对 · 步骤原文')
+    expect(folded.findAll('a').map(link => link.textContent)).toEqual([fullArtifact.title])
+  } finally { folded.unmount() }
+
+  const ended = await renderPanel(<OrchestraNoticeTail turn={{ turn: 4, end: { data: { reason: { kind: 'completed' } } },
+    data: new Map() }} useNotices={() => [state]} openArtifact={openArtifact} />)
+  try {
+    expect(ended.byRole('status')).toHaveLength(1)
+    expect(ended.text()).toContain('信箱已按参与方不可用收口。')
+    expect(ended.text()).toContain('账目中可见退款 128.65 元')
+    expect(ended.findAll('a').map(link => link.textContent)).toEqual([fullArtifact.title])
+  } finally { ended.unmount() }
+})
+
+it('keeps a durable notice visible when optional receipt metadata is malformed', () => {
+  const malformed = { ...event, data: { ...event.data, source: { ...event.data.source, final: true, mailboxReceipt: true,
+    artifacts: [{ ...artifact, location: { ...artifact.location, sha256: 'wrong' } }],
+    attentionLinks: [{ ...attention, location: { ...attention.location, command: 'approve' } }],
+    stepExcerpts: [{ title: '不完整节选', text: 123, truncated: true }] } } }
+  const match = { event: malformed, location: {} }
+  const state = orchestraNoticeDefinition.start({ key: 'notice', id: notice.id }, match)
+  expect(state.text).toBe(notice.text)
+  expect(state.mailboxReceipt).toBe(true)
+  expect(state.artifacts).toBeUndefined()
+  expect(state.attentionLinks).toBeUndefined()
+  expect(state.stepExcerpts).toBeUndefined()
+  expect(orchestraNoticeDefinition.buildViewNode({ key: 'notice', id: notice.id, start: match, state })?.visibility).toBe('visible')
+})

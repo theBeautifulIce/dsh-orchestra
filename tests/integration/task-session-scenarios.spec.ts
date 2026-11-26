@@ -8,6 +8,7 @@ import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
 import { serveDshOrchestra } from '../../src/index.ts'
 import { uuidv7 } from '../../src/core/ids.ts'
+import { chatResultExcerpts, type ChatResultExcerpt } from '../../src/core/receipt-location.ts'
 import { ReadOnlyToolRunner, ToolRegistry } from '../../src/executor/tools.ts'
 import { installNativeChat } from '../../src/service/chat-native.ts'
 import { createExecutionScheduler } from '../../src/service/execution-scheduler.ts'
@@ -51,6 +52,7 @@ const model = { provider: 'controlled', model: 'gpt-6.2-sol',
 const modelProfile = { ref: model.provider + '/' + model.model, provider: model.provider, model: model.model,
   capacity: 'standard' as const, reasoning: { efforts: [{ id: model.reasoningEffort, name: 'Medium' }] } }
 const owner = 'local-dsh:scenario-test-operator'
+const statusQuestion = '请查看刚才任务的状态。'
 const inbox = <T>(worker: Worker, input: Record<string, unknown>) => worker.tool<T>('orchestra_coordination', input)
 const publish = (worker: Worker, text: string) => worker.tool('orchestra_rework', {
   action: 'publish_text_result', deliverable_index: worker.task.deliverables[0]!.deliverable_index, text,
@@ -63,6 +65,7 @@ function readField<T>(prompt: string, prefix: string): T {
 }
 
 function interpret(scenario: Scenario, { current, draft }: SemanticInput) {
+  if (current.text === statusQuestion) return { kind: 'conversation' }
   const admission = { kind: 'task', quote: current.text }
   if (scenario.held?.includes(current.text)) {
     return { ...admission, relation: draft ? 'continue' : 'new', timing: 'held', constraints: [],
@@ -124,7 +127,8 @@ async function scenarioHarness({ projectContext = false } = {}) {
     let activeScenario = scenario
     const pendingNotices: Message[] = []
     const conversation: Message[] = []
-    const events: Array<{ type: 'user/message'; data: Message }> = []
+    const events: Array<{ type: 'user/message'; seq: number; data: Message }> = []
+    const steered = vi.fn()
     const children: string[] = []
     const planningPrompts: Array<{ text: string; input: PlanRequest | WorkflowRequest }> = []
     specs.set(id, activeScenario)
@@ -229,14 +233,19 @@ async function scenarioHarness({ projectContext = false } = {}) {
     }
     const parent = {
       id, status: 'running', model: { current: () => model },
-      session: { id, header: { cwd: workspace, origin: 'root' }, snapshotEvents: () => [...events] },
+      session: { id, header: { cwd: workspace, origin: 'root' }, snapshotEvents: () => [...events],
+        append(type: 'user/message', data: Message, options: { surfaceOp: string }) {
+          expect(options.surfaceOp).toBe('append')
+          events.push({ type, seq: events.length + 1, data })
+          conversation.push(data)
+        } },
       ctx: { agents: childrenApi, get: (key: string) => key === 'approval' ? host.get('approval') : undefined },
       inbox: { nextTurn: pendingNotices, nextStep: [] },
       followup(message: Message) {
         pendingNotices.push(message)
         agentEvents(host, parent).emit('agent/inbox/inserted', { message })
       },
-      steer(message: Message) { parent.followup(message) },
+      steer(message: Message) { steered(message.id); parent.followup(message) },
     } as unknown as Agent
     agents.set(id, parent)
     parents.add(parent)
@@ -267,18 +276,22 @@ async function scenarioHarness({ projectContext = false } = {}) {
     const turnSignal = new AbortController()
     const dispatch = agentEvents(host, parent)
     async function enter(message: Message) {
+      Object.assign(parent, { status: 'running' })
       dispatch.emit('agent/inbox/claimed', { message, turn: ++turn })
       const result = await dispatch.waterfall('agent/pre-step', { messages: [message], turn, step: 0,
         signal: turnSignal.signal, modelSelection: model }, async () => ({ kind: 'enter', messages: [message] }))
       if (result.kind === 'enter') for (const accepted of result.messages) {
-        events.push({ type: 'user/message', data: accepted })
+        events.push({ type: 'user/message', seq: events.length + 1, data: accepted })
       }
     }
-    async function say(text: string) {
+    async function enterHuman(text: string) {
       const message = { id: uuidv7(), role: 'user', source: { kind: 'user', rpcId: uuidv7() },
         content: [{ type: 'text', text }] } as unknown as Message
       dispatch.emit('agent/inbox/inserted', { message })
       await enter(message)
+    }
+    async function say(text: string) {
+      await enterHuman(text)
       return await call({ action: 'start' })
     }
     async function submit(text = activeScenario.goal) {
@@ -286,10 +299,12 @@ async function scenarioHarness({ projectContext = false } = {}) {
       expect(receipt).toMatchObject({ state: 'started', run_id: expect.any(String), title: activeScenario.title })
       return String(receipt.run_id)
     }
+    async function invoke(input: object) {
+      return await taskTool.execute(input, { agent: parent, callId: uuidv7(),
+        signal: turnSignal.signal } as ToolExecution) as { text: string; summary: string; stepExcerpts?: ChatResultExcerpt[] }
+    }
     async function call(input: object) {
-      const result = await taskTool.execute(input, { agent: parent, callId: uuidv7(),
-        signal: turnSignal.signal } as ToolExecution) as { text: string }
-      return JSON.parse(result.text)
+      return JSON.parse((await invoke(input)).text)
     }
     async function readNotices() {
       for (const message of pendingNotices.splice(0)) {
@@ -297,10 +312,21 @@ async function scenarioHarness({ projectContext = false } = {}) {
         await enter(message)
         if (events.some(event => event.data.id === message.id)) conversation.push(message)
       }
-      return conversation.map(message => ({ id: message.id,
-        text: message.content.map(part => part.type === 'text' ? part.text : '').join('\n') }))
+      return conversation.map(message => {
+        const modelText = message.content.map(part => part.type === 'text' ? part.text : '').join('\n')
+        const source = message.source as { stepExcerpts?: unknown; final?: boolean }
+        const quotes = chatResultExcerpts.safeParse(source.stepExcerpts).data ?? []
+        return { id: message.id, final: source.final === true, modelText, text: [modelText, ...quotes.map(quote => quote.text)].join('\n') }
+      })
     }
-    return { get service() { return service }, get db() { return service.orchestra.db.raw }, secret, say, submit, call, children, planningPrompts,
+    return { get service() { return service }, get db() { return service.orchestra.db.raw }, secret, say, submit, call, enterHuman, children, planningPrompts, steered,
+      async statusCard() {
+        const args = { action: 'status' }
+        const result = await invoke(args)
+        expect(result.stepExcerpts, result.summary).toBeDefined()
+        return { modelText: JSON.stringify(taskTool.output.render(args, result)), excerpts: chatResultExcerpts.parse(result.stepExcerpts) }
+      },
+      idle() { Object.assign(parent, { status: 'idle' }) },
       setScenario(next: Scenario) { activeScenario = next; specs.set(id, next) },
       async restartOnSameDatabase() {
         await service.close()
@@ -588,6 +614,9 @@ A、B 分别登记精简的中间文本成果。若收到协作信息，结合�
     const notice = await session.noticeText()
     expect(notice).toContain('「退款核对代理 B」已回应「收入核对代理 A」的协作请求。')
     expect(notice).not.toContain('对，范围包括 R01 和 R02。')
+    const reportStatus = await session.call({ action: 'status' })
+    expect(await session.call({ action: 'artifact', artifact_id: reportStatus.artifact_links[0].location.artifactId }))
+      .toMatchObject({ state: 'error', code: 'RESOLUTION_NOT_AVAILABLE' })
     expect(acceptance(session, run)).toEqual(Array(3).fill({ kind: 'chat/text_result', outcome: 'passed' }))
     expect(harness.workerErrors).toEqual([])
     expect(harness.outsideTool).not.toHaveBeenCalled()
@@ -706,6 +735,7 @@ it('T05 records the missing price without turning the known subtotal into the fu
 
 it('T06 deduplicates identical 30-second requests and lets both workers finish with the other worker silent', async () => {
   const harness = await scenarioHarness()
+  const speculation = '发起的请求在 30 秒后自然过期。'
   const peerReady = Promise.withResolvers<void>()
   const sent = Promise.withResolvers<void>()
   try {
@@ -745,15 +775,16 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
         }
         const values = new RegExp(`代理 ${name} 负责计算 ([\\d、]+)`, 'u').exec(worker.task.task_goal)![1]!.split('、').map(Number)
         const total = sum(values)
-        await publish(worker, `代理 ${name} 合计 ${total}，平均值 ${total / values.length}`)
+        await publish(worker, `代理 ${name} 合计 ${total}，平均值 ${total / values.length}` + (name === 'A' ? '\n' + speculation : ''))
         return { outcome: 'completed', reason: '完成', next_action: null, missing: [] }
       },
     })
     const run = await session.submit()
+    session.idle()
     await expect.poll(() => status(session, run), { timeout: 8_000 }).toBe('succeeded')
     expect(session.children.sort()).toEqual(['first', 'second'])
     expect(registered(session, run)).toEqual(expect.arrayContaining([
-      ['first', '代理 A 合计 120，平均值 30'], ['second', '代理 B 合计 120，平均值 30'],
+      ['first', '代理 A 合计 120，平均值 30\n' + speculation], ['second', '代理 B 合计 120，平均值 30'],
     ]))
     const applied = session.db.prepare("SELECT e.payload FROM node_run_events e JOIN node_runs n USING(node_run_id)"
       + " WHERE n.run_id=? AND e.type='report_applied' ORDER BY e.seq")
@@ -776,6 +807,26 @@ A 不得等待 B 的回应，不得循环查询或重新派发代理，继续完
       return ['代理 A 合计 120，平均值 30', '代理 B 合计 120，平均值 30', '协作未得到回应', '以上为信箱最终状态']
         .filter(result => !text.includes(result))
     }, { timeout: 6_000 }).toEqual([])
+    const notices = await session.readNotices()
+    const final = notices.filter(item => item.final)
+    expect(final).toHaveLength(1)
+    expect(final[0]!.modelText).toContain('参与方不可用')
+    expect(final[0]!.modelText).not.toContain(speculation)
+    expect(final[0]!.text).toContain(speculation)
+    expect(session.steered).not.toHaveBeenCalledWith(final[0]!.id)
+    await expect.poll(() => session.db.prepare('SELECT reported_key FROM chat_task_receipts').get()?.reported_key)
+      .toBe('delivered:terminal:succeeded')
+    await session.enterHuman(statusQuestion)
+    const statusCard = await session.statusCard()
+    expect(statusCard.modelText).toContain('参与方不可用')
+    expect(statusCard.modelText).not.toContain(speculation)
+    expect(statusCard.excerpts.some(item => item.text.includes(speculation))).toBe(true)
+    const { artifact_links: links } = await session.call({ action: 'status' })
+    await session.enterHuman('请读取刚才第一份报告的完整原件。')
+    expect(await session.call({ action: 'artifact', artifact_id: links[0].location.artifactId }))
+      .toMatchObject({ text: '代理 A 合计 120，平均值 30\n' + speculation })
+    expect(await session.call({ action: 'artifact', artifact_id: links[1].location.artifactId }))
+      .toMatchObject({ state: 'error', code: 'FORBIDDEN' })
     expect(acceptance(session, run)).toEqual(Array(2).fill({ kind: 'chat/text_result', outcome: 'passed' }))
     expect(harness.workerErrors).toEqual([])
     expect(harness.outsideTool).not.toHaveBeenCalled()

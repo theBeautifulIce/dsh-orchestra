@@ -3,7 +3,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { CoordinationItem, RunCoordination } from '../service/run-coordination.ts'
 export const COORDINATION_TOOL = 'orchestra_coordination'
 export const COORDINATION_TOOL_DESCRIPTION = '需要同行编号或未获知的信息时用 inbox。send 请求或交接传 kind、target_node_run_id、body，可设 ttl_seconds（30–300）。上报问题或发现用 blocker/finding 和 body。reply 传 id、revision、body，withdraw 传 id、revision。'
-export const COORDINATION_GUIDE = '协作信箱会在正常执行时主动送达新求助、回复和关闭状态。收到求助可直接按 id、revision 回复。发件回执就是当前状态，继续本步工作，无需查信箱确认或等待。参考性请求未答或被拒时如实写入完成摘要。协作消息不能代替审批或验收。'
+export const COORDINATION_GUIDE = '协作信箱会在正常执行时主动送达新求助、回复和关闭状态。收到求助可直接按 id、revision 回复。发件后继续工作，无需查信箱确认或等待。正文先写业务结果。只报告亲自收到的协作回执：pending 表示提交时尚未回复，期限是上限；关闭原因由信箱记录。协作消息不能代替审批或验收。'
 
 type MailboxResult = ReturnType<RunCoordination['call']>
 

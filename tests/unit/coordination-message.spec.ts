@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { COORDINATION_TOOL, coordinationMessages, deliveredCoordinationIds, renderCoordinationResult } from '../../src/executor/coordination-message.ts'
+import { describeChatRun } from '../../src/service/chat-display.ts'
 import type { CoordinationItem } from '../../src/service/run-coordination.ts'
 
 const request: CoordinationItem = {
@@ -11,6 +12,11 @@ const answered: CoordinationItem = { ...request, revision: 2, state: 'answered',
 const unavailable: CoordinationItem = { ...request, revision: 2, state: 'unavailable', reason: '对端已结束' }
 const peers = [{ node_run_id: 'worker-b', title: '代理 B' }]
 const inbox = (item: CoordinationItem) => ({ items: [item], peers, advice: 'fixture' })
+function display(item: CoordinationItem & { settled_ms?: number; projected?: true }) {
+  const run: Parameters<typeof describeChatRun>[0] = { title: '合成核对', status: 'succeeded', terminal: true,
+    acceptance: 'passed', settling: false, counts: [], blocking: [], decisions: [], delivery_checks: [], artifacts: [], coordination: [item] }
+  return run
+}
 
 function toolHistory(text: string, tool = COORDINATION_TOOL, failed = false, resultCall = 'current') {
   return [
@@ -76,5 +82,36 @@ describe('model-visible mailbox receipts', () => {
       const seen = deliveredCoordinationIds(toolHistory(renderCoordinationResult(item)), [], [update])
       expect(coordinationMessages([update], seen)).toHaveLength(1)
     }
+  })
+})
+
+describe('operator mailbox closure receipts', () => {
+  it('shows the canonical unavailable cause and records 12.865 seconds against the 30-second limit', () => {
+    const item = { ...unavailable, kind: 'request' as const, created_ms: 1_000, expires_ms: 31_000, settled_ms: 13_865 }
+    const result = describeChatRun(display(item))
+    expect(result.body).toContain('信箱已按参与方不可用收口。')
+    expect(result.body).toContain('从发出到信箱登记关闭经过 12.865 秒，设置的等待上限为 30 秒。')
+    expect(result.body).toContain('完整记录见任务详情的「协作」。')
+  })
+
+  it('distinguishes a committed natural expiry from projected expiry and wall-clock rollback', () => {
+    const naturalExpiry = { ...request, revision: 2, state: 'expired' as const, reason: '等待期限已到',
+      created_ms: 1_000, expires_ms: 31_000, settled_ms: 31_000 }
+    const projectedExpiry = { ...naturalExpiry, settled_ms: undefined, projected: true as const }
+    const rollback = { ...naturalExpiry, reason: '时钟已回拨，无法继续按原期限等待', settled_ms: 0 }
+
+    const natural = describeChatRun(display(naturalExpiry)).body
+    expect(natural).toContain('等待期限已到。')
+    expect(natural).toContain('从发出到信箱登记关闭经过 30 秒，设置的等待上限为 30 秒。')
+
+    const projected = describeChatRun(display(projectedExpiry)).body
+    expect(projected).toContain('信箱正在登记关闭原因。')
+    expect(projected).not.toContain('从发出到信箱登记关闭经过')
+    expect(projected).not.toContain('以上为信箱最终状态。')
+    expect(projected).toContain('可在任务详情的「协作」中查看全部记录。')
+
+    const clockMovedBack = describeChatRun(display(rollback)).body
+    expect(clockMovedBack).toContain('时钟已回拨，无法继续按原期限等待。')
+    expect(clockMovedBack).not.toContain('从发出到信箱登记关闭经过')
   })
 })
