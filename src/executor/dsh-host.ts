@@ -947,6 +947,9 @@ export function createDshExecutor(options: {
               const request = input as { action: string; file_name?: string; deliverable_index?: number; operation_id?: string }
               const target = request.action === 'publish' ? request.file_name
                 : request.action === 'publish_text_result' ? request.deliverable_index : undefined
+              if (remainingPublications && request.action === 'publish' && typeof target === 'string' && progress?.allowsFile(target) === false) {
+                throw new OrchError('CONFIRMATION_MISMATCH', '文件登记需要本步骤的计划文件名。会话正文请按交付编号使用 publish_text_result。')
+              }
               const key = typeof target === 'number' ? 'text:' + target : 'file:' + target
               const operationId = target !== undefined && request.operation_id === undefined ? issuedPublicationIds.get(key) ?? uuidv7() : undefined
               const receipt = feedback(binding, operationId ? { ...request, operation_id: operationId } : input)

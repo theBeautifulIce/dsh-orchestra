@@ -335,7 +335,11 @@ function schemaActions(f: ReturnType<typeof fixture>) {
 }
 
 it('只在同一子会话提交成功回执后，于step/end收窄下一轮的发布目标', async () => {
-  const targets = { texts: [2, 3], files: ['summary.md', 'table.csv'] }
+  const targets = { texts: [
+    { index: 2, title: 'title-2.txt', fileName: 'internal-2.md' },
+    { index: 3, title: 'title-3.txt', fileName: 'internal-3.md' },
+    { index: 4, title: 'title-4.txt', fileName: 'internal-4.md' },
+  ], files: ['physical.csv'] }
   const publicationTargets = vi.fn<NonNullable<Options['publicationTargets']>>(() => targets)
   const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
   const f = fixture('full', undefined, undefined, feedback, publicationTargets)
@@ -376,28 +380,49 @@ it('只在同一子会话提交成功回执后，于step/end收窄下一轮的�
     expect(publicationTargets).toHaveBeenCalledOnce()
     expect(publicationTargets).toHaveBeenCalledWith(expect.objectContaining({ node_run_id: 'node', attempt: 1,
       action_generation: 1 }))
-    expect(reworkSchema(f).parameters.properties.deliverable_index.enum).toEqual([3])
-    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['summary.md', 'table.csv'])
+    expect(reworkSchema(f).parameters.properties.deliverable_index.enum).toEqual([3, 4])
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual([
+      'physical.csv', 'title-3.txt', 'internal-3.md', 'title-4.txt', 'internal-4.md',
+    ])
     expect(schemaActions(f)).toContain('read')
     expect(schemaActions(f)).toContain('read_material')
 
-    const fileInput = { action: 'publish', file_name: 'summary.md', text: '文件原件。' }
+    const beforeInvalidFile = feedback.mock.calls.length
+    const invalidPhysical = { action: 'publish', file_name: 'title-3.txt', text: '不能把正文别名冒充文件。' }
+    f.toolCall('wrong-physical-file', invalidPhysical)
+    await expect(f.executeLocal('orchestra_rework', invalidPhysical, 'wrong-physical-file'))
+      .rejects.toMatchObject({ code: 'CONFIRMATION_MISMATCH' })
+    expect(feedback).toHaveBeenCalledTimes(beforeInvalidFile)
+
+    const fileInput = { action: 'publish', file_name: 'physical.csv', text: '文件原件。' }
     f.toolCall('real-file', fileInput)
     const fileReceipt = await f.executeLocal('orchestra_rework', fileInput, 'real-file')
     f.toolResult('real-file', JSON.stringify(fileReceipt))
     f.stepEnd()
-    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['table.csv'])
-
-    // Two outstanding targets are both committed in one step, then disappear together.
-    const lastText = { action: 'publish_text_result', deliverable_index: 3, text: '最后正文。' }
-    const lastFile = { action: 'publish', file_name: 'table.csv', text: '最后文件。' }
-    f.toolCall('last-text', lastText)
-    f.toolCall('last-file', lastFile)
-    const lastTextReceipt = await f.executeLocal('orchestra_rework', lastText, 'last-text')
-    const lastFileReceipt = await f.executeLocal('orchestra_rework', lastFile, 'last-file')
-    f.toolResult('last-text', JSON.stringify(lastTextReceipt))
-    f.toolResult('last-file', JSON.stringify(lastFileReceipt))
+    expect(schemaActions(f)).not.toContain('publish')
     expect(schemaActions(f)).toContain('publish_text_result')
+    expect(reworkSchema(f).parameters.properties.deliverable_index.enum).toEqual([3, 4])
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual([
+      'title-3.txt', 'internal-3.md', 'title-4.txt', 'internal-4.md',
+    ])
+
+    const titleAlias = { action: 'publish_text_result', deliverable_index: 3,
+      file_name: 'title-3.txt', text: '用正式标题登记正文。' }
+    f.toolCall('title-alias', titleAlias)
+    const titleReceipt = await f.executeLocal('orchestra_rework', titleAlias, 'title-alias')
+    expect(titleReceipt).toMatchObject({ publication_status: 'registered', deliverable_index: 3 })
+    f.toolResult('title-alias', JSON.stringify(titleReceipt))
+    f.stepEnd()
+    expect(schemaActions(f)).toEqual(['publish_text_result','read','read_material','inbox','get','request','accept','request_changes','escalate'])
+    expect(reworkSchema(f).parameters.properties.deliverable_index.enum).toEqual([4])
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['title-4.txt', 'internal-4.md'])
+
+    const internalAlias = { action: 'publish_text_result', deliverable_index: 4,
+      file_name: 'internal-4.md', text: '用内部文件名登记正文。' }
+    f.toolCall('internal-alias', internalAlias)
+    const internalReceipt = await f.executeLocal('orchestra_rework', internalAlias, 'internal-alias')
+    expect(internalReceipt).toMatchObject({ publication_status: 'registered', deliverable_index: 4 })
+    f.toolResult('internal-alias', JSON.stringify(internalReceipt))
     f.stepEnd()
     expect(schemaActions(f)).toEqual(['read','read_material','inbox','get','request','accept','request_changes','escalate'])
     expect(reworkSchema(f).parameters.properties).not.toHaveProperty('text')
@@ -408,7 +433,10 @@ it('只在同一子会话提交成功回执后，于step/end收窄下一轮的�
 })
 
 it('同批次两个已登记发布都可确认，显式operation_id保留，隐式ID对同目标重试稳定', async () => {
-  const targets = { texts: [0, 1], files: ['one.md', 'two.md'] }
+  const targets = { texts: [
+    { index: 0, title: 'title-0.md', fileName: 'internal-0.md' },
+    { index: 1, title: 'title-1.md', fileName: 'internal-1.md' },
+  ], files: ['one.md', 'two.md'] }
   const publicationTargets = vi.fn<NonNullable<Options['publicationTargets']>>(() => targets)
   const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
   const f = fixture('full', undefined, undefined, feedback, publicationTargets)
@@ -426,7 +454,7 @@ it('同批次两个已登记发布都可确认，显式operation_id保留，隐�
     f.toolResult('batch-file', JSON.stringify(secondReceipt))
     f.stepEnd()
     expect(reworkSchema(f).parameters.properties.deliverable_index.enum).toEqual([1])
-    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['two.md'])
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['two.md', 'title-1.md', 'internal-1.md'])
 
     const implicit = { action: 'publish_text_result', deliverable_index: 1, text: '重试正文。' }
     const explicit = { action: 'publish', file_name: 'two.md', text: '显式ID文件。', operation_id: 'explicit-operation-id' }
@@ -445,7 +473,9 @@ it('同批次两个已登记发布都可确认，显式operation_id保留，隐�
 it('无计划和新子会话保留首次发布工具，不继承旧子会话的收窄状态', async () => {
   const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
   const unplanned = fixture('full', undefined, undefined, feedback, () => null)
-  const fresh = fixture('full', undefined, undefined, feedback, () => ({ texts: [0], files: ['first.md'] }))
+  const fresh = fixture('full', undefined, undefined, feedback, () => ({ texts: [
+    { index: 0, title: 'first-title.md', fileName: 'first-internal.md' },
+  ], files: ['first.md'] }))
   try {
     await unplanned.start()
     expect(schemaActions(unplanned)).toContain('publish')

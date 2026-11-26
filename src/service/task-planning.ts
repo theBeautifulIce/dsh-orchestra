@@ -527,12 +527,12 @@ export function approvedArtifactRequirements(tx: ReadTx, runId: string, nodeId: 
     const { proposal } = assertApprovedPlan(row, run.workflow_id, run.version)
     const step = proposal.steps.find((item) => item.node_id === nodeId)
     if (!step || step.tools.length > 0) return null
-    const rules: Array<{ file_name: string; minimum_bytes: number; textIndex?: number }> = []
+    const rules: Array<{ file_name: string; minimum_bytes: number; textIndex?: number; textTitle?: string }> = []
     for (const [index, item] of proposal.deliverables.entries()) {
       if (item.node_id !== nodeId) continue
       if (item.acceptance.kind === 'artifact') rules.push(item.acceptance)
       else if (item.acceptance.kind === 'chat/text_result') {
-        rules.push({ file_name: textResultFileName(index), minimum_bytes: 1, textIndex: index })
+        rules.push({ file_name: textResultFileName(index), minimum_bytes: 1, textIndex: index, textTitle: item.title })
       } else return null
     }
     if (!rules.length) return null

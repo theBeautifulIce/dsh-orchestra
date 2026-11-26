@@ -370,7 +370,8 @@ it('多文件返工复制保留的文件和会话正文，并为新尝试生成�
     return {node_run_id:id,attempt:row.attempt,action_generation:row.action_generation}
   })
   const old=start(nodeId)
-  expect(readPublicationTargets(db,old)).toEqual({files:['report.md','data.csv'],texts:[2]})
+  expect(readPublicationTargets(db,old)).toEqual({files:['report.md','data.csv'],
+    texts:[{index:2,title:'会话总结',fileName:'会话正文-3.md'}]})
   expect(readPublicationTargets(db,{...old,action_generation:old.action_generation+1})).toBeNull()
   for(const file_name of ['report.md','data.csv'])callDshRework(db,host,old,{action:'publish',operation_id:uuidv7(),file_name,text:'original bytes'},at,secret)
   callDshRework(db,host,old,{action:'publish_text_result',operation_id:uuidv7(),deliverable_index:2,text:'保留的会话正文'},at,secret)

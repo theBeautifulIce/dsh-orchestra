@@ -73,7 +73,7 @@ it('只读一次共享项目资料，并在十个已派发的 DSH 子会话和�
         cancel() { agent.status = 'idle' },
       }
       options.setup({ tools: { restrict() {}, register(tool: TestTool) { tools.set(tool.name, tool) } },
-        on(_event: string, handler: typeof preStep) { preStep = handler } }, agent)
+        on(event: string, handler: typeof preStep) { if (event === 'agent/pre-step') preStep = handler } }, agent)
       return { agent, async dispose() {} }
     },
   } } }

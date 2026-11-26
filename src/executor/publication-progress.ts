@@ -1,7 +1,7 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Session } from '@deepseek-ai/dsh-session'
 
-export type PublicationTargets = { texts: number[]; files: string[] }
+export type PublicationTargets = { texts: { index: number; title: string; fileName: string }[]; files: string[] }
 type ReceiptMessage = Extract<ReturnType<Session['deriveMessages']>[number], { role: 'tool' }>
 
 /** Only a host result actually committed to this child can retire a publication slot. */
@@ -11,6 +11,7 @@ export function publicationProgress(loadTargets: () => PublicationTargets | null
   let plan: PublicationTargets | null | undefined
   let applied = 0
   return {
+    allowsFile(name: string) { return !plan || plan.files.includes(name) },
     issued(callId: string, target: string | number, receipt: unknown, text: string) {
       if (plan === null || !receipt || typeof receipt !== 'object' || !('publication_status' in receipt)
         || receipt.publication_status !== 'registered' || !('artifact_id' in receipt) || typeof receipt.artifact_id !== 'string'
@@ -38,7 +39,7 @@ export function publicationProgress(loadTargets: () => PublicationTargets | null
       }
       applied = confirmed.size
       if (!plan) return
-      const texts = plan.texts.filter(index => !confirmed.has(index))
+      const texts = plan.texts.filter(item => !confirmed.has(item.index))
       const files = plan.files.filter(name => !confirmed.has(name))
       if (texts.length === plan.texts.length && files.length === plan.files.length) return
       return { texts, files }
@@ -49,6 +50,8 @@ export function publicationProgress(loadTargets: () => PublicationTargets | null
 export function reworkToolPresentation(remaining?: PublicationTargets): Pick<ToolDefinition, 'parameters' | 'description'> {
   const textAllowed = !remaining || remaining.texts.length > 0
   const fileAllowed = !remaining || remaining.files.length > 0
+  // file_name also confirms the approved title or internal name of a text slot on older clients.
+  const names = remaining && [...new Set([...remaining.files, ...remaining.texts.flatMap(item => [item.title, item.fileName])])]
   return {
     description: [
       ...(fileAllowed ? ['登记文件(publish，传 file_name 和 text)。'] : []),
@@ -73,9 +76,13 @@ export function reworkToolPresentation(remaining?: PublicationTargets): Pick<Too
       }, required: ['originals','attachments'], additionalProperties: false },
       request_id: { type: 'string' }, artifact_id: { type: 'string' }, artifact_hash: { type: 'string' },
       material_id: { type: 'string' }, digest: { type: 'string' },
-      ...(textAllowed ? { deliverable_index: { type: 'integer', minimum: 0, maximum: 19, ...(remaining && { enum: remaining.texts }) } } : {}),
-      ...(fileAllowed ? { file_name: { type: 'string', ...(remaining && { enum: remaining.files }) } } : {}),
-      ...(fileAllowed || textAllowed ? { text: { type: 'string' } } : {}),
+      ...(textAllowed ? { deliverable_index: { type: 'integer', minimum: 0, maximum: 19, ...(remaining && { enum: remaining.texts.map(item => item.index) }) } } : {}),
+      ...(fileAllowed || textAllowed ? {
+        file_name: { type: 'string', ...(names && { enum: names }), ...(remaining && textAllowed && {
+          description: (fileAllowed ? 'publish 的剩余文件名为 ' + JSON.stringify(remaining.files) + '。' : '')
+            + 'publish_text_result 可省略此字段，若提供则须与该编号的正式标题或内部文件名一致。',
+        }) }, text: { type: 'string' },
+      } : {}),
       offset: { type: 'integer' }, note: { type: 'string' },
     }, required: ['action'], additionalProperties: false },
   }

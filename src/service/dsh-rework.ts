@@ -39,7 +39,8 @@ export function readPublicationTargets(db: Db, binding: ReworkBinding) {
     const approved = node && approvedArtifactRequirements(tx, node.run_id, node.node_id)
     if (!approved) return null
     return {
-      texts: approved.rules.flatMap(rule => rule.textIndex === undefined ? [] : [rule.textIndex]),
+      texts: approved.rules.flatMap(rule => rule.textIndex === undefined ? []
+        : [{ index: rule.textIndex, title: rule.textTitle ?? rule.file_name, fileName: rule.file_name }]),
       files: approved.rules.filter(rule => rule.textIndex === undefined).map(rule => rule.file_name),
     }
   })
