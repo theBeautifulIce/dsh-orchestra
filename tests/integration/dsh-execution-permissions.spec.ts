@@ -470,6 +470,41 @@ it('同批次两个已登记发布都可确认，显式operation_id保留，隐�
   } finally { await f.host.close() }
 })
 
+it('未送达的计划外附件回执可原样重放，Y确认后X仍保留到幂等核对完成', async () => {
+  const targets = { texts: [], files: ['Y.csv'] }
+  const publicationTargets = vi.fn<NonNullable<Options['publicationTargets']>>(() => targets)
+  const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
+  const f = fixture('full', undefined, undefined, feedback, publicationTargets)
+  try {
+    await f.start()
+    const x = { action: 'publish', operation_id: 'x-exact-retry', file_name: 'X.csv', text: '稳定附件正文。' }
+    f.toolCall('x-first', x)
+    const firstReceipt = await f.executeLocal('orchestra_rework', x, 'x-first')
+    expect(firstReceipt).toMatchObject({ publication_status: 'registered', file_name: 'X.csv' })
+    // The host stored X, but the model-facing tool/result event was lost.
+    f.stepEnd()
+    expect(publicationTargets).not.toHaveBeenCalled()
+
+    const y = { action: 'publish', operation_id: 'y-first', file_name: 'Y.csv', text: '计划附件正文。' }
+    f.toolCall('y-first', y)
+    const yReceipt = await f.executeLocal('orchestra_rework', y, 'y-first')
+    f.toolResult('y-first', JSON.stringify(yReceipt))
+    f.stepEnd()
+    expect(publicationTargets).toHaveBeenCalledOnce()
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['X.csv'])
+    expect(schemaActions(f)).toContain('publish')
+
+    f.toolCall('x-retry', x)
+    const retryReceipt = await f.executeLocal('orchestra_rework', x, 'x-retry')
+    expect(retryReceipt).toEqual(firstReceipt)
+    expect(feedback).toHaveBeenNthCalledWith(3, expect.anything(), x)
+    f.toolResult('x-retry', JSON.stringify(retryReceipt))
+    f.stepEnd()
+    expect(schemaActions(f)).not.toContain('publish')
+    expect(reworkSchema(f).parameters.properties).not.toHaveProperty('file_name')
+  } finally { await f.host.close() }
+})
+
 it('无计划和新子会话保留首次发布工具，不继承旧子会话的收窄状态', async () => {
   const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
   const unplanned = fixture('full', undefined, undefined, feedback, () => null)

@@ -7,18 +7,22 @@ type ReceiptMessage = Extract<ReturnType<Session['deriveMessages']>[number], { r
 /** Only a host result actually committed to this child can retire a publication slot. */
 export function publicationProgress(loadTargets: () => PublicationTargets | null) {
   const issued = new Map<string, { text: string; target: string | number }>()
+  const registeredFiles = new Set<string>()
   const confirmed = new Set<string | number>()
   let plan: PublicationTargets | null | undefined
   let applied = 0
   return {
-    allowsFile(name: string) { return !plan || plan.files.includes(name) },
+    // A stored attachment may retry through the original hash check even if its tool result was lost.
+    allowsFile(name: string) { return !plan || plan.files.includes(name) || registeredFiles.has(name) },
     issued(callId: string, target: string | number, receipt: unknown, text: string) {
       if (plan === null || !receipt || typeof receipt !== 'object' || !('publication_status' in receipt)
         || receipt.publication_status !== 'registered' || !('artifact_id' in receipt) || typeof receipt.artifact_id !== 'string'
         || !('sha256' in receipt) || typeof receipt.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.sha256)) return
       const matches = typeof target === 'number' ? 'deliverable_index' in receipt && receipt.deliverable_index === target
         : 'file_name' in receipt && receipt.file_name === target
-      if (matches) issued.set(callId, { target, text })
+      if (!matches) return
+      if (typeof target === 'string') registeredFiles.add(target)
+      issued.set(callId, { target, text })
     },
     observe(message: ReceiptMessage) {
       const receipt = issued.get(message.toolCallId)
@@ -42,6 +46,8 @@ export function publicationProgress(loadTargets: () => PublicationTargets | null
       const texts = plan.texts.filter(item => !confirmed.has(item.index))
       const files = plan.files.filter(name => !confirmed.has(name))
       if (texts.length === plan.texts.length && files.length === plan.files.length) return
+      // Preserve a model-visible replay path for an extra file stored before this list became narrower.
+      for (const name of registeredFiles) if (!confirmed.has(name) && !plan.files.includes(name)) files.push(name)
       return { texts, files }
     },
   }
