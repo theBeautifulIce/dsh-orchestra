@@ -25,7 +25,7 @@ Orchestra is a task management and workflow orchestration plugin for DeepSeek Ha
 
 **Conversations are where work happens. Tasks are what you manage.** This distinction matters whether an assignment needs one agent or several.
 
-[Download beta.2](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.2) · [Quick start](#quick-start) · [A concrete example](#one-task-several-coordinated-deliverables) · [Usage](#work-from-your-conversation) · [Issues](https://github.com/theBeautifulIce/dsh-orchestra/issues/new)
+[Download beta.2](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.2) · [Quick start](#quick-start) · [Task coordination](#how-a-task-organizes-collaboration) · [Recorded evidence](#real-desktop-runs-and-evidence) · [Usage](#work-from-your-conversation) · [Issues](https://github.com/theBeautifulIce/dsh-orchestra/issues/new)
 
 ## Why Orchestra
 
@@ -33,30 +33,7 @@ Orchestra is a task management and workflow orchestration plugin for DeepSeek Ha
 
 Imagine developing a plugin while researching a project. Both assignments generate conversations, but what matters is how each assignment is progressing.
 
-```mermaid
-flowchart LR
-    subgraph Before["Conversation-centric"]
-        direction TB
-        S1["Requirements conversation"]
-        S2["Research conversation"]
-        S3["Implementation conversation"]
-        S4["Report conversation"]
-        S5["Testing conversation"]
-    end
-    subgraph After["Task-centric"]
-        direction TB
-        T1["Task A: Plugin development<br/>Example: in progress"] --> A1["Requirements"]
-        T1 --> A2["Implementation"]
-        T1 --> A3["Testing"]
-        T2["Task B: Research<br/>Example: awaiting review"] --> B1["Research"]
-        T2 --> B2["Report"]
-    end
-    S1 -.-> A1
-    S3 -.-> A2
-    S5 -.-> A3
-    S2 -.-> B1
-    S4 -.-> B2
-```
+![Conversation-centric and task-centric views](docs/assets/readme/task-view-en.svg)
 
 *Conceptual illustration. Orchestra organizes tasks it creates or handles and their associated execution records. It does not automatically scan, classify, merge, or migrate every existing DSH conversation.*
 
@@ -85,59 +62,48 @@ More agents and more elaborate workflows are not goals in themselves. Their valu
 
 Orchestra is for people who use DSH for ongoing work, especially those juggling assignments, checking results across steps, returning to unfinished work, or keeping delivery records. Ordinary questions can remain in native DSH conversations. Only work managed by Orchestra enters its task records. Access, recovery, and available features remain subject to workspace, source-conversation, host, and retention constraints.
 
-## One task, several coordinated deliverables
+## How a task organizes collaboration
 
-A recorded Desktop acceptance run illustrates how several execution steps serve one assignment. It checked income, refunds, and row counts separately. The net calculation then used the income and refund reports. The row-count check finished independently. All four results belong to the same reconciliation task.
+Consider an assignment that requires independent research, checks, or cross-validation of a set of materials, followed by a consolidated report with inspectable sources. You delegate **one task**, instead of creating several conversations and coordinating them yourself.
 
-```mermaid
-flowchart TD
-    T["One reconciliation task"] --> I["Check income"]
-    T --> R["Check refunds"]
-    T --> C["Count data rows"]
-    I --> IA["Income report"]
-    R --> RA["Refund report"]
-    IA --> N["Calculate net amount"]
-    RA --> N
-    N --> NA["Net report"]
-    C --> CA["Row-count report"]
-```
+![Generic collaboration: parallel work, reference exchange, and formal artifact synthesis](docs/assets/readme/collaboration-en.svg)
 
-| Deliverable | Recorded result | Relationship |
+- **Plan the work:** Orchestra plans steps from the goal, constraints, and delivery criteria. Independent steps run as capacity permits; dependent steps wait for specified results.
+- **Coordinate within bounds:** Authorized active agent attempts in the same run can request help, reply, share reference handoffs, or report blockers. Messages do not replace deliverables, approvals, or formal verification evidence, and do not independently wake a model to wait for replies.
+- **Register deliverables:** Each producing step registers its actual result. Synthesis reads the specified upstream artifacts, not just informal coordination replies. An independent check can continue without becoming an unnecessary dependency.
+- **Follow the task:** Return to its task details to inspect progress, attempts, coordination, pending actions, and registered results. Recovery, stopping, and rework follow recorded evidence and authorization.
+
+The pattern applies to research, independent audits, data reconciliation, document preparation, and similar assignments.
+
+### Real Desktop runs and evidence
+
+The diagram is a generic illustration. The following are recorded Desktop runs, with links to actual reports and supporting records.
+
+| Recorded case | Observed behavior | Evidence |
 | --- | --- | --- |
-| [Income report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-income.md) | Two receipts, **200.00** | Reads the original sample |
-| [Refund report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-refund.md) | One refund, **20.00** | Checks the original sample independently |
-| [Row-count report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-rows.md) | **3 data rows** | Produces its own finding |
-| [Net report](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-net.md) | **180.00** | Uses the two registered upstream reports: 200.00 − 20.00 |
+| Desktop 1120-B · Independent checks | Income, refunds, and rows were checked separately. The net calculation read two specified upstream reports and returned 180.00; the row check was independent. | [Income](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-income.md) · [Refunds](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-refund.md) · [Rows](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-rows.md) · [Net amount](docs/reviews/acceptance/evidence/desktop-1120-b/qa-b-net.md) · [Run record](docs/reviews/acceptance/dispatch-views.md) |
+| S6 T04 · Peer coordination | A requested help, B replied to the same inbox record, and synthesis read two registered artifacts to calculate a net amount of 900. | [Desktop acceptance](docs/reviews/S6-session-desktop-case-matrix.md) · [Focused review](docs/audits/S6-coordination-overhead-independent-audit-round2.md) |
+| S6 T02 / T03 / T03B · Lifecycle and approval | A deferred draft resumed after restarting the isolated desktop; another task completed while a named approval was pending. | [Desktop acceptance](docs/reviews/S6-session-desktop-case-matrix.md) |
+| S6 T05 / T06 / T09 / T10 · Exceptions | Missing inputs were reported; duplicate requests were deduplicated, unavailable peers settled, cyclic requests rejected, and canceled agents did not restart after reopening Desktop. | [Desktop acceptance](docs/reviews/S6-session-desktop-case-matrix.md) |
+| S6 T07 · Complete artifacts | Three reports were registered once each, opened in the DSH native Browser, and a follow-up read only the named artifact. | [Independent review and artifact record](docs/audits/S6-task-session-reliability-independent-audit-round11.md) |
 
-The source reports and [Desktop run record](docs/reviews/acceptance/dispatch-views.md) make the calculation and handoffs inspectable. This recorded example uses different inputs from the **109.50** quick-start exercise below.
+The 1120-B Markdown files can be opened directly. S6 links point to committed acceptance and audit reports; some raw JSON, full sessions, and isolated host data referenced by those reports remain in the local test environment, not public downloads. These runs used DSH Desktop `0.2.2-rc.5` and different frozen candidates; they do not establish revalidation on current HEAD or all models. The coordination-overhead review conditionally passed and recorded inaccurate model narration of one closure reason; formal G6 remains unsigned. There is not enough matched evidence to claim a fixed token or billing reduction.
 
-![Recorded Desktop workflow view showing parallel work, dependencies, and step status](docs/assets/readme/workflow.png)
+![Historical Desktop workflow view](docs/assets/readme/workflow.png)
 
-*Historical Desktop acceptance screenshot. It illustrates the task workflow; the current A workbench can differ in layout.*
+*Historical Desktop screenshot. The installed version determines the current layout.*
 
 ### From request to review
 
-```mermaid
-flowchart TD
-    G["Goal and deliverable criteria"] --> P["Plan and check required authorization"]
-    P --> E["Dispatch ready steps"]
-    E -->|Blocked or failed| B["Report the reason and required action"]
-    E -->|Results registered| A["Deliverables and evidence"]
-    A --> Q{"Human review required?"}
-    Q -->|No| F["Return outcome and artifact links"]
-    Q -->|Yes| H["Inspect the exact version"]
-    H -->|Accept| F
-    H -->|Request changes| W["Rework within the permitted scope"]
-    W --> E
-```
+![Task lifecycle: intake, planning, execution, verification, delivery, and conditional paths](docs/assets/readme/task-lifecycle-en.svg)
 
-Starting work and accepting its results are separate decisions. Required approvals show the scope of the action. Delivery review concerns the actual result and its criteria. Recovery from a block or failure follows the available evidence and permitted actions; the graph does not imply an unconditional retry.
+**A task record spans these stages; authorization to execute and acceptance of the result are separate decisions.** Before launch, a draft may be deferred or a plan confirmed. Execution may encounter workflow approval, host tool authorization, blocks, stopping, or recovery. Registered deliverables are checked against the applicable criteria and evidence, and any required human review concerns the exact version. Rework and recovery are allowed only under applicable policy, recorded state, and authorization. Progress notifications and artifact links can reach the source conversation during or after execution, not only at the end.
 
 ## Quick start
 
 ### Choose a build and install it
 
-**The current prerelease is `v0.1.0-beta.2`.** It brings together the A workbench, task-command settings, complete artifact links, and fixes for conversation reporting and execution permissions, with updater `1.1.0`. This README follows `main`; use the matching tagged README and release notes for a published package's features and usage.
+**The published prerelease remains `v0.1.0-beta.2`.** This README describes task management and in-development S6 capabilities on `main`, not a guarantee that all these capabilities are included in that package. Consult the tagged README and release notes for the released package. The updater is `1.1.0`.
 
 | Build | How to get it |
 | --- | --- |
@@ -237,40 +203,24 @@ The personal Desktop adapter supports local task routing and execution. Independ
 
 ## Architecture
 
-**DSH supplies the execution environment. Orchestra coordinates the task and records its progress.** The conversation and workbench are two interfaces to that same task record.
+**DSH supplies conversations and the execution environment; Orchestra organizes tasks, supervises runs, and manages delivery.** The task management layer does not replace the host's conversation system. The source conversation and workbench reach the same task records through authenticated entry points.
 
-```mermaid
-flowchart TD
-    U["Conversation and workbench"]
-    subgraph O["Orchestra"]
-        P["Plan and pin the workflow"]
-        S["Schedule by dependencies and capacity"]
-        B["Execution bridge"]
-        R["Review and recovery"]
-        L[("Task ledger and artifacts")]
-        P --> S --> B
-        B --> R
-        P --> L
-        S --> L
-        R --> L
-        R -->|Permitted rework or recovery| S
-    end
-    subgraph D["DSH host"]
-        M["Models and worker sessions"]
-        T["Authorized tools and plugins"]
-        M --> T
-    end
-    U -->|Goals and inputs| P
-    U -->|Approvals and feedback| R
-    P -.->|Planner model call| M
-    B -->|Scoped work| M
-    M -->|Reports and artifact references| B
-    L -->|Status, results, and required actions| U
-```
+![Current logical architecture: task ledger, supervisor, dispatch, bridge, report pump, coordination inbox, and delivery controls](docs/assets/readme/architecture-en.svg)
 
-The service is the sole SQLite writer. Authenticated commands and queries connect the panel and source conversation to task state; events, receipts, evidence, and artifact versions make the handoffs traceable. The personal adapter isolates ledgers by workspace and conversation. Tool access remains subject to DSH and the relevant service's permissions.
+| Layer | Responsibility and boundary |
+| --- | --- |
+| Intake, planning, and admission | Bind the source and materials, interpret and validate typed requirements, reuse a suitable pinned workflow or generate a task-specific one. Receipts and pinned versions help avoid treating a repeat request as a new assignment. |
+| Supervisor and dispatcher | Merge in-process wakeups after committed SQLite transactions; timed scans provide fallback. The supervisor drives existing scheduling and maintenance; the dispatcher remains the sole owner of dispatch. |
+| Authoritative ledger and artifact storage | The service is SQLite's sole writer and records tasks, runs, node attempts, versions, receipts, events, evidence, and artifact references. Existing contracts govern state, authorization, review, and recovery. |
+| DSH execution bridge | Bind active authorized attempts to host sessions and permitted tools; execution reports enter the existing service and evidence chain. |
+| Bounded coordination inbox | Authorized active attempts in the same run exchange reference messages. Duplicate requests are deduplicated, cycles rejected, and expired, unavailable, or canceled requests settled. The inbox does not dispatch, rewrite workflows, grant authority, or approve results. |
+| Independent source-report pump and workbench | Isolate notifications, acknowledgments, and redelivery by source conversation. Task status, pending human actions, and exact artifact versions are queryable; one slow conversation does not stall others. |
 
-A self-managed host uses `serveDshOrchestra` to supply execution and model/tool services, `resolveHttpHuman` for authenticated human actions, and `orchestraPanelTransport` for the panel. See the [design notes](docs/design-notes.md), [operations and rollback runbook](docs/runbook.md), and [trial-ring guide](docs/trial-circles.md) for those integrations.
+This is a logical responsibility map, not a function-call graph. Reference messages and formal deliverables have distinct recording and authorization boundaries. A post-commit wakeup is not a durable delivery acknowledgment. Recovery and retry follow recorded facts; external exactly-once effects are not guaranteed.
+
+Implementation and evidence: [Task supervisor](src/service/task-supervisor.ts) · [Coordination inbox](src/service/run-coordination.ts) · [Source report pump](src/service/chat-report-pump.ts) · [Task planning](src/service/task-planning.ts) · [Supervisor and coordination design](docs/implementation/task-supervisor-coordination.md) · [Desktop acceptance](docs/reviews/S6-session-desktop-case-matrix.md).
+
+Custom hosts use `serveDshOrchestra` to integrate execution, models, and tools, `resolveHttpHuman` to authenticate human actions, and `orchestraPanelTransport` to connect the panel. See [design notes](docs/design-notes.md), [operations and rollback](docs/runbook.md), and [trial circles](docs/trial-circles.md).
 
 ## Development and validation
 
