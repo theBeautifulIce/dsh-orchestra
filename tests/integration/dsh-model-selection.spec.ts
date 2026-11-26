@@ -84,7 +84,8 @@ it('每个主脑阶段固定该次选择，旧供应商额度错误可安全回�
 })
 
 it.each([
-  ['plan', 'success'], ['workflow', 'success'], ['plan', 'truncated'], ['plan', 'no_message'],
+  ['plan', 'success'], ['workflow', 'success'], ['plan', 'reused_header'], ['workflow', 'reused_header'],
+  ['plan', 'truncated'], ['plan', 'no_message'], ['plan', 'no_initial_header'],
   ['plan', 'wrong_route'], ['plan', 'wrong_initial_route'], ['rework', 'truncated'],
 ] as const)('handles a native length stop in the same %s agent (%s)', async (purpose, followup) => {
   const route = { provider: 'fixture', model: 'planner', reasoningEffort: 'high' }
@@ -99,7 +100,9 @@ it.each([
         const first = prompts.length === 1
         const wrongRoute = first ? followup === 'wrong_initial_route' : followup === 'wrong_route'
         const config = wrongRoute ? { ...route, model: 'different' } : route
-        events.push({ type: 'request/header', data: { header: { config } } })
+        if (first ? followup !== 'no_initial_header' : followup !== 'reused_header' && followup !== 'no_message') {
+          events.push({ type: 'request/header', data: { header: { config } } })
+        }
         if (first || followup !== 'no_message') events.push({ type: 'assistant/message', data: { message: {
           content: [{ type: 'text', text: first ? '{"stale":true}' : '{"complete":true}' }],
         } } })
@@ -112,14 +115,14 @@ it.each([
   const context = { agents: { get: () => parent }, llm: { listModels: async () => [{ id: route.model }],
     resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'high' }] } }) } } as unknown as Context
   const result = createDshPlanningCallback({ context, parent: () => parent, model: route }, purpose)({ goal: 'fixture input marker' })
-  if (followup === 'success') await expect(result).resolves.toEqual({ complete: true })
-  else if (followup === 'wrong_route' || followup === 'wrong_initial_route') {
+  if (followup === 'success' || followup === 'reused_header') await expect(result).resolves.toEqual({ complete: true })
+  else if (followup === 'wrong_route' || followup === 'wrong_initial_route' || followup === 'no_initial_header') {
     await expect(result).rejects.toMatchObject({ code: 'PROTOCOL_VERSION_MISMATCH' })
   }
   else await expect(result).rejects.toMatchObject({ details: { planning_issue: followup === 'no_message' ? 'format' : 'length' } })
   expect(create).toHaveBeenCalledTimes(1)
   expect(dispose).toHaveBeenCalledTimes(1)
-  expect(prompts).toHaveLength(purpose === 'rework' || followup === 'wrong_initial_route' ? 1 : 2)
+  expect(prompts).toHaveLength(purpose === 'rework' || followup === 'wrong_initial_route' || followup === 'no_initial_header' ? 1 : 2)
   if (prompts.length > 1) {
     expect(prompts[1]).not.toContain('fixture input marker')
     expect(prompts[1]).not.toContain('stale')

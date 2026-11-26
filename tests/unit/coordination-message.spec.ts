@@ -65,4 +65,16 @@ describe('model-visible mailbox receipts', () => {
       expect(coordinationMessages([answered], deliveredCoordinationIds(events, [], [answered]))).toHaveLength(1)
     }
   })
+
+  it('delivers a settled retry receipt once while preserving pending requests and changes to the answer', () => {
+    for (const item of [answered, unavailable]) {
+      const seen = deliveredCoordinationIds(toolHistory(renderCoordinationResult(item)), [], [item])
+      expect(coordinationMessages([item], seen)).toEqual([])
+    }
+    for (const item of [request, { ...answered, reply: '另一条答复' }, { ...answered, target: '代理 C' }]) {
+      const update = item.state === 'pending' ? request : answered
+      const seen = deliveredCoordinationIds(toolHistory(renderCoordinationResult(item)), [], [update])
+      expect(coordinationMessages([update], seen)).toHaveLength(1)
+    }
+  })
 })

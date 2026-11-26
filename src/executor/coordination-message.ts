@@ -20,7 +20,7 @@ export function renderCoordinationResult(result: MailboxResult) {
     return JSON.stringify({ ...result, advice: '新请求或状态变化会主动送达，用已有回执继续工作。' })
   }
   return JSON.stringify({ ...statusFields(result),
-    ...(result.state === 'pending' ? { next_action: '已送出，继续工作。回复或关闭会随本步工作送达。' } : {}) })
+    ...(result.state === 'pending' ? { next_action: '已送出，继续工作。回复或关闭会随本步工作送达。' } : { target: result.target }) })
 }
 
 function messageId(id: string, revision: number) {
@@ -45,15 +45,19 @@ export function deliveredCoordinationIds(history: readonly HistoryMessage[], ent
     if (message.content.length !== 1 || block?.type !== 'text') continue
     let receipt
     try { receipt = JSON.parse(block.text) } catch { continue }
-    if (!Array.isArray(receipt?.items)) continue
-    for (const item of receipt.items) {
+    const inbox = Array.isArray(receipt?.items)
+    for (const item of inbox ? receipt.items : [receipt]) {
       const update = current.get(item?.id)
-      if (update && item.revision === update.revision && item.state === update.state && item.kind === update.kind
-        && item.source === update.source && (item.target ?? null) === update.target
-        && (update.state !== 'pending' || item.expires_ms === update.expires_ms)
-        && item.body === update.body && (item.reply ?? null) === update.reply && (item.reason ?? null) === update.reason) {
-        seen.add(messageId(update.id, update.revision))
+      if (!update || item.revision !== update.revision || item.state !== update.state || item.kind !== update.kind
+        || item.target !== update.target || (item.reply ?? null) !== update.reply || (item.reason ?? null) !== update.reason) continue
+      if (inbox) {
+        if (item.source !== update.source || item.body !== update.body
+          || (update.state === 'pending' && item.expires_ms !== update.expires_ms)) continue
+      } else if (update.state === 'pending') {
+        // A sender's short acknowledgement cannot deliver the question to its recipient.
+        continue
       }
+      seen.add(messageId(update.id, update.revision))
     }
   }
   return seen

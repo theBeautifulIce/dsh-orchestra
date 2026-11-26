@@ -432,7 +432,8 @@ export function createDshPlanningCallback(options: {
         ] : []), ORCHESTRA_COMMUNICATION_GUIDE, content].join('\n'))
       await Promise.race([deadline, handle.agent.whenIdle()])
       controller.signal.throwIfAborted()
-      let turn = handle.agent.session.snapshotEvents()
+      let sessionEvents = handle.agent.session.snapshotEvents()
+      let turn = sessionEvents
       if (purpose !== 'rework' && turn.findLast(event => event.type === 'turn/end')?.data.reason.kind === 'max-tokens') {
         // DSH confirmed the tool-free turn actually ended. Ask the same agent once,
         // using its existing input, route, token limit and original stage deadline.
@@ -443,10 +444,13 @@ export function createDshPlanningCallback(options: {
           + '保留用户的全部约束、审批、人员与依赖。职责、交付要求和风险各用最短的准确说明，省去推导、示例和正文。')
         await Promise.race([deadline, handle.agent.whenIdle()])
         controller.signal.throwIfAborted()
-        turn = handle.agent.session.snapshotEvents().slice(previousLength)
+        sessionEvents = handle.agent.session.snapshotEvents()
+        turn = sessionEvents.slice(previousLength)
       }
       const result = readJsonOutput(turn, true)
-      observedModel(turn, route)
+      // DSH records a new request header only when it changes or a new series begins.
+      // The pinned model belongs to this child session; the JSON belongs to its latest turn.
+      observedModel(sessionEvents, route)
       return result
     } finally {
       if (timeout) clearTimeout(timeout)
