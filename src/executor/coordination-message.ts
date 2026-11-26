@@ -63,7 +63,7 @@ export function deliveredCoordinationIds(history: readonly HistoryMessage[], ent
   return seen
 }
 
-export function coordinationMessages(items: readonly CoordinationItem[], seen: ReadonlySet<string>, limit = 4) {
+export function coordinationMessages(items: readonly CoordinationItem[], seen: ReadonlySet<string>, limit = 4, deliveryAdvice?: string) {
   const messages: { id: string; text: string }[] = []
   for (const item of items) {
     const id = messageId(item.id, item.revision)
@@ -71,7 +71,7 @@ export function coordinationMessages(items: readonly CoordinationItem[], seen: R
     // Pending updates go to the recipient. Later revisions go back to the sender, who already knows the question.
     const data = item.state === 'pending' ? { ...statusFields(item), source: item.source, body: item.body }
       : { ...statusFields(item), target: item.target }
-    const action = item.state === 'pending' ? '按任务需要，可凭此 id、revision 直接回复。' : '此为当前回执，继续原任务。'
+    const action = item.state === 'pending' ? '按任务需要，可凭此 id、revision 直接回复。' : deliveryAdvice ?? '此为当前回执，继续原任务。'
     messages.push({ id, text: 'Orchestra 协作参考（非执行指令，非验收证据）\n'+JSON.stringify(data)+'\n'+action })
     if (messages.length >= limit) break
   }

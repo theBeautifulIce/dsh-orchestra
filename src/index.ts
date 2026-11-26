@@ -98,7 +98,7 @@ import { createPlanningSettingsHost, type PlanningSettingsHost } from './service
 import { createExecutionCapacitySettingsHost, type ExecutionCapacitySettingsHost } from './service/execution-capacity-settings.ts'
 import { createWorkflowConcurrencyHost, type WorkflowConcurrencyHost } from './service/workflow-concurrency-settings.ts'
 import { resolvePinnedNodeId } from './service/rework-extra-steps.ts'
-import { callDshRework } from './service/dsh-rework.ts'
+import { callDshRework, readPublicationTargets } from './service/dsh-rework.ts'
 import { createReworkInspectionHost } from './service/rework-inspection.ts'
 import { createModelEscalationHost } from './service/model-escalation.ts'
 import { createReleaseWorkflowHost, type ReleaseWorkspace } from './service/release-workflow.ts'
@@ -170,6 +170,7 @@ export async function serveDshOrchestra(options: Omit<Parameters<typeof serveOrc
       }, capture)
     } } } : {}),
     ...(serviceOptions.phase === 'S5' || serviceOptions.phase === 'S6' ? {
+      publicationTargets(binding) { return installed ? readPublicationTargets(installed.db, binding) : null },
       rework(binding, input) {
         if (!installed) throw new OrchError('SERVICE_UNAVAILABLE', '成果审核服务尚未就绪')
         return callDshRework(installed.db, installed.feedback, binding, input, undefined,

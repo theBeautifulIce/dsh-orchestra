@@ -21,7 +21,8 @@ type Pre = (exec: ToolExecution, next: () => Promise<PreToolDecision>) => Promis
 type Around = (exec: ToolExecution, next: () => Promise<ToolExecutionResult>) => Promise<ToolExecutionResult>
 
 function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'allow', effect: 'read', reason: '任务要求读取公开资讯。' },
-  requirementsContract?: RequirementsContract, rework?: Options['rework']) {
+  requirementsContract?: RequirementsContract, rework?: Options['rework'],
+  publicationTargets?: NonNullable<Options['publicationTargets']>) {
   const route = { provider: 'p', model: 'm' }
   const live = new Map<string, unknown>()
   const presetWrites: string[] = []
@@ -30,6 +31,8 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
   const tools = new Set(['skill', 'bili_hot', 'read', 'write', 'pwsh', 'memory_write'])
   const definitions = new Map([...tools].map(name => [name, { name }]))
   const local = new Map<string, Definition>()
+  const registrations = new Map<string, Definition[]>()
+  const sessionEventListeners = new Set<(session: { id: string }, event: any) => void>()
   const pending = vi.fn(() => vi.fn())
   let idle = Promise.withResolvers<void>()
   let markIdle = () => {}
@@ -37,6 +40,7 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
   const listSkills = vi.fn(async () => publicSkill
     ? [{ name: 'aihot', description: '读取公开资讯', invocation: { modelInvocable: true } }] : [])
   let authorized = true
+  let childSession: { id: string } | undefined
   let agent!: Agent
   let pre!: Pre
   let around!: Around
@@ -49,18 +53,39 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
     : name === 'sandboxPolicy' ? { overrideOf: () => 'workspace-write' }
       : name === 'approval' ? { overrideOf: () => 'ask', config: { policy: 'ask' } }
         : name === 'skills' ? { list: listSkills } : undefined
-  const toolRegistry = { get: (name: string) => tools.has(name) ? definitions.get(name) : undefined,
-    schemas: () => [...tools].map(name => ({ name, description: name })),
-    restrict, register(definition: Definition) { local.set(definition.name, definition) }, guard: (fn: typeof guard) => { guard = fn } }
+  const toolRegistry = { get: (name: string) => local.get(name) ?? (tools.has(name) ? definitions.get(name) : undefined),
+    schemas: () => {
+      const current = new Map([...tools].map(name => [name, { name, description: name }]))
+      for (const [name, definition] of local) current.set(name, definition)
+      return [...current.values()].map(definition => ({ ...definition }))
+    },
+    restrict, register(definition: Definition) {
+      const stack = registrations.get(definition.name) ?? []
+      stack.push(definition)
+      registrations.set(definition.name, stack)
+      local.set(definition.name, definition)
+      return () => {
+        const index = stack.lastIndexOf(definition)
+        if (index >= 0) stack.splice(index, 1)
+        if (stack.length > 0) local.set(definition.name, stack.at(-1)!)
+        else { registrations.delete(definition.name); local.delete(definition.name) }
+      }
+    }, guard: (fn: typeof guard) => { guard = fn } }
   const parent = { session: { id: 'source', header: { cwd: process.cwd() } }, model: { current: () => route },
     ctx: { get, tools: toolRegistry, agents: { async create(options: { sessionId: string; setup: (ctx: unknown, child: Agent) => void }) {
+      const session = { id: options.sessionId, header: { cwd: process.cwd() }, snapshotEvents: () => events,
+        append: (type: string, data: unknown) => appendSessionEvent(session, type, data) }
+      childSession = session
       const ctx = { get, tools: toolRegistry, on(name: string, fn: any) {
         if (name === 'tools/pre-execute') pre = fn
         if (name === 'tools/execute') around = fn
         if (name === 'tools/result') resultEvent = fn
+        if (name === 'session/event') {
+          sessionEventListeners.add(fn)
+          return () => sessionEventListeners.delete(fn)
+        }
       } }
-      const child = { session: { id: options.sessionId, header: { cwd: process.cwd() }, snapshotEvents: () => events,
-        append: (type: string, data: unknown) => { events.push({ type, data }) } },
+      const child = { session,
       ctx, status: 'idle', model: { current: () => route, select() {} },
       followup(message: { content: Array<{ text: string }> }) {
         prompts.push(message.content[0]!.text)
@@ -86,26 +111,52 @@ function fixture(mode: ExecutionPermissionMode, review: unknown = { decision: 'a
   } } as unknown as Context
   const host = createDshExecutor({ context, parentForNode: () => authorized ? parent as unknown as Agent : undefined,
     models: [{ ...route, ref: 'p/m', capacity: 'routine' }], recommend: () => ({ complexity: 'routine', reason: 'test' }),
-    executionPermissionMode: () => mode, onNativeApprovalPending: pending, rework,
+    executionPermissionMode: () => mode, onNativeApprovalPending: pending, rework, publicationTargets,
     nativeToolPolicyForNode: () => ({ sideEffectPolicy: 'pure', ...(requirementsContract ? { requirementsContract } : {}) }),
   })
-  async function start() {
-    const spawned = await host.bridge.spawn({ nodeRunId: 'node', attempt: 1, actionGeneration: 1, input: {},
+  let childSessionId = ''
+  function appendSessionEvent(session: { id: string }, type: string, data: any) {
+    const event = { type, data, seq: events.length + 1 }
+    if (session === childSession) events.push({ type, data })
+    for (const listener of sessionEventListeners) listener(session, event)
+    return event
+  }
+  async function start(actionGeneration: number | undefined = 1) {
+    const spawned = await host.bridge.spawn({ nodeRunId: 'node', attempt: 1,
+      ...(actionGeneration === undefined ? {} : { actionGeneration }), input: {},
       outputSchema: {}, toolPolicy: { allow: [] }, inheritHistory: false, modelRef: 'p/m' })
+    childSessionId = spawned.sessionId
     await host.bridge.send({ executorAgentId: spawned.agentId, attempt: 1, attemptId: 'node:1', instruction: '查找公开AI资讯。' })
     return spawned
   }
   const call = (name: string, id = name): ToolExecution => ({ agent, name, arguments: {}, callId: id, rootCallId: id,
     token: Symbol(id), signal: new AbortController().signal }) as unknown as ToolExecution
   function finishText(text: string) {
-    events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } },
-      { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    appendSessionEvent(childSession!, 'assistant/message', { message: { content: [{ type: 'text', text }] } })
+    appendSessionEvent(childSession!, 'turn/end', { reason: { kind: 'completed' } })
     markIdle()
     idle.resolve()
   }
   return { host, start, tools, pending, presetWrites, restrict, events, prompts, call, listSkills,
     enablePublicSkill: () => { publicSkill = true },
     hasLocalTool: (name: string) => local.has(name),
+    schemas: () => toolRegistry.schemas(),
+    definition: (name: string) => local.get(name),
+    sessionEvent(type: string, data: any, sessionId = childSessionId) {
+      return appendSessionEvent(sessionId === childSessionId ? childSession! : { id: sessionId }, type, data)
+    },
+    toolCall(callId: string, input: object) {
+      return appendSessionEvent(childSession!, 'tool/call', { turn: 1, step: 1, callId,
+        name: 'orchestra_rework', arguments: JSON.stringify(input) })
+    },
+    toolResult(callId: string, text: string, options: { isError?: boolean; sessionId?: string } = {}) {
+      const { isError, sessionId = childSessionId } = options
+      return appendSessionEvent(sessionId === childSessionId ? childSession! : { id: sessionId }, 'tool/result', { turn: 1, step: 1, message: {
+        role: 'tool', source: { kind: 'tool', callId }, toolCallId: callId,
+        ...(isError ? { isError: true } : {}), content: [{ type: 'text', text }],
+      } })
+    },
+    stepEnd() { appendSessionEvent(childSession!, 'step/end', { turn: 1, step: 1 }) },
     revokeSource: () => { authorized = false },
     replaceSource: () => { live.set('source', {}) },
     parent: parent as unknown as Agent,
@@ -264,6 +315,155 @@ it.each(['blocked', 'failed', 'completed'] as const)('授权结束后保留%s回
       } } } })
     } finally { await events.return?.() }
   } finally { await f.host.close() }
+})
+
+function reworkReceipt(input: unknown) {
+  const request = input as { action: string; deliverable_index?: number; file_name?: string }
+  const target = request.action === 'publish_text_result' ? request.deliverable_index : request.file_name
+  return {
+    publication_status: 'registered', artifact_id: `artifact-${String(target)}`, sha256: 'a'.repeat(64), size_bytes: 24,
+    ...(typeof target === 'number' ? { deliverable_index: target } : { file_name: target }),
+  }
+}
+
+function reworkSchema(f: ReturnType<typeof fixture>) {
+  return f.schemas().find((schema: any) => schema.name === 'orchestra_rework') as any
+}
+
+function schemaActions(f: ReturnType<typeof fixture>) {
+  return reworkSchema(f).parameters.properties.action.enum as string[]
+}
+
+it('只在同一子会话提交成功回执后，于step/end收窄下一轮的发布目标', async () => {
+  const targets = { texts: [2, 3], files: ['summary.md', 'table.csv'] }
+  const publicationTargets = vi.fn<NonNullable<Options['publicationTargets']>>(() => targets)
+  const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
+  const f = fixture('full', undefined, undefined, feedback, publicationTargets)
+  try {
+    await f.start()
+    const initial = reworkSchema(f)
+    expect(schemaActions(f)).toEqual(['publish', 'publish_text_result','read','read_material','inbox','get','request','accept','request_changes','escalate'])
+    expect(initial.parameters.properties.deliverable_index).not.toHaveProperty('enum')
+    expect(initial.parameters.properties.file_name).not.toHaveProperty('enum')
+
+    const attempt = async (id: string, input: object, delivery: 'forged' | 'failed' | 'undelivered' | 'other-session') => {
+      f.toolCall(id, input)
+      const receipt = await f.executeLocal('orchestra_rework', input, id)
+      const raw = JSON.stringify(receipt)
+      if (delivery === 'forged') f.toolResult(id, JSON.stringify({ ...receipt, artifact_id: 'forged-artifact' }))
+      if (delivery === 'failed') f.toolResult(id, raw, { isError: true })
+      if (delivery === 'other-session') f.toolResult(id, raw, { sessionId: 'another-session' })
+      f.stepEnd()
+      expect(schemaActions(f)).toContain('publish')
+      expect(schemaActions(f)).toContain('publish_text_result')
+      expect(publicationTargets).not.toHaveBeenCalled()
+      return receipt
+    }
+    const textInput = { action: 'publish_text_result', deliverable_index: 2, text: '可核验的正文。' }
+    await attempt('forged-result', textInput, 'forged')
+    await attempt('failed-result', textInput, 'failed')
+    await attempt('other-session-result', textInput, 'other-session')
+    await attempt('undelivered-result', textInput, 'undelivered')
+
+    const realText = { action: 'publish_text_result', deliverable_index: 2, text: '真实登记正文。' }
+    f.toolCall('real-text', realText)
+    const textReceipt = await f.executeLocal('orchestra_rework', realText, 'real-text')
+    f.toolResult('real-text', JSON.stringify(textReceipt))
+    expect(schemaActions(f)).toContain('publish')
+    expect(schemaActions(f)).toContain('publish_text_result')
+    expect(publicationTargets).not.toHaveBeenCalled()
+    f.stepEnd()
+    expect(publicationTargets).toHaveBeenCalledOnce()
+    expect(publicationTargets).toHaveBeenCalledWith(expect.objectContaining({ node_run_id: 'node', attempt: 1,
+      action_generation: 1 }))
+    expect(reworkSchema(f).parameters.properties.deliverable_index.enum).toEqual([3])
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['summary.md', 'table.csv'])
+    expect(schemaActions(f)).toContain('read')
+    expect(schemaActions(f)).toContain('read_material')
+
+    const fileInput = { action: 'publish', file_name: 'summary.md', text: '文件原件。' }
+    f.toolCall('real-file', fileInput)
+    const fileReceipt = await f.executeLocal('orchestra_rework', fileInput, 'real-file')
+    f.toolResult('real-file', JSON.stringify(fileReceipt))
+    f.stepEnd()
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['table.csv'])
+
+    // Two outstanding targets are both committed in one step, then disappear together.
+    const lastText = { action: 'publish_text_result', deliverable_index: 3, text: '最后正文。' }
+    const lastFile = { action: 'publish', file_name: 'table.csv', text: '最后文件。' }
+    f.toolCall('last-text', lastText)
+    f.toolCall('last-file', lastFile)
+    const lastTextReceipt = await f.executeLocal('orchestra_rework', lastText, 'last-text')
+    const lastFileReceipt = await f.executeLocal('orchestra_rework', lastFile, 'last-file')
+    f.toolResult('last-text', JSON.stringify(lastTextReceipt))
+    f.toolResult('last-file', JSON.stringify(lastFileReceipt))
+    expect(schemaActions(f)).toContain('publish_text_result')
+    f.stepEnd()
+    expect(schemaActions(f)).toEqual(['read','read_material','inbox','get','request','accept','request_changes','escalate'])
+    expect(reworkSchema(f).parameters.properties).not.toHaveProperty('text')
+    expect(reworkSchema(f).parameters.properties).not.toHaveProperty('file_name')
+    expect(reworkSchema(f).parameters.properties).not.toHaveProperty('deliverable_index')
+    expect(feedback).toHaveBeenCalledTimes(8)
+  } finally { await f.host.close() }
+})
+
+it('同批次两个已登记发布都可确认，显式operation_id保留，隐式ID对同目标重试稳定', async () => {
+  const targets = { texts: [0, 1], files: ['one.md', 'two.md'] }
+  const publicationTargets = vi.fn<NonNullable<Options['publicationTargets']>>(() => targets)
+  const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
+  const f = fixture('full', undefined, undefined, feedback, publicationTargets)
+  try {
+    await f.start()
+    const first = { action: 'publish_text_result', deliverable_index: 0, text: '正文0。' }
+    const second = { action: 'publish', file_name: 'one.md', text: '文件1。' }
+    f.toolCall('batch-text', first)
+    f.toolCall('batch-file', second)
+    const firstReceipt = await f.executeLocal('orchestra_rework', first, 'batch-text')
+    const secondReceipt = await f.executeLocal('orchestra_rework', second, 'batch-file')
+    expect(firstReceipt).toMatchObject({ publication_status: 'registered', deliverable_index: 0 })
+    expect(secondReceipt).toMatchObject({ publication_status: 'registered', file_name: 'one.md' })
+    f.toolResult('batch-text', JSON.stringify(firstReceipt))
+    f.toolResult('batch-file', JSON.stringify(secondReceipt))
+    f.stepEnd()
+    expect(reworkSchema(f).parameters.properties.deliverable_index.enum).toEqual([1])
+    expect(reworkSchema(f).parameters.properties.file_name.enum).toEqual(['two.md'])
+
+    const implicit = { action: 'publish_text_result', deliverable_index: 1, text: '重试正文。' }
+    const explicit = { action: 'publish', file_name: 'two.md', text: '显式ID文件。', operation_id: 'explicit-operation-id' }
+    const implicit1 = await f.executeLocal('orchestra_rework', implicit, 'implicit-1')
+    const implicit2 = await f.executeLocal('orchestra_rework', implicit, 'implicit-2')
+    await f.executeLocal('orchestra_rework', explicit, 'explicit')
+    const calls = feedback.mock.calls.map(([, input]) => input as Record<string, unknown>)
+    expect(calls.slice(-3, -1).map(call => call.operation_id)).toEqual([expect.any(String), expect.any(String)])
+    expect(calls.at(-2)?.operation_id).toBe(calls.at(-3)?.operation_id)
+    expect(calls.at(-1)?.operation_id).toBe('explicit-operation-id')
+    expect(implicit1).toMatchObject({ publication_status: 'registered', deliverable_index: 1 })
+    expect(implicit2).toMatchObject({ publication_status: 'registered', deliverable_index: 1 })
+  } finally { await f.host.close() }
+})
+
+it('无计划和新子会话保留首次发布工具，不继承旧子会话的收窄状态', async () => {
+  const feedback = vi.fn<NonNullable<Options['rework']>>((_binding, input) => reworkReceipt(input))
+  const unplanned = fixture('full', undefined, undefined, feedback, () => null)
+  const fresh = fixture('full', undefined, undefined, feedback, () => ({ texts: [0], files: ['first.md'] }))
+  try {
+    await unplanned.start()
+    expect(schemaActions(unplanned)).toContain('publish')
+    expect(schemaActions(unplanned)).toContain('publish_text_result')
+    const first = { action: 'publish_text_result', deliverable_index: 0, text: '无计划也能首次交付。' }
+    unplanned.toolCall('unplanned-first', first)
+    const receipt = await unplanned.executeLocal('orchestra_rework', first, 'unplanned-first')
+    expect(receipt).toMatchObject({ publication_status: 'registered', deliverable_index: 0 })
+    unplanned.toolResult('unplanned-first', JSON.stringify(receipt))
+    unplanned.stepEnd()
+    expect(schemaActions(unplanned)).toContain('publish_text_result')
+
+    await fresh.start()
+    expect(schemaActions(fresh)).toContain('publish')
+    expect(schemaActions(fresh)).toContain('publish_text_result')
+    expect(reworkSchema(fresh).parameters.properties.deliverable_index).not.toHaveProperty('enum')
+    expect(reworkSchema(fresh).parameters.properties.file_name).not.toHaveProperty('enum')
+  } finally { await Promise.all([unplanned.host.close(), fresh.host.close()]) }
 })
 
 it.each(['valid', 'repair', 'still malformed', 'expired'] as const)(

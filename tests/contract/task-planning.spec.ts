@@ -18,7 +18,7 @@ import { openDb, withTx } from '../../src/infra/sqlite/driver.ts'
 import { discardDraft } from '../../src/service/task-plan-drafts.ts'
 import { expireMaterials } from '../../src/service/plan-materials.ts'
 import { planningTimeoutDefaults } from '../../src/service/planning-settings.ts'
-import { callDshRework } from '../../src/service/dsh-rework.ts'
+import { callDshRework, readPublicationTargets } from '../../src/service/dsh-rework.ts'
 import { createReworkHost } from '../../src/service/rework-coordinator.ts'
 import { canonicalJson, sha256Hex } from '../../src/core/canonical.ts'
 import { mergeRequirementsContracts, requirementsContractSchema, type RequirementsContract, type TaskRequirement } from '../../src/core/task-requirements.ts'
@@ -370,6 +370,8 @@ it('多文件返工复制保留的文件和会话正文，并为新尝试生成�
     return {node_run_id:id,attempt:row.attempt,action_generation:row.action_generation}
   })
   const old=start(nodeId)
+  expect(readPublicationTargets(db,old)).toEqual({files:['report.md','data.csv'],texts:[2]})
+  expect(readPublicationTargets(db,{...old,action_generation:old.action_generation+1})).toBeNull()
   for(const file_name of ['report.md','data.csv'])callDshRework(db,host,old,{action:'publish',operation_id:uuidv7(),file_name,text:'original bytes'},at,secret)
   callDshRework(db,host,old,{action:'publish_text_result',operation_id:uuidv7(),deliverable_index:2,text:'保留的会话正文'},at,secret)
   withTx(db,tx=>tx.run("UPDATE node_runs SET status='done' WHERE node_run_id=?",[nodeId]))
@@ -381,6 +383,8 @@ it('多文件返工复制保留的文件和会话正文，并为新尝试生成�
     file_manifest:{originals:originals.map(file=>({...file,action:file.file_name==='report.md'?'revise':'keep'})),attachments:[]}},owner,at)
   expect(request.status).toBe('scheduled')
   const current=start(request.new_node_run_id!)
+  expect(readPublicationTargets(db,current)).toBeNull()
+  expect(readPublicationTargets(db,old)).toBeNull()
   callDshRework(db,host,current,{action:'publish',operation_id:uuidv7(),file_name:'report.md',text:'revised bytes'},at,secret)
   const proof=withTx(db,tx=>verifyArtifactCompletion(tx,secret,{...loadNodeRun(tx,current.node_run_id),status:'verifying'},at))
   expect(proof?.proof.artifacts.map(file=>file.file_name)).toEqual(['report.md','data.csv','会话正文-3.md'])

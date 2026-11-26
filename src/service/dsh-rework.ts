@@ -11,7 +11,8 @@ import { runIdempotentCommand, requestHashOf } from './commands/idempotency.ts'
 import { assertReworkRunActive } from './rework-runtime.ts'
 import { recordArtifactPublication } from './artifact-completion.ts'
 
-import { readApprovedTaskPlanForRun } from './task-planning.ts'
+import { approvedArtifactRequirements, readApprovedTaskPlanForRun } from './task-planning.ts'
+import { withReadTx } from './queries/read-tx.ts'
 import { textTarget, TEXT_PUBLICATION } from './text-result.ts'
 
 const key = z.string().min(1).max(256)
@@ -23,6 +24,26 @@ const publishText = z.strictObject({ operation_id: z.uuidv7(), deliverable_index
   file_name: z.string().optional(),
   text: z.string().min(1).max(65536).refine((text) => Boolean(text.trim()) && !text.includes('\0') && Buffer.from(text, 'utf8').toString('utf8') === text, '请提交完整的 UTF-8 会话正文') })
 const read = z.strictObject({ artifact_id: key, artifact_hash: hash, offset: z.number().int().nonnegative().default(0) })
+
+/** A fixed, approved delivery list can narrow a child's next model request. A rework plan may authorize extra files. */
+export function readPublicationTargets(db: Db, binding: ReworkBinding) {
+  return withReadTx(db, ({ tx }) => {
+    const node = tx.get<{ run_id: string; node_id: string }>(
+      `SELECT n.run_id,n.node_id FROM node_runs n WHERE n.node_run_id=? AND n.attempt=? AND n.action_generation=?
+        AND n.status IN ('started','verifying') AND n.replacement_node_run_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM rework_attempts a WHERE a.new_node_run_id=n.node_run_id)
+        AND NOT EXISTS (SELECT 1 FROM rework_impacts i WHERE i.node_run_id=n.node_run_id OR i.replacement_node_run_id=n.node_run_id)
+        AND NOT EXISTS (SELECT 1 FROM rework_extra_steps s WHERE s.node_run_id=n.node_run_id)`,
+      [binding.node_run_id, binding.attempt, binding.action_generation],
+    )
+    const approved = node && approvedArtifactRequirements(tx, node.run_id, node.node_id)
+    if (!approved) return null
+    return {
+      texts: approved.rules.flatMap(rule => rule.textIndex === undefined ? [] : [rule.textIndex]),
+      files: approved.rules.filter(rule => rule.textIndex === undefined).map(rule => rule.file_name),
+    }
+  })
+}
 
 function bindPublication(tx: Tx, binding: ReworkBinding, runId: string, nodeId: string,
   action: 'publish' | 'publish_text_result', body: unknown) {

@@ -72,6 +72,16 @@ describe('model-visible mailbox receipts', () => {
     }
   })
 
+  it('keeps a new peer request actionable and delivers a late reply with the current publication stage', () => {
+    const advice = '原件已登记，在简短完成报告中说明差异。'
+    const [pending, settled] = coordinationMessages([request, answered], new Set(), 4, advice)
+    expect(pending!.text).toContain(request.body)
+    expect(pending!.text).toContain('直接回复')
+    expect(pending!.text).not.toContain(advice)
+    expect(settled!.text).toContain(answered.reply!)
+    expect(settled!.text).toContain(advice)
+  })
+
   it('delivers a settled retry receipt once while preserving pending requests and changes to the answer', () => {
     for (const item of [answered, unavailable]) {
       const seen = deliveredCoordinationIds(toolHistory(renderCoordinationResult(item)), [], [item])

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { ORCHESTRA_MESSAGE_SOURCE } from '../core/dsh-message-source.ts'
 import { OrchError } from '../core/errors.ts'
@@ -16,6 +16,7 @@ import type { RunNoteBinding, RunNotes } from '../service/run-notes.ts'
 import type { CoordinationBinding, RunCoordination } from '../service/run-coordination.ts'
 import { COORDINATION_TOOL, COORDINATION_TOOL_DESCRIPTION, COORDINATION_GUIDE, coordinationMessages,
   deliveredCoordinationIds, renderCoordinationResult } from './coordination-message.ts'
+import { publicationProgress, reworkToolPresentation, type PublicationTargets } from './publication-progress.ts'
 import { privateNoteCaptureMaterial, type createDshPrivateNotes } from './dsh-private-notes.ts'
 import type { ExecutionPermissionMode } from '../core/execution-permissions.ts'
 import { taskAccess } from '../core/task-access.ts'
@@ -474,6 +475,7 @@ export function createDshExecutor(options: {
   runNote?: (binding: RunNoteBinding, input: unknown, requestId: string, now: string) => unknown
   privateRunNotes?: { model: NonNullable<ReturnType<typeof createDshPrivateNotes>>; capture: RunNotes['captureBrain'] }
   rework?: (binding: DshCollaborationBinding, input: unknown) => unknown
+  publicationTargets?: (binding: DshCollaborationBinding) => PublicationTargets | null
   executionPermissionMode?: () => ExecutionPermissionMode
   nativeToolPolicyForNode?: (nodeRunId: string) => NativeExecutionPolicy
   onNativeApprovalPending?: (input: { nodeRunId: string; executorSessionId: string; callId: string; tool: string; mode: 'brain' | 'user' }) => (() => void) | void
@@ -653,6 +655,7 @@ export function createDshExecutor(options: {
       ? options.coordination : undefined
     let child: Child | undefined
     const create = childOptions(parent, route, (ctx, agent) => {
+        let remainingPublications: PublicationTargets | undefined
         const native = permissionMode !== undefined && !releaseCwd
         if (native) {
           inheritDshComposition(ctx, agent, parent)
@@ -817,7 +820,10 @@ export function createDshExecutor(options: {
               if (!updates.length) return result
               const ids = [...committedPushIds, ...result.messages.map(message=>String(message.id))]
               const seen = deliveredCoordinationIds(agent.session.deriveMessages(), ids, updates)
-              const messages = coordinationMessages(updates, seen)
+              const deliveryAdvice = remainingPublications && (remainingPublications.texts.length || remainingPublications.files.length
+                ? '把新信息用于余下交付。已登记原件如需更正，在完成报告中说明并走正式返工。'
+                : '本步骤的计划原件均已登记。把新信息写入简短完成报告。确需更正原件时说明差异并走正式返工。')
+              const messages = coordinationMessages(updates, seen, 4, deliveryAdvice)
               if (!messages.length) return result
               type Message=Parameters<DshAgent['followup']>[0]
               return {...result,messages:[...result.messages,...messages.map(({id,text})=>({id,role:'user',
@@ -927,26 +933,11 @@ export function createDshExecutor(options: {
           const feedback = options.rework
           const binding = { node_run_id: params.nodeRunId, attempt: params.attempt, action_generation: params.actionGeneration }
           const issuedPublicationIds = new Map<string, string>()
-          ctx.tools.register({
+          const loadTargets = options.publicationTargets
+          const progress = loadTargets && publicationProgress(() => loadTargets(binding))
+          const tool: ToolDefinition = {
             name: 'orchestra_rework',
-            description: '登记文件(publish，传 file_name 和 text)或会话正文(publish_text_result，传 deliverable_index 和 text，标题从计划取得)。两种登记均可省略 operation_id。读取上游版本(read)，查询反馈(inbox/get)，提出修改(request)，验收修订(accept/request_changes)。其他写操作复用同一 UUIDv7。',
-            parameters: { type: 'object', properties: {
-              action: { type: 'string', enum: ['publish','publish_text_result','read','read_material','inbox','get','request','accept','request_changes','escalate'] },
-              operation_id: { type: 'string' }, run_id: { type: 'string' }, target_node_run_id: { type: 'string' },
-              source_artifact_id: { type: 'string' }, source_artifact_hash: { type: 'string' }, expected_revision: { type: 'integer' },
-              reason: { type: 'string' }, expected_result: { type: 'string' }, preserve_requirements: { type: 'array', items: { type: 'string' } },
-              suggested_scope: { type: 'string' }, evidence_ids: { type: 'array', items: { type: 'string' } }, verification_request_id: { type: 'string' },
-              file_manifest: { type: 'object', properties: {
-                originals: { type: 'array', items: { type: 'object', properties: {
-                  artifact_id: { type: 'string' }, sha256: { type: 'string' }, file_name: { type: 'string' },
-                  action: { type: 'string', enum: ['revise','keep','remove'] },
-                }, required: ['artifact_id','sha256','file_name','action'], additionalProperties: false } },
-                attachments: { type: 'array', items: { type: 'string' } },
-              }, required: ['originals','attachments'], additionalProperties: false },
-              request_id: { type: 'string' }, artifact_id: { type: 'string' }, artifact_hash: { type: 'string' },
-              material_id: { type: 'string' }, digest: { type: 'string' },
-              deliverable_index: { type: 'integer', minimum: 0, maximum: 19 }, file_name: { type: 'string' }, text: { type: 'string' }, offset: { type: 'integer' }, note: { type: 'string' },
-            }, required: ['action'], additionalProperties: false },
+            ...reworkToolPresentation(),
             output: { schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
               render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }] },
             async execute(input, execution) {
@@ -954,16 +945,29 @@ export function createDshExecutor(options: {
               enterTool(child, agent, execution.signal)
               if (execution.agent !== agent || agent.status !== 'running') throw new OrchError('FORBIDDEN', '成果工具只接受当前智能体会话')
               const request = input as { action: string; file_name?: string; deliverable_index?: number; operation_id?: string }
-              const publicationKey = request.action === 'publish' && request.file_name ? 'file:' + request.file_name
-                : request.action === 'publish_text_result' && request.deliverable_index !== undefined ? 'text:' + request.deliverable_index : null
-              if (publicationKey && request.operation_id === undefined) {
-                const operationId = issuedPublicationIds.get(publicationKey) ?? uuidv7()
-                const result = feedback(binding, { ...request, operation_id: operationId })
-                issuedPublicationIds.set(publicationKey, operationId)
-                return { text: JSON.stringify(result) }
-              }
-              return { text: JSON.stringify(feedback(binding, input)) }
+              const target = request.action === 'publish' ? request.file_name
+                : request.action === 'publish_text_result' ? request.deliverable_index : undefined
+              const key = typeof target === 'number' ? 'text:' + target : 'file:' + target
+              const operationId = target !== undefined && request.operation_id === undefined ? issuedPublicationIds.get(key) ?? uuidv7() : undefined
+              const receipt = feedback(binding, operationId ? { ...request, operation_id: operationId } : input)
+              if (operationId) issuedPublicationIds.set(key, operationId)
+              const text = JSON.stringify(receipt)
+              if (target !== undefined) progress?.issued(execution.callId, target, receipt, text)
+              return { text }
             },
+          }
+          let unregister = ctx.tools.register(tool)
+          if (progress) ctx.on('session/event', (session, event) => {
+            if (session.id !== agent.session.id) return
+            if (event.type === 'tool/result') progress.observe(event.data.message)
+            if (event.type !== 'step/end') return
+            // This tool batch has settled. The next DSH tools.resolve sees the replacement before its model request.
+            const remaining = progress.finishStep()
+            if (!remaining) return
+            const next = { ...tool, ...reworkToolPresentation(remaining) }
+            unregister()
+            unregister = ctx.tools.register(next)
+            remainingPublications = remaining
           })
         }
         if (!releaseCwd && options.collaboration && params.actionGeneration !== undefined) {
