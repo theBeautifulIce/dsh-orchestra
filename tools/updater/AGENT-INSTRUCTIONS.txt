@@ -1,6 +1,6 @@
 任务：把用户指定版本的 DSH Orchestra 更新到其现有 DSH 安装。
 
-工具版本：1.1.0。入口位于仓库 tools/updater/，或完整解压的工具目录。Update-Orchestra.ps1、update-dsh-orchestra.mjs、inspect-package.mjs、package-contract.mjs 必须保持同目录；不要只替换单个文件。
+工具版本：1.1.1。入口位于仓库 tools/updater/，或完整解压的工具目录。Update-Orchestra.ps1、update-dsh-orchestra.mjs、inspect-package.mjs、package-contract.mjs 必须保持同目录；不要只替换单个文件。
 只操作用户指定的 profile。保持插件范围，不修改 DSH 宿主源码、二进制、兼容性豁免或用户账本。
 
 1. 明确输入是源码目录还是已经构建的 tgz。用户若未要求拉取远端，不自动 pull/reset/切分支；当前工作树中的修复是源码模式的构建输入。
@@ -19,7 +19,7 @@
 7. 不预先 remove 插件，不删除整个node_modules/锁文件/store，不使用 --force 跳过兼容性问题。不得为了安装通过修改包检查白名单，除非项目包协议确有经过审查的变更。
 8. 新版本运行前的包安装失败可用 recovery.json 中的官方命令和旧包恢复；新版本已运行或迁移账本后，先按升级运行手册判断兼容性。不得自动覆盖账本或承诺任意失败均已回滚。
 9. packages/<SHA256>/dsh-orchestra.tgz 是持久file:依赖来源，不是执行结束可删除的临时文件。备份和日志保留给用户。
-10. 先确认回执 updaterVersion 为 1.1.0。当前候选协议为完整12项；旧7/9项提示过时并拒绝，不按长度猜旧版，不删除校验。源码inspect失败时用candidatePackage定位已生成的包。
+10. 先确认回执 updaterVersion 为 1.1.1。当前候选协议为完整12项；旧7/9项提示过时并拒绝，不按长度猜旧版，不删除校验。源码inspect失败时用candidatePackage定位已生成的包。
 11. 最终报告：目标profile/home、安装包版本和SHA256、实际核对文件数、回执路径、是否需重开DSH。安装核验成功不等于已经在真实宿主执行了一条任务；把这两个状态分别报告。
 
 工具本身验证：node --test test/*.test.mjs

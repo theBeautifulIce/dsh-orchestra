@@ -10,7 +10,7 @@ import { gzipSync } from 'node:zlib'
 import { inspectArchive, verifyInstalled } from './inspect-package.mjs'
 
 const PACKAGE = 'dsh-orchestra'
-export const UPDATER_VERSION = '1.1.0'
+export const UPDATER_VERSION = '1.1.1'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const HELP = `DSH Orchestra updater ${UPDATER_VERSION} (Node >= 22.19)
 

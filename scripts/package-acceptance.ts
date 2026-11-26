@@ -4,19 +4,14 @@ import { gunzipSync } from 'node:zlib'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { sha256Hex } from '../src/core/canonical.ts'
-import { assertClientInject } from '../tools/updater/package-contract.mjs'
+import { assertClientInject, PACKAGE_GUIDES, PUBLIC_PACKAGE_FILES } from '../tools/updater/package-contract.mjs'
 
 const baseFiles = new Set([
   'package/package.json', 'package/lib/index.js', 'package/lib/index.d.ts', 'package/lib/client.js',
   'package/cordis.patch.yml', 'package/orchestra.config.json',
 ])
 const migrationPath = /^package\/lib\/infra\/sqlite\/migrations\/(\d{3})_[a-z0-9_]+\.sql$/
-const publicDocs = new Set([
-  'package/LICENSE', 'package/README.en.md',
-  'package/docs/assets/readme/board.png', 'package/docs/assets/readme/queue.png',
-  'package/docs/assets/readme/results.png', 'package/docs/assets/readme/workflow.png',
-])
-const guideFiles = ['docs/runbook.md', 'docs/trial-circles.md']
+const publicDocs = new Set(PUBLIC_PACKAGE_FILES.map((path) => 'package/' + path))
 
 export function inspectPackage(path: string, options: { expectedSha256?: string; previous?: boolean } = {}) {
   const archive = resolve(path)
@@ -28,8 +23,7 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
   if (tarBytes.length > unpackLimit) throw new Error('Package exceeds the 64 MiB inspection limit')
   const entries = execFileSync('tar', ['-tf', '-'], { input: tarBytes, encoding: 'utf8' }).trim().split(/\r?\n/).sort()
   if (new Set(entries).size !== entries.length
-    || entries.some((name) => !baseFiles.has(name) && !publicDocs.has(name) && name !== 'package/README.md' &&
-      !guideFiles.some((file) => name === 'package/' + file) && !migrationPath.test(name))) {
+    || entries.some((name) => !baseFiles.has(name) && !publicDocs.has(name) && !migrationPath.test(name))) {
     throw new Error('Package has duplicate or undeclared paths')
   }
   const metadata = execFileSync('tar', ['-tvf', '-'], { input: tarBytes, encoding: 'utf8' }).trim().split(/\r?\n/)
@@ -42,7 +36,7 @@ export function inspectPackage(path: string, options: { expectedSha256?: string;
   const read = (name: string) => execFileSync('tar', ['-xOf', '-', 'package/' + name], { input: tarBytes, maxBuffer: 10 * 1024 * 1024 })
   const manifest = JSON.parse(read('package.json').toString('utf8'))
   if (!options.previous && Array.isArray(manifest.files)) {
-    for (const file of guideFiles) {
+    for (const file of PACKAGE_GUIDES) {
       if (manifest.files.includes(file) && !entries.includes('package/' + file)) {
         throw new Error('Missing declared package guide: ' + file)
       }

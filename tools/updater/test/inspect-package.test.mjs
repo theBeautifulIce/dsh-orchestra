@@ -114,6 +114,16 @@ test('standalone inspection uses the shared current protocol with order-independ
   assert.equal(inspectArchive(writeArchive(fixtureEntries(current))).clientInjectProtocol, CLIENT_INJECT_ROLES.candidate);
 });
 
+test('accepts the packaged README diagrams and verifies their installed bytes', () => {
+  const path = 'docs/assets/readme/task-view-zh.svg';
+  const entries = [...fixtureEntries(), { name: 'package/' + path, content: Buffer.from('<svg/>'), type: '0' }];
+  const inspection = inspectArchive(writeArchive(entries));
+  const installed = materialize(entries);
+  assert.equal(verifyInstalled(installed.profile, inspection).fileCount, entries.length);
+  writeFileSync(join(installed.actualRoot, path), '<SVG/>');
+  assert.throws(() => verifyInstalled(installed.profile, inspection), /Installed file SHA256 mismatch: docs\/assets\/readme\/task-view-zh\.svg/);
+});
+
 test('standalone inspection rejects every missing current dependency, including all three workbench additions together', () => {
   const current = manifest();
   const inject = current.dsh.client.inject;
@@ -163,7 +173,7 @@ for (const script of ['preinstall', 'install', 'postinstall', 'prepare']) {
 test('rejects duplicate, undeclared, traversing, and whitespace-suffixed paths', () => {
   for (const name of [
     'package/package.json', 'package/extra.js', 'package/../outside', 'package/README.md ',
-    'package/node_modules/zod/package.json',
+    'package/node_modules/zod/package.json', 'package/docs/assets/readme/unknown.svg',
   ]) {
     assert.throws(() => inspectArchive(writeArchive([
       ...fixtureEntries(), { name, content: Buffer.from('bad'), type: '0' },

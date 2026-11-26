@@ -61,7 +61,7 @@ test('Desktop package plan does not create updater state or invoke the installer
   assert.equal(result.status, 'plan');
   assert.equal(result.dshHome, f.home);
   assert.equal(result.dshCommand, f.dsh);
-  assert.equal(result.updaterVersion, '1.1.0');
+  assert.equal(result.updaterVersion, '1.1.1');
   assert.equal(result.clientInjectProtocol, CLIENT_INJECT_ROLES.candidate);
   assert.equal(called, false);
   assert.equal(existsSync(join(f.home, 'orchestra-updater')), false);
@@ -99,7 +99,7 @@ test('failed package installation retains a verified recovery package and persis
   assert.equal(result.ok, false);
   assert.equal(result.status, 'failed');
   assert.equal(result.stage, 'install');
-  assert.equal(result.updaterVersion, '1.1.0');
+  assert.equal(result.updaterVersion, '1.1.1');
   assert.equal(result.candidatePackage, candidate);
   assert.equal(result.clientInjectProtocol, CLIENT_INJECT_ROLES.candidate);
   assert.match(result.error, /simulated package-manager failure/);
@@ -141,7 +141,7 @@ test('verified repeated package invocation skips install and keeps its persisten
   assert.equal(result.status, 'already-current');
   assert.equal(result.ok, true);
   assert.equal(result.restartRequired, false);
-  assert.equal(result.updaterVersion, '1.1.0');
+  assert.equal(result.updaterVersion, '1.1.1');
   assert.equal(result.candidatePackage, candidate);
   assert.equal(result.clientInjectProtocol, CLIENT_INJECT_ROLES.candidate);
   assert.equal(result.backup, undefined);

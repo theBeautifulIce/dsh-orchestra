@@ -10,7 +10,7 @@ import { Context, type Plugin } from '@deepseek-ai/cordis'
 import { createElement, type ComponentType } from 'react'
 import { expect, it } from 'vitest'
 import { inspectPackage } from '../../scripts/package-acceptance.ts'
-import { assertClientInject, CLIENT_INJECT_PROTOCOLS, CLIENT_INJECT_ROLES } from '../../tools/updater/package-contract.mjs'
+import { assertClientInject, CLIENT_INJECT_PROTOCOLS, CLIENT_INJECT_ROLES, PUBLIC_PACKAGE_FILES } from '../../tools/updater/package-contract.mjs'
 import { renderPanel } from '../client/harness.ts'
 import type { DshPanelContext } from '../../src/client/dsh-sidebar.tsx'
 import type { NativeOrchestraToolViewContext } from '../../src/client/dsh-orchestra-toolview.tsx'
@@ -40,6 +40,18 @@ it('安装指南指向同一份带版本的预发行工件，也给出摘要文�
     return match![0]
   })
   expect(assets[0]).toBe(assets[1])
+})
+
+it('中英文安装指南的本地图都随包交付，并在两端共用的清单中登记', () => {
+  const archiveFiles = tarball && sha ? inspectPackage(tarball, { expectedSha256: sha }).entries : undefined
+  for (const name of ['README.md', 'README.en.md']) {
+    const readme = readFileSync(name, 'utf8')
+    for (const [, path] of readme.matchAll(/!\[[^\]]*\]\((?:\.\/)?(docs\/assets\/readme\/[^)\s]+)\)/gu)) {
+      expect(PUBLIC_PACKAGE_FILES).toContain(path)
+      expect(readFileSync(path!).length).toBeGreaterThan(0)
+      if (archiveFiles) expect(archiveFiles).toContain('package/' + path)
+    }
+  }
 })
 
 it('验包要求共享协议的精确集合，只有显式 previous 角色接受已签 G5 清单', { timeout: 30_000 }, () => {

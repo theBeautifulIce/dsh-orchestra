@@ -1,4 +1,16 @@
 // Shared by repository package acceptance and the standalone updater.
+export const PACKAGE_GUIDES = Object.freeze(['docs/runbook.md', 'docs/trial-circles.md']);
+export const PUBLIC_PACKAGE_FILES = Object.freeze([
+  'README.md', 'README.en.md', 'LICENSE', ...PACKAGE_GUIDES,
+  ...[
+    'board.png', 'queue.png', 'results.png', 'workflow.png',
+    'architecture-en.svg', 'architecture-zh.svg',
+    'collaboration-en.svg', 'collaboration-zh.svg',
+    'task-lifecycle-en.svg', 'task-lifecycle-zh.svg',
+    'task-view-en.svg', 'task-view-zh.svg',
+  ].map((name) => 'docs/assets/readme/' + name),
+]);
+
 // Protocol IDs describe exact sets. Package version strings do not select a
 // protocol: historical and current builds can advertise the same npm version.
 const g5 = Object.freeze([

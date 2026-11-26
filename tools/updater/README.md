@@ -1,8 +1,8 @@
-# DSH Orchestra 自动更新工具 1.1.0
+# DSH Orchestra 自动更新工具 1.1.1
 
 给日常使用者和执行智能体共用。支持把**当前本地源码**自动构建、打包并更新到 DSH，也支持安装一个已经生成的 `.tgz`。
 
-本版面向当前 `main` 的包协议。已修复旧校验器因客户端依赖从 9 项增加到 12 项而在 `inspect` 阶段拒绝新包的问题。仓库验包脚本和更新器共用 `package-contract.mjs`，不再分别维护一套当前名单。
+本版 1.1.1 为 beta.3 的 README 配图加入八个具名 SVG 路径，并在检查与安装后逐字节核对这些文件。beta.2 随附的更新器 1.1.0 不认识这些新路径，会拒绝 beta.3 包；更新器 1.1.1 仍接受 beta.2 的旧文件集合。两版都使用相同的 12 项客户端注入契约。仓库验包脚本与更新器共用 `package-contract.mjs`，文件清单只有一处定义。
 
 适用于当前 Orchestra 的插件包格式；更新通过 DSH 官方 `plugin --profile … add …` 完成。工具不改 DSH 宿主代码。Desktop 安装必须使用该 Desktop 自带的命令，不能拿 npm 全局 `dsh` 代替。
 
@@ -61,7 +61,7 @@ if ($LASTEXITCODE -ne 0) { throw '源码拉取失败，请先处理 Git 输出�
 
 ```powershell
 .\Update-Orchestra.ps1 `
-  -Package 'D:\packages\dsh-orchestra-0.1.0-beta.2.tgz' `
+  -Package 'D:\packages\dsh-orchestra-0.1.0-beta.3.tgz' `
   -Dsh 'D:\aboutAI\deepseekharness-desktop\resources\runtime\cli\bin\dsh.cmd'
 ```
 
@@ -84,7 +84,7 @@ node .\update-dsh-orchestra.mjs `
 
 `--json` 在 stdout 只输出一份简洁 JSON；进度和子命令输出另存日志，阶段进度在 stderr。退出码成功为 `0`，失败为 `1`。
 
-回执中的 `updaterVersion` 应为 `1.1.0`。成功验包还会记录 `clientInjectProtocol`；源码模式的 `inspect` 失败会记录 `candidatePackage`，便于找到已生成的包。
+回执中的 `updaterVersion` 应为 `1.1.1`。成功验包还会记录 `clientInjectProtocol`；源码模式的 `inspect` 失败会记录 `candidatePackage`，便于找到已生成的包。
 
 关键状态：
 

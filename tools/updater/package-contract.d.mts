@@ -1,3 +1,5 @@
+export declare const PACKAGE_GUIDES: readonly string[];
+export declare const PUBLIC_PACKAGE_FILES: readonly string[];
 export type ClientInjectRole = 'candidate' | 'previous';
 export type ClientInjectProtocol =
   | 'dsh-orchestra/client-inject/g5/v1'

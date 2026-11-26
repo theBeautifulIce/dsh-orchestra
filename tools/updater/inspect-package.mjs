@@ -6,7 +6,7 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import { assertClientInject } from './package-contract.mjs';
+import { assertClientInject, PACKAGE_GUIDES, PUBLIC_PACKAGE_FILES } from './package-contract.mjs';
 
 const UNPACK_LIMIT = 64 * 1024 * 1024;
 // Bound the input too, while leaving room for gzip framing on an incompressible tar.
@@ -16,13 +16,8 @@ const BASE_FILES = new Set([
   'package.json', 'lib/index.js', 'lib/index.d.ts', 'lib/client.js',
   'cordis.patch.yml', 'orchestra.config.json',
 ]);
-const PUBLIC_FILES = new Set([
-  'README.md', 'LICENSE', 'README.en.md', 'docs/runbook.md', 'docs/trial-circles.md',
-  'docs/assets/readme/board.png', 'docs/assets/readme/queue.png',
-  'docs/assets/readme/results.png', 'docs/assets/readme/workflow.png',
-]);
+const PUBLIC_FILES = new Set(PUBLIC_PACKAGE_FILES);
 const MIGRATION_PATH = /^lib\/infra\/sqlite\/migrations\/(\d{3})_[a-z0-9_]+\.sql$/;
-const GUIDES = ['docs/runbook.md', 'docs/trial-circles.md'];
 const LIFECYCLE_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'];
 
 function hash(bytes) {
@@ -178,7 +173,7 @@ export function inspectArchive(absolutePath, { expectedSha256 } = {}) {
   const config = parseJson(read('orchestra.config.json'), 'orchestra.config.json');
   const clientInjectProtocol = checkManifest(manifest, config?.phase);
   if (Array.isArray(manifest.files)) {
-    for (const guide of GUIDES) {
+    for (const guide of PACKAGE_GUIDES) {
       if (manifest.files.includes(guide) && !paths.includes(guide)) {
         throw new Error('Missing declared package guide: ' + guide);
       }
