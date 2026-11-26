@@ -4,30 +4,90 @@
 
 **From managing agent conversations to managing task workflows.**
 
-**Hand off a goal. Let agents coordinate through dependencies. Receive results you can verify in the original conversation.**
+> Your conversations will keep growing. Your work should not become harder to manage.
 
-DSH Orchestra is a workflow orchestration plugin for DeepSeek Harness (DSH). Give it a goal, the materials it may use, and the result you expect. Orchestra organizes the work into steps, starts independent steps when capacity allows, and passes registered results to the steps that need them. You follow one task, open its deliverables, and send a specific version back for revision when needed.
+## What happens when you have 1,000 agent conversations?
 
-The unit of work is a **task with a plan, dependencies, deliverables, and acceptance criteria**. Its worker conversations, progress, approvals, and results belong to that task. This makes a longer assignment easier to follow from the first request through the final review.
+Can you still tell which conversations belong to the same assignment?
 
-[Why Orchestra](#why-orchestra) · [A concrete example](#one-task-several-coordinated-deliverables) · [Quick start](#quick-start) · [Usage](#work-from-your-conversation) · [Architecture](#architecture) · [Development](#development-and-validation) · [Issues](#issues-and-ideas-welcome)
+A feature might involve requirements analysis, implementation, testing, and several rounds of fixes, spread across different conversations. Meanwhile, you may be researching another project or preparing documentation. When you return to DSH days or weeks later:
+
+- Which tasks are finished, and which are still open?
+- Which execution conversations belong to the same task, and what did each do?
+- Where did the work stop, and what needs your attention now?
+- Where are the deliverables, and which version should you inspect or revise?
+
+More capable agents let you take on more work. But a list of conversations does not directly answer these questions about tasks. You still have to reconstruct the work from memory and chat history.
+
+**That is why DSH Orchestra exists.**
+
+Orchestra is a task management and workflow orchestration plugin for DeepSeek Harness (DSH). For work routed through Orchestra, it organizes execution steps, associated worker sessions and attempts, progress, pending actions, and deliverables around a task record.
+
+**Conversations are where work happens. Tasks are what you manage.** This distinction matters whether an assignment needs one agent or several.
+
+[Download beta.2](https://github.com/theBeautifulIce/dsh-orchestra/releases/tag/v0.1.0-beta.2) · [Quick start](#quick-start) · [A concrete example](#one-task-several-coordinated-deliverables) · [Usage](#work-from-your-conversation) · [Issues](https://github.com/theBeautifulIce/dsh-orchestra/issues/new)
 
 ## Why Orchestra
 
-| What you need | What Orchestra provides |
-| --- | --- |
-| Hand off a whole assignment | A planner turns the goal into steps and deliverable criteria. It can reuse an eligible published workflow or generate one for the task. |
-| Coordinate work across agents | The scheduler follows dependencies and capacity. Independent checks can run in parallel; a consolidation step receives the upstream results it needs. |
-| See what needs attention | One task card connects steps, attempts, results, and human actions. The workflow shows dependencies; the queue explains whether a step is waiting for capacity, an upstream result, or you. |
-| Inspect the actual deliverable | Registered artifacts retain their version and provenance. The source conversation provides named links and original-file downloads alongside the result summary. |
-| Request a precise revision | Review and feedback bind to an exact artifact version. Supported rework can return to its producing step or use a scoped replan, with a new version available for review. |
-| Handle interruptions with evidence | Receipts, events, attempts, and evidence preserve what the system observed. Recovery and retry follow the recorded state and the workflow's policy. |
+### Organize conversations around the work they serve
 
-Useful assignments include research by topic followed by a consolidated report, independent financial checks followed by a reconciliation, and documents that need review and several rounds of revision. Define the allowed inputs and desired outputs when you hand off the work.
+Imagine developing a plugin while researching a project. Both assignments generate conversations, but what matters is how each assignment is progressing.
+
+```mermaid
+flowchart LR
+    subgraph Before["Conversation-centric"]
+        direction TB
+        S1["Requirements conversation"]
+        S2["Research conversation"]
+        S3["Implementation conversation"]
+        S4["Report conversation"]
+        S5["Testing conversation"]
+    end
+    subgraph After["Task-centric"]
+        direction TB
+        T1["Task A: Plugin development<br/>Example: in progress"] --> A1["Requirements"]
+        T1 --> A2["Implementation"]
+        T1 --> A3["Testing"]
+        T2["Task B: Research<br/>Example: awaiting review"] --> B1["Research"]
+        T2 --> B2["Report"]
+    end
+    S1 -.-> A1
+    S3 -.-> A2
+    S5 -.-> A3
+    S2 -.-> B1
+    S4 -.-> B2
+```
+
+*Conceptual illustration. Orchestra organizes tasks it creates or handles and their associated execution records. It does not automatically scan, classify, merge, or migrate every existing DSH conversation.*
+
+| What you need to know | Conversation lists alone | With Orchestra |
+| --- | --- | --- |
+| What work am I doing? | Reconstruct assignments from chat titles | See work tracked in task records and views |
+| Which sessions belong to this assignment? | Remember and find related conversations | Associate task steps with execution sessions and attempts |
+| How far has it progressed? | Read messages and infer progress | Inspect task status, step progress, and waiting reasons |
+| What needs my attention? | Search chats for pending requests | Inspect required authorization, blocks, or delivery review |
+| What if I return later? | Reconstruct context and prior outcomes | Consult retained task records, deliverables, and permitted next actions |
+| What was delivered? | Find files and replies across chats | Inspect registered deliverables, provenance, versions, and reviews |
+
+### Task management first, orchestration for more complex work
+
+You do not have to design a complex workflow diagram before handing off an explicit assignment. Start from the original conversation or plan in the panel. Reuse an eligible published workflow or generate a task-specific one when appropriate.
+
+| Capability | Practical value |
+| --- | --- |
+| **Task management** | Associate execution steps, sessions, and deliverables with the task record. |
+| **Progress and lifecycle management** | See task status, queues, attempts, and pending actions rather than infer completion from chat messages. |
+| **Workflow and multi-agent coordination** | Plan steps and deliverables, schedule by dependency and capacity, and pass specified upstream results to downstream steps. |
+| **Reliable execution and recovery** | Record observed execution facts in the ledger, receipts, events, and evidence; handle interruptions and retries under permitted policies. |
+| **Delivery and review** | Register deliverables with provenance and versions, inspect the actual files, and request revisions to a specific version. |
+
+More agents and more elaborate workflows are not goals in themselves. Their value is keeping complex work manageable, inspectable, and deliverable.
+
+Orchestra is for people who use DSH for ongoing work, especially those juggling assignments, checking results across steps, returning to unfinished work, or keeping delivery records. Ordinary questions can remain in native DSH conversations. Only work managed by Orchestra enters its task records. Access, recovery, and available features remain subject to workspace, source-conversation, host, and retention constraints.
 
 ## One task, several coordinated deliverables
 
-A recorded Desktop acceptance run checked income, refunds, and row counts separately. The net calculation then used the income and refund reports. The row-count check finished independently.
+A recorded Desktop acceptance run illustrates how several execution steps serve one assignment. It checked income, refunds, and row counts separately. The net calculation then used the income and refund reports. The row-count check finished independently. All four results belong to the same reconciliation task.
 
 ```mermaid
 flowchart TD
