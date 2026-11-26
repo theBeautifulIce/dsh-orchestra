@@ -190,7 +190,7 @@ Reopen the task-command settings after enabling or disabling plugins. DSH does n
 
 Ordinary execution nodes run only native tools confirmed to be read-only.
 
-The personal Desktop adapter supports local task routing and execution. Independent collaboration requests, durable memory writes, shared trial rings, and the QQ on-call connector require additional wiring by a trusted host; they are not part of the default personal adapter. When memory is wired, **Organize as memory** requires review and approval of the proposal, source, and scope. Project context and task notes work independently of durable memory.
+The current main-branch personal Desktop adapter supports local task routing, execution, and bounded same-run coordination for eligible authorized attempts. Independent cross-run checks, durable memory writes, shared trial rings, and the QQ on-call connector still require trusted host integration. Supported deferred drafts are isolated by source conversation and have a 30-minute checkpoint lifetime; recovery follows host state, recorded facts, and authorization. When memory is wired, **Organize as memory** requires review and approval of the proposal, source, and scope. Project context and task notes work independently of durable memory.
 
 ### If a task needs attention
 
