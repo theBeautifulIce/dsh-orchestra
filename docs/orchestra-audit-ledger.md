@@ -10,6 +10,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-11-26 | 1 | `38beb4ab` | 未通过 | 0 | 1 | 0 | 0 | 同一条真实发送回执从 505 缩到 206 字节。T09 规划续写成功后因沿用请求头被误拒，尚未建立运行。[第 1 轮](audits/S6-coordination-overhead-independent-audit-round1.md) |
 | 2026-11-26 | 2 | `19b5208c` | 有条件通过 | 0 | 0 | 1 | 0 | 终版 T04、T06、T09 均在官方桌面完成。T06 重发只留一条请求，A 只查一次。终态账本和插件通知准确，来源模型误报了关闭原因。[第 2 轮](audits/S6-coordination-overhead-independent-audit-round2.md) |
+| 2026-11-26 | 3 | `787572df` | 有条件通过 | 0 | 0 | 1 | 0 | T06 在 2.038 秒关闭，原会话准确显示原因和两份计算原件，通知未另开模型回合。T09 由 DevKit 派发并得到真实循环拒绝。T04 出现迟到答复触发的两次无效重写，原件完整。[第 3 轮](audits/S6-coordination-overhead-independent-audit-round3.md) |
 
 ### S6 执行会话专项审计
 

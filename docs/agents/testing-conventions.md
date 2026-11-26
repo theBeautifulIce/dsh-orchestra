@@ -79,6 +79,25 @@ cmd.exe /c "cd /d D:\aboutAI\dsh-orchestra && C:\Users\ASUS\AppData\Roaming\npm\
 
 vitest 4.1.8 没有 `--reporter=basic`，用 `dot`。
 
+## DSH 会话用例
+
+固定操作、测试内审批和结果核对交给 GPT‑6 Luna 高思考子代理执行。用来源会话的原题派单，在同一会话核对返回的结果。遇到需要观察并发窗口的用例，应记录实际发生的分支。
+
+后续会话用例使用已在官方 DSH Desktop 0.2.2-rc.5 验证的 DSH DevKit v0.1.1。用隔离宿主正常提供的连接文件设置 `DSH_DEV_URL_FILE`，先执行 `doctor` 并确认 Orchestra 已加载。绑定现有工作区时，v0.1.1 的 `create` 命令强制携带 `cwd`，而宿主要求在路径与工作区标识中选一个。使用同一工具包的客户端只传 `workspaceId`，核对新会话确实登记在目标工作区。
+
+```python
+from uuid import uuid4
+from dsh_dev import Client, read_url
+
+session_id = "session-" + str(uuid4())
+receipt = Client(read_url()).call("create", {
+    "sessionId": session_id, "workspaceId": workspace_id, "agentPreset": "standard",
+})
+assert receipt["sessionId"] == session_id
+```
+
+其余步骤使用工具自带的 `send`、`wait`、`inspect` 和 `export`。提交返回的请求编号用来定位本轮回复。Orchestra 后台任务可能晚于来源模型回合结束，等对应运行终态和来源回执均出现后再导出。成果链接、内置浏览器和工作台样式继续由子代理在同一来源会话中点击核对。[本轮实测记录](../audits/S6-coordination-overhead-independent-audit-round3.md)
+
 ## 提交前自检
 
 - [ ] `pnpm check` 三步全过（typecheck / vitest / build）。
